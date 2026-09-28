@@ -1,10 +1,10 @@
 //! Application-management IPC bindings: organization, list/get/create/update/
 //! delete applications, owners, password & certificate credentials, search.
 
+use super::ipc::invoke_result;
 use azapptoolkit_core::models::{DirectoryObject, Organization, PasswordCredential};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::{KeyIdArgs, ObjectIdArgs, TenantArg};
 pub use azapptoolkit_dto::applications::*;
@@ -19,13 +19,7 @@ pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> 
 /// Applications and Managed Identities lists, which render *filtered subsets*
 /// of that index and so cannot detect its truncation from their own row counts
 /// the way the App Registrations list can.
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectoryIndexStatus {
-    pub sp_index_truncated: bool,
-    pub sp_index_cap: usize,
-}
-
+///
 /// Fallible on purpose: a failure costs the truncation notice, never the list.
 pub async fn get_directory_index_status(tenant_id: &str) -> Result<DirectoryIndexStatus, UiError> {
     invoke_result("get_directory_index_status", TenantArg { tenant_id }).await
@@ -70,14 +64,6 @@ pub async fn invalidate_application_detail(
         },
     )
     .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResolvePermissionArgs<'a> {
-    tenant_id: &'a str,
-    resource_app_id: &'a str,
-    permission_id: &'a str,
 }
 
 // ---------------- Mutations ----------------
@@ -289,7 +275,7 @@ pub async fn add_certificate_credential(
     tenant_id: &str,
     object_id: &str,
     input: &AddCertificateInput,
-) -> Result<(), UiError> {
+) -> Result<UploadedCertificate, UiError> {
     invoke_result(
         "add_certificate_credential",
         AddCertArgs {
@@ -403,20 +389,13 @@ pub async fn set_application_authentication(
 
 // ---------------- Federated identity credentials ----------------
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FederatedListArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
-
 pub async fn list_federated_credentials(
     tenant_id: &str,
     object_id: &str,
 ) -> Result<Vec<FederatedCredentialDto>, UiError> {
     invoke_result(
         "list_federated_credentials",
-        FederatedListArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },

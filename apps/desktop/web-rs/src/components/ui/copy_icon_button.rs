@@ -52,7 +52,9 @@ pub fn CopyIconButton(
         {move || {
             copied
                 .get()
-                .then(|| view! { <span class="copyable-id__copied">"Copied"</span> })
+                .then(|| view! { <span class="copyable-id__copied" role="status">
+                        "Copied"
+                    </span> })
         }}
     }
 }

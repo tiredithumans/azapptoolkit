@@ -28,23 +28,29 @@
 //! selections grant org-wide. **One mechanism per run.** Opening with
 //! `preseed = Some(selection)` seeds the cart with that one permission and jumps
 //! to the choose-access step (the per-row "Scope…" entry).
+//!
+//! Step 2's options come from one table, `mode_options(kind)` — the scoped
+//! modes a mechanism offers, recommended first — with org-wide appended for
+//! every mechanism, so no choice is a one-way door. Everything that describes or
+//! runs the grant reads `effective_mode`, which is org-wide whenever the cart
+//! has no mechanism: a scoped mode can never outlive the mechanism it belongs to.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
-use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::scoping::{
     ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
 };
@@ -79,45 +85,110 @@ enum ScopeMode {
     OrgWide,
 }
 
+/// The scoped options step 2 offers for a mechanism, recommended first. Org-wide
+/// is appended by the view for EVERY mechanism, so no choice is a one-way door.
+///
+/// Each [`ScopeMode`] other than org-wide belongs to exactly one mechanism (pinned
+/// by test), which is what lets the apply plan key on the mode alone.
+fn mode_options(kind: ScopeKind) -> &'static [(ScopeMode, &'static str)] {
+    match kind {
+        ScopeKind::Exchange => &[
+            (ScopeMode::Managed, "Specific mailboxes"),
+            (ScopeMode::Existing, "Existing groups"),
+        ],
+        ScopeKind::SharePoint => &[(ScopeMode::Sites, "Specific sites")],
+        ScopeKind::SharePointItem => &[(ScopeMode::Items, "Specific libraries, folders & files")],
+    }
+}
+
 /// The default scope mode for a mechanism (the recommended scoped path).
 fn default_mode(kind: ScopeKind) -> ScopeMode {
-    match kind {
-        ScopeKind::Exchange => ScopeMode::Managed,
-        ScopeKind::SharePoint => ScopeMode::Sites,
-        ScopeKind::SharePointItem => ScopeMode::Items,
+    mode_options(kind)[0].0
+}
+
+/// The mode the wizard actually shows and applies. No mechanism ⇒ org-wide. A
+/// stale scoped mode from another mechanism falls to that mechanism's default,
+/// never to org-wide (never widen silently).
+///
+/// `scope_mode` (what the operator last picked) and the cart's mechanism are two
+/// signals; reading them apart once let a preseeded permission the wizard cannot
+/// scope reach step 3 described as scoped, with a Grant button that did nothing.
+fn effective_mode(mechanism: Option<ScopeKind>, chosen: ScopeMode) -> ScopeMode {
+    match mechanism {
+        None => ScopeMode::OrgWide,
+        Some(k)
+            if chosen == ScopeMode::OrgWide
+                || mode_options(k).iter().any(|(m, _)| *m == chosen) =>
+        {
+            chosen
+        }
+        Some(k) => default_mode(k),
+    }
+}
+
+/// Which consent a FAILED apply in `mode` needed — keyed on the mode that ran,
+/// not on the cart's mechanism. An org-wide grant goes through
+/// `grant_single_permission` / `grant_managed_identity_permission`, which ride
+/// the ordinary Graph write scopes; an old `_ => "exchange"` fall-through
+/// consented the Exchange scopes for it, which cannot fix the failure the
+/// operator just saw (and left the button looking broken). Both SharePoint
+/// mechanisms ride the same Sites.FullControl.All consent — the permission
+/// endpoints need it at every level.
+fn consent_scope(mode: ScopeMode) -> &'static str {
+    match mode {
+        ScopeMode::OrgWide => "write",
+        ScopeMode::Managed | ScopeMode::Existing => "exchange",
+        ScopeMode::Sites | ScopeMode::Items => "sharepoint",
     }
 }
 
 fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
     let mut s = format!(
-        "Scoped “{}”: assigned {} role(s), removed {} org-wide grant(s).",
+        "Scoped “{}”: assigned {}, removed {}.",
         r.scope_name,
-        r.roles_assigned.len(),
-        r.removed_entra_grants.len(),
+        count_noun(r.roles_assigned.len(), "role", "roles"),
+        count_noun(
+            r.removed_entra_grants.len(),
+            "org-wide grant",
+            "org-wide grants"
+        ),
     );
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
 
 fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
     let mut s = format!(
-        "Scoped to {} site(s), removed {} org-wide grant(s).",
-        r.sites_granted.len(),
-        r.removed_orgwide_grants.len(),
+        "Scoped to {}, removed {}.",
+        count_noun(r.sites_granted.len(), "site", "sites"),
+        count_noun(
+            r.removed_orgwide_grants.len(),
+            "org-wide grant",
+            "org-wide grants"
+        ),
     );
     if r.declared_permission {
         s.push_str(" Added Sites.Selected to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
 
 fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
-    let mut s = format!("Scoped to {} resource(s).", r.granted.len());
+    let mut s = format!(
+        "Scoped to {}.",
+        count_noun(r.granted.len(), "resource", "resources")
+    );
     if r.granted_role_added {
         s.push_str(" Granted the Selected permission.");
     }
@@ -125,7 +196,10 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
         s.push_str(" Added it to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
@@ -268,11 +342,14 @@ async fn apply_orgwide(
                 Err(e) => return Err(e),
             }
         }
-        let mut s = format!("Granted {} permission(s) org-wide.", items.len());
+        let mut s = format!(
+            "Granted {} org-wide.",
+            count_noun(items.len(), "permission", "permissions")
+        );
         if !failures.is_empty() {
             s.push_str(&format!(
-                " {} issue(s): {}",
-                failures.len(),
+                " {}: {}",
+                count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
             ));
         }
@@ -301,15 +378,18 @@ async fn apply_orgwide(
             skipped += r.skipped.len();
             failures.extend(r.failures);
         }
-        let mut s = format!("Granted {granted} permission(s) org-wide");
+        let mut s = format!(
+            "Granted {} org-wide",
+            count_noun(granted, "permission", "permissions")
+        );
         if skipped > 0 {
             s.push_str(&format!(", {skipped} already present"));
         }
         s.push('.');
         if !failures.is_empty() {
             s.push_str(&format!(
-                " {} issue(s): {}",
-                failures.len(),
+                " {}: {}",
+                count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
             ));
         }
@@ -444,7 +524,10 @@ pub fn ScopeWizard(
     // non-empty and every item is an Application permission mapping to the same
     // `ScopeKind`; otherwise `None` (org-wide only). Delegated scopes never
     // scope, so they force `None`.
-    let mechanism = Signal::derive(move || selected.with(|s| cart_mechanism(s)));
+    let mechanism = Memo::new(move |_| selected.with(|s| cart_mechanism(s)));
+    // The mode every reader uses — see `effective_mode`. Writes go to
+    // `scope_mode`; reads of what will run go through this.
+    let active_mode = Signal::derive(move || effective_mode(mechanism.get(), scope_mode.get()));
 
     use_escape(
         move || open.get_untracked() && !busy.get_untracked(),
@@ -475,19 +558,30 @@ pub fn ScopeWizard(
         on_close.run(());
     };
 
+    // Re-anchor the mode (and any mechanism-specific cart state) to the cart as
+    // it now stands: that mechanism's default, or org-wide when the cart isn't
+    // scopable. The ONE step both the preseed and a cart toggle run, so the two
+    // can never infer the mechanism from different predicates. Computed from the
+    // cart directly rather than the memo, so it is never a stale read.
+    let anchor = move || {
+        let kind = selected.with_untracked(|s| cart_mechanism(s));
+        match kind {
+            Some(ScopeKind::SharePoint) => {
+                site_write.set(selected.with_untracked(|s| sites_need_write(s)));
+            }
+            Some(ScopeKind::Exchange | ScopeKind::SharePointItem) | None => {}
+        }
+        scope_mode.set(kind.map_or(ScopeMode::OrgWide, default_mode));
+    };
+
     // Pre-seed on open: a row "Scope…" opens the wizard with one permission
     // already in the cart, jumping to the choose-access step for its mechanism.
     Effect::new(move |_| {
         if open.get()
             && let Some(sel) = preseed.get_untracked()
         {
-            if let Some(k) = scope_kind_for(Some(&sel.resource_app_id), &sel.permission_value) {
-                if k == ScopeKind::SharePoint {
-                    site_write.set(sel.permission_value != "Sites.Read.All");
-                }
-                scope_mode.set(default_mode(k));
-            }
             selected.set(vec![sel]);
+            anchor();
             step.set(1);
         }
     });
@@ -503,14 +597,7 @@ pub fn ScopeWizard(
             }
         });
         error.set(None);
-        match mechanism.get_untracked() {
-            Some(ScopeKind::SharePoint) => {
-                site_write.set(selected.with_untracked(|s| sites_need_write(s)));
-                scope_mode.set(ScopeMode::Sites);
-            }
-            Some(k) => scope_mode.set(default_mode(k)),
-            None => scope_mode.set(ScopeMode::OrgWide),
-        }
+        anchor();
     };
     let on_toggle = Callback::new(move |sel: PickerSelection| toggle(sel));
 
@@ -526,7 +613,6 @@ pub fn ScopeWizard(
             error.set(Some("Select at least one permission.".into()));
             return;
         }
-        let mode = scope_mode.get_untracked();
         let tenant_id = t.tenant_id.clone();
         let target = target.get_untracked();
 
@@ -538,70 +624,67 @@ pub fn ScopeWizard(
             SharePointItemScoped(Vec<String>, &'static str, String),
             OrgWide,
         }
-        let plan = if mode == ScopeMode::OrgWide {
-            Plan::OrgWide
-        } else {
-            let Some(kind) = mechanism.get_untracked() else {
-                return;
-            };
-            match (kind, mode) {
-                (ScopeKind::Exchange, ScopeMode::Managed) => match group_state.get_untracked() {
-                    Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![
-                        g.primary_smtp_address
-                            .clone()
-                            .unwrap_or(g.group_name.clone()),
-                    ]),
-                    _ => {
-                        error.set(Some(
+        // Keyed on the effective mode alone: a scoped mode exists only while its
+        // mechanism does (`effective_mode`), and each belongs to one mechanism,
+        // so there is no (mechanism, mode) pair left to fall through silently.
+        let plan = match active_mode.get_untracked() {
+            ScopeMode::OrgWide => Plan::OrgWide,
+            ScopeMode::Managed => match group_state.get_untracked() {
+                Some(Ok(g)) if g.exists => Plan::ExchangeScoped(vec![
+                    g.primary_smtp_address
+                        .clone()
+                        .unwrap_or(g.group_name.clone()),
+                ]),
+                _ => {
+                    error.set(Some(
                             "Add at least one mailbox to the managed group first — that creates the group to scope to.".into(),
                         ));
-                        return;
-                    }
-                },
-                (ScopeKind::Exchange, ScopeMode::Existing) => {
-                    let g = parse_lines(&existing_groups.get_untracked());
-                    if g.is_empty() {
-                        error.set(Some(
-                            "Enter at least one group identifier (one per line).".into(),
-                        ));
-                        return;
-                    }
-                    Plan::ExchangeScoped(g)
+                    return;
                 }
-                (ScopeKind::SharePoint, ScopeMode::Sites) => {
-                    let urls = parse_lines(&site_urls.get_untracked());
-                    if urls.is_empty() {
-                        error.set(Some("Enter at least one site URL (one per line).".into()));
-                        return;
-                    }
-                    let role = if site_write.get_untracked() {
-                        "write"
-                    } else {
-                        "read"
-                    };
-                    Plan::SharePointScoped(urls, role)
+            },
+            ScopeMode::Existing => {
+                let g = parse_lines(&existing_groups.get_untracked());
+                if g.is_empty() {
+                    error.set(Some(
+                        "Enter at least one group identifier (one per line).".into(),
+                    ));
+                    return;
                 }
-                (ScopeKind::SharePointItem, ScopeMode::Items) => {
-                    let urls = parse_lines(&item_urls.get_untracked());
-                    if urls.is_empty() {
-                        error.set(Some(
-                            "Enter at least one library, folder or file URL (one per line).".into(),
-                        ));
-                        return;
-                    }
-                    // The cart is level-homogeneous whenever the mechanism
-                    // resolved, so any item's value names the scope to grant.
-                    let Some(value) = items.first().map(|i| i.permission_value.clone()) else {
-                        return;
-                    };
-                    let role = if item_write.get_untracked() {
-                        "write"
-                    } else {
-                        "read"
-                    };
-                    Plan::SharePointItemScoped(urls, role, value)
+                Plan::ExchangeScoped(g)
+            }
+            ScopeMode::Sites => {
+                let urls = parse_lines(&site_urls.get_untracked());
+                if urls.is_empty() {
+                    error.set(Some("Enter at least one site URL (one per line).".into()));
+                    return;
                 }
-                _ => return,
+                let role = if site_write.get_untracked() {
+                    "write"
+                } else {
+                    "read"
+                };
+                Plan::SharePointScoped(urls, role)
+            }
+            ScopeMode::Items => {
+                let urls = parse_lines(&item_urls.get_untracked());
+                if urls.is_empty() {
+                    error.set(Some(
+                        "Enter at least one library, folder or file URL (one per line).".into(),
+                    ));
+                    return;
+                }
+                // The cart is level-homogeneous whenever the mechanism
+                // resolved, so any item's value names the scope to grant.
+                let Some(value) = items.first().map(|i| i.permission_value.clone()) else {
+                    error.set(Some("Select at least one permission.".into()));
+                    return;
+                };
+                let role = if item_write.get_untracked() {
+                    "write"
+                } else {
+                    "read"
+                };
+                Plan::SharePointItemScoped(urls, role, value)
             }
         };
 
@@ -628,7 +711,7 @@ pub fn ScopeWizard(
                     close();
                 }
                 Err(e) => {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         needs_consent.set(true);
                     }
                     error.set(Some(e.message));
@@ -646,19 +729,8 @@ pub fn ScopeWizard(
         let Some(t) = session.active_tenant.get_untracked() else {
             return;
         };
-        // Which consent the FAILED apply needed — keyed on the mode that ran,
-        // not on the cart's mechanism. An org-wide grant goes through
-        // `grant_single_permission` / `grant_managed_identity_permission`, which
-        // ride the ordinary Graph write scopes; the old `_ => "exchange"`
-        // fall-through consented the Exchange scopes for it, which cannot fix
-        // the failure the operator just saw (and left the button looking broken).
-        let scope = match (scope_mode.get_untracked(), mechanism.get_untracked()) {
-            (ScopeMode::OrgWide, _) | (_, None) => "write",
-            // Both SharePoint mechanisms ride the same Sites.FullControl.All
-            // consent — the permission endpoints need it at every level.
-            (_, Some(ScopeKind::SharePoint | ScopeKind::SharePointItem)) => "sharepoint",
-            (_, Some(ScopeKind::Exchange)) => "exchange",
-        };
+        // Which consent the FAILED apply needed — see `consent_scope`.
+        let scope = consent_scope(active_mode.get_untracked());
         busy.set(true);
         error.set(None);
         let tenant_id = t.tenant_id.clone();
@@ -684,8 +756,8 @@ pub fn ScopeWizard(
     // describe a different grant from the one that executes.
 
     // What the resolved targets ARE, for the definition-list label.
-    let targets_label = move || match scope_mode.get() {
-        ScopeMode::Managed | ScopeMode::Existing => "Mailbox group(s)",
+    let targets_label = move || match active_mode.get() {
+        ScopeMode::Managed | ScopeMode::Existing => "Mailbox groups",
         ScopeMode::Sites => "Sites",
         ScopeMode::Items => "Libraries, folders & files",
         ScopeMode::OrgWide => "Reach",
@@ -696,7 +768,7 @@ pub fn ScopeWizard(
     // org-wide (which has no targets) and for a scoped mode whose target isn't
     // resolved yet (which `run_apply` refuses).
     let review_targets = move || -> Vec<String> {
-        match scope_mode.get() {
+        match active_mode.get() {
             ScopeMode::Managed => match group_state.get() {
                 Some(Ok(g)) if g.exists => vec![
                     g.primary_smtp_address
@@ -720,7 +792,7 @@ pub fn ScopeWizard(
     // afterwards, in the result toast. The item path strips nothing: a
     // `…Selected` scope has no org-wide predecessor to convert away from.
     let strip_warning = move || -> Option<String> {
-        let after = match scope_mode.get() {
+        let after = match active_mode.get() {
             ScopeMode::Managed | ScopeMode::Existing => "the scoped role assignment",
             ScopeMode::Sites => "per-site access",
             ScopeMode::Items | ScopeMode::OrgWide => return None,
@@ -733,19 +805,45 @@ pub fn ScopeWizard(
 
     let review_line = move || {
         let perms = selected.with(|s| perm_values(s).join(", "));
-        match scope_mode.get() {
+        match active_mode.get() {
             ScopeMode::OrgWide => format!(
                 "Grant {perms} org-wide. The app will reach EVERY resource in the tenant — use only when the permission genuinely needs tenant-wide reach.",
             ),
             ScopeMode::Managed | ScopeMode::Existing => format!(
-                "Grant {perms}, scoped to the chosen mailbox group(s). The app will not have org-wide mailbox access.",
+                "Grant {perms}, scoped to the chosen mailbox groups. The app will not have org-wide mailbox access.",
             ),
             ScopeMode::Sites => format!(
-                "Grant {perms}, scoped to the chosen site(s) via Sites.Selected. The app will not have org-wide site access.",
+                "Grant {perms}, scoped to the chosen sites via Sites.Selected. The app will not have org-wide site access.",
             ),
             ScopeMode::Items => format!(
-                "Grant {perms}, scoped to the chosen library/folder/file(s). The app reaches nothing else, and permission inheritance is broken on each target.",
+                "Grant {perms}, scoped to the chosen libraries, folders or files. The app reaches nothing else, and permission inheritance is broken on each target.",
             ),
+        }
+    };
+
+    // The target panel for one scoped mode — exhaustive, so a new mode cannot
+    // compile without saying what step 2 shows for it.
+    let mode_panel = move |m: ScopeMode| -> AnyView {
+        match m {
+            ScopeMode::Managed => {
+                view! { <ManagedScopeGroupPanel app_id=app_id group_state=group_state /> }
+                    .into_any()
+            }
+            ScopeMode::Existing => {
+                view! { <MailboxGroupsField value=existing_groups /> }.into_any()
+            }
+            ScopeMode::Sites => {
+                view! { <SiteSelectionPanel site_urls=site_urls write=site_write /> }.into_any()
+            }
+            ScopeMode::Items => view! {
+                <ItemSelectionPanel
+                    target_urls=item_urls
+                    write=item_write
+                    scope_level=cart_scope_level
+                />
+            }
+            .into_any(),
+            ScopeMode::OrgWide => ().into_any(),
         }
     };
 
@@ -781,76 +879,47 @@ pub fn ScopeWizard(
 
                     // ---- Step 1: choose access (dispatched on mechanism) ----
                     <Show when=move || step.get() == 1 fallback=|| ()>
-                        <Show
-                            when=move || mechanism.get() == Some(ScopeKind::Exchange)
-                            fallback=|| ()
-                        >
-                            <label class="radio-row">
-                                <input
-                                    type="radio"
-                                    name="scope-mode"
-                                    prop:checked=move || scope_mode.get() == ScopeMode::Managed
-                                    on:change=move |_| scope_mode.set(ScopeMode::Managed)
-                                />
-                                <span><strong>"Specific mailboxes"</strong> " (recommended)"</span>
-                            </label>
-                            <Show when=move || scope_mode.get() == ScopeMode::Managed fallback=|| ()>
-                                <ManagedScopeGroupPanel app_id=app_id group_state=group_state />
-                            </Show>
-                            <label class="radio-row">
-                                <input
-                                    type="radio"
-                                    name="scope-mode"
-                                    prop:checked=move || scope_mode.get() == ScopeMode::Existing
-                                    on:change=move |_| scope_mode.set(ScopeMode::Existing)
-                                />
-                                <span><strong>"Existing group(s)"</strong></span>
-                            </label>
-                            <Show when=move || scope_mode.get() == ScopeMode::Existing fallback=|| ()>
-                                <GroupAutocomplete target=existing_groups />
-                                <Textarea
-                                    value=existing_groups
-                                    placeholder="hr-team@contoso.com\nFinanceMailboxes"
-                                />
-                            </Show>
-                        </Show>
-
-                        <Show
-                            when=move || mechanism.get() == Some(ScopeKind::SharePoint)
-                            fallback=|| ()
-                        >
-                            <Show when=move || scope_mode.get() == ScopeMode::Sites fallback=|| ()>
-                                <SiteSelectionPanel site_urls=site_urls write=site_write />
-                            </Show>
-                        </Show>
-
-                        <Show
-                            when=move || mechanism.get() == Some(ScopeKind::SharePointItem)
-                            fallback=|| ()
-                        >
-                            <Show when=move || scope_mode.get() == ScopeMode::Items fallback=|| ()>
-                                <ItemSelectionPanel
-                                    target_urls=item_urls
-                                    write=item_write
-                                    scope_level=cart_scope_level
-                                />
-                            </Show>
-                        </Show>
-
-                        // Org-wide: a de-emphasized alternative when the cart is
-                        // scopable; the only path otherwise.
+                        // One radio per scoped mode the mechanism offers (from
+                        // `mode_options`, recommended first), each with its target
+                        // panel; then org-wide — a de-emphasized alternative when
+                        // the cart is scopable, reversible like every other choice.
                         {move || {
                             mechanism
                                 .get()
-                                .is_some()
-                                .then(|| {
+                                .map(|k| {
                                     view! {
+                                        {mode_options(k)
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, &(m, label))| {
+                                                view! {
+                                                    <label class="radio-row">
+                                                        <input
+                                                            type="radio"
+                                                            name="scope-mode"
+                                                            prop:checked=move || active_mode.get() == m
+                                                            on:change=move |_| scope_mode.set(m)
+                                                        />
+                                                        <span>
+                                                            <strong>{label}</strong>
+                                                            {(i == 0).then_some(" (recommended)")}
+                                                        </span>
+                                                    </label>
+                                                    <Show
+                                                        when=move || active_mode.get() == m
+                                                        fallback=|| ()
+                                                    >
+                                                        {mode_panel(m)}
+                                                    </Show>
+                                                }
+                                            })
+                                            .collect_view()}
                                         <label class="radio-row">
                                             <input
                                                 type="radio"
                                                 name="scope-mode"
                                                 prop:checked=move || {
-                                                    scope_mode.get() == ScopeMode::OrgWide
+                                                    active_mode.get() == ScopeMode::OrgWide
                                                 }
                                                 on:change=move |_| scope_mode.set(ScopeMode::OrgWide)
                                             />
@@ -871,7 +940,7 @@ pub fn ScopeWizard(
                                     }
                                 })
                         }}
-                        <Show when=move || scope_mode.get() == ScopeMode::OrgWide fallback=|| ()>
+                        <Show when=move || active_mode.get() == ScopeMode::OrgWide fallback=|| ()>
                             <Callout tone="warn">
                                 <Body1>
                                     "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
@@ -909,7 +978,7 @@ pub fn ScopeWizard(
                             <dd>
                                 {move || {
                                     let targets = review_targets();
-                                    match (scope_mode.get(), targets.is_empty()) {
+                                    match (active_mode.get(), targets.is_empty()) {
                                         (ScopeMode::OrgWide, _) => {
                                             view! { "Every resource in the tenant" }.into_any()
                                         }
@@ -955,7 +1024,7 @@ pub fn ScopeWizard(
                                     // scopes, not on a mechanism's admin scope —
                                     // the same distinction `consent_and_retry`
                                     // now keys on, said out loud.
-                                    let what = if scope_mode.get() == ScopeMode::OrgWide {
+                                    let what = if active_mode.get() == ScopeMode::OrgWide {
                                         "Granting these permissions needs an admin consent."
                                     } else {
                                         "Scoping needs an admin consent for this mechanism."
@@ -976,7 +1045,7 @@ pub fn ScopeWizard(
                         }}
                     </Show>
 
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
                     // Tell the user why "Next" is disabled on step 1 — the cart is
                     // empty. The apply-time validation message is unreachable from
@@ -1195,6 +1264,102 @@ mod tests {
             cart_mechanism(&[app(OFFICE365_EXCHANGE_ONLINE_APP_ID, "full_access_as_app")]),
             Some(ScopeKind::Exchange)
         );
+    }
+
+    const MECHANISMS: [ScopeKind; 3] = [
+        ScopeKind::Exchange,
+        ScopeKind::SharePoint,
+        ScopeKind::SharePointItem,
+    ];
+    const SCOPED_MODES: [ScopeMode; 4] = [
+        ScopeMode::Managed,
+        ScopeMode::Existing,
+        ScopeMode::Sites,
+        ScopeMode::Items,
+    ];
+
+    #[test]
+    fn every_mechanism_offers_a_scoped_mode_and_defaults_to_its_first() {
+        // A mechanism with no scoped radio is the one-way door: once org-wide is
+        // picked, nothing on step 2 could bring the target panel back.
+        for k in MECHANISMS {
+            let options = mode_options(k);
+            assert!(!options.is_empty(), "{k:?} offers no scoped mode");
+            assert!(
+                options.iter().all(|(m, _)| *m != ScopeMode::OrgWide),
+                "{k:?}: org-wide is appended by the view, never a table row"
+            );
+            assert_eq!(default_mode(k), options[0].0);
+        }
+    }
+
+    #[test]
+    fn no_mode_belongs_to_two_mechanisms() {
+        // What makes an apply plan keyed on the mode alone sound.
+        for (i, a) in MECHANISMS.iter().enumerate() {
+            for b in &MECHANISMS[i + 1..] {
+                for (m, _) in mode_options(*a) {
+                    assert!(
+                        mode_options(*b).iter().all(|(n, _)| n != m),
+                        "{m:?} is offered by both {a:?} and {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cart_without_a_mechanism_always_applies_org_wide() {
+        // A preseed the wizard cannot scope — delegated, or `Sites.*` on the
+        // SharePoint Online resource — once kept its scoped default: the review
+        // described a scoped grant and "Grant access" silently did nothing.
+        assert_eq!(
+            effective_mode(
+                cart_mechanism(&[delegated(MICROSOFT_GRAPH_APP_ID, "Mail.Read")]),
+                ScopeMode::Managed
+            ),
+            ScopeMode::OrgWide
+        );
+        assert_eq!(
+            effective_mode(
+                cart_mechanism(&[app(OFFICE365_SHAREPOINT_ONLINE_APP_ID, "Sites.Read.All")]),
+                ScopeMode::Sites
+            ),
+            ScopeMode::OrgWide
+        );
+        for m in SCOPED_MODES {
+            assert_eq!(effective_mode(None, m), ScopeMode::OrgWide);
+        }
+    }
+
+    #[test]
+    fn a_stale_scoped_mode_falls_to_the_mechanisms_default_never_org_wide() {
+        assert_eq!(
+            effective_mode(Some(ScopeKind::SharePoint), ScopeMode::Managed),
+            ScopeMode::Sites
+        );
+        assert_eq!(
+            effective_mode(Some(ScopeKind::Exchange), ScopeMode::Existing),
+            ScopeMode::Existing
+        );
+        assert_eq!(
+            effective_mode(Some(ScopeKind::SharePointItem), ScopeMode::Sites),
+            ScopeMode::Items
+        );
+        // Org-wide is a choice every mechanism honours.
+        assert_eq!(
+            effective_mode(Some(ScopeKind::SharePointItem), ScopeMode::OrgWide),
+            ScopeMode::OrgWide
+        );
+    }
+
+    #[test]
+    fn consent_follows_the_mode_that_ran() {
+        assert_eq!(consent_scope(ScopeMode::OrgWide), "write");
+        assert_eq!(consent_scope(ScopeMode::Managed), "exchange");
+        assert_eq!(consent_scope(ScopeMode::Existing), "exchange");
+        assert_eq!(consent_scope(ScopeMode::Sites), "sharepoint");
+        assert_eq!(consent_scope(ScopeMode::Items), "sharepoint");
     }
 
     #[test]

@@ -47,12 +47,20 @@ pub fn validate_federated_credential(
     validate_field("subject", subject)?;
 
     // Required, and Entra accepts exactly one value. An empty list would let
-    // Graph pick nothing at all to match `aud` against.
+    // Graph pick nothing at all to match `aud` against; a second value is
+    // rejected by Graph with a generic 400 — after a restore has already
+    // created the app shell — so refuse it here, before any write.
     if audiences.is_empty() {
         return Err(
             "at least one audience is required (Entra recommends 'api://AzureADTokenExchange')"
                 .into(),
         );
+    }
+    if audiences.len() > 1 {
+        return Err(format!(
+            "exactly one audience is allowed — Entra accepts a single value (got {})",
+            audiences.len()
+        ));
     }
     for audience in audiences {
         validate_field("audience", audience)?;
@@ -288,6 +296,33 @@ mod tests {
                 None,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_one_audience() {
+        let two = vec![
+            "api://AzureADTokenExchange".to_string(),
+            "api://other".to_string(),
+        ];
+        let err = validate_federated_credential(
+            Some("ok-name"),
+            "https://issuer.example",
+            "sub",
+            &two,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("exactly one audience"), "{err}");
+        assert!(
+            validate_federated_credential(
+                Some("ok-name"),
+                "https://issuer.example",
+                "sub",
+                &aud(),
+                None,
+            )
+            .is_ok()
         );
     }
 

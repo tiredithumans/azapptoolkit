@@ -5,18 +5,84 @@
 //! mutation. Advisory only — the admin chooses; purely additive, so it can't
 //! break a working sign-in.
 
+use std::collections::HashSet;
+
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::RemediationAction;
 use azapptoolkit_core::models::DirectoryObject;
 
 use crate::bindings::applications;
+use crate::components::directory_search::DirectorySearch;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
-use crate::hooks::use_debounced::use_debounced;
+use crate::components::ui::FormError;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
+use crate::util::count_noun;
+
+/// Outcome of [`add_default_owners`].
+pub(crate) enum DefaultOwnersOutcome {
+    /// The tenant has no app-registration default owners configured.
+    NoneConfigured,
+    Done {
+        added: usize,
+        failures: Vec<String>,
+    },
+}
+
+impl DefaultOwnersOutcome {
+    /// The per-owner failure line both callers render, or `None` when nothing
+    /// failed.
+    pub(crate) fn failure_message(failures: &[String]) -> Option<String> {
+        (!failures.is_empty()).then(|| {
+            format!(
+                "{} failed — {}",
+                count_noun(failures.len(), "default owner", "default owners"),
+                failures.join("; ")
+            )
+        })
+    }
+}
+
+/// Adds the tenant's Settings-configured app-registration default owners
+/// (`app_registration.default_owners`) to one app registration. Additive:
+/// skips anyone in `existing` (or, when `None`, anyone already an owner per the
+/// cached detail) and never removes. The one loop behind the Owners tab's and
+/// the audit remediation's "Add default owners" buttons.
+pub(crate) async fn add_default_owners(
+    tenant_id: &str,
+    object_id: &str,
+    existing: Option<HashSet<String>>,
+) -> DefaultOwnersOutcome {
+    let defaults = crate::bindings::defaults::get_tenant_defaults(tenant_id).await;
+    let owners = defaults.app_registration.default_owners;
+    if owners.is_empty() {
+        return DefaultOwnersOutcome::NoneConfigured;
+    }
+    // Skip anyone already an owner so a re-run doesn't error on an existing
+    // owner. `get_application_detail` is cached.
+    let existing = match existing {
+        Some(e) => e,
+        None => match applications::get_application_detail(tenant_id, object_id).await {
+            Ok(d) => d.owners.iter().map(|o| o.id.clone()).collect(),
+            Err(_) => HashSet::new(),
+        },
+    };
+    let mut added = 0usize;
+    let mut failures = Vec::new();
+    for p in owners {
+        if existing.contains(&p.id) {
+            continue;
+        }
+        match applications::add_application_owner(tenant_id, object_id, &p.id).await {
+            Ok(()) => added += 1,
+            Err(e) => failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message)),
+        }
+    }
+    DefaultOwnersOutcome::Done { added, failures }
+}
 
 /// "Add owner" remediation — one-click applies the tenant's default owners
 /// (Settings → `app_registration.default_owners`) or searches users and adds the
@@ -40,26 +106,6 @@ pub fn AddOwnerButton(
     // the route in it rather than as dead red text (`OwnerDefaultsHint`).
     let no_owner_defaults = RwSignal::new(false);
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 300);
-
-    let candidates = LocalResource::new(move || {
-        let q = query.get();
-        let tenant = tenant.get();
-        async move {
-            let q = q.trim().to_string();
-            if q.len() < 2 {
-                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
-            }
-            let Some(t) = tenant else {
-                return Ok(Vec::new());
-            };
-            // Carry the error message so a Graph/network failure shows up as an
-            // error instead of being indistinguishable from "No matches."
-            applications::search_users(&t.tenant_id, &q)
-                .await
-                .map_err(|e| e.message)
-        }
-    });
 
     // `object_id` is consumed by both the per-row add and the default-owners
     // handler; give each its own clone.
@@ -108,49 +154,27 @@ pub fn AddOwnerButton(
         no_owner_defaults.set(false);
         let object_id = object_id.clone();
         leptos::task::spawn_local(async move {
-            let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
-            let owners = defaults.app_registration.default_owners;
-            if owners.is_empty() {
-                no_owner_defaults.set(true);
-                adding_defaults.set(false);
-                return;
-            }
-            // Skip anyone already an owner so a re-run doesn't error on the
-            // existing single owner. `get_application_detail` is cached.
-            let existing: std::collections::HashSet<String> =
-                match applications::get_application_detail(&t.tenant_id, &object_id).await {
-                    Ok(d) => d.owners.iter().map(|o| o.id.clone()).collect(),
-                    Err(_) => std::collections::HashSet::new(),
-                };
-            let mut added = 0usize;
-            let mut failures = Vec::new();
-            for p in owners {
-                if existing.contains(&p.id) {
-                    continue;
+            let (added, failures) = match add_default_owners(&t.tenant_id, &object_id, None).await {
+                DefaultOwnersOutcome::NoneConfigured => {
+                    no_owner_defaults.set(true);
+                    adding_defaults.set(false);
+                    return;
                 }
-                match applications::add_application_owner(&t.tenant_id, &object_id, &p.id).await {
-                    Ok(()) => added += 1,
-                    Err(e) => {
-                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
-                    }
-                }
-            }
+                DefaultOwnersOutcome::Done { added, failures } => (added, failures),
+            };
             adding_defaults.set(false);
-            if !failures.is_empty() {
+            if let Some(msg) = DefaultOwnersOutcome::failure_message(&failures) {
                 // Leave the modal open with the error so the operator can retry;
                 // don't clear the Fix button.
-                error.set(Some(format!(
-                    "{} default owner(s) failed — {}",
-                    failures.len(),
-                    failures.join("; ")
-                )));
+                error.set(Some(msg));
                 return;
             }
             open.set(false);
             raw_query.set(String::new());
             if added > 0 {
                 session.toast_success(format!(
-                    "Added {added} default owner(s) — re-run the audit to refresh the ownership finding."
+                    "Added {} — re-run the audit to refresh the ownership finding.",
+                    count_noun(added, "default owner", "default owners")
                 ));
             } else {
                 session.toast_success(
@@ -210,57 +234,20 @@ pub fn AddOwnerButton(
                         <Body1 class="muted">
                             "Adds the owners configured for this tenant in Settings (additive — skips anyone already an owner). Or search below to add someone specific."
                         </Body1>
-                        <Input value=raw_query placeholder="Search users by name or UPN (min 2 chars)" />
+                        // Cleared by the add handler only on success, so a
+                        // failed add keeps the operator's query.
+                        <DirectorySearch
+                            on_pick=Callback::new(move |u: DirectoryObject| add.run(u.id))
+                            query=raw_query
+                            placeholder="Search users by name or UPN (min 2 chars)"
+                            action_appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            clear_on_pick=false
+                            row_disabled=Callback::new(move |_: String| {
+                                busy.get() || adding_defaults.get()
+                            })
+                        />
                         {move || {
-                            candidates
-                                .get()
-                                .map(|res| match res {
-                                    Ok(users) if users.is_empty() => {
-                                        if query.get().trim().len() < 2 {
-                                            ().into_any()
-                                        } else {
-                                            view! { <p class="muted">"No matches."</p> }.into_any()
-                                        }
-                                    }
-                                    Ok(users) => {
-                                        view! {
-                                            <ul class="add-owner-candidates">
-                                                {users
-                                                    .into_iter()
-                                                    .map(|u| {
-                                                        let name = u
-                                                            .display_name
-                                                            .clone()
-                                                            .unwrap_or_else(|| "—".to_string());
-                                                        let upn = u.user_principal_name.clone().unwrap_or_default();
-                                                        let id = u.id.clone();
-                                                        view! {
-                                                            <li class="add-owner-candidates__row">
-                                                                <span>
-                                                                    {name} <span class="muted">{" "}{upn}</span>
-                                                                </span>
-                                                                <Button
-                                                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                                                    disabled=Signal::derive(move || busy.get() || adding_defaults.get())
-                                                                    on_click=Box::new(move |_| add.run(id.clone()))
-                                                                >
-                                                                    "Add"
-                                                                </Button>
-                                                            </li>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </ul>
-                                        }
-                                            .into_any()
-                                    }
-                                    Err(e) => {
-                                        view! { <Body1 class="form-error">{e}</Body1> }.into_any()
-                                    }
-                                })
-                        }}
-                        {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <Show when=move || no_owner_defaults.get() fallback=|| ()>
                             <OwnerDefaultsHint class="form-error" tab="app-reg" />

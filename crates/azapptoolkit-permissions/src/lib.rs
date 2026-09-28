@@ -2,128 +2,75 @@
 //!
 //! Ships a bundled `catalog.json` listing the well-known Microsoft API
 //! resources (Graph, SharePoint, Exchange, Key Vault, ARM, …) by `appId` and
-//! `displayName` so the permission picker can populate its resource dropdown
-//! offline. It deliberately carries **no** per-permission data: the actual
-//! `appRoles`/`oauth2PermissionScopes` are resolved live from Microsoft Graph
-//! via [`azapptoolkit_graph::GraphClient::resolve_resource_sp`] so the picker
-//! always shows the complete, current Application **and** Delegated set without
-//! a hand-maintained GUID catalog. `ResourceEntry` keeps the permission fields
-//! (they default to empty here) so the same type can hold a live SP's data.
+//! `displayName` only. It feeds two things: the permission picker's resource
+//! dropdown and the resource names on the Permissions tab. It deliberately
+//! carries **no** per-permission data: every `appRoles` /
+//! `oauth2PermissionScopes` definition is resolved live from Microsoft Graph
+//! via `GraphClient::resolve_resource_sp` and cached under
+//! `CacheKind::Permissions`, so the picker always shows the complete, current
+//! Application **and** Delegated set without a hand-maintained GUID catalog.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 const BUNDLED: &str = include_str!("../data/catalog.json");
 
-/// Convenience: the bundled catalog's resource list. The slice is stable for
+/// Convenience: the bundled directory's resource list. The slice is stable for
 /// the lifetime of the process.
 pub fn bundled_resources_slice() -> &'static [ResourceEntry] {
-    PermissionsCatalog::bundled().resources()
+    ResourceDirectory::bundled().resources()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CatalogRoot {
-    #[serde(default)]
-    pub generated: String,
-    #[serde(default)]
-    pub version: u32,
-    pub resources: Vec<ResourceEntry>,
+/// On-disk shape of `data/catalog.json`.
+#[derive(Deserialize)]
+struct DirectoryFile {
+    resources: Vec<ResourceEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One well-known Microsoft API resource: its `appId` and display name.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResourceEntry {
     #[serde(rename = "appId")]
     pub app_id: String,
     #[serde(rename = "displayName")]
     pub display_name: String,
-    #[serde(default, rename = "appRoles")]
-    pub app_roles: Vec<AppRoleEntry>,
-    #[serde(default, rename = "oauth2PermissionScopes")]
-    pub oauth2_permission_scopes: Vec<ScopeEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppRoleEntry {
-    pub id: String,
-    pub value: String,
-    #[serde(rename = "displayName")]
-    pub display_name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Graph's `appRoles[].allowedMemberTypes`. Defaulted because older
-    /// catalog snapshots don't carry this field; the consumer treats an
-    /// empty list as "unknown — show it".
-    #[serde(default, rename = "allowedMemberTypes")]
-    pub allowed_member_types: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScopeEntry {
-    pub id: String,
-    pub value: String,
-    #[serde(default, rename = "adminConsentDisplayName")]
-    pub admin_consent_display_name: Option<String>,
-    #[serde(default, rename = "adminConsentDescription")]
-    pub admin_consent_description: Option<String>,
-}
-
-pub struct PermissionsCatalog {
-    by_app_id: HashMap<String, ResourceEntry>,
+/// The bundled directory of well-known Microsoft API resources, indexed by
+/// `appId` and kept in file order for the picker dropdown.
+pub struct ResourceDirectory {
+    /// `appId` → index into `ordered`.
+    by_app_id: HashMap<String, usize>,
     ordered: Vec<ResourceEntry>,
 }
 
-impl PermissionsCatalog {
-    pub fn from_root(root: CatalogRoot) -> Self {
-        let ordered = root.resources;
-        let mut by_app_id = HashMap::with_capacity(ordered.len());
-        for r in &ordered {
-            by_app_id.insert(r.app_id.clone(), r.clone());
-        }
+impl ResourceDirectory {
+    fn from_file(file: DirectoryFile) -> Self {
+        let ordered = file.resources;
+        let by_app_id = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.app_id.clone(), i))
+            .collect();
         Self { by_app_id, ordered }
     }
 
     pub fn bundled() -> &'static Self {
-        static ONCE: OnceLock<PermissionsCatalog> = OnceLock::new();
+        static ONCE: OnceLock<ResourceDirectory> = OnceLock::new();
         ONCE.get_or_init(|| {
-            let root: CatalogRoot =
-                serde_json::from_str(BUNDLED).expect("bundled catalog is valid JSON");
-            PermissionsCatalog::from_root(root)
+            let file: DirectoryFile =
+                serde_json::from_str(BUNDLED).expect("bundled resource directory is valid JSON");
+            ResourceDirectory::from_file(file)
         })
     }
 
     pub fn resource(&self, app_id: &str) -> Option<&ResourceEntry> {
-        self.by_app_id.get(app_id)
+        self.by_app_id.get(app_id).map(|&i| &self.ordered[i])
     }
 
     pub fn resources(&self) -> &[ResourceEntry] {
         &self.ordered
-    }
-
-    /// Friendly name for a role/scope on a resource. Returns (display, kind)
-    /// where kind is `"Role"` or `"Scope"`. `None` when the catalog has no
-    /// match.
-    pub fn lookup_permission(
-        &self,
-        resource_app_id: &str,
-        permission_id: &str,
-    ) -> Option<(String, &'static str)> {
-        let res = self.resource(resource_app_id)?;
-        if let Some(role) = res.app_roles.iter().find(|r| r.id == permission_id) {
-            return Some((role.display_name.clone(), "Role"));
-        }
-        if let Some(scope) = res
-            .oauth2_permission_scopes
-            .iter()
-            .find(|s| s.id == permission_id)
-        {
-            let name = scope
-                .admin_consent_display_name
-                .clone()
-                .unwrap_or_else(|| scope.value.clone());
-            return Some((name, "Scope"));
-        }
-        None
     }
 }
 
@@ -133,20 +80,16 @@ mod tests {
 
     #[test]
     fn bundled_directory_parses() {
-        let catalog = PermissionsCatalog::bundled();
-        let graph = catalog
+        let directory = ResourceDirectory::bundled();
+        let graph = directory
             .resource("00000003-0000-0000-c000-000000000000")
             .expect("Graph entry present");
         assert_eq!(graph.display_name, "Microsoft Graph");
-        // The directory is intentionally permission-free — definitions are
-        // resolved live from Graph, not bundled.
-        assert!(graph.app_roles.is_empty());
-        assert!(graph.oauth2_permission_scopes.is_empty());
     }
 
     #[test]
     fn directory_lists_common_microsoft_resources() {
-        let catalog = PermissionsCatalog::bundled();
+        let directory = ResourceDirectory::bundled();
         // The picker dropdown is driven entirely by these entries, so the
         // well-known resources must be present by appId.
         for app_id in [
@@ -157,37 +100,48 @@ mod tests {
             "797f4846-ba00-4fd7-ba43-dac1f8f63013", // Azure Service Management
         ] {
             assert!(
-                catalog.resource(app_id).is_some(),
+                directory.resource(app_id).is_some(),
                 "directory missing resource {app_id}"
             );
         }
     }
 
     #[test]
-    fn lookup_permission_returns_none_without_bundled_data() {
-        // The directory carries no per-permission data, so every lookup misses
-        // and callers fall through to a live `resolve_resource_sp`.
-        let catalog = PermissionsCatalog::bundled();
-        assert!(
-            catalog
-                .lookup_permission(
-                    "00000003-0000-0000-c000-000000000000",
-                    "df021288-bdef-4463-88db-98f22de89214"
-                )
-                .is_none()
-        );
-    }
-
-    #[test]
     fn all_resources_have_non_empty_app_id() {
         // Regression: ensure every entry has an app_id so the HashMap index is valid.
-        let catalog = PermissionsCatalog::bundled();
-        for entry in catalog.resources() {
+        let directory = ResourceDirectory::bundled();
+        for entry in directory.resources() {
             assert!(
                 !entry.app_id.is_empty(),
                 "resource entry has empty app_id: {:?}",
                 entry.display_name
             );
+        }
+    }
+
+    #[test]
+    fn directory_app_ids_are_unique() {
+        // A duplicate appId would silently shadow an earlier row in the index.
+        let directory = ResourceDirectory::bundled();
+        assert_eq!(directory.by_app_id.len(), directory.ordered.len());
+    }
+
+    #[test]
+    fn directory_entries_carry_no_permission_data() {
+        // Permission definitions resolve live from the resource SP. Keeping
+        // the file to `{appId, displayName}` stops per-permission data from
+        // creeping back in without any code learning to read it.
+        let root: serde_json::Value = serde_json::from_str(BUNDLED).expect("valid JSON");
+        let resources = root["resources"].as_array().expect("resources array");
+        assert!(!resources.is_empty());
+        for entry in resources {
+            let obj = entry.as_object().expect("resource entry is an object");
+            for key in obj.keys() {
+                assert!(
+                    key == "appId" || key == "displayName",
+                    "resource entry carries unexpected key {key:?}: {entry}"
+                );
+            }
         }
     }
 }

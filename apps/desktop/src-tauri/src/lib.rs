@@ -4,6 +4,8 @@ mod dto;
 mod state;
 mod token_adapter;
 
+use std::path::{Path, PathBuf};
+
 use tracing_appender::rolling;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -12,6 +14,7 @@ pub fn run() {
     install_panic_hook();
 
     let app_state = state::AppState::new();
+    let auth = std::sync::Arc::clone(&app_state.auth);
 
     let builder = tauri::Builder::default();
     // macOS only: Windows and Linux get no menu bar at all (Tauri installs a
@@ -23,13 +26,22 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .setup(move |app| {
+            // A browser that won't launch hands the sign-in link to the webview
+            // instead of leaving the operator waiting out the redirect timeout.
+            commands::auth::offer_sign_in_link_in_the_webview(app.handle().clone(), &auth);
             // Ensure the config directory exists for the settings/keyring paths.
             // The former silent background auto-install lived here; updates are
             // now interactive — the front-end checks on launch and drives the
             // changelog splash + "Update & restart" via `commands::updater`.
             let config_dir = config_directory();
-            let _ = std::fs::create_dir_all(&config_dir);
+            if let Err(e) = azapptoolkit_core::private_file::create_owner_only_dir(&config_dir) {
+                tracing::warn!(
+                    dir = %config_dir.display(),
+                    error = %e,
+                    "could not create the config directory owner-only"
+                );
+            }
             Ok(())
         })
         .manage(app_state)
@@ -48,12 +60,14 @@ pub fn run() {
             commands::auth::refresh_session,
             commands::auth::reauthenticate,
             commands::auth::request_scope_consent,
+            commands::auth::request_scope_step_up,
             commands::backup::backup_tenant,
             commands::backup::save_backup_to_file,
             commands::backup::load_backup_from_file,
-            commands::backup::cancel_dr,
+            commands::backup::cancel_backup,
             commands::restore::plan_restore,
             commands::restore::restore_tenant,
+            commands::restore::cancel_restore,
             commands::restore::save_restore_report_to_file,
             commands::applications::get_organization,
             commands::applications::list_applications_with_pairing,
@@ -66,7 +80,8 @@ pub fn run() {
             commands::applications::get_application_authentication,
             commands::applications::set_application_authentication,
             commands::expose_api::get_expose_api,
-            commands::expose_api::set_identifier_uris,
+            commands::expose_api::add_identifier_uri,
+            commands::expose_api::remove_identifier_uri,
             commands::expose_api::upsert_api_scope,
             commands::expose_api::delete_api_scope,
             commands::expose_api::set_pre_authorized_app,
@@ -106,6 +121,7 @@ pub fn run() {
             commands::audit::run_audit,
             commands::audit::cancel_audit,
             commands::audit::get_cached_audit,
+            commands::audit::get_cached_audit_summary,
             commands::audit::save_audit_to_file,
             commands::remediation::remediate_disable_sign_in,
             commands::remediation::remediate_remove_expired_credentials,
@@ -142,6 +158,7 @@ pub fn run() {
             commands::exchange::add_exchange_scope_group_members,
             commands::exchange::remove_exchange_scope_group_members,
             commands::exchange::migrate_application_access_policies,
+            commands::exchange::cancel_aap_migration,
             commands::exchange::move_exchange_scope_to_managed_group,
             commands::exchange::delete_exchange_scope_group,
             commands::managed_identity::list_managed_identities,
@@ -192,7 +209,6 @@ pub fn run() {
             commands::sso::set_claims_mapping,
             commands::sso::set_notification_emails,
             commands::sso::set_oidc_redirect_uris,
-            commands::sso::get_sso_summary,
             commands::credentials::list_credential_expirations,
             commands::credentials::save_credentials_to_file,
             commands::consent::list_oauth2_grants_audit,
@@ -206,7 +222,7 @@ pub fn run() {
             commands::sharepoint::remove_site_permission,
             commands::sharepoint::convert_site_access_to_selected,
             commands::sharepoint::sweep_site_permissions,
-            commands::sharepoint::cancel_resource_sweep,
+            commands::sharepoint::cancel_site_sweep,
             commands::sharepoint::get_cached_site_sweep,
             commands::sharepoint::get_app_site_access,
             commands::sharepoint::save_site_access_to_file,
@@ -215,10 +231,12 @@ pub fn run() {
             commands::sharepoint::list_selected_item_permissions,
             commands::sharepoint::remove_selected_item_permission,
             commands::keyvault_rbac::sweep_key_vault_access,
+            commands::keyvault_rbac::cancel_key_vault_sweep,
             commands::keyvault_rbac::get_cached_key_vault_access,
             commands::keyvault_rbac::save_key_vault_access_to_file,
             commands::permission_tester::test_mailbox_access,
             commands::permission_tester::find_mailbox_reachers,
+            commands::permission_tester::cancel_mailbox_probe,
             commands::permission_tester::save_mailbox_reachers_to_file,
             commands::usage::get_app_graph_usage,
             commands::permission_tester::test_site_access,
@@ -322,27 +340,25 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 
 /// RAII guards for the rolling file appender — returned so the caller can
 /// `manage` them into Tauri state and keep the writer thread alive for the
-/// lifetime of the app.
+/// lifetime of the app. `None` means file logging is off: the log directory
+/// could not be opened, and the app logs to the console only.
 pub struct LogGuards {
-    _file: tracing_appender::non_blocking::WorkerGuard,
+    _file: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
 
-fn install_tracing() -> LogGuards {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,azapptoolkit=debug,desktop=debug"));
-
-    // Rolling daily files under the platform's app-data dir. On Windows this
-    // lands in `%APPDATA%\azapptoolkit\logs`; on macOS it's
-    // `~/Library/Application Support/azapptoolkit/logs`; on Linux
-    // `~/.local/share/azapptoolkit/logs`. We avoid `dirs` as a dependency
-    // by computing the path from environment variables the OS provides.
-    let log_dir = log_directory();
-    let _ = std::fs::create_dir_all(&log_dir);
+/// The rolling daily log file under `log_dir`.
+///
+/// Fallible on purpose: an unwritable app-data folder (a read-only or
+/// redirected profile, a kiosk account, `HOME` unset so the fallback is the
+/// install directory) used to `expect()` here and kill the process before any
+/// subscriber or panic hook existed — the app "just didn't open" and left no
+/// log to say why.
+fn file_appender(log_dir: &Path) -> Result<rolling::RollingFileAppender, rolling::InitError> {
     // Builder instead of `rolling::daily(dir, "azapptoolkit.log")`: the
     // shorthand appends the date *after* the name (`azapptoolkit.log.2026-06-12`),
     // which breaks file-type association. A suffix yields
     // `azapptoolkit.2026-06-12.log` instead.
-    let file_appender = rolling::RollingFileAppender::builder()
+    rolling::RollingFileAppender::builder()
         .rotation(rolling::Rotation::DAILY)
         .filename_prefix("azapptoolkit")
         .filename_suffix("log")
@@ -350,26 +366,84 @@ fn install_tracing() -> LogGuards {
         // unbounded. Two weeks covers any plausible "what happened last week"
         // support question.
         .max_log_files(14)
-        .build(&log_dir)
-        .expect("failed to initialize rolling log file appender");
-    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+        .build(log_dir)
+}
+
+fn install_tracing() -> LogGuards {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,azapptoolkit=debug,desktop=debug"));
+
+    // Rolling daily files. On Windows they land in
+    // `%LOCALAPPDATA%\azapptoolkit\logs` — Local, not Roaming: roaming
+    // profiles (FSLogix / UE-V) copy `%APPDATA%` at every logon and logoff, and
+    // two weeks of debug logs have no business travelling with the profile.
+    // That is also where Tauri's own `app_log_dir` puts them. On macOS and
+    // Linux they stay under the config dir:
+    // `~/Library/Application Support/azapptoolkit/logs` and
+    // `~/.local/share/azapptoolkit/logs`. We avoid `dirs` as a dependency by
+    // computing the path from environment variables the OS provides.
+    let log_dir = log_directory();
+    // Owner-only first (the logs carry tenant ids and Graph error bodies). Not
+    // fatal: the appender below is still attempted and reports its own error.
+    let dir_error = azapptoolkit_core::private_file::create_owner_only_dir(&log_dir).err();
+    let (file_writer, file_guard, file_error) = match file_appender(&log_dir) {
+        Ok(appender) => {
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            (Some(writer), Some(guard), None)
+        }
+        Err(e) => {
+            // No subscriber exists yet, so stderr is the only place this can
+            // go now; it is repeated through `tracing` once one does.
+            eprintln!(
+                "azapptoolkit: file logging disabled — could not open {}: {e}",
+                log_dir.display()
+            );
+            (None, None, Some(e.to_string()))
+        }
+    };
+    let file_logging = file_writer.is_some();
+    // Only the file shows the event target: a log excerpt must say which
+    // component wrote each line, while the console stays compact.
+    let file_layer = file_writer.map(|w| {
+        fmt::layer()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(w)
+    });
 
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(false).compact())
-        .with(
-            fmt::layer()
-                .with_ansi(false)
-                .with_target(false)
-                .with_writer(file_writer),
-        )
+        .with(file_layer)
         .try_init();
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         log_dir = %log_dir.display(),
+        file_logging,
         "azapptoolkit starting"
     );
+    if let Some(e) = file_error {
+        tracing::warn!(
+            log_dir = %log_dir.display(),
+            error = %e,
+            "file logging disabled; logging to the console only"
+        );
+    }
+    if let Some(e) = dir_error {
+        tracing::warn!(
+            log_dir = %log_dir.display(),
+            error = %e,
+            "could not make the log directory owner-only"
+        );
+    }
     LogGuards { _file: file_guard }
 }
 
@@ -387,8 +461,23 @@ fn install_panic_hook() {
     }));
 }
 
-fn log_directory() -> std::path::PathBuf {
-    config_directory().join("logs")
+fn log_directory() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    #[cfg(not(target_os = "windows"))]
+    let local: Option<PathBuf> = None;
+    log_directory_in(local.as_deref(), &config_directory())
+}
+
+/// `%LOCALAPPDATA%\azapptoolkit\logs` when a Local app-data folder is known
+/// (Windows), else `logs` under the config directory. Split from
+/// [`log_directory`] so the choice is testable without touching the process
+/// environment.
+fn log_directory_in(local_app_data: Option<&Path>, config_dir: &Path) -> PathBuf {
+    match local_app_data.filter(|p| !p.as_os_str().is_empty()) {
+        Some(local) => local.join("azapptoolkit").join("logs"),
+        None => config_dir.join("logs"),
+    }
 }
 
 pub(crate) fn config_directory() -> std::path::PathBuf {
@@ -425,3 +514,61 @@ pub(crate) fn config_directory() -> std::path::PathBuf {
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;
+
+#[cfg(test)]
+mod tests {
+    use super::{file_appender, log_directory_in};
+    use std::path::{Path, PathBuf};
+
+    /// Hand-rolled like `core::private_file`'s tests: no `tempfile` dependency.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn tempdir() -> TempDir {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "azapptoolkit-log-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        TempDir(p)
+    }
+
+    /// A regular file where a directory is expected fails for every user,
+    /// root included (a permission-based test would pass wrongly as root).
+    #[test]
+    fn an_unwritable_log_dir_is_an_error_not_a_panic() {
+        let dir = tempdir();
+        std::fs::write(dir.0.join("blocker"), b"").unwrap();
+        assert!(file_appender(&dir.0.join("blocker").join("logs")).is_err());
+    }
+
+    #[test]
+    fn a_writable_log_dir_opens() {
+        let dir = tempdir();
+        assert!(file_appender(&dir.0.join("logs")).is_ok());
+    }
+
+    #[test]
+    fn logs_go_to_local_app_data_when_known() {
+        assert_eq!(
+            log_directory_in(Some(Path::new("L")), Path::new("C")),
+            Path::new("L").join("azapptoolkit").join("logs")
+        );
+    }
+
+    #[test]
+    fn logs_fall_back_to_the_config_dir() {
+        let expected = Path::new("C").join("logs");
+        assert_eq!(log_directory_in(None, Path::new("C")), expected);
+        assert_eq!(
+            log_directory_in(Some(Path::new("")), Path::new("C")),
+            expected
+        );
+    }
+}

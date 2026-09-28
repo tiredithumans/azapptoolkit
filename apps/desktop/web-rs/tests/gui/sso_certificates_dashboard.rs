@@ -48,6 +48,16 @@ async fn the_board_flags_apps_with_no_replacement_and_nobody_notified() {
             .as_deref(),
         Some("test-tenant")
     );
+    // Only the trailing empty header is the action column; the leading one
+    // (the row-select checkbox column) must not be mislabelled "Actions".
+    assert_eq!(
+        ts::text(".data-table thead th:last-child .visually-hidden"),
+        "Actions"
+    );
+    assert!(
+        ts::query(".data-table thead th:first-child .visually-hidden").is_none(),
+        "the row-select column must not be named \"Actions\""
+    );
 }
 
 #[wasm_bindgen_test]

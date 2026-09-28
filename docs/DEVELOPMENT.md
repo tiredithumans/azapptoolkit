@@ -27,15 +27,18 @@ The Rust-side tooling reduces to **two manual steps** — `just setup` provision
 System dependencies that no `cargo`/`rustup` command can install — `just setup` detects and warns about
 these, but you provide them via your OS package manager:
 
-- A C toolchain: MSVC on Windows, Xcode CLT on macOS, gcc/clang on Linux
-- On Linux: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`
+- A C toolchain: MSVC on Windows, Xcode CLT on macOS, gcc/clang on Linux (`just setup` checks
+  `cc`/`gcc`/`clang`, `xcode-select -p`, or the MSVC build tools via `vswhere`)
+- On Linux: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`;
+  and, to sign in under `just dev`, a running Secret Service provider (e.g. `gnome-keyring`) in the
+  desktop session — the refresh token has no other store on Linux
 - On Windows, for MSI packaging: WiX Toolset 3.11+ (the NSIS target needs no manual prereq — Tauri
   downloads its toolchain on first build)
 
 ## Quick setup
 
 With `just` installed, the `setup` recipe installs the Tauri CLI and trunk if missing, adds the wasm
-target + rustfmt/clippy, checks OS build deps, and runs a compile + frontend-build smoke test. It is
+target + rustfmt/clippy, checks OS build deps, and runs `just check` + `just web-build` as a smoke test. It is
 idempotent (safe to rerun after pulling) and picks the right `[unix]`/`[windows]` variant automatically:
 
 ```bash
@@ -75,10 +78,27 @@ just build-windows         # (or `cargo tauri build` for your host target)
 
 The desktop crate's `build.rs` reads `.env` at the workspace root and
 emits the values via `cargo:rustc-env=AZAPPTOOLKIT_BUILD_*`. At runtime
-`state.rs` prefers a real `AZAPPTOOLKIT_*` env var, then the baked-in
-value, then the placeholder — so a packaged build "just works" while
-developers can still override locally with `export`. `.env` is
+`state.rs` resolves each ID as a non-empty `AZAPPTOOLKIT_*` env var, then
+the value saved in the user's `settings.json` (written by the first-run
+**Configure your tenant** screen and by Settings → Tenant connection; it
+lives in `%APPDATA%\azapptoolkit\` on Windows,
+`~/Library/Application Support/azapptoolkit/` on macOS and
+`~/.local/share/azapptoolkit/` on Linux),
+then the baked-in value, then the placeholder. So a packaged build "just
+works", developers can still override locally with `export`, and a stale
+in-app save beats a freshly baked `.env`: clear its `client_id` /
+`tenant_id` or re-save in the Tenant connection tab. The startup log line
+`resolved auth config` records which tier won for each ID, and Settings →
+Tenant connection names an active env or baked source. `build.rs` prints a
+`cargo:warning` when a `.env` ID is empty or not a GUID. `.env` is
 git-ignored; check in only `.env.example`.
+
+A sovereign-cloud team build can bake the cloud the same way: uncomment
+`AZAPPTOOLKIT_CLOUD=usgov` (or `usgovdod` / `china`) in `.env`, and
+`build.rs` emits it as `AZAPPTOOLKIT_BUILD_CLOUD`. At runtime the cloud
+resolves as env var → baked-in value → commercial
+(`CloudEnvironment::from_env_or`); an unrecognized value logs a warning
+and falls through to the next layer.
 
 ## Testing
 
@@ -87,7 +107,7 @@ Run every CI gate, in CI order, with one command:
 ```bash
 just verify        # the core gates + the browser GUI tests when Chrome + chromedriver are present
 just verify-ui     # same, browser tests mandatory
-just verify-full   # full CI parity: adds the dependency audit/deny gates (needs network)
+just verify-full   # full CI parity: adds the dependency audit/deny/machete gates (audit/deny need network) + the shard-size ceiling (loud-skipped on Windows; CI runs it on Linux)
 ```
 
 `just --list` names every individual gate (`fmt-check`, `clippy`, `test`, `web-fmt-check`,
@@ -95,7 +115,7 @@ just verify-full   # full CI parity: adds the dependency audit/deny gates (needs
 what each one runs. For the inner loop while iterating:
 
 ```bash
-just check                        # type-check both trees, no build, no tests
+just check                        # type-check both trees (incl. the GUI test harness), no build, no tests
 just test-crate azapptoolkit-core # one crate's tests (append `-- <filter>` to narrow)
 ```
 
@@ -104,12 +124,28 @@ a matching table-driven test that cites the PowerShell source
 `file:line` it was ported from — this is how rule-for-rule parity with
 the legacy module is maintained.
 
+### Bumping the Rust toolchain
+
+`rust-toolchain.toml` pins the exact toolchain, so a lint the compiler is phasing out stays a
+warning until someone bumps it — and then fails in a transitive crate, not in our code. Bump
+deliberately:
+
+1. Run `just future-incompat` and resolve, or plan for, every crate it lists. Known today:
+   proc-macro-error2 2.0.1 under the frontend's view macros (the recipe's comment names the chain
+   and the upstream exits). The fallback when a bump must land first is a `[patch.crates-io]` to a
+   fixed fork, which also needs a `deny.toml` `allow-git` entry.
+2. Advance `rust-toolchain.toml`, the `rust-version` in `/Cargo.toml` and
+   `apps/desktop/web-rs/Cargo.toml` (when the MSRV moves), and the six `dtolnay/rust-toolchain`
+   SHA pins across `.github/workflows/` together (precedent: the 0.30.2 "Changed" entry).
+3. Run `just verify-full`.
+
 ## Packaging installers
 
 The release workflow builds packages for all three platforms — Windows
 (MSI + NSIS), macOS (`.dmg` + `.app` updater payload), and Linux
 (`.AppImage` + `.deb`) — each on its native GitHub-hosted runner. Locally
-you can build for your own host with the per-platform recipes below.
+you can build for your own host with the keyless recipes (`just build-windows`,
+`just build-macos`, `just build-linux`); the `-updater` variants need the signing key.
 
 ### Windows
 
@@ -162,7 +198,13 @@ later). The builds are **unsigned / not notarized**, so first launch hits
 Gatekeeper — see the README's [Install → macOS](../README.md#install) note
 for the one-time `xattr` / right-click-Open workaround. (Apple notarization
 can be layered on later by adding the Developer-ID secrets + `APPLE_*` env
-to the macOS leg, exactly as Authenticode is optional on Windows.)
+to the macOS leg, exactly as Authenticode is optional on Windows.) Unsigned
+also means macOS asks for keychain access again after **every** update: the
+refresh token's legacy-keychain ACL trusts the binary that wrote it, and an
+unsigned binary has no stable designated requirement, so the updated `.app`
+is a stranger to it. Developer-ID **signing** (a stable `identifier + team`
+designated requirement) is what fixes that prompt — notarization alone does
+not.
 
 ### Linux
 
@@ -174,11 +216,25 @@ a `.deb`. The build host needs the GTK/WebKit dev libraries + `patchelf`
 libssl-dev patchelf`); the release runner installs them. `rpm` is omitted
 for now (add it to the recipe's `--bundles` when needed).
 
+The release leg builds on **`ubuntu-22.04` on purpose**: glibc symbol
+versions bind to the build host's libc, so the runner image *is* the oldest
+distro the AppImage/.deb can start on (glibc 2.35 — Ubuntu 22.04 / Debian 12).
+A floating `ubuntu-latest` silently raised that floor to 2.38. A post-build
+`objdump -T` step fails the release if the shipped `desktop` binary needs a
+GLIBC symbol version above 2.35, and `repo_invariants/release.rs` pins the
+runner, the guard and the README's stated floor together. GitHub retires
+`ubuntu-22.04` runners around Ubuntu 22.04's April 2027 EOL — before then,
+move the leg into a container (e.g. `debian:bookworm`, glibc 2.36) and update
+`GLIBC_FLOOR`, the README and the release-body rows together.
+
 ### Which installer to ship
 
 For most "just run it" cases, use the **NSIS `-setup.exe`** — the
-tester double-clicks it, it asks once about per-user vs per-machine,
-and the app is on their Start menu within seconds. WebView2 is already
+tester double-clicks it, it installs per-user with no prompt and no admin
+rights (Tauri's default `currentUser` NSIS mode — keep it: it is what the
+README and release body promise, and it keeps the passive update UAC-free;
+`repo_invariants/release.rs` pins it), and the app is on their Start menu
+within seconds. WebView2 is already
 present on current Windows 10/11, so there's no prompt; setup only reaches
 the internet to fetch WebView2 on an older machine that lacks it.
 
@@ -311,7 +367,8 @@ shipping a *higher-versioned* fix — not by deleting the release:
 3. **Manual downgrade path** (users who can't wait): the MSI/NSIS installers from any previous
    release install over a newer build only if Windows allows the downgrade — document the specific
    release to grab in the incident notes. Users with auto-update disabled
-   (`AZAPPTOOLKIT_AUTO_UPDATE=0` or the settings toggle) are unaffected throughout.
+   (`AZAPPTOOLKIT_AUTO_UPDATE=0` or `"auto_update": false` in settings.json), and MSI/.deb
+   installs, are unaffected throughout.
 
 Never re-tag or re-upload different bytes under an existing version: the updater signature and
 Authenticode timestamps make the history auditable — keep it that way.
@@ -327,7 +384,8 @@ same recipes you run locally, so CI and local builds can't drift:
 - actionlint over the workflow files; shellcheck over `.claude/hooks/` plus a whole-history secrets
   scan (never gated on the change detector)
 - Dependency policy: `just audit` + `just web-audit` (RustSec advisories — root workspace **and**
-  the frontend's own lockfile) and `just deny` + `just web-deny` (license/source/bans for both trees)
+  the frontend's own lockfile), `just deny` + `just web-deny` (license/source/bans for both trees)
+  and `just machete` (declared-but-unused dependencies, both trees)
 
 `.github/workflows/release.yml` runs on `v*` tags: a `guard` job (tag ⇔ manifests, updater pubkey,
 RustSec) → a 3-OS build matrix (Windows NSIS + MSI, macOS Apple Silicon `.dmg` + `.app.tar.gz`,
@@ -343,12 +401,32 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   (`Zeroize` on `AccessToken` in `azapptoolkit-auth/src/token_cache.rs`); their `Debug` impl prints
   `<redacted>`. Refresh tokens go to the OS keyring — chunked across numbered entries because
   Windows Credential Manager caps a blob at 2560 UTF-16 bytes (don't collapse the chunking).
+  On Linux the only store is the Secret Service via zbus (`zbus_secret_service_keyring_store`); a
+  missing provider surfaces as `keyring_unavailable` (`AuthError::KeyringUnavailable`, memoised for
+  the process), distinct from `keyring` (a store that exists but refused, e.g. locked). There is no
+  in-memory fallback for the refresh token.
+  Exactly what is wiped from the heap: `AccessToken` on drop; the refresh token on load (each
+  keyring chunk and the combined buffer) and on save (each chunk string); the `/token` response
+  body buffer and the parsed access/refresh/id tokens (`TokenResponse`'s token fields are
+  `Zeroizing`); and the PKCE verifier (moved into `Zeroizing`, never copied). Not wiped, and outside
+  our control: transport buffers inside hyper/rustls, serde_json's scratch space for escaped strings
+  (tokens carry none), and oauth2's random verifier pre-image.
 - **Build-time baking is for non-secrets only.** `src-tauri/build.rs` bakes `AZAPPTOOLKIT_CLIENT_ID`
-  / `_TENANT_ID` (public-client identifiers). Never route a credential through `build.rs` or `.env`.
+  / `_TENANT_ID` (public-client identifiers) and `_CLOUD` (a cloud name, not a secret). Never route
+  a credential through `build.rs` or `.env`.
 - **Errors are sanitized before they're shown or logged.** AAD errors are redacted to the AADSTS
-  code (`azapptoolkit-auth/src/service.rs::redacted_aad_error`); Exchange response bodies are
-  control-char-stripped and length-capped (`azapptoolkit-exchange/src/client.rs::sanitize_error_body`)
-  — log the `ui_code`/request id, never a raw body that could carry token material.
+  code (`azapptoolkit_auth::service::wire::redacted_aad_error`); every client's error bodies —
+  Graph (including `$batch` sub-responses), ARM, Key Vault and Exchange — are control-char-stripped
+  and capped at 800 characters by the one helper, `azapptoolkit_core::http_error::sanitize_error_body`
+  — log the `ui_code`/status/request id, never a raw body that could carry token material. The
+  shared retry loop logs the status and reason, and a network failure's cause chain (it has no body).
+- **Owner-only on disk.** `settings.json`, exports, backups, restore reports and `.pfx` files go
+  through `azapptoolkit_core::private_file::write_owner_only` (0600 on unix; written to an
+  unpredictably named temp created exclusively — never following a planted symlink — then renamed
+  into place). The config and log directories are created, and existing ones tightened, to 0700 on
+  unix by `private_file::create_owner_only_dir`: the log files themselves are written at the umask,
+  and they carry tenant ids, app names and Graph error bodies. Windows relies on the per-user
+  profile ACL.
 - **Tokens stay scoped to their resource.** Write scopes are consented incrementally; optional
   admin scopes ride `ScopedTokenAdapter`, never the sign-in scope set. A missing consent surfaces
   as `consent_required` — it must not purge the refresh token (see AGENTS.md).
@@ -358,6 +436,9 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
 1. Run `just setup` once on a fresh clone (install `just` first — see Prerequisites).
 2. `just fmt` before submitting.
 3. `just verify` must pass — it runs the CI gates, in CI order.
+4. Synchronous locks are `parking_lot` (`Mutex`/`RwLock`: no poisoning, const `new` for statics);
+   a lock held across `.await` is `tokio::sync`. `std::sync::Mutex`/`RwLock` are kept out of the
+   root workspace by `apps/desktop/src-tauri/tests/dependency_policy.rs`.
 
 Changes that port behavior from the legacy PowerShell module should
 reference the source file and line range in the commit message or PR

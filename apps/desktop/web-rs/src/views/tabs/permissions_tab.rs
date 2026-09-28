@@ -1,7 +1,8 @@
 //! Permissions tab. Lists declared `requiredResourceAccess` entries with
-//! human-friendly resource + permission names resolved server-side via the
-//! bundled catalog (`PermissionsCatalog::lookup_permission`). Application vs.
-//! Delegated permissions get distinct chips. Lets you grant admin consent.
+//! human-friendly resource + permission names resolved server-side from each
+//! resource's live service principal (`resolve_resource_sp`; the bundled
+//! resource directory only supplies well-known resource names). Application
+//! vs. Delegated permissions get distinct chips. Lets you grant admin consent.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,24 +22,26 @@ use crate::components::legacy_exchange_grants_callout::{
 use crate::components::permission_picker::PickerSelection;
 use crate::components::requires_role::RequiresRole;
 use crate::components::scope_badge::{
-    is_exchange_scopable_on, is_sharepoint_orgwide, permission_scope_cell,
-    permission_scope_reach_is_unstated,
+    is_exchange_scopable_on, permission_scope_cell, permission_scope_reach_is_unstated,
 };
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::Callout;
-use crate::components::ui::IconButton;
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, EmptyState, FormError, IconButton, TabBar, TabBarItem,
+};
 use crate::hooks::use_command::use_command;
+use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::{Session, use_session};
+use crate::util::count_noun;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
-    is_scoped_sharepoint_item_resource_permission,
+    is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
@@ -80,6 +83,40 @@ fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKin
         .then_some(ScopeKind::SharePointItem)
 }
 
+/// The admin-consent outcome as a toast message: `Ok` for a clean grant, `Err`
+/// when any grant failed — the backend collects per-grant failures into an
+/// `Ok(GrantResult)` rather than erroring, so a partial consent must not read as
+/// an unqualified success.
+fn consent_report(r: &GrantResult) -> Result<String, String> {
+    let created = count_noun(
+        r.role_assignments_created.len(),
+        "role assignment",
+        "role assignments",
+    );
+    let upserted = count_noun(r.scope_grants_upserted.len(), "scope grant", "scope grants");
+    if let Some(first) = r.failures.first() {
+        let failed = r.failures.len();
+        let more = if failed > 1 {
+            format!(" (+{} more)", failed - 1)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "Admin consent partly applied: {created}, {upserted}; {failed} failed — {}{more}",
+            first.message
+        ));
+    }
+    let skipped = r.role_assignments_skipped.len();
+    let skipped = if skipped > 0 {
+        format!(", {skipped} already granted/skipped")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Admin consent granted: {created}, {upserted}{skipped}."
+    ))
+}
+
 /// Runs the admin-consent grant for the app in `detail`, reporting via toasts.
 /// Pulled out of the component so a retryable-error toast can re-invoke it: on
 /// a retryable failure it builds an `Rc<dyn Fn()>` that calls back into this
@@ -90,7 +127,6 @@ fn run_grant(
     detail: Signal<Arc<ApplicationDetail>>,
     consenting: RwSignal<bool>,
     consent_error: RwSignal<Option<String>>,
-    consent_result: RwSignal<Option<GrantResult>>,
     on_changed: Callback<()>,
 ) {
     if consenting.get_untracked() {
@@ -98,7 +134,6 @@ fn run_grant(
     }
     consenting.set(true);
     consent_error.set(None);
-    consent_result.set(None);
     let tenant = session.active_tenant.get_untracked();
     let object_id = detail.with_untracked(|d| d.application.id.clone());
     leptos::task::spawn_local(async move {
@@ -108,26 +143,26 @@ fn run_grant(
         };
         match permissions::grant_admin_consent(&t.tenant_id, &object_id).await {
             Ok(r) => {
-                session.toast_success(format!(
-                    "Admin consent granted: {} role assignment(s), {} scope grant(s).",
-                    r.role_assignments_created.len(),
-                    r.scope_grants_upserted.len(),
-                ));
-                consent_result.set(Some(r));
+                // Report through the toast host before `on_changed`: the reload
+                // rebuilds this tab, so anything held in its signals is gone
+                // before it can be read (the credentials tab's precedent). A
+                // partial consent is an error toast naming the failure — it
+                // lingers until read.
+                match consent_report(&r) {
+                    Ok(msg) => {
+                        session.toast_success(msg);
+                    }
+                    Err(msg) => {
+                        session.toast_error(msg, None);
+                    }
+                }
                 on_changed.run(());
             }
             Err(e) => {
                 // Offer Retry only when the backend says the failure is transient.
                 let retry: Option<ToastAction> = e.retryable.then(|| {
                     Rc::new(move || {
-                        run_grant(
-                            session,
-                            detail,
-                            consenting,
-                            consent_error,
-                            consent_result,
-                            on_changed,
-                        )
+                        run_grant(session, detail, consenting, consent_error, on_changed)
                     }) as ToastAction
                 });
                 session.toast_error(e.message.clone(), retry);
@@ -179,7 +214,6 @@ pub fn PermissionsTab(
     let session = use_session();
     let consenting = RwSignal::new(false);
     let consent_error: RwSignal<Option<String>> = RwSignal::new(None);
-    let consent_result: RwSignal<Option<GrantResult>> = RwSignal::new(None);
     // The unified "Grant access" wizard — always reachable, so adding/scoping is
     // the obvious first move. `wizard_preseed` carries a permission selection when
     // a row's "Scope…" opens the wizard pre-selected; None opens a blank select step.
@@ -202,13 +236,18 @@ pub fn PermissionsTab(
     // tab — they share a single busy + error (`cmd.error` is the row-level error
     // surface, formerly `row_error`).
     let cmd = use_command();
-    // Outcome note for the per-row downgrade flow (reports inline rather than via
-    // a toast, since the success path keeps the chooser open).
-    let scope_note: RwSignal<Option<String>> = RwSignal::new(None);
 
-    // Application/Delegated filter toggles. Both default on.
-    let show_application = RwSignal::new(true);
-    let show_delegated = RwSignal::new(true);
+    // Application/Delegated kind filter: one choice (`all` | `application` |
+    // `delegated`), so it can never reach a both-off state that hides every row.
+    let kind_filter = RwSignal::new("all".to_string());
+    // Roving-tabindex row navigation for the keyed table (it can't be a
+    // `DataTable`: the rows are a `<For>`). Reseeds when the filter or the
+    // row set changes.
+    let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
+    let on_grid_key = use_grid_keynav(tbody_ref, move || {
+        let _ = kind_filter.get();
+        let _ = detail.with(|d| d.resolved_permissions.len());
+    });
 
     // Effective Exchange mailbox scoping per Graph permission value, lazily
     // resolved when the app declares any scopable mail permission. Empty until
@@ -260,16 +299,7 @@ pub fn PermissionsTab(
             scopes_loading,
         );
     };
-    let grant = move |_| {
-        run_grant(
-            session,
-            detail,
-            consenting,
-            consent_error,
-            consent_result,
-            on_changed,
-        )
-    };
+    let grant = move |_| run_grant(session, detail, consenting, consent_error, on_changed);
 
     // A row's "Test access…" seeds the Permission tester with THIS principal and
     // jumps to it. Offered only beside a badge that can't state its own reach
@@ -301,7 +331,6 @@ pub fn PermissionsTab(
         }
         let object_id = detail.with(|d| d.application.id.clone());
         cmd.error.set(None);
-        scope_note.set(None);
         pending_downgrade.set(Some(PendingDowngrade {
             object_id,
             resource_app_id,
@@ -338,7 +367,8 @@ pub fn PermissionsTab(
                 } else {
                     format!("{broad_value} was already gone — nothing to change.")
                 };
-                scope_note.set(Some(note));
+                // Toast before `on_changed`: the reload rebuilds this tab.
+                session.toast_success(note);
                 pending_downgrade.set(None);
                 on_changed.run(());
             },
@@ -518,23 +548,39 @@ pub fn PermissionsTab(
                 })
                 on_changed=on_changed
             />
-            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
-            <div class="permissions-tab__filters">
-                <button
-                    class=move || filter_chip_class(show_application.get())
-                    type="button"
-                    on:click=move |_| show_application.update(|v| *v = !*v)
-                >
-                    "Application"
-                </button>
-                <button
-                    class=move || filter_chip_class(show_delegated.get())
-                    type="button"
-                    on:click=move |_| show_delegated.update(|v| *v = !*v)
-                >
-                    "Delegated"
-                </button>
-            </div>
+            {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
+            <TabBar
+                items=vec![
+                    TabBarItem {
+                        value: "all",
+                        label: "All",
+                    },
+                    TabBarItem {
+                        value: "application",
+                        label: "Application",
+                    },
+                    TabBarItem {
+                        value: "delegated",
+                        label: "Delegated",
+                    },
+                ]
+                selected=kind_filter
+            />
+            // A resource SP the backend couldn't read leaves that resource's
+            // granted rows reading "Not granted" (no SP id to join grants to).
+            // The backend doesn't cache such a detail; this says why the rows
+            // may be wrong and what clears it, before anyone acts on them.
+            {move || {
+                detail
+                    .with(|d| d.resolution_degraded)
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn" role="status">
+                                "Some permission grants couldn't be read from Microsoft Graph (it may be throttling requests), so a permission below can show “Not granted” even though it is granted. Use Refresh to try again before granting or removing anything."
+                            </Callout>
+                        }
+                    })
+            }}
             // Shared banner (consent-and-retry handled internally) so the Scope
             // column's unavailable state matches the MI and enterprise panes.
             {move || {
@@ -566,13 +612,11 @@ pub fn PermissionsTab(
             {move || {
                 // The empty check reads only the (stable) resolved set, so this
                 // outer block renders the table shell once. The rows are a keyed
-                // `<For>` whose `each` tracks just the filters — so toggling
+                // `<For>` whose `each` tracks just the filter — so switching
                 // Application/Delegated diffs rows instead of rebuilding the table.
                 if detail.with(|d| d.resolved_permissions.is_empty()) {
                     return view! {
-                        <Body1>
-                            "No permissions declared. Use the Entra portal or restore from a saved manifest."
-                        </Body1>
+                        <EmptyState title="No permissions declared" body="Use Grant access to add one." />
                     }
                         .into_any();
                 }
@@ -585,23 +629,19 @@ pub fn PermissionsTab(
                                 <th>"Kind"</th>
                                 <th>"Scope"</th>
                                 <th>"Status"</th>
-                                <th></th>
+                                <th>
+                                    <span class="visually-hidden">"Actions"</span>
+                                </th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody node_ref=tbody_ref on:keydown=on_grid_key.clone()>
                             <For
                                 each=move || {
-                                    let show_app = show_application.get();
-                                    let show_del = show_delegated.get();
+                                    let filter = kind_filter.get();
                                     detail.with(|d| {
                                         d.resolved_permissions
                                             .iter()
-                                            .filter(|p| match p.permission_kind {
-                                                PermissionKind::Application => show_app,
-                                                PermissionKind::Delegated => show_del,
-                                                // Unknown shows whenever either filter is on.
-                                                PermissionKind::Unknown => show_app || show_del,
-                                            })
+                                            .filter(|p| kind_visible(&filter, p.permission_kind))
                                             .cloned()
                                             .collect::<Vec<_>>()
                                     })
@@ -636,6 +676,26 @@ pub fn PermissionsTab(
                             />
                         </tbody>
                     </table>
+                    // A kind with nothing in it says so, rather than leaving a
+                    // bare header row.
+                    {move || {
+                        let filter = kind_filter.get();
+                        let any_visible = detail
+                            .with(|d| {
+                                d.resolved_permissions
+                                    .iter()
+                                    .any(|p| kind_visible(&filter, p.permission_kind))
+                            });
+                        (!any_visible)
+                            .then(|| {
+                                let kind = if filter == "delegated" { "delegated" } else { "application" };
+                                view! {
+                                    <Body1 class="data-table__empty">
+                                        {format!("No {kind} permissions declared.")}
+                                    </Body1>
+                                }
+                            })
+                    }}
                 }
                     .into_any()
             }}
@@ -756,27 +816,7 @@ pub fn PermissionsTab(
                 })
                 on_close=Callback::new(move |()| close_revoke())
             />
-            {move || {
-                scope_note.get().map(|m| view! { <Callout tone="ok" role="status">{m}</Callout> })
-            }}
-            {move || consent_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
-            {move || {
-                consent_result
-                    .get()
-                    .map(|r| {
-                        view! {
-                            <Callout tone="ok" role="status">
-                                {format!(
-                                    "Created {} role assignment(s); {} scope grant(s); {} skipped; {} failure(s).",
-                                    r.role_assignments_created.len(),
-                                    r.scope_grants_upserted.len(),
-                                    r.role_assignments_skipped.len(),
-                                    r.failures.len(),
-                                )}
-                            </Callout>
-                        }
-                    })
-            }}
+            {move || consent_error.get().map(|e| view! { <FormError>{e}</FormError> })}
             {move || {
                 let has_mail = detail.with(|d| {
                     d.resolved_permissions.iter().any(|p| {
@@ -808,9 +848,9 @@ pub fn PermissionsTab(
             {move || {
                 let has_sites = detail.with(|d| {
                     d.resolved_permissions.iter().any(|p| {
-                        p.permission_value
-                            .as_deref()
-                            .is_some_and(|v| v == "Sites.Selected" || is_sharepoint_orgwide(v))
+                        p.permission_value.as_deref().is_some_and(|v| {
+                            is_sharepoint_site_access_permission(Some(&p.resource_app_id), v)
+                        })
                     })
                 });
                 has_sites
@@ -832,12 +872,16 @@ pub fn PermissionsTab(
     }
 }
 
-fn filter_chip_class(on: bool) -> String {
-    let mut c = String::from("permissions-tab__filter-chip");
-    if on {
-        c.push_str(" permissions-tab__filter-chip--on");
+/// Whether a row of `kind` shows under the kind filter (`all` |
+/// `application` | `delegated`). An unclassified (`Unknown`) row shows under
+/// every choice: hiding it would drop a permission the operator can't see
+/// anywhere else.
+fn kind_visible(filter: &str, kind: PermissionKind) -> bool {
+    match filter {
+        "application" => matches!(kind, PermissionKind::Application | PermissionKind::Unknown),
+        "delegated" => matches!(kind, PermissionKind::Delegated | PermissionKind::Unknown),
+        _ => true,
     }
-    c
 }
 
 fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
@@ -898,6 +942,10 @@ where
     // the modal names the permission the operator clicked rather than "this
     // permission" over a row it is covering.
     let revoke_subject = perm_primary.clone();
+    // The row's accessible name for its trash button: a table of twelve grants
+    // announced twelve identical "Revoke application permission"s, so the
+    // operator had to count rows to know which one they were on.
+    let row_name = format!("{perm_primary} on {resource_display}");
     let runtime_assignment_id = p.runtime_assignment_id.clone();
     let runtime_grant_id = p.runtime_grant_id.clone();
     let permission_value = p.permission_value.clone();
@@ -911,7 +959,11 @@ where
     let remove_permission_id = p.permission_id.clone();
     let granted = runtime_assignment_id.is_some() || runtime_grant_id.is_some();
     let status_label = if granted { "Granted" } else { "Not granted" };
-    let status_class = if granted { "badge badge--ok" } else { "badge" };
+    let status_tone = if granted {
+        BadgeTone::Ok
+    } else {
+        BadgeTone::Neutral
+    };
 
     let trash_button = match (permission_kind, runtime_assignment_id, runtime_grant_id) {
         (PermissionKind::Application, Some(assignment_id), _) => {
@@ -920,7 +972,7 @@ where
             view! {
                 <IconButton
                     icon=IconName::Trash
-                    aria_label="Revoke application permission".to_string()
+                    aria_label=format!("Revoke application permission {row_name}")
                     title="Revoke".to_string()
                     class="button--danger".to_string()
                     on_click=Callback::new(on_click)
@@ -934,7 +986,7 @@ where
                 view! {
                     <IconButton
                         icon=IconName::Trash
-                        aria_label="Revoke delegated permission".to_string()
+                        aria_label=format!("Revoke delegated permission {row_name}")
                         title="Revoke".to_string()
                         class="button--danger".to_string()
                         on_click=Callback::new(on_click)
@@ -961,7 +1013,7 @@ where
             view! {
                 <IconButton
                     icon=IconName::Trash
-                    aria_label="Remove declared permission".to_string()
+                    aria_label=format!("Remove declared permission {row_name}")
                     title="Remove".to_string()
                     class="button--danger".to_string()
                     on_click=Callback::new(on_click)
@@ -1081,7 +1133,7 @@ where
                 }
             </td>
             <td class="cell-mid">
-                <span class=status_class>{status_label}</span>
+                <Badge label=status_label tone=status_tone />
             </td>
             <td class="cell-mid">
                 <div class="cell-actions">
@@ -1098,6 +1150,62 @@ where
 mod tests {
     use super::*;
     use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+
+    /// The kind filter narrows, but never hides an unclassified row, and
+    /// `all` hides nothing.
+    #[test]
+    fn kind_filter_never_hides_an_unclassified_row() {
+        use PermissionKind::{Application, Delegated, Unknown};
+        let cases = [
+            ("all", Application, true),
+            ("all", Delegated, true),
+            ("all", Unknown, true),
+            ("application", Application, true),
+            ("application", Delegated, false),
+            ("application", Unknown, true),
+            ("delegated", Application, false),
+            ("delegated", Delegated, true),
+            ("delegated", Unknown, true),
+        ];
+        for (filter, kind, shown) in cases {
+            assert_eq!(kind_visible(filter, kind), shown, "{filter} / {kind:?}");
+        }
+    }
+
+    fn grant_result(failures: Vec<permissions::GrantFailure>) -> GrantResult {
+        GrantResult {
+            client_service_principal_id: "sp-1".into(),
+            role_assignments_created: vec![Default::default(), Default::default()],
+            role_assignments_skipped: vec![],
+            scope_grants_upserted: vec![],
+            failures,
+        }
+    }
+
+    /// A partial consent is reported as an error naming the failure — the
+    /// backend returns it as `Ok` with `failures`, and the tab reloads right
+    /// after, so the toast is the only place the operator can read it.
+    #[test]
+    fn a_partial_consent_is_reported_as_an_error() {
+        let ok = consent_report(&grant_result(vec![])).expect("a clean grant");
+        assert!(ok.contains("2 role assignments, 0 scope grants"), "{ok}");
+
+        let failure = permissions::GrantFailure {
+            resource_app_id: MICROSOFT_GRAPH_APP_ID.into(),
+            permission_id: None,
+            kind: "Role".into(),
+            message: "Insufficient privileges".into(),
+        };
+        let err = consent_report(&grant_result(vec![failure.clone()])).expect_err("partial");
+        assert!(err.contains("1 failed"), "{err}");
+        assert!(err.contains("Insufficient privileges"), "{err}");
+        assert!(!err.contains("more"), "{err}");
+
+        let err =
+            consent_report(&grant_result(vec![failure.clone(), failure])).expect_err("partial");
+        assert!(err.contains("2 failed"), "{err}");
+        assert!(err.contains("(+1 more)"), "{err}");
+    }
 
     /// The "Scope…" button's gate. It must appear exactly where the per-row
     /// conversion to `Sites.Selected` can actually be performed: offering it

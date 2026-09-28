@@ -7,14 +7,16 @@
 //! principal. Mirrors the legacy `Get-AzManagedIdentity` /
 //! `Grant-AzManagedIdentityPermission` cmdlets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use futures::stream::{self, StreamExt};
 use tauri::{AppHandle, State};
 
-use azapptoolkit_arm::RoleAssignment;
+use azapptoolkit_arm::{ArmError, RoleAssignment};
+use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
@@ -23,13 +25,6 @@ use crate::dto::managed_identity::{
 };
 use crate::state::AppState;
 
-/// Broadly-privileged built-in Azure roles flagged in the MI RBAC view.
-const HIGH_PRIVILEGE_ROLES: &[&str] = &[
-    "Owner",
-    "Contributor",
-    "User Access Administrator",
-    "Role Based Access Control Administrator",
-];
 /// Max concurrent ARM calls (per-subscription fetches + role-def resolution).
 /// Bounds fan-out so scanning every subscription stays within ARM's rate limits
 /// (429s are retried with backoff in the client); a large estate just takes
@@ -54,10 +49,10 @@ pub async fn list_managed_identities(
         .cache
         .get::<Vec<ManagedIdentityDto>>(CacheKind::Lists, &key)
     {
-        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
     }
-    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
     // Filter the SHARED service-principal index rather than running a second,
     // near-identical `/servicePrincipals` scan of our own. That index is
@@ -196,11 +191,14 @@ pub async fn list_managed_identity_azure_roles(
     tenant_id: String,
     principal_id: String,
 ) -> Result<AzureRolesResult, UiError> {
+    // The role-definition names below are resolved from cache; a client
+    // factory only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
-    // the typed `consent_required` code (the UI offers an interactive consent
-    // button) instead of being flattened to a generic `token_error` deep inside
-    // the ARM client. On success the token is cached and the call below reuses
-    // it — no extra round trip on the happy path.
+    // the typed `consent_required` code before any ARM call, bound to the `arm`
+    // feature the UI's interactive consent button requests. On success the
+    // token is cached and the call below reuses it — no extra round trip on the
+    // happy path.
     state
         .ensure_arm_token(&tenant_id)
         .await
@@ -210,11 +208,10 @@ pub async fn list_managed_identity_azure_roles(
     let subscriptions = arm.list_subscriptions().await?;
     // Scan every subscription the signed-in user can reach so the Azure RBAC
     // picture is complete (no cap). Coverage is still tracked: `total` is what
-    // the user can reach, `scanned` now equals it, and `skipped` counts scanned
-    // subs whose role-assignment lookup failed — the only remaining source of a
-    // partial view. Fan-out stays bounded by `ARM_CONCURRENCY`.
+    // the user can reach and `skipped` counts subs whose role-assignment lookup
+    // failed — the only source of a partial view. Fan-out stays bounded by
+    // `ARM_CONCURRENCY`.
     let total = subscriptions.len();
-    let scanned = total;
     let subs = subscriptions;
 
     // Fetch each subscription's assignments concurrently (bounded). A failed
@@ -247,93 +244,110 @@ pub async fn list_managed_identity_azure_roles(
 
     let skipped = per_sub.iter().filter(|(_, list)| list.is_none()).count();
 
-    // Flatten, keeping each assignment's owning subscription display name.
-    let flat: Vec<(String, RoleAssignment)> = per_sub
-        .into_iter()
-        .flat_map(|(display, list)| {
-            list.unwrap_or_default()
-                .into_iter()
-                .map(move |a| (display.clone(), a))
-        })
-        .collect();
+    // Flatten, keeping each assignment's owning subscription display name and
+    // collapsing the above-subscription copies every subscription returns.
+    let flat = flatten_assignments(per_sub);
 
-    // Resolve the unique role-definition ids to names concurrently.
-    let unique_ids: HashSet<String> = flat
-        .iter()
-        .filter_map(|(_, a)| a.properties.role_definition_id.clone())
-        .filter(|id| !id.is_empty())
-        .collect();
-    let cache = state.cache.clone();
-    let role_names: HashMap<String, String> = stream::iter(unique_ids)
-        .map(|id| {
-            let arm = arm.clone();
-            let cache = cache.clone();
-            let tenant_id = tenant_id.clone();
-            async move {
-                // Role definitions (Owner, Contributor, custom roles) are
-                // tenant-stable, so cache the resolved name — otherwise every
-                // managed-identity Azure-RBAC view re-fetches the same handful
-                // (and ARM throttles aggressively). Only a real name is cached;
-                // a fetch failure falls back to the GUID tail without poisoning.
-                // Read-only until TTL / sign-out by design: a role-definition
-                // rename is rare, so no mutation busts this — it's cleared by the
-                // 60-min Permissions TTL and the sign-out tenant sweep.
-                let key = format!("{tenant_id}|arm_roledef|{id}");
-                if let Some(name) = cache.get::<String>(CacheKind::Permissions, &key) {
-                    return (id, name);
-                }
-                match arm
-                    .get_role_definition(&id)
-                    .await
-                    .ok()
-                    .and_then(|d| d.properties.role_name)
-                {
-                    Some(name) => {
-                        cache.put(CacheKind::Permissions, key, &name);
-                        (id, name)
-                    }
-                    None => {
-                        let fallback = id.rsplit('/').next().unwrap_or("role").to_string();
-                        (id, fallback)
-                    }
-                }
+    // Resolve the role-definition ids to names (one fetch per role GUID,
+    // cached per tenant — see `arm_roles`).
+    let role_names = resolve_role_names_cached(
+        &arm,
+        &state.cache,
+        &tenant_id,
+        flat.iter()
+            .filter_map(|(_, a)| a.properties.role_definition_id.as_deref()),
+        ARM_CONCURRENCY,
+    )
+    .await;
+
+    let mut rows: Vec<AzureRoleDto> = flat
+        .into_iter()
+        .map(|(sub_display, a)| {
+            let scope = a.properties.scope.unwrap_or_default();
+            let role_def_id = a.properties.role_definition_id.unwrap_or_default();
+            let role_name = role_display_name(&role_names, &role_def_id);
+            let high_privilege = is_high_privilege_role(&role_name, RoleContext::AzureResources);
+            AzureRoleDto {
+                scope_level: scope_level(&scope),
+                role_name,
+                scope,
+                subscription: sub_display,
+                high_privilege,
             }
         })
-        .buffer_unordered(ARM_CONCURRENCY)
-        .collect()
-        .await;
-
-    let mut rows: Vec<AzureRoleDto> =
-        flat.into_iter()
-            .map(|(sub_display, a)| {
-                let scope = a.properties.scope.unwrap_or_default();
-                let role_def_id = a.properties.role_definition_id.unwrap_or_default();
-                let role_name = if role_def_id.is_empty() {
-                    "(unknown role)".to_string()
-                } else {
-                    role_names.get(&role_def_id).cloned().unwrap_or_else(|| {
-                        role_def_id.rsplit('/').next().unwrap_or("role").to_string()
-                    })
-                };
-                let high_privilege = HIGH_PRIVILEGE_ROLES.contains(&role_name.as_str());
-                AzureRoleDto {
-                    scope_level: scope_level(&scope),
-                    role_name,
-                    scope,
-                    subscription: sub_display,
-                    high_privilege,
-                }
-            })
-            .collect();
+        .collect();
 
     // High-privilege roles first, then by name.
     rows.sort_by_key(|r| (std::cmp::Reverse(r.high_privilege), r.role_name.clone()));
     Ok(AzureRolesResult {
         roles: rows,
-        scanned,
         total,
         skipped,
     })
+}
+
+/// The Subscription column's label for an assignment made above the
+/// subscription level (a management group or the tenant root): every
+/// subscription beneath it returns it, so no single subscription owns it.
+const ABOVE_SUBSCRIPTION_LABEL: &str = "(inherited from above the subscription)";
+
+/// Dedupe key for one role assignment: its ARM id (an absolute path embedding
+/// the assignment's own scope, so identical whichever subscription surfaced
+/// it), lowercased; `scope|roleDefinitionId|principalId` when the id is absent.
+fn assignment_key(a: &RoleAssignment) -> String {
+    match a.id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => id.to_ascii_lowercase(),
+        None => {
+            let p = &a.properties;
+            format!(
+                "{}|{}|{}",
+                p.scope.as_deref().unwrap_or_default(),
+                p.role_definition_id.as_deref().unwrap_or_default(),
+                p.principal_id.as_deref().unwrap_or_default(),
+            )
+            .to_ascii_lowercase()
+        }
+    }
+}
+
+/// Flattens the per-subscription `principalId eq` results into one
+/// `(subscription label, assignment)` list, each assignment once.
+///
+/// ARM's `principalId eq {id}` filter returns assignments **at, above or
+/// below** the subscription queried, so a management-group or tenant-root
+/// assignment comes back once per subscription beneath it — without this
+/// dedupe one Reader on a management group over 20 subscriptions renders as
+/// 20 rows. Such an above-subscription row is labelled
+/// [`ABOVE_SUBSCRIPTION_LABEL`] rather than the subscription that happened to
+/// return it first, so the output does not depend on the `buffer_unordered`
+/// arrival order; a subscription-or-below assignment is only ever returned by
+/// its own subscription, so first-wins is exact for it. An empty or absent
+/// scope keeps the subscription label (where it sits is unknown). A failed
+/// subscription (`None`) contributes nothing. `readiness.rs` needs no such
+/// dedupe: it collects role GUIDs into a `HashSet`.
+fn flatten_assignments(
+    per_sub: Vec<(String, Option<Vec<RoleAssignment>>)>,
+) -> Vec<(String, RoleAssignment)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut flat = Vec::new();
+    for (display, list) in per_sub {
+        for a in list.into_iter().flatten() {
+            if !seen.insert(assignment_key(&a)) {
+                continue;
+            }
+            let above_subscription =
+                a.properties.scope.as_deref().is_some_and(|scope| {
+                    !scope.is_empty() && subscription_from_scope(scope).is_none()
+                });
+            let label = if above_subscription {
+                ABOVE_SUBSCRIPTION_LABEL.to_string()
+            } else {
+                display.clone()
+            };
+            flat.push((label, a));
+        }
+    }
+    flat
 }
 
 /// Extracts the subscription id from an ARM `scope` path
@@ -394,18 +408,40 @@ pub async fn assign_managed_identity_azure_role(
         &principal_id,
     )
     .await
-    .map_err(|err| {
-        let mut ui = UiError::from(err);
-        if ui.code == "forbidden" {
-            // Append the concrete scope so the user knows *where* the role is
-            // needed; the guidance itself comes from the capability catalog.
-            let base = forbidden_remediation(&ui, "azure_role_assign")
-                .unwrap_or("Not authorized to create role assignments at this scope.");
-            ui.message = format!("{base} (scope: {scope})");
-        }
-        ui
-    })?;
+    .map_err(|err| assign_role_error(err, scope))?;
+    // An assignment at ANY level can change who can reach a vault — the Key
+    // Vault sweep keeps the assignment's own scope, and a resource-group or
+    // subscription grant covers every vault beneath it — so bust unconditionally
+    // rather than only for a `/providers/Microsoft.KeyVault/vaults/` scope. One
+    // key per tenant, refilled only by an explicit sweep: the bust costs nothing.
+    crate::commands::keyvault_rbac::invalidate_kv_sweep(&state.cache, &tenant_id);
     Ok(())
+}
+
+/// Maps a failed role-assignment PUT to what the Assign Azure role form shows.
+///
+/// A duplicate (409 `RoleAssignmentExists`) is the common operator slip: it is
+/// a validation message, not success — nothing was created, and no cache is
+/// busted — instead of the raw `arm error (409): {json}`. A 403 appends the
+/// concrete scope to the capability catalog's guidance, so the user knows
+/// *where* the role is needed.
+fn assign_role_error(err: ArmError, scope: &str) -> UiError {
+    if err.is_role_assignment_exists() {
+        return UiError::validation(
+            "already_assigned",
+            format!(
+                "This identity already holds that role at this scope ({scope}). Nothing was \
+                 changed."
+            ),
+        );
+    }
+    let mut ui = UiError::from(err);
+    if ui.code == "forbidden" {
+        let base = forbidden_remediation(&ui, "azure_role_assign")
+            .unwrap_or("Not authorized to create role assignments at this scope.");
+        ui.message = format!("{base} (scope: {scope})");
+    }
+    ui
 }
 
 /// Classifies an ARM scope string by level for display.
@@ -429,8 +465,9 @@ fn scope_level(scope: &str) -> String {
 
 // ---------------- Inventory export ----------------
 
-/// Human label for a managed-identity sub-type, for the export's Subtype column.
-fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
+/// Human label for a managed-identity sub-type, for the export's Subtype column
+/// and the restore runbook's "not found" item.
+pub(crate) fn mi_subtype_label(subtype: MiSubtype) -> &'static str {
     match subtype {
         MiSubtype::SystemAssigned => "System-assigned",
         MiSubtype::UserAssigned => "User-assigned",
@@ -481,7 +518,6 @@ pub async fn save_managed_identities_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_arm::ArmError;
 
     fn mi_row(name: &str, subtype: MiSubtype) -> ManagedIdentityDto {
         ManagedIdentityDto {
@@ -504,6 +540,94 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[1].contains("User-assigned"));
         assert!(!lines[2].starts_with('='));
+    }
+
+    fn ra(id: Option<&str>, scope: &str, roledef: &str) -> RoleAssignment {
+        RoleAssignment {
+            id: id.map(str::to_string),
+            properties: azapptoolkit_arm::RoleAssignmentProperties {
+                role_definition_id: Some(roledef.to_string()),
+                scope: Some(scope.to_string()),
+                principal_id: Some("mi-principal".to_string()),
+                principal_type: None,
+            },
+        }
+    }
+
+    #[test]
+    fn flatten_dedupes_a_management_group_assignment_returned_by_every_subscription() {
+        const MG: &str = "/providers/Microsoft.Management/managementGroups/mg";
+        let mg_id = format!("{MG}/providers/Microsoft.Authorization/roleAssignments/ra-1");
+        let rg = "/subscriptions/sub-1/resourceGroups/rg";
+        let rg_id = format!("{rg}/providers/Microsoft.Authorization/roleAssignments/ra-2");
+        let prod = (
+            "Prod".to_string(),
+            Some(vec![
+                ra(Some(&mg_id), MG, "/roleDefinitions/reader"),
+                ra(Some(&rg_id), rg, "/roleDefinitions/contributor"),
+            ]),
+        );
+        let dev = (
+            "Dev".to_string(),
+            Some(vec![ra(Some(&mg_id), MG, "/roleDefinitions/reader")]),
+        );
+        let broken = ("Broken".to_string(), None);
+
+        // `per_sub` arrives in `buffer_unordered` order: the result must not
+        // depend on which subscription returned the MG row first.
+        for per_sub in [
+            vec![prod.clone(), dev.clone(), broken.clone()],
+            vec![dev.clone(), broken.clone(), prod.clone()],
+        ] {
+            let flat = flatten_assignments(per_sub);
+            assert_eq!(flat.len(), 2, "one row per assignment: {flat:?}");
+            let label_of = |id: &str| {
+                flat.iter()
+                    .find(|(_, a)| a.id.as_deref() == Some(id))
+                    .map(|(label, _)| label.clone())
+                    .expect("row present")
+            };
+            assert_eq!(label_of(&mg_id), ABOVE_SUBSCRIPTION_LABEL);
+            assert_eq!(label_of(&rg_id), "Prod");
+        }
+    }
+
+    #[test]
+    fn flatten_dedupes_ids_case_insensitively_and_falls_back_to_scope_role_principal() {
+        let sub = "/subscriptions/sub-1";
+        let flat = flatten_assignments(vec![
+            (
+                "Prod".to_string(),
+                Some(vec![
+                    ra(
+                        Some("/subscriptions/sub-1/providers/x/ra-1"),
+                        sub,
+                        "/rd/reader",
+                    ),
+                    ra(None, sub, "/rd/owner"),
+                    ra(None, sub, "/rd/contributor"),
+                ]),
+            ),
+            (
+                "Prod again".to_string(),
+                Some(vec![
+                    ra(
+                        Some("/SUBSCRIPTIONS/SUB-1/providers/X/RA-1"),
+                        sub,
+                        "/rd/reader",
+                    ),
+                    ra(None, "/Subscriptions/Sub-1", "/RD/Owner"),
+                ]),
+            ),
+        ]);
+        let roledefs: Vec<&str> = flat
+            .iter()
+            .map(|(_, a)| a.properties.role_definition_id.as_deref().unwrap())
+            .collect();
+        // Same id in a different case collapses; two id-less copies with the
+        // same scope/role/principal collapse; a different role is kept.
+        assert_eq!(roledefs, ["/rd/reader", "/rd/owner", "/rd/contributor"]);
+        assert!(flat.iter().all(|(label, _)| label == "Prod"));
     }
 
     #[test]
@@ -566,5 +690,45 @@ mod tests {
         assert_eq!(ui.code, "forbidden");
         assert!(!ui.retryable);
         assert!(ui.message.contains("denied"));
+    }
+
+    #[test]
+    fn a_duplicate_role_assignment_reads_as_already_assigned() {
+        let scope = "/subscriptions/s/resourceGroups/rg";
+        let ui = assign_role_error(
+            ArmError::Api {
+                status: 409,
+                body: r#"{"error":{"code":"RoleAssignmentExists","message":"The role assignment already exists."}}"#
+                    .into(),
+            },
+            scope,
+        );
+        assert_eq!(ui.code, "already_assigned");
+        assert!(!ui.retryable);
+        assert!(ui.message.contains(scope), "{}", ui.message);
+        assert!(
+            !ui.message.contains("RoleAssignmentExists"),
+            "{}",
+            ui.message
+        );
+
+        // Any other conflict keeps the generic ARM error.
+        let ui = assign_role_error(
+            ArmError::Api {
+                status: 409,
+                body: r#"{"error":{"code":"RoleAssignmentUpdateNotPermitted"}}"#.into(),
+            },
+            scope,
+        );
+        assert_eq!(ui.code, "arm_error");
+
+        // A 403 still names the scope the role is needed at.
+        let ui = assign_role_error(ArmError::Forbidden("denied".into()), scope);
+        assert_eq!(ui.code, "forbidden");
+        assert!(
+            ui.message.ends_with(&format!("(scope: {scope})")),
+            "{}",
+            ui.message
+        );
     }
 }

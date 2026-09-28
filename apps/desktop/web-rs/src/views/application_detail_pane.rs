@@ -1,6 +1,5 @@
-//! Detail pane for a selected application: header (name + delete) + tab list
-//! + active tab body. Mirrors
-//!   `apps/desktop/web/src/views/ApplicationDetailPane.tsx`.
+//! Detail pane for a selected application: header (name + delete), the
+//! `AppTab` `TabBar`, and the active tab body.
 
 use std::collections::HashSet;
 
@@ -13,7 +12,7 @@ use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{DetailLoadError, DetailSkeleton, TabBar, TabBarItem};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::keep_alive;
+use crate::util::{keep_alive, no_tenant};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_enterprise;
 use crate::views::tabs::{
@@ -42,11 +41,7 @@ pub fn ApplicationDetailPane(
         let _ = reload.get();
         async move {
             let Some(t) = tenant else {
-                return Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                });
+                return Err(no_tenant());
             };
             applications::get_application_detail(&t.tenant_id, &id).await
         }

@@ -8,10 +8,43 @@
 //! the `partial` reading below, which is the whole safety story of the flow.
 
 use leptos::prelude::*;
+use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::exchange::AapMigrationReport;
+use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::ui::{Callout, CopyableId};
+use crate::util::count_noun;
+
+/// Stops an in-flight migration: it stops before the next application; an
+/// application already mid-migration finishes, because its steps are ordered
+/// never to leave it half-scoped.
+///
+/// Both surfaces that start a migration render this one button. Mount it only
+/// while the run is in flight (`busy.get().then(…)`): `stopping` lives here, so
+/// each run gets a fresh button rather than one still reading "Stopping…" from
+/// the last one (the `BulkProgressRow` precedent).
+#[component]
+pub fn AapMigrationStop() -> impl IntoView {
+    let stopping = RwSignal::new(false);
+    let do_stop = move |_| {
+        if stopping.get() {
+            return;
+        }
+        stopping.set(true);
+        leptos::task::spawn_local(async move {
+            let _ = exchange::cancel_aap_migration().await;
+        });
+    };
+    view! {
+        <Button
+            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+            on_click=Box::new(do_stop)
+            disabled=Signal::derive(move || stopping.get())
+        >
+            {move || if stopping.get() { "Stopping…" } else { "Stop migration" }}
+        </Button>
+    }
+}
 
 /// Renders a migration report: a headline that distinguishes plan / done /
 /// needs-attention, then one line per application with its scoped roles,
@@ -27,13 +60,16 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
     let needs_attention = !report.dry_run && report.items.iter().any(|i| i.status != "migrated");
     let header = match (report.dry_run, needs_attention) {
         (true, _) => format!(
-            "Plan: {} app(s) would be migrated. Nothing has changed yet.",
-            report.items.len()
+            "Plan: {} would be migrated. Nothing has changed yet.",
+            count_noun(report.items.len(), "app", "apps")
         ),
-        (false, false) => format!("Migrated {} app(s).", report.items.len()),
+        (false, false) => format!(
+            "Migrated {}.",
+            count_noun(report.items.len(), "app", "apps")
+        ),
         (false, true) => format!(
-            "Migrated {} app(s), but some need attention — see the notes below.",
-            report.items.len(),
+            "Migrated {}, but some need attention — see the notes below.",
+            count_noun(report.items.len(), "app", "apps"),
         ),
     };
     // A run stopped by Cancel or a dead session has left the remaining apps on
@@ -64,7 +100,10 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
         <Show when=move || { unattempted_count > 0 }>
             <details class="aap-unattempted">
                 <summary>
-                    {format!("{unattempted_count} app(s) not reached — still on legacy policies")}
+                    {format!(
+                        "{} not reached — still on legacy policies",
+                        count_noun(unattempted_count, "app", "apps"),
+                    )}
                 </summary>
                 <ul class="warnings">
                     {unattempted

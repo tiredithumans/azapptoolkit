@@ -13,8 +13,9 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission,
+    exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
 };
+use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
 use crate::commands::exchange::{
@@ -55,10 +56,25 @@ pub async fn remediate_remove_expired_credentials(
     tenant_id: String,
     object_id: String,
 ) -> Result<RemediationOutcome, UiError> {
-    let client = state.graph_for(&tenant_id);
+    remediate_remove_expired_credentials_core(&state, &tenant_id, &object_id).await
+}
+
+/// The body of [`remediate_remove_expired_credentials`], over `&AppState` so the
+/// handler tests drive the same code.
+///
+/// A credential that is already gone by the time its removal runs (another
+/// admin, a concurrent run) answers `NotFound`. That is the end state this Fix
+/// wants, so it is skipped — neither counted as removed nor allowed to stop the
+/// loop. Any other failure still stops it.
+pub(crate) async fn remediate_remove_expired_credentials_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<RemediationOutcome, UiError> {
+    let client = state.graph_for(tenant_id);
     // Fail before any mutation if we can't read the live app — nothing changed,
     // so no cache bust is needed on this path.
-    let app = client.get_application(&object_id).await?;
+    let app = client.get_application(object_id).await?;
     let now = Utc::now();
 
     let expired_secrets = expired_password_key_ids(&app, now);
@@ -68,19 +84,30 @@ pub async fn remediate_remove_expired_credentials(
     let mut error: Option<UiError> = None;
 
     for key_id in &expired_secrets {
-        if let Err(e) = client.remove_password(&object_id, key_id).await {
-            error = Some(e.into());
-            break;
-        }
-        outcome.removed_secrets += 1;
-    }
-    if error.is_none() {
-        for key_id in &expired_certs {
-            if let Err(e) = client.remove_key_credential(&object_id, key_id).await {
+        match client.remove_password(object_id, key_id).await {
+            Ok(()) => outcome.removed_secrets += 1,
+            // Removed since the live read (another admin, a concurrent run):
+            // already the end state this Fix wants, so skip it without counting
+            // it or stopping the loop.
+            Err(GraphError::NotFound(_)) => {}
+            Err(e) => {
                 error = Some(e.into());
                 break;
             }
-            outcome.removed_certificates += 1;
+        }
+    }
+    if error.is_none() {
+        for key_id in &expired_certs {
+            match client.remove_key_credential(object_id, key_id).await {
+                Ok(()) => outcome.removed_certificates += 1,
+                // As above: already gone, and `remove_key_credential` sent no
+                // PATCH for it.
+                Err(GraphError::NotFound(_)) => {}
+                Err(e) => {
+                    error = Some(e.into());
+                    break;
+                }
+            }
         }
     }
 
@@ -92,7 +119,7 @@ pub async fn remediate_remove_expired_credentials(
     // so we bust caches even when a later removal failed (but never when nothing
     // was removed).
     if outcome.total() > 0 {
-        invalidate_app_credentials(&state.cache, &tenant_id, &object_id);
+        invalidate_app_credentials(&state.cache, tenant_id, object_id);
     }
     if let Some(e) = error {
         return Err(e);
@@ -219,7 +246,9 @@ struct RedundantRemoval {
 /// - A broader permission that is itself **confined** (Exchange RBAC / a legacy
 ///   Application Access Policy) covers nothing org-wide, so it cannot justify
 ///   removing the narrower one. `broader_is_confined` is the same veto the
-///   scorer applies in `redundant_app_permissions`.
+///   scorer applies in `redundant_app_permissions`. A value whose every
+///   covering permission is vetoed lands in `skipped` too — granted or not,
+///   since a confined broader does not cover it.
 ///
 /// That last rule is why the veto is a parameter rather than the scorer's
 /// business alone. The scorer refuses to flag `Mail.Read` when the covering
@@ -253,13 +282,25 @@ fn plan_redundant_removals(
             .collect();
         let value_to_id: HashMap<&str, &str> = declared.iter().map(|(id, v)| (*v, *id)).collect();
         for (id, value) in &declared {
-            let broaders: Vec<&str> = subsuming_app_permissions(value)
+            let covering: Vec<&str> = subsuming_app_permissions(value)
                 .iter()
                 .copied()
                 .filter(|b| value_to_id.contains_key(*b))
+                .collect();
+            if covering.is_empty() {
+                // Not redundant at all — nothing to remove, nothing to report.
+                continue;
+            }
+            let broaders: Vec<&str> = covering
+                .into_iter()
                 .filter(|b| !broader_is_confined(&resource.resource_app_id, b))
                 .collect();
             if broaders.is_empty() {
+                // Every covering permission is confined, or its verdict is
+                // unknown (fail closed): the value is kept, and reported so —
+                // a silent drop reads as "nothing to remove" while the finding
+                // and the permission both remain.
+                skipped.push((*value).to_string());
                 continue;
             }
             let assignment_id = grants.get(*id).cloned();
@@ -303,9 +344,19 @@ pub async fn remediate_remove_redundant_permissions(
     tenant_id: String,
     object_id: String,
 ) -> Result<RedundantPermissionsOutcome, UiError> {
-    let client = state.graph_for(&tenant_id);
+    remediate_remove_redundant_permissions_core(&state, &tenant_id, &object_id).await
+}
+
+/// The body of [`remediate_remove_redundant_permissions`], over `&AppState` so
+/// the bulk path and the handler tests drive the same code.
+pub(crate) async fn remediate_remove_redundant_permissions_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<RedundantPermissionsOutcome, UiError> {
+    let client = state.graph_for(tenant_id);
     // Fail before any mutation if the live app can't be read.
-    let app = client.get_application(&object_id).await?;
+    let app = client.get_application(object_id).await?;
 
     // Resolve each declared resource's appRole id → value index (+ the resource
     // SP object id, which is what appRoleAssignments key their resource by). A
@@ -375,31 +426,40 @@ pub async fn remediate_remove_redundant_permissions(
     // removal, not permit it. Permitting it is how a Fix removes live,
     // uncovered mailbox access; skipping it costs the operator a re-run once
     // Exchange answers, and the value shows up in `skipped` saying so.
-    let mail_scopes: HashMap<String, MailPermissionScope> =
-        match exchange_client(&state, &tenant_id) {
-            Ok(exo) => {
-                let graph_mail: Vec<String> = app
-                    .required_resource_access
-                    .iter()
-                    .filter(|r| r.resource_app_id == MICROSOFT_GRAPH_APP_ID)
-                    .flat_map(|r| {
-                        role_indexes
-                            .get(&r.resource_app_id)
-                            .into_iter()
-                            .flat_map(|ix| {
-                                r.resource_access
-                                    .iter()
-                                    .filter(|a| a.r#type == "Role")
-                                    .filter_map(|a| ix.get(&a.id).cloned())
-                            })
-                    })
-                    .collect();
-                resolve_mail_scopes(&exo, &app.app_id, &graph_mail, &HashSet::new(), false)
-                    .await
-                    .unwrap_or_default()
-            }
-            Err(_) => HashMap::new(),
-        };
+    let mail_scopes: HashMap<String, MailPermissionScope> = match exchange_client(state, tenant_id)
+    {
+        Ok(exo) => {
+            // Every declared application permission its OWN resource maps
+            // to an Exchange role — Graph's mail family and the EWS scope on
+            // Office 365 Exchange Online — as the `(value, role)` pairs the
+            // resolver takes. The same resource-aware gate
+            // `broader_is_confined` applies below, so the two agree on what
+            // a verdict can exist for.
+            let scopable: Vec<(String, &'static str)> = app
+                .required_resource_access
+                .iter()
+                .flat_map(|r| {
+                    role_indexes
+                        .get(&r.resource_app_id)
+                        .into_iter()
+                        .flat_map(move |ix| {
+                            r.resource_access
+                                .iter()
+                                .filter(|a| a.r#type == "Role")
+                                .filter_map(move |a| ix.get(&a.id))
+                                .filter_map(move |value| {
+                                    exchange_role_for_resource_permission(&r.resource_app_id, value)
+                                        .map(|role| (value.clone(), role))
+                                })
+                        })
+                })
+                .collect();
+            resolve_mail_scopes(&exo, &app.app_id, &scopable, &HashSet::new(), false)
+                .await
+                .unwrap_or_default()
+        }
+        Err(_) => HashMap::new(),
+    };
     let broader_is_confined = |resource_app_id: &str, broader: &str| {
         if !is_scopable_exchange_resource_permission(Some(resource_app_id), broader) {
             return false;
@@ -461,7 +521,7 @@ pub async fn remediate_remove_redundant_permissions(
             required_resource_access: Some(next),
             ..Default::default()
         };
-        match client.update_application(&object_id, &patch).await {
+        match client.update_application(object_id, &patch).await {
             Ok(_) => {
                 manifest_patched = true;
                 outcome.removed = declarations_to_drop
@@ -481,7 +541,7 @@ pub async fn remediate_remove_redundant_permissions(
     // still mutated live state, so bust caches even on the error path (but never
     // when nothing changed).
     if grants_revoked || manifest_patched {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(&state.cache, tenant_id);
     }
     if let Some(e) = error {
         return Err(e);
@@ -647,5 +707,284 @@ mod tests {
         let granted = grants(GRAPH, &["Sites.FullControl.All", "Sites.Selected"]);
         let (plan, _) = plan_redundant_removals(&required, &idx, &granted, |_, _| false);
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn plan_reports_a_narrower_whose_only_cover_is_vetoed_as_skipped() {
+        // Mail.ReadWrite is confined (Exchange RBAC, or its verdict unknown):
+        // it covers no org-wide read, so Mail.Read stays — and says so.
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &granted, |_, b| b == "Mail.ReadWrite");
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+    }
+
+    #[test]
+    fn a_veto_never_plans_a_removal() {
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+
+        // Granted: the narrower grant is load-bearing once its cover is vetoed.
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let (plan, skipped) = plan_redundant_removals(&required, &idx, &granted, |_, _| true);
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+
+        // Declaration-only: a confined broader covers nothing either, so the
+        // narrower declaration is not redundant and stays (fail closed).
+        let (plan, skipped) =
+            plan_redundant_removals(&required, &idx, &HashMap::new(), |_, _| true);
+        assert!(plan.is_empty());
+        assert_eq!(skipped, vec!["Mail.Read".to_string()]);
+    }
+
+    #[test]
+    fn the_veto_is_asked_about_the_resource_and_the_broader() {
+        let required = vec![declared(GRAPH, &["Mail.ReadWrite", "Mail.Read"])];
+        let idx = index(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let granted = grants(GRAPH, &["Mail.ReadWrite", "Mail.Read"]);
+        let asked = std::cell::RefCell::new(Vec::<(String, String)>::new());
+        let _ = plan_redundant_removals(&required, &idx, &granted, |r, b| {
+            asked.borrow_mut().push((r.to_string(), b.to_string()));
+            false
+        });
+        assert_eq!(
+            asked.into_inner(),
+            vec![(GRAPH.to_string(), "Mail.ReadWrite".to_string())]
+        );
+    }
+
+    // ---------------- redundant-permissions handler ----------------
+
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TENANT: &str = "tenant-1";
+    const OBJECT: &str = "obj-1";
+
+    async fn mock_get(
+        server: &MockServer,
+        at: &str,
+        filter: Option<&str>,
+        body: serde_json::Value,
+    ) {
+        let mut mock = Mock::given(method("GET")).and(path(at));
+        if let Some(f) = filter {
+            mock = mock.and(query_param("$filter", f));
+        }
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_non_exchange_admin_gets_the_vetoed_value_back_as_skipped() {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            &format!("/v1.0/applications/{OBJECT}"),
+            None,
+            serde_json::json!({
+                "id": OBJECT,
+                "appId": "app-1",
+                "displayName": "App One",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [
+                        {"id": "id-Mail.ReadWrite", "type": "Role"},
+                        {"id": "id-Mail.Read", "type": "Role"}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals",
+            Some(&format!("appId eq '{GRAPH}'")),
+            serde_json::json!({"value": [{
+                "id": "sp-graph",
+                "appId": GRAPH,
+                "displayName": "Microsoft Graph",
+                "appRoles": [
+                    {"id": "id-Mail.ReadWrite", "allowedMemberTypes": ["Application"],
+                     "displayName": "Read and write mail", "value": "Mail.ReadWrite"},
+                    {"id": "id-Mail.Read", "allowedMemberTypes": ["Application"],
+                     "displayName": "Read mail", "value": "Mail.Read"}
+                ]
+            }]}),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals",
+            Some("appId eq 'app-1'"),
+            serde_json::json!({"value": [{"id": "sp-app", "appId": "app-1"}]}),
+        )
+        .await;
+        mock_get(
+            &server,
+            "/v1.0/servicePrincipals/sp-app/appRoleAssignments",
+            None,
+            serde_json::json!({"value": [
+                {"id": "a-rw", "principalId": "sp-app", "resourceId": "sp-graph",
+                 "appRoleId": "id-Mail.ReadWrite"},
+                {"id": "a-r", "principalId": "sp-app", "resourceId": "sp-graph",
+                 "appRoleId": "id-Mail.Read"}
+            ]}),
+        )
+        .await;
+        // POST $batch (the resource-SP prewarm) is left unmocked: it is
+        // best-effort and degrades to the per-resource GET above.
+
+        // `for_test` has no signed-in tenant context, so `exchange_client`
+        // fails — exactly an operator Exchange can't answer for. Every Graph
+        // mail verdict is then unknown, and unknown vetoes (fail closed).
+        let state = AppState::for_test(TENANT, &server.uri());
+        let outcome = remediate_remove_redundant_permissions_core(&state, TENANT, OBJECT)
+            .await
+            .expect("the reads are mocked");
+
+        assert!(outcome.removed.is_empty());
+        assert_eq!(
+            outcome.skipped,
+            vec!["Mail.Read".to_string()],
+            "a vetoed value must come back as skipped, not vanish"
+        );
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method.as_str() != "DELETE" && r.method.as_str() != "PATCH"),
+            "a vetoed plan must mutate nothing"
+        );
+    }
+
+    // ---------------- expired-credentials handler ----------------
+    //
+    // An expired `endDateTime` must be past "now" by more than a whole day
+    // (`audit::is_expired`), so the fixtures use dates years from the wall clock.
+
+    use crate::commands::test_support::{
+        detail_cached, indexes_intact, mock_state, sample_app_json, seed_indexes_and_detail,
+    };
+    use wiremock::matchers::body_partial_json;
+
+    const EXPIRED: &str = "2020-01-01T00:00:00Z";
+
+    /// `sample_app_json()` carrying the given expired secrets and certificates.
+    fn app_with_expired(secrets: &[&str], certs: &[&str]) -> serde_json::Value {
+        let mut app = sample_app_json();
+        app["passwordCredentials"] = secrets
+            .iter()
+            .map(|k| serde_json::json!({"keyId": k, "endDateTime": EXPIRED}))
+            .collect();
+        app["keyCredentials"] = certs
+            .iter()
+            .map(|k| serde_json::json!({"keyId": k, "endDateTime": EXPIRED}))
+            .collect();
+        app
+    }
+
+    async fn mount_app(server: &MockServer, app: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_remove_password(server: &MockServer, key_id: &str, status: u16) {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/removePassword")))
+            .and(body_partial_json(serde_json::json!({ "keyId": key_id })))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_already_removed_certificate_is_skipped_and_not_counted() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&[], &["c1"])).await;
+        // `remove_key_credential`'s live re-read (`$select=keyCredentials`,
+        // which `get_application`'s longer `$select` does not match): another
+        // admin removed the certificate since the Fix read the app.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .and(query_param("$select", "keyCredentials"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"keyCredentials": []})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let out = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect("an already-gone certificate is the end state, not a failure");
+        assert_eq!(out.removed_certificates, 0, "nothing was removed");
+        assert_eq!(out.total(), 0);
+        assert!(
+            detail_cached(&state, TENANT, OBJECT),
+            "nothing was written, so nothing is busted"
+        );
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    #[tokio::test]
+    async fn a_vanished_secret_is_skipped_and_the_rest_are_removed() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&["s1", "s2"], &[])).await;
+        mount_remove_password(&server, "s1", 404).await;
+        mount_remove_password(&server, "s2", 204).await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let out = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect("a vanished secret must not stop the Fix");
+        assert_eq!(out.removed_secrets, 1, "only s2 was actually removed");
+        assert!(
+            !detail_cached(&state, TENANT, OBJECT),
+            "s2 WAS removed, so the credential list changed"
+        );
+        assert!(
+            indexes_intact(&state, TENANT),
+            "a credential-only removal must keep both tenant-wide indexes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_404_failure_still_stops_the_fix() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&["s1"], &["c1"])).await;
+        mount_remove_password(&server, "s1", 403).await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let err = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect_err("a 403 is a real failure");
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            detail_cached(&state, TENANT, OBJECT),
+            "nothing was removed, so nothing is busted"
+        );
+        assert!(indexes_intact(&state, TENANT));
     }
 }

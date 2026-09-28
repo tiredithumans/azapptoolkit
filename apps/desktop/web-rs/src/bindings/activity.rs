@@ -1,8 +1,8 @@
 //! Directory activity / change-log IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::AppIdArgs;
 pub use azapptoolkit_dto::activity::{ActivityLogItem, SignInActivityDto};

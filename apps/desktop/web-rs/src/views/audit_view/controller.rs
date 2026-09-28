@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::RemediationKind;
+use azapptoolkit_core::audit::{PostureCounts, RemediationKind, posture_counts};
 use leptos::prelude::*;
 
 use crate::bindings::audit::{self, AuditExportCoverage, AuditProgress, AuditRunResult};
@@ -19,8 +19,6 @@ use crate::bindings::auth;
 use crate::bindings::events;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::Session;
-
-use super::posture::{PostureCounts, posture_counts};
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuditController {
@@ -31,12 +29,15 @@ pub(crate) struct AuditController {
     /// High-water concurrency cap. When the live cap later drops below this
     /// peak, Graph is throttling and the scan is backing off — surfaced so a
     /// slow audit reads as expected, not stalled. Monotonic within a run;
-    /// reset when a new run clears `progress`.
+    /// reset when a new run clears `progress`. The placeholder `run` seeds
+    /// carries cap 0, so the peak only ever tracks the backend's own events.
     pub peak_cap: RwSignal<usize>,
     pub scan_error: RwSignal<Option<String>>,
     pub exporting: RwSignal<bool>,
-    /// Per-bucket counts for the posture strip + Home card, computed once per
-    /// scan (never per keystroke) without cloning the multi-MB run.
+    /// Per-bucket counts for the posture strip, computed once per scan (never
+    /// per keystroke) without cloning the multi-MB run — by core's
+    /// `posture_counts`, the same function the backend runs for the Home
+    /// card's summary, so the two surfaces can't disagree.
     pub posture: Memo<Option<PostureCounts>>,
     pub consent_needed: Memo<bool>,
     pub total_items: Memo<Option<usize>>,
@@ -46,6 +47,10 @@ pub(crate) struct AuditController {
     /// pane — a full-tenant HashMap per reader per render.
     pub names: Memo<Arc<HashMap<String, String>>>,
     pub report_available: Memo<bool>,
+    /// `false` when the run couldn't check some mail permission against
+    /// Exchange mailbox scoping — the org-wide mailbox group then says its
+    /// findings may already be confined. `true` with no run (nothing to caveat).
+    pub mailbox_scoping_resolved: Memo<bool>,
     /// When a row's remediation succeeds, drops **that one kind** from the
     /// item so its "Fix" button is gone for good (the audit cache is already
     /// busted server-side; scores refresh on the next manual re-run). Only that
@@ -96,6 +101,9 @@ impl AuditController {
         });
         let report_available = Memo::new(move |_| {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_report_available))
+        });
+        let mailbox_scoping_resolved = Memo::new(move |_| {
+            result.with(|r| r.as_ref().is_none_or(|r| r.mailbox_scoping_resolved))
         });
 
         let on_remediated = Callback::new(move |(object_id, kind): (String, RemediationKind)| {
@@ -152,6 +160,7 @@ impl AuditController {
             total_items,
             names,
             report_available,
+            mailbox_scoping_resolved,
             on_remediated,
             on_bulk_done,
         };
@@ -188,7 +197,11 @@ impl AuditController {
             done: 0,
             total: 0,
             current_app: None,
-            in_flight_cap: 8,
+            // 0, not the backend's INITIAL_CONCURRENCY: `peak_cap` is a
+            // high-water mark of the BACKEND's live cap, and a re-spelled 8
+            // made the rate-limit notice fire on a healthy scan if the backend
+            // constant ever dropped.
+            in_flight_cap: 0,
             cancelled: false,
         }));
         let t = self.session.active_tenant.get();
@@ -237,13 +250,15 @@ impl AuditController {
     }
 
     /// Exports by reference: the backend serves its own cached run, so the
-    /// item vector doesn't round-trip the IPC bridge. Only a CANCELLED run
-    /// (never cached backend-side) ships its items along.
+    /// item vector doesn't round-trip the IPC bridge. Any run the backend did
+    /// not cache (cancelled, truncated or degraded) ships its items along: the
+    /// cache holds nothing for it — or an EARLIER complete run, which would be
+    /// written out in its place and labelled complete.
     ///
     /// The run's coverage always rides along, cached path included: the file
     /// leaving the app has to carry the same caveats this workbench refuses to
-    /// omit on screen, and a cancelled run — the one that ships its items here
-    /// — is exactly the one with something to disclose.
+    /// omit on screen, and an incomplete run — the one that ships its items
+    /// here — is exactly the one with something to disclose.
     pub(crate) fn export(self, format: &'static str) {
         if self.exporting.get() {
             return;
@@ -251,12 +266,17 @@ impl AuditController {
         let Some(t) = self.session.active_tenant.get() else {
             return;
         };
-        let (empty, cancelled_items, coverage) = self.result.with(|r| match r.as_ref() {
-            Some(r) => (
-                r.items.is_empty(),
-                r.cancelled.then(|| r.items.clone()),
-                r.coverage(),
-            ),
+        let (empty, uncached_items, coverage) = self.result.with(|r| match r.as_ref() {
+            Some(r) => {
+                // `is_complete` is the same conjunction as the backend's cache
+                // guard, so "incomplete" here means "not in the cache".
+                let coverage = r.coverage();
+                (
+                    r.items.is_empty(),
+                    (!coverage.is_complete()).then(|| r.items.clone()),
+                    coverage,
+                )
+            }
             None => (true, None, AuditExportCoverage::default()),
         });
         if empty {
@@ -266,7 +286,7 @@ impl AuditController {
         leptos::task::spawn_local(async move {
             match audit::save_audit_to_file(
                 &t.tenant_id,
-                cancelled_items.as_deref(),
+                uncached_items.as_deref(),
                 coverage,
                 format,
             )

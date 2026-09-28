@@ -20,7 +20,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize};
 
 use crate::bindings::exchange::{self, RetiredScopeGroupDto};
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::state::use_session;
 
 /// The label an operator recognises the group by, falling back to the DN — which
@@ -49,7 +49,7 @@ pub fn RetiredScopeGroups(
     view! {
         <Callout tone="info" role="status">
             <Body1>
-                "This app's mailboxes now come from the toolkit-managed group. The group(s) below were the previous scope source, left in place for you to retire — with whatever still references them, as far as Exchange can be asked."
+                "This app's mailboxes now come from the toolkit-managed group. Each group below was a previous scope source, left in place for you to retire — with whatever still references it, as far as Exchange can be asked."
             </Body1>
             <ul class="warnings">
                 {groups
@@ -192,7 +192,12 @@ fn RetiredGroupRow(
                         }
                     >
                         <div class="actions-row">
-                            <Input value=typed placeholder=Signal::derive(move || type_prompt.get()) />
+                            // Named by a wrapping <label>, like `ConfirmDialog`'s typed
+                            // confirm: a placeholder alone is not an accessible name.
+                            <label>
+                                <span class="visually-hidden">{move || type_prompt.get()}</span>
+                                <Input value=typed placeholder=Signal::derive(move || type_prompt.get()) />
+                            </label>
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                 on_click=Box::new(move |_| armed.set(false))
@@ -218,7 +223,7 @@ fn RetiredGroupRow(
                         </div>
                     </Show>
                 </Show>
-                {move || error.get().map(|e| view! { <div class="form-error">{e}</div> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             </Show>
         </li>
     }

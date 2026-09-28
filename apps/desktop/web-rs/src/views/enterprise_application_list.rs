@@ -22,14 +22,14 @@ use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
-use crate::components::virtual_list::VirtualList;
+use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
-use crate::state::{OpenItemKind, use_session};
+use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::{contains_ignore_case, created_in_range};
 use crate::views::pairing::jump_to_paired_app;
 
@@ -50,9 +50,11 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     // the enterprise-app lens, so it's not offered here.
     let ent_filter = session.tenant_ui.enterprise_facet;
     // Unset date picker (None) leaves that side of the creation-date range open;
-    // together they bound creation date to an inclusive window.
-    let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
-    let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
+    // together they bound creation date to an inclusive window. Lifted to
+    // `TenantScopedUi` so it resets on tenant switch — this view stays mounted,
+    // and a leftover range would silently narrow the next tenant's list.
+    let created_after = session.tenant_ui.enterprise_created_after;
+    let created_before = session.tenant_ui.enterprise_created_before;
 
     // Collapsible advanced-filter drawer (saved views + created-on range + facet
     // chips); search stays outside it. Default collapsed to reclaim list space,
@@ -60,12 +62,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let filters_open = RwSignal::new(false);
     // A Home dashboard drill (open_enterprise_with_facet) lands here pre-filtered
     // but with the drawer collapsed, hiding the active facet chip. Consume the
-    // one-shot flag to expand the drawer once so the chip is visible (this is the
-    // sole consumer, so no view-guard is needed).
+    // one-shot flag to expand the drawer once so the chip is visible — only when
+    // it names THIS list: the App Registrations list consumes the same flag.
     Effect::new(move |_| {
-        if session.tenant_ui.pending_open_filters.get() {
+        if session.tenant_ui.pending_open_filters.get() == Some(ActiveView::EnterpriseApps) {
             filters_open.set(true);
-            session.tenant_ui.pending_open_filters.set(false);
+            session.tenant_ui.pending_open_filters.set(None);
         }
     });
     let active_filters = Signal::derive(move || {
@@ -112,14 +114,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
             return;
         };
         refreshing.set(true);
-        // Bump immediately so the resource refetches on next tick.
-        reload.update(|n| *n = n.wrapping_add(1));
         leptos::task::spawn_local(async move {
-            let _ = diagnostics::invalidate_list_cache(
-                t.tenant_id.clone(),
-                ListCacheKindDto::Enterprise,
-            )
-            .await;
+            diagnostics::invalidate_list_cache(t.tenant_id.clone(), ListCacheKindDto::Enterprise)
+                .await;
+            // Only now: the backend's cache-hit path is synchronous, so a
+            // refetch started first could re-serve the list being dropped.
+            reload.update(|n| *n = n.wrapping_add(1));
         });
     };
 
@@ -171,7 +171,9 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                     <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                         {move || {
                             // Re-runs only on an actual refetch; the filters are read
-                            // inside `LoadedEnterpriseApps`' memos, not here.
+                            // inside `LoadedEnterpriseApps`' memos, not here. A refetch
+                            // remounts the loaded body; `tenant_ui.enterprise_scroll_top`
+                            // carries the scroll position across it.
                             Suspend::new(async move {
                                 match sps.await {
                                     Ok(items) => {
@@ -313,6 +315,9 @@ fn VirtualRows(
     total: usize,
 ) -> impl IntoView {
     let session = use_session();
+    // Here, not in `VirtualList`: the `<Show>` below unmounts the list when a
+    // search matches nothing, and the carried offset must still reset then.
+    reset_scroll_offset_on_change(items, session.tenant_ui.enterprise_scroll_top);
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())
@@ -357,6 +362,7 @@ fn VirtualRows(
                 row_selector=".app-list__row"
                 key=|sp: &EnterpriseApplicationDto| sp.id.clone()
                 render_row=move |idx, sp| view_row(idx, sp, session).into_any()
+                scroll_offset=session.tenant_ui.enterprise_scroll_top
             />
         </Show>
     }
@@ -423,7 +429,7 @@ fn view_row(
                             view! {
                                 <Badge
                                     label="Disabled"
-                                    tone="unknown"
+                                    tone=BadgeTone::Unknown
                                     title="Sign-in disabled — this service principal's accountEnabled is false."
                                 />
                             }
@@ -433,7 +439,7 @@ fn view_row(
                             view! {
                                 <Badge
                                     label="Foreign"
-                                    tone="warning"
+                                    tone=BadgeTone::Warning
                                     title="Foreign tenant — app registered in a different tenant; consented locally."
                                 />
                             }

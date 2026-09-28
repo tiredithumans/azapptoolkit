@@ -39,8 +39,6 @@ futures = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
@@ -55,7 +53,9 @@ reqwest = { workspace = true }
 # `ring` can sign but not generate RSA, whereas aws-lc-rs can). aws-lc-rs is
 # already compiled into the tree via rustls, so this adds no new build toolchain
 # and keeps the `rsa` crate (RUSTSEC-2023-0071) out of the dependency graph.
-rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+# `zeroize` gives `KeyPair: Zeroize`, so cert.rs wipes the PKCS#8 DER rcgen
+# holds; zeroize is already a direct dependency below, so no crate is added.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs", "zeroize"] }
 # Certificate thumbprints (SHA-1 as Entra derives `customKeyIdentifier`, plus
 # SHA-256) come from the SAME aws-lc-rs rcgen already signs with — the feature
 # spec mirrors rcgen's `aws_lc_rs` feature exactly so resolution unifies and no
@@ -83,8 +83,15 @@ aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sy
 # `rsa` edge is reachable only through the `builder` feature, which nothing here
 # enables. `deny.toml`'s `[[bans.deny]] name = "rsa"` is what actually holds it.
 p12-keystore = { version = "0.2.1", default-features = false }
+# Parses an operator-pasted certificate before upload (refuse a private key or
+# a non-certificate before anything reaches Graph; read its thumbprint and
+# notAfter). Already in the lock file via rcgen and p12-keystore, so this adds
+# an edge, not a crate. `default-features = false` keeps the ring-backed
+# `verify` feature off (its default set is empty; stated so it stays that way).
+x509-parser = { version = "0.18", default-features = false }
 rand = "0.10"
 zeroize = { workspace = true }
+# rcgen's validity fields are time::OffsetDateTime; chrono everywhere else (keep time inside cert.rs).
 time = "0.3"
 
 [dev-dependencies]

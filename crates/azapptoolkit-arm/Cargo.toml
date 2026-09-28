@@ -10,17 +10,21 @@ description = "Minimal Azure Resource Manager (ARM) client for azapptoolkit — 
 [dependencies]
 azapptoolkit-core = { path = "../azapptoolkit-core" }
 
-tokio = { workspace = true }
-bytes = "1"
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+# `thiserror` is used only inside `azapptoolkit_core::http_error_enum!`'s expansion
+# (`#[derive(::thiserror::Error)]`, crates/azapptoolkit-core/src/http_error.rs), which
+# cargo-machete cannot see. The dependency is required; `just machete` would flag it.
+[package.metadata.cargo-machete]
+ignored = ["thiserror"]
 
 [lints]
 workspace = true

@@ -1,12 +1,13 @@
 //! Permission-tester IPC bindings — "App → resource" effective-access checks
 //! against a specific Exchange mailbox or SharePoint site.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 pub use azapptoolkit_dto::permission_tester::{
-    MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,
+    AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
+    PermissionTestResult,
 };
 
 #[derive(Serialize)]
@@ -25,13 +26,21 @@ struct ReachersArgs<'a> {
 }
 
 /// The mailbox reverse lookup: every service principal holding a mail-scopable
-/// Graph application permission, probed against `mailbox` (long-running;
+/// application permission on either mailbox resource (Microsoft Graph, or the
+/// EWS `full_access_as_app` scope on Office 365 Exchange Online), plus the
+/// principals in Exchange's SP store, probed against `mailbox` (long-running;
 /// progress arrives via the `mailbox-probe-progress` event stream).
 pub async fn find_mailbox_reachers(
     tenant_id: &str,
     mailbox: &str,
 ) -> Result<MailboxReachersResult, UiError> {
     invoke_result("find_mailbox_reachers", ReachersArgs { tenant_id, mailbox }).await
+}
+
+/// Signals an in-progress mailbox reverse-lookup probe to stop at the next
+/// dispatch boundary.
+pub async fn cancel_mailbox_probe() -> Result<(), UiError> {
+    invoke_result("cancel_mailbox_probe", ()).await
 }
 
 pub async fn test_mailbox_access(

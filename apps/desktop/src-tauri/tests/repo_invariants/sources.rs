@@ -1,5 +1,5 @@
-//! The command layer as data: every module, and every `#[tauri::command]`
-//! body, read from the source tree at test time.
+//! The command layer as data: every module, every `#[tauri::command]` body and
+//! every function body, read from the source tree at test time.
 //!
 //! Replaces the three hand-maintained `include_str!` tables the fan-out, cancel
 //! and command rules each kept. Those tables were the reason a 7 822-insertion
@@ -79,19 +79,91 @@ pub(crate) fn command_modules() -> Vec<(String, String)> {
     out
 }
 
+/// Every `.rs` file under the frontend's `web-rs/src`, as (path relative to
+/// `src`, `/`-separated, source), sorted. Unlike [`command_modules`] nothing is
+/// stripped: the frontend rules scan markup, and a `#[cfg(test)]` module
+/// spelling that markup is as much a bypass as any other.
+pub(crate) fn web_modules() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("apps/desktop")
+        .join("web-rs/src");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let name = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            out.push((name.replace('\\', "/"), src));
+        }
+    }
+    assert!(
+        out.len() > 50,
+        "walked {} frontend modules from {} — the source-tree walk is broken, and a rule that \
+         scans nothing passes vacuously",
+        out.len(),
+        root.display()
+    );
+    out.sort();
+    out
+}
+
+/// The lines of `src` that are not `//` comments (doc or plain), so a rule
+/// keyed on markup never fires on prose that merely describes it.
+pub(crate) fn code_lines(src: &str) -> impl Iterator<Item = &str> {
+    src.lines().filter(|l| !l.trim_start().starts_with("//"))
+}
+
 /// One `#[tauri::command]` handler: its name and its **own** body.
 pub(crate) struct Command {
     pub(crate) module: String,
     pub(crate) name: String,
+    /// The raw parameter list, the text between the signature's parens.
+    pub(crate) params: String,
+    /// The declared return type with the leading `->` removed and trimmed;
+    /// empty for a command that returns `()`.
+    pub(crate) ret: String,
     /// Brace-balanced function body, `{` to matching `}`.
     pub(crate) body: String,
+}
+
+/// Whether the `#[tauri::command]` found at byte `at` opens its own line, i.e.
+/// only whitespace sits between the previous newline (or the start of the
+/// file) and it.
+///
+/// A doc comment that merely *mentions* the attribute (`/// behind a
+/// `#[tauri::command]` …`) is otherwise read as a command: the extractor then
+/// takes the next `fn` — a private `*_core` helper — and every rule counts a
+/// phantom command no `generate_handler![]` could ever register. The advisory
+/// `command-parity-check.sh` hook learned the same lesson ("anchored to line
+/// start").
+pub(crate) fn command_attribute_at_line_start(src: &str, at: usize) -> bool {
+    let line_start = src[..at].rfind('\n').map_or(0, |n| n + 1);
+    src[line_start..at].trim().is_empty()
 }
 
 /// Extracts the brace-balanced block starting at the first `{` at or after
 /// `from`. Skips string literals and `//` comments so a brace inside either
 /// cannot unbalance the scan (same reasoning as `fanout::call_sites`; char
 /// literals are deliberately not tracked because `'` also opens a lifetime).
-fn balanced_block(src: &str, from: usize) -> Option<String> {
+pub(crate) fn balanced_block(src: &str, from: usize) -> Option<String> {
     let bytes = src.as_bytes();
     let open = src[from..].find('{')? + from;
     let (mut depth, mut i) = (0usize, open);
@@ -142,6 +214,9 @@ pub(crate) fn commands() -> Vec<Command> {
         while let Some(hit) = src[from..].find("#[tauri::command]") {
             let at = from + hit;
             from = at + "#[tauri::command]".len();
+            if !command_attribute_at_line_start(&src, at) {
+                continue;
+            }
             // Skip any further attributes, then read `fn <name>`.
             let Some(fn_at) = src[from..].find("fn ") else {
                 continue;
@@ -165,13 +240,25 @@ pub(crate) fn commands() -> Vec<Command> {
             let Some(params_end) = balanced_paren_end(&src, fn_at) else {
                 continue;
             };
+            let Some(params_open) = src[fn_at..params_end].find('(').map(|p| fn_at + p) else {
+                continue;
+            };
+            let params = src[params_open + 1..params_end - 1].to_string();
             let Some(body) = balanced_block(&src, params_end) else {
                 continue;
             };
-            from = params_end + body.len();
+            let body_open = params_end + src[params_end..].find('{').unwrap_or(0);
+            let ret = src[params_end..body_open]
+                .trim()
+                .trim_start_matches("->")
+                .trim()
+                .to_string();
+            from = body_open + body.len();
             out.push(Command {
                 module: module.clone(),
                 name,
+                params,
+                ret,
                 body,
             });
         }
@@ -181,6 +268,88 @@ pub(crate) fn commands() -> Vec<Command> {
         "found only {} #[tauri::command] handlers — the extractor is broken",
         out.len()
     );
+    out
+}
+
+/// Whether `trimmed` opens a function — at any indentation, with any
+/// combination of visibility, `async`, `const`, `unsafe` or `extern`.
+///
+/// Both the cache rule's back-walk and [`functions_in`] use this as their
+/// boundary, so anything it fails to recognise silently widens the search into
+/// the previous function. One definition, so the two cannot disagree.
+pub(crate) fn is_fn_header(trimmed: &str) -> bool {
+    let rest = trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub "))
+        .unwrap_or(trimmed);
+    let rest = rest
+        .strip_prefix("const ")
+        .or_else(|| rest.strip_prefix("async "))
+        .or_else(|| rest.strip_prefix("unsafe "))
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    rest.starts_with("fn ")
+}
+
+/// One `fn` item — a command, a private helper, a nested fn — with its **own**
+/// body.
+pub(crate) struct Function {
+    pub(crate) name: String,
+    /// Brace-balanced body with every `//` line removed, so a comment that
+    /// merely names a validator cannot satisfy a rule that asks for the call.
+    pub(crate) body: String,
+}
+
+/// Every `fn` item in `src`, each with its own body.
+///
+/// [`commands`] stops at `#[tauri::command]` handlers; the trust rules also
+/// need the private helpers a command delegates its write to (`configure_oidc`,
+/// `wire_application`), because that is where the write sits and where the
+/// check has to be proven. Every header is scanned independently — a nested fn
+/// appears both inside its parent's body and as an item of its own. Bodiless
+/// declarations (trait items) are skipped.
+pub(crate) fn functions_in(src: &str) -> Vec<Function> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        let line_at = offset;
+        offset += line.len();
+        let trimmed = line.trim_start();
+        if !is_fn_header(trimmed) {
+            continue;
+        }
+        let Some(kw) = trimmed.find("fn ") else {
+            continue;
+        };
+        let fn_at = line_at + (line.len() - trimmed.len()) + kw;
+        let name: String = src[fn_at + 3..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(params_end) = balanced_paren_end(src, fn_at) else {
+            continue;
+        };
+        let rest = &src[params_end..];
+        let (Some(brace), semi) = (rest.find('{'), rest.find(';')) else {
+            continue;
+        };
+        if semi.is_some_and(|semi| semi < brace) {
+            continue;
+        }
+        let Some(block) = balanced_block(src, params_end) else {
+            continue;
+        };
+        let body = block
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(Function { name, body });
+    }
     out
 }
 

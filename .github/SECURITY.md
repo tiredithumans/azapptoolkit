@@ -7,8 +7,8 @@
 Report privately through GitHub's
 [security advisory flow](https://github.com/tiredithumans/azapptoolkit/security/advisories/new),
 so a fix can be prepared and released before the issue is disclosed. Please
-include reproduction steps and the affected version (see Help → About, or the
-installer filename) where you can.
+include reproduction steps and the affected version (shown at the bottom of the account menu — click your name in the top
+bar — or in the installer filename) where you can.
 
 We aim to acknowledge a report within a few days and to keep you updated as a
 fix is developed and shipped via the in-app updater.

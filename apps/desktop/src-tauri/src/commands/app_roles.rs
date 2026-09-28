@@ -25,7 +25,7 @@ use crate::dto::UiError;
 use crate::dto::enterprise_application::{AppRoleInput, AppRolesView};
 use crate::state::AppState;
 
-use super::applications::invalidate_app_details;
+use super::applications::{invalidate_app_details, invalidate_app_role_resources};
 use super::guid::new_v4_guid;
 
 /// Where an enterprise app's exposed roles live. Resolved per request from the
@@ -337,6 +337,11 @@ pub async fn upsert_enterprise_app_role(
     // Entra mirrors the app's roles onto the paired SP's appRoles, which the
     // cached detail payloads embed (the Access tab's role picker reads them).
     invalidate_app_details(&state.cache, &tenant_id);
+    // The first enabled Application role moves this SP INTO the Grant-access
+    // picker's tenant-app directory (and every role shifts its count). The graph
+    // crate busts its own `resource:` prefix on this write; the command-side
+    // directory needs the same.
+    invalidate_app_role_resources(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -363,6 +368,9 @@ pub async fn delete_enterprise_app_role(
     }
     write_roles(&client, &target, &plan.roles).await?;
     invalidate_app_details(&state.cache, &tenant_id);
+    // Removing (or disabling) the last Application role moves this SP OUT of
+    // the Grant-access picker's tenant-app directory.
+    invalidate_app_role_resources(&state.cache, &tenant_id);
     Ok(())
 }
 

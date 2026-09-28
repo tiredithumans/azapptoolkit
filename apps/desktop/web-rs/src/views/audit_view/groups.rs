@@ -1,6 +1,6 @@
 //! Finding-group taxonomy for the findings-first Security workbench.
 //!
-//! One catalog entry per finding key (the same keys `filter::matches_finding`
+//! One catalog entry per finding key (the same keys core's `matches_finding`
 //! understands, so Home drills and the characterization tests share one
 //! vocabulary), classified into two sections: **Actionable** findings ranked by
 //! their own worst severity, and demoted **Healthy** positives
@@ -8,11 +8,12 @@
 //! key — the load-bearing `.contains(SCOPED_VIA_RBAC)` vs `.starts_with`
 //! asymmetry lives in exactly one place.
 
-use azapptoolkit_core::audit::{AuditItem, RemediationKind, RiskLevel};
+use std::cmp::Reverse;
+
+use azapptoolkit_core::audit::{AuditItem, RemediationKind, RiskLevel, matches_finding};
 
 use crate::components::bulk_action_bar::BulkAction;
-
-use super::filter::matches_finding;
+use crate::components::ui::BadgeTone;
 
 /// Which section of the Findings pane a group renders in.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "legacy_mailbox_scope",
         title: "Legacy Application Access Policy scoping",
-        blurb: "Mailbox access confined by an Application Access Policy — deprecated, per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
+        blurb: "Mailbox access confined by an Application Access Policy — legacy (replaced by RBAC for Applications; Microsoft has said its deprecation will be announced), per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },
@@ -100,6 +101,22 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Org-wide reach the toolkit cannot confine — advisory siblings of
+    // `high_risk_perms`, split by the scorer's advice (remove vs. review).
+    GroupSpec {
+        key: "unscopable_legacy_mailbox",
+        title: "Legacy Exchange Online mailbox grants",
+        blurb: "Mail, calendar, contacts and mailbox-settings permissions granted on the legacy Office 365 Exchange Online resource. They reach every mailbox and RBAC for Applications cannot confine them (it covers Microsoft Graph and EWS only); the Outlook REST endpoints they authorized were decommissioned in March 2024. Remove the grant and use the identically named Microsoft Graph permission instead.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
+    GroupSpec {
+        key: "unconfinable_orgwide",
+        title: "Org-wide access that can't be confined here",
+        blurb: "Mailbox or SharePoint permissions that reach every mailbox or site, but that neither RBAC for Applications nor Sites.Selected can confine from this toolkit: a mail permission with no supported Exchange application role or whose resource could not be resolved, or Sites.* granted on Office 365 SharePoint Online. Review whether each grant is needed; where it is, re-declare it as a Microsoft Graph permission that can be scoped.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "external_exposure",
         title: "Reachable outside this tenant",
@@ -110,7 +127,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "high_risk_delegated",
         title: "High-risk delegated permissions",
-        blurb: "Admin-consented delegated scopes with broad reach. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",
+        blurb: "Delegated scopes that let the app act as a signed-in user (Directory.AccessAsUser.All, user_impersonation), and broad-reach scopes (mail, files, directory, sites…) an admin consented to for every user. If the tenant's consent grants couldn't be read, requested broad scopes are listed too. Review on the principal's Permissions tab; delegated scopes are requested by name, so removal is admin-judged.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },
@@ -149,13 +166,17 @@ pub(super) struct FindingGroup {
     pub worst: RiskLevel,
 }
 
-fn sev_rank(level: RiskLevel) -> u8 {
-    match level {
-        RiskLevel::Critical => 3,
-        RiskLevel::High => 2,
-        RiskLevel::Medium => 1,
-        RiskLevel::Low => 0,
-    }
+/// The one ordering both rankers sort by: Actionable before Healthy, then the
+/// group's worst severity descending (`RiskLevel`'s `Ord` is severity order),
+/// then its affected-principal count descending. Shared by [`group_findings`]
+/// and [`ranked_actionable_findings`] so the Home card lists findings in the
+/// order the workbench shows them.
+fn rank_key(section: GroupSection, worst: RiskLevel, count: usize) -> impl Ord {
+    (
+        matches!(section, GroupSection::Healthy),
+        Reverse(worst),
+        Reverse(count),
+    )
 }
 
 /// Classifies `items` into every catalog group and ranks the Actionable
@@ -176,7 +197,7 @@ pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
             let worst = item_indices
                 .iter()
                 .map(|&i| items[i].risk_level)
-                .max_by_key(|&l| sev_rank(l))
+                .max()
                 .unwrap_or(RiskLevel::Low);
             FindingGroup {
                 spec,
@@ -197,40 +218,47 @@ pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
     // workbench — pushing a twelve-app Critical org-wide-mailbox group below
     // the fold. Count only breaks ties, so breadth still ranks within a tier
     // without ever outvoting severity.
-    groups.sort_by_key(|g| {
-        (
-            matches!(g.spec.section, GroupSection::Healthy),
-            std::cmp::Reverse(sev_rank(g.worst)),
-            std::cmp::Reverse(g.item_indices.len()),
-        )
-    });
+    groups.sort_by_key(|g| rank_key(g.spec.section, g.worst, g.item_indices.len()));
     groups
 }
 
-/// The Findings pane's Actionable groups, in the SAME severity ranking, as
-/// `(key, title, tone)` — for surfaces outside the workbench (the Home posture
-/// card) that echo the order + severity tone without re-deriving them. Healthy
-/// groups are excluded; empty groups stay (the caller decides whether a
-/// zero-count finding is worth showing). `tone` is the group's worst-severity
-/// colour, matching the workbench's finding-group tone dot.
+/// The Findings pane's Actionable groups, in the SAME ranking ([`rank_key`]),
+/// as `(key, title, tone, count)` — for surfaces outside the workbench (the Home
+/// posture card) that hold precomputed tallies instead of the run's items.
+///
+/// `tally` answers `(count, worst)` for a finding key, or `None` to leave that
+/// finding out; zero-count findings are dropped too (a zero line is noise,
+/// mirroring the pane hiding empty Actionable groups). Healthy groups are
+/// excluded. `tone` is the finding's worst-severity colour, matching the
+/// workbench's finding-group tone dot.
 pub(crate) fn ranked_actionable_findings(
-    items: &[AuditItem],
-) -> Vec<(&'static str, &'static str, &'static str)> {
-    group_findings(items)
+    tally: impl Fn(&str) -> Option<(usize, RiskLevel)>,
+) -> Vec<(&'static str, &'static str, BadgeTone, usize)> {
+    let mut ranked: Vec<(&'static GroupSpec, usize, RiskLevel)> = GROUP_CATALOG
+        .iter()
+        .filter(|spec| matches!(spec.section, GroupSection::Actionable))
+        .filter_map(|spec| {
+            let (count, worst) = tally(spec.key)?;
+            (count > 0).then_some((spec, count, worst))
+        })
+        .collect();
+    // Stable, over catalog order — the same final tie-break `group_findings` has.
+    ranked.sort_by_key(|&(spec, count, worst)| rank_key(spec.section, worst, count));
+    ranked
         .into_iter()
-        .filter(|g| matches!(g.spec.section, GroupSection::Actionable))
-        .map(|g| (g.spec.key, g.spec.title, tone(g.worst)))
+        .map(|(spec, count, worst)| (spec.key, spec.title, tone(worst), count))
         .collect()
 }
 
-/// Maps a risk level to the shared tone-dot colour vocabulary (the same mapping
-/// `finding_group_view` uses inline).
-fn tone(level: RiskLevel) -> &'static str {
+/// The one `RiskLevel` → tone mapping; `finding_group_view`, `risk_tone` and
+/// (via [`ranked_actionable_findings`]) the Home card all derive from it. Its
+/// `Display` is the `--{tone}` suffix the finding-group dots share.
+pub(super) fn tone(level: RiskLevel) -> BadgeTone {
     match level {
-        RiskLevel::Critical => "critical",
-        RiskLevel::High => "danger",
-        RiskLevel::Medium => "warning",
-        RiskLevel::Low => "ok",
+        RiskLevel::Critical => BadgeTone::Critical,
+        RiskLevel::High => BadgeTone::Danger,
+        RiskLevel::Medium => BadgeTone::Warning,
+        RiskLevel::Low => BadgeTone::Ok,
     }
 }
 
@@ -262,8 +290,9 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// section's own Fix with it. A section shows only the Fix for its own rule;
 /// the others are one click away in the section that owns them.
 ///
-/// Advisory groups (`high_risk_perms`, `external_exposure`,
-/// `high_risk_delegated`, `no_local_app`) and the Healthy positives own none —
+/// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
+/// `unconfinable_orgwide`, `external_exposure`, `high_risk_delegated`,
+/// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
 pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
@@ -282,7 +311,8 @@ pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, issue};
+    use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus, issue, posture_counts};
+    use azapptoolkit_dto::audit::CachedAuditSummary;
 
     fn blank() -> AuditItem {
         AuditItem {
@@ -307,6 +337,7 @@ mod tests {
             unused: false,
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
+            app_owner_organization_id: None,
         }
     }
 
@@ -450,6 +481,127 @@ mod tests {
         assert_eq!(group(&groups, "orgwide_mailbox").worst, RiskLevel::Critical);
     }
 
+    /// The Home card ranks from the backend's precomputed tallies, the
+    /// workbench from the items — both through `rank_key`, but the counts and
+    /// worst levels come from core's posture predicates on one side and the
+    /// group classifier on the other. Pin that they agree: same keys, same
+    /// order, same tone, same count.
+    #[test]
+    fn summary_ranking_matches_the_workbench_ranking() {
+        let items = vec![
+            with_issue(
+                format!("{} Mail.ReadWrite", issue::ORG_WIDE_MAILBOX),
+                25,
+                RiskLevel::Critical,
+            ),
+            with_issue(format!("{} x", issue::NO_OWNERS), 20, RiskLevel::Low),
+            with_issue(format!("{} x", issue::SINGLE_OWNER), 20, RiskLevel::Low),
+            with_issue(format!("{} y", issue::NO_OWNERS), 20, RiskLevel::Low),
+            with_issue(
+                format!("{} a", issue::REDUNDANT_APP_PERMS),
+                0,
+                RiskLevel::Low,
+            ),
+            AuditItem {
+                credential_status: CredentialStatus::Expired,
+                risk_level: RiskLevel::High,
+                ..blank()
+            },
+            AuditItem {
+                credential_status: CredentialStatus::Expired,
+                ..blank()
+            },
+            with_issue(
+                format!("{} Sites.ReadWrite.All", issue::ORG_WIDE_SHAREPOINT),
+                0,
+                RiskLevel::Low,
+            ),
+            AuditItem {
+                unused: true,
+                risk_level: RiskLevel::Medium,
+                ..blank()
+            },
+            with_issue(
+                format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX),
+                0,
+                RiskLevel::High,
+            ),
+        ];
+        let summary = CachedAuditSummary::from_items(&items, None);
+        let from_summary: Vec<(&str, BadgeTone, usize)> =
+            ranked_actionable_findings(|k| summary.finding_tally(k))
+                .into_iter()
+                .map(|(key, _, tone, n)| (key, tone, n))
+                .collect();
+        let from_items: Vec<(&str, BadgeTone, usize)> = group_findings(&items)
+            .into_iter()
+            .filter(|g| matches!(g.spec.section, GroupSection::Actionable))
+            .filter(|g| !g.item_indices.is_empty())
+            // The summary counts the posture buckets only (not redundant /
+            // external exposure), so compare over the keys it answers for.
+            .filter(|g| summary.finding_tally(g.spec.key).is_some())
+            .map(|g| (g.spec.key, tone(g.worst), g.item_indices.len()))
+            .collect();
+        assert!(
+            from_summary.len() >= 5,
+            "fixture too thin: {from_summary:?}"
+        );
+        assert_eq!(from_summary, from_items);
+    }
+
+    /// Every posture bucket must equal the size of the Findings-pane group it
+    /// summarizes — the Home card and the strip quote these numbers next to
+    /// the groups, so a divergent predicate would contradict the workbench.
+    #[test]
+    fn posture_counts_agree_with_finding_groups() {
+        let marker = |m: &str| AuditItem {
+            issues: vec![format!("{m}: x")],
+            ..blank()
+        };
+        let items = vec![
+            marker(issue::HIGH_RISK_APP_PERMS),
+            marker(issue::HIGH_RISK_DELEGATED_PERMS),
+            marker(issue::ORG_WIDE_MAILBOX),
+            marker(issue::LEGACY_MAILBOX_POLICY),
+            marker(issue::UNSCOPABLE_LEGACY_MAILBOX),
+            marker(issue::UNCONFINABLE_MAILBOX),
+            marker(issue::UNCONFINABLE_SHAREPOINT),
+            marker(issue::ORG_WIDE_SHAREPOINT),
+            marker(issue::SCOPED_SHAREPOINT),
+            marker(issue::NO_OWNERS),
+            marker(issue::SINGLE_OWNER),
+            AuditItem {
+                issues: vec![format!("Mail.Read {} (Sales)", issue::SCOPED_VIA_RBAC)],
+                ..blank()
+            },
+            AuditItem {
+                credential_status: CredentialStatus::Expired,
+                ..blank()
+            },
+            AuditItem {
+                unused: true,
+                ..blank()
+            },
+            AuditItem {
+                principal_kind: AuditPrincipalKind::ServicePrincipal,
+                ..blank()
+            },
+        ];
+        let c = posture_counts(&items);
+        let groups = group_findings(&items);
+        for key in azapptoolkit_core::audit::POSTURE_FINDING_KEYS {
+            let count = c.finding(key).unwrap_or_else(|| panic!("no bucket {key}"));
+            assert!(count > 0, "fixture leaves {key} empty");
+            assert_eq!(
+                count,
+                group(&groups, key).item_indices.len(),
+                "posture count for {key}"
+            );
+        }
+        assert_eq!(c.unconfinable_orgwide, 2);
+        assert_eq!(c.unowned, 2);
+    }
+
     #[test]
     fn group_bulk_actions_pair_each_fix_with_its_own_rule() {
         assert_eq!(
@@ -475,6 +627,89 @@ mod tests {
         assert!(group_bulk_actions("legacy_mailbox_scope").is_empty());
         assert!(group_bulk_actions("no_local_app").is_empty());
         assert!(group_bulk_actions("scoped_mailbox").is_empty());
+        // Unconfinable reach has no safe uniform mutation: removing or
+        // re-declaring the grant is the operator's call.
+        assert!(group_bulk_actions("unscopable_legacy_mailbox").is_empty());
+        assert!(group_bulk_actions("unconfinable_orgwide").is_empty());
+    }
+
+    /// The scorer keeps unconfinable reach out of the fixable org-wide groups
+    /// (their bulk Fix can't apply), so these rows need their own advisory
+    /// homes — and the legacy-resource one stays apart from the other two,
+    /// because "remove the grant" is the wrong advice for them.
+    #[test]
+    fn unconfinable_reach_lands_in_its_own_advisory_groups() {
+        let legacy = with_issue(
+            format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX),
+            0,
+            RiskLevel::Medium,
+        );
+        let mailbox = with_issue(
+            format!("{}: Mail.ReadWrite.Shared", issue::UNCONFINABLE_MAILBOX),
+            0,
+            RiskLevel::Medium,
+        );
+        let sharepoint = with_issue(
+            format!("{}: Sites.Read.All", issue::UNCONFINABLE_SHAREPOINT),
+            0,
+            RiskLevel::High,
+        );
+        let items = vec![legacy, mailbox, sharepoint];
+        let groups = group_findings(&items);
+        assert_eq!(
+            group(&groups, "unscopable_legacy_mailbox").item_indices,
+            vec![0]
+        );
+        assert_eq!(
+            group(&groups, "unconfinable_orgwide").item_indices,
+            vec![1, 2]
+        );
+        for key in [
+            "orgwide_mailbox",
+            "orgwide_sharepoint",
+            "legacy_mailbox_scope",
+            "scoped_mailbox",
+            "scoped_sites",
+        ] {
+            assert!(
+                group(&groups, key).item_indices.is_empty(),
+                "unconfinable reach leaked into {key}"
+            );
+        }
+    }
+
+    /// The F127 regression class: a marker the scorer emits for a reach/risk
+    /// finding but that no group matches is scored yet invisible on the
+    /// findings-first pane. Every such marker must land in at least one group.
+    /// INSTANCE_LOCK_DISABLED, PUBLIC_CLIENT_CREDENTIALS and
+    /// PREFER_CERT_OVER_SECRET are hygiene notes deliberately left to the
+    /// All-apps issue column.
+    #[test]
+    fn every_reach_marker_has_a_group() {
+        for marker in [
+            issue::ORG_WIDE_MAILBOX,
+            issue::UNSCOPABLE_LEGACY_MAILBOX,
+            issue::UNCONFINABLE_MAILBOX,
+            issue::LEGACY_MAILBOX_POLICY,
+            issue::ORG_WIDE_SHAREPOINT,
+            issue::UNCONFINABLE_SHAREPOINT,
+            issue::SCOPED_SHAREPOINT,
+            issue::HIGH_RISK_APP_PERMS,
+            issue::HIGH_RISK_DELEGATED_PERMS,
+            issue::REDUNDANT_APP_PERMS,
+            issue::NO_OWNERS,
+            issue::SINGLE_OWNER,
+            issue::MULTITENANT_AUDIENCE,
+            issue::UNVERIFIED_PUBLISHER,
+        ] {
+            let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
+            assert!(
+                GROUP_CATALOG
+                    .iter()
+                    .any(|spec| matches_finding(&item, spec.key)),
+                "marker {marker:?} belongs to no finding group"
+            );
+        }
     }
 
     /// A section's `tab` is a deep-link target: an unknown value doesn't error,
@@ -530,6 +765,8 @@ mod tests {
             "high_risk_delegated",
             "external_exposure",
             "no_local_app",
+            "unscopable_legacy_mailbox",
+            "unconfinable_orgwide",
         ] {
             assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
         }

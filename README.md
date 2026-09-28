@@ -73,9 +73,10 @@ toolkit-owned service principal storing tokens you cannot audit.
 ### Permissions, consent & scoping
 
 - **API permissions and admin consent** — pick delegated and
-  application permissions from a bundled catalog (with Graph fallback
-  for unknown resources) and grant admin consent in one click, with a
-  diff view before writing.
+  application permissions, listed live from each API's service
+  principal in your tenant (Microsoft APIs and your own app
+  registrations), and grant admin consent in one click, with a diff
+  view before writing.
 - **SharePoint site access (`Sites.Selected`)** — list, grant, and revoke a
   site's per-app permissions, and convert an org-wide `Sites.*` grant to
   site-scoped access.
@@ -157,6 +158,21 @@ toolkit-owned service principal storing tokens you cannot audit.
   actionable 403 hints throughout the app.
 - **Cache diagnostics** — inspect hit/miss counters per cache, clear
   individual caches, or disable caching entirely for debugging.
+- **Disaster recovery** — back up app registrations to a portable JSON
+  manifest (no secret values), preview a restore as a dry-run plan, and
+  restore into a tenant; regenerated credentials are shown once and managed
+  identities come back as runbook items. See
+  [backup-and-restore.md](docs/architecture/backup-and-restore.md).
+- **SSO certificate board** — every SAML signing certificate in the tenant
+  by expiry, with bulk staging of replacements (Security tab).
+- **Settings** — per-tenant defaults (scope and group naming, Key Vault
+  bindings) and the Tenant connection page showing where the client and
+  tenant IDs come from.
+- **Session restore** — a signed-in session is restored at launch from the
+  OS keyring instead of asking you to sign in again.
+- **Accessibility** — full keyboard operation (press `?` for shortcuts),
+  labelled controls and ARIA state throughout; see
+  [ACCESSIBILITY.md](docs/ACCESSIBILITY.md) for the commitments and known gaps.
 
 ## Quick start
 
@@ -194,8 +210,9 @@ leaves two conflicting entries in Windows (see [Updates](#updates)):
 - **`azapptoolkit_<version>_x64_en-US.msi`** — classic Windows Installer
   for **enterprise rollout** via SCCM, Intune, or Group Policy. The
   in-app auto-updater does **not** manage MSI installs (it ships only the
-  NSIS payload); deploy new versions through your management tooling and
-  **disable auto-update** on these installs (see [Opting out](#opting-out)).
+  NSIS payload): the app detects an MSI install and never offers an
+  in-app update, so deploy new versions through your management tooling.
+  Disabling update checks as well is optional (see [Opting out](#opting-out)).
 
 The Edge WebView2 runtime is the only external dependency, and it ships
 with current Windows 10/11 — so on those machines installation and first
@@ -215,29 +232,39 @@ cannot check it for malicious software"). Clear it once, either way:
 - run `xattr -dr com.apple.quarantine "/Applications/azapptoolkit.app"`.
 
 After that it launches normally and **updates in place** like the Windows
-NSIS build. Apple Silicon (M-series) only for now; Intel builds aren't
-published yet.
+NSIS build. Because the build is unsigned, macOS asks for keychain access
+again after each update ("azapptoolkit wants to use your confidential
+information stored in 'azapptoolkit'") — choose **Always Allow**. If you
+click **Deny**, or the prompt is missed, the relaunch lands on the sign-in
+card: that is this prompt, not a revoked session. Apple Silicon (M-series)
+only for now; Intel builds aren't published yet.
 
 ### Linux (x86_64)
 
 Two formats:
 
-- **`azapptoolkit_<version>_amd64.AppImage`** — portable, runs on most
-  distributions; `chmod +x` it and run. This is the format the in-app
-  **auto-updater** manages.
+- **`azapptoolkit_<version>_amd64.AppImage`** — portable; `chmod +x` it
+  and run. This is the format the in-app **auto-updater** manages.
 - **`azapptoolkit_<version>_amd64.deb`** — for Debian/Ubuntu and
-  derivatives (`sudo apt install ./azapptoolkit_<version>_amd64.deb`).
+  derivatives (`sudo apt install ./azapptoolkit_<version>_amd64.deb`);
+  updated by apt, not the in-app updater.
 
-Needs a WebKitGTK runtime (`libwebkit2gtk-4.1`), present on most modern
-desktops and pulled in automatically by the `.deb`.
+Both need **glibc 2.35 or newer** — Ubuntu 22.04, Debian 12 or newer;
+RHEL 9 (glibc 2.34) is not supported. Both also need a WebKitGTK runtime
+(`libwebkit2gtk-4.1`), present on most modern desktops and pulled in
+automatically by the `.deb`, and a running Secret Service (GNOME Keyring
+or KWallet) to keep your sign-in — see
+[First-run configuration](#first-run-configuration).
 
 ## Updates
 
 The in-app updater manages the **NSIS (`-setup.exe`) install** on
 Windows, the **`.app`** on macOS, and the **`.AppImage`** on Linux (the
 MSI and `.deb` are not auto-updated — manage those through your packaging
-tooling). On launch, azapptoolkit checks the configured release endpoint
-for a newer signed build for your platform.
+tooling; the app detects these installs and never offers the in-app update,
+and the account menu says who manages updates instead). On launch,
+azapptoolkit checks the configured release endpoint for a newer signed
+build for your platform.
 
 **Updating is always your choice — nothing installs in the background.**
 If an update is available you get a notification; opening it shows the new
@@ -252,11 +279,15 @@ release time — a payload that fails signature verification is rejected
 before any bytes touch disk. A failed update check or install never blocks
 the app; it is logged (see [Logs](#logs)) and retried on a later launch.
 
-> **MSI installs:** the updater only ever ships the NSIS payload, so
-> letting it run against an MSI install creates a second, conflicting
-> installation. If you deployed the `.msi`, **disable auto-update** (see
-> [Opting out](#opting-out)) and push new versions through your management
-> tooling instead.
+On macOS, expect a keychain-access prompt on the first launch after each
+update (the build is unsigned) — choose **Always Allow**; see
+[macOS](#macos-apple-silicon).
+
+> **MSI installs:** the updater only ever ships the NSIS payload, so the
+> app detects an MSI install and never offers it — the account menu reads
+> "Updates managed by your MSI deployment" instead. Push new versions
+> through your management tooling. The opt-out below is no longer needed for
+> that; it stays available for fleets that want no update checks at all.
 
 ### Opting out
 
@@ -284,7 +315,9 @@ the updater endpoint at any point in the session.
 ## Requirements
 
 - Windows 10 or newer (primary target), macOS on Apple Silicon, or a
-  modern x86_64 Linux desktop with WebKitGTK — installers for all three
+  x86_64 Linux desktop with glibc 2.35 or newer (Ubuntu 22.04, Debian 12
+  or newer), WebKitGTK and a Secret Service provider (GNOME Keyring or
+  KWallet) running in the desktop session — installers for all three
   are on the [Releases page](https://github.com/tiredithumans/azapptoolkit/releases).
 - A Microsoft Entra ID account with at least the
   `Application Administrator` role, or the equivalent delegated
@@ -295,7 +328,16 @@ the updater endpoint at any point in the session.
   `outlook.office365.com` for Exchange mailbox scoping,
   `management.azure.com` for a managed identity's Azure RBAC roles, and
   `api.loganalytics.azure.com` for observed Graph activity (usage
-  analysis).
+  analysis). Update checks and downloads reach `github.com` and
+  `objects.githubusercontent.com` (turn them off as described under
+  [Opting out](#opting-out)).
+- **Behind a proxy:** the app's own traffic honours `HTTPS_PROXY`,
+  `HTTP_PROXY` and `NO_PROXY`; PAC files are not evaluated. Sign-in
+  finishes on a browser redirect to `127.0.0.1`, so the browser must not
+  send loopback addresses through the proxy.
+- **TLS inspection:** certificates are checked against the operating
+  system's trust store, so an inspecting proxy works once its root CA is
+  installed there; no separate bundle is needed.
 
 ## First-run configuration
 
@@ -323,8 +365,15 @@ workstation reuses the same client id and tenant id.
 
 On first launch, azapptoolkit opens a loopback listener, pops your default
 browser for the Entra sign-in, and persists the resulting refresh token in the
-OS keyring (Windows Credential Manager / macOS Keychain / libsecret). Access
-tokens are refreshed lazily and never written to disk.
+OS keyring (Windows Credential Manager / macOS Keychain / the Secret Service on
+Linux). Access tokens are refreshed lazily and never written to disk.
+
+On Linux a Secret Service provider — GNOME Keyring or KWallet, running in
+your desktop session over D-Bus — is required. Without one, sign-in
+completes in the browser and then fails with "no OS credential store is
+available". Headless/SSH sessions, WSLg and minimal window managers often
+lack one; start a provider (e.g. `gnome-keyring-daemon`) in the session,
+then restart azapptoolkit.
 
 ### Permissions
 
@@ -343,8 +392,8 @@ one-click **Grant consent** prompt.
 | Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
 | Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
 | Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
-| Graph | `Policy.ReadWrite.ApplicationConfiguration` | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard | Optional |
-| Graph | `GroupMember.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
+| Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |
+| Graph | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
 | Graph | `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |
 | Graph | `Sites.FullControl.All` | SharePoint **Sites.Selected** — list / grant / revoke a site's per-app permissions (SharePoint site access section on the Permissions tab) | Optional |
 | Office 365 Exchange Online | `Exchange.Manage` | **Exchange mailbox scoping** (RBAC for Applications) — confine an app's mailbox access to specific groups | Optional |
@@ -414,21 +463,25 @@ configuration screen is shown.
 **Sovereign / national clouds.** The app targets the commercial cloud by
 default. To use a tenant in US Gov (GCC High), US Gov DoD, or Azure China
 (21Vianet), set `AZAPPTOOLKIT_CLOUD` to `usgov`, `usgovdod`, or `china`
-respectively (unset or `commercial` for the global cloud). This switches the
-Entra login, Microsoft Graph, Exchange Online, Key Vault, and ARM endpoints to
-that cloud's hosts. The app registration must be created in the matching
-national-cloud admin center.
+respectively (unset or `commercial` for the global cloud). A team build can
+bake it in instead, by adding `AZAPPTOOLKIT_CLOUD` to `.env` before building
+(the order is environment variable → baked-in value → commercial). This
+switches the Entra login, Microsoft Graph, Exchange Online, Key Vault, ARM and
+Log Analytics endpoints, and the SSO wizard's application template and
+app-owner URLs, to that cloud's hosts. The app registration must be created in
+the matching national-cloud admin center.
 
 ## Logs
 
-Rolling daily log files are written to the platform's app-data folder:
+Each day's log is a file named `azapptoolkit.YYYY-MM-DD.log`, in:
 
-- Windows: `%APPDATA%\azapptoolkit\logs\azapptoolkit.log*`
+- Windows: `%LOCALAPPDATA%\azapptoolkit\logs\` (earlier versions wrote to `%APPDATA%\azapptoolkit\logs\`, which can be deleted)
 - macOS: `~/Library/Application Support/azapptoolkit/logs/`
 - Linux: `~/.local/share/azapptoolkit/logs/`
 
-Increase verbosity with `RUST_LOG=debug` (or the narrower `EnvFilter`
-syntax — for example `azapptoolkit_graph=trace`).
+The newest 14 files (about two weeks) are kept and older ones are deleted. Each line names the component that wrote it, and a backend crash (panic) is written to the same file with a backtrace. The first lines of each run record the app version, OS, architecture, cloud and tenant. On macOS and Linux the folder is readable by your account only. If the folder can't be written, the app still starts and logs to the console instead.
+
+Increase verbosity with `RUST_LOG=debug` (or the narrower `EnvFilter` syntax, for example `azapptoolkit_graph=trace`, or `azapptoolkit::cache=debug` for cache hits and misses).
 
 ## Data and privacy
 
@@ -469,8 +522,9 @@ Defensive choices worth knowing:
   for the WASM frontend
 - [reqwest](https://github.com/seanmonstar/reqwest) /
   [rustls](https://github.com/rustls/rustls) for HTTPS
-- [oauth2](https://github.com/ramosbugs/oauth2-rs) and the OS keyring
-  via [`keyring`](https://github.com/hwchen/keyring-rs)
+- [oauth2](https://github.com/ramosbugs/oauth2-rs) and the OS keyring via
+  [`keyring_core`](https://crates.io/crates/keyring_core) with the
+  platform-native stores (Secret Service over zbus on Linux)
 
 ## Contributing
 

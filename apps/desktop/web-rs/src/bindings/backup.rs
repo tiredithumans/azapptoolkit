@@ -1,10 +1,10 @@
 //! Disaster-recovery backup IPC bindings. The progress stream lives in
-//! `bindings::events::backup_progress`. The restore side is added with the
-//! restore slices.
+//! `bindings::events::backup_progress`. The restore side (plan, run, cancel,
+//! save report) follows the backup commands.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 // Re-export the manifest types (`TenantBackup`, …) for the DR view, and bring
 // them into scope for the signatures below.
@@ -13,7 +13,7 @@ pub use azapptoolkit_dto::backup::*;
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
 /// (a per-app fan-out); subscribe to `events::backup_progress` for progress and
-/// call [`cancel_dr`] to stop it.
+/// call [`cancel_backup`] to stop it.
 pub async fn backup_tenant(tenant_id: &str) -> Result<TenantBackup, UiError> {
     invoke_result("backup_tenant", TenantArg { tenant_id }).await
 }
@@ -41,13 +41,19 @@ pub async fn load_backup_from_file() -> Result<Option<TenantBackup>, UiError> {
     invoke_result("load_backup_from_file", ()).await
 }
 
-/// Signals an in-progress backup (or restore) to stop at the next dispatch
-/// boundary.
-pub async fn cancel_dr() -> Result<(), UiError> {
-    invoke_result("cancel_dr", ()).await
+/// Signals an in-progress backup to stop at the next dispatch boundary. Never
+/// stops a restore.
+pub async fn cancel_backup() -> Result<(), UiError> {
+    invoke_result("cancel_backup", ()).await
 }
 
 // ---------------- Restore ----------------
+
+/// Signals an in-progress restore to stop at the next item of whichever pass is
+/// running. Never stops a backup.
+pub async fn cancel_restore() -> Result<(), UiError> {
+    invoke_result("cancel_restore", ()).await
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

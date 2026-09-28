@@ -8,9 +8,9 @@
 //! roughly a quarter the test density of comparable command files while being
 //! the one flow whose mistakes are hardest to undo. Down here the decisions are
 //! ordinary functions over ordinary data, so the awkward cases (a first-party
-//! resource that must NOT be remapped, an identifier URI that only sometimes
-//! encodes the appId, a pre-authorized client absent from the backup) are cheap
-//! to pin.
+//! resource that must NOT be remapped, an identifier URI that names the source
+//! appId or tenant in any of several segment positions, a pre-authorized client
+//! absent from the backup) are cheap to pin.
 //!
 //! The command layer keeps what genuinely needs the client: creating the
 //! objects, applying these plans, and reporting per-item outcomes.
@@ -47,17 +47,52 @@ pub fn remap_required_resource_access(
         .collect()
 }
 
-/// Rewrites the `api://{source_app_id}` identifier URI to the new appId. Other
-/// URIs (custom domains, other forms) are passed through unchanged.
+/// Rewrites every `api://` identifier-URI segment that names the source appId
+/// (→ `new_app_id`) or the source tenant id (→ `dest_tenant_id`).
+///
+/// Microsoft supports `api://<appId>`, `api://<tenantId>/<appId>`,
+/// `api://<tenantId>/<string>` and `api://<string>/<appId>`, and a GUID in one
+/// of them must match the app's own appId or the tenant id. A source GUID left
+/// in place is therefore rejected by the destination — and the identifier URIs
+/// share one PATCH with the app's scopes and pre-authorized clients, so one
+/// stale URI loses the whole Expose-an-API surface.
+///
+/// Matching is whole-segment and case-insensitive (GUIDs have no canonical
+/// case); a same-tenant restore makes the tenant rewrite a no-op. Non-`api://`
+/// URIs (`https://` / verified-domain forms) are operator-owned and pass
+/// through untouched.
 pub fn rewrite_identifier_uris(
     uris: &[String],
     source_app_id: &str,
     new_app_id: &str,
+    source_tenant_id: &str,
+    dest_tenant_id: &str,
 ) -> Vec<String> {
-    let old = format!("api://{source_app_id}");
-    let new = format!("api://{new_app_id}");
+    const SCHEME: &str = "api://";
+    let names = |seg: &str, id: &str| !id.is_empty() && seg.eq_ignore_ascii_case(id);
     uris.iter()
-        .map(|u| if u == &old { new.clone() } else { u.clone() })
+        .map(|u| {
+            let Some(rest) = u
+                .get(..SCHEME.len())
+                .filter(|p| p.eq_ignore_ascii_case(SCHEME))
+                .map(|_| &u[SCHEME.len()..])
+            else {
+                return u.clone();
+            };
+            let rewritten: Vec<&str> = rest
+                .split('/')
+                .map(|seg| {
+                    if names(seg, source_app_id) {
+                        new_app_id
+                    } else if names(seg, source_tenant_id) {
+                        dest_tenant_id
+                    } else {
+                        seg
+                    }
+                })
+                .collect();
+            format!("{}{}", &u[..SCHEME.len()], rewritten.join("/"))
+        })
         .collect()
 }
 
@@ -147,23 +182,53 @@ mod tests {
     }
 
     #[test]
-    fn identifier_uri_rewrites_only_the_appid_form() {
-        // Table-driven: the appId form is the ONLY one that encodes an identity
-        // the restore invalidates; everything else is operator-owned and a
-        // rewrite would silently break an audience the app's callers rely on.
+    fn identifier_uri_rewrites_every_segment_naming_the_source_app_or_tenant() {
+        // Table-driven over Microsoft's four supported `api://` forms: a GUID
+        // segment must match the app's appId or the tenant id, so every segment
+        // naming the source app or source tenant has to move with the restore.
         for (input, expected) in [
+            // api://<appId>
             ("api://src-app", "api://new-app"),
+            // api://<tenantId>/<appId> — one of the two "default" forms.
+            ("api://src-tenant/src-app", "api://dst-tenant/new-app"),
+            // api://<tenantId>/<string>
+            ("api://src-tenant/api", "api://dst-tenant/api"),
+            // api://<string>/<appId>
+            ("api://productapi/src-app", "api://productapi/new-app"),
+            ("api://contoso.com/src-app", "api://contoso.com/new-app"),
+            // GUIDs have no canonical case.
+            ("api://SRC-APP", "api://new-app"),
+            ("API://src-app", "API://new-app"),
             // A different app's URI, even in the same form.
             ("api://other-app", "api://other-app"),
-            // Custom domains and https forms pass through.
-            ("https://contoso.com/app", "https://contoso.com/app"),
-            ("api://contoso.com/src-app", "api://contoso.com/src-app"),
-            // Substring, not the whole URI — must not match.
+            // Substring, not a whole segment — must not match.
             ("api://src-app-two", "api://src-app-two"),
+            ("api://src-tenant-x/api", "api://src-tenant-x/api"),
+            // Non-api:// forms are operator-owned and pass through.
+            ("https://contoso.com/app", "https://contoso.com/app"),
+            ("https://contoso.com/src-app", "https://contoso.com/src-app"),
         ] {
-            let out = rewrite_identifier_uris(&[input.to_string()], "src-app", "new-app");
+            let out = rewrite_identifier_uris(
+                &[input.to_string()],
+                "src-app",
+                "new-app",
+                "src-tenant",
+                "dst-tenant",
+            );
             assert_eq!(out[0], expected, "input {input}");
         }
+    }
+
+    #[test]
+    fn identifier_uri_rewrite_is_app_only_within_one_tenant_and_ignores_an_empty_id() {
+        // Same-tenant restore: the tenant rewrite is a no-op.
+        let out =
+            rewrite_identifier_uris(&["api://t/src-app".into()], "src-app", "new-app", "t", "t");
+        assert_eq!(out, vec!["api://t/new-app".to_string()]);
+        // An empty source tenant id never matches an empty segment.
+        let out =
+            rewrite_identifier_uris(&["api:///src-app".into()], "src-app", "new-app", "", "dst");
+        assert_eq!(out, vec!["api:///new-app".to_string()]);
     }
 
     #[test]
@@ -196,6 +261,6 @@ mod tests {
         let empty = AppIdRemap::new();
         assert!(remap_required_resource_access(&[], &empty).is_empty());
         assert!(remap_pre_authorized(&[], &empty).is_empty());
-        assert!(rewrite_identifier_uris(&[], "a", "b").is_empty());
+        assert!(rewrite_identifier_uris(&[], "a", "b", "c", "d").is_empty());
     }
 }

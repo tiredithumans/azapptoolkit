@@ -19,8 +19,9 @@ Review work in progress before it lands on `main`. Use the repo's exact verifica
 ## 1. Inspect the diffs
 
 - **New Tauri commands** follow the three-step pattern in AGENTS.md → Common patterns (handler,
-  `generate_handler![]`, typed binding). The `command-parity-check.sh` hook names a missing leg;
-  mention which one.
+  `generate_handler![]`, typed binding through `bindings::ipc`). `repo_invariants/ipc.rs` gates the
+  registry, binding literal, arg keys and return type; the `command-parity-check.sh` hook names a
+  missing leg locally. Mention which one.
 - **Tenant cache footgun:** New cache reads/writes must include `{tenant_id}|` prefix. Flag any that look unscoped.
 - **cache invalidation:** After mutation, is the relevant list cache busted? On failure is it left alone? (See [caching-and-search.md](docs/architecture/caching-and-search.md)).
 - **WASM gates:** Any server-only dep used in web-rs? Should be `#[cfg(not(target_arch = "wasm32"))]`.
@@ -61,5 +62,5 @@ Review result in PR body form when reviewing via `gh`:
 ## Failure handling
 
 - `just verify` fails → report the failing gate's output; do not approve.
-- Unmatched command/stub pair → flag it (check `command-parity-check.sh`).
+- Unmatched command/stub pair → flag it (`repo_invariants/ipc.rs` fails on it; the hook names it).
 - Tenant cache not scoped → high-priority warning.

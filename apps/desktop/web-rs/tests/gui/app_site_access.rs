@@ -10,7 +10,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SiteAppGrantRow};
@@ -18,17 +17,6 @@ use azapptoolkit_web_rs::components::sharepoint_sites_section::SharePointSitesSe
 use azapptoolkit_web_rs::test_support as ts;
 
 const APP_ID: &str = "11111111-2222-3333-4444-555555555555";
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
 
 fn row(site: &str, roles: &[&str]) -> SiteAppGrantRow {
     SiteAppGrantRow {
@@ -67,7 +55,7 @@ async fn mount_with(access: Option<AppSiteAccessDto>) -> ts::Mounted {
         0,
         "a collapsed section must cost no IPC"
     );
-    click_button("Show");
+    ts::click_button_labelled("Show");
     m
 }
 
@@ -79,6 +67,7 @@ async fn cached_sweep_lists_this_apps_sites_with_their_roles() {
         sites_scanned: 42,
         sites_failed: 0,
         cancelled: false,
+        truncated: false,
     }))
     .await;
 
@@ -109,6 +98,7 @@ async fn a_partial_sweep_never_reports_no_access() {
         sites_scanned: 40,
         sites_failed: 2,
         cancelled: false,
+        truncated: false,
     }))
     .await;
 
@@ -116,6 +106,34 @@ async fn a_partial_sweep_never_reports_no_access() {
     assert!(
         ts::body_contains("not proof the app has none"),
         "a partial scan must not read as 'no grants'"
+    );
+    assert!(!ts::body_contains("This app reaches no site"));
+}
+
+#[wasm_bindgen_test]
+async fn a_capped_sweep_never_reports_no_access() {
+    // Zero failures and no cancel is exactly the shape that used to read as
+    // complete — but the scan stopped at the site cap, so this app's grants may
+    // sit on a site it never reached. The empty state must hedge, and the cap
+    // must be named so the operator knows a re-scan won't help.
+    let _m = mount_with(Some(AppSiteAccessDto {
+        sites: Vec::new(),
+        total_sites: 5000,
+        sites_scanned: 5000,
+        sites_failed: 0,
+        cancelled: false,
+        truncated: true,
+    }))
+    .await;
+
+    ts::wait_for(|| ts::body_contains("coverage is partial")).await;
+    assert!(
+        ts::body_contains("not proof the app has none"),
+        "a capped scan must not read as 'no grants'"
+    );
+    assert!(
+        ts::body_contains("more than 5000 SharePoint sites"),
+        "the cap itself must be named"
     );
     assert!(!ts::body_contains("This app reaches no site"));
 }
@@ -144,9 +162,10 @@ async fn no_cached_sweep_offers_a_scan_instead_of_an_empty_table() {
                 },
             ],
             cancelled: false,
+            truncated: false,
         },
     );
-    click_button("Scan sites");
+    ts::click_button_labelled("Scan sites");
     ts::wait_for(|| ts::body_contains("Marketing")).await;
     assert!(
         !ts::body_contains("Finance"),
@@ -162,17 +181,36 @@ async fn picking_a_site_loads_it_into_the_per_site_flow() {
         sites_scanned: 1,
         sites_failed: 0,
         cancelled: false,
+        truncated: false,
     }))
     .await;
     ts::wait_for(|| ts::body_contains("Marketing")).await;
 
     // "Manage" hands the URL to the existing grant/list/revoke section instead
     // of duplicating those mutations — so the site's permissions get listed.
-    click_button("Manage");
+    ts::click_button_labelled("Manage");
     ts::wait_for(|| ts::call_count("list_site_permissions") >= 1).await;
     let call = ts::last_call("list_site_permissions").expect("listed the picked site");
     assert_eq!(
         call.arg_str("siteUrl").as_deref(),
         Some("https://contoso.sharepoint.com/sites/Marketing")
     );
+}
+
+#[wasm_bindgen_test]
+async fn grant_read_is_the_emphasized_default_not_grant_write() {
+    // Least privilege: the Primary button is the narrower role, as in the
+    // audit's Scope dialog — an operator clicking the highlighted button must
+    // not be handing out write.
+    let _m = mount_with(None).await;
+    let class_of = |label: &str| {
+        ts::query_all("button")
+            .into_iter()
+            .find(|el| el.text_content().unwrap_or_default().trim() == label)
+            .unwrap_or_else(|| panic!("no button labelled `{label}`"))
+            .class_name()
+    };
+    ts::wait_for(|| ts::body_contains("Grant read")).await;
+    assert!(class_of("Grant read").contains("thaw-button--primary"));
+    assert!(class_of("Grant write").contains("thaw-button--secondary"));
 }

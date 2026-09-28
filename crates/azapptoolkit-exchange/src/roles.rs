@@ -13,6 +13,6 @@
 // and hid them from every caller of this crate root — has nothing to allow.
 pub use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    exchange_role_for_resource_permission, is_blanket_mailbox_grant,
+    exchange_role_for_resource_permission, is_aap_confinable_permission, is_blanket_mailbox_grant,
     is_scopable_exchange_resource_permission,
 };

@@ -27,8 +27,8 @@ pub const GRAPH_WRITE_SCOPES: &[&str] = &[
     "DelegatedPermissionGrant.ReadWrite.All",
 ];
 
-/// Exchange Online Admin API delegated scope. The audience is
-/// `outlook.office365.com` (not Graph), so this token is acquired separately
+/// Exchange Online Admin API delegated scope. The audience is Exchange Online
+/// (commercial `outlook.office365.com`, not Graph), so this token is acquired separately
 /// from the Graph read/write tokens. Used for RBAC for Applications —
 /// registering service principals, management scopes, and role assignments
 /// that scope mailbox access. Requires admin consent on the tenant and an
@@ -41,11 +41,17 @@ pub const GRAPH_WRITE_SCOPES: &[&str] = &[
 /// Admin API (`/adminapi/v2.0/<tenant>/<Cmdlet>`, allow-listed cmdlets, not
 /// enabled in all tenants). A `ManageV2` token at the InvokeCommand gateway is
 /// rejected with a bodyless 403 (no `x-ms-diagnostics`) before RBAC evaluation.
-pub const EXCHANGE_SCOPES: &[&str] = &["https://outlook.office365.com/Exchange.Manage"];
+///
+/// Bare permission: `EntraAuthService::default_exchange_scopes` prefixes the
+/// selected cloud's Exchange resource (commercial `https://outlook.office365.com`).
+pub const EXCHANGE_SCOPES: &[&str] = &["Exchange.Manage"];
 
-/// Cache TTLs and per-kind entry cap. These are the runtime-tunable defaults
-/// seeded into [`crate::cache::CacheConfig`]; every kind defaults to a 60-minute
-/// TTL with a 5000-entry-per-kind cap (adjustable live via `configure`).
+/// Cache TTLs and entry caps. These are the runtime-tunable defaults seeded
+/// into [`crate::cache::CacheConfig`]; every kind defaults to a 60-minute TTL.
+/// Aggregate kinds are capped at [`MAX_CACHE_SIZE`] entries per kind; the two
+/// per-object kinds (`ServicePrincipal`, `Lists`) default to
+/// [`MAX_PER_OBJECT_CACHE_SIZE`] — see [`crate::cache::Cache::capacity_for`]
+/// (adjustable live via `configure`).
 pub const SERVICE_PRINCIPAL_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const PERMISSIONS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const AUDIT_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
@@ -56,9 +62,17 @@ pub const LISTS_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 pub const MAX_CACHE_SIZE: usize = 5000;
 
 /// Entry cap for kinds that hold **one small entry per directory object** rather
-/// than a handful of tenant-wide aggregates — currently only
-/// [`crate::cache::CacheKind::ServicePrincipal`], whose `|lean` keys are seeded
-/// one-per-app-registration by the audit.
+/// than a handful of tenant-wide aggregates, applied by
+/// [`crate::cache::Cache::capacity_for`] to two kinds:
+///
+/// - [`crate::cache::CacheKind::ServicePrincipal`] — the audit's `|lean` keys,
+///   seeded one per app registration;
+/// - [`crate::cache::CacheKind::Lists`] — it carries the per-app `app_detail|`
+///   and `mail_scopes|` entries alongside the tenant aggregates.
+///
+/// It is a default, not a floor: it applies only while the configured
+/// `max_size` is at least [`MAX_CACHE_SIZE`], so lowering the cache size still
+/// shrinks these kinds.
 ///
 /// [`MAX_CACHE_SIZE`] (5000) is sized for aggregate entries and is *below* the
 /// 10 000-app ceiling the list/audit/credential scans enumerate to, so a

@@ -1,5 +1,6 @@
-//! Key Vault panel — a tenant-wide sweep of every reachable Key Vault's direct
-//! Azure-RBAC role assignments, filterable by vault or principal. Answers "which
+//! Key Vault panel — a tenant-wide sweep of every reachable Key Vault's
+//! Azure-RBAC role assignments (made on the vault or inherited from an ancestor
+//! scope, the latter badged Inherited), filterable by vault or principal. Answers "which
 //! apps / managed identities can touch this vault?" (and, filtered by principal,
 //! the reverse). Mirrors the Sites panel; the plane is ARM, so consent uses the
 //! `arm` feature and rows come from role assignments rather than site grants.
@@ -14,16 +15,15 @@ use crate::bindings::events;
 use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
-use crate::bindings::sharepoint;
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
-use crate::components::ui::{Badge, Callout, ShowMore};
-use crate::constants::*;
-use crate::hooks::use_debounced::use_debounced;
+use crate::components::ui::{Badge, BadgeTone, Callout, ShowMore};
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::plural;
 
 /// Lowercased haystack of a row's vault + principal + role facets, newline-joined
 /// so one search box serves both lookup directions. Built once per sweep result.
@@ -50,9 +50,14 @@ fn row_haystack(row: &KeyVaultAccessRow) -> String {
     hay
 }
 
-/// A stable key for the keyed `<For>` — one principal holds one role per vault.
+/// A stable key for the keyed `<For>`. The scope is part of it: with inherited
+/// rows listed, one principal can hold the same role on a vault both directly
+/// and from an ancestor (Reader on the vault AND on its subscription).
 fn row_key(row: &KeyVaultAccessRow) -> String {
-    format!("{}|{}|{}", row.vault_id, row.principal_id, row.role_name)
+    format!(
+        "{}|{}|{}|{}",
+        row.vault_id, row.principal_id, row.role_name, row.scope
+    )
 }
 
 #[component]
@@ -65,46 +70,12 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
     let progress: RwSignal<Option<KeyVaultSweepProgress>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_required = RwSignal::new(false);
+    // A Conditional Access step-up for Azure management (`interaction_required`).
+    let step_up_required = RwSignal::new(false);
     let search = RwSignal::new(String::new());
 
-    let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
-    // Lowercased search haystack per row, rebuilt once per sweep result (reads
-    // `result`, not the query) so a keystroke just runs `contains`.
-    let corpus: Memo<Vec<String>> = Memo::new(move |_| {
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| r.rows.iter().map(row_haystack).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
-    let filtered_rows = Memo::new(move |_| {
-        let needle = search_debounced.get().trim().to_lowercase();
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    if needle.is_empty() {
-                        return r.rows.clone();
-                    }
-                    corpus.with(|hays| {
-                        r.rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| hays.get(*i).is_some_and(|h| h.contains(&needle)))
-                            .map(|(_, row)| row.clone())
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default()
-        })
-    });
-    let render_limit = RwSignal::new(RENDER_PAGE);
-    Effect::new(move |prev: Option<()>| {
-        search_debounced.track();
-        let _ = filtered_rows.with(|r| r.len());
-        if prev.is_some() {
-            render_limit.set(RENDER_PAGE);
-        }
-    });
+    let (filtered_rows, render_limit) =
+        super::use_sweep_filter(result, search, |r| &r.rows, row_haystack);
     let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
     let on_grid_key = use_grid_keynav(tbody_ref, move || {
         let _ = render_limit.get();
@@ -123,12 +94,12 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     format!(
                         "{} role assignment{} across {} vault{} — scanned {} of {} vault{}{}{}",
                         rows.len(),
-                        if rows.len() == 1 { "" } else { "s" },
+                        plural(rows.len()),
                         distinct_vaults,
-                        if distinct_vaults == 1 { "" } else { "s" },
+                        plural(distinct_vaults),
                         r.vaults_scanned,
                         r.total_vaults,
-                        if r.total_vaults == 1 { "" } else { "s" },
+                        plural(r.total_vaults),
                         if r.vaults_failed > 0 {
                             format!(" ({} failed — coverage is partial)", r.vaults_failed)
                         } else {
@@ -171,6 +142,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         error.set(None);
         progress.set(None);
         consent_required.set(false);
+        step_up_required.set(false);
         let Some(t) = t else { return };
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
@@ -195,6 +167,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         scanning.set(true);
         error.set(None);
         consent_required.set(false);
+        step_up_required.set(false);
         progress.set(Some(KeyVaultSweepProgress {
             done: 0,
             total: 0,
@@ -210,8 +183,18 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             match keyvault_rbac::sweep_key_vault_access(&t.tenant_id).await {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
-                    consent_required.set(e.code == "consent_required");
-                    error.set(Some(e.message));
+                    consent_required.set(e.is_consent_required());
+                    step_up_required.set(e.is_interaction_required());
+                    // A dead session gets the Re-authenticate lever instead of a
+                    // dead-end line; consent and step-up keep this panel's own
+                    // buttons.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(if e.is_interaction_required() {
+                            VERIFY_IDENTITY_MESSAGE.to_string()
+                        } else {
+                            e.message
+                        }));
+                    }
                 }
             }
             scanning.set(false);
@@ -229,20 +212,24 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match auth::request_scope_consent(&t.tenant_id, "arm").await {
                 Ok(()) => do_run(),
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
+                }
             }
         });
     };
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = keyvault_rbac::cancel_key_vault_sweep().await;
         });
     };
 
     view! {
         <Body1>
-            "Scans every reachable Key Vault's direct Azure RBAC role assignments; search by principal to see the vaults an app or managed identity can reach, or by vault to see who can touch it. Only direct (atScope) grants are shown — roles inherited from the subscription or resource group aren't listed."
+            "Scans every reachable Key Vault's Azure RBAC role assignments — those made on the vault and those inherited from its resource group, subscription or management group (marked Inherited); search by principal to see the vaults an app or managed identity can reach, or by vault to see who can touch it."
         </Body1>
         <div class="actions-row">
             {move || {
@@ -326,6 +313,16 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                         </div>
                                     }
                                 })}
+                            {step_up_required
+                                .get()
+                                .then(|| {
+                                    view! {
+                                        <VerifyIdentityButton
+                                            features=&["arm"]
+                                            on_verified=Callback::new(move |()| do_run())
+                                        />
+                                    }
+                                })}
                         </Callout>
                     }
                 })
@@ -351,7 +348,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     fallback=|| {
                         view! {
                             <Body1>
-                                "No role assignments match. Vaults without direct RBAC assignments produce no rows — a vault in legacy access-policy mode, or one reachable only via inherited subscription roles, won't appear here (see the Security audit for the broader picture)."
+                                "No role assignments match. A vault in legacy access-policy mode grants data access through access policies, which aren't listed here (see the Security audit for the broader picture)."
                             </Body1>
                         }
                     }
@@ -389,6 +386,8 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                     let principal_secondary = row.principal_id.clone();
                                     let high = row.high_privilege;
                                     let role_name = row.role_name.clone();
+                                    let inherited = row.inherited;
+                                    let scope = row.scope.clone();
                                     view! {
                                         <tr>
                                             <td class="cell-mid">{vault_primary}</td>
@@ -405,7 +404,16 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                 {high
                                                     .then(|| {
                                                         view! {
-                                                            <Badge label="High-privilege" tone="warning" />
+                                                            <Badge label="High-privilege" tone=BadgeTone::Warning />
+                                                        }
+                                                    })}
+                                                {inherited
+                                                    .then(|| {
+                                                        view! {
+                                                            <Badge
+                                                                label="Inherited"
+                                                                title=format!("Inherited from {scope}")
+                                                            />
                                                         }
                                                     })}
                                             </td>

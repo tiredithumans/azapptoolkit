@@ -6,9 +6,7 @@ use super::*;
 use crate::components::ui::Callout;
 
 #[component]
-pub(super) fn ProvisioningContent(
-    signal: Signal<Arc<EnterpriseApplicationDetail>>,
-) -> impl IntoView {
+pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
@@ -28,18 +26,67 @@ pub(super) fn ProvisioningContent(
         }
     });
 
+    let consenting = RwSignal::new(false);
+    let on_consent = move |_| {
+        // One browser round trip at a time: a double click must not open two.
+        if consenting.get_untracked() {
+            return;
+        }
+        let Some(t) = session.active_tenant.get_untracked() else {
+            return;
+        };
+        consenting.set(true);
+        leptos::task::spawn_local(async move {
+            match auth::request_scope_consent(&t.tenant_id, "sync").await {
+                Ok(()) => reload.update(|n| *n += 1),
+                Err(e) => session.report_command_error(&e),
+            }
+            consenting.set(false);
+        });
+    };
+
     view! {
+        <header class="row-between">
+            <div class="row">
+                <strong>"SCIM provisioning"</strong>
+                <RequiresRole capability_key="provisioning_read" />
+            </div>
+        </header>
         <Suspense fallback=move || view! { <DetailSkeleton /> }>
             {move || Suspend::new(async move {
                 match jobs.await {
-                    // Only an authorization failure means "you need consent /
-                    // a license". Swallowing EVERY error into that message told
-                    // an operator hitting a transient 429 to go grant a scope
-                    // they already have, with no way to retry.
-                    Err(e) if e.code == "forbidden" || e.code == "consent_required" => {
+                    // A missing consent arrives typed (the backend pre-acquires
+                    // the Synchronization.Read.All token), so it gets the grant
+                    // round trip; a 403 is a role / license gap no consent can
+                    // fix. Every other error (a transient 429, …) keeps Retry.
+                    Err(e) if e.is_consent_required() => {
                         view! {
                             <Callout tone="warn">
-                                "Provisioning status is unavailable. It needs admin consent to Synchronization.Read.All and an Entra ID P1/P2 license."
+                                <Body1>
+                                    "Provisioning status needs admin consent to Synchronization.Read.All."
+                                </Body1>
+                                <div class="actions-row">
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(on_consent)
+                                        disabled=Signal::derive(move || consenting.get())
+                                    >
+                                        "Grant consent & retry"
+                                    </Button>
+                                </div>
+                            </Callout>
+                        }
+                            .into_any()
+                    }
+                    // The backend splices the `provisioning_read` catalog
+                    // remediation (the roles to activate) into the message.
+                    Err(e) if e.code == "forbidden" => {
+                        view! {
+                            <Callout tone="warn">
+                                <Body1>
+                                    "Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
+                                </Body1>
+                                <Body1>{e.message}</Body1>
                             </Callout>
                         }
                             .into_any()
@@ -65,13 +112,13 @@ pub(super) fn ProvisioningContent(
                                 {list
                                     .into_iter()
                                     .map(|j| {
-                                        let (label, cls) = match j.status_code.as_deref() {
-                                            Some("Active") => ("Active".to_string(), "badge badge--ok"),
+                                        let (label, tone) = match j.status_code.as_deref() {
+                                            Some("Active") => ("Active".to_string(), BadgeTone::Ok),
                                             Some("Quarantine") => {
-                                                ("Quarantine".to_string(), "badge badge--danger")
+                                                ("Quarantine".to_string(), BadgeTone::Danger)
                                             }
-                                            Some(other) => (other.to_string(), "badge badge--warning"),
-                                            None => ("Unknown".to_string(), "badge"),
+                                            Some(other) => (other.to_string(), BadgeTone::Warning),
+                                            None => ("Unknown".to_string(), BadgeTone::Neutral),
                                         };
                                         let last = match (j.last_state.clone(), j.last_run.clone()) {
                                             (Some(s), Some(t)) => format!("{s} — {t}"),
@@ -86,7 +133,7 @@ pub(super) fn ProvisioningContent(
                                             <div class="prov-job">
                                                 <div class="row-between">
                                                     <strong>{title}</strong>
-                                                    <span class=cls>{label}</span>
+                                                    <Badge label=label tone=tone />
                                                 </div>
                                                 <dl class="read-field">
                                                     <dt>"Last run"</dt>

@@ -10,9 +10,13 @@ crypto-dependency pins in `src-tauri/Cargo.toml`.
 
 1. **`guard`** — version/pubkey/audit checks, fails fast before any build minutes are spent.
 2. **`build` matrix** — `windows-latest` runs `just build-windows-updater`; `macos-latest` runs
-   `build-macos-updater` (native **aarch64** only); `ubuntu-latest` runs `build-linux-updater`
-   (needs the GTK/WebKit + `patchelf` apt deps). Each leg uploads its `bundle/` tree as an
-   artifact.
+   `build-macos-updater` (native **aarch64** only); `ubuntu-22.04` runs `build-linux-updater`
+   (needs the GTK/WebKit + `patchelf` apt deps). The Linux runner pin is **load-bearing**: glibc
+   symbol versions bind to the build host's libc, so it sets the AppImage/.deb's glibc floor
+   (2.35 — Ubuntu 22.04 / Debian 12); a post-build `objdump -T` step fails the release above
+   `GLIBC_FLOOR`, and `repo_invariants/release.rs` pins the runner, the guard and the README
+   floor together (move to a `debian:bookworm` container before GitHub retires the runner around
+   April 2027). Each leg uploads its `bundle/` tree as an artifact.
 3. **`release`** — downloads all three artifacts and assembles ONE `latest.json` with
    `windows-x86_64` (NSIS `-setup.exe`) + `darwin-aarch64` (`.app.tar.gz`) + `linux-x86_64`
    (`.AppImage`) updater entries from each platform's `.sig`, plus SHA256SUMS, into a single
@@ -35,7 +39,9 @@ and that regex.
 
 **Two parsers now depend on that header**, and they must agree: `release.yml` (above) and
 `web-rs/build.rs`, which slices the *running* version's section the same way and bakes it into
-the wasm bundle for the in-app "What's new" (below). `web-rs`'s
+the wasm bundle for the in-app "What's new" (below). Their agreement is pinned by
+`both_changelog_extractors_produce_the_same_notes` (`repo_invariants/release.rs`), which mounts
+the real `build_support.rs` parser. `web-rs`'s
 `the_running_versions_changelog_section_is_baked_in` test fails the build when the manifest
 version has no finalized section — the same mistake that would otherwise ship blank in-app notes.
 
@@ -53,6 +59,35 @@ so it only lights up for releases from **v0.8.0 onward** — v0.7.0's `latest.js
 
 **Do not reintroduce a silent background `download_and_install` in `lib.rs` setup** — it was
 removed in favour of this flow and would race the prompt.
+
+The webview holds no updater or dialog permission: `capabilities/default.json` grants only
+`core:default`, so webview script cannot call `plugin:updater|download_and_install` — the
+backend's `perform_update` (a Rust API, not capability-gated) is the only install path. The CSP's
+`connect-src` is `'self'` only; the frontend makes no network calls. Both are pinned by
+`repo_invariants/webview.rs`. The manifest's `notes` is **not** covered by the minisign signature
+(which signs the bundle, not `latest.json`) — it is trusted via TLS only — so `ChangelogNotes`
+builds elements, never raw HTML, and turns a link into an anchor only for an `https://` href.
+
+### Who is offered an update
+
+`commands::updater::update_policy(auto_update, bundle_type())` gates **both** commands before any
+network call (`update_gate()` precedes `app.updater()`; pinned by
+`repo_invariants/release.rs::updater_commands_consult_the_update_gate_before_the_network`):
+
+- `Msi` → the deployment tooling owns updates; `Deb | Rpm` → the package manager. `latest.json`
+  only carries the NSIS / AppImage keys, so the plugin would otherwise hand an MSI install a
+  second, per-user NSIS copy and a `.deb` install an AppImage it rejects after the download.
+- `Nsis | AppImage | App | Dmg` → updatable unless the opt-out is set (`"auto_update": false` in
+  `settings.json` or `AZAPPTOOLKIT_AUTO_UPDATE=0`, resolved by `UserSettings::load` on each call).
+- `None` (a dev build or raw binary — no baked bundle marker) stays **updatable**, never blocked.
+- The match is exhaustive with no wildcard, so a new Tauri bundle type must be classified; the
+  install format wins over the opt-out as the more specific explanation.
+
+`check_for_update` returns the tri-state `UpdateCheck` (`UpToDate` / `Available { info }` /
+`Disabled { reason }`); the shell records `Disabled` silently and relabels the account-menu item
+with `UpdatesDisabled::menu_label()` (tooltip: `description()`, one definition shared with the
+backend's `updates_disabled` error from `perform_update`). The updater plugin logs check failures
+itself; the command layer logs only what it does not — `app.updater()` and install failures.
 
 ### Release notes are rendered summary-first
 
@@ -96,25 +131,63 @@ deploys it (needs Settings → Pages → Source = "GitHub Actions"). The `demo` 
 - **The bridge** — the demo installs the shared `ipc_mock` bridge, the same
   `window.__TAURI_INTERNALS__` mock the GUI test harness uses. It lives in
   `web-rs/src/ipc_mock/` (not inside `test_support`), gated by the internal `mock-ipc` feature
-  that both `test-support` and `demo` enable.
+  that both `test-support` and `demo` enable. Fixtures cross it as JSON (`serde_json` →
+  `JSON.parse`), the same shape Tauri delivers and `tauri-sys` (`JSON.stringify` + `serde_json`)
+  decodes; a `serde_wasm_bindgen` `Map` or `undefined` would arrive as `{}` or panic.
 - **Boot** — fixtures are pre-loaded from `demo/mod.rs`; a demo tenant is seeded so the
   config/sign-in gates fall through to the shell (`lib.rs`); a read-only banner renders
   (`shell.rs`, `.demo-banner`).
-- **Unregistered commands** (every mutation + any unfixtured read) degrade to a friendly
-  `demo_unsupported` error via `ipc_mock::Unmocked::DemoFriendly`.
+- **Unregistered commands** (every mutation) degrade to a friendly `demo_unsupported` error via
+  `ipc_mock::Unmocked::DemoFriendly`. A *read* must not rely on that: every read-shaped
+  `invoke_result` (`list_`/`get_`/`search_`/`check_`/`find_`/`probe_`/`current_`) is either
+  fixtured or listed, with its reason, in `DEMO_READS_LEFT_UNFIXTURED` — and every fixture must name
+  a command some binding still invokes. `web-rs/tests/demo_fixture_coverage.rs` enforces both over
+  comment-stripped source, walking all of `src/`.
+- **One catalog, many surfaces** — the audit run, the credential-expiry and SSO-certificate boards,
+  the site sweep and the mailbox lookup are built from (or re-keyed onto) the demo's own
+  app/enterprise catalogs, so every "Open" lands on the object it names; credential and certificate
+  expiries are offsets from today (`fixtures::days_from_now`), never fixed dates that age into the
+  past. `demo::tests` pins both; `just web-test` runs them natively with `--features demo`, which is
+  also the demo's only compile gate before `pages.yml`.
 - **Args-aware detail fixtures** — `get_application_detail` / `get_enterprise_application_detail`
   / `get_mail_permission_scopes` are registered with `ipc_mock::mock_each` (the handler reads the
   call's camelCase args → returns a per-id fixture) so the detail pane switches per selection. A
   plain `mock_ok` returns one payload for every id — the wrong-detail bug to avoid. Ids are
   synthetic-but-realistic GUIDs from `fixtures::guid(seed)`.
 - **Footgun: infallible invokes panic without a fixture.** The infallible `invoke()` reads
-  (`get_cached_audit` / `cache_stats` / `export_audit_csv` / `get_auth_config`) and the
+  (`get_cached_audit` / `get_cached_audit_summary` / `cache_stats` / `get_auth_config` /
+  `get_tenant_defaults`) and the
   `()`-returning ones (`invalidate_list_cache` — fired by every list Refresh — `clear_cache`,
   `cancel_*`, …) must be registered in `demo::register_fixtures`, or they **panic** on the
   rejected-promise fallback. Adding a new infallible `invoke()`/`invoke::<()>` reachable in the
   demo → register a fixture for it.
 - **No SPA fallback needed** — nav is signal-based (no router), so there is no `404.html`; only
   the `--public-url` subpath base-href matters.
+
+## Shipped frontend size
+
+`just web-size` prints the raw and `gzip -9` bytes of the built `dist/*.wasm`, `*.js` and `*.css`
+as a markdown table. It measures whatever `dist/` holds, so build first:
+`just web-build-release && just web-size`. `pages.yml` (after the demo build) and the release
+workflow's Linux leg (after "Build bundles") append the table to the job summary. It is not in
+`verify-full`, which builds the frontend in debug like CI's `web` job; `web-itest-size` gates only
+the debug GUI-test shards.
+
+Baseline, 2026-09-27 (0.30.2 + `minify = "on_release"`, Trunk 0.21.14):
+
+| file | bytes | gzip -9 |
+|---|---:|---:|
+| desktop `_bg.wasm` | 4,990,548 | 1,817,338 |
+| desktop JS glue | 57,009 | 9,494 |
+| `styles.css` | 69,111 | 11,434 |
+| **desktop total** | **5,116,668** | **1,838,266** |
+| Pages demo total (`--features demo`) | 5,279,325 | 1,905,422 |
+
+Before minification the stylesheet shipped verbatim at 121,586 bytes (28,206 gzipped). The JS
+glue is not minified: Trunk's JS minifier cannot parse wasm-bindgen's `export { .. as default }`
+and ships it as written (a `WARN Failed to minify JS` in the build log). The recipe's soft
+ceiling, `WASM_WARN_KB=7300` (~1.5x the release wasm), prints a `WARN` line and still exits 0 —
+find what grew before raising it, and re-record the table here when it moves materially.
 
 ## Crypto dependencies: no `rsa`; a deliberate `sha2` pin
 

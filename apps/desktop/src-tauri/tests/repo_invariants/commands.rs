@@ -1,5 +1,5 @@
-//! Rules that scan the whole command layer, plus the shared source table the
-//! other concern modules read.
+//! Rules that scan the command layer and the frontend as a whole rather than
+//! one command at a time; the shared source walk lives in [`super::sources`].
 
 /// The `.alert` tone vocabulary lives in exactly ONE component.
 ///
@@ -73,6 +73,357 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
     );
 }
 
+/// The `.badge` tone vocabulary lives in exactly ONE component.
+///
+/// `components::ui::Badge` declared itself the one home of the status pill, yet
+/// 45 lines across 16 files hand-wrote `"badge badge--…"` — more than twice the
+/// primitive's own call sites. That is how `badge--info` shipped for a staged
+/// SAML signing certificate with no stylesheet rule behind it: a class string
+/// is invisible to the compiler, so the certificate the whole rollover flow is
+/// about rendered in the bare neutral chrome. The tone is now a `BadgeTone`
+/// enum (an unknown tone is a compile error, and `badge.rs`'s own test proves
+/// each tone has a rule), which only helps if nobody routes around it.
+///
+/// Like the Callout rule, this matches the class strings themselves rather than
+/// the inline `class="badge` attribute: most bypasses bound the class to a
+/// variable first (`("Enabled", "badge--ok")` tuples, `format!("badge {cls}")`),
+/// and that is the same bypass with one more line. Comment lines are skipped so
+/// prose that describes the markup is not an offender.
+#[test]
+fn status_pill_markup_lives_only_in_the_badge_primitive() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::web_modules() {
+        // The primitive itself is where this markup belongs.
+        if name == "components/ui/badge.rs" {
+            continue;
+        }
+        for (n, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("\"badge") || line.contains("badge--") {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled status-pill markup outside the Badge primitive: {offenders:#?}\n\
+         Use `components::ui::Badge` with a `BadgeTone` (a helper returns the tone, not a \
+         class string) instead of writing the `.badge` classes directly."
+    );
+}
+
+/// The inline "this failed" line has ONE home: `components::ui::FormError`.
+///
+/// Sixty-six sites wrote `<Body1 class="form-error">` by hand, and only one of
+/// them carried a live-region role — so a failed save inside a dialog, a failed
+/// tab load, or a failed backup appeared on screen without a sound, and a
+/// screen-reader user was left on a re-enabled button with no idea why.
+/// `FormError` pairs the class with `role="alert"`; writing the markup directly
+/// is how the role goes missing again.
+#[test]
+fn inline_error_markup_lives_only_in_the_form_error_primitive() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::web_modules() {
+        // The primitive itself is where this markup belongs.
+        if name == "components/ui/form_error.rs" {
+            continue;
+        }
+        for (n, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("<Body1 class=\"form-error\"") {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled inline-error markup outside the FormError primitive: {offenders:#?}\n\
+         Use `components::ui::FormError`, which adds `role=\"alert\"` so the error is \
+         announced when it appears."
+    );
+}
+
+/// Typed searches whose `Err` carries a `String`, not a `UiError`, so
+/// `DetailLoadError` cannot take it — and the next keystroke re-runs the search,
+/// which is its retry. `(file, marker in the arm, reason)`.
+const SEARCH_ERR_ARMS: &[(&str, &str, &str)] = &[
+    (
+        "components/directory_search.rs",
+        "Search failed:",
+        "typed directory search; String error, the next keystroke retries",
+    ),
+    (
+        "views/dialogs/gallery_dialog.rs",
+        "Search failed:",
+        "typed gallery search; String error, the next keystroke retries",
+    ),
+];
+
+/// The `Err` arms inside each `Suspend::new(..)` block of `src` that render an
+/// inline error (`form-error` / `<FormError`) instead of `DetailLoadError`,
+/// plus the number of `Suspend::new(` blocks walked.
+///
+/// An arm's window is its own line plus up to three following lines, stopping
+/// before the next `=>` — without that stop, a consent arm that renders nothing
+/// (`Err(e) if e.is_consent_required() => ().into_any(),`) bleeds into the
+/// `DetailLoadError` arm after it, and a clean arm is read as the offender's.
+fn suspend_err_offenders(src: &str) -> (Vec<String>, usize) {
+    let src = src.replace("\r\n", "\n");
+    let (mut offenders, mut blocks) = (Vec::new(), 0usize);
+    let mut from = 0usize;
+    while let Some(hit) = src[from..].find("Suspend::new(") {
+        let end = from + hit + "Suspend::new(".len();
+        from = end;
+        let Some(body) = super::sources::balanced_block(&src, end) else {
+            continue;
+        };
+        blocks += 1;
+        let lines: Vec<&str> = super::sources::code_lines(&body).collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.contains("Err(") && line.contains("=>")) {
+                continue;
+            }
+            let mut window = vec![*line];
+            for next in lines.iter().skip(i + 1).take(3) {
+                if next.contains("=>") {
+                    break;
+                }
+                window.push(next);
+            }
+            let window = window.join("\n");
+            if window.contains("form-error") || window.contains("<FormError") {
+                offenders.push(window);
+            }
+        }
+    }
+    (offenders, blocks)
+}
+
+/// A failed load inside a `Suspense` renders `DetailLoadError`, never a bare
+/// inline error.
+///
+/// `DetailLoadError` is the documented "message + Retry" block, yet the
+/// enterprise app's Access, Permissions and App roles tabs and the SharePoint
+/// site-permission list each printed `Err(e)` as a red line — the Access tab as
+/// `error [graph_http_429]: …` — with no Retry: a throttled read was a dead end
+/// until the operator switched tabs. Every such tab already owns the `reload`
+/// signal `on_retry` needs, so there is no reason to route around it.
+#[test]
+fn suspense_load_failures_render_detail_load_error() {
+    let modules = super::sources::web_modules();
+    for (file, marker, why) in SEARCH_ERR_ARMS {
+        let src = modules
+            .iter()
+            .find(|(name, _)| name == file)
+            .map(|(_, src)| src)
+            .unwrap_or_else(|| {
+                panic!("stale SEARCH_ERR_ARMS entry `{file}` ({why}): no such file")
+            });
+        assert!(
+            src.contains(marker),
+            "stale SEARCH_ERR_ARMS entry `{file}` ({why}): `{marker}` no longer occurs"
+        );
+    }
+    let (mut offenders, mut blocks) = (Vec::new(), 0usize);
+    for (name, src) in &modules {
+        let (found, walked) = suspend_err_offenders(src);
+        blocks += walked;
+        for window in found {
+            let exempt = SEARCH_ERR_ARMS
+                .iter()
+                .any(|(file, marker, _)| file == name && window.contains(marker));
+            if !exempt {
+                offenders.push(format!("{name}: {}", window.trim()));
+            }
+        }
+    }
+    assert!(
+        blocks >= 30,
+        "walked only {blocks} `Suspend::new(` blocks — the scan is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "Suspense load failures rendered as a bare inline error: {offenders:#?}\n\
+         Render `<DetailLoadError error=e on_retry=Callback::new(move |_| reload.update(|n| \
+         *n += 1)) />` so the failure offers Retry (a typed search with a String error goes \
+         in SEARCH_ERR_ARMS with its reason)."
+    );
+}
+
+/// The Suspense scanner flags an inline-error arm and does not let a consent
+/// arm that renders nothing bleed into the `DetailLoadError` arm after it.
+#[test]
+fn the_suspense_err_scanner_reads_the_shapes_the_tree_uses() {
+    let bad = "{move || Suspend::new(async move {\n\
+               match res.await {\n\
+               Ok(v) => v.into_any(),\n\
+               Err(e) => view! { <Body1 class=\"form-error\">{e.message}</Body1> }.into_any(),\n\
+               }\n\
+               })}";
+    let (offenders, blocks) = suspend_err_offenders(bad);
+    assert_eq!(blocks, 1);
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+
+    let clean = "{move || Suspend::new(async move {\r\n\
+                 match res.await {\r\n\
+                 Ok(v) => v.into_any(),\r\n\
+                 Err(e) if e.is_consent_required() => ().into_any(),\r\n\
+                 Err(e) => {\r\n\
+                 view! { <DetailLoadError error=e on_retry=retry /> }.into_any()\r\n\
+                 }\r\n\
+                 }\r\n\
+                 })}\r\n\
+                 view! { <FormError>{msg}</FormError> }";
+    let (offenders, blocks) = suspend_err_offenders(clean);
+    assert_eq!(blocks, 1);
+    assert!(offenders.is_empty(), "{offenders:?}");
+}
+
+/// Every row table is keyboard-navigable.
+///
+/// The shortcuts sheet promises "↑ ↓ / Home / End — Move between rows in a
+/// table", and `DataTable` exists so that promise holds for free. Eleven
+/// tables hand-rolled `<table class="data-table">` instead — the App
+/// Registration Permissions and Expose an API tabs, an enterprise app's App
+/// roles and SAML signing certificates, the observed Graph usage table — and
+/// none wired `use_grid_keynav`, so the arrow keys did nothing there.
+///
+/// A table goes through `DataTable`; one whose rows are a keyed `<For>` (which
+/// `DataTable`'s by-value `rows` can't express) wires `use_grid_keynav` on its
+/// `<tbody>` itself. The rule counts per file — every `<table` needs its own
+/// keynav call — rather than accepting any keynav call anywhere in the file,
+/// the coarse per-file match `repo_invariants.rs` warns about.
+#[test]
+fn every_table_wires_keyboard_row_navigation() {
+    /// Tables that are not a row list, with the reason.
+    const NOT_A_GRID: &[(&str, &str)] = &[(
+        "views/dialogs/cache_diagnostics_dialog.rs",
+        "headerless key/value stats, not a row list",
+    )];
+    let modules = super::sources::web_modules();
+    for (exempt, why) in NOT_A_GRID {
+        let src = modules
+            .iter()
+            .find(|(name, _)| name == exempt)
+            .map(|(_, src)| src)
+            .unwrap_or_else(|| panic!("stale NOT_A_GRID entry `{exempt}` ({why}): no such file"));
+        assert!(
+            super::sources::code_lines(src).any(|l| l.contains("<table")),
+            "stale NOT_A_GRID entry `{exempt}` ({why}): it no longer renders a <table>"
+        );
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in &modules {
+        if name == "components/ui/data_table.rs" || NOT_A_GRID.iter().any(|(f, _)| f == name) {
+            continue;
+        }
+        let (mut tables, mut keynavs) = (0usize, 0usize);
+        for line in super::sources::code_lines(src) {
+            tables += line.matches("<table").count();
+            keynavs += line.matches("use_grid_keynav(").count();
+        }
+        if tables > keynavs {
+            offenders.push(format!(
+                "{name}: {tables} <table> vs {keynavs} use_grid_keynav"
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "tables without keyboard row navigation: {offenders:#?}\n\
+         Render the table through `components::ui::DataTable`; a keyed `<For>` table wires \
+         `use_grid_keynav(tbody_ref, ..)` on its `<tbody>` (see `resource_access/sites.rs`)."
+    );
+}
+
+/// No source points at the retired TSX frontend.
+///
+/// `apps/desktop/` holds only `src-tauri` and `web-rs`, but eight module docs
+/// still said a view "mirrors `apps/desktop/web/src/…tsx`" — a pointer a new
+/// contributor follows to nothing. (`web-rs/` does not contain the needle.)
+#[test]
+fn no_source_points_at_the_retired_tsx_frontend() {
+    let offenders: Vec<String> = super::sources::web_modules()
+        .into_iter()
+        .filter(|(_, src)| src.contains("apps/desktop/web/"))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "sources pointing at the deleted `apps/desktop/web/` TSX frontend: {offenders:#?}\n\
+         State the module's purpose instead."
+    );
+}
+
+/// A missing consent is recognised by ONE predicate, `UiError::is_consent_required`.
+///
+/// Twenty-odd surfaces compared `e.code == "consent_required"` by hand, so the
+/// literal was restated at every consumer — the drift `core::reauth` exists to
+/// prevent for the re-auth-fatal codes. The helper reads the one literal in
+/// `core::reauth::CONSENT_REQUIRED`; a hand-rolled compare in the frontend or
+/// the command layer is the bypass. (A `match` arm on the code, as the sign-in
+/// hint table uses, is not a compare and is not matched.)
+#[test]
+fn consent_required_is_recognised_only_through_the_ui_error_helper() {
+    let desktop = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("apps/desktop");
+    let roots = [
+        desktop.join("web-rs/src"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands"),
+    ];
+    let mut scanned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for root in roots {
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let Ok(src) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                scanned += 1;
+                let squashed: String = src.split_whitespace().collect();
+                if squashed.contains("==\"consent_required\"")
+                    || squashed.contains("!=\"consent_required\"")
+                {
+                    offenders.push(
+                        path.strip_prefix(desktop)
+                            .unwrap_or(&path)
+                            .display()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        scanned > 50,
+        "the scan found almost no sources ({scanned}) — wrong root?"
+    );
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled `consent_required` compares: {offenders:#?}\n\
+         Use `UiError::is_consent_required()` (one literal, in core::reauth::CONSENT_REQUIRED)."
+    );
+}
+
 /// A scope remediation must be gated on a POSITIVE "this resource can be
 /// confined" test, never on the negation of a legacy/unscopable test.
 ///
@@ -126,12 +477,18 @@ fn scope_fixes_are_gated_on_a_positive_resource_test() {
 /// call sites carried their own `#[allow]` besides. AGENTS.md meanwhile said
 /// the value-only forms were pinned as forbidden. Now they do not exist, and
 /// this is what makes that true — reintroducing one by name fails here.
+///
+/// `least_privilege_alternative(value)` joined them later for the same reason:
+/// it defaulted the resource to Microsoft Graph, so the permission picker told
+/// operators to scope Office 365 Exchange Online mail permissions via Exchange
+/// RBAC. The `(` keeps the resource-aware `least_privilege_alternative_for` out.
 #[test]
 fn the_resource_blind_mailbox_gates_are_not_reintroduced() {
-    const GONE: [&str; 3] = [
+    const GONE: [&str; 4] = [
         "exchange_role_for_permission",
         "is_scopable_exchange_permission",
         "fn scope_kind(",
+        "least_privilege_alternative(",
     ];
     // Every Rust source in the workspace + the excluded frontend tree.
     // apps/desktop/src-tauri → apps/desktop → apps → repo root.
@@ -202,7 +559,179 @@ fn the_resource_blind_mailbox_gates_are_not_reintroduced() {
          Both mailbox resources expose the same permission names and only Microsoft Graph's can \
          be confined, so a value-only answer reports an unscopable legacy grant as scopable. Take \
          the resource: is_scopable_exchange_resource_permission / \
-         exchange_role_for_resource_permission / scope_kind_for.",
+         exchange_role_for_resource_permission / scope_kind_for / \
+         least_privilege_alternative_for.",
         offenders.join("\n  ")
+    );
+}
+
+/// The `*_not_found` offenders in one (whitespace-squashed) source: a
+/// `validation`/`new` code that spells the suffix by hand, or a
+/// `UiError::not_found` resource that already carries it (which the factory
+/// then doubles into `x_not_found_not_found`). Returns `(offender, seen)`, where
+/// `seen` counts the `UiError::not_found(` sites with a literal resource.
+fn not_found_offenders(src: &str) -> (Vec<String>, usize) {
+    fn literals<'a>(squashed: &'a str, call: &str) -> Vec<&'a str> {
+        let needle = format!("{call}(\"");
+        squashed
+            .match_indices(&needle)
+            .filter_map(|(at, _)| {
+                let rest = &squashed[at + needle.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect()
+    }
+    let squashed: String = src.split_whitespace().collect();
+    let mut offenders = Vec::new();
+    for call in ["UiError::validation", "UiError::new"] {
+        for code in literals(&squashed, call) {
+            if code == "not_found" || code.ends_with("_not_found") {
+                offenders.push(format!("{call}(\"{code}\""));
+            }
+        }
+    }
+    let factory = literals(&squashed, "UiError::not_found");
+    for resource in &factory {
+        if resource.ends_with("not_found") {
+            offenders.push(format!("UiError::not_found(\"{resource}\""));
+        }
+    }
+    (offenders, factory.len())
+}
+
+/// Every `*_not_found` wire code comes from `UiError::not_found(resource)`,
+/// which formats `{resource}_not_found`.
+///
+/// The same condition — a service principal gone between list and detail —
+/// reached the frontend as a bare `not_found` from the SSO tab and as
+/// `service_principal_not_found` from the enterprise-app detail, and three
+/// sites passed an already-suffixed code into the factory, putting
+/// `*_not_found_not_found` on the wire. A future `ends_with("_not_found")`
+/// handler would silently miss the first and match the others by accident.
+/// (The bare `not_found` transport code from `http_error_enum!` lives outside
+/// the command layer and is not scanned.)
+#[test]
+fn not_found_codes_come_only_from_the_factory() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for (name, src) in super::sources::command_modules() {
+        let (found, sites) = not_found_offenders(&src);
+        seen += sites;
+        offenders.extend(found.into_iter().map(|o| format!("{name}: {o}")));
+    }
+    assert!(
+        seen >= 10,
+        "saw only {seen} `UiError::not_found(\"…\"` sites — the scan is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "hand-spelled or doubled not-found codes:\n  {}\n\
+         Use `UiError::not_found(\"<resource>\", …)`, which formats `<resource>_not_found` — \
+         pass the bare resource, never a code that already ends in `not_found`.",
+        offenders.join("\n  ")
+    );
+}
+
+/// The not-found scanner reads the shapes rustfmt produces, so the rule above
+/// cannot pass because a call was wrapped across lines.
+#[test]
+fn the_not_found_scanner_reads_the_shapes_the_tree_uses() {
+    let wrapped = "Err(UiError::not_found(\n    \"group_not_found\",\n    \"gone\",\n))";
+    let (offenders, seen) = not_found_offenders(wrapped);
+    assert_eq!(seen, 1);
+    assert_eq!(
+        offenders,
+        vec!["UiError::not_found(\"group_not_found\"".to_string()]
+    );
+
+    let hand = "UiError::validation(\n        \"not_found\",\n        \"x\")\n\
+                crate::dto::UiError::new(\"cert_not_found\", \"y\", false)";
+    let (offenders, _) = not_found_offenders(hand);
+    assert_eq!(offenders.len(), 2, "{offenders:?}");
+
+    let clean = "UiError::not_found(\"service_principal\", \"gone\")\n\
+                 UiError::validation(\"cert_is_active\", \"z\")\n\
+                 UiError::not_found(resource, \"dynamic\")";
+    let (offenders, seen) = not_found_offenders(clean);
+    assert!(offenders.is_empty(), "{offenders:?}");
+    assert_eq!(seen, 1, "a non-literal resource is not counted");
+}
+
+/// The org-wide strip and the Selected declare-then-grant each have ONE home.
+///
+/// The Exchange core and the SharePoint `Sites.Selected` conversion each carried
+/// their own strip loop, and the two SharePoint Selected paths each carried
+/// their own declare → idempotency check → assign block. Four copies of two
+/// small algorithms drift independently: a fix to what a failed strip reports,
+/// or to the declared-before-assigned order, had to be made in each. They now
+/// route through `graph_roles::strip_app_role_grants` and
+/// `sharepoint::declare_and_grant_graph_role`.
+///
+/// Scoped to these two areas: `permissions.rs`, `remediation.rs` and
+/// `managed_identity.rs` revoke single grants for their own reasons.
+#[test]
+fn the_org_wide_strip_and_the_selected_grant_have_one_home() {
+    let modules = super::sources::command_modules();
+    let mut offenders = Vec::new();
+    let mut strip_home = false;
+    let mut sharepoint_grants = None;
+    for (name, src) in &modules {
+        let src = src.replace("\r\n", "\n");
+        if name == "commands/graph_roles.rs" {
+            strip_home = src.contains(".remove_app_role_assignment(");
+        }
+        let scoping_plane =
+            name == "commands/sharepoint.rs" || name.starts_with("commands/exchange/");
+        if scoping_plane && src.contains(".remove_app_role_assignment(") {
+            offenders.push(format!(
+                "{name}: strips a grant itself instead of through graph_roles::strip_app_role_grants"
+            ));
+        }
+        if name == "commands/sharepoint.rs" {
+            sharepoint_grants = Some(src.matches(".grant_app_role(").count());
+        }
+    }
+    assert!(
+        strip_home,
+        "commands/graph_roles.rs no longer calls `.remove_app_role_assignment(` — the shared strip \
+         moved, and this rule would pass vacuously"
+    );
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    assert_eq!(
+        sharepoint_grants,
+        Some(1),
+        "commands/sharepoint.rs must assign a Graph appRole in exactly one place \
+         (declare_and_grant_graph_role), so both Selected paths declare before they assign"
+    );
+}
+
+/// `grant_exchange_mailbox_access` validates the request before it creates the
+/// app's service principal.
+///
+/// `ensure_service_principal` is a directory write — it adds an enterprise app
+/// when the app has none — and it used to run before `require_scopable_targets`,
+/// so a "nothing to scope" refusal still left a new enterprise app behind that
+/// the cached lists did not show. The targets need only the manifest and the
+/// resource indexes, so the check can always come first.
+#[test]
+fn the_mailbox_grant_validates_before_it_creates_a_service_principal() {
+    let commands = super::sources::commands();
+    let cmd = commands
+        .iter()
+        .find(|c| c.name == "grant_exchange_mailbox_access")
+        .expect("grant_exchange_mailbox_access is a command");
+    let body = cmd.body.replace("\r\n", "\n");
+    let check = body
+        .find("require_scopable_targets(")
+        .expect("the command validates its targets");
+    // The method-call form, so a comment naming it cannot satisfy the rule.
+    let create = body
+        .find(".ensure_service_principal(")
+        .expect("the command ensures the Entra service principal");
+    assert!(
+        check < create,
+        "grant_exchange_mailbox_access creates the service principal before it checks there is \
+         anything to scope"
     );
 }

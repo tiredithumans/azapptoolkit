@@ -3,7 +3,8 @@
 //! the group↔bulk-action pairing (the retired over-privileged→remove-redundant
 //! mismatch), the per-row fix↔section pairing (a section offers its own rule's
 //! Fix only, deep-links "Open" to its own tab, and applying one fix leaves the
-//! others standing), the add-owner / disable-sign-in bulk flows, and the
+//! others standing), the add-owner / disable-sign-in bulk flows, the
+//! keyword-gated bulk delete, and the
 //! Home-drill routing (severity → All apps pane, finding → expanded group).
 #![cfg(target_arch = "wasm32")]
 
@@ -15,9 +16,10 @@ use azapptoolkit_core::audit::{
     AuditPrincipalKind, CredentialStatus, RemediationAction, RemediationKind, RiskLevel, issue,
 };
 use azapptoolkit_core::models::DirectoryObject;
-use azapptoolkit_dto::audit::AuditRunResult;
+use azapptoolkit_dto::audit::{AuditCoverageGap, AuditRunResult};
 use azapptoolkit_dto::bulk::{
-    BulkAddOwnerResult, BulkDisableOutcome, BulkDisableSignInResult, BulkOwnerOutcome,
+    BulkAddOwnerResult, BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome,
+    BulkDisableSignInResult, BulkOwnerOutcome,
 };
 use azapptoolkit_dto::exchange::{AapMigrationItem, AapMigrationReport};
 use azapptoolkit_dto::remediation::RemediationOutcome;
@@ -112,6 +114,7 @@ fn cached_run() -> AuditRunResult {
         truncated: false,
         degraded: Vec::new(),
         completed_at: None,
+        mailbox_scoping_resolved: true,
     }
 }
 
@@ -121,26 +124,6 @@ async fn mount_security() -> ts::Mounted {
     let m = ts::mount_view(|| view! { <SecurityView /> });
     ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
     m
-}
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-/// True once a button with exactly this label exists — body-text waits are not
-/// enough here because group blurbs can mention an action's name before the
-/// bulk bar's button renders.
-fn has_button(label: &str) -> bool {
-    ts::query_all("button")
-        .iter()
-        .any(|el| el.text_content().unwrap_or_default().trim() == label)
 }
 
 /// Clicks the "Open" deep-link inside the row for `app_name`. Every row carries
@@ -162,19 +145,6 @@ fn click_row_open(app_name: &str) {
     panic!("no Open button in a row for `{app_name}`");
 }
 
-/// Clicks a button inside the bulk bar's armed panel — the panel's confirm can
-/// share its label with the bar's action button, so scope to the panel.
-fn click_panel_button(label: &str) {
-    for el in ts::query_all(".bulk-action-bar__confirm button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no armed-panel button labelled `{label}`");
-}
-
 /// Groups rank by their OWN worst severity, then by how many principals they
 /// affect, then by catalog order — never by Σ `risk_score` over their members,
 /// which is every rule's score, not this one's. Ownership contributes no points
@@ -183,6 +153,11 @@ fn click_panel_button(label: &str) {
 #[wasm_bindgen_test]
 async fn groups_rank_by_worst_severity_then_count() {
     let _m = mount_security().await;
+    // A complete run carries none of the coverage caveats — they are real-
+    // failure surfaces, and showing one here would call a full scan partial.
+    assert!(!ts::body_contains("cancelled early"));
+    assert!(!ts::body_contains("arbitrary prefix"));
+    assert!(!ts::body_contains("could not run"));
     let titles: Vec<String> = ts::query_all(".finding-group__title")
         .iter()
         .map(|el| el.text_content().unwrap_or_default())
@@ -217,11 +192,249 @@ async fn groups_rank_by_worst_severity_then_count() {
         ts::query("[aria-label='Worst: Critical']").is_some(),
         "the worst-severity dot carries its tier as an accessible name"
     );
+    // Every header is a disclosure with a real `"true"`/`"false"` state, and
+    // its ▾/▸ glyph is hidden from the accessible name.
+    let headers = ts::query_all(".finding-group__header");
+    assert!(!headers.is_empty());
+    for h in &headers {
+        assert_eq!(
+            h.get_attribute("aria-expanded").as_deref(),
+            Some("false"),
+            "collapsed header {:?}",
+            h.text_content()
+        );
+    }
+    for c in ts::query_all(".finding-group__chevron") {
+        assert_eq!(c.get_attribute("aria-hidden").as_deref(), Some("true"));
+    }
     // The healthy section trails as a collapsed disclosure; expanding it
     // reveals the positive groups even at zero count.
     assert!(!ts::body_contains("Mailbox access scoped"));
+    let section = || ts::query(".finding-group__header--section").expect("the healthy header");
+    assert_eq!(section().get_attribute("aria-controls"), None);
     ts::click(".finding-group__header--section");
     ts::wait_for(|| ts::body_contains("Mailbox access scoped")).await;
+    assert_eq!(
+        section().get_attribute("aria-expanded").as_deref(),
+        Some("true")
+    );
+    // Open, it names the container it revealed — and that container holds the
+    // positive groups.
+    let controls = section()
+        .get_attribute("aria-controls")
+        .expect("an open healthy section points at its body");
+    let body = ts::query(&format!("#{controls}")).expect("aria-controls resolves");
+    assert!(
+        body.text_content()
+            .unwrap_or_default()
+            .contains("Mailbox access scoped")
+    );
+}
+
+/// An open group's header says so and points `aria-controls` at the body it
+/// revealed; a collapsed one carries no `aria-controls` (its body is not in
+/// the DOM, so the reference would dangle).
+#[wasm_bindgen_test]
+async fn an_open_group_header_is_expanded_and_controls_its_body() {
+    let m = mount_security().await;
+    let unused_header = || {
+        ts::query_all(".finding-group__header")
+            .into_iter()
+            .find(|h| {
+                h.query_selector(".finding-group__title")
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.text_content())
+                    .is_some_and(|t| t == "Unused applications")
+            })
+            .expect("Unused applications header")
+    };
+    assert_eq!(unused_header().get_attribute("aria-controls"), None);
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unused".to_string()));
+    ts::wait_for(|| ts::query(".finding-group__body").is_some()).await;
+
+    let header = unused_header();
+    assert_eq!(
+        header.get_attribute("aria-expanded").as_deref(),
+        Some("true")
+    );
+    let body_id = ts::query(".finding-group__body")
+        .and_then(|b| b.get_attribute("id"))
+        .expect("the open body carries an id");
+    assert_eq!(body_id, "finding-group-body-unused");
+    assert_eq!(
+        header.get_attribute("aria-controls").as_deref(),
+        Some(body_id.as_str())
+    );
+}
+
+/// Trimmed text of the posture strip — the coverage caveats' one home, above
+/// both audit panes. Scoped to it because `body_contains` also sees the
+/// keep-alive-hidden panes.
+fn strip_text() -> String {
+    ts::query(".posture-strip")
+        .and_then(|el| el.text_content())
+        .unwrap_or_default()
+}
+
+/// A partial run must say so above everything it computed, whichever pane is
+/// showing — including when it DID find problems, which is exactly when the
+/// counts and every "Fix all N" look like a full scan. Cancelled, truncated and
+/// degraded are independent, so all three render together.
+#[wasm_bindgen_test]
+async fn partial_runs_are_marked_on_the_strip_above_both_panes() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            cancelled: true,
+            truncated: true,
+            total_apps: 20,
+            degraded: vec![AuditCoverageGap::PerPrincipalScoring],
+            ..cached_run()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    // Findings still render — the caveats qualify them, never replace them.
+    ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
+    let strip = strip_text();
+    assert!(
+        strip.contains("This scan was cancelled early — 9 of 20 principals were scored"),
+        "{strip}"
+    );
+    assert!(strip.contains("covered an arbitrary prefix"), "{strip}");
+    assert!(strip.contains("Part of this scan could not run"), "{strip}");
+    assert!(
+        strip.contains(AuditCoverageGap::PerPrincipalScoring.description()),
+        "each gap is listed under the lede: {strip}"
+    );
+
+    // The strip sits above the tab bar, so the All-apps pane carries the same
+    // caveats (it rendered none of them before).
+    m.session.open_security("apps");
+    ts::wait_for(|| ts::query(".audit-apps-pane").is_some()).await;
+    let strip = strip_text();
+    assert!(strip.contains("arbitrary prefix"), "{strip}");
+    assert!(strip.contains("could not run"), "{strip}");
+}
+
+/// A truncated scan that found nothing scored only a prefix of the tenant, so
+/// the empty Findings pane must qualify itself instead of declaring all-clear.
+#[wasm_bindgen_test]
+async fn truncated_run_without_findings_is_not_an_all_clear() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            truncated: true,
+            items: vec![fixtures::audit_item("Clean App", RiskLevel::Low, &[])],
+            total_apps: 1,
+            ..cached_run()
+        },
+    );
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| {
+        ts::body_contains("No actionable findings among the applications this scan reached")
+    })
+    .await;
+    assert!(!ts::body_contains("nothing to fix right now"));
+    assert!(strip_text().contains("arbitrary prefix"));
+}
+
+/// Org-wide reach the toolkit can't confine is scored, so it must be visible
+/// on the findings-first pane: two advisory groups (the legacy-resource advice
+/// differs from the rest), no bulk Fix, and never folded into the fixable
+/// org-wide mailbox group whose Fix could not apply to them.
+#[wasm_bindgen_test]
+async fn unconfinable_reach_lands_in_advisory_groups() {
+    ts::reset();
+    let mut run = cached_run();
+    run.items.extend([
+        fixtures::audit_item(
+            "Legacy EXO App",
+            RiskLevel::Medium,
+            &[format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX)],
+        ),
+        fixtures::audit_item(
+            "Unmapped Mail App",
+            RiskLevel::Medium,
+            &[format!(
+                "{}: Mail.ReadWrite.Shared",
+                issue::UNCONFINABLE_MAILBOX
+            )],
+        ),
+        fixtures::audit_item(
+            "SPO Legacy App",
+            RiskLevel::High,
+            &[format!(
+                "{}: Sites.Read.All",
+                issue::UNCONFINABLE_SHAREPOINT
+            )],
+        ),
+    ]);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Legacy Exchange Online mailbox grants")).await;
+    let titles: Vec<String> = ts::query_all(".finding-group__title")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .collect();
+    assert!(
+        titles.contains(&"Org-wide access that can't be confined here".to_string()),
+        "{titles:?}"
+    );
+    // The fixable group keeps exactly its own two members.
+    let mailbox_header = ts::query_all(".finding-group__header")
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default())
+        .find(|t| t.starts_with("Org-wide mailbox access"))
+        .expect("org-wide mailbox group renders");
+    assert!(mailbox_header.contains("2 principals"), "{mailbox_header}");
+
+    let details = || -> Vec<String> {
+        ts::query_all(".finding-group__detail")
+            .iter()
+            .map(|el| el.text_content().unwrap_or_default())
+            .collect()
+    };
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unconfinable_orgwide".to_string()));
+    ts::wait_for(|| ts::query(".finding-group__detail").is_some()).await;
+    let d = details();
+    assert!(
+        d.iter().any(|x| x.contains("Mail.ReadWrite.Shared")),
+        "{d:?}"
+    );
+    assert!(d.iter().any(|x| x.contains("Sites.Read.All")), "{d:?}");
+    assert!(
+        !ts::query_all("button").iter().any(|b| b
+            .text_content()
+            .unwrap_or_default()
+            .trim()
+            .starts_with("Fix all")),
+        "an advisory group offers no bulk Fix"
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unscopable_legacy_mailbox".to_string()));
+    ts::wait_for(|| {
+        details()
+            .iter()
+            .any(|x| x.contains("Unscopable legacy Exchange"))
+    })
+    .await;
+    let d = details();
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].contains("Mail.Read"), "{d:?}");
 }
 
 /// A pane grouped BY finding has to say what the finding is: the row quotes the
@@ -288,6 +501,31 @@ fn findings_headers() -> Vec<String> {
         .collect()
 }
 
+// A run that couldn't check mail permissions against Exchange scored them all
+// org-wide: the group has to say its findings may already be confined, with
+// the same sentence the export carries.
+#[wasm_bindgen_test]
+async fn org_wide_mailbox_group_says_when_scoping_was_unresolved() {
+    ts::reset();
+    let run = AuditRunResult {
+        mailbox_scoping_resolved: false,
+        ..cached_run()
+    };
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
+    // Collapsed, the caveat stays with the group it qualifies.
+    assert!(!ts::body_contains("Mailbox scoping could not be resolved"));
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Mailbox scoping could not be resolved")).await;
+    assert!(ts::body_contains(
+        azapptoolkit_dto::audit::MAILBOX_SCOPING_UNRESOLVED
+    ));
+}
+
 #[wasm_bindgen_test]
 async fn fix_all_selects_only_application_rows() {
     let m = mount_security().await;
@@ -296,9 +534,11 @@ async fn fix_all_selects_only_application_rows() {
         .audit_expanded_group
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
+    // A run that resolved mailbox scoping carries no scoping caveat.
+    assert!(!ts::body_contains("Mailbox scoping could not be resolved"));
     // The group holds 2 principals (app + SP) but only the app registration is
     // bulk-eligible — Fix all must seed exactly it.
-    click_button("Fix all 1");
+    ts::click_button_labelled("Fix all 1");
     ts::wait_for(|| {
         !m.session
             .tenant_ui
@@ -325,7 +565,7 @@ async fn group_bar_pairs_each_fix_with_its_own_rule() {
         .audit_expanded_group
         .set(Some("redundant_perms".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
-    click_button("Fix all 1");
+    ts::click_button_labelled("Fix all 1");
     ts::wait_for(|| ts::body_contains("Remove redundant permissions")).await;
 
     // …but the over-privileged (advisory) group must NOT — the old
@@ -403,15 +643,19 @@ async fn bulk_add_owner_flow_sends_the_picked_principal() {
         .audit_expanded_group
         .set(Some("ownership".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 2")).await;
-    click_button("Fix all 2");
-    ts::wait_for(|| has_button("Add owner")).await;
-    click_button("Add owner");
+    ts::click_button_labelled("Fix all 2");
+    // A button wait, not a body-text one: group blurbs can mention an action's
+    // name before the bulk bar's button renders.
+    ts::wait_for(|| ts::has_button_labelled("Add owner")).await;
+    ts::click_button_labelled("Add owner");
     ts::wait_for(|| ts::query(".bulk-action-bar__confirm input").is_some()).await;
     ts::set_input_value(".bulk-action-bar__confirm input", "dana");
     ts::wait_for(|| ts::query(".add-owner-candidates button").is_some()).await;
     ts::click(".add-owner-candidates button");
     ts::wait_for(|| ts::body_contains("Adding:")).await;
-    click_panel_button("Add owner");
+    // Scoped to the armed panel: its confirm shares its label with the bar's
+    // action button.
+    ts::click_button_labelled_in(".bulk-action-bar__confirm", "Add owner");
     ts::wait_for(|| ts::call_count("bulk_add_owner") == 1).await;
 
     let call = ts::last_call("bulk_add_owner").unwrap();
@@ -447,12 +691,12 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
         .audit_expanded_group
         .set(Some("unused".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
-    click_button("Fix all 1");
-    ts::wait_for(|| has_button("Disable sign-in")).await;
-    click_button("Disable sign-in");
+    ts::click_button_labelled("Fix all 1");
+    ts::wait_for(|| ts::has_button_labelled("Disable sign-in")).await;
+    ts::click_button_labelled("Disable sign-in");
     // Reversible ⇒ plain confirm panel (no typed keyword).
     ts::wait_for(|| ts::query(".bulk-action-bar__confirm").is_some()).await;
-    click_panel_button("Disable sign-in");
+    ts::click_button_labelled_in(".bulk-action-bar__confirm", "Disable sign-in");
     ts::wait_for(|| ts::call_count("bulk_disable_sign_in") == 1).await;
 
     let call = ts::last_call("bulk_disable_sign_in").unwrap();
@@ -464,6 +708,76 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
             .and_then(|v| v.as_str()),
         Some("obj-Idle App")
     );
+}
+
+/// The typed DELETE gate is wired to the button, not just the spec: the unit
+/// tests pin that Delete is `Confirm::Keyword("DELETE")`; this proves the
+/// command cannot fire until the exact word is typed, and that a failed row is
+/// reported.
+#[wasm_bindgen_test]
+async fn bulk_delete_fires_only_after_the_exact_keyword() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "bulk_delete_applications",
+        &BulkDeleteResult {
+            deleted: vec![],
+            failed: vec![BulkDeleteFailure {
+                object_id: "obj-Idle App".to_string(),
+                message: "Insufficient privileges to complete the operation.".to_string(),
+            }],
+            cancelled: false,
+        },
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unused".to_string()));
+    ts::wait_for(|| ts::body_contains("Fix all 1")).await;
+    ts::click_button_labelled("Fix all 1");
+    // Scoped: the armed panel's confirm button shares the label.
+    ts::wait_for(|| ts::button_labelled_in(".bulk-action-bar__actions", "Delete").is_some()).await;
+    ts::click_button_labelled_in(".bulk-action-bar__actions", "Delete");
+    let gate = ".bulk-action-bar__confirm .confirm-gate input";
+    ts::wait_for(|| ts::query(gate).is_some()).await;
+    let confirm = || {
+        ts::button_labelled_in(".bulk-action-bar__confirm", "Delete").expect("armed panel's Delete")
+    };
+    assert!(
+        confirm().has_attribute("disabled"),
+        "empty keyword must not arm Delete"
+    );
+
+    ts::set_input_value(gate, "delete");
+    ts::tick().await;
+    assert!(
+        confirm().has_attribute("disabled"),
+        "a wrong-case keyword must not arm Delete"
+    );
+    confirm().click();
+    ts::tick().await;
+    assert_eq!(
+        ts::call_count("bulk_delete_applications"),
+        0,
+        "a wrong-case keyword must not run a bulk delete"
+    );
+
+    ts::set_input_value(gate, "DELETE");
+    ts::wait_for(|| !confirm().has_attribute("disabled")).await;
+    confirm().click();
+    ts::wait_for(|| ts::call_count("bulk_delete_applications") == 1).await;
+    let call = ts::last_call("bulk_delete_applications").unwrap();
+    assert_eq!(
+        call.args
+            .get("objectIds")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+        Some(vec!["obj-Idle App"])
+    );
+
+    ts::wait_for(|| ts::body_contains("1 item failed:")).await;
+    assert!(ts::body_contains("Insufficient privileges"));
+    assert!(ts::body_contains("Deleted 0 apps; 1 failed."));
 }
 
 /// The legacy-policy migration Fix is plan-first: opening it must run a **dry
@@ -502,8 +816,8 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
-    click_button("Migrate to RBAC for Applications");
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
+    ts::click_button_labelled("Migrate to RBAC for Applications");
 
     // Opening the modal plans; nothing is committed yet.
     ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 1).await;
@@ -520,7 +834,7 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
     ts::wait_for(|| ts::body_contains("Nothing has changed yet")).await;
 
     // Committing sends the same call with dry_run cleared.
-    click_button("Migrate");
+    ts::click_button_labelled("Migrate");
     ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 2).await;
     let commit = ts::last_call("migrate_application_access_policies").unwrap();
     assert_eq!(
@@ -545,17 +859,17 @@ async fn section_rows_offer_only_their_own_rules_fix() {
     };
 
     expand("legacy_mailbox_scope");
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
     assert!(
-        !has_button("Remove 1 expired credential"),
+        !ts::has_button_labelled("Remove 1 expired credential"),
         "the legacy-policy section must not offer the credential fix"
     );
 
     // …and symmetrically: the expired section owns the credential fix only.
     expand("expired");
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
     assert!(
-        !has_button("Migrate to RBAC for Applications"),
+        !ts::has_button_labelled("Migrate to RBAC for Applications"),
         "the expired-credentials section must not offer the migration fix"
     );
 }
@@ -573,15 +887,29 @@ async fn open_deep_links_to_the_section_it_was_clicked_in() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("expired".to_string()));
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
     click_row_open("Legacy Policy App");
     assert_eq!(tab().as_deref(), Some("credentials"));
+    // What the mounted detail pane does: consume the tab once. (The harness
+    // mounts no workspace pane, so the test plays its part.)
+    m.session.tenant_ui.pending_app_tab.set(None);
 
     m.session
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
+    // The app is still open: it keeps its live tab, and no pane mounts to
+    // consume a queued one — queuing it would land the NEXT app on it.
+    click_row_open("Legacy Policy App");
+    assert_eq!(
+        tab(),
+        None,
+        "an already-open app must not queue a tab for the next app"
+    );
+
+    // Closed again, Open from this section lands on Permissions.
+    m.session.close_all_items();
     click_row_open("Legacy Policy App");
     assert_eq!(tab().as_deref(), Some("permissions"));
 }
@@ -605,8 +933,8 @@ async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("expired".to_string()));
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
-    click_button("Remove 1 expired credential");
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
+    ts::click_button_labelled("Remove 1 expired credential");
     ts::wait_for(|| ts::body_contains("Remove expired credentials?")).await;
     // The modal covers the row it was opened from, so it has to name what it
     // will remove — a static body describing the *kind* of change left the
@@ -618,17 +946,17 @@ async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
             .as_deref(),
         Some("old-secret (expired 2024-01-01)")
     );
-    click_button("Remove");
+    ts::click_button_labelled("Remove");
     ts::wait_for(|| ts::call_count("remediate_remove_expired_credentials") == 1).await;
     // The applied fix is gone for good.
-    ts::wait_for(|| !has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| !ts::has_button_labelled("Remove 1 expired credential")).await;
 
     // The legacy-policy section still offers the migration nobody has run.
     m.session
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
 }
 
 #[wasm_bindgen_test]

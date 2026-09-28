@@ -30,11 +30,35 @@ impl ArmError {
                     .map(|c| c.remediation)
             }
             ArmError::Unauthorized => Some(
-                "Your Azure Resource Manager token was rejected. Sign out and back in; if it \
-                 persists, confirm the app has consented the management.azure.com scope.",
+                "Your Azure Resource Manager token was rejected. Use \"Refresh token\" (next to \
+                 Sign out), then retry; if it persists, confirm the app has consented the \
+                 management.azure.com scope.",
             ),
             _ => None,
         }
+    }
+
+    /// The ARM error envelope's `error.code` (e.g. `RoleAssignmentExists`) of a
+    /// terminal 4xx [`ArmError::Api`], so a caller can branch on the code rather
+    /// than substring-match the JSON. `None` for any other variant or a body
+    /// that is not the envelope. The body is sanitized and capped, which leaves
+    /// ARM's short envelopes intact.
+    pub fn arm_error_code(&self) -> Option<String> {
+        let ArmError::Api { body, .. } = self else {
+            return None;
+        };
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()?
+            .pointer("/error/code")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// ARM's answer to a role assignment the principal already holds at that
+    /// scope: 409 `RoleAssignmentExists`. Nothing was created.
+    pub fn is_role_assignment_exists(&self) -> bool {
+        matches!(self, ArmError::Api { status: 409, .. })
+            && self.arm_error_code().as_deref() == Some("RoleAssignmentExists")
     }
 }
 
@@ -124,9 +148,49 @@ mod tests {
             .ui_hint()
             .expect("forbidden has a hint");
         assert!(f.contains("Reader"));
-        assert!(ArmError::Unauthorized.ui_hint().is_some());
+        // A 401 points at the in-place lever, never at signing out (which
+        // would drop every data cache).
+        let u = ArmError::Unauthorized
+            .ui_hint()
+            .expect("unauthorized has a hint");
+        assert!(u.contains("Refresh token"), "{u}");
+        assert!(!u.contains("Sign out and back in"), "{u}");
         // Non-authz variants carry no role hint.
         assert!(ArmError::NotFound(String::new()).ui_hint().is_none());
         assert!(ArmError::Token("x".into()).ui_hint().is_none());
+    }
+
+    #[test]
+    fn a_duplicate_role_assignment_is_recognised_by_status_and_code() {
+        let api = |status, body: &str| ArmError::Api {
+            status,
+            body: body.to_string(),
+        };
+        let exists = r#"{"error":{"code":"RoleAssignmentExists","message":"The role assignment already exists."}}"#;
+        let err = api(409, exists);
+        assert_eq!(
+            err.arm_error_code().as_deref(),
+            Some("RoleAssignmentExists")
+        );
+        assert!(err.is_role_assignment_exists());
+
+        // A different 409 conflict is not a duplicate.
+        let other = api(
+            409,
+            r#"{"error":{"code":"RoleAssignmentUpdateNotPermitted","message":"no"}}"#,
+        );
+        assert_eq!(
+            other.arm_error_code().as_deref(),
+            Some("RoleAssignmentUpdateNotPermitted")
+        );
+        assert!(!other.is_role_assignment_exists());
+        // The code on a non-409 status is not trusted as the duplicate case.
+        assert!(!api(400, exists).is_role_assignment_exists());
+        // A body that is not the envelope (a proxy page) yields no code.
+        let html = api(409, "<html>conflict</html>");
+        assert_eq!(html.arm_error_code(), None);
+        assert!(!html.is_role_assignment_exists());
+        // Only the Api variant carries an ARM envelope.
+        assert_eq!(ArmError::Forbidden(exists.into()).arm_error_code(), None);
     }
 }

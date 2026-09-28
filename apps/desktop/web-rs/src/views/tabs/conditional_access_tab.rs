@@ -10,7 +10,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{Callout, DataTable, DetailLoadError, SkeletonList};
+use crate::components::ui::{Badge, BadgeTone, Callout, DataTable, DetailLoadError, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::no_tenant;
@@ -95,7 +95,7 @@ fn ca_table(list: Vec<ConditionalAccessPolicyDto>) -> impl IntoView {
 }
 
 fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
-    let (state_label, state_class) = state_badge(&p.state);
+    let (state_label, state_tone) = state_badge(&p.state);
     let applies = applies_label(&p.applies_reason);
     let controls = if p.grant_controls.is_empty() {
         "—".to_string()
@@ -114,7 +114,7 @@ fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
         <tr>
             <td>{p.display_name}</td>
             <td>
-                <span class=state_class>{state_label}</span>
+                <Badge label=state_label tone=state_tone />
             </td>
             <td>{applies}</td>
             <td>{controls}</td>
@@ -122,12 +122,12 @@ fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
     }
 }
 
-fn state_badge(state: &str) -> (&'static str, &'static str) {
+fn state_badge(state: &str) -> (&'static str, BadgeTone) {
     match state {
-        "enabled" => ("Enabled", "badge badge--ok"),
-        "enabledForReportingButNotEnforced" => ("Report-only", "badge badge--warning"),
-        "disabled" => ("Disabled", "badge"),
-        _ => ("Unknown", "badge"),
+        "enabled" => ("Enabled", BadgeTone::Ok),
+        "enabledForReportingButNotEnforced" => ("Report-only", BadgeTone::Warning),
+        "disabled" => ("Disabled", BadgeTone::Neutral),
+        _ => ("Unknown", BadgeTone::Neutral),
     }
 }
 

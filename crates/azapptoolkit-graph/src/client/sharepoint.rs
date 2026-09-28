@@ -39,7 +39,8 @@ impl GraphClient {
     /// transport documents as the throttle-happiest.
     ///
     /// A sub-response that still carries an `@odata.nextLink` is followed
-    /// outside the batch by [`Self::finish_paged_batch`], so a site whose grant
+    /// outside the batch by [`Self::finish_paged_batch_scoped`] — on the same
+    /// SharePoint token, which page 2 needs as much as page 1 — so a site whose grant
     /// list spans pages is never silently truncated — the same contract the
     /// single-site path guarantees.
     pub async fn batch_list_site_permissions(
@@ -67,43 +68,27 @@ impl GraphClient {
     /// SharePoint scope like the permission endpoints (`Sites.FullControl.All`
     /// covers the read), so the whole site-permission sweep needs one consent.
     ///
+    /// Returns `(sites, truncated)`, the shape of every other capped tenant-wide
+    /// walk (`list_applications_all`, `collect_all_pages_capped`): `truncated`
+    /// is true when sites existed beyond `max`. The sweep must surface that
+    /// (`SiteSweepResult::truncated`) and never present the prefix as the
+    /// tenant — an empty per-app match over a prefix is not "no grants".
+    ///
     /// Boundary: the delegated search endpoint returns team/communication site
     /// collections and subsites — personal (OneDrive) sites are not included,
     /// and `/sites/getAllSites` (which is) is application-permission-only, so
     /// it is out of reach by design for this delegated-only app.
-    pub async fn list_all_sites(&self, max: usize) -> Result<Vec<Site>> {
+    pub async fn list_all_sites(&self, max: usize) -> Result<(Vec<Site>, bool)> {
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites?search=*&$select=id,displayName,webUrl&$top=200",
             self.base_url
         );
-        let mut page: Paged<Site> = self.scoped_get_retried(token, &url).await?;
-        let mut out = Vec::new();
-        out.append(&mut page.items);
-
-        const MAX_PAGES: usize = 200;
-        let mut pages = 1usize;
-
-        while out.len() < max {
-            let Some(next) = page.next_link.take() else {
-                break;
-            };
-            if !same_origin(&self.base_url, &next) {
-                return Err(GraphError::Protocol(
-                    "refusing to follow nextLink to a different origin".into(),
-                ));
-            }
-            if pages >= MAX_PAGES {
-                return Err(GraphError::Protocol(
-                    "site paging exceeded the page limit".into(),
-                ));
-            }
-            page = self.scoped_get_retried(token, &next).await?;
-            out.append(&mut page.items);
-            pages += 1;
-        }
-        out.truncate(max);
-        Ok(out)
+        let first: Paged<Site> = self.scoped_get_retried(token, &url).await?;
+        self.collect_pages_from_capped(first, max, |u| async move {
+            self.scoped_get_retried(token, &u).await
+        })
+        .await
     }
 
     /// Grants an application the given `roles` (e.g. `["read"]` / `["write"]`)
@@ -195,13 +180,21 @@ impl GraphClient {
                     };
                     match self.get_site_by_url(&next_url).await {
                         Ok(next) => site = next,
-                        // Not a subsite either — the path names nothing this
-                        // toolkit can grant against.
-                        Err(_) => {
+                        // Only a 404 means "not a subsite": the path names
+                        // nothing this toolkit can grant against.
+                        Err(GraphError::NotFound(_)) => {
                             return Err(GraphError::Protocol(format!(
                                 "{target_url} did not resolve to a list, library or item in this site"
                             )));
                         }
+                        // A 403 (no rights on the subsite), 401 or a
+                        // post-budget 429 is a fact about the caller or the
+                        // service, not the URL — propagate it typed so the
+                        // command's `map_sharepoint_err` can splice the
+                        // Full-Control remediation and `retryable` survives.
+                        // Collapsing these into the sentence above told the
+                        // operator to fix a URL that was fine.
+                        Err(e) => return Err(e),
                     }
                 }
             }

@@ -17,7 +17,9 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_dto::backup::{RestorePlan, RestoreReport, TenantBackup};
+use azapptoolkit_dto::backup::{
+    RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, SkippedObject, TenantBackup,
+};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 
@@ -50,7 +52,7 @@ fn backup() -> TenantBackup {
         schema_version: 1,
         created_at: chrono::Utc::now(),
         source_tenant_id: "source-tenant".to_string(),
-        cloud: "Commercial".to_string(),
+        cloud: azapptoolkit_core::cloud::CloudEnvironment::Commercial,
         app_registrations: Vec::new(),
         enterprise_apps: Vec::new(),
         managed_identities: Vec::new(),
@@ -66,50 +68,170 @@ fn plan() -> RestorePlan {
         destination_tenant_id: "test-tenant".to_string(),
         app_registrations_to_create: 2,
         secrets_to_regenerate: 0,
+        expired_secrets_skipped: 0,
         certificates_needing_manual_upload: 0,
         federated_credentials_to_restore: 0,
         owners_to_remap: 0,
+        ..Default::default()
     }
+}
+
+/// Mocks Load file → `plan_restore` answering `p`, mounts the view, and waits
+/// for the plan to render. `ts::reset()` is the caller's to have done.
+async fn load_plan(p: RestorePlan) -> ts::Mounted {
+    ts::mock_ok("load_backup_from_file", &Some(backup()));
+    ts::mock_ok("plan_restore", &p);
+
+    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+
+    ts::click_button_labelled("Load backup file…");
+    ts::wait_for(|| ts::query(".dr-view__plan").is_some()).await;
+    m
 }
 
 /// Drives Load file → confirm → Restore, with `restore_tenant` answering
 /// `report`.
 async fn run_restore(report: RestoreReport) -> ts::Mounted {
     ts::reset();
-    ts::mock_ok("load_backup_from_file", &Some(backup()));
-    ts::mock_ok("plan_restore", &plan());
     ts::mock_ok("restore_tenant", &report);
+    let m = load_plan(plan()).await;
 
-    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
-    ts::tick().await;
-
-    click_button("Load backup file…");
     // The plan lands before the restore button is offered.
-    ts::wait_for(|| has_button("Restore into this tenant…")).await;
-    click_button("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
+    ts::click_button_labelled("Restore into this tenant…");
     // The confirm dialog's own "Restore" is the one that fires the command.
-    ts::wait_for(|| has_button("Restore")).await;
-    click_button("Restore");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
     m
 }
 
-fn has_button(label: &str) -> bool {
-    ts::query_all("button")
-        .iter()
-        .any(|el| el.text_content().unwrap_or_default().trim() == label)
+/// Runs a backup whose `backup_tenant` answers `b`, and waits for the result
+/// panel (summary + Save). `ts::reset()` is the caller's to have done.
+async fn run_backup(b: TenantBackup) -> ts::Mounted {
+    ts::mock_ok("backup_tenant", &b);
+    let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+    ts::click_button_labelled("Back up this tenant");
+    ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
+    m
 }
 
-fn click_button(label: &str) {
-    use wasm_bindgen::JsCast;
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
+/// An object the backup could not read restores as if it never existed, so
+/// the result must say so — by name — BEFORE the operator decides to save
+/// this file as the tenant's DR artifact.
+#[wasm_bindgen_test]
+async fn a_backup_with_skipped_objects_warns_before_save() {
+    ts::reset();
+    let _m = run_backup(TenantBackup {
+        skipped: vec![SkippedObject::new(
+            "application",
+            "obj-9",
+            Some("Payroll API".to_string()),
+            "owners read failed",
+        )],
+        ..backup()
+    })
+    .await;
+
+    assert!(
+        ts::body_contains("1 object could not be fully read"),
+        "{}",
+        ts::body_text()
+    );
+    assert!(ts::body_contains("restoring it will not recreate it"));
+    assert!(ts::body_contains("Payroll API"));
+    assert!(ts::body_contains("owners read failed"));
+    assert_eq!(ts::query_all(".dr-view__skipped-list li").len(), 1);
+
+    // The notice precedes the save decision in document order.
+    let list = ts::query(".dr-view__skipped-list").expect("skipped list");
+    let save = ts::query_all(".dr-view__result button")
+        .into_iter()
+        .find(|el| {
+            el.text_content()
+                .unwrap_or_default()
+                .contains("Save backup file")
+        })
+        .expect("save button");
+    let following = web_sys::Node::DOCUMENT_POSITION_FOLLOWING;
+    assert_ne!(
+        list.compare_document_position(&save) & following,
+        0,
+        "the skipped-object notice must come before Save backup file…"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_clean_backup_shows_no_skipped_notice() {
+    ts::reset();
+    let _m = run_backup(backup()).await;
+    assert!(ts::body_contains("Save backup file"));
+    assert!(ts::query(".dr-view__skipped-list").is_none());
+    assert!(!ts::body_contains("could not be fully read"));
+}
+
+/// A manifest from a newer build is blocked in the plan, before Confirm — not
+/// refused by `restore_tenant` only after the operator has confirmed.
+#[wasm_bindgen_test]
+async fn a_too_new_manifest_blocks_restore_before_confirm() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        schema_too_new: Some(SchemaTooNew {
+            manifest_version: 2,
+            supported_version: 1,
+        }),
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains("newer version of azapptoolkit"));
+    assert!(
+        ts::query(".dr-view__plan [role=alert]").is_some(),
+        "the blocker is announced"
+    );
+    assert!(
+        !ts::has_button_labelled("Restore into this tenant…"),
+        "a blocked plan must not offer the restore"
+    );
+}
+
+/// Restoring into the tenant the backup came from duplicates the estate — the
+/// one case the tenant-change note never covered.
+#[wasm_bindgen_test]
+async fn restoring_into_the_source_tenant_warns_of_duplicates() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        tenant_changed: false,
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains("second copy of every app registration"));
+    // Not a blocker: an operator may mean it.
+    assert!(ts::has_button_labelled("Restore into this tenant…"));
+}
+
+/// The plan describes the enterprise-app, managed-identity and backup-gap
+/// work too, not just the app registrations.
+#[wasm_bindgen_test]
+async fn the_plan_lists_enterprise_and_managed_identity_work() {
+    ts::reset();
+    let _m = load_plan(RestorePlan {
+        enterprise_apps_to_reapply: 3,
+        enterprise_apps_manual: 2,
+        managed_identities_to_rebind: 4,
+        skipped_in_backup: 1,
+        ..plan()
+    })
+    .await;
+    assert!(ts::body_contains("3 enterprise apps to re-apply access to"));
+    assert!(ts::body_contains("2 enterprise apps need manual follow-up"));
+    assert!(ts::body_contains("4 managed identities to re-bind by name"));
+    assert!(ts::body_contains("1 gap recorded in the backup"));
+    assert!(
+        !ts::body_contains("second copy"),
+        "a cross-tenant plan has no duplicate warning"
+    );
 }
 
 /// A completed restore reads as completed — and says nothing about stopping.
@@ -120,6 +242,41 @@ async fn a_completed_restore_carries_no_partial_wording() {
     assert!(
         !body.contains("cancelled before completing") && !body.contains("session expired"),
         "a clean run must not be described as stopped: {body}"
+    );
+}
+
+/// Once a report renders, the Restore button is withdrawn: a second click would
+/// be a second restore, so running it again needs a deliberate re-load.
+#[wasm_bindgen_test]
+async fn the_restore_button_is_withdrawn_once_a_report_renders() {
+    let _m = run_restore(RestoreReport::default()).await;
+    assert!(
+        !ts::has_button_labelled("Restore into this tenant…"),
+        "the restore must not be re-runnable with one click"
+    );
+    assert!(
+        ts::has_button_labelled("Load backup file…"),
+        "re-loading stays possible"
+    );
+}
+
+/// An app a re-run recognised from an earlier run (by its restore tag) is
+/// labelled, so it does not read as a second, freshly created copy.
+#[wasm_bindgen_test]
+async fn an_app_recognised_from_an_earlier_run_is_labelled() {
+    let _m = run_restore(RestoreReport {
+        apps: vec![RestoredApp {
+            adopted: true,
+            display_name: "App A".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+    assert!(
+        ts::body_contains("already restored"),
+        "an adopted app must be labelled: {}",
+        ts::body_text()
     );
 }
 

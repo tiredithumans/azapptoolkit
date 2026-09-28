@@ -14,21 +14,22 @@
 //! those.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use azapptoolkit_core::defaults::TenantDefaults;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::bindings::{auth, defaults};
-use crate::components::aap_migration_report::AapMigrationReportView;
+use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::scope_wizard::ScopeTarget;
-use crate::components::ui::{Callout, DataTable};
+use crate::components::ui::{Callout, DataTable, FormError};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, no_tenant, parse_lines};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 // The principal this section addresses is a `ScopeTarget` — the SAME model the
@@ -169,11 +170,7 @@ pub fn ExchangeScopingSection(
                 return Ok(Vec::new());
             }
             let Some(t) = tenant else {
-                return Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                });
+                return Err(no_tenant());
             };
             exchange::list_exchange_role_assignments(&t.tenant_id, &app_id).await
         }
@@ -212,11 +209,15 @@ pub fn ExchangeScopingSection(
             move |r: exchange::ExchangeAccessResult| {
                 if r.warnings.is_empty() {
                     session.toast_success(format!(
-                        "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
+                        "Scope “{}”: assigned {}, skipped {}, removed {}.",
                         r.scope_name,
-                        r.roles_assigned.len(),
+                        count_noun(r.roles_assigned.len(), "role", "roles"),
                         r.roles_skipped.len(),
-                        r.removed_entra_grants.len(),
+                        count_noun(
+                            r.removed_entra_grants.len(),
+                            "org-wide grant",
+                            "org-wide grants"
+                        ),
                     ));
                     on_changed.run(());
                 } else {
@@ -316,15 +317,26 @@ pub fn ExchangeScopingSection(
         let scope = (!scope.is_empty()).then_some(scope);
         mig_cmd.run(
             move |r: AapMigrationReport| {
-                // Dry run mutated nothing — show the plan inline. A clean
-                // execute reloads the caller (which rebuilds this section), so
-                // the summary rides a toast instead. A partial failure keeps
-                // the report inline (no reload) so the failure lines survive;
-                // Refresh picks up whatever did land.
-                if dry_run || !r.failures.is_empty() {
+                // Only a clean run (`AapMigrationReport::is_clean`, the same
+                // gate the Security tab's migrate dialog uses) toasts and
+                // reloads the caller — the reload rebuilds this section, so
+                // anything held here is gone. Every other shape keeps the
+                // report inline, because the report is the only place that
+                // says what happened: a dry run's plan; a `partial` item that
+                // kept its legacy policy because a grant is still org-wide
+                // (reported as a warning, not a failure); a failed app; and a
+                // stopped run (Stop migration, or a dead session) with its
+                // unattempted tail. Refresh picks up whatever did land.
+                if !r.is_clean() {
                     mig_result.set(Some(r));
                 } else {
-                    session.toast_success(format!("Migrated {} policy(ies).", r.items.len()));
+                    // One item per app; an app can fold several policies.
+                    let policies: usize = r.items.iter().map(|i| i.removed_policies.len()).sum();
+                    session.toast_success(format!(
+                        "Migrated {}; removed {}.",
+                        count_noun(r.items.len(), "app", "apps"),
+                        count_noun(policies, "legacy policy", "legacy policies"),
+                    ));
                     on_changed.run(());
                 }
             },
@@ -395,11 +407,11 @@ pub fn ExchangeScopingSection(
                     .get()
                     .map(|r| {
                         let summary = format!(
-                            "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s). Some of what you asked for may not have been applied — read the notes below.",
+                            "Scope “{}”: assigned {}, skipped {}, removed {}. Some of what you asked for may not have been applied — read the notes below.",
                             r.scope_name,
-                            r.roles_assigned.len(),
+                            count_noun(r.roles_assigned.len(), "role", "roles"),
                             r.roles_skipped.len(),
-                            r.removed_entra_grants.len(),
+                            count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
                         );
                         let filter = r.scope_filter.clone();
                         let warnings = r.warnings.clone();
@@ -433,12 +445,10 @@ pub fn ExchangeScopingSection(
 
                             <hr />
                             <strong>"Advanced: scope to existing groups"</strong>
-                            <Field label="Existing group identifiers (one per line)">
-                                <Textarea
-                                    value=groups_text
-                                    placeholder="hr-team@contoso.com\nFinanceMailboxes"
-                                />
-                            </Field>
+                            <MailboxGroupsField
+                                value=groups_text
+                                label="Existing group identifiers (one per line)"
+                            />
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -459,7 +469,7 @@ pub fn ExchangeScopingSection(
                                 grant_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
 
                             <hr />
@@ -493,7 +503,7 @@ pub fn ExchangeScopingSection(
                                 move_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 move_result
@@ -503,18 +513,18 @@ pub fn ExchangeScopingSection(
                                         let headline = match (r.dry_run, r.repointed) {
                                             (true, _) => {
                                                 format!(
-                                                    "Plan: copy {} mailbox(es) into “{}”, then point scope “{}” at it. Nothing has changed yet.",
-                                                    r.members_copied.len(),
+                                                    "Plan: copy {} into “{}”, then point scope “{}” at it. Nothing has changed yet.",
+                                                    count_noun(r.members_copied.len(), "mailbox", "mailboxes"),
                                                     r.group_name,
                                                     r.scope_name,
                                                 )
                                             }
                                             (false, true) => {
                                                 format!(
-                                                    "Scope “{}” now points at “{}” ({} mailbox(es)).",
+                                                    "Scope “{}” now points at “{}” ({}).",
                                                     r.scope_name,
                                                     r.group_name,
-                                                    r.members_copied.len(),
+                                                    count_noun(r.members_copied.len(), "mailbox", "mailboxes"),
                                                 )
                                             }
                                             (false, false) => {
@@ -544,12 +554,12 @@ pub fn ExchangeScopingSection(
                                                 {(!unverified.is_empty())
                                                     .then(|| {
                                                         view! {
-                                                            <Body1 class="form-error">
+                                                            <FormError>
                                                                 {format!(
                                                                     "Not verified in the managed group: {}",
                                                                     unverified.join(", "),
                                                                 )}
-                                                            </Body1>
+                                                            </FormError>
                                                         }
                                                     })}
                                                 {(!warnings.is_empty())
@@ -606,7 +616,7 @@ pub fn ExchangeScopingSection(
                                 remove_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             <ConfirmDialog
                                 open=Signal::derive(move || confirm_remove.get())
@@ -624,11 +634,12 @@ pub fn ExchangeScopingSection(
                                         .run(
                                             move |res: exchange::ExchangeAccessRemovalResult| {
                                                 confirm_remove.set(false);
-                                                let n = res.removed_assignments.len();
-                                                session
-                                                    .toast_success(
-                                                        format!("Removed {n} Exchange role assignment(s)"),
-                                                    );
+                                                let removed = count_noun(
+                                                    res.removed_assignments.len(),
+                                                    "Exchange role assignment",
+                                                    "Exchange role assignments",
+                                                );
+                                                session.toast_success(format!("Removed {removed}"));
                                                 reload.update(|v| *v += 1);
                                                 on_changed.run(());
                                             },
@@ -657,14 +668,11 @@ pub fn ExchangeScopingSection(
                                                         noun.get_untracked(),
                                                     )
                                                     row=|a: exchange::ExchangeRoleAssignmentDto| {
+                                                        let scope = assignment_scope_label(&a);
                                                         view! {
                                                             <tr>
                                                                 <td>{a.role.unwrap_or_default()}</td>
-                                                                <td class="mono">
-                                                                    {a
-                                                                        .custom_resource_scope
-                                                                        .unwrap_or_else(|| "(org-wide)".into())}
-                                                                </td>
+                                                                <td class="mono">{scope}</td>
                                                             </tr>
                                                         }
                                                             .into_any()
@@ -674,7 +682,7 @@ pub fn ExchangeScopingSection(
                                                 .into_any()
                                         }
                                         Err(e) => {
-                                            let needs_consent = e.code == "consent_required";
+                                            let needs_consent = e.is_consent_required();
                                             view! {
                                                 <Callout tone="warn">
                                                     <Body1>{e.message}</Body1>
@@ -748,12 +756,13 @@ pub fn ExchangeScopingSection(
                                         }
                                     }}
                                 </Button>
+                                {move || mig_cmd.busy.get().then(|| view! { <AapMigrationStop /> })}
                             </div>
                             {move || {
                                 mig_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 mig_result
@@ -762,5 +771,115 @@ pub fn ExchangeScopingSection(
                             }}
                             })}
         </CollapsibleScopingSection>
+    }
+}
+
+/// The Scope cell of "Current Exchange role assignments". An assignment with
+/// no management scope is org-wide only when nothing else confines it: one
+/// made with `-RecipientAdministrativeUnitScope` reaches just that unit.
+/// Blank strings count as absent. Other raw `RecipientWriteScope` values are
+/// never shown: an unfamiliar value on a genuinely org-wide row would
+/// otherwise read as a confinement.
+fn assignment_scope_label(a: &exchange::ExchangeRoleAssignmentDto) -> String {
+    let present = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(scope) = present(&a.custom_resource_scope) {
+        return scope;
+    }
+    if let Some(unit) = present(&a.recipient_administrative_unit_scope) {
+        return format!("Administrative unit {unit}");
+    }
+    let custom = present(&a.custom_recipient_write_scope);
+    let is_au = present(&a.recipient_write_scope)
+        .is_some_and(|t| t.eq_ignore_ascii_case("AdministrativeUnit"));
+    match (is_au, custom) {
+        (true, Some(unit)) => format!("Administrative unit {unit}"),
+        (true, None) => "Administrative unit".to_string(),
+        (false, Some(scope)) => scope,
+        (false, None) => "(org-wide)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment() -> exchange::ExchangeRoleAssignmentDto {
+        exchange::ExchangeRoleAssignmentDto {
+            name: None,
+            role: Some("Application Mail.Read".into()),
+            custom_resource_scope: None,
+            identity: None,
+            recipient_write_scope: None,
+            custom_recipient_write_scope: None,
+            recipient_administrative_unit_scope: None,
+        }
+    }
+
+    #[test]
+    fn a_management_scope_wins_over_every_write_scope_field() {
+        let a = exchange::ExchangeRoleAssignmentDto {
+            custom_resource_scope: Some("app_scope_x".into()),
+            recipient_write_scope: Some("AdministrativeUnit".into()),
+            custom_recipient_write_scope: Some("au-1".into()),
+            recipient_administrative_unit_scope: Some("au-2".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&a), "app_scope_x");
+    }
+
+    #[test]
+    fn an_administrative_unit_scope_is_named_not_called_org_wide() {
+        let named = exchange::ExchangeRoleAssignmentDto {
+            recipient_administrative_unit_scope: Some("au-2".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&named), "Administrative unit au-2");
+
+        let typed = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("administrativeunit".into()),
+            custom_recipient_write_scope: Some("au-1".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&typed), "Administrative unit au-1");
+
+        let bare = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("AdministrativeUnit".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&bare), "Administrative unit");
+    }
+
+    #[test]
+    fn a_custom_recipient_write_scope_is_shown_by_name() {
+        let a = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("CustomRecipientScope".into()),
+            custom_recipient_write_scope: Some("Sales".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&a), "Sales");
+    }
+
+    #[test]
+    fn nothing_confining_reads_org_wide_and_blanks_count_as_absent() {
+        assert_eq!(assignment_scope_label(&assignment()), "(org-wide)");
+        // An unfamiliar write-scope type alone is not a confinement.
+        let unknown = exchange::ExchangeRoleAssignmentDto {
+            recipient_write_scope: Some("Organization".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&unknown), "(org-wide)");
+        let blanks = exchange::ExchangeRoleAssignmentDto {
+            custom_resource_scope: Some("  ".into()),
+            recipient_write_scope: Some(" ".into()),
+            custom_recipient_write_scope: Some(String::new()),
+            recipient_administrative_unit_scope: Some("\t".into()),
+            ..assignment()
+        };
+        assert_eq!(assignment_scope_label(&blanks), "(org-wide)");
     }
 }

@@ -16,18 +16,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::CredentialStatus;
+use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::sso::{self, RolloverPhase, SsoCertificateRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
-use crate::components::ui::{Callout, CopyableId};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-
-const CRITICAL_DAYS: i64 = 7;
-const WARNING_DAYS: i64 = 30;
+use crate::util::EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS;
+use crate::util::count_noun;
 
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {
@@ -117,7 +116,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh SSO certificate expiry"
             view_key="sso-certificates"
-            noun="SAML app(s)"
+            noun="SAML apps"
             empty_message="No SAML applications match this filter."
             reload=reload
             facets=vec![
@@ -159,7 +158,8 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                    "{} already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                    count_noun(expired, "signing certificate", "signing certificates"),
                                 )}
                             </Callout>
                         }
@@ -190,7 +190,7 @@ fn sso_cert_row(
     selection: RwSignal<std::collections::HashSet<String>>,
     r: SsoCertificateRowDto,
 ) -> impl IntoView {
-    let (status_label, badge_class) = status_badge(r.status, r.days_to_expiry);
+    let (status_label, status_tone) = status_badge(r.status, r.days_to_expiry);
     // The payload carries RFC3339; the board only ever shows the date.
     let expires = r
         .end_date_time
@@ -207,11 +207,11 @@ fn sso_cert_row(
     // An expired *active* certificate with a valid replacement staged is the
     // case where Entra has already promoted on its own — call that out rather
     // than showing a bare "Staged", which reads as "nothing has happened yet".
-    let (replacement_label, replacement_class) = match (r.has_staged_replacement, r.status) {
-        (true, CredentialStatus::Expired) => ("Auto-promoted", "badge--warning"),
-        (true, _) => ("Staged", "badge--ok"),
-        (false, _) if matches!(r.phase, RolloverPhase::Unconfigured) => ("None", "badge--danger"),
-        (false, _) => ("None", "badge--unknown"),
+    let (replacement_label, replacement_tone) = match (r.has_staged_replacement, r.status) {
+        (true, CredentialStatus::Expired) => ("Auto-promoted", BadgeTone::Warning),
+        (true, _) => ("Staged", BadgeTone::Ok),
+        (false, _) if matches!(r.phase, RolloverPhase::Unconfigured) => ("None", BadgeTone::Danger),
+        (false, _) => ("None", BadgeTone::Unknown),
     };
 
     let checkbox_id = r.service_principal_id.clone();
@@ -250,21 +250,19 @@ fn sso_cert_row(
             </td>
             <td>{expires}</td>
             <td>
-                <span class=format!("badge {badge_class}")>{status_label}</span>
+                <Badge label=status_label tone=status_tone />
             </td>
             <td>
-                <span class=format!(
-                    "badge {replacement_class}",
-                )>{replacement_label.to_string()}</span>
+                <Badge label=replacement_label tone=replacement_tone />
             </td>
             <td>
                 {if r.notification_emails_configured {
-                    view! { <span class="badge badge--ok">"Set"</span> }
+                    view! { <Badge label="Set" tone=BadgeTone::Ok /> }
                 } else {
-                    view! { <span class="badge badge--warning">"Nobody"</span> }
+                    view! { <Badge label="Nobody" tone=BadgeTone::Warning /> }
                 }}
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {
@@ -294,29 +292,29 @@ fn matches_facet(r: &SsoCertificateRowDto, facet: &str) -> bool {
     }
 }
 
-/// Maps a signing certificate's status + days-left to a label and badge class.
-/// Same `badge--*` classes and thresholds as the credential-expiry board, so the
-/// two read identically at a glance.
-fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, &'static str) {
+/// Maps a signing certificate's status + days-left to a label and badge tone.
+/// Same `BadgeTone`s and thresholds as the credential-expiry board, so the two
+/// read identically at a glance.
+fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, BadgeTone) {
     match status {
-        CredentialStatus::Expired => ("Expired".to_string(), "badge--danger"),
+        CredentialStatus::Expired => ("Expired".to_string(), BadgeTone::Danger),
         CredentialStatus::ExpiringSoon => {
-            let cls = match days {
-                Some(d) if d <= CRITICAL_DAYS => "badge--danger",
-                _ => "badge--warning",
+            let tone = match days {
+                Some(d) if d <= CRITICAL_DAYS => BadgeTone::Danger,
+                _ => BadgeTone::Warning,
             };
             let label = days
                 .map(|d| format!("{d}d left"))
                 .unwrap_or_else(|| "Expiring".to_string());
-            (label, cls)
+            (label, tone)
         }
         CredentialStatus::Active => {
             let label = days
                 .map(|d| format!("{d}d left"))
                 .unwrap_or_else(|| "Active".to_string());
-            (label, "badge--ok")
+            (label, BadgeTone::Ok)
         }
         // Never "Active": an expiry we couldn't read is not evidence of health.
-        CredentialStatus::Unknown => ("Unknown".to_string(), "badge--unknown"),
+        CredentialStatus::Unknown => ("Unknown".to_string(), BadgeTone::Unknown),
     }
 }

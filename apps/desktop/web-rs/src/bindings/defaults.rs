@@ -1,25 +1,21 @@
 //! Per-tenant operator-defaults IPC bindings. The payload types live in
 //! `azapptoolkit-core::defaults` (pure data, shared with the backend).
 
+use super::ipc::{invoke, invoke_result};
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::{invoke, invoke_result};
+
+use crate::bindings::TenantArg;
 
 pub use azapptoolkit_core::defaults::{
     AppRegistrationDefaults, AppVaultBinding, EnterpriseApplicationDefaults, StoredPrincipal,
     TenantDefaults,
 };
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// The saved defaults for a tenant (an empty set if none). Infallible — a
 /// missing/unparseable settings file falls back to defaults.
 pub async fn get_tenant_defaults(tenant_id: &str) -> TenantDefaults {
-    invoke("get_tenant_defaults", TenantArgs { tenant_id }).await
+    invoke("get_tenant_defaults", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

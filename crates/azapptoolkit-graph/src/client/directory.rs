@@ -77,7 +77,10 @@ impl GraphClient {
     /// mistakes "lost auth mid-scan" for "no policies".
     pub async fn list_conditional_access_policies(&self) -> Result<Vec<ConditionalAccessPolicy>> {
         let token = self.policy_token()?;
-        let url = format!("{}/identity/conditionalAccess/policies", self.base_url);
+        let url = format!(
+            "{}/identity/conditionalAccess/policies?$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
 
         match self.scoped_get(token, &url).await {
             Ok(page) => self
@@ -172,7 +175,7 @@ impl GraphClient {
             ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<GroupSummary> = self.get_json(&path, &params, true).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, true).await
     }
 
     /// Batched [`Self::list_service_principal_groups`]: the group memberships of
@@ -180,7 +183,9 @@ impl GraphClient {
     /// cast is an advanced query, so each sub-request carries its own
     /// `ConsistencyLevel: eventual` header (the outer POST's headers don't reach
     /// batched sub-requests) alongside `$count=true`. Returns each SP's group
-    /// list in input order; the rare overflow paginates outside the batch. The
+    /// list in input order; the rare overflow paginates outside the batch —
+    /// as an advanced query too, since Graph does not carry the header into
+    /// the `nextLink` request. The
     /// caller treats a per-SP `Err` as "no groups" (matching the un-batched
     /// path's degrade-to-empty), so a tenant that rejects `$count` in a batch
     /// loses group data but never fails the backup.
@@ -204,7 +209,7 @@ impl GraphClient {
         let pages: Vec<Result<Paged<GroupSummary>>> = self
             .batch_get_json_with_headers(&urls, &[("ConsistencyLevel", "eventual")])
             .await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, true).await
     }
 
     /// Adds a directory object (here: a service principal) as a member of a
@@ -285,9 +290,10 @@ impl GraphClient {
     /// Follows `@odata.nextLink`. Deliberately bypasses the shared retry/throttle
     /// loop: this is an optional report, and a failure is handled, not retried.
     /// The `nextLink` still rides the privileged `AuditLog.Read.All` bearer and is
-    /// attacker-influenced server output, so — like [`Self::get_json_absolute`]
-    /// and [`Self::list_conditional_access_policies`] — each page is origin-checked
-    /// before the token is attached and the loop is bounded against a cyclic link.
+    /// attacker-influenced server output, so — like [`Self::get_json_absolute_with`]
+    /// and [`Self::list_conditional_access_policies`] — the pages are followed by
+    /// `collect_pages_from`, which origin-checks each nextLink before the token is
+    /// attached and bounds the walk at `MAX_PAGES` against a cyclic link.
     pub async fn list_service_principal_sign_in_activities(
         &self,
     ) -> Result<Vec<ServicePrincipalSignInActivity>> {
@@ -307,39 +313,22 @@ impl GraphClient {
         }
         let token = self.audit_log_token()?;
 
-        const MAX_PAGES: usize = 200;
         // `$top` matters more here than anywhere else: Graph's default page of
         // 100 would make a 10k-SP tenant ~100 serial round trips against the
         // slowest, most rate-limited read in the crate. The endpoint documents
         // `$top` support, the size carries into every `@odata.nextLink`, and an
-        // over-ask is clamped silently — so one parameter also lifts the
-        // MAX_PAGES ceiling from 20k rows to ~200k.
-        let mut url = format!(
+        // over-ask is clamped silently — so one parameter also lifts the shared
+        // `MAX_PAGES` ceiling from 20k rows to ~200k.
+        let url = format!(
             "{}/reports/servicePrincipalSignInActivities?$select=appId,lastSignInActivity&$top={MAX_PAGE_SIZE}",
             self.beta_base()
         );
-        let mut out = Vec::new();
-        let mut pages = 0usize;
-
-        loop {
-            if !same_origin(&self.base_url, &url) {
-                return Err(GraphError::Protocol(
-                    "refusing to follow nextLink to a different origin".into(),
-                ));
-            }
-            if pages >= MAX_PAGES {
-                return Err(GraphError::Protocol(
-                    "sign-in activity paging exceeded the page limit".into(),
-                ));
-            }
-            let page: Paged<ServicePrincipalSignInActivity> = self.scoped_get(token, &url).await?;
-            out.extend(page.items);
-            pages += 1;
-            match page.next_link {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
+        // `beta_base()` derives from `base_url`, so the first URL is same-origin
+        // by construction; the helper checks every nextLink after it.
+        let first: Paged<ServicePrincipalSignInActivity> = self.scoped_get(token, &url).await?;
+        let out = self
+            .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
+            .await?;
         self.cache.put(CacheKind::Permissions, cache_key, &out);
         Ok(out)
     }

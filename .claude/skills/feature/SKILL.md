@@ -62,11 +62,11 @@ let builder = tauri::Builder::default()
 
 ## 4. Create the frontend binding (`web-rs/src/bindings/<domain>.rs`)
 
-Typed Rust stub over `tauri_sys` — mirror `bindings/activity.rs`:
+Typed Rust stub over `bindings::ipc` — mirror `bindings/activity.rs`:
 ```rust
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,9 +90,9 @@ pub async fn <name>(tenant_id: &str, object_id: &str) -> Result<ReturnType, UiEr
 - The command name string is the **flat snake_case fn name** (`"<name>"`, no domain prefix).
 - Args struct fields are snake_case Rust; `#[serde(rename_all = "camelCase")]` produces the camelCase wire keys the Tauri macro expects. Common shapes (`TenantArg`, `ObjectIdArgs`, `AppIdArgs`, …) already exist in `bindings/common.rs` — reuse before defining a new one.
 - New module file? Add `pub mod <domain>;` to `web-rs/src/bindings/mod.rs`.
-- Use `invoke_result` for `Result<T, UiError>` commands (not bare `invoke`, which panics on a rejected promise).
+- Import `invoke_result` (fallible `Result<T, UiError>` commands) or `invoke` (infallible commands only) from `bindings::ipc` — never from `tauri_sys::core`, whose `invoke_result` panics on a rejection that is not a `UiError` (Tauri rejects with a plain string for wrong args, an unknown command or a denied permission). The wrapper maps such a rejection to code `ipc` instead.
 
-The command fn + `generate_handler![]` entry + binding are the 3-step parity contract; the advisory `command-parity-check.sh` hook warns if one leg is missing.
+The command fn + `generate_handler![]` entry + binding are the 3-step parity contract. It is gated by `repo_invariants/ipc.rs` in `just test` (and CI): every registered command has a declared `#[tauri::command]` and a binding literal, each binding's arg keys match the command's camelCased parameters, and its return type and fallibility match. The advisory `command-parity-check.sh` hook is only the local early warning.
 
 ## 5. If WASM component — add to views/components
 
@@ -125,5 +125,5 @@ Write the implementation in `src-tauri/src/commands/<domain>.rs` and update the 
 ## Failure handling
 
 - If `generate_handler![]` already has the handler → warn (skip duplicate).
-- If command-parity-check.sh warns about missing binding → add one.
+- If `repo_invariants/ipc.rs` (or the command-parity-check.sh hook) reports a missing binding, a mismatched arg key or return type → fix the binding to match the command.
 - If the backend uses a new dependency → check `Cargo.lock` for conflicts before adding to `[workspace.dependencies]`.

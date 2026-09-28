@@ -1,9 +1,33 @@
 use tauri::State;
 
-use azapptoolkit_auth::{SignInOutcome, TenantContext};
+use azapptoolkit_auth::{EntraAuthService, SignInOutcome, TenantContext};
 
+use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
 use crate::state::AppState;
+
+/// The event the sign-in link rides when the system browser can't be launched:
+/// `Some(authorize_url)` while that browser leg is live, `None` once the flow
+/// ended (however it ended). Consumed by the webview's `BrowserFallbackNotice`.
+const BROWSER_FALLBACK_EVENT: &str = "auth-browser-fallback";
+
+/// Hands the auth service a way to offer the sign-in link in the app's own
+/// window when the system browser won't open (no default handler, a confined
+/// `xdg-open`, a policy blocking the handler) — sign-in, consent, step-up and
+/// re-auth all run through the same authorization-code flow, so one hook
+/// covers them all. Installed once at startup.
+///
+/// Safe to hand to the operator's own webview: the URL is single-use, bound to
+/// this flow's PKCE verifier and `state`, and only redeemable through this
+/// process's 127.0.0.1 listener. It is never logged.
+pub(crate) fn offer_sign_in_link_in_the_webview<S>(sink: S, auth: &EntraAuthService)
+where
+    S: ProgressSink + Send + Sync + 'static,
+{
+    auth.set_browser_fallback(move |url| {
+        emit_progress(&sink, BROWSER_FALLBACK_EVENT, url.map(str::to_owned));
+    });
+}
 
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiError> {
@@ -21,23 +45,50 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiErro
 /// already open on your tenant". Called once by the front-end at startup, before
 /// the sign-in card is painted.
 ///
-/// `Ok(None)` — never an error — is the answer for *every* way this can come up
-/// empty: nobody has signed in on this machine, the operator signed out, the
-/// tenant was repointed, the refresh token expired or was revoked, or the
-/// keyring is locked. All of them mean the same thing to the operator (sign in),
-/// and the existing sign-in card already says it; an error toast at launch would
-/// add noise to a screen that is about to ask for the credential anyway. The
-/// code is logged so a persistent failure is still diagnosable — the code only,
+/// `Ok(None)` is the answer for *every* way this can come up empty: nobody has
+/// signed in on this machine, the operator signed out, the tenant was
+/// repointed, the refresh token expired or was revoked, or the keyring is
+/// locked. All of them mean the same thing to the operator (sign in), and the
+/// existing sign-in card already says it; an error toast at launch would add
+/// noise to a screen that is about to ask for the credential anyway. The code
+/// is logged so a persistent failure is still diagnosable — the code only,
 /// since an AAD message routinely embeds tenant and user GUIDs.
+///
+/// The ONE exception is an unreachable token endpoint (`network`: offline, a
+/// captive portal, a proxy down). There the refresh token is intact — only
+/// `InvalidGrant` purges it — so "sign in" is the wrong instruction (it opens a
+/// browser that can't load Entra ID either), and a retry succeeds once
+/// connectivity returns. That case is an `Err`, which the launch screen answers
+/// with a Retry. See [`restore_outcome`].
 #[tauri::command]
 pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<TenantContext>, UiError> {
     let Some(tenant) = state.remembered_account() else {
         return Ok(None);
     };
-    match state.auth.restore_session(&tenant).await {
+    restore_outcome(state.auth.restore_session(&tenant).await)
+}
+
+/// [`restore_session`]'s answer for one silent restore attempt: the restored
+/// tenant, `Err` only for `network`, `Ok(None)` for everything else. Split out
+/// so the policy is testable without a `settings.json`.
+fn restore_outcome(
+    result: azapptoolkit_auth::Result<SignInOutcome>,
+) -> Result<Option<TenantContext>, UiError> {
+    match result {
         Ok(outcome) => Ok(Some(outcome.tenant)),
         Err(err) => {
-            let code = UiError::from(err).code;
+            let ui = UiError::from(err);
+            // The code only: a `network` message's cause chain can carry the
+            // token URL, and with it the tenant GUID.
+            if ui.code == "network" {
+                tracing::info!(
+                    target: "auth",
+                    code = %ui.code,
+                    "could not reach Entra ID to restore the session; offering retry"
+                );
+                return Err(ui);
+            }
+            let code = ui.code;
             tracing::info!(target: "auth", %code, "no session to restore; showing sign-in");
             Ok(None)
         }
@@ -51,14 +102,9 @@ pub async fn sign_out(state: State<'_, AppState>, tenant: TenantContext) -> Resu
     // leaving it behind would have the next launch try to revive a session whose
     // keyring token `sign_out` just deleted.
     state.forget_account();
-    state.graph_clients.lock().remove(&tenant.tenant_id);
-    state.exchange_clients.lock().remove(&tenant.tenant_id);
-    // Drop EVERY tenant-scoped cache entry — lists, the cached audit run +
-    // site sweep (`CacheKind::Audit`), and the SP/permission lookups — so the
-    // next sign-in (a different tenant, or a different operator on the SAME
-    // tenant) never reads this session's data. `invalidate_tenant` sweeps all
-    // kinds by the shared `{tenant_id}|` convention (and is unit-tested in core).
-    state.cache.invalidate_tenant(&tenant.tenant_id);
+    // Every per-tenant client map, idle gate and cache kind — one sweep, so a
+    // new map can't be missed here (see `AppState::forget_tenant`).
+    state.forget_tenant(&tenant.tenant_id);
     Ok(())
 }
 
@@ -117,4 +163,79 @@ pub async fn request_scope_consent(
         .consent_for_scopes(&tenant_id, &scopes)
         .await
         .map_err(UiError::from)
+}
+
+/// Completes a Conditional Access step-up for an optional `feature`'s audience
+/// (e.g. `"arm"`, `"exchange"`, `"log_analytics"`). The recovery path the UI's
+/// "Verify identity" levers invoke after a command fails with the
+/// `interaction_required` code (MFA, registration or an external challenge a
+/// policy demands for that resource): one browser round trip with
+/// `prompt=login`, pinned to the signed-in account, that seeds the token cache
+/// so the retried command's silent acquisition succeeds. The session is never
+/// dropped — that code does not purge the refresh token.
+///
+/// `EntraAuthService::step_up_where_required` picks the set: every Graph
+/// feature steps up on the sign-in read scopes (a Graph policy targets the
+/// resource, and the read set is the one always consented), and a non-Graph
+/// feature opens the browser only when its silent acquisition still needs the
+/// step-up — so a surface can name every audience its command touches.
+#[tauri::command]
+pub async fn request_scope_step_up(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    feature: String,
+) -> Result<(), UiError> {
+    let scopes = state.consent_scopes_for(&feature).ok_or_else(|| {
+        UiError::validation("bad_request", format!("unknown step-up feature: {feature}"))
+    })?;
+    state
+        .auth
+        .step_up_where_required(&tenant_id, &scopes)
+        .await
+        .map_err(UiError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_outcome;
+    use azapptoolkit_auth::{AuthError, SignInOutcome, TenantContext};
+
+    fn tenant() -> TenantContext {
+        TenantContext {
+            tenant_id: "t1".into(),
+            account_oid: "oid".into(),
+            username: None,
+            display_name: None,
+        }
+    }
+
+    #[test]
+    fn restore_outcome_errs_only_when_entra_is_unreachable() {
+        // reqwest defers an unparseable URL to `build()`, the one public way
+        // to get a `reqwest::Error` without a live socket.
+        let http = reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("an unparseable URL fails to build");
+        let err = restore_outcome(Err(AuthError::Http(http))).expect_err("network is an Err");
+        assert_eq!(err.code, "network");
+
+        for empty in [
+            AuthError::InvalidGrant("x".into()),
+            AuthError::RefreshTokenMissing("t".into()),
+            AuthError::Keyring("locked".into()),
+            AuthError::NotSignedIn,
+        ] {
+            let label = format!("{empty:?}");
+            assert!(
+                matches!(restore_outcome(Err(empty)), Ok(None)),
+                "{label} must land on the plain sign-in card"
+            );
+        }
+
+        let restored = restore_outcome(Ok(SignInOutcome { tenant: tenant() }))
+            .expect("a restored session is Ok")
+            .expect("and carries its tenant");
+        assert_eq!(restored.tenant_id, "t1");
+    }
 }

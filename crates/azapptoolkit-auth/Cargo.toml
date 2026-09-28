@@ -17,7 +17,7 @@ reqwest = { workspace = true }
 oauth2 = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
-keyring-core = "1.0"
+keyring-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
@@ -27,6 +27,8 @@ webbrowser = "1"
 
 [dev-dependencies]
 wiremock = { workspace = true }
+# `start_paused` lets the redirect-timeout test skip the 300s wait.
+tokio = { workspace = true, features = ["test-util"] }
 
 # OS-native credential stores registered as keyring-core's default store
 # (replaces the dropped `keyring` meta-crate's `use_native_store`). One per

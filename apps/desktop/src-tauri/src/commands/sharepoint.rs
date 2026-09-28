@@ -7,24 +7,25 @@
 //! app strategy is a future phase. Each command resolves the site from its URL
 //! first, since the UI works in terms of the browser site URL.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
-    ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
+    AppRoleAssignment, ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SelectedScopeLevel, is_sharepoint_orgwide, selected_scope_accepts,
-    selected_scope_level_for,
+    MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_sharepoint_orgwide,
+    selected_scope_accepts, selected_scope_level_for,
 };
 
 use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
-use crate::commands::graph_roles::graph_role_index;
+use crate::commands::graph_roles::{graph_role_id, graph_role_index, strip_app_role_grants};
 use crate::commands::permissions::declare_resource_access;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
@@ -90,6 +91,89 @@ async fn declare_graph_role(
     Ok(true)
 }
 
+/// The principal a Selected grant is for. Named fields because three adjacent
+/// `&str` ids transpose easily (the `ApplyExchangeMailboxScopeParams`
+/// reasoning in `exchange/grants.rs`).
+struct GraphRolePrincipal<'a> {
+    tenant_id: &'a str,
+    /// The app registration to declare on; `None` for an SP-only principal.
+    object_id: Option<&'a str>,
+    sp_object_id: &'a str,
+}
+
+/// What [`declare_and_grant_graph_role`] changed.
+struct GraphRoleGrant {
+    declared_permission: bool,
+    granted_role_added: bool,
+}
+
+/// Declares Microsoft Graph application permission `value` on the app
+/// registration ([`declare_graph_role`]), THEN assigns it to the principal's
+/// service principal unless `existing` already holds it — declared before
+/// assigned, and idempotent. Shared by both Selected apply paths
+/// (`convert_site_access_to_selected` and `grant_selected_item_access`).
+///
+/// Declared first for the reason the ordinary grant path declares first: the
+/// manifest should never promise less than what is assigned. The wizard's
+/// picker is the full live catalog, so this is usually a permission the app has
+/// never declared — and an assignment with no declaration does not appear in
+/// the Permissions tab at all. Without the assigned appRole in the token, the
+/// per-resource permissions the callers grant next give nothing at all.
+async fn declare_and_grant_graph_role(
+    client: &azapptoolkit_graph::GraphClient,
+    cache: &Cache,
+    principal: &GraphRolePrincipal<'_>,
+    graph_sp_id: &str,
+    role_value_by_id: &HashMap<String, String>,
+    existing: &[AppRoleAssignment],
+    value: &str,
+) -> Result<GraphRoleGrant, UiError> {
+    let role_id = graph_role_id(role_value_by_id, value)?;
+    let declared_permission = declare_graph_role(
+        client,
+        cache,
+        principal.tenant_id,
+        principal.object_id,
+        &role_id,
+    )
+    .await?;
+    let already_held = existing
+        .iter()
+        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == role_id);
+    let mut granted_role_added = false;
+    if !already_held {
+        client
+            .grant_app_role(principal.sp_object_id, graph_sp_id, &role_id)
+            .await
+            .map_err(|err| {
+                UiError::validation("grant_failed", format!("failed to grant {value}: {err}"))
+            })?;
+        granted_role_added = true;
+    }
+    Ok(GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    })
+}
+
+/// The value assignment `a` grants when it is an org-wide `Sites.*` grant on
+/// Microsoft Graph — the one the `Sites.Selected` conversion strips — and
+/// `None` for anything else (another resource, a role the index does not know,
+/// or a Selected scope, which is the confinement itself).
+fn orgwide_sites_value(
+    graph_sp_id: &str,
+    role_value_by_id: &HashMap<String, String>,
+    a: &AppRoleAssignment,
+) -> Option<String> {
+    if a.resource_id != graph_sp_id {
+        return None;
+    }
+    role_value_by_id
+        .get(&a.app_role_id)
+        .filter(|value| is_sharepoint_orgwide(value))
+        .cloned()
+}
+
 /// The distinct resources in a pasted target list, in the order given.
 ///
 /// Two spellings of one resource would create two permission entries on it, each
@@ -113,12 +197,12 @@ fn dedupe_targets(urls: &[String]) -> Vec<String> {
 
 /// Pre-acquires the `Sites.FullControl.All` token with a typed call — so a
 /// not-yet-consented SharePoint scope surfaces as `consent_required` (the tab
-/// shows a "Grant consent" button) instead of a generic `token_error` from deep
-/// inside the scoped Graph call — then returns the tenant's Graph client.
-/// Mirrors `exchange_client_checked`; every SharePoint command routes its
-/// pre-acquire through here so the "consent_required survives the BearerProvider"
-/// contract lives in one place.
-async fn sharepoint_client_checked(
+/// shows a "Grant consent" button for the `sharepoint` feature) before any
+/// SharePoint work starts, rather than partway through it — then returns the
+/// tenant's Graph client. Mirrors `exchange_client_checked`; every SharePoint
+/// command routes its pre-acquire through here so the "consent is checked
+/// before side effects" contract lives in one place.
+pub(crate) async fn sharepoint_client_checked(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<Arc<azapptoolkit_graph::GraphClient>, UiError> {
@@ -149,7 +233,9 @@ fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
 /// the site's content — which the tenant SharePoint Administrator role doesn't
 /// reach. Sending both through one message told an operator whose site-level
 /// grants worked that they lacked a role they demonstrably held.
-fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
+/// A 403 from the permission tester's reads means the *operator* lacks rights
+/// on the resource, so it routes through here too.
+pub(crate) fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
     map_sharepoint_err(err, "sharepoint_selected_items")
 }
 
@@ -288,54 +374,31 @@ pub async fn convert_site_access_to_selected(
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
 
-    // Reverse-lookup the Sites.Selected appRole id so we can grant it.
-    let sites_selected_id = role_value_by_id
-        .iter()
-        .find(|(_, value)| value.as_str() == "Sites.Selected")
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| {
-            UiError::not_found(
-                "role",
-                "Sites.Selected application role not found on Microsoft Graph",
-            )
-        })?;
-
     let mut warnings = Vec::new();
 
     // Snapshot the current assignments once: drives both the idempotency check
     // for the Sites.Selected grant and the org-wide-removal scan below.
     let existing = client.list_app_role_assignments(&sp_object_id).await?;
 
-    // 0. Declare Sites.Selected on the app registration, so the grant below is
-    //    visible in the Permissions tab. Ordered first for the same reason the
-    //    ordinary grant path declares first: the manifest should never promise
-    //    less than what is assigned.
-    let declared_permission = declare_graph_role(
+    // 0-1. Declare Sites.Selected on the app registration (so the grant is
+    //      visible in the Permissions tab), then grant it (idempotent).
+    let GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    } = declare_and_grant_graph_role(
         &client,
         &state.cache,
-        &tenant_id,
-        object_id.as_deref(),
-        &sites_selected_id,
+        &GraphRolePrincipal {
+            tenant_id: &tenant_id,
+            object_id: object_id.as_deref(),
+            sp_object_id: &sp_object_id,
+        },
+        &graph_sp_id,
+        &role_value_by_id,
+        &existing,
+        SP_SITES_SELECTED,
     )
     .await?;
-
-    // 1. Grant Sites.Selected (idempotent).
-    let already_selected = existing
-        .iter()
-        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == sites_selected_id);
-    let mut granted_role_added = false;
-    if !already_selected {
-        client
-            .grant_app_role(&sp_object_id, &graph_sp_id, &sites_selected_id)
-            .await
-            .map_err(|err| {
-                UiError::validation(
-                    "grant_failed",
-                    format!("failed to grant Sites.Selected: {err}"),
-                )
-            })?;
-        granted_role_added = true;
-    }
 
     // 2. Grant the scoped per-site access (before removing the broad grant).
     let roles = vec![role];
@@ -365,26 +428,14 @@ pub async fn convert_site_access_to_selected(
     //    but only if some site access actually landed.
     let mut removed_orgwide_grants = Vec::new();
     if should_remove_orgwide(remove_orgwide, !sites_granted.is_empty()) {
-        for a in &existing {
-            if a.resource_id != graph_sp_id {
-                continue;
-            }
-            let Some(value) = role_value_by_id.get(&a.app_role_id) else {
-                continue;
-            };
-            if !is_sharepoint_orgwide(value) {
-                continue;
-            }
-            match client
-                .remove_app_role_assignment(&sp_object_id, &a.id)
-                .await
-            {
-                Ok(()) => removed_orgwide_grants.push(value.clone()),
-                Err(err) => {
-                    warnings.push(format!("failed to remove org-wide grant {value}: {err}"))
-                }
-            }
-        }
+        removed_orgwide_grants = strip_app_role_grants(
+            &client,
+            &sp_object_id,
+            &existing,
+            |a| orgwide_sites_value(&graph_sp_id, &role_value_by_id, a),
+            &mut warnings,
+        )
+        .await;
     } else if remove_orgwide {
         warnings.push(
             "no site access was granted, so the org-wide Sites.* grant was left in place".into(),
@@ -512,51 +563,32 @@ pub async fn grant_selected_item_access(
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
 
-    let role_id = role_value_by_id
-        .iter()
-        .find(|(_, value)| value.as_str() == permission_value)
-        .map(|(id, _)| id.clone())
-        .ok_or_else(|| {
-            UiError::not_found(
-                "role",
-                format!("{permission_value} application role not found on Microsoft Graph"),
-            )
-        })?;
-
     let mut warnings = Vec::new();
 
-    // 0. Declare the Selected permission on the app registration. The picker is
-    //    the full live catalog, so this is usually a permission the app has
-    //    never declared — and an assignment with no declaration doesn't appear
-    //    in the Permissions tab at all.
-    let declared_permission = declare_graph_role(
+    // Read the assignments BEFORE the manifest PATCH, so a failed read aborts
+    // with nothing mutated.
+    let existing = client.list_app_role_assignments(&sp_object_id).await?;
+
+    // 0-1. Declare the Selected permission on the app registration, then grant
+    //      the appRole (idempotent) — without it in the token, the per-resource
+    //      permissions below grant nothing at all.
+    let GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    } = declare_and_grant_graph_role(
         &client,
         &state.cache,
-        &tenant_id,
-        object_id.as_deref(),
-        &role_id,
+        &GraphRolePrincipal {
+            tenant_id: &tenant_id,
+            object_id: object_id.as_deref(),
+            sp_object_id: &sp_object_id,
+        },
+        &graph_sp_id,
+        &role_value_by_id,
+        &existing,
+        &permission_value,
     )
     .await?;
-
-    // 1. Grant the Selected appRole (idempotent) — without it in the token, the
-    //    per-resource permissions below grant nothing at all.
-    let existing = client.list_app_role_assignments(&sp_object_id).await?;
-    let already_held = existing
-        .iter()
-        .any(|a| a.resource_id == graph_sp_id && a.app_role_id == role_id);
-    let mut granted_role_added = false;
-    if !already_held {
-        client
-            .grant_app_role(&sp_object_id, &graph_sp_id, &role_id)
-            .await
-            .map_err(|err| {
-                UiError::validation(
-                    "grant_failed",
-                    format!("failed to grant {permission_value}: {err}"),
-                )
-            })?;
-        granted_role_added = true;
-    }
 
     // 2. Grant per resource. A target that fails to resolve, sits at the wrong
     //    level, or is rejected by SharePoint is reported and skipped — one bad
@@ -567,7 +599,13 @@ pub async fn grant_selected_item_access(
         let resolved = match client.resolve_sharepoint_resource(url).await {
             Ok(r) => r,
             Err(err) => {
-                warnings.push(format!("could not resolve '{url}': {err}"));
+                // Through the module's own mapper, not `Display`: a 403 on the
+                // subsite probe now propagates typed (the resolver used to
+                // collapse it into "did not resolve"), and this is where its
+                // `sharepoint_selected_items` remediation is spliced in — and
+                // where Graph's raw body is kept out of the panel's warnings.
+                let ui = sharepoint_item_err(err);
+                warnings.push(format!("could not resolve '{url}': {}", ui.message));
                 continue;
             }
         };
@@ -741,11 +779,14 @@ pub async fn remove_selected_item_permission(
 
 // ---------------- Site-permission sweep (reverse lookup) ----------------
 
-/// In-flight cap for per-site permission reads. SharePoint throttles harder
-/// than the directory endpoints, so this stays below the audit's initial cap.
-/// The per-site read rides the client's retrying transport
-/// (`scoped_get_retried`), so a transient 429 is absorbed with `Retry-After`
-/// honored; only a *persistently* failing site lands in `sites_failed`.
+/// In-flight cap on concurrent *chunk tasks*, each a `$batch` fan-out over up
+/// to [`SWEEP_BATCH`] sites — so up to `SWEEP_CONCURRENCY × SWEEP_BATCH` site
+/// reads, in `$batch` POSTs of 20, are in flight, not six single reads.
+/// SharePoint throttles harder than the directory endpoints, so this stays
+/// below the audit's initial cap, and the `ConcurrencyThrottle` halves it on
+/// 429s. The per-request retry (`scoped_get_retried` / the batch transport)
+/// absorbs a transient 429 with `Retry-After` honored; only a *persistently*
+/// failing site lands in `sites_failed`.
 const SWEEP_CONCURRENCY: usize = 6;
 /// Sites resolved per progress step. The Graph `$batch` cap is 20 sub-requests,
 /// and `batch_list_site_permissions` chunks internally, so this is the
@@ -754,7 +795,9 @@ const SWEEP_CONCURRENCY: usize = 6;
 /// batching win isn't given back in round trips.
 const SWEEP_BATCH: usize = 100;
 /// Safety cap on sites per sweep — prevents a pathological tenant from
-/// queueing an unbounded scan. Raise if a user legitimately hits it.
+/// queueing an unbounded scan. Hitting it is *reported*
+/// (`SiteSweepResult::truncated`, logged at warn), never silent — raise it if
+/// a tenant legitimately hits it.
 const MAX_SITES_PER_SWEEP: usize = 5_000;
 
 /// Tenant-prefixed cache key (cross-tenant leakage guard, same convention as
@@ -817,15 +860,18 @@ fn fold_site_result(
 /// site?") and, filtered by appId, app → sites (the `Sites.Selected` blind
 /// spot). Enumerates sites via `/sites?search=*` (team/communication sites;
 /// OneDrive personal sites aren't returned by the delegated search endpoint),
-/// then reads `/sites/{id}/permissions` with bounded concurrency.
+/// then reads `/sites/{id}/permissions` in `$batch` chunks under an adaptive
+/// in-flight cap.
 ///
-/// Long-running: emits `site-sweep-progress` after each site and polls the
-/// dedicated `AppState.sweep_cancel` atomic (NOT `audit_cancel` — a sweep
-/// cancel must not abort a concurrent audit/bulk run) between dispatches.
-/// Per-site read failures increment `sites_failed` rather than aborting or
-/// silently reading as "no grants", so coverage is never overstated. The
-/// completed result is cached (60-minute audit TTL) under a tenant-prefixed
-/// key; a cancelled or partially-failed run is never cached.
+/// Long-running: emits `site-sweep-progress` after each chunk of
+/// [`SWEEP_BATCH`] sites and polls its own `AppState.site_sweep_cancel` token
+/// (stopped only by [`cancel_site_sweep`], so no other run's Cancel can abort
+/// it, and it aborts no other run) between dispatches. Per-site read failures increment `sites_failed`
+/// rather than aborting or silently reading as "no grants", so coverage is
+/// never overstated. The result is cached (60-minute audit TTL) under a
+/// tenant-prefixed key; a cancelled or partially-failed run is never cached,
+/// and a run that hit [`MAX_SITES_PER_SWEEP`] is cached *with* `truncated` set
+/// so it is never presented as complete.
 #[tauri::command]
 pub async fn sweep_site_permissions(
     app_handle: AppHandle,
@@ -836,14 +882,20 @@ pub async fn sweep_site_permissions(
     // tenant, and a token claimed after it carries a higher generation than a
     // cancel issued during it, which `is_cancelled()` then discards. Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.sweep_cancel.claim();
+    let cancel = state.site_sweep_cancel.claim();
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
-    let sites = client
+    let (sites, truncated) = client
         .list_all_sites(MAX_SITES_PER_SWEEP)
         .await
         .map_err(sharepoint_err)?;
     let total = sites.len();
+    if truncated {
+        tracing::warn!(
+            cap = MAX_SITES_PER_SWEEP,
+            "site sweep: site enumeration hit the cap; coverage is partial"
+        );
+    }
     emit_progress(
         &app_handle,
         "site-sweep-progress",
@@ -867,7 +919,6 @@ pub async fn sweep_site_permissions(
     let mut sites_scanned = 0usize;
     let mut sites_failed = 0usize;
     let mut done = 0usize;
-    let mut cancelled = false;
 
     // `/sites/{id}/permissions` is a plain GET, so the sweep reads them in
     // `$batch` POSTs of 20 instead of one request per site — at the 5000-site
@@ -953,19 +1004,18 @@ pub async fn sweep_site_permissions(
     )
     .await;
     if session.is_dead() {
-        // Never cache or return a truncated sweep: `AppSiteAccessDto::from_sweep`
+        // Never cache or return a dead-session sweep: `AppSiteAccessDto::from_sweep`
         // reads an empty site list as "no grants" whenever the sweep claims to
         // be complete, so a partial run understates an app's reach.
         return Err(session.err("the SharePoint site sweep"));
     }
-    cancelled = cancelled || stopped_early;
-
-    cancelled = cancelled || cancel.is_cancelled();
+    let cancelled = stopped_early || cancel.is_cancelled();
     tracing::info!(
         total,
         sites_scanned,
         sites_failed,
         cancelled,
+        truncated,
         "site sweep complete"
     );
     rows.sort_by(|a, b| {
@@ -981,11 +1031,13 @@ pub async fn sweep_site_permissions(
         sites_failed,
         rows,
         cancelled,
+        truncated,
     };
-    // Cache only a COMPLETE sweep: serving a cancelled or partially-failed
-    // result for the next hour would overstate coverage — the "coverage is
-    // never overstated" promise extends to the cache.
-    if !cancelled && sites_failed == 0 {
+    // Never cache a cancelled or partially-failed sweep: serving that gap for
+    // the next hour would overstate coverage — the "coverage is never
+    // overstated" promise extends to the cache. A capped sweep IS cached, with
+    // its flag; see `sweep_is_cacheable` for why that is safe.
+    if sweep_is_cacheable(cancelled, sites_failed) {
         state
             .cache
             .put(CacheKind::Audit, sweep_cache_key(&tenant_id), &result);
@@ -993,15 +1045,35 @@ pub async fn sweep_site_permissions(
     Ok(result)
 }
 
-/// Signals the in-progress resource sweep/probe (site sweep or mailbox probe —
-/// both poll `sweep_cancel`) to stop at the next dispatch boundary.
-#[tauri::command]
-pub fn cancel_resource_sweep(state: State<'_, AppState>) {
-    state.sweep_cancel.cancel();
+/// Whether a finished sweep may be written to the sweep cache.
+///
+/// A cancelled or partially-failed run is a *transient* prefix — a re-run can
+/// complete it — so caching it would serve the gap for an hour. A run that hit
+/// [`MAX_SITES_PER_SWEEP`] IS cached: the cap is deterministic, so a re-run
+/// would cost another 250 `$batch` round trips for the same prefix. That is
+/// safe only because `SiteSweepResult::truncated` rides along and
+/// `AppSiteAccessDto::is_complete()` folds it, so no consumer — the per-app
+/// panel, the Sites tab summary or the export — can read the cached prefix as
+/// "no grants" (pinned by `a_capped_sweep_is_cached_but_never_reads_complete`).
+///
+/// Extracted from [`sweep_site_permissions`] purely so it can be table-tested,
+/// like the audit's `run_is_cacheable`; that function takes a Tauri `State`.
+fn sweep_is_cacheable(cancelled: bool, sites_failed: usize) -> bool {
+    !cancelled && sites_failed == 0
 }
 
-/// Returns the cached sweep for this tenant, if one completed within the cache
+/// Signals an in-progress [`sweep_site_permissions`] run to stop at the next
+/// dispatch boundary. Covers both the Resource Access Sites tab and the per-app
+/// site panel: same sweep, same flag (`AppState.site_sweep_cancel`).
+#[tauri::command]
+pub fn cancel_site_sweep(state: State<'_, AppState>) {
+    state.site_sweep_cancel.cancel();
+}
+
+/// Returns the cached sweep for this tenant, if one finished within the cache
 /// TTL — so the view (and any future surface) can render without re-scanning.
+/// A capped run is served with its `truncated` flag, which the view renders as
+/// a coverage caveat.
 #[tauri::command]
 pub fn get_cached_site_sweep(
     state: State<'_, AppState>,
@@ -1017,8 +1089,10 @@ pub fn get_cached_site_sweep(
 }
 
 /// The sites one principal can reach under `Sites.Selected`, and the roles it
-/// holds on each — read from the cached tenant sweep, `None` when no completed
-/// sweep is cached (the caller then offers to run one).
+/// holds on each — read from the cached tenant sweep, `None` when no finished
+/// sweep is cached (the caller then offers to run one). A capped run is served
+/// with its `truncated` flag, which `is_complete()` carries, so the panel never
+/// reads the prefix as "no grants".
 ///
 /// This is the per-app read of the same index the Resource Access Sites tab
 /// builds, and it exists because Graph has **no reverse `appId → sites`
@@ -1238,6 +1312,7 @@ mod tests {
             sites_failed: 0,
             rows: Vec::new(),
             cancelled: false,
+            truncated: false,
         };
         cache.put(CacheKind::Audit, sweep_cache_key("t1"), &sweep);
         cache.put(CacheKind::Audit, sweep_cache_key("t2"), &sweep);
@@ -1254,6 +1329,63 @@ mod tests {
                 .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t2"))
                 .is_some(),
             "other tenant must survive"
+        );
+    }
+
+    /// The cache guard and the completeness verdict, exhaustively — the pair is
+    /// what proves a cached capped sweep cannot be read as "no grants".
+    ///
+    /// Cacheability ignores `truncated` on purpose (the cap is deterministic;
+    /// re-sweeping 5000 sites buys the same prefix), but completeness must fold
+    /// it: a sweep with zero failures and no cancel that stopped at the cap is
+    /// exactly the shape that used to read as complete and was cached as such.
+    /// Every combination, because the failure mode is one condition dropped
+    /// from a conjunction, which a single-case test would miss.
+    #[test]
+    fn a_capped_sweep_is_cached_but_never_reads_complete() {
+        for &cancelled in &[false, true] {
+            for &sites_failed in &[0usize, 1] {
+                for &truncated in &[false, true] {
+                    assert_eq!(
+                        sweep_is_cacheable(cancelled, sites_failed),
+                        !cancelled && sites_failed == 0,
+                        "cancelled={cancelled} sites_failed={sites_failed} truncated={truncated} \
+                         — a transient prefix cached here serves the gap for an hour; \
+                         the cap alone must not block caching"
+                    );
+                    let sweep = SiteSweepResult {
+                        tenant_id: "t".into(),
+                        total_sites: 2,
+                        sites_scanned: 2 - sites_failed,
+                        sites_failed,
+                        rows: Vec::new(),
+                        cancelled,
+                        truncated,
+                    };
+                    assert_eq!(
+                        AppSiteAccessDto::from_sweep(&sweep, "app-1").is_complete(),
+                        !cancelled && sites_failed == 0 && !truncated,
+                        "cancelled={cancelled} sites_failed={sites_failed} truncated={truncated} \
+                         — an empty per-app list over a prefix is not 'no grants'"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The export copies the panel's coverage sentence verbatim, so a cap
+    /// caveat in the summary reaches the CSV comment block unchanged.
+    #[test]
+    fn site_csv_carries_a_cap_caveat_from_the_summary() {
+        let csv = site_access_to_csv(
+            &[grant_row("Finance", "Contoso API")],
+            "1 app grant across 1 site — scanned 5000 of 5000 sites — stopped at the 5000-site scan cap, coverage is partial",
+        );
+        // Title line, then the coverage line.
+        let coverage = csv.lines().nth(1).unwrap_or_default();
+        assert!(
+            coverage.contains("stopped at the 5000-site scan cap"),
+            "coverage line must carry the cap caveat: {coverage}"
         );
     }
 
@@ -1334,5 +1466,85 @@ mod tests {
         for v in ["Sites.Selected", "Sites.Read.All", "Files.Read.All"] {
             assert!(level(v).is_none(), "{v} must not route to the item grant");
         }
+    }
+
+    #[test]
+    fn orgwide_strip_selects_only_orgwide_sites_roles_on_graph() {
+        let index: HashMap<String, String> = [
+            ("role-read-all".to_string(), "Sites.Read.All".to_string()),
+            ("role-selected".to_string(), "Sites.Selected".to_string()),
+        ]
+        .into();
+        let on = |resource: &str, role: &str| AppRoleAssignment {
+            id: "a".into(),
+            resource_id: resource.into(),
+            app_role_id: role.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-read-all")).as_deref(),
+            Some("Sites.Read.All")
+        );
+        // Sites.Selected IS the confinement — never stripped by the conversion.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-selected")),
+            None
+        );
+        // Graph's role id on another resource is not Graph's grant.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("spo-sp", "role-read-all")),
+            None
+        );
+        // A role the Graph index does not know is left alone.
+        assert_eq!(
+            orgwide_sites_value("graph-sp", &index, &on("graph-sp", "role-unknown")),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_selected_role_is_neither_regranted_nor_declared_for_an_sp_only_principal() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/appRoleAssignments$"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(path_regex(r"^/v1\.0/applications"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = crate::commands::test_support::mock_graph(&server);
+        let index: HashMap<String, String> =
+            [("role-selected".to_string(), "Sites.Selected".to_string())].into();
+        let existing = vec![AppRoleAssignment {
+            id: "a1".into(),
+            resource_id: "graph-sp".into(),
+            app_role_id: "role-selected".into(),
+            ..Default::default()
+        }];
+        let out = declare_and_grant_graph_role(
+            &client,
+            &Cache::new(),
+            &GraphRolePrincipal {
+                tenant_id: "t1",
+                object_id: None,
+                sp_object_id: "sp1",
+            },
+            "graph-sp",
+            &index,
+            &existing,
+            SP_SITES_SELECTED,
+        )
+        .await
+        .expect("nothing to do is success");
+        assert!(!out.declared_permission);
+        assert!(!out.granted_role_added);
     }
 }

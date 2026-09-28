@@ -8,9 +8,12 @@
 //! wizard's flex column, and an empty result set renders **nothing** rather
 //! than "No matches." — the field below is a perfectly good manual fallback, so
 //! a miss is not a dead end worth announcing.
+//!
+//! [`MailboxGroupsField`] pairs the typeahead with its free-text field — the
+//! one mailbox-group input every Exchange scope form uses.
 
 use leptos::prelude::*;
-use thaw::ButtonAppearance;
+use thaw::{ButtonAppearance, Field, Textarea};
 
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 
@@ -41,5 +44,37 @@ pub fn GroupAutocomplete(
             action_appearance=Signal::derive(|| ButtonAppearance::Secondary)
             show_no_matches=false
         />
+    }
+}
+
+/// The one placeholder every mailbox-group field shows.
+pub const MAILBOX_GROUPS_PLACEHOLDER: &str =
+    "Mail-enabled groups — one per line (name, address, or object id)";
+
+/// The mailbox-group input every Exchange scope form uses: the directory
+/// typeahead plus the free-text field it appends to. The field stays the source
+/// of truth, read with `util::parse_lines`.
+#[component]
+pub fn MailboxGroupsField(
+    /// The free-text group field (one identifier per line).
+    value: RwSignal<String>,
+    /// Wrap the text field in a labelled `<Field>`. The typeahead stays outside
+    /// it so the label binds to the textarea.
+    #[prop(optional)]
+    label: Option<&'static str>,
+) -> impl IntoView {
+    match label {
+        Some(l) => view! {
+            <GroupAutocomplete target=value />
+            <Field label=l>
+                <Textarea value=value placeholder=MAILBOX_GROUPS_PLACEHOLDER />
+            </Field>
+        }
+        .into_any(),
+        None => view! {
+            <GroupAutocomplete target=value />
+            <Textarea value=value placeholder=MAILBOX_GROUPS_PLACEHOLDER />
+        }
+        .into_any(),
     }
 }

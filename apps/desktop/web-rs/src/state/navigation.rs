@@ -26,7 +26,8 @@ impl Session {
     }
 
     /// Navigate to the Security workbench on a specific sub-tab (`"findings"`
-    /// | `"apps"` | `"credentials"` | `"grants"`). Used by the Home cards and
+    /// | `"apps"` | `"credentials"` | `"sso-certificates"` | `"grants"` |
+    /// `"app-permissions"`). Used by the Home cards and
     /// command palette to deep-link past the default Findings tab.
     /// Goes through [`Session::set_view`] rather than poking `view` directly:
     /// every caller today is the Home dashboard, which is `inert` while the
@@ -105,19 +106,34 @@ impl Session {
     /// straight into the rotation workflow. The detail pane consumes
     /// `pending_app_tab` once on mount; the chip starts labelled with the id and
     /// the pane corrects it to the real name once it loads.
+    ///
+    /// An already-open app keeps its live tab and nothing is queued: no pane
+    /// mounts to consume the tab, so setting it would leak into the *next* app
+    /// opened from a list. The signal is deliberately left untouched (not
+    /// cleared) in that case — a double-clicked "Open" calls this twice before
+    /// the new pane mounts, and clearing it would drop the first call's tab.
     pub fn open_app_on_tab(&self, object_id: String, tab: &str) {
-        self.tenant_ui.pending_app_tab.set(Some(tab.to_string()));
+        if self.is_open(OpenItemKind::AppReg, &object_id).is_none() {
+            self.tenant_ui.pending_app_tab.set(Some(tab.to_string()));
+        }
         self.open_item(OpenItemKind::AppReg, object_id.clone(), object_id);
     }
 
     /// Open an enterprise application in the workspace on a specific tab (e.g.
     /// `"permissions"`). Used to deep-link from a risky consent grant or
     /// delegated-permission finding straight to where it can be revoked. The
-    /// enterprise pane consumes `pending_enterprise_tab` once on mount.
+    /// enterprise pane consumes `pending_enterprise_tab` once on mount; an
+    /// already-open enterprise app keeps its live tab and nothing is queued
+    /// (same reasoning as [`Self::open_app_on_tab`]).
     pub fn open_enterprise_on_tab(&self, sp_object_id: String, tab: &str) {
-        self.tenant_ui
-            .pending_enterprise_tab
-            .set(Some(tab.to_string()));
+        if self
+            .is_open(OpenItemKind::Enterprise, &sp_object_id)
+            .is_none()
+        {
+            self.tenant_ui
+                .pending_enterprise_tab
+                .set(Some(tab.to_string()));
+        }
         self.open_item(OpenItemKind::Enterprise, sp_object_id.clone(), sp_object_id);
     }
 
@@ -143,8 +159,25 @@ impl Session {
     pub fn open_enterprise_with_facet(&self, facet: &str) {
         self.tenant_ui.enterprise_facet.set(facet.to_string());
         self.tenant_ui.enterprise_search.set(String::new());
-        self.tenant_ui.pending_open_filters.set(true);
+        self.tenant_ui
+            .pending_open_filters
+            .set(Some(ActiveView::EnterpriseApps));
         self.set_view(ActiveView::EnterpriseApps);
+    }
+
+    /// Navigate to the App Registrations list pre-filtered to a credential
+    /// facet (`"secrets"` | `"certs"` | `"active"` | `"expiring"` |
+    /// `"expired"` | `"none"`). Used by the Home dashboard's "With secrets" /
+    /// "With certs" metrics. Same shape as [`Self::open_enterprise_with_facet`]:
+    /// clears the list search and opens the collapsed filter drawer once so the
+    /// active chip is visible.
+    pub fn open_apps_with_facet(&self, facet: &str) {
+        self.tenant_ui.apps_facet.set(facet.to_string());
+        self.tenant_ui.apps_search.set(String::new());
+        self.tenant_ui
+            .pending_open_filters
+            .set(Some(ActiveView::Apps));
+        self.set_view(ActiveView::Apps);
     }
 
     /// Navigate to the Managed Identities list pre-filtered to a facet

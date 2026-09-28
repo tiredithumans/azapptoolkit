@@ -1,13 +1,15 @@
-//! Azure Key Vault IPC bindings: list / get / set secrets. DTOs come from the
-//! shared `azapptoolkit-dto` crate (re-exported here for callers).
+//! Azure Key Vault IPC bindings: list and read secrets, rotate an app credential
+//! into a vault, and discover vaults. DTOs come from the shared
+//! `azapptoolkit-dto` crate (re-exported here for callers).
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
+
+use crate::bindings::TenantArg;
 
 pub use azapptoolkit_dto::keyvault::{
-    KvSecretItemDto, KvSecretMetadataDto, KvSecretValueDto, KvSetSecretInput,
-    RotateCredentialInput, RotateCredentialResult,
+    KvSecretItemDto, KvSecretValueDto, RotateCredentialInput, RotateCredentialResult,
 };
 
 #[derive(Serialize)]
@@ -57,13 +59,6 @@ pub async fn kv_get_secret(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SetArgs<'a> {
-    tenant_id: &'a str,
-    input: &'a KvSetSecretInput,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct RotateArgs<'a> {
     tenant_id: &'a str,
     input: &'a RotateCredentialInput,
@@ -76,15 +71,9 @@ pub async fn rotate_app_credential(
     invoke_result("rotate_app_credential", RotateArgs { tenant_id, input }).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Names of Key Vaults the signed-in user can see (ARM discovery), for the vault
 /// picker. Returns an error when ARM consent is missing — callers degrade to
 /// free-text entry.
 pub async fn list_available_key_vaults(tenant_id: &str) -> Result<Vec<String>, UiError> {
-    invoke_result("list_available_key_vaults", TenantArgs { tenant_id }).await
+    invoke_result("list_available_key_vaults", TenantArg { tenant_id }).await
 }

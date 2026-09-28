@@ -122,7 +122,7 @@ pub fn AuthConfigForm(
             <Input value=client_id placeholder="00000000-0000-0000-0000-000000000000" />
         </Field>
         <Field label="Directory (tenant) ID">
-            <Input value=tenant_id placeholder="GUID or contoso.onmicrosoft.com" />
+            <Input value=tenant_id placeholder="00000000-0000-0000-0000-000000000000" />
         </Field>
         <Button
             appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -173,8 +173,8 @@ fn config_error_hint(code: &str) -> &'static str {
              registration's Overview page in the Entra portal."
         }
         "invalid_tenant_id" => {
-            "The Directory (tenant) ID must be a GUID or a domain like \
-             contoso.onmicrosoft.com — copy it from the registration's Overview page."
+            "The Directory (tenant) ID must be a GUID — copy it from the registration's \
+             Overview page. A domain like contoso.onmicrosoft.com isn't accepted."
         }
         "io" => {
             "Couldn't write settings.json — check that the app's config folder is \

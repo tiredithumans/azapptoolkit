@@ -11,17 +11,28 @@ List cache keys are prefixed with the tenant id via helpers like
 The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 `{tenant}|site_sweep`), ServicePrincipal, and Permissions — uses `{tenant_id}|…`, and `sign_out`
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
-reads the previous session's audit/sweep/SP data.
+reads the previous session's audit/sweep/SP data. The audit-run entry is stored typed
+(`put_typed`, unpinned) and must be read with `get_typed::<CachedAuditRun>` — an untyped `get` on
+it misses. `sign_out` calls `AppState::forget_tenant`, the one sign-out sweep: every per-tenant
+client map (graph/exchange/kv/arm/la), the tenant's idle single-flight gates, and
+`invalidate_tenant`. A new `Mutex<HashMap<…>>` field on `AppState` must be named there (pinned by
+`repo_invariants/cache.rs::sign_out_forgets_every_per_tenant_map_on_app_state`).
 
 ### Proving the session, and what may be pinned
 
 Two rules ride alongside the key prefix:
 
-- **A cache-only command must prove the session** with `state.auth.tenant_context(tenant_id)`. Every
-  other read proves it implicitly by needing a token; a command answering purely from cache has no
-  such gate, so without this an operator who signed out (or a window that never signed in) could
-  still read a populated tenant's data. Pinned by
-  `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session`.
+- **A command that can answer from cache must prove the session** with
+  `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)`)
+  as its first statement, ahead of any cache read. Every other read proves it implicitly by needing
+  a token; a command answering from cache has no such gate, so without this an operator whose
+  session died (or a window that never signed in) could still read a populated tenant's data. **A
+  client factory call is not a proof**: `graph_for` / `exchange_for` / `arm_for` / `keyvault_for`
+  only build token adapters, and no token is fetched until a request is sent. Reads through the
+  index accessors (`sp_index_cached` / `app_name_index_cached` / `indexes_cached` / `*_hit` /
+  `search_corpus` / `load_gallery_corpus`) count as cache reads. Pinned by
+  `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session` (and
+  `every_index_accessor_counts_as_a_cache_read`).
 - **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
   scan to rebuild (the two indexes, the search corpus). A pinned per-app entry can never be evicted,
   so a large tenant's thousands of `app_detail|…` writes would grow the bucket without bound. Pinned
@@ -37,7 +48,7 @@ There are exactly **two** cached tenant-wide directory enumerations, and no surf
 | Index | Key | Fetched by | Projection |
 |---|---|---|---|
 | Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames` |
-| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named` | `id,appId,displayName` |
+| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named`, or seeded (stripped to `id,appId,displayName`) by the App Registrations scan | `id,appId,displayName` |
 
 Readers: both entity lists, global search, the security audit, the consent audit, the DR backup, the
 managed-identity list, and the mailbox probe. A tab switch, a search keystroke, or a backup run right
@@ -58,7 +69,34 @@ accessors under a non-short-circuiting `join` so one unreadable index degrades o
 the corpus instead of blanking the results.
 
 Both are bounded at `APPS_MAX` / `SP_INDEX_MAX` (both 10 000). Those caps must not drift — a surface
-enumerating deeper than another silently knows about principals the other does not.
+enumerating deeper than another silently knows about principals the other does not. `APPS_MAX` is
+defined once, in `azapptoolkit_dto::applications`, so the App Registrations list's cap notice in the
+frontend reads the same constant as the backend's enumerations; the SP-index lists learn
+`SP_INDEX_MAX` at runtime from `get_directory_index_status` (`DirectoryIndexStatus`, also in the
+dto crate).
+
+### One `/applications` list scan
+
+`scan_app_list` (in `commands/applications/mod.rs`) pages `/applications` once with the list-row
+`$select`, a strict superset of the other two projections, and feeds three caches from it:
+`apps_pairing` (the App Registrations rows), `credential_expirations` (the credential-expiry
+roll-up) and `app_name_index` (stripped to `id,appId,displayName`, so no credential array is pinned
+into an index six surfaces hold an `Arc` to). Readers go through `apps_pairing_cached` /
+`credential_expirations_cached` / `app_name_index_cached`, all behind one single-flight gate,
+`app_scan_gate`, keyed on `apps_pairing_key`. Each store has its own per-key watch captured before
+the scan, so a credential write landing mid-scan refuses the two credential-bearing stores and
+leaves the name index. The SP side of the pairing join goes through `sp_index_cached`, never the
+client directly.
+
+- **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
+  `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.
+- The audit (`$expand=owners`) and the bulk expired-credential sweep are the only other
+  `list_applications_all` callers, pinned by `repo_invariants::the_full_application_list_scan_has_one_home`.
+- A cold Home launch used to run three concurrent scans (the App Registrations, Enterprise Apps and
+  Credential health cards): 3 × ceil(N/999) serial round trips, 18 → 6 at 5,000 apps. If the
+  Enterprise card wins the gate it runs its lean scan and the list scan follows serially.
+- Tradeoff: a cold standalone Credential Expiry visit now also reads the SP index (gated,
+  concurrent with the app scan, and shared with every other reader).
 
 ## Filtering happens in the frontend, on lean rows
 
@@ -148,40 +186,69 @@ word-boundary → substring → publisher-only; *whether* a row matches is per-t
 name/publisher, so "office 365" doesn't drag in every "365" app while "teams microsoft" still finds
 Microsoft Teams) and caps display at `GALLERY_TOP`. Because the corpus is the whole catalog,
 `total_matches`/`truncated` are **exact** — "showing the closest 50 of N" is honest without a
-`$count` round trip, and `partial_catalog` is always false (a short fetch is an `Err`, not a partial
+`$count` round trip, and there is no partial-catalog state (a short fetch is an `Err`, not a partial
 `Ok`).
 
 One asymmetry worth keeping: **a failed corpus fetch propagates as an error**, unlike `search_corpus`,
 which degrades to an empty corpus. An empty result set here is a *claim that no such app exists* — a
 lie the operator can't distinguish from a broken fetch, which is the bug class this whole path exists
-to avoid. (The demo's mock keeps its args-aware `gallery_search_for` match over the sample catalog
-and sets `partial_catalog: true`, so a curated-sample miss isn't presented as a confident
-full-gallery zero.)
+to avoid. (The demo's mock keeps its args-aware `gallery_search_for` match over the sample catalog.)
 
 ## Invalidation — only on `Ok`
 
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on
 the error path, so a failed write doesn't clear fresh data.
 
-`invalidate_app_lists` drops **seven** things together: the apps-pairing, enterprise, `sp_index`,
-`app_name_index`, and `search_corpus` keys, plus — transitively — the per-app detail cache
-(`invalidate_app_details`) and the cached audit run (`invalidate_audit_cache`). The transitive two
-matter: a scope grant or credential change re-scores the app, so the audit/posture tile must
-refetch too (two reviews independently mis-read this as a missing invalidation because earlier
-versions of this doc listed only the four list keys) — so any mutation that can add/remove/rename a service principal or app registration
-(`create_application`, `grant_exchange_mailbox_access`) must call it, or a stale pairing/search
-index survives until the TTL.
+`invalidate_app_lists` drops every tenant key derived from the app/SP set: `apps_pairing_key`,
+`enterprise_key`, `sp_index_key`, `app_name_index_key`, `search_corpus_key`, `mi_key` (the
+managed-identity list, now a filtered projection of the SP index), `credential_expirations_key` (a
+create/delete changes the app set it scans) and `invalidate_app_role_resources` (the Grant-access
+picker's "Tenant app registrations" directory — a create/delete adds or removes an SP that may
+expose roles), plus — transitively — the per-app detail cache (`invalidate_app_details`) and the
+cached audit run (`invalidate_audit_cache`). The transitive two matter: a scope grant or credential
+change re-scores the app, so the audit/posture tile must refetch too. Two reviews independently
+mis-read this as a missing invalidation because earlier versions of this doc listed only the four
+list keys, and the list drifted twice more after that; it is now pinned both ways
+(`repo_invariants::the_list_tier_doc_names_every_key_invalidate_app_lists_drops` checks this
+paragraph names every key the function drops, and
+`invalidate_app_lists_drops_every_app_set_key_and_nothing_else` checks the runtime behaviour). Any
+mutation that can add/remove/rename a service principal or app registration (`create_application`,
+`grant_exchange_mailbox_access`) must call it, or a stale pairing/search index survives until the
+TTL.
 
 **Credential-only mutations are tiered.** `add_password`, `remove_password`, the certificate
-add/remove pair, `generate_self_signed_certificate`, and `remove_expired_passwords` change a single
-app's secrets/certs — which surfaces in the App Registrations list row (its credential-status
+add/remove pair, `generate_self_signed_certificate`, `remove_expired_passwords`,
+`remediate_remove_expired_credentials` and the bulk `bulk_remove_expired_credentials` sweep (once
+per mutated app) change a single app's secrets/certs — which surfaces in the App Registrations list row (its credential-status
 badge), that app's detail payload, and the audit (expiring-credential findings), but **cannot** add,
 remove, or rename a service principal or app registration. They call
 `invalidate_app_credentials(cache, tenant, object_id)` instead of `invalidate_app_lists`: it drops
-apps-pairing, the *one* app's detail, and the audit run, and deliberately **keeps** `sp_index`,
+apps-pairing, the *one* app's detail, the credential-expiry list and the audit run, and deliberately **keeps** `sp_index`,
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+
+**Detail-affecting mutations that cannot change the set take `invalidate_app_detail_state`**
+(= `invalidate_app_details` + `invalidate_audit_cache`): grant/revoke/scope a permission
+(`permissions.rs`, the Exchange and SharePoint scoping cores), owners (`owners.rs`), authentication
+settings (`authentication.rs`) and remediations (`remediation.rs`, `bulk.rs`). They change
+detail-visible and audit-relevant state but add, remove or rename nothing, so the list tier stays
+valid. Calling the one function instead of its two halves means a call site can't drop one of them.
+
+**In-place PATCHes of one app take the detail tier.** SSO URLs (`set_saml_urls`), OIDC redirect
+URIs (`set_oidc_redirect_uris`), the claims mapping (`set_claims_mapping`), and the exposed
+roles/scopes (`app_roles.rs`, `expose_api.rs`) change one app or SP in place — they add, remove or
+rename nothing, so nothing in the list tier changes — and call `invalidate_app_details` (the
+can't-miss cheap sweep of the per-app payloads). `repo_invariants::an_in_place_write_never_busts_the_list_tier`
+pins both tiers lexically: a command body with an in-place mutation call and no set-changing call
+must not name `invalidate_app_lists`.
+
+**The app-role resource directory has two busts.** `list_app_role_resources` (the Grant-access
+picker's "Tenant app registrations" group) caches which tenant SPs expose ≥1 enabled Application
+role. `invalidate_app_lists` drops it (a create/delete changes the set), and the App roles tab's
+writers call `invalidate_app_role_resources` directly — the first Application role added, or the
+last one disabled or removed, moves an SP in or out of the directory (pinned by
+`an_exposed_app_role_write_refreshes_the_role_resource_directory`).
 
 ### The other half: a scan that raced an invalidation must not be stored
 
@@ -220,12 +287,20 @@ Two shapes of this bug are worth naming, because both hid behind a guard that lo
 - The three list caches (App Registrations pairing, Enterprise Apps, Managed Identities) stored
   unconditionally, as did the search corpus — while the two indexes they are built from were
   already guarded. The indexes correctly refused their stale snapshots and the derived caches then
-  re-pinned them anyway.
+  re-pinned them anyway. The credential-expiry roll-up was the last one: stored with a plain
+  `put`, it was both unguarded and unpinned, although the `put_index` doc named it as pinned. It is
+  now a guarded, pinned store in the shared App Registrations scan.
 
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,
-`downgrade_application_permission`, the `bulk_*` commands, and the SSO create flows all follow it
+`downgrade_application_permission`, `create_application`, `grant_single_permission`,
+`grant_admin_consent` (and their bulk and DR-restore callers), the `bulk_*` commands, and the SSO
+create flows all follow it
 (see [audit-findings-and-remediation.md](./audit-findings-and-remediation.md#audit-remediations-one-click-fix) for the remediation case).
+A core that can fail after its first write returns the landed-write flags plus an
+`Option<UiError>` (`downgrade_application_permission_core`, `create_application_core`, the grant
+cores' `GrantRun`); the command busts on those flags and only then returns the error. A failure
+before the first write stays a plain `Err` — nothing landed, so nothing is invalidated.
 
 ## `CacheKind::ServicePrincipal` self-invalidates in the graph client
 
@@ -240,7 +315,10 @@ rely on it for SP-field freshness.
 Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk
 grant) call `invalidate_app_lists` only when an SP was newly created; otherwise the cheaper
-detail + audit bust suffices.
+detail + audit bust suffices. `GrantRun.sp_created` survives a later failure in the same run, so
+an SP created just before a refused grant still busts the list tier. `grant_exchange_mailbox_access`
+does the same when `apply_exchange_mailbox_scope` refuses after its SP was created (the core busts
+the list tier itself on success).
 
 ## Batched Graph fan-out + the adaptive throttle
 
@@ -249,7 +327,8 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
 
 - **Graph JSON batching** — `client.batch_get_json[_with_headers]`
   (`graph/src/client/batch.rs`): 20 GETs per POST, results returned in input order, inner-429
-  sub-requests re-batched. Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
+  and 5xx sub-requests re-batched on the shared `RetryBudget` (the same policy the GET would get
+  sent alone; only a 429 notifies the throttle observer). Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
   **per-sub-request** header form — the outer POST's headers don't reach sub-requests.
   Whole-batch failures must degrade to per-object reads through `dispatch::batch_or_serial`,
   never fail the run.
@@ -257,7 +336,10 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   and fed to `dispatch_capped` as `|| throttle.current_limit()`, so the in-flight cap halves on
   429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
   RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
-  halving the shared per-tenant client's cap.
+  halving the shared per-tenant client's cap, and a finishing fan-out detaches only its own tracker
+  (the slot is single: a concurrent attach displaces the earlier run, which then runs at a fixed
+  cap — logged). The halve window is anchored on the last *halving*, not the last 429, so a
+  sustained storm keeps degrading toward the floor instead of holding at half.
 
 ### `$count`/`$orderby` belong to `$search` alone
 
@@ -267,6 +349,16 @@ query carrying `$expand` fails *silently*: Graph returns 200 with the expanded p
 rather than an error, so the caller reads an empty collection and concludes the object has no
 related entities. Keep `$count`/`$orderby` on the `$search` paths that need them, and never add them
 to a request that expands.
+
+Every paging helper (`collect_all_pages`, `collect_all_pages_capped`, `finish_paged_batch`) takes
+the consistency flag page 1 was issued with — there is no default. Graph does not carry
+`ConsistencyLevel` into the `nextLink` request, so an advanced query (the SP index, the `memberOf`
+casts) restates it on every continuation, and a plain read never adds it: page 2 of an `$expand`
+scan would lose the expansion, and page 2 of any other plain read would come from the
+eventually-consistent index while page 1 came from the directory. The scoped helpers
+(`collect_pages_from`, `collect_pages_from_capped`) take a fetch closure instead of a consistency flag,
+origin-check each nextLink before the scoped bearer is attached, and share the one `client::MAX_PAGES`
+page cap with the rest.
 
 ## Page size is a wall-clock divisor, not a tuning knob
 
@@ -281,10 +373,26 @@ silently), and per-endpoint caps are **not reliably documented** — `list_servi
 logs its effective first-page size for exactly that reason. Batched sub-requests carry it too, so a
 `$batch` sub-response rarely overflows into `finish_paged_batch`'s serial continuation.
 
+The rule is pinned by `repo_invariants/fanout.rs::every_paged_graph_read_sends_a_page_size`: every
+function in `graph/src/client/` that calls a paging helper must send `$top` (as a query pair or
+inline, `MAX_PAGE_SIZE` / `DEFAULT_APP_PAGE_SIZE`) or, where an endpoint's `$top` ceiling is too
+low, `Prefer: odata.maxpagesize` (the application gallery, 2800 a page). Two exemptions are
+justified in its table: `list_applications_all` (page 1 is `list_applications`, which sends
+`DEFAULT_APP_PAGE_SIZE`) and `list_federated_credentials` (Graph caps them at 20 per app). A stale
+exemption fails the rule.
+
 The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
 every application-permission grant in the tenant, and both the security audit
 (`prefetch_graph_app_roles`) and the consent view walk it end-to-end *before* they can score
-anything.
+anything. Those two — and only those two — read it through the Permissions-kind read-through
+`list_app_role_assigned_to_cached` (`{tenant}|grants:assigned_to:{sp}`), swept by every grant
+mutator in the client (`invalidate_grant_cache`). A grant changed outside the app (the portal) can
+lag there by up to the Permissions TTL, the same contract as `grants:oauth2_all`; the Cache dialog's
+Permissions clear resets it. Every other `appRoleAssignedTo` reader — the Enterprise Access tab, the
+permission tester, the audit's EWS full-access check, the DR backup's per-SP fallback — calls the
+live `list_app_role_assigned_to`, so its reload or re-run always sees portal-side changes.
+`appRoleAssignments` (what one SP holds) is deliberately **uncached**: it is per-SP and small, and
+the pre-write `existing` checks read it, so it must be live.
 
 The write fan-outs (bulk delete / grant / remove-expired, DR backup writes) **can't `$batch`** —
 Graph batches GETs — so their win is bounded concurrency + adaptive 429 backoff, not round-trip
@@ -302,11 +410,14 @@ sweep — a security-posture surface — could show a revoked grant as still pre
 one) for up to the audit TTL.
 
 The **Key Vault RBAC** reverse-lookup caches its completed sweep under `{tenant}|keyvault_sweep`
-(same `CacheKind::Audit` + TTL). It's a **read-only** view of ARM role assignments — the app grants
-no Key Vault roles — so there's no in-app mutation to invalidate it; the 60-minute TTL and the
-sign-out tenant sweep are the only clears (matching the managed-identity Azure-roles read caches).
-Like the site sweep, a cancelled or partially-failed run is never cached, so coverage is never
-overstated.
+(same `CacheKind::Audit` + TTL). The sweep itself is a **read-only** view of ARM role assignments,
+but the app's own `assign_managed_identity_azure_role` (the Managed Identities pane) can change the
+answer, so it calls `invalidate_kv_sweep` on `Ok` — **unconditionally**, not only for a
+`/providers/Microsoft.KeyVault/vaults/` scope, because a resource-group or subscription-level grant
+reaches every vault beneath it and the sweep keeps the assignment's own scope (pinned by
+`an_azure_role_assignment_busts_the_key_vault_sweep`). The 60-minute TTL and the sign-out tenant
+sweep remain the other clears. Like the site sweep, a cancelled or partially-failed run is never
+cached, so coverage is never overstated.
 
 ## Mailbox-scope verdicts are cached per principal
 
@@ -347,4 +458,16 @@ stays empty.
   than a partial result. Sequential flows that have already mutated (restore, AAP migration) instead
   break each pass and flag the report — stopping is not enough once writes have landed.
 
-Flags: `audit_cancel` (audit + bulk), `sweep_cancel`, `dr_cancel`.
+**One flag per run kind, each with exactly one Cancel command.** `audit_cancel` (`run_audit`,
+`cancel_audit`), `bulk_cancel` (every `bulk_*`, `cancel_bulk`), `migration_cancel` (the AAP
+migration, `cancel_aap_migration`), `site_sweep_cancel` (`sweep_site_permissions`, from the Sites
+tab and the per-app site panel, `cancel_site_sweep`), `key_vault_sweep_cancel`
+(`cancel_key_vault_sweep`), `mailbox_probe_cancel` (`find_mailbox_reachers`,
+`cancel_mailbox_probe`), `backup_cancel` (`cancel_backup`) and `restore_cancel` (`cancel_restore`).
+Why per kind: `CancelFlag::cancel` stamps the flag's current generation, so it stops *every* run on
+the flag, and the views that start these runs stay mounted (keep-alive views, display-toggled
+panels), so runs of different kinds overlap — a shared flag let cancelling a read-only audit halt a
+bulk delete, or a mailbox probe's Cancel throw away a site sweep. The one remaining same-kind
+overlap: two bulk runs started from different bulk action bars share `bulk_cancel`, so one Cancel
+stops both (separating them needs a per-run id). Pinned by `repo_invariants/cancel.rs`
+(`every_cancel_flag_belongs_to_one_run_kind_and_one_cancel_command`).

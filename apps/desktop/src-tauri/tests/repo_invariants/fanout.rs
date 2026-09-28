@@ -3,7 +3,9 @@
 //! A re-auth-fatal failure makes every remaining item fail identically, so a
 //! fan-out that only warns returns a partial result the UI presents as
 //! complete. Checked per `dispatch_capped` **call site** — see [`call_sites`]
-//! for why the whole-file form was unsound.
+//! for why the whole-file form was unsound. Also the page-size rule for the
+//! serial paged Graph reads the fan-outs sit on
+//! ([`every_paged_graph_read_sends_a_page_size`]).
 
 // The module list this file used to carry is gone: the fan-out modules are now
 // whichever modules actually contain a `dispatch_capped` call site, read from
@@ -190,7 +192,6 @@ fn call_sites<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
 #[test]
 fn every_fan_out_command_honours_is_reauth_fatal() {
     let mut missing: Vec<String> = Vec::new();
-    let stale: Vec<&str> = Vec::new();
     let mut checked = 0usize;
 
     for (name, src) in super::sources::command_modules() {
@@ -207,10 +208,9 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
 
         // `run_bulk_seq` gates centrally, in the driver — every caller inherits
         // it, and `a_dead_session_halts_the_run_instead_of_burning_the_selection`
-        // covers it. A module that only drives the sequential path is handled by
-        // that, so it has no call sites to check here.
+        // covers it. So a module that only drives the sequential path has no
+        // `dispatch_capped` sites, and the loop below is empty for it.
         let sites = call_sites(&src, "dispatch_capped");
-        let _handled_by_driver = sites.is_empty() && src.contains("run_bulk_seq(");
 
         for (n, site) in sites.iter().enumerate() {
             // Two accepted shapes. Either the spawn closure gates on the shared
@@ -238,18 +238,14 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
          on `SessionDead::is_dead()`, note failures through it in the collect arm, and return \
          `session.err(..)` rather than a partial result. See commands/backup.rs for the shape."
     );
-    assert!(
-        stale.is_empty(),
-        "these now handle is_reauth_fatal — drop them from KNOWN_GAPS: {stale:?}"
-    );
     // AGENTS.md: KNOWN_GAPS "is empty and must stay so". It was empty, and the
     // test above tolerated entries being ADDED to it — a new fan-out with no
     // dead-session branch could ship by appending one line, and the only
     // pushback would be a staleness message that never fires while the gap is
     // real. An allowlist that can grow is not a ratchet.
     //
-    // Deliberately last, so the two diagnostics above (which say what to fix)
-    // are reached first when several things are wrong at once.
+    // Deliberately last, so the diagnostics above (which say what to fix) are
+    // reached first when several things are wrong at once.
     assert!(
         KNOWN_GAPS.is_empty(),
         "KNOWN_GAPS must stay empty: {KNOWN_GAPS:?}\n\
@@ -349,4 +345,197 @@ fn call_sites_extracts_balanced_calls_and_ignores_lookalikes() {
     );
     // The `use` item and the doc comment are not calls.
     assert!(sites.iter().all(|s| !s.contains("use crate")));
+}
+
+// ── Every paged read sends a page size ─────────────────────────────────────
+
+/// The Graph client's paging helpers. Each follows `@odata.nextLink` serially,
+/// so the first page's size divides the wall clock of the whole read: without
+/// `$top` Graph serves its default of 100, a 10x round-trip multiplier on a
+/// large tenant, and nothing fails. The size rides the `nextLink`, so it only
+/// has to be on the first request — which the CALLER builds, and which is
+/// therefore where the rule looks. (`collect_all_pages(` does not match
+/// `collect_all_pages_capped(`, nor `collect_pages_from(` the scoped
+/// `collect_pages_from_capped(`, so each capped form is listed on its own.)
+const PAGING_HELPERS: &[&str] = &[
+    "collect_all_pages(",
+    "collect_all_pages_capped(",
+    "collect_pages_from(",
+    "collect_pages_from_capped(",
+];
+
+/// What counts as asking for a page size: `$top` as a query pair or inline in
+/// a URL, the shared constants, or the `Prefer: odata.maxpagesize` header a
+/// collection whose `$top` ceiling is too low uses instead.
+const PAGE_SIZE_EVIDENCE: &[&str] = &[
+    "\"$top\"",
+    "$top=",
+    "MAX_PAGE_SIZE",
+    "DEFAULT_APP_PAGE_SIZE",
+    "odata.maxpagesize",
+];
+
+/// Paged reads that legitimately send no page size of their own, each with the
+/// reason. Every entry must still match a real call site (a stale exemption
+/// fails the rule), so this cannot quietly grow into an allowlist.
+const PAGE_SIZE_EXEMPT: &[(&str, &str, &str)] = &[
+    (
+        "applications.rs",
+        "list_applications_all",
+        "page 1 is list_applications, which sends DEFAULT_APP_PAGE_SIZE — pinned by \
+         list_applications_pages_at_the_graph_maximum",
+    ),
+    (
+        "credentials.rs",
+        "list_federated_credentials",
+        "Graph caps federated credentials at 20 per app, so one default page holds them all",
+    ),
+];
+
+/// One entry per paging-helper call site in `src`: the enclosing function and
+/// whether that function's own body asks for a page size. Comment lines never
+/// count either way — `functions_in` drops them, so a doc line that names a
+/// helper is not a call and a comment that names `$top` is not a request.
+fn paged_read_sites(src: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for f in super::sources::functions_in(src) {
+        let calls: usize = PAGING_HELPERS
+            .iter()
+            .map(|h| {
+                f.body
+                    .match_indices(h)
+                    .filter(|(at, _)| {
+                        // A call, not a longer identifier ending in the name.
+                        let prev = f.body[..*at].chars().next_back();
+                        prev.is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+                    })
+                    .count()
+            })
+            .sum();
+        if calls == 0 {
+            continue;
+        }
+        let sized = PAGE_SIZE_EVIDENCE.iter().any(|e| f.body.contains(e));
+        out.extend(std::iter::repeat_n((f.name.clone(), sized), calls));
+    }
+    out
+}
+
+/// AGENTS.md: "Every paged read sends `$top`". Scans the Graph client's domain
+/// modules (not `tests/`), skipping `transport.rs`, where the helpers are
+/// defined, and `batch.rs`, whose continuations follow sub-URLs its callers
+/// built.
+#[test]
+fn every_paged_graph_read_sends_a_page_size() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/azapptoolkit-graph/src/client")
+        .canonicalize()
+        .expect("graph client dir");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+        .expect("read graph client dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "rs"))
+        .collect();
+    files.sort();
+
+    let mut found = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    let mut exemptions_hit: Vec<(&str, &str)> = Vec::new();
+    for path in files {
+        let file = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if file == "transport.rs" || file == "batch.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read graph client source");
+        for (func, sized) in paged_read_sites(super::sources::strip_tests(&text)) {
+            found += 1;
+            if sized {
+                continue;
+            }
+            match PAGE_SIZE_EXEMPT
+                .iter()
+                .find(|(f, name, _)| *f == file && *name == func)
+            {
+                Some((f, name, _)) => exemptions_hit.push((f, name)),
+                None => offenders.push(format!("{file}::{func}")),
+            }
+        }
+    }
+
+    assert!(
+        found >= 20,
+        "found only {found} paged Graph reads — the scan is broken, and a rule that scans \
+         nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "paged Graph read(s) with no page size: {offenders:#?}\n\
+         Paging is serial, so Graph's default page of 100 multiplies the round trips of the whole \
+         read. Send `(\"$top\", MAX_PAGE_SIZE)` (or `$top={{MAX_PAGE_SIZE}}` in the URL, or \
+         `Prefer: odata.maxpagesize` where `$top` is capped lower), or add a justified entry to \
+         `PAGE_SIZE_EXEMPT`."
+    );
+    for (file, func, _) in PAGE_SIZE_EXEMPT {
+        assert!(
+            exemptions_hit.contains(&(file, func)),
+            "stale page-size exemption `{file}::{func}` — it matches no unsized paged read; \
+             remove it"
+        );
+    }
+}
+
+/// The page-size rule must fire on the shape it exists to catch, and not on a
+/// sized read or a doc comment that merely names a helper.
+#[test]
+fn the_page_size_rule_fires_on_a_read_without_top() {
+    let unsized_read = r#"
+    pub async fn list_things(&self) -> Result<Vec<Thing>> {
+        let page = self.get_json("/things", &[], false).await?;
+        self.collect_all_pages(page, false).await
+    }
+"#;
+    assert_eq!(
+        paged_read_sites(unsized_read),
+        vec![("list_things".to_string(), false)]
+    );
+
+    let sized_read = r#"
+    pub async fn list_things(&self) -> Result<Vec<Thing>> {
+        let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
+        let page = self.get_json("/things", &params, false).await?;
+        self.collect_all_pages(page, false).await
+    }
+"#;
+    assert_eq!(
+        paged_read_sites(sized_read),
+        vec![("list_things".to_string(), true)]
+    );
+
+    let doc_only = r#"
+    /// Walks every page via `collect_all_pages(` — prose, not a call.
+    pub async fn get_thing(&self) -> Result<Thing> {
+        // collect_all_pages(page, false) would be wrong here
+        self.get_json("/things/1", &[], false).await
+    }
+"#;
+    assert!(paged_read_sites(doc_only).is_empty());
+
+    // A comment naming `$top` does not satisfy the rule, and the capped helper
+    // is a paging helper too.
+    let comment_top = r#"
+    pub async fn list_capped(&self) -> Result<(Vec<Thing>, bool)> {
+        // TODO: send $top= here
+        let page = self.get_json("/things", &[], false).await?;
+        self.collect_all_pages_capped(page, 10, false).await
+    }
+"#;
+    assert_eq!(
+        paged_read_sites(comment_top),
+        vec![("list_capped".to_string(), false)]
+    );
 }

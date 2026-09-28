@@ -1,17 +1,19 @@
-//! Owners tab. Lists current owners + lets you search and add. Mirrors
-//! `apps/desktop/web/src/views/tabs/OwnersTab.tsx`.
+//! Owners tab. Lists current owners + lets you search and add.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use crate::bindings::applications::{self, ApplicationDetail};
+use crate::components::directory_search::DirectorySearch;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
-use crate::components::ui::DataTable;
-use crate::hooks::use_debounced::use_debounced;
+use crate::components::ui::{DataTable, FormError};
 use crate::state::use_session;
+use crate::util::count_noun;
+use crate::views::dialogs::add_owner::{DefaultOwnersOutcome, add_default_owners};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 fn owner_kind(o: &DirectoryObject) -> &'static str {
@@ -33,8 +35,8 @@ pub fn OwnersTab(
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
+    // Owned here (not by `DirectorySearch`) so a successful add can clear it.
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 300);
     let adding: RwSignal<Option<String>> = RwSignal::new(None);
     let removing: RwSignal<Option<String>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -47,22 +49,13 @@ pub fn OwnersTab(
     let staged: RwSignal<Vec<DirectoryObject>> = RwSignal::new(Vec::new());
     let applying = RwSignal::new(false);
 
-    let candidates = LocalResource::new(move || {
-        let q = query.get();
-        let tenant = session.active_tenant.get();
-        async move {
-            let q = q.trim().to_string();
-            if q.len() < 2 {
-                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
-            }
-            let Some(t) = tenant else {
-                return Ok(Vec::new());
-            };
-            // Carry the error message so a Graph/network failure shows up as an
-            // error instead of being indistinguishable from "No matches."
-            applications::search_users(&t.tenant_id, &q)
-                .await
-                .map_err(|e| e.message)
+    // Hidden from the search: the staged set while replacing, else the
+    // current owners.
+    let exclude = Signal::derive(move || -> HashSet<String> {
+        if replacing.get() {
+            staged.with(|s| s.iter().map(|o| o.id.clone()).collect())
+        } else {
+            detail.with(|d| d.owners.iter().map(|o| o.id.clone()).collect())
         }
     });
 
@@ -109,7 +102,7 @@ pub fn OwnersTab(
         no_owner_defaults.set(false);
         let tenant = session.active_tenant.get();
         let object_id = detail.with_untracked(|d| d.application.id.clone());
-        let existing: std::collections::HashSet<String> =
+        let existing: HashSet<String> =
             detail.with_untracked(|d| d.owners.iter().map(|o| o.id.clone()).collect());
         let on_changed_cb = on_changed;
         leptos::task::spawn_local(async move {
@@ -117,34 +110,22 @@ pub fn OwnersTab(
                 adding_defaults.set(false);
                 return;
             };
-            let defaults = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
-            let owners = defaults.app_registration.default_owners;
-            if owners.is_empty() {
-                no_owner_defaults.set(true);
-                adding_defaults.set(false);
-                return;
-            }
-            let mut added = 0usize;
-            let mut failures = Vec::new();
-            for p in owners {
-                if existing.contains(&p.id) {
-                    continue;
-                }
-                match applications::add_application_owner(&t.tenant_id, &object_id, &p.id).await {
-                    Ok(()) => added += 1,
-                    Err(e) => {
-                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
+            let (added, failures) =
+                match add_default_owners(&t.tenant_id, &object_id, Some(existing)).await {
+                    DefaultOwnersOutcome::NoneConfigured => {
+                        no_owner_defaults.set(true);
+                        adding_defaults.set(false);
+                        return;
                     }
-                }
-            }
-            if !failures.is_empty() {
-                error.set(Some(format!(
-                    "{} default owner(s) failed — {}",
-                    failures.len(),
-                    failures.join("; ")
-                )));
+                    DefaultOwnersOutcome::Done { added, failures } => (added, failures),
+                };
+            if let Some(msg) = DefaultOwnersOutcome::failure_message(&failures) {
+                error.set(Some(msg));
             } else if added > 0 {
-                session.toast_success(format!("Added {added} default owner(s)."));
+                session.toast_success(format!(
+                    "Added {}.",
+                    count_noun(added, "default owner", "default owners")
+                ));
             } else {
                 session.toast_success("Default owners are already present.");
             }
@@ -243,6 +224,15 @@ pub fn OwnersTab(
                 Ok(res) => {
                     replacing.set(false);
                     staged.set(Vec::new());
+                    // A re-auth-fatal failure means the backend stopped the
+                    // reconcile on a dead session: offer Re-authenticate.
+                    if let Some(f) = res.failures.iter().find(|f| f.is_reauth_fatal()) {
+                        session.report_if_session_dead(&azapptoolkit_dto::UiError::new(
+                            f.code.clone(),
+                            f.message.clone(),
+                            false,
+                        ));
+                    }
                     if !res.failures.is_empty() {
                         let details = res
                             .failures
@@ -257,15 +247,18 @@ pub fn OwnersTab(
                             .collect::<Vec<_>>()
                             .join("; ");
                         error.set(Some(format!(
-                            "{} owner change(s) failed — {details}",
-                            res.failures.len()
+                            "{} failed — {details}",
+                            count_noun(res.failures.len(), "owner change", "owner changes")
                         )));
                     } else {
                         session.toast_success("Owners updated.");
                     }
                     on_changed_cb.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    session.report_if_session_dead(&e);
+                    error.set(Some(e.message));
+                }
             }
             applying.set(false);
         });
@@ -311,15 +304,21 @@ pub fn OwnersTab(
                                     .clone()
                                     .or_else(|| o.user_principal_name.clone())
                                     .unwrap_or_default();
+                                let remove_aria = if remove_label.is_empty() {
+                                    format!("Remove owner {}", o.id)
+                                } else {
+                                    format!("Remove owner {remove_label}")
+                                };
                                 view! {
                                     <tr>
                                         <td>{display}</td>
                                         <td class="mono">{upn}</td>
                                         <td>{kind}</td>
-                                        <td>
+                                        <td class="cell-mid">
                                             <Button
                                                 class="button--danger"
                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                attr:aria-label=remove_aria
                                                 disabled=Signal::derive(move || {
                                                     removing.with(|r| r.as_deref() == Some(id_disabled.as_str()))
                                                 })
@@ -358,9 +357,9 @@ pub fn OwnersTab(
                         let items = staged.get();
                         if items.is_empty() {
                             view! {
-                                <Body1 class="form-error">
+                                <FormError>
                                     "No owners staged — applying would leave the app with no explicit owners."
-                                </Body1>
+                                </FormError>
                             }
                                 .into_any()
                         } else {
@@ -374,6 +373,9 @@ pub fn OwnersTab(
                                                 .display_name
                                                 .clone()
                                                 .unwrap_or_else(|| o.id.clone());
+                                            let unstage_aria = format!(
+                                                "Remove {display} from the target owner set",
+                                            );
                                             let upn = o
                                                 .user_principal_name
                                                 .clone()
@@ -387,6 +389,7 @@ pub fn OwnersTab(
                                                     <Button
                                                         class="button--danger"
                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                        attr:aria-label=unstage_aria
                                                         on_click=Box::new(move |_| unstage(id.clone()))
                                                     >
                                                         "Remove"
@@ -446,96 +449,41 @@ pub fn OwnersTab(
                         </Button>
                     </div>
                 </Show>
-                <Field label="Search by display name or UPN (2+ chars)">
-                    <Input value=raw_query placeholder="alice@contoso.com" />
-                </Field>
-                <Suspense fallback=move || {
-                    view! {
-                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" />
-                    }
-                }>
-                    {move || Suspend::new(async move {
-                        let result = candidates.await;
-                        let users = match result {
-                            Ok(users) => users,
-                            Err(msg) => {
-                                return view! {
-                                    <Body1 class="form-error">
-                                        {format!("Search failed: {msg}")}
-                                    </Body1>
-                                }
-                                    .into_any();
-                            }
-                        };
-                        let exclude: std::collections::HashSet<String> = if replacing.get() {
-                            staged.with(|s| s.iter().map(|o| o.id.clone()).collect())
-                        } else {
-                            detail.with(|d| d.owners.iter().map(|o| o.id.clone()).collect())
-                        };
-                        let filtered: Vec<DirectoryObject> = users
-                            .into_iter()
-                            .filter(|u| !exclude.contains(&u.id))
-                            .collect();
-                        if filtered.is_empty() {
-                            return view! { <Body1>"No matches."</Body1> }.into_any();
-                        }
+                // One instance per mode so the row action reads "Stage" or
+                // "Add"; both share `raw_query`, so flipping mode keeps the text.
+                {move || {
+                    if replacing.get() {
                         view! {
-                            <ul class="candidates">
-                                {filtered
-                                    .into_iter()
-                                    .map(|u| {
-                                        let id_disabled = u.id.clone();
-                                        let id_click = u.id.clone();
-                                        let id_label = u.id.clone();
-                                        let u_stage = u.clone();
-                                        let upn = u.user_principal_name.clone().unwrap_or_else(|| u.id.clone());
-                                        let display = u.display_name.clone().unwrap_or_else(|| u.id.clone());
-                                        view! {
-                                            <li>
-                                                <div>
-                                                    <div>{display}</div>
-                                                    <div class="mono small">{upn}</div>
-                                                </div>
-                                                <Button
-                                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                                    disabled=Signal::derive(move || {
-                                                        !replacing.get()
-                                                            && adding.with(|a| a.as_deref() == Some(id_disabled.as_str()))
-                                                    })
-                                                    on_click=Box::new(move |_| {
-                                                        if replacing.get_untracked() {
-                                                            stage(u_stage.clone());
-                                                        } else {
-                                                            add(id_click.clone());
-                                                        }
-                                                    })
-                                                >
-                                                    {move || {
-                                                        if replacing.get() {
-                                                            view! { "Stage" }.into_any()
-                                                        } else if adding
-                                                            .with(|a| a.as_deref() == Some(id_label.as_str()))
-                                                        {
-                                                            view! {
-                                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                                            }
-                                                                .into_any()
-                                                        } else {
-                                                            view! { "Add" }.into_any()
-                                                        }
-                                                    }}
-                                                </Button>
-                                            </li>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </ul>
+                            <DirectorySearch
+                                on_pick=Callback::new(move |u: DirectoryObject| stage(u))
+                                exclude=exclude
+                                query=raw_query
+                                label="Search by display name or UPN (2+ chars)"
+                                placeholder="alice@contoso.com"
+                                action_label="Stage"
+                                clear_on_pick=false
+                            />
                         }
                             .into_any()
-                    })}
-                </Suspense>
+                    } else {
+                        view! {
+                            <DirectorySearch
+                                on_pick=Callback::new(move |u: DirectoryObject| add(u.id))
+                                exclude=exclude
+                                query=raw_query
+                                label="Search by display name or UPN (2+ chars)"
+                                placeholder="alice@contoso.com"
+                                clear_on_pick=false
+                                row_disabled=Callback::new(move |id: String| {
+                                    adding.with(|a| a.as_deref() == Some(id.as_str()))
+                                })
+                            />
+                        }
+                            .into_any()
+                    }
+                }}
             </section>
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <Show when=move || no_owner_defaults.get() fallback=|| ()>
                 <OwnerDefaultsHint class="form-error" tab="app-reg" />
             </Show>

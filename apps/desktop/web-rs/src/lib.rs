@@ -4,13 +4,10 @@
 //! integration tests (a binary-only crate exposes nothing). The Trunk build
 //! still bundles the `main.rs` bin; this split adds no runtime cost.
 //!
-//! Exposing the view/component modules as `pub` (so integration tests can mount
-//! them) makes each `#[component]` fn `pub`, and many take props of crate-
-//! internal types — an intentional design (those types are not part of any
-//! shipped API; the components are only "public" to be test-mountable). Allow
-//! the resulting `private_interfaces` lint crate-wide rather than leaking those
-//! prop types into the public surface.
-#![allow(private_interfaces)]
+//! The view/component modules are `pub` only so integration tests can mount
+//! them. No crate-wide `private_interfaces` allow: every prop type a `pub`
+//! `#[component]` takes is itself reachable, so a crate-internal type leaking
+//! through a `pub` item still warns (and fails `just web-clippy`).
 
 use leptos::prelude::*;
 use thaw::{ConfigProvider, Theme};
@@ -42,7 +39,8 @@ pub mod test_support;
 #[cfg(feature = "demo")]
 pub mod demo;
 
-use bindings::config::AuthConfigStatus;
+use bindings::config::{AuthConfigStatus, ConfigSource};
+use components::browser_fallback_notice::BrowserFallbackNotice;
 use state::{ActiveView, provide_session, use_session};
 use util::keep_alive;
 use views::{
@@ -146,6 +144,8 @@ fn Root() -> impl IntoView {
             configured: true,
             client_id: String::new(),
             tenant_id: String::new(),
+            client_id_source: ConfigSource::Unset,
+            tenant_id_source: ConfigSource::Unset,
         })
     } else {
         None::<AuthConfigStatus>
@@ -156,6 +156,10 @@ fn Root() -> impl IntoView {
     // already — the friction this whole path exists to remove. The demo build
     // starts signed in and never asks.
     let restoring = RwSignal::new(!cfg!(feature = "demo"));
+    // Raised when the launch restore could not reach Entra ID (`network`): the
+    // sign-in card then offers a Retry of the silent restore. Shared with the
+    // card so its Retry and this launch attempt are one code path.
+    let restore_unreachable = RwSignal::new(false);
     // Chained into the config probe rather than spawned beside it: the restore
     // is only meaningful once the app HAS a client/tenant to redeem a refresh
     // token against, and one task is also what makes "exactly once" structural.
@@ -164,18 +168,24 @@ fn Root() -> impl IntoView {
         let status = bindings::config::get_auth_config().await;
         let configured = status.configured;
         config.set(Some(status));
-        // Every failure — nothing stored, a revoked token, an unreachable
-        // keyring — comes back as `Ok(None)` or an `Err` we ignore, and lands on
-        // the untouched sign-in card. Deliberately no error surface here: the
-        // card is the recovery, and it already says what to do.
-        if configured && let Ok(Some(restored)) = bindings::auth::restore_session().await {
-            session.set_active_tenant(Some(restored));
+        // Only an unreachable Entra ID (offline, captive portal, proxy down)
+        // gets a surface: a warning Callout with Retry on the sign-in card, since
+        // the stored session is intact and "sign in" would open a browser that
+        // can't load either. Every other failure — nothing stored, a revoked
+        // token, a locked keyring — lands on the untouched card, which is the
+        // recovery and already says what to do.
+        if configured {
+            views::sign_in::attempt_restore(session, restore_unreachable).await;
         }
         restoring.set(false);
     });
 
     view! {
         <div style="height: 100%; display: flex; flex-direction: column;">
+            // Mounted once, above every screen: sign-in, consent, step-up and
+            // re-auth all run the same browser flow, so a browser that won't
+            // open offers its link here whichever surface started it.
+            <BrowserFallbackNotice />
             {move || match config.get() {
                 None => ().into_any(),
                 // Freshly-downloaded release with no usable client/tenant IDs —
@@ -202,6 +212,7 @@ fn Root() -> impl IntoView {
                                 view! {
                                     <SignInScreen
                                         tenant=tenant_id.clone()
+                                        restore_unreachable=restore_unreachable
                                         // Drops back to the (prefilled) config
                                         // form. Sign-in is the only surface an
                                         // install pointed at the wrong tenant
@@ -309,8 +320,9 @@ fn initial_theme() -> Theme {
 
 /// `build.rs`'s CHANGELOG parser, mounted so its tests run in `cargo test`.
 /// A build script belongs to no test target, and this extraction has a second,
-/// independent implementation in `release.yml` — the edge cases are worth
-/// pinning on at least this side.
+/// independent implementation in `release.yml`; agreement between the two is
+/// pinned by `both_changelog_extractors_produce_the_same_notes`
+/// (`src-tauri/tests/repo_invariants/release.rs`); the edge cases are pinned here.
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;

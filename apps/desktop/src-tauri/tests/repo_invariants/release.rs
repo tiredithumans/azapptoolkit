@@ -1,6 +1,7 @@
 //! Release identity and the hand-mirrored definitions around it: the three
-//! manifests, the web-rs lint block, the CHANGELOG header format, and the
-//! AGENTS.md size budget.
+//! manifests, the web-rs lint block, the CHANGELOG header format, the
+//! AGENTS.md size budget — and who the shipped artifacts reach: the update gate,
+//! the Linux glibc floor and the NSIS install mode.
 
 /// The non-comment, non-blank lines of a TOML block, sorted.
 ///
@@ -241,7 +242,8 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
 
     assert!(
         documented.len() >= 5,
-        "parsed only {documented:?} from AGENTS.md — the line format changed and this test is          checking nothing"
+        "parsed only {documented:?} from AGENTS.md — the line format changed and this test is \
+         checking nothing"
     );
     assert_eq!(
         documented, enforced,
@@ -249,14 +251,20 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
     );
 }
 
+/// `web-rs/build_support.rs` — the parser `web-rs/build.rs` bakes "What's new"
+/// with — mounted so the differential below runs the real `section_for`, not a
+/// copy of it.
+#[path = "../../../web-rs/build_support.rs"]
+mod build_support;
+
 /// The two CHANGELOG section extractors agree.
 ///
-/// There are two, in different languages, and the Rust one's own header comment
-/// says they "are expected to produce identical text for a release; nothing
-/// checks that". This is that check.
+/// There are two, in different languages, and they are expected to produce
+/// identical text for a release. This is the check that they do.
 ///
 /// * Rust — `web-rs/build_support.rs::section_for`, bakes the in-app
-///   "What's new" panel at compile time.
+///   "What's new" panel at compile time. The real function is mounted above
+///   via `#[path]`, so an edit to the parser changes this differential.
 /// * PowerShell — `release.yml`, fills the updater manifest's `notes` field,
 ///   which is what the update splash shows.
 ///
@@ -274,20 +282,6 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
 /// CHANGELOG will tell you whether the two still match.
 #[test]
 fn both_changelog_extractors_produce_the_same_notes() {
-    /// The Rust parser, mirroring `web-rs/build_support.rs::section_for`.
-    fn rust_semantics(changelog: &str, version: &str) -> Option<String> {
-        let header = format!("## [{version}]");
-        let mut lines = changelog.lines().skip_while(|l| !l.starts_with(&header));
-        lines.next()?;
-        let body = lines
-            .take_while(|l| !l.starts_with("## ["))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        (!body.is_empty()).then_some(body)
-    }
-
     /// A port of `release.yml`'s loop: skip until the target header, collect
     /// until the next `## [` header, trim. Empty ⇒ the workflow substitutes its
     /// own fallback sentence, which is `None` here.
@@ -339,7 +333,7 @@ fn both_changelog_extractors_produce_the_same_notes() {
 
     for v in &versions {
         assert_eq!(
-            rust_semantics(changelog, v),
+            build_support::section_for(changelog, v),
             powershell_semantics(changelog, v),
             "the in-app 'What's new' panel and the updater's release notes would show DIFFERENT \
              text for {v}. One is baked by web-rs/build_support.rs, the other by release.yml — \
@@ -352,7 +346,7 @@ fn both_changelog_extractors_produce_the_same_notes() {
     // workflow and invisible to the bake. `changelog_headers_match_what_both_
     // parsers_require` is what keeps it out of the real file.
     let sloppy = "##  [1.2.3] - 2026-01-01\n\n- note\n";
-    assert_eq!(rust_semantics(sloppy, "1.2.3"), None);
+    assert_eq!(build_support::section_for(sloppy, "1.2.3"), None);
     assert_eq!(
         powershell_semantics(sloppy, "1.2.3"),
         Some("- note".to_string()),
@@ -447,4 +441,293 @@ fn verify_full_runs_every_gate_ci_runs() {
          opening a PR. Add them to the recipe, or add them to NOT_A_GATE with a reason if they \
          are helpers rather than checks."
     );
+}
+
+/// The CI change detector must not classify as docs a file a test here pins.
+///
+/// ci.yml's `changes` job skips `just test` when a diff is docs-only (`*.md`,
+/// `docs/`, `.claude/`, …) — yet AGENTS.md, CHANGELOG.md, README.md, an
+/// architecture doc and the commit hook are all `include_str!`d by these tests.
+/// A PR touching only one of them merged green with the test that pins it
+/// skipped, and the failure surfaced on the next unrelated code PR (or, for the
+/// CHANGELOG header, at release time). The detector therefore carries an
+/// exceptions arm ahead of its docs arm.
+///
+/// Derived, not listed: every `include_str!` under `tests/` is resolved, and each
+/// path the docs arm would match must also be matched by the exceptions arm. So
+/// a new test that pins another doc fails here until the detector learns it.
+#[test]
+fn docs_only_ci_detector_runs_the_tests_that_pin_docs() {
+    use std::path::{Path, PathBuf};
+
+    let ci = include_str!("../../../../../.github/workflows/ci.yml");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = manifest
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root resolves");
+
+    /// A `case` arm's patterns: the text before `)`, split on `|`.
+    fn arm_patterns(line: &str) -> Vec<&str> {
+        line.trim()
+            .split_once(')')
+            .map(|(pats, _)| pats.split('|').map(str::trim).collect())
+            .unwrap_or_default()
+    }
+    /// The subset of shell `case` globbing the detector uses: a leading `*` is a
+    /// suffix match, a trailing `*` a prefix match (`*` crosses `/` in `case`),
+    /// anything else exact.
+    fn glob(pattern: &str, path: &str) -> bool {
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            path.ends_with(suffix)
+        } else if let Some(prefix) = pattern.strip_suffix('*') {
+            path.starts_with(prefix)
+        } else {
+            path == pattern
+        }
+    }
+
+    // The exceptions arm (`… ) code=true ;;`, not the `*)` catch-all) and the
+    // docs arm (`… ) : ;;`).
+    let exceptions = ci
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with(") code=true ;;") && !l.starts_with("*)"))
+        .map(arm_patterns)
+        .unwrap_or_default();
+    let docs = ci
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains(") : ;;"))
+        .map(arm_patterns)
+        .unwrap_or_default();
+    assert!(
+        !exceptions.is_empty(),
+        "ci.yml's change detector has no exceptions arm (`<paths>) code=true ;;` ahead of the \
+         docs arm) — the rule below would pass vacuously"
+    );
+    assert!(
+        !docs.is_empty(),
+        "ci.yml's change detector docs arm (`<globs>) : ;;`) not found — did the detector move?"
+    );
+
+    // Every `.rs` under tests/, recursively (same walk as `sources.rs`).
+    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![manifest.join("tests")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+
+    let needle = concat!("include_str", "!(");
+    let mut pinned_docs: Vec<String> = Vec::new();
+    for file in &sources {
+        let src = std::fs::read_to_string(file).expect("test source is readable");
+        // Comments may mention the macro; only code pins a file.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find(needle) {
+            rest = rest[at + needle.len()..].trim_start();
+            let Some(lit) = rest.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = lit.find('"') else {
+                break;
+            };
+            let target = file
+                .parent()
+                .expect("a source file has a parent")
+                .join(&lit[..end]);
+            rest = &lit[end + 1..];
+            let Ok(abs) = target.canonicalize() else {
+                continue;
+            };
+            let Ok(rel) = abs.strip_prefix(&repo) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if docs.iter().any(|p| glob(p, &rel)) && !pinned_docs.contains(&rel) {
+                pinned_docs.push(rel);
+            }
+        }
+    }
+    pinned_docs.sort();
+    assert!(
+        // AGENTS.md, CHANGELOG.md, README.md, caching-and-search.md and the
+        // commit hook today. Far fewer means the scan stopped seeing the pins.
+        pinned_docs.len() >= 4,
+        "found only {pinned_docs:?} docs-classified file(s) pinned by `include_str!` under tests/ \
+         — the scan is broken, and this rule would pass vacuously"
+    );
+
+    let unguarded: Vec<&String> = pinned_docs
+        .iter()
+        .filter(|path| !exceptions.iter().any(|p| glob(p, path)))
+        .collect();
+    assert!(
+        unguarded.is_empty(),
+        "these files are `include_str!`d by a test yet ci.yml's change detector classifies them \
+         as docs, so a PR touching only them skips `just test`: {unguarded:?}\n\
+         Add each to the detector's exceptions arm (`… ) code=true ;;`, ahead of the docs arm) \
+         in .github/workflows/ci.yml."
+    );
+}
+
+/// The documented opt-out and the MSI / .deb / .rpm formats are honoured only
+/// if both updater commands ask `update_gate` BEFORE they touch the updater
+/// plugin — `app.updater()` is the first step towards the release endpoint.
+/// The gate was once documented but never read by either command.
+#[test]
+fn updater_commands_consult_the_update_gate_before_the_network() {
+    let commands = super::sources::commands();
+    for name in ["check_for_update", "perform_update"] {
+        let cmd = commands.iter().find(|c| c.name == name).unwrap_or_else(|| {
+            panic!(
+                "updater command `{name}` not found under src/commands — renamed? Update this \
+                     rule rather than letting it pass vacuously"
+            )
+        });
+        let gate = cmd.body.find("update_gate(").unwrap_or_else(|| {
+            panic!(
+                "`{name}` ({}) never calls `update_gate()`: the auto-update opt-out and the \
+                 MSI/.deb gate would be ignored",
+                cmd.module
+            )
+        });
+        let network = cmd.body.find(".updater()").unwrap_or_else(|| {
+            panic!(
+                "`{name}` ({}) no longer calls `.updater()` — the scan cannot place the gate",
+                cmd.module
+            )
+        });
+        assert!(
+            gate < network,
+            "`{name}` ({}) reaches `.updater()` before `update_gate()`: an opted-out or \
+             externally managed install would still contact the release endpoint",
+            cmd.module
+        );
+    }
+}
+
+/// Auto-update is interactive (AGENTS.md): only the UpdateSplash's click
+/// handler may install. A launch-time `perform_update` — or a second installer
+/// path in the backend — would reintroduce the silent install.
+#[test]
+fn only_the_update_splash_installs_an_update() {
+    let callers: Vec<String> = super::sources::web_modules()
+        .into_iter()
+        .filter(|(path, src)| path != "bindings/updater.rs" && src.contains("perform_update("))
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(
+        callers,
+        vec!["components/update_splash.rs".to_string()],
+        "only the UpdateSplash may call `perform_update`: any other caller can install \
+         without the operator's click"
+    );
+    let splash = super::sources::web_modules()
+        .into_iter()
+        .find(|(path, _)| path == "components/update_splash.rs")
+        .map(|(_, src)| src)
+        .expect("update_splash.rs");
+    let handler = splash.find("let do_update").expect(
+        "UpdateSplash no longer defines `do_update` — renamed? Update this rule rather than \
+         letting it pass vacuously",
+    );
+    let call = splash.find("updater::perform_update(").expect(
+        "UpdateSplash no longer calls `updater::perform_update(` — renamed? Update this rule \
+         rather than letting it pass vacuously",
+    );
+    assert!(
+        handler < call,
+        "`perform_update` must be called from inside the `do_update` click handler"
+    );
+    assert!(
+        splash.contains("on_click=Box::new(do_update)"),
+        "`do_update` must be the Update button's click handler, not run on mount"
+    );
+
+    let installers: Vec<String> = super::sources::commands()
+        .into_iter()
+        .filter(|c| c.body.contains("download_and_install"))
+        .map(|c| c.name.to_string())
+        .collect();
+    assert_eq!(
+        installers,
+        vec!["perform_update".to_string()],
+        "only the `perform_update` command may download and install an update"
+    );
+    let total: usize = super::sources::command_modules()
+        .iter()
+        .map(|(_, src)| src.matches(".download_and_install(").count())
+        .sum();
+    assert_eq!(
+        total, 1,
+        "exactly one `.download_and_install(` may exist under src/commands (in `perform_update`)"
+    );
+}
+
+/// glibc symbol versions bind to the BUILD host's libc, so the Linux release
+/// runner IS the oldest distro the AppImage/.deb can start on. A floating
+/// `ubuntu-latest` silently raised the floor to glibc 2.38; the pin, the
+/// guard's floor and the README's stated floor must move together.
+#[test]
+fn the_linux_release_leg_is_pinned_to_its_glibc_floor() {
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    assert!(
+        release.contains("- os: ubuntu-22.04"),
+        "release.yml's Linux matrix leg must build on ubuntu-22.04 (glibc 2.35), the floor the \
+         README documents"
+    );
+    assert!(
+        !release.contains("- os: ubuntu-latest"),
+        "a release matrix leg builds on floating ubuntu-latest: its glibc floor moves with \
+         GitHub's runner image"
+    );
+    assert!(
+        release.contains("GLIBC_FLOOR: \"2.35\""),
+        "release.yml lost the objdump guard that fails a build needing glibc newer than 2.35"
+    );
+    let readme = include_str!("../../../../../README.md");
+    assert!(
+        readme.contains("glibc 2.35"),
+        "README no longer states the Linux glibc floor (2.35) the release leg is pinned to"
+    );
+}
+
+/// Tauri's default NSIS `installMode` is `currentUser`: per-user, no prompt, no
+/// admin rights — what the README and release body promise, and what keeps the
+/// passive `/P /UPDATE` relaunch UAC-free. Parsed, not string-matched:
+/// `plugins.updater.windows.installMode` is an unrelated key of the same name.
+#[test]
+fn nsis_install_mode_stays_current_user() {
+    for (file, src) in [
+        ("tauri.conf.json", include_str!("../../tauri.conf.json")),
+        (
+            "updater-build.json",
+            include_str!("../../updater-build.json"),
+        ),
+    ] {
+        let conf: serde_json::Value =
+            serde_json::from_str(src).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
+        let mode = &conf["bundle"]["windows"]["nsis"]["installMode"];
+        assert!(
+            mode.is_null() || mode == "currentUser",
+            "{file} sets bundle.windows.nsis.installMode = {mode}; keep Tauri's default \
+             `currentUser` (per-user, no admin, UAC-free passive updates)"
+        );
+    }
 }

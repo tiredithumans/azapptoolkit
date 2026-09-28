@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 ///   + `id` (the source property, e.g. `userprincipalname`),
 /// - **extension attribute**: `source` + `extension_id`,
 /// - **constant**: `value` only (no `source`),
-/// - **transformation-sourced**: `source = "transformation"` + `id` (the
-///   transformation's id; emitted as `TransformationID` in the Graph schema).
+/// - **transformation-sourced**: `source = "transformation"` + `id` (this
+///   entry's own `ID`, which the transformation's `OutputClaims[].ClaimTypeReferenceId`
+///   joins to) + `transformation_id` (the `ID` of the `ClaimsTransformation`
+///   entry that generates the value, emitted as `TransformationID`).
 ///
 /// The emitted claim is named by `saml_claim_type` (SAML token claim URI) and/or
 /// `jwt_claim_type` (JWT/OIDC token claim name); at least one is normally set.
@@ -29,10 +31,17 @@ pub struct ClaimSchemaEntryDto {
     /// `transformation`. `None` ⇒ a constant claim (`value`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// `ID` — the source attribute; or the transformation id when
-    /// `source == "transformation"` (emitted as `TransformationID`).
+    /// `ID` — the source attribute; for a transformation-sourced entry, this
+    /// entry's own id (what `OutputClaims[].ClaimTypeReferenceId` joins to).
+    /// Always emitted as `ID`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// `TransformationID` — for `source == "transformation"`, the `ID` of the
+    /// `ClaimsTransformation` entry that generates this claim's value. Distinct from
+    /// `id`, which is this schema entry's OWN `ID` — the value a transformation's
+    /// `OutputClaims[].ClaimTypeReferenceId` joins to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformation_id: Option<String>,
     /// `ExtensionID` — a directory extension attribute (alternative to `id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
@@ -71,6 +80,9 @@ pub struct TransformParamDto {
     pub id: String,
     /// `Value` — the constant value passed to the transformation.
     pub value: String,
+    /// `DataType` (e.g. `string`) — optional; round-tripped so a save never drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
 }
 
 /// An output claim produced by a claims transformation (`OutputClaims[]`).
@@ -88,7 +100,8 @@ pub struct TransformOutputClaimDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimsTransformationDto {
-    /// `ID` — referenced by a schema entry's `TransformationID`. Must be unique.
+    /// `ID` — referenced by a schema entry's `transformation_id`
+    /// (`TransformationID`). Must be unique.
     pub id: String,
     /// `TransformationMethod` — `Join` | `ExtractMailPrefix` | `ToLowercase()` |
     /// `ToUppercase()` | `RegexReplace()`.
@@ -171,8 +184,7 @@ pub struct SamlSsoConfigInput {
     /// Certificate validity in days; defaults to 365 server-side.
     pub cert_lifetime_days: Option<u32>,
     /// Optional custom claims-mapping policy; `None`/empty leaves Entra's default
-    /// claim set (and avoids the `Policy.ReadWrite.ApplicationConfiguration`
-    /// consent).
+    /// claim set (and avoids the claims-mapping policy consent).
     #[serde(default)]
     pub claims_policy: Option<ClaimsPolicyDto>,
     /// Optional SAML signing-certificate expiry notification recipients
@@ -192,7 +204,8 @@ pub struct OidcSsoConfigInput {
     pub spa_redirect_uris: Vec<String>,
     /// When set, mint a client secret with this display name (returned once).
     pub secret_display_name: Option<String>,
-    /// Secret lifetime in days; defaults to 180 server-side when omitted.
+    /// Secret lifetime in days, 1–730 (Entra's 24-month cap; anything else is
+    /// rejected before the app is created); defaults to 180 server-side when omitted.
     pub secret_lifetime_days: Option<u32>,
 }
 
@@ -205,11 +218,14 @@ pub struct SamlSsoSummary {
     pub service_principal_id: String,
     /// Application (client) id.
     pub app_id: String,
-    /// Microsoft Entra Identifier / Issuer: `https://sts.windows.net/{tenant}/`.
+    /// Microsoft Entra Identifier / Issuer: `https://sts.windows.net/{tenant}/`
+    /// (commercial shown; follows the configured cloud).
     pub entity_id_issuer: String,
-    /// Login URL: `https://login.microsoftonline.com/{tenant}/saml2`.
+    /// Login URL: `https://login.microsoftonline.com/{tenant}/saml2`
+    /// (commercial shown; follows the configured cloud).
     pub login_url: String,
-    /// Logout URL: `https://login.microsoftonline.com/{tenant}/saml2`.
+    /// Logout URL: `https://login.microsoftonline.com/{tenant}/saml2`
+    /// (commercial shown; follows the configured cloud).
     pub logout_url: String,
     /// App Federation Metadata URL.
     pub federation_metadata_url: String,
@@ -219,9 +235,17 @@ pub struct SamlSsoSummary {
     pub reply_url: String,
     pub signing_cert_base64: Option<String>,
     pub signing_cert_thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): minted
+    /// with `to_rfc3339()` at creation; `get_sso_config`'s summary copies
+    /// [`SsoConfigDto::signing_cert_expiry`], Graph's text verbatim.
     pub signing_cert_expiry: Option<String>,
     /// Set when a custom claims-mapping policy was created and assigned.
     pub claims_policy_id: Option<String>,
+    /// Best-effort create steps that did not land (custom claims, notification
+    /// emails), as operator-facing messages. Empty on success and always empty
+    /// in the summary `get_sso_config` carries.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// App-owner output summary for an OIDC SSO integration. Also the result of
@@ -233,7 +257,8 @@ pub struct OidcSsoSummary {
     pub service_principal_id: String,
     pub client_id: String,
     pub tenant_id: String,
-    /// Authority: `https://login.microsoftonline.com/{tenant}/v2.0`.
+    /// Authority: `https://login.microsoftonline.com/{tenant}/v2.0`
+    /// (commercial shown; follows the configured cloud).
     pub authority: String,
     /// OIDC discovery document URL.
     pub discovery_url: String,
@@ -242,6 +267,9 @@ pub struct OidcSsoSummary {
     #[serde(default)]
     pub spa_redirect_uris: Vec<String>,
     pub client_secret: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// new secret's typed `endDateTime` via `to_rfc3339()`; `None` whenever
+    /// `client_secret` is.
     pub client_secret_expiry: Option<String>,
 }
 // Hand-written rather than derived: the workspace treats a derived `Debug` on
@@ -274,6 +302,9 @@ pub struct SsoConfigDto {
     pub service_principal_id: String,
     pub app_id: String,
     /// `preferredSingleSignOnMode`: `saml`, `oidc`, `password`, … or `None`.
+    /// Kept as Graph's open vocabulary (`password`, `linked`, `notSupported`, …)
+    /// rather than an [`SsoMode`], which models only what this app can set and
+    /// would lose the rest; [`SsoMode::from_graph`] is the one reading of it.
     pub sso_mode: Option<String>,
     /// `identifierUris[0]` (SAML Entity ID), if any. Kept for the app-owner
     /// summary; the SSO tab edits the full [`Self::identifier_uris`] list.
@@ -289,17 +320,101 @@ pub struct SsoConfigDto {
     #[serde(default)]
     pub spa_redirect_uris: Vec<String>,
     pub signing_cert_thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// preferred signing cert's `keyCredentials` `endDateTime`, Graph's text
+    /// verbatim and unparsed.
     pub signing_cert_expiry: Option<String>,
     /// SAML signing-cert expiry notification recipients
     /// (`notificationEmailAddresses` on the service principal).
     #[serde(default)]
     pub notification_emails: Vec<String>,
     /// The currently assigned claims-mapping policy, decoded for editing.
-    /// `None` when no policy is assigned (or the read was skipped on missing
-    /// scope/consent).
+    /// `None` means no policy is assigned — meaningful only when
+    /// [`Self::claims_read_failed`] is false.
     #[serde(default)]
     pub claims_policy: Option<ClaimsPolicyDto>,
     pub claims_policy_id: Option<String>,
+    /// True when the assigned claims-mapping policy could NOT be read (consent for
+    /// the policy-write bundle not granted yet, a 403, a transient failure). Then
+    /// `claims_policy == None` means "unknown", not "no policy": the SSO tab must
+    /// not offer Save, or it would replace claims the operator never saw.
+    #[serde(default)]
+    pub claims_read_failed: bool,
+    /// App-owner summary ("Details for the application owner"), `Some` only
+    /// when the saved mode is SAML or OIDC. Built from this same read plus the
+    /// cloud's static URL formulas, so the tab needs no second round trip.
+    #[serde(default)]
+    pub summary: Option<SsoSummary>,
+    /// Rollover state projected from the SAME service-principal read (SAML
+    /// only) — the signing-certificate panel's initial state. The panel
+    /// re-reads through `get_signing_cert_rollover` only after its own actions.
+    #[serde(default)]
+    pub rollover: Option<SigningCertRolloverDto>,
+}
+
+/// The SSO mode this app can set on a service principal
+/// (`preferredSingleSignOnMode`). `Disabled` clears the preference. The wire
+/// strings (`"saml"`, `"oidc"`, `"disabled"`) are exact: an unknown or
+/// mis-cased value fails deserialisation instead of mapping to `Disabled`,
+/// so a typo can never clear an app's SSO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SsoMode {
+    Saml,
+    Oidc,
+    Disabled,
+}
+
+impl SsoMode {
+    /// The wire string (also the SSO tab's `<option value>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Saml => "saml",
+            Self::Oidc => "oidc",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Exact inverse of [`Self::as_str`]: `"SAML"` or `""` is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "saml" => Some(Self::Saml),
+            "oidc" => Some(Self::Oidc),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// Reads Graph's `preferredSingleSignOnMode`: `saml` / `oidc` map to their
+    /// variant; anything else (unset, `password`, `notSupported`, …) is not a
+    /// mode this app manages and reads as `Disabled`.
+    pub fn from_graph(preferred: Option<&str>) -> Self {
+        match preferred {
+            Some("saml") => Self::Saml,
+            Some("oidc") => Self::Oidc,
+            _ => Self::Disabled,
+        }
+    }
+
+    /// The `preferredSingleSignOnMode` value to PATCH: `None` clears it.
+    pub fn graph_value(self) -> Option<&'static str> {
+        match self {
+            Self::Saml => Some("saml"),
+            Self::Oidc => Some("oidc"),
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// The app-owner summary of an existing SSO integration, tagged by protocol
+/// on the wire (`"protocol": "saml" | "oidc"`) so the frontend never guesses
+/// which shape it holds. The derived `Debug` delegates to
+/// [`OidcSsoSummary`]'s redacting one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "protocol", rename_all = "lowercase")]
+pub enum SsoSummary {
+    Saml(SamlSsoSummary),
+    Oidc(OidcSsoSummary),
 }
 
 /// Lifecycle position of one SAML token-signing certificate. Derived from live
@@ -357,6 +472,10 @@ pub struct SigningCertDto {
     /// differ in case, so every comparison against it is case-insensitive.
     pub thumbprint: String,
     pub display_name: Option<String>,
+    /// RFC3339 UTC `String` stamps (see the crate doc's *Timestamps*): the
+    /// `keyCredentials` entry's `startDateTime` / `endDateTime`, read from
+    /// untyped JSON and passed through verbatim, so one odd value degrades
+    /// only its own field.
     pub start_date_time: Option<String>,
     pub end_date_time: Option<String>,
     /// Matches `preferredTokenSigningKeyThumbprint`. Independent of
@@ -379,7 +498,9 @@ pub struct SigningCertRolloverDto {
     pub federation_metadata_url: String,
     /// Newest first. Includes expired certificates so retire can clear them.
     pub certs: Vec<SigningCertDto>,
-    /// `preferredTokenSigningKeyThumbprint` as Entra has it, expired or not.
+    /// `preferredTokenSigningKeyThumbprint` normalised through
+    /// `thumbprint::canonical` (raw only if it cannot be normalised), expired
+    /// or not.
     pub active_thumbprint: Option<String>,
     pub staged_thumbprint: Option<String>,
     pub phase: RolloverPhase,
@@ -387,7 +508,9 @@ pub struct SigningCertRolloverDto {
     /// staged. Entra silently promotes a valid inactive certificate once the
     /// active one expires, so with a certificate staged this is a hard deadline
     /// for an intentional activation — not a soft warning. A value in the past
-    /// means Entra has already promoted for you.
+    /// means Entra has already promoted for you. An RFC3339 UTC `String`
+    /// stamp (see the crate doc's *Timestamps*), copied from the active
+    /// [`SigningCertDto::end_date_time`].
     pub auto_promote_deadline: Option<String>,
 }
 
@@ -406,6 +529,8 @@ pub struct SigningCertRolloverDto {
 /// reports, never as a security primitive.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataProbeDto {
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*), minted
+    /// by the backend when the fetch ran.
     pub fetched_at: String,
     /// Distinct signing certificates published, deduped by body. Two or more
     /// means an app that polls metadata can see the staged certificate.
@@ -431,6 +556,8 @@ pub struct MetadataProbeDto {
 pub struct SsoCertResult {
     pub thumbprint: String,
     pub base64: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// minted certificate's typed `endDateTime` via `to_rfc3339()`.
     pub expiry: Option<String>,
 }
 
@@ -453,6 +580,8 @@ pub struct SsoCertificateRowDto {
     pub display_name: String,
     /// The active certificate's thumbprint (`preferredTokenSigningKeyThumbprint`).
     pub thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*), copied
+    /// from the active [`SigningCertDto::end_date_time`].
     pub end_date_time: Option<String>,
     pub days_to_expiry: Option<i64>,
     pub status: azapptoolkit_core::audit::CredentialStatus,
@@ -568,6 +697,7 @@ mod tests {
         // Unset optionals must not serialize (camelCase + skip_serializing_if).
         assert!(json.get("source").is_none());
         assert!(json.get("id").is_none());
+        assert!(json.get("transformationId").is_none());
         assert!(json.get("samlClaimType").is_none());
     }
 
@@ -598,5 +728,104 @@ mod tests {
         let back: OidcSsoSummary =
             serde_json::from_str(&serde_json::to_string(&oidc).unwrap()).unwrap();
         assert_eq!(back.client_id, "c");
+    }
+
+    #[test]
+    fn sso_mode_wire_strings_are_the_ones_the_tab_sends() {
+        for (mode, wire, graph) in [
+            (SsoMode::Saml, "saml", Some("saml")),
+            (SsoMode::Oidc, "oidc", Some("oidc")),
+            (SsoMode::Disabled, "disabled", None),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<SsoMode>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+            assert_eq!(mode.as_str(), wire);
+            assert_eq!(SsoMode::parse(wire), Some(mode));
+            assert_eq!(mode.graph_value(), graph);
+        }
+        // An unknown or mis-cased mode fails instead of clearing SSO.
+        for bad in ["SAML", "", "password", "none"] {
+            assert!(
+                serde_json::from_value::<SsoMode>(serde_json::json!(bad)).is_err(),
+                "{bad:?} must not deserialise"
+            );
+            assert_eq!(SsoMode::parse(bad), None, "{bad:?}");
+        }
+        for (preferred, mode) in [
+            (Some("saml"), SsoMode::Saml),
+            (Some("oidc"), SsoMode::Oidc),
+            (Some("password"), SsoMode::Disabled),
+            (Some("notSupported"), SsoMode::Disabled),
+            (Some("SAML"), SsoMode::Disabled),
+            (None, SsoMode::Disabled),
+        ] {
+            assert_eq!(SsoMode::from_graph(preferred), mode, "{preferred:?}");
+        }
+    }
+
+    #[test]
+    fn sso_summary_is_tagged_by_protocol() {
+        let saml = SsoSummary::Saml(SamlSsoSummary {
+            app_id: "a".into(),
+            ..Default::default()
+        });
+        let v = serde_json::to_value(&saml).unwrap();
+        assert_eq!(v["protocol"], "saml");
+        assert_eq!(v["app_id"], "a");
+        match serde_json::from_value::<SsoSummary>(v).unwrap() {
+            SsoSummary::Saml(s) => assert_eq!(s.app_id, "a"),
+            SsoSummary::Oidc(_) => panic!("a SAML summary came back as OIDC"),
+        }
+
+        let oidc = SsoSummary::Oidc(OidcSsoSummary {
+            client_id: "c".into(),
+            ..Default::default()
+        });
+        let v = serde_json::to_value(&oidc).unwrap();
+        assert_eq!(v["protocol"], "oidc");
+        match serde_json::from_value::<SsoSummary>(v).unwrap() {
+            SsoSummary::Oidc(s) => assert_eq!(s.client_id, "c"),
+            SsoSummary::Saml(_) => panic!("an OIDC summary came back as SAML"),
+        }
+    }
+
+    #[test]
+    fn an_sso_config_without_summary_or_rollover_still_parses() {
+        let cfg: SsoConfigDto = serde_json::from_value(serde_json::json!({
+            "object_id": "o", "service_principal_id": "s", "app_id": "a",
+            "sso_mode": "saml", "entity_id": null, "logout_url": null,
+            "signing_cert_thumbprint": null, "signing_cert_expiry": null,
+            "claims_policy_id": null
+        }))
+        .unwrap();
+        assert!(cfg.summary.is_none());
+        assert!(cfg.rollover.is_none());
+    }
+
+    /// `warnings` is additive on the wire: a summary serialized without it
+    /// (an older backend, a hand-written fixture) still deserializes, and a
+    /// populated list survives the round trip.
+    #[test]
+    fn saml_summary_warnings_default_and_round_trip() {
+        let bare: SamlSsoSummary = serde_json::from_value(serde_json::json!({
+            "object_id": "o", "service_principal_id": "s", "app_id": "a",
+            "entity_id_issuer": "", "login_url": "", "logout_url": "",
+            "federation_metadata_url": "", "sp_entity_id": "", "reply_url": "",
+            "signing_cert_base64": null, "signing_cert_thumbprint": null,
+            "signing_cert_expiry": null, "claims_policy_id": null
+        }))
+        .unwrap();
+        assert!(bare.warnings.is_empty());
+
+        let saml = SamlSsoSummary {
+            warnings: vec!["x".into()],
+            ..Default::default()
+        };
+        let back: SamlSsoSummary =
+            serde_json::from_str(&serde_json::to_string(&saml).unwrap()).unwrap();
+        assert_eq!(back.warnings, vec!["x".to_string()]);
     }
 }

@@ -1,9 +1,10 @@
 //! Truncation notice for the surfaces built on the shared service-principal
 //! index.
 //!
-//! The App Registrations list detects its own cap with `total >= APPS_HARD_CAP`,
-//! because its rows *are* the capped set. The Enterprise Applications and
-//! Managed Identities lists cannot: both are filtered subsets of the SP index
+//! The App Registrations list detects its own cap with `total >= APPS_MAX` (the
+//! constant `azapptoolkit_dto` shares with the backend), because its rows *are*
+//! the capped set. The Enterprise Applications and Managed Identities lists
+//! cannot: both are filtered subsets of the SP index
 //! (one drops managed identities, the other keeps only them), so their row
 //! counts sit below the cap even on a tenant whose index truncated — a
 //! `len() >= cap` check there would never fire. They ask the backend instead.
@@ -14,10 +15,12 @@
 //! enterprise applications" and the operator concludes it isn't in the tenant.
 //!
 //! The wording lives in [`index_cap_message`] rather than in the component, so
-//! the top-bar search dropdown — which filters a corpus built from the *same*
-//! capped index, and so can answer "No matches." for a principal that is
-//! genuinely present — says the same thing rather than a second, subtly
-//! different thing about the same cap.
+//! every surface says the same thing rather than a second, subtly different
+//! thing about the same cap. The top-bar search dropdown filters a corpus built
+//! from the *same* capped SP index **and** the app-registration index (capped at
+//! the same number), so either cap can make it answer "No matches." for a record
+//! that is genuinely present; its form, [`corpus_cap_message`], names both and
+//! lives here beside the list form.
 
 use leptos::prelude::*;
 
@@ -38,6 +41,15 @@ pub fn index_cap_message(cap: usize, noun: &str) -> String {
         "This tenant has more than {cap} service principals. Only the first {cap} are loaded, \
          so this list — and its search and filters — cover that subset. A {noun} outside it \
          will not appear."
+    )
+}
+
+/// The search dropdown's form of [`index_cap_message`]. Its corpus is built from
+/// BOTH tenant-wide indexes, so either cap can hide a record.
+pub fn corpus_cap_message(cap: usize) -> String {
+    format!(
+        "This tenant has more than {cap} service principals or app registrations. Search \
+         covers only the first {cap} of each, so a record outside them will not appear."
     )
 }
 

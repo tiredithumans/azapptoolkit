@@ -5,10 +5,18 @@
 //! surface's own hook — [`crate::hooks::use_escape`],
 //! [`crate::hooks::use_grid_keynav`] — not here.
 //!
-//! **Typing must never be hijacked.** Every binding is skipped while focus is in
-//! a text field or a `contenteditable` region, except the modified ones
-//! (Cmd/Ctrl-…) that can't collide with typing. This is why `/` is safe as a
-//! bare key: it reaches the handler only when the operator is not in an input.
+//! **Typing must never be hijacked.** Every bare-key binding is skipped while
+//! focus is in text entry ([`crate::hooks::is_text_entry`] — the one predicate,
+//! shared with the grid hook; a focused checkbox, radio or button is not
+//! typing), except the modified ones (Cmd/Ctrl-…) that can't collide with
+//! typing. This is why `/` is safe as a bare key: it reaches the handler only
+//! when the operator is not in a text field.
+//!
+//! **A dialog owns the keyboard.** Bare keys also no-op while any modal is open
+//! ([`crate::hooks::modal_is_open`]): `?` would otherwise stack the sheet over
+//! the dialog (one Escape then closed both), and `/` would pull focus out of the
+//! dialog's trap to a list filter behind the backdrop. The one exception is `?`
+//! closing the sheet it opened — the sheet is itself a modal.
 
 use leptos::ev;
 use leptos::prelude::*;
@@ -29,44 +37,36 @@ const QUICK_NAV: &[(char, ActiveView)] = &[
     ('5', ActiveView::Security),
 ];
 
-/// True when the event target is a text-entry context, where a bare-key binding
-/// would eat the keystroke.
-fn is_typing(ev: &ev::KeyboardEvent) -> bool {
-    let Some(el) = ev.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) else {
-        return false;
-    };
-    if el.is_content_editable() {
-        return true;
-    }
-    matches!(
-        el.tag_name().to_ascii_lowercase().as_str(),
-        "input" | "textarea" | "select"
-    )
-}
-
-/// Focuses the active surface's filter input, if it has one.
+/// Focuses the visible surface's filter input, if it has one.
 ///
-/// Matches on the shared `SearchInput` markup rather than threading a
-/// `NodeRef` through every list — the lists mount and unmount independently
-/// (keep-alive), so there is no single ref to hold, and the *visible* one is
-/// whichever pane is displayed.
+/// Keys off the "Filter…" placeholder convention (every `ListScaffold`
+/// `search_placeholder` and `SearchInput` caller starts with "Filter"; Global
+/// Search's "Search…" deliberately doesn't match) rather than threading a
+/// `NodeRef` through every list — the lists mount and unmount independently, so
+/// there is no single ref to hold.
+///
+/// It must take the first match that can actually take focus, NOT the first in
+/// document order: keep-alive panes are declared in `lib.rs` order, not visit
+/// order, so once App Registrations has been visited its hidden filter precedes
+/// every later view's. Skipped: a hidden pane's input (`display:none`, so no
+/// offset parent) and one under an `inert` subtree (`.shell__content` while the
+/// open-items workspace is shown — laid out, but unfocusable), so with an item
+/// open the pane's own filter wins.
 fn focus_list_filter() -> bool {
-    let Ok(Some(node)) = document().query_selector(
-        // `:not([style*='display:none'])` would not survive keep-alive's inline
-        // style, so instead take the first filter input that is actually laid
-        // out — a hidden pane's input has no offset parent.
-        "input.search-input__field, .search-input input, input[placeholder^='Filter']",
-    ) else {
+    let Ok(list) = document().query_selector_all("input[placeholder^='Filter']") else {
         return false;
     };
-    let Ok(el) = node.dyn_into::<HtmlElement>() else {
-        return false;
-    };
-    if el.offset_parent().is_none() {
-        return false;
+    let target = (0..list.length())
+        .filter_map(|i| list.item(i))
+        .filter_map(|n| n.dyn_into::<HtmlElement>().ok())
+        .find(|el| el.offset_parent().is_some() && !matches!(el.closest("[inert]"), Ok(Some(_))));
+    match target {
+        Some(el) => {
+            let _ = el.focus();
+            true
+        }
+        None => false,
     }
-    let _ = el.focus();
-    true
 }
 
 /// Move the workspace focus one entry along the dock, wrapping at both ends.
@@ -147,22 +147,32 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
             return;
         }
 
-        // ---- Bare-key bindings: only outside text entry. ----
-        if is_typing(&ev) {
+        // ---- Bare-key bindings: only outside text entry and dialogs. ----
+        if crate::hooks::is_text_entry(&ev) {
             return;
         }
         match ev.key().as_str() {
             // Focus this list's filter. Distinct from Cmd/Ctrl-K, which focuses
             // the tenant-wide Global Search — different tools, and conflating
-            // them is a common annoyance in admin UIs.
+            // them is a common annoyance in admin UIs. Not inside a dialog: the
+            // filter behind the backdrop is still laid out, so this would move
+            // focus out of the dialog's trap.
             "/" => {
-                if focus_list_filter() {
+                if !crate::hooks::modal_is_open() && focus_list_filter() {
                     ev.prevent_default();
                 }
             }
+            // Toggle the sheet — but never open it over another dialog (two
+            // stacked modals, two focus traps, one Escape closing both). Closing
+            // is checked first because the open sheet is itself a modal.
             "?" => {
-                ev.prevent_default();
-                show_help.update(|open| *open = !*open);
+                if show_help.get_untracked() {
+                    ev.prevent_default();
+                    show_help.set(false);
+                } else if !crate::hooks::modal_is_open() {
+                    ev.prevent_default();
+                    show_help.set(true);
+                }
             }
             _ => {}
         }

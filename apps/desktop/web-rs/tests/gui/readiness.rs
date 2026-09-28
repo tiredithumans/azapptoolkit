@@ -26,6 +26,8 @@ async fn loads_and_renders_checklist() {
     // The report's second item + its remediation hint render too.
     assert!(ts::body_contains("Read Key Vault secrets"));
     assert!(ts::body_contains("Assign the Key Vault Secrets User role."));
+    // A Missing role links to PIM so an eligible operator can activate it.
+    assert!(ts::body_contains("Open PIM (My roles)"));
 }
 
 #[wasm_bindgen_test]

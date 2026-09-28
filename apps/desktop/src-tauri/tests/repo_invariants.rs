@@ -5,7 +5,7 @@
 //! rather than needing a shell script that `verify` could not portably call
 //! (recipe lines run under PowerShell on Windows).
 //!
-//! One binary, five concern modules. It was a single 940-line file, which made
+//! One binary, one module per concern. It was a single 940-line file, which made
 //! the rules hard to find and — more to the point — hid how coarse some of them
 //! were: the fan-out rule matched per *file*, so `commands/bulk.rs` satisfied it
 //! with a string that lived in an unrelated function while three of its
@@ -14,13 +14,24 @@
 //! Cargo only compiles top-level `tests/*.rs` as test binaries, so the
 //! `repo_invariants/` directory is picked up through these declarations alone.
 //!
-//! - [`sources`] — the command layer as data: the source walk every rule reads
+//! - [`sources`] — the command layer as data: the source walk and the
+//!   per-command / per-function extractors every rule reads
 //! - [`fanout`] — dead-session gating in the long-running fan-outs
-//! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch
+//! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch, the
+//!   sign-out sweep
 //! - [`cancel`] — one `CancelToken` claim per long-running command
-//! - [`commands`] — whole-command-layer scans, and the shared source table
-//! - [`release`] — version identity, CHANGELOG format, mirrored lint block
-//! - [`trust`] — every path that mints an authentication trust validates it
+//! - [`commands`] — whole-layer scans (the Callout and Badge primitives,
+//!   keyboard-navigable tables, retired TSX pointers, consent detection,
+//!   resource-gated scope fixes)
+//! - [`ipc`] — the IPC contract: handler registry ↔ commands ↔ bindings, arg
+//!   keys, return types, and the single tauri-sys door
+//! - [`logging`] — tracing macros set their target with `target:`, not a field
+//! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
+//!   update gate, the Linux glibc floor and the NSIS install mode
+//! - [`trust`] — every path that mints an authentication trust validates it,
+//!   and every signing-certificate mint bounds its lifetime
+//! - [`webview`] — the webview's grants: CSP `connect-src` holds no remote
+//!   origin, and the capability file grants only `core:default`
 
 #[path = "repo_invariants/cache.rs"]
 mod cache;
@@ -30,9 +41,15 @@ mod cancel;
 mod commands;
 #[path = "repo_invariants/fanout.rs"]
 mod fanout;
+#[path = "repo_invariants/ipc.rs"]
+mod ipc;
+#[path = "repo_invariants/logging.rs"]
+mod logging;
 #[path = "repo_invariants/release.rs"]
 mod release;
 #[path = "repo_invariants/sources.rs"]
 mod sources;
 #[path = "repo_invariants/trust.rs"]
 mod trust;
+#[path = "repo_invariants/webview.rs"]
+mod webview;

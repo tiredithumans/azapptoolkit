@@ -6,10 +6,13 @@
 //! the security audit's. CSV export goes through the OS save dialog, mirroring
 //! `save_audit_to_file`.
 //!
-//! Read-through cached under `CacheKind::Lists` (`{tenant}|credential_expirations`).
-//! It scans the same `/applications` collection the Home dashboard's
-//! `list_applications_with_pairing` already caches, so an uncached scan here was a
-//! second full-tenant scan on every cold load. The cache is busted by
+//! The roll-up has no scan of its own: it is derived from the App
+//! Registrations scan (`applications::scan_app_list`), whose `$select` is a
+//! superset of what it reads, and stored pinned and guarded under
+//! `CacheKind::Lists` (`{tenant}|credential_expirations`) with a watch captured
+//! before that scan. It used to page the whole `/applications` collection
+//! itself, a second (with the Enterprise Apps name index, third) full-tenant
+//! scan on every cold Home load. The cache is busted by
 //! `invalidate_app_credentials` (a rotate/remove shifts an expiry) and
 //! `invalidate_app_lists` (a create/delete changes the app set), so a
 //! just-rotated/removed credential is never shown as still-expiring — the same
@@ -18,18 +21,13 @@
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::summarize_credentials;
-use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_graph::client::AppListQuery;
+use azapptoolkit_core::models::Application;
+use chrono::{DateTime, Utc};
 
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
 use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
-
-/// Page size — the shared `/applications` maximum.
-const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
-/// Safety cap on total apps scanned, mirroring the audit run.
-const MAX_APPS: usize = crate::commands::applications::APPS_MAX;
 
 /// Lists every app-registration credential (client secret + certificate) in the
 /// tenant, sorted soonest-to-expire first (credentials with no expiry sort
@@ -39,44 +37,18 @@ pub async fn list_credential_expirations(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<CredentialRowDto>, UiError> {
-    // The cache-HIT path below returns before any client is built, so the
-    // `graph_for` on the miss path is not a session proof for it.
+    // The cache-HIT path returns before any client is built, so it needs its
+    // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let cache_key = crate::commands::applications::credential_expirations_key(&tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &cache_key)
-    {
-        return Ok(cached);
-    }
-    let client = state.graph_for(&tenant_id);
-    // Project only what `summarize_credentials` + the row build read. The
-    // default projection drags in `requiredResourceAccess`, `verifiedPublisher`,
-    // etc. — unused here and, for permission-heavy apps, the bulk of the
-    // payload, multiplied across a full-tenant scan on every visit to this view.
-    // `_truncated`: this view is a credential-expiry roll-up over the first
-    // MAX_APPS registrations. A tenant past that cap loses the tail of the list,
-    // which understates expiries — acceptable here only because the same cap
-    // governs every other tenant-wide view, so the number shown is consistent
-    // with them rather than silently different.
-    let (apps, _truncated) = client
-        .list_applications_all(
-            AppListQuery::default()
-                .with_top(PAGE_SIZE)
-                .with_select(vec![
-                    "id",
-                    "appId",
-                    "displayName",
-                    "passwordCredentials",
-                    "keyCredentials",
-                ]),
-            Some(MAX_APPS),
-        )
-        .await?;
-    let now = chrono::Utc::now();
+    Ok(crate::commands::applications::credential_expirations_cached(&state, &tenant_id).await?)
+}
 
+/// Flattens every app's client secrets + certificates into one expiry-sorted
+/// list, reusing the audit's [`summarize_credentials`] so the roll-up's expiry
+/// semantics match the security audit's.
+pub(crate) fn credential_rows(apps: &[Application], now: DateTime<Utc>) -> Vec<CredentialRowDto> {
     let mut rows: Vec<CredentialRowDto> = Vec::new();
-    for app in &apps {
+    for app in apps {
         let (secrets, certs) = summarize_credentials(app, now);
         for c in secrets.into_iter().chain(certs) {
             rows.push(CredentialRowDto {
@@ -92,10 +64,8 @@ pub async fn list_credential_expirations(
             });
         }
     }
-
     rows.sort_by_key(|r| sort_key(r.days_to_expiry));
-    state.cache.put(CacheKind::Lists, cache_key, &rows);
-    Ok(rows)
+    rows
 }
 
 /// Sort by days-to-expiry ascending; `None` (no expiry) sorts last.
@@ -168,6 +138,58 @@ mod tests {
         let mut v = vec![None, Some(30), Some(-3), Some(7)];
         v.sort_by_key(|d| sort_key(*d));
         assert_eq!(v, vec![Some(-3), Some(7), Some(30), None]);
+    }
+
+    /// The roll-up is flattened across apps and sorted by expiry, whatever the
+    /// order the scan returned the apps and credentials in, and every row
+    /// carries the identity of the app it came from.
+    #[test]
+    fn credential_rows_flattens_and_sorts_across_apps() {
+        use azapptoolkit_core::models::{KeyCredential, PasswordCredential};
+        let now = Utc::now();
+        let a = Application {
+            id: "obj-a".into(),
+            app_id: "app-a".into(),
+            display_name: "App A".into(),
+            password_credentials: vec![PasswordCredential {
+                key_id: "k1".into(),
+                display_name: Some("later".into()),
+                end_date_time: Some(now + chrono::Duration::days(90)),
+                ..Default::default()
+            }],
+            key_credentials: vec![KeyCredential {
+                key_id: "k2".into(),
+                display_name: Some("no-end".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let b = Application {
+            id: "obj-b".into(),
+            app_id: "app-b".into(),
+            display_name: "App B".into(),
+            password_credentials: vec![PasswordCredential {
+                key_id: "k3".into(),
+                display_name: Some("expired".into()),
+                end_date_time: Some(now - chrono::Duration::days(5)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let rows = credential_rows(&[a, b], now);
+
+        let names: Vec<&str> = rows.iter().map(|r| r.credential_name.as_str()).collect();
+        assert_eq!(names, ["expired", "later", "no-end"]);
+        assert_eq!(rows[0].app_object_id, "obj-b");
+        assert_eq!(rows[0].app_id, "app-b");
+        assert_eq!(rows[0].app_display_name, "App B");
+        assert_eq!(rows[0].kind, CredentialKind::Secret);
+        assert_eq!(rows[1].app_object_id, "obj-a");
+        assert_eq!(rows[2].app_id, "app-a");
+        assert_eq!(rows[2].app_display_name, "App A");
+        assert_eq!(rows[2].kind, CredentialKind::Certificate);
+        assert_eq!(rows[2].days_to_expiry, None);
     }
 
     #[test]

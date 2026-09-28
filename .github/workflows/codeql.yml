@@ -45,13 +45,13 @@ jobs:
       # Rust is supported only in build-mode `none`. The prep below (pinned
       # toolchain, wasm32 target for the excluded web-rs crate, native deps,
       # frontend-dist stub, pre-fetched deps) is correct hygiene and future-proofs
-      # extraction, but DOES NOT improve the current quality metric: CodeQL
-      # 2.25.6's Rust extractor does not expand macros — proc OR builtin — for this
+      # extraction, but DOES NOT improve the current quality metric: CodeQL's
+      # Rust extractor (measured on 2.25.6) does not expand macros — proc OR builtin — for this
       # codebase regardless of config, so "% calls with call target" sits at ~39%
       # (a known extractor limit; cf. github/codeql#20643, #20659). Confirmed by
       # forcing sysroot/proc_macro_server to real paths — byte-identical result.
       # Revisit when a newer CodeQL bundle ships working Rust macro expansion
-      # (branch ci/codeql-proc-macro-expansion holds the setup to re-apply).
+      # (re-measure "% calls with call target" on the current bundle first).
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: wasm32-unknown-unknown

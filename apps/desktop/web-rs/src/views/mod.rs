@@ -1,4 +1,4 @@
-//! Leptos view components, mirroring `apps/desktop/web/src/views/`.
+//! Leptos view components.
 
 pub mod app_permission_grants_view;
 pub mod application_detail_pane;

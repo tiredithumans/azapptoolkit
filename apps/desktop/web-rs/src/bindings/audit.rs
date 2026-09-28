@@ -1,13 +1,17 @@
-//! Audit IPC bindings: run, cancel, cached read, CSV export. Streamed
+//! Audit IPC bindings: run, cancel, cached read (whole run, or the Home
+//! card's counts-only summary), CSV export. Streamed
 //! progress events live in `bindings::events::audit_progress`.
 
+use super::ipc::{invoke, invoke_result};
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::{invoke, invoke_result};
 
 use crate::bindings::TenantArg;
-pub use azapptoolkit_dto::audit::{AuditExportCoverage, AuditProgress, AuditRunResult};
+pub use azapptoolkit_dto::audit::{
+    AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
+    MAILBOX_SCOPING_UNRESOLVED,
+};
 
 /// Runs a full security audit. Exchange mailbox-scoping is resolved as part of
 /// every run (best-effort — it degrades to unscoped scoring when the signed-in
@@ -24,9 +28,9 @@ pub async fn get_cached_audit(tenant_id: &str) -> Option<AuditRunResult> {
     invoke("get_cached_audit", TenantArg { tenant_id }).await
 }
 
-#[derive(Serialize)]
-struct ExportArgs<'a> {
-    items: &'a [AuditItem],
+/// The cached run reduced to the Home posture card's counts — never the items.
+pub async fn get_cached_audit_summary(tenant_id: &str) -> Option<CachedAuditSummary> {
+    invoke("get_cached_audit_summary", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]
@@ -41,8 +45,8 @@ struct SaveArgs<'a> {
 /// Opens an OS save dialog and writes the audit in `format` (`csv`, `json`, or
 /// `html`). Returns the chosen path on success, `None` if the user cancelled.
 /// Exports by reference: pass `items: None` and the backend serves its own
-/// cached run (no multi-MB IPC round trip); pass `Some` only for a cancelled
-/// run, which is never cached.
+/// cached run (no multi-MB IPC round trip); pass `Some` for any run the
+/// backend did not cache — cancelled, truncated or degraded.
 ///
 /// `coverage` is the run's caveats ([`AuditRunResult::coverage`]) — small
 /// enough to always send, and what makes the exported file say what the scan

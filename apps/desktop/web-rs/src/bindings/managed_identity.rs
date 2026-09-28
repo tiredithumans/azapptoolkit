@@ -2,9 +2,9 @@
 //! their application permissions. DTOs come from the shared `azapptoolkit-dto`
 //! crate (re-exported here for callers).
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::managed_identity::*;

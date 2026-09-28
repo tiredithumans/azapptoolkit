@@ -12,7 +12,6 @@ mod controller;
 mod filter;
 mod findings;
 mod groups;
-pub mod posture;
 mod row;
 mod sort;
 
@@ -29,11 +28,14 @@ use thaw::Body1;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::icon::IconName;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{CopyableId, EmptyState, SearchInput, ShowMore, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, CopyableId, EmptyState, SearchInput, ShowMore, TabBar, TabBarItem,
+};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
+use crate::util::fmt_day;
 
 use filter::filter_indices;
 use row::AuditRowActions;
@@ -408,10 +410,10 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                     <CopyableId value=i.app_id.clone() label="app id" />
                                                 </td>
                                                 <td>
-                                                    <span class=format!(
-                                                        "badge {}",
-                                                        risk_class(&i.risk_level),
-                                                    )>{i.risk_level.as_str()}</span>
+                                                    <Badge
+                                                        label=i.risk_level.as_str()
+                                                        tone=risk_tone(&i.risk_level)
+                                                    />
                                                 </td>
                                                 <td>{i.risk_score}</td>
                                                 <td>
@@ -485,13 +487,10 @@ pub fn AuditAppsPane() -> impl IntoView {
     }
 }
 
-fn risk_class(level: &RiskLevel) -> &'static str {
-    match level {
-        RiskLevel::Critical => "badge--critical",
-        RiskLevel::High => "badge--danger",
-        RiskLevel::Medium => "badge--warning",
-        RiskLevel::Low => "badge--ok",
-    }
+/// A risk badge's tone, derived from the one tone map ([`groups::tone`]) so
+/// badges and finding-group dots can't drift apart.
+fn risk_tone(level: &RiskLevel) -> BadgeTone {
+    groups::tone(*level)
 }
 
 /// "Last sign-in" cell. Distinguishes never-signed-in from an unavailable report
@@ -503,7 +502,7 @@ fn last_sign_in_cell(i: &AuditItem) -> AnyView {
             .into_any();
     }
     match i.last_sign_in {
-        Some(dt) => view! { <span>{dt.format("%Y-%m-%d").to_string()}</span> }.into_any(),
+        Some(dt) => view! { <span>{fmt_day(dt)}</span> }.into_any(),
         None => view! { <span class="muted">"Never"</span> }.into_any(),
     }
 }

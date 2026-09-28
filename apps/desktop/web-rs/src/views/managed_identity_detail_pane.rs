@@ -7,9 +7,10 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::scoping::SP_SITES_SELECTED;
 
 use crate::bindings::TenantContext;
 use crate::bindings::auth as auth_bindings;
@@ -26,8 +27,10 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    Badge, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, FormError, SkeletonList,
+    TabBar, TabBarItem,
 };
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
 use crate::util::keep_alive;
 use crate::views::managed_identities::chip_kind_for;
@@ -278,7 +281,7 @@ pub fn ManagedIdentityDetailPane(
                             // and enterprise surfaces.
                             let sharepoint_section = list
                                 .iter()
-                                .any(|p| p.app_role_value.as_deref() == Some("Sites.Selected"))
+                                .any(|p| p.app_role_value.as_deref() == Some(SP_SITES_SELECTED))
                                 .then(|| {
                                     view! {
                                         <CollapsibleScopingSection
@@ -354,7 +357,7 @@ pub fn ManagedIdentityDetailPane(
                         // The signed-in user (or tenant admin) hasn't
                         // consented to ARM yet. Offer to run interactive
                         // incremental consent, then the resource re-runs.
-                        Err(e) if e.code == "consent_required" => {
+                        Err(e) if e.is_consent_required() => {
                             let on_consent = move |_| {
                                 if consenting.get() {
                                     return;
@@ -387,13 +390,30 @@ pub fn ManagedIdentityDetailPane(
                                         on_click=Box::new(on_consent)
                                         disabled=Signal::derive(move || consenting.get())
                                     >
-                                        "Grant access"
+                                        "Grant consent to Azure"
                                     </Button>
                                     {move || {
                                         consent_error
                                             .get()
-                                            .map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                                            .map(|m| view! { <FormError>{m}</FormError> })
                                     }}
+                                </Callout>
+                            }
+                                .into_any()
+                        }
+                        // A Conditional Access policy wants MFA (or another
+                        // interactive step) for Azure management: the session
+                        // is fine, so offer the ARM step-up, then re-run.
+                        Err(e) if e.is_interaction_required() => {
+                            view! {
+                                <Callout tone="warn">
+                                    <p>{VERIFY_IDENTITY_MESSAGE}</p>
+                                    <VerifyIdentityButton
+                                        features=&["arm"]
+                                        on_verified=Callback::new(move |()| {
+                                            arm_reload.update(|n| *n += 1)
+                                        })
+                                    />
                                 </Callout>
                             }
                                 .into_any()
@@ -411,27 +431,12 @@ pub fn ManagedIdentityDetailPane(
                             // shown with no high-privilege roles could be Owner
                             // on an unscanned/unreadable subscription, so a
                             // partial view must never read as authoritative.
-                            let coverage = (res.scanned < res.total
-                                || res.skipped > 0)
+                            let coverage = (res.skipped > 0)
                                 .then(|| {
-                                    let mut parts = Vec::new();
-                                    if res.scanned < res.total {
-                                        parts
-                                            .push(format!(
-                                                "scanned {} of {} subscriptions (capped)",
-                                                res.scanned, res.total,
-                                            ));
-                                    }
-                                    if res.skipped > 0 {
-                                        parts
-                                            .push(format!(
-                                                "{} unreadable and skipped",
-                                                res.skipped,
-                                            ));
-                                    }
                                     let msg = format!(
-                                        "Partial view — {}. Roles on subscriptions not scanned aren't shown.",
-                                        parts.join("; "),
+                                        "Partial view — {} of {} subscriptions unreadable and skipped. Roles on subscriptions not scanned aren't shown.",
+                                        res.skipped,
+                                        res.total,
                                     );
                                     view! { <Callout tone="warn">{msg}</Callout> }
                                 });
@@ -446,7 +451,7 @@ pub fn ManagedIdentityDetailPane(
                                             .high_privilege
                                             .then(|| {
                                                 view! {
-                                                    <Badge label="High" tone="danger" />
+                                                    <Badge label="High" tone=BadgeTone::Danger />
                                                 }
                                             });
                                         view! {
@@ -502,6 +507,11 @@ const COMMON_AZURE_ROLES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The `<Select>` value of the "Custom role definition id…" option, which
+/// reveals a GUID input for any other built-in or custom role. Not a GUID, so it
+/// can never collide with a [`COMMON_AZURE_ROLES`] entry.
+const CUSTOM_ROLE_OPTION: &str = "custom";
+
 /// Inline form to create an Azure RBAC role assignment for the selected managed
 /// identity (`Microsoft.Authorization/roleAssignments` PUT). Collapsed by
 /// default; on success it calls `on_assigned` so the parent re-reads the roles.
@@ -511,8 +521,10 @@ fn AssignAzureRolePanel(
     #[prop(into)] principal_id: Signal<Option<String>>,
     #[prop(into)] on_assigned: Callback<()>,
 ) -> impl IntoView {
+    let session = use_session();
     let open = RwSignal::new(false);
     let role = RwSignal::new(COMMON_AZURE_ROLES[0].1.to_string());
+    let custom_role = RwSignal::new(String::new());
     let scope = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -531,7 +543,18 @@ fn AssignAzureRolePanel(
             ));
             return;
         }
-        let role_v = role.get();
+        let role_v = if role.get() == CUSTOM_ROLE_OPTION {
+            let custom = custom_role.get().trim().to_string();
+            if !azapptoolkit_core::guid::is_guid(&custom) {
+                error.set(Some(
+                    "Enter the role definition id as a GUID, e.g. 974c5e8b-45b9-4653-ba55-5f855dd0fb88.".into(),
+                ));
+                return;
+            }
+            custom
+        } else {
+            role.get()
+        };
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
@@ -545,7 +568,14 @@ fn AssignAzureRolePanel(
                     scope.set(String::new());
                     on_assigned.run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    // The shared recovery toast, aimed at ARM: "Grant consent"
+                    // or "Verify identity" (an Azure-management MFA policy)
+                    // for the audience this write rides — never the Graph
+                    // write default. The inline text stays this form's message.
+                    session.report_recovery_action(&e, "arm");
+                    error.set(Some(e.message));
+                }
             }
             busy.set(false);
         });
@@ -581,14 +611,23 @@ fn AssignAzureRolePanel(
                                             view! { <option value=*guid>{*name}</option> }
                                         })
                                         .collect_view()}
+                                    <option value=CUSTOM_ROLE_OPTION>
+                                        "Custom role definition id…"
+                                    </option>
                                 </Select>
                             </div>
+                            <Show when=move || role.get() == CUSTOM_ROLE_OPTION>
+                                <div class="read-field">
+                                    <strong>"Role definition id (GUID)"</strong>
+                                    <Input value=custom_role />
+                                </div>
+                            </Show>
                             <div class="read-field">
                                 <strong>"Scope (/subscriptions/<id>[/resourceGroups/<rg>])"</strong>
                                 <Input value=scope />
                             </div>
                             {move || {
-                                error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                                error.get().map(|m| view! { <FormError>{m}</FormError> })
                             }}
                             <div class="actions-row">
                                 <Button

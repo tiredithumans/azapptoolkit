@@ -9,12 +9,14 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
 
 use azapptoolkit_core::audit::RemediationAction;
 
+use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
-use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::group_autocomplete::MailboxGroupsField;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 
 /// Which principal a scope Fix targets. App-registration rows route to the
 /// audit remediation wrappers (which re-resolve the application + its SP);
@@ -58,6 +60,11 @@ pub fn ScopeMailboxButton(
     let open = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // Set when the grant failed on a missing Exchange admin-API consent: the
+    // primary action becomes "Grant consent" (mirrors `ScopeSharePointButton`).
+    let needs_consent = RwSignal::new(false);
+    // A grant that came back with warnings — shown in the modal until read.
+    let warned: RwSignal<Option<ExchangeAccessResult>> = RwSignal::new(None);
     let groups_text = RwSignal::new(String::new());
 
     let targets = action.targets.clone();
@@ -77,12 +84,13 @@ pub fn ScopeMailboxButton(
         };
         busy.set(true);
         error.set(None);
+        warned.set(None);
         let target = target.clone();
         let targets = targets.clone();
         leptos::task::spawn_local(async move {
-            // Both paths share the grant-before-strip Exchange scoping core;
-            // only the entry point differs (manifest-resolving wrapper vs the
-            // SP-only command). Unified to (removed grants, warnings) counts.
+            // Both paths share the grant-before-strip Exchange scoping core and
+            // return the same `ExchangeAccessResult`; only the entry point
+            // differs (manifest-resolving wrapper vs the SP-only command).
             let outcome = match &target {
                 ScopeFixTarget::AppReg { object_id } => {
                     remediation::remediate_scope_mailbox_access(
@@ -92,36 +100,77 @@ pub fn ScopeMailboxButton(
                         &groups,
                     )
                     .await
-                    .map(|res| (res.removed_entra_grants.len(), res.warnings.len()))
                 }
                 ScopeFixTarget::ServicePrincipal {
                     sp_object_id,
                     app_id,
                     display_name,
-                } => exchange::grant_managed_identity_scoped_exchange_access(
-                    &t.tenant_id,
-                    sp_object_id,
-                    app_id,
-                    display_name,
-                    &targets,
-                    &groups,
-                    true,
-                )
-                .await
-                .map(|res| (res.removed_entra_grants.len(), 0)),
+                } => {
+                    exchange::grant_managed_identity_scoped_exchange_access(
+                        &t.tenant_id,
+                        sp_object_id,
+                        app_id,
+                        display_name,
+                        &targets,
+                        &groups,
+                        true,
+                    )
+                    .await
+                }
             };
             match outcome {
-                Ok((removed, warnings)) => {
+                Ok(res) if res.warnings.is_empty() => {
                     open.set(false);
-                    let warn = if warnings == 0 {
-                        String::new()
-                    } else {
-                        format!(" ({warnings} warning(s))")
-                    };
+                    needs_consent.set(false);
                     session.toast_success(format!(
-                        "Scoped mailbox access — removed {removed} org-wide grant(s){warn}. Re-run the audit to refresh scores."
+                        "Scoped mailbox access — removed {}. Re-run the audit to refresh scores.",
+                        count_noun(
+                            res.removed_entra_grants.len(),
+                            "org-wide grant",
+                            "org-wide grants"
+                        )
                     ));
                     on_done.run(target.row_id());
+                }
+                // A warned grant stays in the modal and keeps the row's Fix:
+                // the common warning ("a management scope already exists for
+                // this app with a different group set") means the groups just
+                // requested were NOT applied, so a success toast would read a
+                // no-op as done. Same rule as the Exchange scoping section's
+                // `grant_result`.
+                Ok(res) => {
+                    needs_consent.set(false);
+                    warned.set(Some(res));
+                }
+                // Both entry points pre-acquire the Exchange token
+                // (`exchange_client_checked`), so a missing consent arrives
+                // typed, before anything was granted or stripped.
+                Err(e) if e.is_consent_required() => {
+                    needs_consent.set(true);
+                    error.set(Some(
+                        "Scoping mailbox access needs the Exchange admin-API scope (Exchange.Manage). Grant consent, then try again.".into(),
+                    ));
+                }
+                Err(e) => error.set(Some(e.message)),
+            }
+            busy.set(false);
+        });
+    });
+
+    let grant_consent = Callback::new(move |()| {
+        if busy.get() {
+            return;
+        }
+        let Some(t) = tenant.get() else {
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match auth::request_scope_consent(&t.tenant_id, "exchange").await {
+                Ok(()) => {
+                    needs_consent.set(false);
+                    session.toast_success("Consent granted — select Scope access to continue.");
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -142,7 +191,10 @@ pub fn ScopeMailboxButton(
         <div class="audit-actions">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(move |_| open.set(true))
+                on_click=Box::new(move |_| {
+                    warned.set(None);
+                    open.set(true);
+                })
             >
                 {label}
             </Button>
@@ -160,13 +212,32 @@ pub fn ScopeMailboxButton(
                             "Confine these permissions to members of specific mail-enabled groups via Exchange RBAC for Applications. The app keeps access only to those mailboxes; its org-wide grant is removed once the scoped roles are in place. You must be an Exchange administrator."
                         </Body1>
                         <p class="muted">{action.detail.clone()}</p>
-                        <GroupAutocomplete target=groups_text />
-                        <Textarea
-                            value=groups_text
-                            placeholder="Mail-enabled groups — one per line (name, address, or object id)"
-                        />
+                        <MailboxGroupsField value=groups_text />
                         {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            warned
+                                .get()
+                                .map(|r| {
+                                    let summary = format!(
+                                        "Scope “{}”: removed {}, but some of what you asked for may not have been applied — read the notes below.",
+                                        r.scope_name,
+                                        count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
+                                    );
+                                    view! {
+                                        <Callout tone="warn" role="status">
+                                            <Body1>{summary}</Body1>
+                                            <ul class="warnings">
+                                                {r
+                                                    .warnings
+                                                    .into_iter()
+                                                    .map(|w| view! { <li>{w}</li> })
+                                                    .collect_view()}
+                                            </ul>
+                                        </Callout>
+                                    }
+                                })
+                        }}
+                        {move || {
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <div class="actions-row">
                             <Button
@@ -176,20 +247,37 @@ pub fn ScopeMailboxButton(
                             >
                                 "Cancel"
                             </Button>
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(move |_| confirm.run(()))
-                                disabled=Signal::derive(move || busy.get())
-                            >
-                                {move || {
-                                    if busy.get() {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                            .into_any()
-                                    } else {
-                                        view! { "Scope access" }.into_any()
+                            <Show
+                                when=move || needs_consent.get()
+                                fallback=move || {
+                                    view! {
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                            on_click=Box::new(move |_| confirm.run(()))
+                                            disabled=Signal::derive(move || busy.get())
+                                        >
+                                            {move || {
+                                                if busy.get() {
+                                                    view! {
+                                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! { "Scope access" }.into_any()
+                                                }
+                                            }}
+                                        </Button>
                                     }
-                                }}
-                            </Button>
+                                }
+                            >
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(move |_| grant_consent.run(()))
+                                    disabled=Signal::derive(move || busy.get())
+                                >
+                                    "Grant consent"
+                                </Button>
+                            </Show>
                         </div>
                     </div>
                 </div>
@@ -274,11 +362,13 @@ pub fn ScopeSharePointButton(
                         open.set(false);
                         needs_consent.set(false);
                         session.toast_success(format!(
-                            "Restricted SharePoint access to {sites} site(s) — removed {removed} org-wide grant(s). Re-run the audit to refresh scores."
+                            "Restricted SharePoint access to {} — removed {}. Re-run the audit to refresh scores.",
+                            count_noun(sites, "site", "sites"),
+                            count_noun(removed, "org-wide grant", "org-wide grants"),
                         ));
                         on_done.run(target.row_id());
                     }
-                    Err(e) if e.code == "consent_required" => {
+                    Err(e) if e.is_consent_required() => {
                         needs_consent.set(true);
                         error.set(Some(
                             "Granting per-site access needs the SharePoint admin scope (Sites.FullControl.All). Grant consent, then try again.".into(),
@@ -350,7 +440,7 @@ pub fn ScopeSharePointButton(
                             placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
                         />
                         {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <div class="actions-row">
                             <Button
@@ -373,8 +463,10 @@ pub fn ScopeSharePointButton(
                                     // equivalent paths already default to read
                                     // (the wizard's `SiteSelectionPanel` starts
                                     // `write=false`; the bulk bar's checkbox is
-                                    // labelled "default: read"), so this also
-                                    // stops the three surfaces disagreeing.
+                                    // labelled "default: read"; the SharePoint
+                                    // site access section's "Grant read" is its
+                                    // Primary), so this also stops the four
+                                    // surfaces disagreeing.
                                     view! {
                                         <Button
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)

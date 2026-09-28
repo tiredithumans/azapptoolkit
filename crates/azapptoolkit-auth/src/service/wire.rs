@@ -6,20 +6,50 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use zeroize::Zeroizing;
 
 use crate::error::{AuthError, Result};
 
-#[derive(Debug, Deserialize)]
+/// A `/token` success body. The three tokens are [`Zeroizing`], so every path
+/// that drops a response (a nonce/tid mismatch, a save, the move into
+/// `AccessToken`) wipes them; `Debug` prints `<redacted>` for each.
+#[derive(Deserialize)]
 pub(super) struct TokenResponse {
-    pub(super) access_token: String,
-    #[serde(default)]
-    pub(super) refresh_token: Option<String>,
-    #[serde(default)]
-    pub(super) id_token: Option<String>,
+    #[serde(deserialize_with = "zeroizing")]
+    pub(super) access_token: Zeroizing<String>,
+    #[serde(default, deserialize_with = "zeroizing_opt")]
+    pub(super) refresh_token: Option<Zeroizing<String>>,
+    #[serde(default, deserialize_with = "zeroizing_opt")]
+    pub(super) id_token: Option<Zeroizing<String>>,
     pub(super) expires_in: u64,
     #[serde(default)]
     pub(super) scope: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |t: &Option<Zeroizing<String>>| t.as_ref().map(|_| "<redacted>");
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &redact(&self.refresh_token))
+            .field("id_token", &redact(&self.id_token))
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+// zeroize's `serde` feature is off in the workspace; these move the
+// deserialized `String` into the wrapper (no copy is left behind).
+fn zeroizing<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Zeroizing<String>, D::Error> {
+    String::deserialize(d).map(Zeroizing::new)
+}
+
+fn zeroizing_opt<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Zeroizing<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(|o| o.map(Zeroizing::new))
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,9 +68,13 @@ pub(super) struct TokenErrorBody {
 /// rejection (AADSTS65001 "not consented", 65004 "user declined", or the
 /// `consent_required` OAuth code) is recoverable via interactive consent and
 /// must be distinguished *first* — unlike [`AuthError::InvalidGrant`], it must
-/// NOT purge the refresh token. Everything else `invalid_grant`-like means the
-/// refresh token is dead; the remainder is a generic exchange failure. The
-/// carried string is always the UI-safe redacted summary.
+/// NOT purge the refresh token. A Conditional Access step-up
+/// (`interaction_required` / `login_required`, or `invalid_grant` carrying
+/// AADSTS50074/50076/50079/50158 — MFA, registration, an external challenge)
+/// comes next: the refresh token is still good for other audiences, so it is
+/// [`AuthError::InteractionRequired`], never a purge. What remains of
+/// `invalid_grant` means the refresh token is dead; the rest is a generic
+/// exchange failure. The carried string is always the UI-safe redacted summary.
 pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     let safe = redacted_aad_error(body);
     let aadsts = body
@@ -54,8 +88,16 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     }
     if matches!(
         body.error.as_str(),
-        "invalid_grant" | "interaction_required" | "login_required"
-    ) {
+        "interaction_required" | "login_required"
+    ) || (body.error == "invalid_grant"
+        && matches!(
+            aadsts.as_deref(),
+            Some("AADSTS50074" | "AADSTS50076" | "AADSTS50079" | "AADSTS50158")
+        ))
+    {
+        return AuthError::InteractionRequired(safe);
+    }
+    if body.error == "invalid_grant" {
         return AuthError::InvalidGrant(safe);
     }
     AuthError::TokenExchange(safe)
@@ -66,18 +108,22 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
 /// present, and drops the rest of `error_description` (which routinely
 /// embeds tenant/user GUIDs, correlation IDs, and client IPs).
 pub(super) fn redacted_aad_error(body: &TokenErrorBody) -> String {
-    let aadsts = body
-        .error_description
-        .as_deref()
-        .and_then(extract_aadsts_code);
-    match aadsts {
-        Some(code) => format!("{} ({})", body.error, code),
-        None => body.error.clone(),
+    redact_aad_error(&body.error, body.error_description.as_deref())
+}
+
+/// The one redaction rule behind [`redacted_aad_error`], shared with the
+/// loopback redirect's `error=` / `error_description=` pair:
+/// `"{error} (AADSTSnnnnn)"`, or the bare `error` when the description carries
+/// no AADSTS code.
+pub(super) fn redact_aad_error(error: &str, description: Option<&str>) -> String {
+    match description.and_then(extract_aadsts_code) {
+        Some(code) => format!("{error} ({code})"),
+        None => error.to_string(),
     }
 }
 
 /// Pulls the first `AADSTSnnnnn` token out of an AAD error_description.
-fn extract_aadsts_code(description: &str) -> Option<String> {
+pub(super) fn extract_aadsts_code(description: &str) -> Option<String> {
     let idx = description.find("AADSTS")?;
     let tail = &description[idx + "AADSTS".len()..];
     // A non-digit right after "AADSTS" yields no digits below → `None`.
@@ -207,6 +253,50 @@ mod aad_redaction_tests {
     }
 
     #[test]
+    fn redact_aad_error_is_the_shared_rule() {
+        assert_eq!(
+            redact_aad_error(
+                "access_denied",
+                Some("AADSTS65004: User declined. Trace ID: abc")
+            ),
+            "access_denied (AADSTS65004)"
+        );
+        assert_eq!(redact_aad_error("access_denied", None), "access_denied");
+        assert_eq!(
+            redact_aad_error("access_denied", Some("no code here")),
+            "access_denied"
+        );
+    }
+
+    #[test]
+    fn token_response_wraps_every_token() {
+        let r: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"at-SECRET","refresh_token":"rt-SECRET","id_token":"id-SECRET","expires_in":3600,"scope":"a b"}"#,
+        )
+        .unwrap();
+        let _: &Zeroizing<String> = &r.access_token;
+        let _: &Option<Zeroizing<String>> = &r.refresh_token;
+        let _: &Option<Zeroizing<String>> = &r.id_token;
+        assert_eq!(r.access_token.as_str(), "at-SECRET");
+        assert_eq!(
+            r.refresh_token.as_deref().map(String::as_str),
+            Some("rt-SECRET")
+        );
+        assert_eq!(r.id_token.as_deref().map(String::as_str), Some("id-SECRET"));
+        assert_eq!(r.expires_in, 3600);
+        let debug = format!("{r:?}");
+        assert!(!debug.contains("SECRET"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+
+        let bare: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"at","expires_in":60}"#).unwrap();
+        assert_eq!(bare.access_token.as_str(), "at");
+        assert!(bare.refresh_token.is_none());
+        assert!(bare.id_token.is_none());
+        assert!(bare.scope.is_none());
+    }
+
+    #[test]
     fn redacted_falls_back_to_oauth_code() {
         let body = TokenErrorBody {
             error: "invalid_client".into(),
@@ -251,6 +341,58 @@ mod aad_redaction_tests {
         };
         assert!(matches!(
             classify_token_error(&explicit),
+            AuthError::ConsentRequired(_)
+        ));
+    }
+
+    #[test]
+    fn step_up_codes_classify_as_interaction_required_not_invalid_grant() {
+        // A CA step-up for one resource must NOT read as a dead refresh token.
+        for (error, description) in [
+            (
+                "interaction_required",
+                Some("AADSTS50076: Due to a configuration change..."),
+            ),
+            ("login_required", None),
+            (
+                "invalid_grant",
+                Some("AADSTS50079: The user is required to enroll..."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS50074: Strong Authentication is required."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS50158: External security challenge not satisfied."),
+            ),
+        ] {
+            let body = TokenErrorBody {
+                error: error.into(),
+                error_description: description.map(str::to_string),
+                correlation_id: None,
+            };
+            assert!(
+                matches!(
+                    classify_token_error(&body),
+                    AuthError::InteractionRequired(_)
+                ),
+                "{error} {description:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_still_wins_over_interaction_required() {
+        let body = TokenErrorBody {
+            error: "interaction_required".into(),
+            error_description: Some(
+                "AADSTS65001: The user or administrator has not consented".into(),
+            ),
+            correlation_id: None,
+        };
+        assert!(matches!(
+            classify_token_error(&body),
             AuthError::ConsentRequired(_)
         ));
     }

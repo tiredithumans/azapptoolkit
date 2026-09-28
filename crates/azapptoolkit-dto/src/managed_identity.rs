@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 /// User-assigned MIs include an ARM resource id containing
 /// `userAssignedIdentities`; system-assigned MIs are tied to a single
 /// Azure resource (their parent), and may have an empty `alternativeNames`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MiSubtype {
     SystemAssigned,
     UserAssigned,
+    #[default]
     Unknown,
 }
 
@@ -84,7 +85,10 @@ pub struct AzureRoleDto {
     pub scope: String,
     /// Derived from `scope`: Subscription / Resource group / Resource / ….
     pub scope_level: String,
-    /// Display name (or id) of the owning subscription.
+    /// Display name (or id) of the subscription that returned it; a
+    /// management-group / tenant-root assignment (returned once per
+    /// subscription beneath it, shown once) carries an "inherited from above
+    /// the subscription" label instead.
     pub subscription: String,
     /// True for broadly-privileged roles (Owner, Contributor, …).
     pub high_privilege: bool,
@@ -97,11 +101,9 @@ pub struct AzureRoleDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AzureRolesResult {
     pub roles: Vec<AzureRoleDto>,
-    /// Subscriptions actually scanned (capped for safety).
-    pub scanned: usize,
-    /// Subscriptions the signed-in user can reach (before the cap).
+    /// Subscriptions the signed-in user can reach — every one is scanned.
     pub total: usize,
-    /// Scanned subscriptions whose role-assignment lookup failed and was skipped.
+    /// Subscriptions whose role-assignment lookup failed and was skipped.
     pub skipped: usize,
 }
 

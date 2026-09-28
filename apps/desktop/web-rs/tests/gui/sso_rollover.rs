@@ -16,21 +16,26 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_detail_pane::sso_tab::SsoContent;
 
+/// Whether some `pre.secret-reveal` block holds `needle`.
+fn revealed(needle: &str) -> bool {
+    ts::query_all("pre.secret-reveal")
+        .iter()
+        .any(|e| e.text_content().unwrap_or_default().contains(needle))
+}
+
 /// Mounts the SSO tab over a SAML app whose rollover state is `rollover`.
+/// `get_sso_config` carries the initial state; `get_signing_cert_rollover`
+/// answers the panel's re-reads after its own actions.
 fn mount(rollover: &azapptoolkit_dto::sso::SigningCertRolloverDto) -> ts::Mounted {
-    ts::mock_ok(
-        "get_sso_config",
-        &fixtures::sso_config("sp-demo", "app-demo"),
-    );
-    ts::mock_ok(
-        "get_sso_summary",
-        &fixtures::saml_sso_summary("sp-demo", "app-demo"),
-    );
+    let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
+    cfg.rollover = Some(rollover.clone());
+    ts::mock_ok("get_sso_config", &cfg);
     ts::mock_ok("get_signing_cert_rollover", rollover);
 
     let detail = Arc::new(fixtures::enterprise_application_detail(
@@ -72,6 +77,19 @@ async fn staging_a_certificate_does_not_activate_it() {
         "staging must leave the new certificate INACTIVE — activation is a \
          separate, explicit step",
     );
+
+    // The show-once public certificate is revealed in the shared copy block —
+    // labelled, with a Copy button — not a bare `pre` the operator has to
+    // select by hand. (Copy itself isn't clicked: headless clipboard writes are
+    // unreliable.)
+    ts::wait_for(|| revealed("MIIC-demo-newly-staged-certificate-body")).await;
+    assert!(ts::body_contains("Staged signing certificate (Base64)"));
+    assert!(
+        ts::query_all("button")
+            .iter()
+            .any(|b| b.text_content().unwrap_or_default().trim() == "Copy"),
+        "the staged certificate must come with a Copy button",
+    );
 }
 
 #[wasm_bindgen_test]
@@ -79,11 +97,21 @@ async fn a_staged_replacement_surfaces_entras_activation_deadline() {
     ts::reset();
     // Staged phase: the ACTIVE certificate's expiry is the deadline, because
     // Entra promotes the staged one on its own once it passes.
-    let _m = mount(&fixtures::signing_cert_rollover("sp-demo", "app-demo"));
+    // The fixture dates its certificates relative to today, so the expected
+    // day is read from the payload rather than pinned: the assertion is that
+    // THIS rollover's deadline is the one on screen.
+    let roll = fixtures::signing_cert_rollover("sp-demo", "app-demo");
+    let day = roll
+        .auto_promote_deadline
+        .as_deref()
+        .and_then(|d| d.split('T').next())
+        .expect("the staged fixture carries an activation deadline")
+        .to_string();
+    let _m = mount(&roll);
 
     ts::wait_for(|| ts::body_contains("Activate staged certificate")).await;
     assert!(
-        ts::body_contains("2027-04-30"),
+        ts::body_contains(&format!("active certificate expires on {day}")),
         "the active certificate's expiry is the activation deadline and must be \
          on screen; body was: {}",
         ts::body_text()
@@ -118,18 +146,15 @@ async fn a_steady_app_offers_no_activate_button() {
     );
 }
 
-/// An expired certificate that is no longer nominated is dead weight: the
-/// backend has always been willing to remove it, but no UI offered the action —
-/// the retire button only appeared for a superseded (rollback) certificate, so
-/// expired leftovers accumulated forever. The portal's equivalent is "Delete
-/// certificate" on an inactive cert.
-#[wasm_bindgen_test]
-async fn an_expired_inactive_certificate_offers_remove() {
-    ts::reset();
+const EXPIRED_THUMBPRINT: &str = "00B2C3D4E5F60718293A4B5C6D7E8F9012345678";
+
+/// Mounts a steady app that also carries one expired, non-nominated
+/// certificate (the last row), with `retire_saml_signing_certificate` mocked.
+fn mount_with_expired_cert() -> ts::Mounted {
     let mut roll = fixtures::signing_cert_rollover_steady("sp-demo", "app-demo");
     roll.certs.push(azapptoolkit_dto::sso::SigningCertDto {
         key_id: "key-expired".to_string(),
-        thumbprint: "00B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
+        thumbprint: EXPIRED_THUMBPRINT.to_string(),
         display_name: Some("CN=Contoso SSO 2023".to_string()),
         start_date_time: Some("2020-05-01T00:00:00Z".to_string()),
         end_date_time: Some("2023-05-01T00:00:00Z".to_string()),
@@ -141,16 +166,239 @@ async fn an_expired_inactive_certificate_offers_remove() {
         "retire_saml_signing_certificate",
         &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
     );
+    mount(&roll)
+}
 
-    let _m = mount(&roll);
+/// An expired certificate that is no longer nominated is dead weight: the
+/// backend has always been willing to remove it, but no UI offered the action —
+/// the retire button only appeared for a superseded (rollback) certificate, so
+/// expired leftovers accumulated forever. The portal's equivalent is "Delete
+/// certificate" on an inactive cert. Removal is irreversible, so it runs only
+/// once the operator confirms it.
+#[wasm_bindgen_test]
+async fn an_expired_inactive_certificate_offers_remove() {
+    ts::reset();
+    let _m = mount_with_expired_cert();
     ts::wait_for(|| ts::query(".cert-rollover__remove").is_some()).await;
 
     ts::click(".cert-rollover__remove");
-    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+    ts::wait_for(|| ts::body_contains("Remove the expired signing certificate?")).await;
+    assert_eq!(ts::text(".confirm-dialog__subject"), EXPIRED_THUMBPRINT);
+    assert_eq!(
+        ts::call_count("retire_saml_signing_certificate"),
+        0,
+        "removing a certificate is irreversible — it must not run on one click",
+    );
 
+    ts::click_button_labelled_in(".modal", "Remove");
+    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+    assert_eq!(
+        ts::last_call("retire_saml_signing_certificate")
+            .unwrap()
+            .arg_str("keyId")
+            .as_deref(),
+        Some("key-expired"),
+        "remove must target the expired certificate",
+    );
     assert_eq!(
         ts::call_count("activate_saml_signing_certificate"),
         0,
         "removing an expired leftover must not touch the nomination",
+    );
+}
+
+/// The certificate table is a keyboard grid, whose Enter on a focused row
+/// activates the row's first button — on an expired row, that is Remove.
+/// Enter must therefore open the confirm, never delete the certificate.
+#[wasm_bindgen_test]
+async fn enter_on_an_expired_row_asks_before_removing() {
+    ts::reset();
+    let _m = mount_with_expired_cert();
+    ts::wait_for(|| ts::query(".cert-rollover__remove").is_some()).await;
+
+    let roving = ".cert-rollover__row[tabindex='0']";
+    ts::wait_for(|| ts::query_all(roving).len() == 1).await;
+    ts::focus(roving);
+    ts::press_key(roving, "End");
+    ts::wait_for(|| ts::text(roving).contains(EXPIRED_THUMBPRINT)).await;
+    ts::wait_for(|| ts::focused_matches(roving)).await;
+
+    ts::press_key(roving, "Enter");
+    ts::wait_for(|| ts::body_contains("Remove the expired signing certificate?")).await;
+    for _ in 0..3 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("retire_saml_signing_certificate"),
+        0,
+        "Enter on a row must not delete a certificate without confirmation",
+    );
+}
+
+/// Opening the SSO tab is ONE backend read. The owner summary and the rollover
+/// panel's initial state ride on `get_sso_config`; before, the tab re-ran the
+/// whole service-principal → application chain for the summary and read the
+/// service principal a third time for the panel.
+#[wasm_bindgen_test]
+async fn the_sso_tab_fills_from_one_config_read() {
+    ts::reset();
+    let _m = mount(&fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
+
+    ts::wait_for(|| ts::body_contains("Details for the application owner")).await;
+    ts::wait_for(|| ts::body_contains("Stage new certificate")).await;
+    assert!(
+        ts::body_contains("/saml2"),
+        "the owner summary's login URL must render; body was: {}",
+        ts::body_text()
+    );
+    assert_eq!(ts::call_count("get_sso_config"), 1);
+    assert_eq!(
+        ts::call_count("get_signing_cert_rollover"),
+        0,
+        "the rollover panel must render the state get_sso_config carried, not \
+         read the service principal again",
+    );
+}
+
+/// Opens the immediate-rotation confirmation, types the keyword and confirms.
+async fn confirm_rotation() {
+    ts::click_button_labelled("Rotate and activate immediately");
+    assert_eq!(
+        ts::call_count("rotate_saml_signing_certificate"),
+        0,
+        "the button only asks — an immediate rotation breaks sign-in for \
+         static-certificate apps, so it must never run on one click",
+    );
+    ts::wait_for(|| ts::query(".confirm-dialog__keyword input").is_some()).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "ROTATE");
+    // The typed keyword enables the confirm button on the next render pass.
+    ts::wait_for(|| {
+        ts::query_all("button").into_iter().any(|el| {
+            let b: web_sys::HtmlButtonElement = el.unchecked_into();
+            b.text_content().unwrap_or_default().trim() == "Rotate now" && !b.disabled()
+        })
+    })
+    .await;
+    ts::click_button_labelled("Rotate now");
+}
+
+/// The rotated certificate is show-once (`SsoCertResult::base64`), and the
+/// rotation reloads the SSO config, which remounts the whole editor. The reveal
+/// used to live in that editor and vanished with the reload it triggered — the
+/// same teardown class `certificate_reveal.rs` (`mount_tab_counting`) pins for
+/// the Credentials tab.
+#[wasm_bindgen_test]
+async fn a_rotated_certificate_survives_the_reload_it_triggers() {
+    ts::reset();
+    ts::mock_ok(
+        "rotate_saml_signing_certificate",
+        &azapptoolkit_dto::sso::SsoCertResult {
+            thumbprint: "ROT0C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
+            base64: Some("MIIC-rotated-certificate-body".to_string()),
+            expiry: Some("2029-09-01T00:00:00Z".to_string()),
+        },
+    );
+    let steady = fixtures::signing_cert_rollover_steady("sp-demo", "app-demo");
+    let _m = mount(&steady);
+    ts::wait_for(|| ts::body_contains("Rotate and activate immediately")).await;
+
+    // The reload's answer carries a marker only a REMOUNTED editor can show,
+    // so the wait below proves the refetch resolved and rebuilt the editor —
+    // the call count alone rises at invoke time, before the rebuild.
+    let mut reloaded = fixtures::sso_config("sp-demo", "app-demo");
+    reloaded.rollover = Some(steady);
+    reloaded.claims_read_failed = true;
+    ts::mock_ok("get_sso_config", &reloaded);
+
+    confirm_rotation().await;
+    ts::wait_for(|| ts::call_count("rotate_saml_signing_certificate") == 1).await;
+    ts::wait_for(|| ts::body_contains("Couldn't read this app's current claims policy")).await;
+
+    assert!(
+        revealed("MIIC-rotated-certificate-body"),
+        "the new certificate must still be on screen after the reload; body was: {}",
+        ts::body_text()
+    );
+    assert!(ts::body_contains("New signing certificate (Base64)"));
+    assert!(
+        ts::query_all("button")
+            .iter()
+            .any(|b| b.text_content().unwrap_or_default().trim() == "Copy"),
+        "the rotated certificate must come with a Copy button",
+    );
+}
+
+#[wasm_bindgen_test]
+async fn rotating_immediately_asks_first_and_cancel_does_nothing() {
+    ts::reset();
+    ts::mock_ok(
+        "rotate_saml_signing_certificate",
+        &fixtures::staged_cert_result(),
+    );
+    let _m = mount(&fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
+    ts::wait_for(|| ts::body_contains("Rotate and activate immediately")).await;
+
+    ts::click_button_labelled("Rotate and activate immediately");
+    ts::wait_for(|| ts::body_contains("Rotate the signing certificate now?")).await;
+    ts::click_button_labelled("Cancel");
+    ts::wait_for(|| !ts::body_contains("Rotate the signing certificate now?")).await;
+
+    assert_eq!(
+        ts::call_count("rotate_saml_signing_certificate"),
+        0,
+        "cancelling the confirmation must not rotate",
+    );
+}
+
+/// Retiring the superseded certificate ends the ability to revert, so it asks
+/// before it runs — and then retires exactly the superseded key.
+#[wasm_bindgen_test]
+async fn retiring_the_previous_certificate_asks_first() {
+    ts::reset();
+    // Pending retire: the staged certificate went live, the old one is kept as
+    // the rollback target.
+    let mut roll = fixtures::signing_cert_rollover("sp-demo", "app-demo");
+    for c in &mut roll.certs {
+        if c.key_id == "key-staged" {
+            c.is_active = true;
+            c.status = azapptoolkit_dto::sso::CertStatus::Active;
+        } else if c.key_id == "key-active" {
+            c.is_active = false;
+            c.status = azapptoolkit_dto::sso::CertStatus::Superseded;
+        }
+    }
+    roll.active_thumbprint = Some("FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string());
+    roll.staged_thumbprint = None;
+    roll.phase = azapptoolkit_dto::sso::RolloverPhase::PendingRetire;
+    roll.auto_promote_deadline = None;
+    ts::mock_ok(
+        "retire_saml_signing_certificate",
+        &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
+    );
+
+    let _m = mount(&roll);
+    ts::wait_for(|| ts::body_contains("Retire previous certificate")).await;
+
+    ts::click_button_labelled("Retire previous certificate");
+    ts::wait_for(|| ts::body_contains("Retire the previous signing certificate?")).await;
+    assert_eq!(
+        ts::call_count("retire_saml_signing_certificate"),
+        0,
+        "retire removes the only rollback — it must not run on one click",
+    );
+
+    ts::click_button_labelled("Retire");
+    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+    assert_eq!(
+        ts::last_call("retire_saml_signing_certificate")
+            .unwrap()
+            .arg_str("keyId")
+            .as_deref(),
+        Some("key-active"),
+        "retire must target the superseded certificate",
     );
 }

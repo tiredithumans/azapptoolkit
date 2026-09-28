@@ -8,13 +8,30 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use crate::bindings::auth;
-use crate::components::ui::Card;
-use crate::state::use_session;
+use crate::components::ui::{Callout, Card};
+use crate::state::{Session, use_session};
+
+/// One silent attempt at reviving the previous session — the launch restore in
+/// `Root` and the offline card's Retry are this same call. A restored session
+/// replaces the sign-in card; an unreachable Entra ID (`network`, the one case
+/// the backend returns as an error) raises `unreachable` so the card offers a
+/// Retry; every other outcome is the plain card. The error message is never
+/// shown: its cause chain can carry the token URL.
+pub(crate) async fn attempt_restore(session: Session, unreachable: RwSignal<bool>) {
+    match auth::restore_session().await {
+        Ok(Some(tenant)) => {
+            unreachable.set(false);
+            session.set_active_tenant(Some(tenant));
+        }
+        Err(e) if e.code == "network" => unreachable.set(true),
+        Ok(None) | Err(_) => unreachable.set(false),
+    }
+}
 
 #[component]
 pub fn SignInScreen(
-    /// The tenant this build authenticates against — the domain or GUID
-    /// currently configured. Named on the card because it is the last moment a
+    /// The tenant this build authenticates against — the GUID currently
+    /// configured. Named on the card because it is the last moment a
     /// wrong one is cheap: after the button, a well-formed but wrong id costs a
     /// browser round trip and comes back as an opaque `token_exchange` failure.
     tenant: String,
@@ -24,12 +41,29 @@ pub fn SignInScreen(
     /// can never complete.
     #[prop(into)]
     on_reconfigure: Callback<()>,
+    /// Set when the launch restore could not reach Entra ID: the stored
+    /// session is intact, so the card offers a Retry of the silent restore
+    /// instead of only a browser sign-in that can't load either. Owned by
+    /// `Root`, which runs the launch attempt.
+    #[prop(optional)]
+    restore_unreachable: RwSignal<bool>,
 ) -> impl IntoView {
     let session = use_session();
     let busy = RwSignal::new(false);
-    // (message, hint): the hint translates the machine error code into a
-    // recovery step, since "error [keyring]" means nothing to most users.
-    let error: RwSignal<Option<(String, &'static str)>> = RwSignal::new(None);
+    let retrying = RwSignal::new(false);
+    let on_retry = move |_| {
+        if retrying.get() {
+            return;
+        }
+        retrying.set(true);
+        leptos::task::spawn_local(async move {
+            attempt_restore(session, restore_unreachable).await;
+            retrying.set(false);
+        });
+    };
+    // (message, code, hint): the hint translates the machine error code into a
+    // recovery step, since a bare `[keyring]` means nothing to most users.
+    let error: RwSignal<Option<(String, String, &'static str)>> = RwSignal::new(None);
 
     let on_sign_in = move |_| {
         if busy.get() {
@@ -40,14 +74,18 @@ pub fn SignInScreen(
         let session = session;
         leptos::task::spawn_local(async move {
             match auth::sign_in().await {
-                Ok(outcome) => session.set_active_tenant(Some(outcome.tenant)),
-                // Surface the error code alongside the message (matches the
-                // detail-pane `error [code]: message` convention) so failures
-                // are diagnosable.
-                Err(err) => error.set(Some((
-                    format!("error [{}]: {}", err.code, err.message),
-                    recovery_hint(&err.code, &err.message),
-                ))),
+                Ok(outcome) => {
+                    // So a later sign-out doesn't repaint a stale offline callout.
+                    restore_unreachable.set(false);
+                    session.set_active_tenant(Some(outcome.tenant));
+                }
+                // Message first, with the machine code muted after it — the
+                // same shape as `DetailLoadError` — so a failure stays
+                // diagnosable without leading with the wire code.
+                Err(err) => {
+                    let hint = recovery_hint(&err.code, &err.message);
+                    error.set(Some((err.message, err.code, hint)));
+                }
             }
             busy.set(false);
         });
@@ -64,6 +102,36 @@ pub fn SignInScreen(
                 <Body1>
                     "Use Entra ID to manage App Registrations, permissions, and run security audits."
                 </Body1>
+                {move || {
+                    restore_unreachable
+                        .get()
+                        .then(|| {
+                            view! {
+                                <Callout tone="warn" role="status">
+                                    <Body1>
+                                        "Couldn't reach Entra ID to restore your session — check your network connection, then retry."
+                                    </Body1>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        class="signin-restore-retry"
+                                        on_click=Box::new(on_retry)
+                                        disabled=Signal::derive(move || retrying.get())
+                                    >
+                                        {move || {
+                                            if retrying.get() {
+                                                view! {
+                                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                }
+                                                    .into_any()
+                                            } else {
+                                                view! { "Retry" }.into_any()
+                                            }
+                                        }}
+                                    </Button>
+                                </Callout>
+                            }
+                        })
+                }}
                 {(!tenant.is_empty())
                     .then(|| {
                         view! {
@@ -96,11 +164,19 @@ pub fn SignInScreen(
                 {move || {
                     error
                         .get()
-                        .map(|(msg, hint)| {
+                        .map(|(msg, code, hint)| {
                             view! {
                                 <Body1 class="signin-error">
                                     {format!("Sign-in failed: {msg}")}
                                 </Body1>
+                                {(!code.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <span class="ui-load-error__code">
+                                                {format!("[{code}]")}
+                                            </span>
+                                        }
+                                    })}
                                 <Body1 class="signin-hint">{hint}</Body1>
                             }
                         })
@@ -157,6 +233,13 @@ fn recovery_hint(code: &str, message: &str) -> &'static str {
             "The OS credential store couldn't be reached — unlock your \
              keychain/credential manager, then retry."
         }
+        // No store at all — nothing to unlock. Registration is memoised for the
+        // process, so a provider started afterwards needs a restart.
+        "keyring_unavailable" => {
+            "No OS credential store is available, so azapptoolkit can't keep your \
+             sign-in. On Linux it needs a running Secret Service (GNOME Keyring or \
+             KWallet) in your desktop session — start one, then restart azapptoolkit."
+        }
         "authorization" | "consent_required" => {
             "The sign-in was declined. An administrator may need to grant the app \
              consent in this tenant before you can sign in."
@@ -185,16 +268,17 @@ fn aadsts_hint(message: &str) -> Option<&'static str> {
         .collect();
     Some(match digits.as_str() {
         // The two "you are pointed at the wrong directory" shapes. A well-formed
-        // but wrong tenant GUID fails exactly like this, which is why the hint
-        // names Settings: the ids are editable there.
+        // but wrong tenant GUID fails exactly like this, so the hint points at
+        // the card's own Change link, which reopens the config form holding
+        // both ids — Settings is behind the sign-in that just failed.
         "90002" | "900023" => {
-            "That tenant doesn't resolve. Check the tenant ID under Settings → \
-             Tenant connection — a well-formed but wrong GUID fails exactly this way."
+            "That tenant doesn't resolve. Select Change above to correct the tenant \
+             ID — a well-formed but wrong GUID fails exactly this way."
         }
         "700016" | "700054" => {
             "No app registration with this client ID exists in the configured \
-             tenant. Check the client ID under Settings → Tenant connection, or \
-             that you're pointed at the right tenant."
+             tenant. Select Change above to check the client ID, or that you're \
+             pointed at the right tenant."
         }
         // Right tenant, wrong account.
         "50020" | "50034" | "500011" => {
@@ -249,6 +333,32 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_id_hint_points_at_the_cards_change_link_not_settings() {
+        // These render on the sign-in card, where Settings is unreachable (it is
+        // behind the sign-in that failed); the card's Change link is the way to
+        // the ids.
+        for code in ["90002", "900023", "700016", "700054"] {
+            let hint = recovery_hint("token_exchange", &format!("invalid_request (AADSTS{code})"));
+            assert!(hint.contains("Change"), "AADSTS{code}: {hint}");
+            assert!(!hint.contains("Settings"), "AADSTS{code}: {hint}");
+        }
+    }
+
+    #[test]
+    fn an_abandoned_browser_sign_in_says_so() {
+        // The backend now produces `cancelled` for a closed tab (redirect
+        // timeout) and a Cancel at Entra, instead of `loopback` / `authorization`,
+        // whose hints blamed the network or an administrator.
+        assert_eq!(
+            recovery_hint(
+                "cancelled",
+                "sign-in was cancelled or not completed in the browser"
+            ),
+            "The browser sign-in was closed before completing — retry when ready.",
+        );
+    }
+
+    #[test]
     fn an_unmapped_or_absent_code_falls_back_rather_than_guessing() {
         assert!(aadsts_hint("invalid_request (AADSTS99999)").is_none());
         assert!(aadsts_hint("invalid_request").is_none());
@@ -259,6 +369,17 @@ mod tests {
             recovery_hint("network", "connection refused"),
             "Check your network connection, then select Sign in to retry.",
         );
+    }
+
+    #[test]
+    fn a_missing_credential_store_is_not_told_to_unlock_it() {
+        let hint = recovery_hint(
+            "keyring_unavailable",
+            "no OS credential store is available: no session bus",
+        );
+        assert!(hint.contains("Secret Service"), "{hint}");
+        assert!(hint.contains("restart"), "{hint}");
+        assert!(!hint.contains("unlock"), "{hint}");
     }
 
     #[test]

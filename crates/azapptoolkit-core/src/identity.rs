@@ -19,9 +19,34 @@ pub struct SignInOutcome {
     pub tenant: TenantContext,
 }
 
+/// The one spelling of a configured tenant id: trimmed and ASCII-lowercased.
+///
+/// Entra issues the id token's `tid` claim (and so every `TenantContext`,
+/// cache key and keyring entry derived from it) as a lowercase GUID, while
+/// the configured value is operator-typed and a GUID is case-insensitive. Every
+/// place a configured tenant enters the app (the auth service, `AppState`
+/// resolution, the config screen's save) goes through this, so an uppercase
+/// GUID compares equal to its `tid` instead of failing sign-in after a full
+/// browser round trip and never matching the remembered account at launch.
+pub fn canonical_tenant_id(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_tenant_id_matches_the_lowercase_tid() {
+        assert_eq!(
+            canonical_tenant_id(" 3FA85F64-5717-4562-B3FC-2C963F66AFA6 "),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        );
+        assert_eq!(
+            canonical_tenant_id("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        );
+    }
 
     #[test]
     fn tenant_context_round_trips_through_json() {

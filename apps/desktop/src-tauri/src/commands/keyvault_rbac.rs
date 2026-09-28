@@ -2,8 +2,9 @@
 //!
 //! The resource → identities view Graph/ARM don't offer directly: sweep every
 //! Key Vault the signed-in user can reach and, for each, list the principals
-//! holding an Azure RBAC role **directly on the vault** — "which apps / managed
-//! identities can touch this vault?". Complements the per-managed-identity
+//! holding an Azure RBAC role that applies to the vault — made on it or
+//! inherited from an ancestor scope — "which apps / managed identities can
+//! touch this vault?". Complements the per-managed-identity
 //! forward view (MI → its Azure roles); this is the reverse.
 //!
 //! ARM plane (management.azure.com), so it mirrors the SharePoint site sweep's
@@ -18,8 +19,10 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
-use azapptoolkit_core::cache::CacheKind;
+use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
+use azapptoolkit_core::cache::{Cache, CacheKind};
 
+use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
@@ -36,24 +39,21 @@ const ARM_CONCURRENCY: usize = 8;
 /// user legitimately hits it.
 const MAX_VAULTS_PER_SWEEP: usize = 2_000;
 
-/// Built-in Azure roles that grant broad management or data-plane reach over a
-/// Key Vault — flagged so the reverse lookup surfaces the risky grants first.
-const KV_HIGH_PRIVILEGE_ROLES: &[&str] = &[
-    "Owner",
-    "Contributor",
-    "User Access Administrator",
-    "Role Based Access Control Administrator",
-    "Key Vault Administrator",
-    "Key Vault Data Access Administrator",
-    "Key Vault Secrets Officer",
-    "Key Vault Certificates Officer",
-    "Key Vault Crypto Officer",
-];
-
 /// Tenant-prefixed cache key (cross-tenant leakage guard, same convention as
 /// the site sweep and the list caches).
 fn kv_sweep_cache_key(tenant_id: &str) -> String {
     format!("{tenant_id}|keyvault_sweep")
+}
+
+/// Drops the cached vault-access sweep for this tenant. The sweep lives under
+/// its own `CacheKind::Audit` key, so neither `invalidate_app_lists` nor
+/// `invalidate_audit_cache` reaches it (mirrors `sharepoint::invalidate_site_sweep`).
+/// The sweep itself is read-only about vault roles, but the app's own
+/// `assign_managed_identity_azure_role` changes "who can touch this vault", so
+/// every in-app mutation that can change the answer calls this on `Ok` — or the
+/// pre-assignment sweep is served as current for the rest of the audit TTL.
+pub(crate) fn invalidate_kv_sweep(cache: &Cache, tenant_id: &str) {
+    cache.invalidate(CacheKind::Audit, &kv_sweep_cache_key(tenant_id));
 }
 
 /// Maps an ARM error to a `UiError`, replacing a 403's message with the
@@ -69,15 +69,17 @@ fn keyvault_rbac_err(err: azapptoolkit_arm::ArmError) -> UiError {
     ui
 }
 
-/// Sweeps every reachable Key Vault's direct Azure-RBAC role assignments to
+/// Sweeps every reachable Key Vault's Azure-RBAC role assignments to
 /// build the reverse-lookup index: vault → principals ("who can touch this
 /// vault?") and, filtered by principal, principal → vaults. Enumerates vaults
-/// across every accessible subscription, then reads each vault's `atScope()`
-/// role assignments with bounded concurrency, resolving role-definition ids to
+/// across every accessible subscription, then reads each vault's at-or-above-scope
+/// (`atScope()`) role assignments — direct and inherited, flagged per row —
+/// with bounded concurrency, resolving role-definition ids to
 /// names and service-principal ids to display names.
 ///
-/// Long-running: emits `keyvault-sweep-progress` per vault and polls the shared
-/// `AppState.sweep_cancel` (NOT `audit_cancel`) between dispatches. A per-vault
+/// Long-running: emits `keyvault-sweep-progress` per vault and polls its own
+/// `AppState.key_vault_sweep_cancel` token (stopped only by
+/// [`cancel_key_vault_sweep`]) between dispatches. A per-vault
 /// read failure increments `vaults_failed` rather than aborting or silently
 /// reading as "no access", so coverage is never overstated. A complete result
 /// is cached (60-minute audit TTL) under a tenant-prefixed key; a cancelled or
@@ -88,12 +90,16 @@ pub async fn sweep_key_vault_access(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<KeyVaultSweepResult, UiError> {
+    // Names resolved below can come from cache; the rule counts only an
+    // explicit proof ahead of every read (a client factory only builds token
+    // adapters). Sync, so the claim still precedes every await.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Claimed before the first await — the token acquisition, subscription list
     // and per-subscription vault enumeration below all precede the dispatch,
     // and a token claimed after them discards any cancel issued during them
     // (`is_cancelled()` compares `cancelled >= generation`). Pinned by
     // `repo_invariants::cancel`.
-    let cancel = state.sweep_cancel.claim();
+    let cancel = state.key_vault_sweep_cancel.claim();
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
     // the typed `consent_required` code (the UI offers a consent button)
     // instead of a generic error deep inside the ARM client.
@@ -147,7 +153,8 @@ pub async fn sweep_key_vault_access(
         },
     );
 
-    // Phase 2 — role assignments directly on each vault (bounded, cancellable).
+    // Phase 2 — role assignments that apply to each vault, made on it or
+    // inherited from an ancestor (bounded, cancellable).
     let done = Arc::new(Mutex::new(0usize));
     let mut pairs: Vec<(KeyVaultResource, Vec<RoleAssignment>)> = Vec::new();
     let mut vaults_scanned = 0usize;
@@ -209,44 +216,18 @@ pub async fn sweep_key_vault_access(
         .flat_map(|(v, list)| list.into_iter().map(move |a| (v.clone(), a)))
         .collect();
 
-    // Resolve the unique role-definition ids to names (cached, tenant-stable —
-    // Owner/Contributor/Key Vault Administrator/…), mirroring the MI Azure-roles
-    // command so both surfaces read the same names.
-    let unique_roledefs: HashSet<String> = flat
-        .iter()
-        .filter_map(|(_, a)| a.properties.role_definition_id.clone())
-        .filter(|id| !id.is_empty())
-        .collect();
-    let role_names: HashMap<String, String> = stream::iter(unique_roledefs)
-        .map(|id| {
-            let arm = arm.clone();
-            let cache = cache.clone();
-            let tenant_id = tenant_id.clone();
-            async move {
-                let key = format!("{tenant_id}|arm_roledef|{id}");
-                if let Some(name) = cache.get::<String>(CacheKind::Permissions, &key) {
-                    return (id, name);
-                }
-                match arm
-                    .get_role_definition(&id)
-                    .await
-                    .ok()
-                    .and_then(|d| d.properties.role_name)
-                {
-                    Some(name) => {
-                        cache.put(CacheKind::Permissions, key, &name);
-                        (id, name)
-                    }
-                    None => {
-                        let fallback = id.rsplit('/').next().unwrap_or("role").to_string();
-                        (id, fallback)
-                    }
-                }
-            }
-        })
-        .buffer_unordered(ARM_CONCURRENCY)
-        .collect()
-        .await;
+    // Resolve the role-definition ids to names (one fetch per role GUID, cached
+    // per tenant), shared with the MI Azure-roles command so both surfaces read
+    // the same names.
+    let role_names = resolve_role_names_cached(
+        &arm,
+        &cache,
+        &tenant_id,
+        flat.iter()
+            .filter_map(|(_, a)| a.properties.role_definition_id.as_deref()),
+        ARM_CONCURRENCY,
+    )
+    .await;
 
     // Resolve principal display names via the Graph SP batch. Apps and managed
     // identities are both service principals, so they resolve; users/groups
@@ -260,40 +241,38 @@ pub async fn sweep_key_vault_access(
         .collect();
     let principal_names = resolve_principal_names(&graph, &unique_principals).await;
 
-    let mut rows: Vec<KeyVaultAccessRow> =
-        flat.into_iter()
-            .map(|(vault, a)| {
-                let props = a.properties;
-                let vault_id = vault.id.unwrap_or_default();
-                let scope = props.scope.unwrap_or_else(|| vault_id.clone());
-                let role_def_id = props.role_definition_id.unwrap_or_default();
-                let role_name = if role_def_id.is_empty() {
-                    "(unknown role)".to_string()
-                } else {
-                    role_names.get(&role_def_id).cloned().unwrap_or_else(|| {
-                        role_def_id.rsplit('/').next().unwrap_or("role").to_string()
-                    })
-                };
-                let high_privilege = KV_HIGH_PRIVILEGE_ROLES.contains(&role_name.as_str());
-                let principal_id = props.principal_id.unwrap_or_default();
-                let principal_display_name = principal_names.get(&principal_id).cloned();
-                KeyVaultAccessRow {
-                    vault_id,
-                    vault_name: vault.name,
-                    scope,
-                    role_name,
-                    principal_id,
-                    principal_type: props.principal_type,
-                    principal_display_name,
-                    high_privilege,
-                }
-            })
-            .collect();
-    // High-privilege first, then by vault, then by role — the risky grants lead.
+    let mut rows: Vec<KeyVaultAccessRow> = flat
+        .into_iter()
+        .map(|(vault, a)| {
+            let props = a.properties;
+            let vault_id = vault.id.unwrap_or_default();
+            let inherited = is_inherited(props.scope.as_deref(), &vault_id);
+            let scope = props.scope.unwrap_or_else(|| vault_id.clone());
+            let role_def_id = props.role_definition_id.unwrap_or_default();
+            let role_name = role_display_name(&role_names, &role_def_id);
+            let high_privilege = is_high_privilege_role(&role_name, RoleContext::KeyVault);
+            let principal_id = props.principal_id.unwrap_or_default();
+            let principal_display_name = principal_names.get(&principal_id).cloned();
+            KeyVaultAccessRow {
+                vault_id,
+                vault_name: vault.name,
+                scope,
+                role_name,
+                principal_id,
+                principal_type: props.principal_type,
+                principal_display_name,
+                high_privilege,
+                inherited,
+            }
+        })
+        .collect();
+    // High-privilege first, then by vault (its direct grants before its
+    // inherited ones), then by role — the risky grants lead.
     rows.sort_by(|a, b| {
         b.high_privilege
             .cmp(&a.high_privilege)
             .then_with(|| a.vault_name.cmp(&b.vault_name))
+            .then_with(|| a.inherited.cmp(&b.inherited))
             .then_with(|| a.role_name.cmp(&b.role_name))
     });
 
@@ -320,6 +299,13 @@ pub async fn sweep_key_vault_access(
         cache.put(CacheKind::Audit, kv_sweep_cache_key(&tenant_id), &result);
     }
     Ok(result)
+}
+
+/// Signals an in-progress [`sweep_key_vault_access`] run to stop at the next
+/// dispatch boundary.
+#[tauri::command]
+pub fn cancel_key_vault_sweep(state: State<'_, AppState>) {
+    state.key_vault_sweep_cancel.cancel();
 }
 
 /// Batch-resolves service-principal object ids to display names. A non-SP id
@@ -399,22 +385,37 @@ pub async fn save_key_vault_access_to_file(
     .await
 }
 
+/// True when an assignment returned for `vault_id` by `atScope()` was made at
+/// an ancestor scope (resource group, subscription, management group, root)
+/// rather than on the vault itself. ARM scopes are case-insensitive; an absent
+/// or empty scope falls back to the vault (as the row builder does), so it
+/// reads as direct.
+fn is_inherited(scope: Option<&str>, vault_id: &str) -> bool {
+    match scope.filter(|s| !s.is_empty()) {
+        None => false,
+        Some(scope) => !scope
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(vault_id.trim_end_matches('/')),
+    }
+}
+
 /// Serializes vault-access rows as CSV under the shared coverage comment block.
 /// Principal display names come from the directory, so every field is routed
 /// through `csv_field` (formula-injection guard + delimiter quoting).
 fn key_vault_access_to_csv(rows: &[KeyVaultAccessRow], summary: &str) -> String {
     let mut out = coverage_comment_block(
-        "azapptoolkit — Key Vault access (direct Azure RBAC role assignments)",
+        "azapptoolkit — Key Vault access (Azure RBAC role assignments, direct and inherited)",
         summary,
     );
     out.push_str(
-        "Vault,VaultResourceId,Scope,Role,HighPrivilege,Principal,PrincipalId,PrincipalType\n",
+        "Vault,VaultResourceId,Scope,Inherited,Role,HighPrivilege,Principal,PrincipalId,PrincipalType\n",
     );
     for r in rows {
         let row = [
             csv_field(r.vault_name.as_deref().unwrap_or("")),
             csv_field(&r.vault_id),
             csv_field(&r.scope),
+            r.inherited.to_string(),
             csv_field(&r.role_name),
             r.high_privilege.to_string(),
             csv_field(r.principal_display_name.as_deref().unwrap_or("")),
@@ -446,7 +447,37 @@ mod tests {
             principal_type: Some("ServicePrincipal".into()),
             principal_display_name: Some(principal.into()),
             high_privilege: false,
+            inherited: false,
         }
+    }
+
+    #[test]
+    fn is_inherited_compares_scope_to_the_vault_case_insensitively() {
+        let vault = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv";
+        assert!(!is_inherited(Some(vault), vault));
+        assert!(!is_inherited(Some(&vault.to_uppercase()), vault));
+        assert!(!is_inherited(Some(&format!("{vault}/")), vault));
+        assert!(!is_inherited(None, vault));
+        assert!(!is_inherited(Some(""), vault));
+        assert!(is_inherited(Some("/subscriptions/s"), vault));
+        assert!(is_inherited(
+            Some("/subscriptions/s/resourceGroups/rg"),
+            vault
+        ));
+        assert!(is_inherited(
+            Some("/providers/Microsoft.Management/managementGroups/mg"),
+            vault
+        ));
+    }
+
+    #[test]
+    fn csv_carries_an_inherited_column_after_scope() {
+        let mut inherited = access_row("kv", "Contoso API");
+        inherited.scope = "/subscriptions/s".into();
+        inherited.inherited = true;
+        let csv = key_vault_access_to_csv(&[inherited], "complete");
+        assert!(csv.contains(",Scope,Inherited,"), "{csv}");
+        assert!(csv.contains(",/subscriptions/s,true,"), "{csv}");
     }
 
     #[test]
@@ -481,12 +512,47 @@ mod tests {
         assert_ne!(kv_sweep_cache_key("t1"), kv_sweep_cache_key("t2"));
     }
 
+    /// An Azure role assignment made from the Managed Identities pane changes
+    /// which principals the sweep would list, and the sweep key is NOT covered
+    /// by `invalidate_app_lists` or `invalidate_audit_cache` (a different
+    /// Audit-kind key) — so the assignment busts it directly. The other tenant's
+    /// sweep must survive.
+    #[test]
+    fn invalidate_kv_sweep_drops_only_the_target_tenant() {
+        let cache = Cache::new();
+        let sweep = KeyVaultSweepResult {
+            tenant_id: "t1".into(),
+            total_vaults: 1,
+            vaults_scanned: 1,
+            vaults_failed: 0,
+            rows: Vec::new(),
+            cancelled: false,
+        };
+        cache.put(CacheKind::Audit, kv_sweep_cache_key("t1"), &sweep);
+        cache.put(CacheKind::Audit, kv_sweep_cache_key("t2"), &sweep);
+
+        invalidate_kv_sweep(&cache, "t1");
+
+        assert!(
+            cache
+                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t1"))
+                .is_none()
+        );
+        assert!(
+            cache
+                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t2"))
+                .is_some(),
+            "other tenant must survive"
+        );
+    }
+
     #[test]
     fn high_privilege_roles_flagged_exactly() {
-        assert!(KV_HIGH_PRIVILEGE_ROLES.contains(&"Key Vault Administrator"));
-        assert!(KV_HIGH_PRIVILEGE_ROLES.contains(&"Owner"));
+        let flagged = |name: &str| is_high_privilege_role(name, RoleContext::KeyVault);
+        assert!(flagged("Key Vault Administrator"));
+        assert!(flagged("Owner"));
         // A read-only data role is NOT high-privilege.
-        assert!(!KV_HIGH_PRIVILEGE_ROLES.contains(&"Key Vault Secrets User"));
-        assert!(!KV_HIGH_PRIVILEGE_ROLES.contains(&"Reader"));
+        assert!(!flagged("Key Vault Secrets User"));
+        assert!(!flagged("Reader"));
     }
 }

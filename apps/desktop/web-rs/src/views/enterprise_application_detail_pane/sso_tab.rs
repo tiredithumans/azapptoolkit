@@ -1,7 +1,8 @@
 use super::*;
 
-use crate::components::ui::Callout;
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyBlock, DataTable};
 use crate::hooks::use_command::use_command;
+use crate::util::{expiry_label, expiry_tone};
 
 /// SSO configuration for the enterprise app — view/edit the SAML or OIDC setup
 /// and surface the app-owner output summary. Reads `get_sso_config`; edits go
@@ -12,6 +13,15 @@ pub fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl Into
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
     let reload = RwSignal::new(0u32);
+    // The certificate "Rotate and activate immediately" returns. Show-once
+    // (`dto::sso::SsoCertResult::base64`: Graph never returns it on a later
+    // read), so it lives HERE, outside the Suspense: every `reload` — including
+    // the one the rotation itself fires — remounts `SsoEditor`, and a signal
+    // owned by the editor would take the reveal down with it.
+    let rotated_cert: RwSignal<Option<String>> = RwSignal::new(None);
+    // The confirm dialog's subject for an immediate rotation.
+    let app_name =
+        Signal::derive(move || signal.with(|d| d.service_principal.display_name.clone()));
 
     let config = LocalResource::new(move || {
         let tenant = tenant.get();
@@ -42,7 +52,17 @@ pub fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl Into
                         }
                             .into_any()
                     }
-                    Ok(cfg) => view! { <SsoEditor cfg=cfg reload=reload /> }.into_any(),
+                    Ok(cfg) => {
+                        view! {
+                            <SsoEditor
+                                cfg=cfg
+                                reload=reload
+                                rotated_cert=rotated_cert
+                                app_name=app_name
+                            />
+                        }
+                            .into_any()
+                    }
                 }
             })}
         </Suspense>
@@ -56,10 +76,15 @@ pub fn SsoContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl Into
 /// there when the new one goes live. The panel reads its phase from live Graph
 /// state on every load: nothing about a rollover is stored, so one abandoned
 /// halfway picks up exactly where it was left.
+///
+/// `initial` is the state `get_sso_config` already projected from its own live
+/// service-principal read; the panel renders it on mount and calls
+/// `get_signing_cert_rollover` only to re-read after its own actions.
 #[component]
 fn SigningCertRolloverPanel(
     sp_id: StoredValue<String>,
     app_id: StoredValue<String>,
+    initial: Option<sso::SigningCertRolloverDto>,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
@@ -69,12 +94,28 @@ fn SigningCertRolloverPanel(
     // Show-once public certificate, revealed right after staging.
     let staged_pem: RwSignal<Option<String>> = RwSignal::new(None);
     let probe: RwSignal<Option<sso::MetadataProbeDto>> = RwSignal::new(None);
+    // (thumbprint, key_id) of the superseded certificate awaiting a confirmed
+    // retire. Component-level, like the dialog below: both sit outside the
+    // Suspense so a `bump()` never rebuilds them mid-confirmation.
+    let pending_retire: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    // (thumbprint, key_id) of the expired certificate awaiting a confirmed
+    // removal. Removal is irreversible, and the table's grid keynav makes the
+    // row's Remove button the target of Enter on a focused row — so it only
+    // ever opens this confirm, never deletes on the spot.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
+    // Consumed by the first load, so every later one (a bump after stage,
+    // activate, revert or retire) re-reads live.
+    let seed = StoredValue::new(initial);
     let rollover = LocalResource::new(move || {
         let tenant = tenant.get();
         let id = sp_id.get_value();
         let _ = reload.get();
+        let seeded = seed.try_update_value(Option::take).flatten();
         async move {
+            if let Some(roll) = seeded {
+                return Ok(roll);
+            }
             match tenant {
                 Some(t) => sso::get_signing_cert_rollover(&t.tenant_id, &id).await,
                 None => Ok(sso::SigningCertRolloverDto::default()),
@@ -97,6 +138,38 @@ fn SigningCertRolloverPanel(
                 async move {
                     sso::stage_saml_signing_certificate(&tenant_id, &id, &subject, None).await
                 }
+            },
+        );
+    };
+
+    // Retiring removes the rollback target, so it runs only from the confirm
+    // dialog.
+    let do_retire = move |key_id: String| {
+        cmd.run_toast_err(
+            move |_: sso::SigningCertRolloverDto| {
+                session.toast_success("Previous certificate retired.");
+                bump();
+            },
+            move |tenant_id| {
+                let id = sp_id.get_value();
+                let key_id = key_id.clone();
+                async move { sso::retire_saml_signing_certificate(&tenant_id, &id, &key_id).await }
+            },
+        );
+    };
+
+    // Removing an expired leftover also deletes a keyCredential for good, so it
+    // too runs only from its confirm dialog.
+    let do_remove = move |key_id: String| {
+        cmd.run_toast_err(
+            move |_: sso::SigningCertRolloverDto| {
+                session.toast_success("Expired certificate removed.");
+                bump();
+            },
+            move |tenant_id| {
+                let id = sp_id.get_value();
+                let key_id = key_id.clone();
+                async move { sso::retire_saml_signing_certificate(&tenant_id, &id, &key_id).await }
             },
         );
     };
@@ -195,141 +268,102 @@ fn SigningCertRolloverPanel(
                     };
                     let retire = {
                         let superseded = superseded.clone();
-                        move |_| {
-                            let Some((_, key_id)) = superseded.clone() else { return };
-                            cmd.run_toast_err(
-                                move |_: sso::SigningCertRolloverDto| {
-                                    session.toast_success("Previous certificate retired.");
-                                    bump();
-                                },
-                                move |tenant_id| {
-                                    let id = sp_id.get_value();
-                                    let key_id = key_id.clone();
-                                    async move {
-                                        sso::retire_saml_signing_certificate(&tenant_id, &id, &key_id)
-                                            .await
-                                    }
-                                },
-                            );
-                        }
+                        move |_| pending_retire.set(superseded.clone())
                     };
-                    let rows = roll
-                        .certs
-                        .iter()
-                        .map(|c| {
-                            let label = match c.status {
-                                sso::CertStatus::Active => "Active",
-                                sso::CertStatus::Staged => "Staged",
-                                sso::CertStatus::Superseded => "Previous",
-                                sso::CertStatus::Expired => "Expired",
-                            };
-                            // Status reads as a badge, matching the expiry board,
-                            // so Active is findable at a glance in a list where
-                            // every other row is inert.
-                            let status_class = match c.status {
-                                sso::CertStatus::Active => "badge badge--ok",
-                                sso::CertStatus::Staged => "badge badge--info",
-                                sso::CertStatus::Superseded => "badge badge--unknown",
-                                sso::CertStatus::Expired => "badge badge--danger",
-                            };
-                            // Only the DATE, not the full RFC3339 timestamp: a
-                            // wall of `2029-08-12T13:34:01Z` buries the one
-                            // number that matters.
-                            let expiry = c
-                                .end_date_time
-                                .as_deref()
-                                .and_then(|d| d.split('T').next())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let days = c
-                                .days_to_expiry
-                                .map(|d| if d < 0 {
-                                    format!("expired {} days ago", -d)
-                                } else {
-                                    format!("{d} days left")
-                                })
-                                .unwrap_or_default();
-                            // An imminent expiry must not read with the same
-                            // weight as one three years out — the live tenant
-                            // showed "4 days left" and "1095 days left" in
-                            // identical plain text.
-                            let days_class = match c.days_to_expiry {
-                                Some(d) if d < 0 => "cert-rollover__days badge badge--danger",
-                                Some(d) if d <= 7 => "cert-rollover__days badge badge--danger",
-                                Some(d) if d <= 30 => "cert-rollover__days badge badge--warning",
-                                _ => "cert-rollover__days",
-                            };
-                            // An expired, non-nominated certificate is dead
-                            // weight the backend will happily remove (the retire
-                            // guards only protect the active and staged ones) —
-                            // this is the portal's "Delete certificate" on
-                            // inactive certs. The superseded cert deliberately
-                            // does NOT get this button: it is the rollback
-                            // target, and its removal stays on the explicit
-                            // "Retire previous certificate" action below.
-                            let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
-                                && !c.is_active)
-                                .then(|| {
-                                    let key_id = c.key_id.clone();
-                                    view! {
-                                        <Button
-                                            class="cert-rollover__remove"
-                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                            on_click=Box::new(move |_| {
-                                                let key_id = key_id.clone();
-                                                cmd.run_toast_err(
-                                                    move |_: sso::SigningCertRolloverDto| {
-                                                        session.toast_success("Expired certificate removed.");
-                                                        bump();
-                                                    },
-                                                    move |tenant_id| {
-                                                        let id = sp_id.get_value();
-                                                        let key_id = key_id.clone();
-                                                        async move {
-                                                            sso::retire_saml_signing_certificate(
-                                                                    &tenant_id,
-                                                                    &id,
-                                                                    &key_id,
-                                                                )
-                                                                .await
-                                                        }
-                                                    },
-                                                );
-                                            })
-                                            disabled=Signal::derive(move || cmd.busy.get())
-                                        >
-                                            "Remove"
-                                        </Button>
-                                    }
-                                });
-                            view! {
-                                <tr class="cert-rollover__row">
-                                    <td class="cert-rollover__status">
-                                        <span class=status_class>{label}</span>
-                                    </td>
-                                    <td class="cert-rollover__thumbprint">
-                                        <code>{c.thumbprint.clone()}</code>
-                                    </td>
-                                    <td class="cert-rollover__expiry">
-                                        {expiry} " " <span class=days_class>{days}</span>
-                                    </td>
-                                    <td class="cert-rollover__actions">{remove_btn}</td>
-                                </tr>
-                            }
-                        })
-                        .collect_view();
                     view! {
-                        <table class="cert-rollover__table">
-                            <thead>
-                                <tr>
-                                    <th>"Status"</th>
-                                    <th>"Thumbprint"</th>
-                                    <th>"Expires"</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>{rows}</tbody>
-                        </table>
+                        <DataTable
+                            headers=vec!["Status", "Thumbprint", "Expires", ""]
+                            rows=roll.certs.clone()
+                            empty_message="No signing certificates on this application."
+                            row=move |c: sso::SigningCertDto| {
+                                let label = match c.status {
+                                    sso::CertStatus::Active => "Active",
+                                    sso::CertStatus::Staged => "Staged",
+                                    sso::CertStatus::Superseded => "Previous",
+                                    sso::CertStatus::Expired => "Expired",
+                                };
+                                // Status reads as a badge, matching the expiry board,
+                                // so Active is findable at a glance in a list where
+                                // every other row is inert. Staged is informational,
+                                // not a verdict: it is the certificate the whole
+                                // rollover flow is about.
+                                let status_tone = match c.status {
+                                    sso::CertStatus::Active => BadgeTone::Ok,
+                                    sso::CertStatus::Staged => BadgeTone::Info,
+                                    sso::CertStatus::Superseded => BadgeTone::Unknown,
+                                    sso::CertStatus::Expired => BadgeTone::Danger,
+                                };
+                                // Only the DATE, not the full RFC3339 timestamp: a
+                                // wall of `2029-08-12T13:34:01Z` buries the one
+                                // number that matters.
+                                let expiry = c
+                                    .end_date_time
+                                    .as_deref()
+                                    .and_then(|d| d.split('T').next())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                // The backend floors `days_to_expiry` (`div_euclid`),
+                                // which is exactly `expiry_label`'s input contract.
+                                let days = c.days_to_expiry.map(expiry_label).unwrap_or_default();
+                                // An imminent expiry must not read with the same
+                                // weight as one three years out — the live tenant
+                                // showed "4 days left" and "1095 days left" in
+                                // identical plain text. An already-expired one
+                                // (d < 0) takes the danger arm too.
+                                let days_view = match c.days_to_expiry.map(expiry_tone) {
+                                    Some(tone @ (BadgeTone::Danger | BadgeTone::Warning)) => {
+                                        view! { <Badge label=days tone=tone class="cert-rollover__days" /> }
+                                            .into_any()
+                                    }
+                                    _ => view! { <span class="cert-rollover__days">{days}</span> }.into_any(),
+                                };
+                                // An expired, non-nominated certificate is dead
+                                // weight the backend will happily remove (the retire
+                                // guards only protect the active and staged ones) —
+                                // this is the portal's "Delete certificate" on
+                                // inactive certs. The superseded cert deliberately
+                                // does NOT get this button: it is the rollback
+                                // target, and its removal stays on the explicit
+                                // "Retire previous certificate" action below.
+                                let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
+                                    && !c.is_active)
+                                    .then(|| {
+                                        let target = (c.thumbprint.clone(), c.key_id.clone());
+                                        let remove_aria = format!(
+                                            "Remove expired certificate {}",
+                                            c.thumbprint,
+                                        );
+                                        view! {
+                                            <Button
+                                                class="cert-rollover__remove"
+                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                attr:aria-label=remove_aria
+                                                on_click=Box::new(move |_| {
+                                                    pending_remove.set(Some(target.clone()));
+                                                })
+                                                disabled=Signal::derive(move || cmd.busy.get())
+                                            >
+                                                "Remove"
+                                            </Button>
+                                        }
+                                    });
+                                view! {
+                                    <tr class="cert-rollover__row">
+                                        <td class="cert-rollover__status">
+                                            <Badge label=label tone=status_tone />
+                                        </td>
+                                        <td class="cert-rollover__thumbprint">
+                                            <code>{c.thumbprint.clone()}</code>
+                                        </td>
+                                        <td class="cert-rollover__expiry">
+                                            {expiry} " " {days_view}
+                                        </td>
+                                        <td class="cert-rollover__actions">{remove_btn}</td>
+                                    </tr>
+                                }
+                                    .into_any()
+                            }
+                        />
 
                         // Phase guidance — one Callout, never two competing ones.
                         {(phase == sso::RolloverPhase::Staged && active_expired)
@@ -397,10 +431,11 @@ fn SigningCertRolloverPanel(
                                 .get()
                                 .map(|c| {
                                     view! {
-                                        <p class="hint">
-                                            "Upload this to the application before activating."
-                                        </p>
-                                        <pre class="secret-reveal">{c}</pre>
+                                        <CopyBlock
+                                            label="Staged signing certificate (Base64)"
+                                            value=c
+                                            hint="Upload this to the application before activating. Entra returns it only once here; it is also published in this app's federation metadata."
+                                        />
                                     }
                                 })
                         }}
@@ -483,6 +518,40 @@ fn SigningCertRolloverPanel(
                         .into_any()
                 })}
             </Suspense>
+            <ConfirmDialog
+                open=Signal::derive(move || pending_retire.with(|p| p.is_some()))
+                title="Retire the previous signing certificate?"
+                body="The previous certificate is your only rollback. Once it is removed, Revert is no longer possible — if sign-ins then fail, the fix is a new certificate. Retire it only once sign-ins look healthy."
+                subject=Signal::derive(move || {
+                    pending_retire.with(|p| p.as_ref().map(|(t, _)| t.clone())).unwrap_or_default()
+                })
+                confirm_label="Retire"
+                busy=Signal::derive(move || cmd.busy.get())
+                on_confirm=Callback::new(move |()| {
+                    if let Some((_, key_id)) = pending_retire.get() {
+                        pending_retire.set(None);
+                        do_retire(key_id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_retire.set(None))
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
+                title="Remove the expired signing certificate?"
+                body="The certificate is permanently deleted from this application. It is expired and no longer nominated, so sign-ins do not use it, but it cannot be restored."
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(t, _)| t.clone())).unwrap_or_default()
+                })
+                confirm_label="Remove"
+                busy=Signal::derive(move || cmd.busy.get())
+                on_confirm=Callback::new(move |()| {
+                    if let Some((_, key_id)) = pending_remove.get() {
+                        pending_remove.set(None);
+                        do_remove(key_id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_remove.set(None))
+            />
         </div>
     }
 }
@@ -490,37 +559,40 @@ fn SigningCertRolloverPanel(
 /// Inner SSO editor, seeded from the loaded [`SsoConfigDto`]. A method selector
 /// sets `preferredSingleSignOnMode`; the editable fields then branch on the
 /// *saved* mode (SAML / OIDC / not-configured). Renders the app-owner summary
-/// fetched via `get_sso_summary`.
+/// `get_sso_config` already carries (`SsoConfigDto::summary`).
+///
+/// `rotated_cert` is owned by [`SsoContent`] so the show-once reveal outlives
+/// the remount every `reload` causes; `app_name` names the app in the rotate
+/// confirmation.
 #[component]
-fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
+fn SsoEditor(
+    cfg: SsoConfigDto,
+    reload: RwSignal<u32>,
+    rotated_cert: RwSignal<Option<String>>,
+    app_name: Signal<String>,
+) -> impl IntoView {
     let session = use_session();
-    let tenant_id = session
-        .active_tenant
-        .get_untracked()
-        .map(|t| t.tenant_id)
-        .unwrap_or_default();
 
-    let is_oidc = cfg.sso_mode.as_deref() == Some("oidc");
-    let is_saml = cfg.sso_mode.as_deref() == Some("saml");
+    let saved_mode = SsoMode::from_graph(cfg.sso_mode.as_deref());
+    let is_saml = saved_mode == SsoMode::Saml;
+    let is_oidc = saved_mode == SsoMode::Oidc;
     let configured = is_saml || is_oidc;
-    let protocol = if is_oidc { "oidc" } else { "saml" };
     let saved_mode_label = cfg
         .sso_mode
         .clone()
         .unwrap_or_else(|| "not configured".to_string());
     // Held in `StoredValue` (Copy) so the on_click handlers below capture only
     // Copy state and stay `Fn` — Leptos `<Show>` children must be re-callable.
-    let tenant_id = StoredValue::new(tenant_id);
     let object_id = StoredValue::new(cfg.object_id.clone());
     let sp_id = StoredValue::new(cfg.service_principal_id.clone());
     let app_id = StoredValue::new(cfg.app_id.clone());
+    // The rollover panel's initial state, from the same read.
+    let rollover_seed = StoredValue::new(cfg.rollover.clone());
+    // The app-owner summary, from the same read (`None` unless SAML/OIDC).
+    let owner_summary = cfg.summary.clone();
 
-    // Method selector — seeded to the saved mode; "disabled" clears SSO.
-    let selected_mode = RwSignal::new(match cfg.sso_mode.as_deref() {
-        Some("saml") => "saml".to_string(),
-        Some("oidc") => "oidc".to_string(),
-        _ => "disabled".to_string(),
-    });
+    // Method selector — seeded to the saved mode; `Disabled` clears SSO.
+    let selected_mode = RwSignal::new(saved_mode);
     let mode_cmd = use_command();
 
     // SAML editable fields — one row per entry (`components::uri_list_editor`),
@@ -531,34 +603,25 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let identifiers = UriListState::new(&cfg.identifier_uris);
     let reply_urls = UriListState::validated(&cfg.reply_urls, redirect_uri_reason);
     let logout_url = RwSignal::new(cfg.logout_url.clone().unwrap_or_default());
-    // SAML signing-cert expiry notification recipients (one per line).
+    // SAML signing-cert expiry notification recipients — one row per address
+    // (`UriListEditor`).
     let notification_emails = UriListState::new(&cfg.notification_emails);
-    // OIDC editable fields (one URI per line).
+    // OIDC editable fields — one row per URI (`UriListEditor`).
     let redirect_uris = UriListState::validated(&cfg.redirect_uris, redirect_uri_reason);
     let spa_uris = UriListState::validated(&cfg.spa_redirect_uris, redirect_uri_reason);
-    // Cert rotation.
+    // Cert rotation. The big-bang path breaks sign-in for static-certificate
+    // apps, so the button only opens a typed confirmation.
     let cert_subject = RwSignal::new(String::new());
-    let rotated_cert: RwSignal<Option<String>> = RwSignal::new(None);
+    let rotate_open = RwSignal::new(false);
     // Attributes & claims editor state, seeded from the assigned policy.
     let claims_state = ClaimsEditorState::from_dto(&cfg.claims_policy.clone().unwrap_or_default());
+    // The assigned policy couldn't be read: the editor above shows "no policy",
+    // which may be false, so Save stays off until a read succeeds. Plain bool —
+    // every reload re-mounts this editor through `SsoContent`'s Suspense.
+    let claims_unread = cfg.claims_read_failed;
 
     let cmd = use_command();
     let needs_consent = RwSignal::new(false);
-
-    // App-owner summary (read-only), recomputed on reload. Only fetched once SSO
-    // is actually configured for SAML/OIDC (no point otherwise).
-    let summary = LocalResource::new(move || {
-        let tenant_id = tenant_id.get_value();
-        let sp_id = sp_id.get_value();
-        let _ = reload.get();
-        async move {
-            if configured {
-                sso::get_sso_summary(&tenant_id, &sp_id, protocol).await
-            } else {
-                Ok(serde_json::Value::Null)
-            }
-        }
-    });
 
     // Apply a new SSO method, then reload so the editor switches to it.
     let apply_mode = move |_| {
@@ -570,7 +633,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             move |tenant_id| {
                 let sp_id = sp_id.get_value();
                 let mode = selected_mode.get_untracked();
-                async move { sso::set_sso_mode(&tenant_id, &sp_id, &mode).await }
+                async move { sso::set_sso_mode(&tenant_id, &sp_id, mode).await }
             },
         );
     };
@@ -615,7 +678,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
         );
     };
 
-    let rotate_cert = move |_| {
+    let do_rotate = move || {
         cmd.run_toast_err(
             move |cert: sso::SsoCertResult| {
                 session.toast_success(format!("New signing certificate: {}", cert.thumbprint));
@@ -637,8 +700,8 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
     let save_notification_emails = move |_| {
         cmd.run_toast_err(
             move |()| {
-                // Deliberately do NOT bump `reload` here: the textarea already
-                // shows the saved value, and reloading would tear down the
+                // Deliberately do NOT bump `reload` here: the list editor
+                // already shows the saved value, and reloading would tear down the
                 // Suspense subtree and discard any in-progress edits in the
                 // sibling claims editor.
                 session.toast_success("Notification emails saved.");
@@ -651,6 +714,11 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
         );
     };
     let save_claims = move || {
+        // Belt and braces behind the disabled button: never save over a policy
+        // this editor never loaded.
+        if claims_unread {
+            return;
+        }
         needs_consent.set(false);
         let policy = claims_state.to_dto();
         cmd.run_with(
@@ -659,7 +727,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 reload.update(|n| *n = n.wrapping_add(1));
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 session.report_command_error(&e);
@@ -683,6 +751,19 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             },
         );
     };
+    // Consent, then re-read the SSO config so the editor shows the live policy.
+    // If the read still fails the flag stays set and Save stays off.
+    let load_claims = move |_| {
+        cmd.run_toast_err(
+            move |()| {
+                session.toast_success("Consent granted. Loading the current claims.");
+                reload.update(|n| *n = n.wrapping_add(1));
+            },
+            move |tenant_id| async move {
+                crate::bindings::auth::request_scope_consent(&tenant_id, "policy_write").await
+            },
+        );
+    };
 
     view! {
         <div class="sso-tab">
@@ -694,15 +775,21 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
             <Field label="Set sign-on method">
                 <select
                     class="ui-select"
-                    on:change=move |ev| selected_mode.set(event_target_value(&ev))
+                    on:change=move |ev| {
+                        // Exact parse: an unknown value leaves the choice alone
+                        // rather than falling through to Disabled.
+                        if let Some(m) = SsoMode::parse(&event_target_value(&ev)) {
+                            selected_mode.set(m);
+                        }
+                    }
                 >
-                    <option value="saml" selected=is_saml>
+                    <option value=SsoMode::Saml.as_str() selected=is_saml>
                         "SAML"
                     </option>
-                    <option value="oidc" selected=is_oidc>
+                    <option value=SsoMode::Oidc.as_str() selected=is_oidc>
                         "OIDC / OpenID Connect"
                     </option>
-                    <option value="disabled" selected=!configured>
+                    <option value=SsoMode::Disabled.as_str() selected=!configured>
                         "Disabled"
                     </option>
                 </select>
@@ -747,7 +834,11 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Button>
 
                 <h4>"Signing certificate"</h4>
-                <SigningCertRolloverPanel sp_id=sp_id app_id=app_id />
+                <SigningCertRolloverPanel
+                    sp_id=sp_id
+                    app_id=app_id
+                    initial=rollover_seed.get_value()
+                />
 
                 <h5>"Rotate now (no staging)"</h5>
                 <Callout tone="warn">
@@ -758,7 +849,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Field>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                    on_click=Box::new(rotate_cert)
+                    on_click=Box::new(move |_| rotate_open.set(true))
                     disabled=Signal::derive(move || cmd.busy.get())
                 >
                     "Rotate and activate immediately"
@@ -768,10 +859,28 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                         .get()
                         .map(|c| {
                             view! {
-                                <pre class="secret-reveal">{c}</pre>
+                                <CopyBlock
+                                    label="New signing certificate (Base64)"
+                                    value=c
+                                    hint="This certificate is already active. Applications holding the old one reject sign-ins until they have it — send it to the application owner now."
+                                />
                             }
                         })
                 }}
+                <ConfirmDialog
+                    open=Signal::derive(move || rotate_open.get())
+                    title="Rotate the signing certificate now?"
+                    body="Entra starts signing with a brand-new certificate immediately. Applications that hold a single static certificate reject every sign-in until their copy is replaced. Use the staged rollover above unless you're in a maintenance window."
+                    subject=app_name
+                    confirm_label="Rotate now"
+                    require_keyword="ROTATE"
+                    busy=Signal::derive(move || cmd.busy.get())
+                    on_confirm=Callback::new(move |()| {
+                        rotate_open.set(false);
+                        do_rotate();
+                    })
+                    on_close=Callback::new(move |()| rotate_open.set(false))
+                />
 
                 <h4>"Signing-certificate notification emails"</h4>
                 <UriListEditor
@@ -793,11 +902,26 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 </Button>
 
                 <h4>"Attributes & claims"</h4>
+                {claims_unread
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                "Couldn't read this app's current claims policy, so the editor below may not show its real claims. Saving is turned off until they load — a save now could replace claims you can't see. Loading needs admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(load_claims)
+                                    disabled=Signal::derive(move || cmd.busy.get())
+                                >
+                                    "Load claims"
+                                </Button>
+                            </Callout>
+                        }
+                    })}
                 <ClaimsEditor state=claims_state />
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| save_claims())
-                    disabled=Signal::derive(move || cmd.busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get() || claims_unread)
                 >
                     "Save claims"
                 </Button>
@@ -807,7 +931,7 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                         .then(|| {
                             view! {
                                 <Callout tone="warn">
-                                    "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
+                                    "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(grant_consent)
@@ -856,39 +980,14 @@ fn SsoEditor(cfg: SsoConfigDto, reload: RwSignal<u32>) -> impl IntoView {
                 })}
 
             // ---- app-owner summary (only once SSO is configured) ----
-            {configured
-                .then(|| {
+            {owner_summary
+                .map(|summary| {
                     view! {
                         <h4>"Details for the application owner"</h4>
-                        <Suspense fallback=move || {
-                            view! { <SkeletonList rows=3 /> }
-                        }>
-                            {move || Suspend::new(async move {
-                                match summary.await {
-                                    Err(e) => {
-                                        view! { <Callout tone="warn">{e.message}</Callout> }
-                                            .into_any()
-                                    }
-                                    Ok(value) => {
-                                        if is_oidc {
-                                            match serde_json::from_value::<OidcSsoSummary>(value) {
-                                                Ok(s) => view! { <OidcSummaryView summary=s /> }.into_any(),
-                                                Err(_) => {
-                                                    view! { <Body1>"Summary unavailable."</Body1> }.into_any()
-                                                }
-                                            }
-                                        } else {
-                                            match serde_json::from_value::<SamlSsoSummary>(value) {
-                                                Ok(s) => view! { <SamlSummaryView summary=s /> }.into_any(),
-                                                Err(_) => {
-                                                    view! { <Body1>"Summary unavailable."</Body1> }.into_any()
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            })}
-                        </Suspense>
+                        {match summary {
+                            SsoSummary::Saml(s) => view! { <SamlSummaryView summary=s /> }.into_any(),
+                            SsoSummary::Oidc(s) => view! { <OidcSummaryView summary=s /> }.into_any(),
+                        }}
                     }
                 })}
         </div>

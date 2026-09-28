@@ -4,8 +4,12 @@
 //! grant this app per-site access via the `Sites.Selected` model, list a
 //! site's app permissions, and revoke them.
 //!
-//! Callers render this only when the principal declares/holds a `Sites.*`
-//! permission. No `on_changed` callback: site grants live on the SharePoint
+//! Callers render this only when the principal declares/holds a permission
+//! `azapptoolkit_core::scoping::is_sharepoint_site_access_permission` accepts —
+//! an org-wide `Sites.*` or `Sites.Selected` on Microsoft Graph **or** Office 365
+//! SharePoint Online (a per-site grant is one object on the site, honoured by
+//! both APIs, so this list describes either), never on a bare `Sites.` value
+//! from some other resource. No `on_changed` callback: site grants live on the SharePoint
 //! site (not the Entra grant list), and the `Sites.*` Scope badges above are
 //! name-derived — nothing in the permissions table changes, so inline result
 //! notes survive.
@@ -17,7 +21,7 @@ use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
-use crate::components::ui::{Callout, DataTable};
+use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -70,7 +74,7 @@ pub fn SharePointSitesSection(
             let r = sharepoint::list_site_permissions(&t.tenant_id, &url).await;
             match &r {
                 Ok(_) => needs_consent.set(false),
-                Err(e) if e.code == "consent_required" => needs_consent.set(true),
+                Err(e) if e.is_consent_required() => needs_consent.set(true),
                 Err(_) => {}
             }
             r
@@ -110,7 +114,7 @@ pub fn SharePointSitesSection(
                 reload.update(|n| *n += 1);
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 cmd.error.set(Some(e.message));
@@ -151,7 +155,7 @@ pub fn SharePointSitesSection(
                 reload.update(|n| *n += 1);
             },
             move |e| {
-                if e.code == "consent_required" {
+                if e.is_consent_required() {
                     needs_consent.set(true);
                 }
                 cmd.error.set(Some(e.message));
@@ -193,19 +197,22 @@ pub fn SharePointSitesSection(
                                 />
                             </Field>
                             <div class="actions-row">
+                                // Read is the Primary, last of the grant pair, as in
+                                // `views/dialogs/scope_remediation.rs`: the emphasized
+                                // default must not be the broader role.
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    on_click=Box::new(move |_| do_grant("write"))
+                                    disabled=Signal::derive(move || cmd.busy.get())
+                                >
+                                    "Grant write"
+                                </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_grant("read"))
                                     disabled=Signal::derive(move || cmd.busy.get())
                                 >
                                     "Grant read"
-                                </Button>
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| do_grant("write"))
-                                    disabled=Signal::derive(move || cmd.busy.get())
-                                >
-                                    "Grant write"
                                 </Button>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -226,7 +233,7 @@ pub fn SharePointSitesSection(
                             </div>
 
                             {move || {
-                                cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 needs_consent
@@ -291,7 +298,7 @@ pub fn SharePointSitesSection(
                                                             <tr>
                                                                 <td>{app}</td>
                                                                 <td class="mono">{p.roles.join(", ")}</td>
-                                                                <td>
+                                                                <td class="cell-mid">
                                                                     <Button
                                                                         class="button--danger"
                                                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
@@ -314,9 +321,16 @@ pub fn SharePointSitesSection(
                                         }
                                         // Consent is surfaced by the banner above; don't also
                                         // echo the raw 403 body here.
-                                        Err(e) if e.code == "consent_required" => ().into_any(),
+                                        Err(e) if e.is_consent_required() => ().into_any(),
                                         Err(e) => {
-                                            view! { <Body1 class="form-error">{e.message}</Body1> }
+                                            view! {
+                                                <DetailLoadError
+                                                    error=e
+                                                    on_retry=Callback::new(move |_| {
+                                                        reload.update(|n| *n += 1)
+                                                    })
+                                                />
+                                            }
                                                 .into_any()
                                         }
                                     }

@@ -12,7 +12,10 @@
 # Mid-edit gaps are expected (the steps land one file at a time) — the output
 # is the escort through the remaining steps, not an error.
 #
-# Exits 0 always — this hook never blocks. The agent makes the judgment call.
+# The CI gate is `apps/desktop/src-tauri/tests/repo_invariants/ipc.rs`, which
+# runs under `just test` and pins the same three halves plus each binding's arg
+# keys and return type. This hook is only the fast local escort: it exits 0
+# always, never blocks, and skips silently without jq.
 
 set -uo pipefail
 

@@ -4,11 +4,14 @@
 //! consent prompt.
 //!
 //! Loads live state via `get_expose_api` (these fields aren't on the cached
-//! list shape), then each mutation goes through its own command; the backend
-//! re-reads live state before every write because Graph full-replaces the
-//! `api` arrays. After a successful save the tab refetches itself and bumps
-//! the parent detail (the paired SP mirrors the scope list).
+//! list shape), then each mutation goes through its own command carrying only
+//! its delta — one URI added or removed, one scope, one client — and the
+//! backend re-reads live state and merges it before every write, because
+//! Graph full-replaces `identifierUris` and the `api` arrays. After a
+//! successful save the tab refetches itself and bumps the parent detail (the
+//! paired SP mirrors the scope list).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use leptos::prelude::*;
@@ -18,13 +21,16 @@ use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::expose_api::{
     self, ExposeApiDto, SetPreAuthorizedAppInput, UpsertApiScopeInput,
 };
+use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::DetailSkeleton;
+use crate::components::ui::{
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError,
+};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
-use azapptoolkit_core::models::OAuth2PermissionScope;
+use azapptoolkit_core::models::{OAuth2PermissionScope, PreAuthorizedApplication};
 
 use crate::util::no_tenant;
 
@@ -79,7 +85,13 @@ pub fn ExposeApiTab(
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}
@@ -97,7 +109,9 @@ fn ExposeApiLoaded(
 ) -> impl IntoView {
     let session = use_session();
     let object_id = StoredValue::new(object_id);
-    let uris = StoredValue::new(dto.identifier_uris.clone());
+    // Only for the Add dialog's early duplicate check — never a write's merge
+    // base (the backend re-reads live and is authoritative).
+    let loaded_uris = StoredValue::new(dto.identifier_uris.clone());
     let scopes = StoredValue::new(dto.scopes.clone());
 
     // ---- Application ID URI ----
@@ -120,14 +134,12 @@ fn ExposeApiLoaded(
             uri_add_cmd.error.set(Some("Enter a URI.".into()));
             return;
         }
-        let mut list = uris.get_value();
-        if list.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
+        if loaded_uris.with_value(|l| l.iter().any(|u| u.eq_ignore_ascii_case(&v))) {
             uri_add_cmd
                 .error
                 .set(Some("That URI is already set.".into()));
             return;
         }
-        list.push(v);
         uri_add_cmd.run(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
@@ -136,13 +148,12 @@ fn ExposeApiLoaded(
             },
             move |tenant_id| {
                 let id = object_id.get_value();
-                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+                async move { expose_api::add_identifier_uri(&tenant_id, &id, &v).await }
             },
         );
     };
 
     let remove_uri = move |uri: String| {
-        let list: Vec<String> = uris.get_value().into_iter().filter(|u| u != &uri).collect();
         uri_remove_cmd.run(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
@@ -151,7 +162,7 @@ fn ExposeApiLoaded(
             },
             move |tenant_id| {
                 let id = object_id.get_value();
-                async move { expose_api::set_identifier_uris(&tenant_id, &id, &list).await }
+                async move { expose_api::remove_identifier_uri(&tenant_id, &id, &uri).await }
             },
         );
     };
@@ -267,10 +278,27 @@ fn ExposeApiLoaded(
     let pre_selected: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
     let pre_cmd = use_command();
     let pre_remove_cmd = use_command();
-    let pending_remove_pre: RwSignal<Option<String>> = RwSignal::new(None);
+    // (client appId, subject): like `pending_delete_scope`, the row's label
+    // rides along to be the confirm dialog's subject.
+    let pending_remove_pre: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    // (appId, name) of the client picked from directory search — shown as
+    // "Selected: …" only while the Client ID field still holds that appId.
+    let pre_picked: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let client_names = StoredValue::new(dto.client_display_names.clone());
+    let client_name = move |app_id: &str| {
+        client_names.with_value(|m| m.get(&app_id.to_ascii_lowercase()).cloned())
+    };
+    // Already-authorized clients are hidden from the Add dialog's search.
+    let authorized_ids: HashSet<String> = dto
+        .pre_authorized_applications
+        .iter()
+        .map(|p| p.app_id.clone())
+        .collect();
+    let authorized_ids = Signal::derive(move || authorized_ids.clone());
 
     let open_add_pre = move || {
         pre_editing.set(false);
+        pre_picked.set(None);
         pre_client_id.set(String::new());
         pre_selected.set(Vec::new());
         pre_cmd.error.set(None);
@@ -360,54 +388,34 @@ fn ExposeApiLoaded(
                 <Body1 class="hint">
                     "The globally unique URI clients use to request tokens for this API (the audience). Usually api://{client-id}."
                 </Body1>
-                {
-                    let list = dto.identifier_uris.clone();
-                    if list.is_empty() {
+                <DataTable
+                    headers=vec!["URI", ""]
+                    rows=dto.identifier_uris.clone()
+                    empty_message="No Application ID URI is set — clients can't request tokens for this API's scopes until one is added."
+                    row=move |uri: String| {
+                        let uri_click = uri.clone();
+                        let remove_label = format!("Remove Application ID URI {uri}");
                         view! {
-                            <Body1>
-                                "No Application ID URI is set — clients can't request tokens for this API's scopes until one is added."
-                            </Body1>
-                        }
-                            .into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>"URI"</th>
-                                        <th></th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|uri| {
-                                            let uri_click = uri.clone();
-                                            view! {
-                                                <tr>
-                                                    <td class="mono">{uri.clone()}</td>
-                                                    <td>
-                                                        <Button
-                                                            class="button--danger"
-                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                            on_click=Box::new(move |_| {
-                                                                uri_remove_cmd.error.set(None);
-                                                                pending_remove_uri.set(Some(uri_click.clone()))
-                                                            })
-                                                        >
-                                                            "Remove"
-                                                        </Button>
-                                                    </td>
-                                                </tr>
-                                            }
+                            <tr>
+                                <td class="mono">{uri}</td>
+                                <td class="cell-mid">
+                                    <Button
+                                        class="button--danger"
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        attr:aria-label=remove_label
+                                        on_click=Box::new(move |_| {
+                                            uri_remove_cmd.error.set(None);
+                                            pending_remove_uri.set(Some(uri_click.clone()))
                                         })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
+                                    >
+                                        "Remove"
+                                    </Button>
+                                </td>
+                            </tr>
                         }
                             .into_any()
                     }
-                }
+                />
             </section>
             <section>
                 <header class="row-between">
@@ -424,84 +432,63 @@ fn ExposeApiLoaded(
                 <Body1 class="hint">
                     "Delegated permissions client applications can request when calling this API on a signed-in user's behalf."
                 </Body1>
-                {
-                    let list = dto.scopes.clone();
-                    if list.is_empty() {
-                        view! { <Body1>"No scopes defined."</Body1> }.into_any()
-                    } else {
+                <DataTable
+                    headers=vec![
+                        "Scope name",
+                        "Who can consent",
+                        "Admin consent display name",
+                        "State",
+                        "",
+                    ]
+                    rows=dto.scopes.clone()
+                    empty_message="No scopes defined."
+                    row=move |s: OAuth2PermissionScope| {
+                        let enabled = s.is_enabled.unwrap_or(true);
+                        let (state_label, state_tone) = if enabled {
+                            ("Enabled", BadgeTone::Ok)
+                        } else {
+                            ("Disabled", BadgeTone::Unknown)
+                        };
+                        let edit_scope = s.clone();
+                        let delete_id = s.id.clone();
+                        let delete_value = s.value.clone();
+                        let delete_label = format!("Delete scope {}", s.value);
                         view! {
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>"Scope name"</th>
-                                        <th>"Who can consent"</th>
-                                        <th>"Admin consent display name"</th>
-                                        <th>"State"</th>
-                                        <th></th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|s| {
-                                            let enabled = s.is_enabled.unwrap_or(true);
-                                            let (state_label, badge_class) = if enabled {
-                                                ("Enabled", "badge--ok")
-                                            } else {
-                                                ("Disabled", "badge--unknown")
-                                            };
-                                            let edit_scope = s.clone();
-                                            let delete_id = s.id.clone();
-                                            let delete_value = s.value.clone();
-                                            view! {
-                                                <tr>
-                                                    <td class="mono">{s.value.clone()}</td>
-                                                    <td>{consent_label(s.r#type.as_deref())}</td>
-                                                    <td>
-                                                        {s
-                                                            .admin_consent_display_name
-                                                            .clone()
-                                                            .unwrap_or_else(|| "—".into())}
-                                                    </td>
-                                                    <td>
-                                                        <span class=format!(
-                                                            "badge {badge_class}",
-                                                        )>{state_label}</span>
-                                                    </td>
-                                                    <td>
-                                                        <div class="actions-row">
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| open_edit_scope(
-                                                                    edit_scope.clone(),
-                                                                ))
-                                                            >
-                                                                "Edit"
-                                                            </Button>
-                                                            <Button
-                                                                class="button--danger"
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| {
-                                                                    pending_delete_scope
-                                                                        .set(
-                                                                            Some((delete_id.clone(), delete_value.clone())),
-                                                                        )
-                                                                })
-                                                            >
-                                                                "Delete"
-                                                            </Button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
+                            <tr>
+                                <td class="mono">{s.value.clone()}</td>
+                                <td>{consent_label(s.r#type.as_deref())}</td>
+                                <td>
+                                    {s.admin_consent_display_name.clone().unwrap_or_else(|| "—".into())}
+                                </td>
+                                <td>
+                                    <Badge label=state_label tone=state_tone />
+                                </td>
+                                <td>
+                                    <div class="actions-row">
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            on_click=Box::new(move |_| open_edit_scope(edit_scope.clone()))
+                                        >
+                                            "Edit"
+                                        </Button>
+                                        <Button
+                                            class="button--danger"
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            attr:aria-label=delete_label
+                                            on_click=Box::new(move |_| {
+                                                pending_delete_scope
+                                                    .set(Some((delete_id.clone(), delete_value.clone())))
+                                            })
+                                        >
+                                            "Delete"
+                                        </Button>
+                                    </div>
+                                </td>
+                            </tr>
                         }
                             .into_any()
                     }
-                }
+                />
             </section>
             <section>
                 <header class="row-between">
@@ -523,79 +510,75 @@ fn ExposeApiLoaded(
                     "Pre-authorized clients can request the selected scopes without the user being asked to consent. Only authorize clients you trust."
                 </Body1>
                 {
-                    let list = dto.pre_authorized_applications.clone();
+                    let names = dto.client_display_names.clone();
                     let by_id: std::collections::HashMap<String, String> = dto
                         .scopes
                         .iter()
                         .map(|s| (s.id.clone(), s.value.clone()))
                         .collect();
-                    if list.is_empty() {
-                        view! { <Body1>"No authorized client applications."</Body1> }.into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
+                    view! {
+                        <DataTable
+                            headers=vec!["Client application", "Client ID", "Authorized scopes", ""]
+                            rows=dto.pre_authorized_applications.clone()
+                            empty_message="No authorized client applications."
+                            row=move |p: PreAuthorizedApplication| {
+                                let scope_names = p
+                                    .delegated_permission_ids
+                                    .iter()
+                                    .map(|id| {
+                                        by_id
+                                            .get(id)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!(
+                                                "{}…",
+                                                id.chars().take(8).collect::<String>(),
+                                            ))
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let edit_id = p.app_id.clone();
+                                let edit_scopes = p.delegated_permission_ids.clone();
+                                let name = names.get(&p.app_id.to_ascii_lowercase()).cloned();
+                                let remove_subject = match &name {
+                                    Some(n) => format!("{n} ({})", p.app_id),
+                                    None => p.app_id.clone(),
+                                };
+                                let remove_id = p.app_id.clone();
+                                let remove_aria = format!("Remove authorized client {remove_subject}");
+                                view! {
                                     <tr>
-                                        <th>"Client ID"</th>
-                                        <th>"Authorized scopes"</th>
-                                        <th></th>
+                                        <td>{name.unwrap_or_else(|| "—".into())}</td>
+                                        <td class="mono">{p.app_id.clone()}</td>
+                                        <td>{scope_names}</td>
+                                        <td>
+                                            <div class="actions-row">
+                                                <Button
+                                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                    on_click=Box::new(move |_| open_edit_pre(
+                                                        edit_id.clone(),
+                                                        edit_scopes.clone(),
+                                                    ))
+                                                >
+                                                    "Edit"
+                                                </Button>
+                                                <Button
+                                                    class="button--danger"
+                                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                    attr:aria-label=remove_aria
+                                                    on_click=Box::new(move |_| {
+                                                        pending_remove_pre
+                                                            .set(Some((remove_id.clone(), remove_subject.clone())))
+                                                    })
+                                                >
+                                                    "Remove"
+                                                </Button>
+                                            </div>
+                                        </td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|p| {
-                                            let scope_names = p
-                                                .delegated_permission_ids
-                                                .iter()
-                                                .map(|id| {
-                                                    by_id
-                                                        .get(id)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| format!(
-                                                            "{}…",
-                                                            id.chars().take(8).collect::<String>(),
-                                                        ))
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-                                            let edit_id = p.app_id.clone();
-                                            let edit_scopes = p.delegated_permission_ids.clone();
-                                            let remove_id = p.app_id.clone();
-                                            view! {
-                                                <tr>
-                                                    <td class="mono">{p.app_id.clone()}</td>
-                                                    <td>{scope_names}</td>
-                                                    <td>
-                                                        <div class="actions-row">
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| open_edit_pre(
-                                                                    edit_id.clone(),
-                                                                    edit_scopes.clone(),
-                                                                ))
-                                                            >
-                                                                "Edit"
-                                                            </Button>
-                                                            <Button
-                                                                class="button--danger"
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| {
-                                                                    pending_remove_pre.set(Some(remove_id.clone()))
-                                                                })
-                                                            >
-                                                                "Remove"
-                                                            </Button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
-                        }
-                            .into_any()
+                                }
+                                    .into_any()
+                            }
+                        />
                     }
                 }
             </section>
@@ -614,7 +597,7 @@ fn ExposeApiLoaded(
                     <Input value=uri_value />
                 </Field>
                 {move || {
-                    uri_add_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    uri_add_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button
@@ -693,7 +676,7 @@ fn ExposeApiLoaded(
                     " Enabled — clients can request this scope"
                 </label>
                 {move || {
-                    scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    scope_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button
@@ -735,15 +718,51 @@ fn ExposeApiLoaded(
             >
                 {move || {
                     if pre_editing.get() {
-                        view! { <Body1 class="mono">{pre_client_id.get()}</Body1> }.into_any()
+                        let id = pre_client_id.get();
+                        let heading = match client_name(&id) {
+                            Some(n) => view! {
+                                <Body1>
+                                    <strong>{n}</strong>
+                                    " "
+                                    <span class="mono">{id}</span>
+                                </Body1>
+                            }
+                                .into_any(),
+                            None => view! { <Body1 class="mono">{id}</Body1> }.into_any(),
+                        };
+                        heading
                     } else {
                         view! {
+                            <DirectorySearch
+                                on_pick=Callback::new(move |o: azapptoolkit_core::models::DirectoryObject| {
+                                    let name = o.display_name.clone().unwrap_or_else(|| o.id.clone());
+                                    pre_client_id.set(o.id.clone());
+                                    pre_picked.set(Some((o.id, name)));
+                                })
+                                scope=Signal::derive(|| DirectoryScope::Applications)
+                                exclude=authorized_ids
+                                label="Find the client application"
+                                placeholder="Search by name or application ID…"
+                                action_label="Select"
+                            />
+                            {move || {
+                                let id = pre_client_id.get();
+                                pre_picked
+                                    .get()
+                                    .filter(|(picked, _)| picked == id.trim())
+                                    .map(|(_, name)| {
+                                        view! { <Body1 class="hint">{format!("Selected: {name}")}</Body1> }
+                                    })
+                            }}
                             <Field label="Client ID (application ID of the client app)">
                                 <Input
                                     value=pre_client_id
                                     placeholder="00000000-0000-0000-0000-000000000000"
                                 />
                             </Field>
+                            <Body1 class="hint">
+                                "A client registered in another tenant won't appear in search — paste its application ID."
+                            </Body1>
                         }
                             .into_any()
                     }
@@ -785,7 +804,7 @@ fn ExposeApiLoaded(
                     })
                     .collect_view()}
                 {move || {
-                    pre_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    pre_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button
@@ -849,14 +868,17 @@ fn ExposeApiLoaded(
                 open=Signal::derive(move || pending_remove_pre.with(|p| p.is_some()))
                 title="Remove this authorized client application?"
                 body="The client can still request these scopes, but users will be prompted to consent again."
-                // No display name is resolvable for a pre-authorized client — the
-                // client id IS the row's identity here (and its only column), so
-                // it is the one string the operator can match to the row.
-                subject=Signal::derive(move || pending_remove_pre.get().unwrap_or_default())
+                // "Name (appId)" when the tenant SP index names the client, else
+                // the bare appId — either way both strings the row shows.
+                subject=Signal::derive(move || {
+                    pending_remove_pre
+                        .with(|p| p.as_ref().map(|(_, subject)| subject.clone()))
+                        .unwrap_or_default()
+                })
                 confirm_label="Remove"
                 busy=Signal::derive(move || pre_remove_cmd.busy.get())
                 on_confirm=Callback::new(move |()| {
-                    if let Some(id) = pending_remove_pre.get() {
+                    if let Some((id, _)) = pending_remove_pre.get() {
                         remove_pre(id);
                     }
                 })

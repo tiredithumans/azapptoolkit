@@ -1,6 +1,10 @@
 //! Audit IPC DTOs.
 
-use azapptoolkit_core::audit::AuditItem;
+use std::collections::BTreeMap;
+
+use azapptoolkit_core::audit::{
+    AuditItem, POSTURE_FINDING_KEYS, PostureCounts, RiskLevel, finding_worst, posture_counts,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +75,32 @@ pub struct AuditRunResult {
     /// none had ever been run when the truth was that this session had not.
     #[serde(default)]
     pub completed_at: Option<String>,
+    /// `false` when some mail permission could not be checked against
+    /// Exchange mailbox scoping this run — no Exchange client, the legacy
+    /// Application Access Policy list unreadable, or an app left unprobed
+    /// (the Exchange breaker tripped or its probe failed). Those permissions
+    /// were scored at org-wide weight, so some "Org-wide mailbox access"
+    /// findings may already be confined to specific mailboxes by Exchange RBAC
+    /// or an AAP.
+    ///
+    /// Deliberately NOT a [`Self::degraded`] gap: the degrade over-reports and
+    /// never under-reports, so the run stays cacheable — the same call as the
+    /// sign-in report precedent ([`Self::sign_in_report_available`]). It still
+    /// has to be *said*, on the org-wide mailbox group and in every export
+    /// ([`MAILBOX_SCOPING_UNRESOLVED`]). Defaults to `true` so a run cached
+    /// before the field existed reads as it was presented then.
+    #[serde(default = "default_true")]
+    pub mailbox_scoping_resolved: bool,
 }
+
+fn default_true() -> bool {
+    true
+}
+
+/// The one sentence the export's coverage notes and the workbench's org-wide
+/// mailbox Callout both use when [`AuditRunResult::mailbox_scoping_resolved`]
+/// is `false` — defined once so the file and the screen can't drift apart.
+pub const MAILBOX_SCOPING_UNRESOLVED: &str = "Mailbox scoping could not be resolved for this run — some applications listed with org-wide mailbox access may already be confined to specific mailboxes through Exchange RBAC or an application access policy. Sign in as an Exchange administrator and re-run to refine.";
 
 /// One run's coverage caveats, minus its items — what an export needs in order
 /// to say what the scan did *not* cover.
@@ -88,7 +117,7 @@ pub struct AuditRunResult {
 /// A separate struct rather than the whole [`AuditRunResult`] so the
 /// by-reference export path keeps its property that the multi-MB item vector
 /// never round-trips the IPC bridge.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditExportCoverage {
     /// Principals the run SET OUT to score — the denominator a partial run
     /// needs (the numerator is the exported item count).
@@ -99,6 +128,69 @@ pub struct AuditExportCoverage {
     pub sign_in_report_available: bool,
     /// RFC3339 UTC, from [`AuditRunResult::completed_at`].
     pub completed_at: Option<String>,
+    /// From [`AuditRunResult::mailbox_scoping_resolved`]; a caveat, not a
+    /// completeness gap — [`Self::is_complete`] deliberately ignores it.
+    #[serde(default = "default_true")]
+    pub mailbox_scoping_resolved: bool,
+}
+
+/// A clean run's coverage: nothing cancelled, truncated or degraded, and
+/// mailbox scoping resolved — so `Default` still means "no caveats".
+impl Default for AuditExportCoverage {
+    fn default() -> Self {
+        Self {
+            total_apps: 0,
+            cancelled: false,
+            truncated: false,
+            degraded: Vec::new(),
+            sign_in_report_available: false,
+            completed_at: None,
+            mailbox_scoping_resolved: true,
+        }
+    }
+}
+
+/// What the Home dashboard's Security Posture card needs from the cached run:
+/// counts, never items.
+///
+/// The cached run is up to 10 000 [`AuditItem`]s with five `Vec`s each —
+/// several to tens of MB of JSON. Home used to receive all of it over IPC on
+/// every audit reload (while the Security tab held a second copy) only to
+/// reduce it to a dozen numbers; the backend now reduces it with the same
+/// core [`posture_counts`] the Security strip runs over its own copy, so the
+/// two surfaces still share one count source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedAuditSummary {
+    /// The stamp the RUN wrote (RFC3339 UTC), never the read time — see
+    /// [`AuditRunResult::completed_at`]. `Option` to mirror it.
+    pub completed_at: Option<String>,
+    pub posture: PostureCounts,
+    /// Worst member risk level per non-empty posture finding, keyed by the
+    /// finding key ([`POSTURE_FINDING_KEYS`]) — what ranks the card's "Top
+    /// findings" and colours their tone dots, as the Findings pane does.
+    pub worst: BTreeMap<String, RiskLevel>,
+}
+
+impl CachedAuditSummary {
+    pub fn from_items(items: &[AuditItem], completed_at: Option<String>) -> Self {
+        let worst = POSTURE_FINDING_KEYS
+            .iter()
+            .filter_map(|&key| finding_worst(items, key).map(|w| (key.to_string(), w)))
+            .collect();
+        Self {
+            completed_at,
+            posture: posture_counts(items),
+            worst,
+        }
+    }
+
+    /// `(count, worst)` for a finding key; `None` for a key the posture counts
+    /// don't cover. An empty finding reads `(0, Low)`.
+    pub fn finding_tally(&self, key: &str) -> Option<(usize, RiskLevel)> {
+        let count = self.posture.finding(key)?;
+        let worst = self.worst.get(key).copied().unwrap_or(RiskLevel::Low);
+        Some((count, worst))
+    }
 }
 
 impl AuditRunResult {
@@ -112,6 +204,7 @@ impl AuditRunResult {
             degraded: self.degraded.clone(),
             sign_in_report_available: self.sign_in_report_available,
             completed_at: self.completed_at.clone(),
+            mailbox_scoping_resolved: self.mailbox_scoping_resolved,
         }
     }
 }
@@ -196,7 +289,10 @@ impl AuditCoverageGap {
     pub fn description(self) -> &'static str {
         match self {
             AuditCoverageGap::GraphAppRoleAssignments => {
-                "Tenant-wide Microsoft Graph app-role assignments could not be read, so                  enterprise applications, managed identities and orphaned service principals                  were not scored, and mailbox permissions could not be checked for an                  un-stripped org-wide grant."
+                "Tenant-wide Microsoft Graph app-role assignments could not be read, so \
+                 enterprise applications, managed identities and orphaned service principals \
+                 were not scored, and mailbox permissions could not be checked for an \
+                 un-stripped org-wide grant."
             }
             AuditCoverageGap::ServicePrincipalIndex => {
                 "The tenant's service-principal list could not be read, so enterprise \
@@ -204,13 +300,17 @@ impl AuditCoverageGap {
                  scored. App registrations were still covered."
             }
             AuditCoverageGap::EwsFullAccessGrants => {
-                "Org-wide EWS full-mailbox-access grants could not be read, so an application                  shown as scoped to specific mailboxes may still reach every mailbox."
+                "Org-wide EWS full-mailbox-access grants could not be read, so an application \
+                 shown as scoped to specific mailboxes may still reach every mailbox."
             }
             AuditCoverageGap::PerPrincipalScoring => {
-                "Some applications could not be scored and are missing from these results,                  so a risk this run does not show may simply not have been looked at."
+                "Some applications could not be scored and are missing from these results, \
+                 so a risk this run does not show may simply not have been looked at."
             }
             AuditCoverageGap::PermissionResolution => {
-                "The permissions an application programming interface defines could not be                  read, so applications holding those permissions were scored as though they                  held none — they may look clean here while holding high-risk access."
+                "The permissions an application programming interface defines could not be \
+                 read, so applications holding those permissions were scored as though they \
+                 held none — they may look clean here while holding high-risk access."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
@@ -224,6 +324,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn summary_carries_counts_worst_and_the_runs_own_stamp() {
+        use azapptoolkit_core::audit::{AuditPrincipalKind, CredentialStatus};
+        let item = |level, status, unused| AuditItem {
+            application_name: "App".into(),
+            app_id: "app-1".into(),
+            object_id: "obj-1".into(),
+            created_date: None,
+            publisher: None,
+            sign_in_audience: None,
+            risk_score: 0,
+            risk_level: level,
+            issues: vec![],
+            recommendations: vec![],
+            remediations: vec![],
+            credential_status: status,
+            permission_count: 0,
+            service_principal_enabled: None,
+            days_since_created: None,
+            certificates: vec![],
+            secrets: vec![],
+            last_sign_in: None,
+            unused,
+            sign_in_report_available: false,
+            principal_kind: AuditPrincipalKind::Application,
+            app_owner_organization_id: None,
+        };
+        let items = [
+            item(RiskLevel::High, CredentialStatus::Expired, false),
+            item(RiskLevel::Low, CredentialStatus::Expired, false),
+            item(RiskLevel::Medium, CredentialStatus::Active, false),
+        ];
+        let s = CachedAuditSummary::from_items(&items, Some("2026-01-01T00:00:00Z".into()));
+        assert_eq!(s.completed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(s.posture, posture_counts(&items));
+        assert_eq!(s.finding_tally("expired"), Some((2, RiskLevel::High)));
+        // An empty finding is a zero tally, not a missing one.
+        assert_eq!(s.finding_tally("unused"), Some((0, RiskLevel::Low)));
+        assert!(!s.worst.contains_key("unused"));
+        assert_eq!(s.finding_tally("redundant_perms"), None);
+        // Survives the IPC round trip.
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CachedAuditSummary>(&json).unwrap(),
+            s
+        );
+    }
+
+    #[test]
     fn coverage_gaps_round_trip_and_unknown_variants_degrade_to_other() {
         // The enum is serialized as a plain camelCase string precisely so a new
         // variant is not a wire-format change: an older build reading a newer
@@ -232,8 +380,11 @@ mod tests {
         // and losing the result.
         for gap in [
             AuditCoverageGap::GraphAppRoleAssignments,
+            AuditCoverageGap::ServicePrincipalIndex,
             AuditCoverageGap::EwsFullAccessGrants,
             AuditCoverageGap::PerPrincipalScoring,
+            AuditCoverageGap::PermissionResolution,
+            AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");
             assert_eq!(
@@ -243,6 +394,14 @@ mod tests {
             assert!(
                 !gap.description().trim().is_empty(),
                 "{gap:?} needs an operator-facing description"
+            );
+            // A multi-line literal missing its `\` continuation keeps the
+            // newline's indentation — a run of spaces the UI (`pre-wrap`) and
+            // the CSV export both show verbatim.
+            assert!(
+                !gap.description().contains("  ") && !gap.description().contains('\n'),
+                "{gap:?}'s description carries a whitespace run: {:?}",
+                gap.description()
             );
         }
         assert_eq!(
@@ -266,6 +425,7 @@ mod tests {
             truncated: false,
             degraded: Vec::new(),
             completed_at: Some("2026-09-02T10:00:00+00:00".into()),
+            mailbox_scoping_resolved: true,
         }
     }
 
@@ -278,8 +438,10 @@ mod tests {
         r.cancelled = true;
         r.truncated = true;
         r.degraded = vec![AuditCoverageGap::PerPrincipalScoring];
+        r.mailbox_scoping_resolved = false;
 
         let c = r.coverage();
+        assert!(!c.mailbox_scoping_resolved);
         assert_eq!(c.total_apps, 12);
         assert!(c.cancelled);
         assert!(c.truncated);
@@ -303,6 +465,13 @@ mod tests {
             mutate(&mut c);
             assert!(!c.is_complete(), "{c:?} must not read as a complete scan");
         }
+        // Unresolved mailbox scoping is a caveat, not a gap: the degrade
+        // over-reports, so the run stays complete (and cacheable).
+        let mut c = run().coverage();
+        c.mailbox_scoping_resolved = false;
+        assert!(c.is_complete());
+        // `Default` is a clean run's coverage.
+        assert!(AuditExportCoverage::default().mailbox_scoping_resolved);
     }
 
     /// `completed_at` is additive: a run cached (or exported) by a build from
@@ -313,5 +482,7 @@ mod tests {
         let json = r#"{"tenant_id":"t1","total_apps":0,"items":[],"cancelled":false}"#;
         let back: AuditRunResult = serde_json::from_str(json).expect("pre-field run");
         assert_eq!(back.completed_at, None);
+        // A run cached before the flag existed reads as it was shown then.
+        assert!(back.mailbox_scoping_resolved);
     }
 }

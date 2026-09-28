@@ -24,8 +24,16 @@ emit_and_exit() {
 }
 
 if command -v gitleaks >/dev/null 2>&1; then
-  if ! output=$(gitleaks detect --no-banner --redact 2>&1); then
-    emit_and_exit "$output"
+  # Fail closed on ANY non-zero exit, but say what happened: gitleaks exits
+  # non-zero for leaks and for its own errors alike.
+  if [ "$scope" = "all" ]; then
+    output=$(gitleaks git --no-banner --redact . 2>&1) || emit_and_exit "gitleaks reported a problem (a leak or a scan error):
+$output"
+  else
+    output=$(gitleaks git --pre-commit --staged --no-banner --redact . 2>&1) || emit_and_exit "gitleaks reported a problem in staged changes (a leak or a scan error):
+$output"
+    output=$(gitleaks git --pre-commit --no-banner --redact . 2>&1) || emit_and_exit "gitleaks reported a problem in unstaged changes (a leak or a scan error):
+$output"
   fi
   exit 0
 fi

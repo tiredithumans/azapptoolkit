@@ -15,11 +15,11 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textare
 
 use crate::bindings::auth;
 use crate::bindings::exchange;
-use crate::components::ui::Badge;
 use crate::components::ui::Callout;
+use crate::components::ui::{Badge, BadgeTone, FormError, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 #[allow(clippy::type_complexity)]
@@ -102,8 +102,8 @@ pub fn ManagedScopeGroupPanel(
             move |r: exchange::ExchangeMemberMutationResult| {
                 add_text.set(String::new());
                 let mut msg = format!(
-                    "Added {} mailbox(es) to {}.",
-                    r.succeeded.len(),
+                    "Added {} to {}.",
+                    count_noun(r.succeeded.len(), "mailbox", "mailboxes"),
                     r.group_name
                 );
                 if r.group_created {
@@ -112,8 +112,8 @@ pub fn ManagedScopeGroupPanel(
                 session.toast_success(msg);
                 if !r.failed.is_empty() {
                     group_cmd.error.set(Some(format!(
-                        "{} mailbox(es) could not be added: {}",
-                        r.failed.len(),
+                        "{} could not be added: {}",
+                        count_noun(r.failed.len(), "mailbox", "mailboxes"),
                         r.failed
                             .iter()
                             .map(|f| format!("{} ({})", f.mailbox, f.reason))
@@ -207,18 +207,17 @@ pub fn ManagedScopeGroupPanel(
                     }
                     Some(Ok(g)) => {
                         let name = g.group_name.clone();
-                        let n = g.members.len();
-                        let noun = if n == 1 { "mailbox" } else { "mailboxes" };
+                        let in_scope = count_noun(g.members.len(), "mailbox", "mailboxes");
                         view! {
                             <div class="managed-scope-group__status">
                                 <div>
                                     <strong>{format!("Mailboxes in scope — managed group “{name}”")}</strong>
                                     " "
-                                    <Badge label="Exists" tone="ok" />
+                                    <Badge label="Exists" tone=BadgeTone::Ok />
                                 </div>
                                 <Body1 class="hint">
                                     {format!(
-                                        "{n} {noun} in scope — the app can reach exactly these through the scoped grant.",
+                                        "{in_scope} in scope — the app can reach exactly these through the scoped grant.",
                                     )}
                                 </Body1>
                             </div>
@@ -247,13 +246,13 @@ pub fn ManagedScopeGroupPanel(
                 </Button>
             </div>
             {move || {
-                group_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                group_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
             }}
             {move || {
                 match group_state.get() {
-                    None => view! { <Body1 class="hint">"Loading…"</Body1> }.into_any(),
+                    None => view! { <SkeletonList rows=2 /> }.into_any(),
                     Some(Err(e)) => {
-                        let needs_consent = e.code == "consent_required";
+                        let needs_consent = e.is_consent_required();
                         view! {
                             <Callout tone="warn">
                                 <Body1>{e.message}</Body1>

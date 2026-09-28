@@ -15,6 +15,7 @@
 //! Clicking sets the host view's `facet` signal to this chip's `value`. The chip
 //! mutes + disables at a zero count *unless* it is the active selection, so a user
 //! can't navigate into an empty filter but can always click away from one.
+//! The active chip is announced through `aria-pressed`, not by color alone.
 
 use leptos::prelude::*;
 
@@ -47,6 +48,10 @@ pub fn FilterChip(
     view! {
         <button
             class=class
+            // A *string*, never a bare `bool`: Leptos renders a bool as a
+            // boolean attribute, and neither `aria-pressed=""` nor an absent
+            // one is a valid ARIA value.
+            aria-pressed=move || facet.with(|f| f == value).to_string()
             type="button"
             prop:disabled=disabled
             on:click=move |_| facet.set(value.to_string())

@@ -14,7 +14,7 @@ use crate::bindings::applications::{
     UpdateFederatedCredentialInput,
 };
 use crate::bindings::managed_identity;
-use crate::components::ui::{DataTable, SkeletonList};
+use crate::components::ui::{DataTable, DetailLoadError, FormError, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -211,7 +211,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
 
     let start_edit = move |c: FederatedCredentialDto| {
         edit_issuer.set(c.issuer.clone());
-        edit_subject.set(c.subject.clone());
+        edit_subject.set(c.subject.clone().unwrap_or_default());
         edit_description.set(c.description.clone().unwrap_or_default());
         edit_audience.set(
             c.audiences
@@ -505,7 +505,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                 </section>
             </Show>
 
-            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
             <Suspense fallback=move || view! { <SkeletonList rows=3 /> }>
                 {move || Suspend::new(async move {
@@ -520,24 +520,55 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                         let cid = c.id.clone();
                                         let cname = c.name.clone();
                                         let edit_cred = c.clone();
+                                        // A flexible credential is matched by a claims
+                                        // expression and has no subject. The edit form
+                                        // requires one, and PATCHing a subject onto it
+                                        // conflicts with the expression, so it is
+                                        // listed and removable but not editable here.
+                                        let flexible = c.subject.is_none();
+                                        let subject_cell = match c.subject.clone() {
+                                            Some(s) => view! { <td class="mono">{s}</td> }.into_any(),
+                                            None => {
+                                                view! {
+                                                    <td>
+                                                        <span
+                                                            class="muted"
+                                                            title="Edit flexible credentials in the Entra portal"
+                                                        >
+                                                            "Expression-matched (flexible)"
+                                                        </span>
+                                                    </td>
+                                                }
+                                                    .into_any()
+                                            }
+                                        };
                                         view! {
                                             <tr>
                                                 <td>{c.name.clone()}</td>
                                                 <td class="mono">{c.issuer.clone()}</td>
-                                                <td class="mono">{c.subject.clone()}</td>
+                                                {subject_cell}
                                                 <td>
                                                     <div class="actions-row">
-                                                        <Button
-                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                            on_click=Box::new(move |_| {
-                                                                start_edit(edit_cred.clone())
-                                                            })
-                                                        >
-                                                            "Edit"
-                                                        </Button>
+                                                        {(!flexible)
+                                                            .then(|| {
+                                                                view! {
+                                                                    <Button
+                                                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                        on_click=Box::new(move |_| {
+                                                                            start_edit(edit_cred.clone())
+                                                                        })
+                                                                    >
+                                                                        "Edit"
+                                                                    </Button>
+                                                                }
+                                                            })}
                                                         <Button
                                                             class="button--danger"
                                                             appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                            attr:aria-label=format!(
+                                                                "Remove federated credential {}",
+                                                                c.name,
+                                                            )
                                                             on_click=Box::new(move |_| {
                                                                 pending_remove.set(Some((cid.clone(), cname.clone())))
                                                             })
@@ -555,7 +586,13 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                 .into_any()
                         }
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                     }
                 })}

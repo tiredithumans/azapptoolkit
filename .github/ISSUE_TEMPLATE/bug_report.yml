@@ -29,8 +29,22 @@ body:
     id: version
     attributes:
       label: App version
-      description: From Help → About, or the installer filename.
-      placeholder: "0.1.0"
+      description: Shown at the bottom of the account menu (click your name in the top bar), or in the installer filename.
+      placeholder: "0.30.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_format
+    attributes:
+      label: Install format
+      description: The updater behaves differently per format.
+      options:
+        - Windows installer (-setup.exe, NSIS)
+        - Windows MSI
+        - macOS .dmg
+        - Linux AppImage
+        - Linux .deb
+        - Built from source
     validations:
       required: true
   - type: dropdown

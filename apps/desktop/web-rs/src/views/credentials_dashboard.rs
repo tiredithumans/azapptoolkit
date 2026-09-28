@@ -3,22 +3,23 @@
 //! Tenant-wide view of every app-registration client secret and certificate,
 //! sorted soonest-to-expire first, with status filters, an "expiring soon"
 //! banner, CSV export (OS save dialog), and a one-click deep-link into each
-//! app's Credentials tab to rotate. Data is fetched fresh on open (no cache) so
-//! a just-rotated credential is never shown as still-expiring. The scaffold
+//! app's Credentials tab to rotate. The list is read through the backend's
+//! `{tenant}|credential_expirations` cache (`CacheKind::Lists`), which
+//! `invalidate_app_credentials` (rotate/remove) and `invalidate_app_lists`
+//! (create/delete) bust on `Ok`, so a just-rotated credential is never shown as
+//! still-expiring. The scaffold
 //! (fetch, filters, export, keyboard-navigable table) lives in
 //! [`AuditDashboard`]; this view supplies the credential-specific bits.
 
-use azapptoolkit_core::audit::CredentialStatus;
+use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::{Callout, CopyableId};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-
-const CRITICAL_DAYS: i64 = 7;
-const WARNING_DAYS: i64 = 30;
+use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date};
 
 #[component]
 pub fn CredentialsDashboard() -> impl IntoView {
@@ -39,7 +40,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh credential expiry"
             view_key="credentials"
-            noun="credential(s)"
+            noun="credentials"
             empty_message="No credentials match this filter."
             facets=vec![
                 ("all", "All"),
@@ -69,7 +70,8 @@ pub fn CredentialsDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{expired} credential(s) already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    "{} already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    count_noun(expired, "credential", "credentials"),
                                 )}
                             </Callout>
                         }
@@ -87,11 +89,8 @@ pub fn CredentialsDashboard() -> impl IntoView {
 }
 
 fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl IntoView {
-    let (status_label, badge_class) = status_badge(r.status, r.days_to_expiry);
-    let expires = r
-        .end_date_time
-        .map(|d| d.date_naive().to_string())
-        .unwrap_or_else(|| "—".into());
+    let (status_label, status_tone) = status_badge(r.status, r.days_to_expiry);
+    let expires = fmt_date(r.end_date_time);
     let object_id = r.app_object_id.clone();
     view! {
         <tr>
@@ -105,9 +104,9 @@ fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl I
             <td>{r.credential_name.clone()}</td>
             <td>{expires}</td>
             <td>
-                <span class=format!("badge {badge_class}")>{status_label}</span>
+                <Badge label=status_label tone=status_tone />
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {
@@ -131,27 +130,27 @@ fn matches_facet(r: &CredentialRowDto, facet: &str) -> bool {
     }
 }
 
-/// Maps a credential's status + days-left to a label and badge class. Reuses
-/// the same `badge--*` classes as the per-app Credentials tab.
-fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, &'static str) {
+/// Maps a credential's status + days-left to a label and badge tone. Reuses
+/// the same `BadgeTone`s as the per-app Credentials tab.
+fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, BadgeTone) {
     match status {
-        CredentialStatus::Expired => ("Expired".to_string(), "badge--danger"),
+        CredentialStatus::Expired => ("Expired".to_string(), BadgeTone::Danger),
         CredentialStatus::ExpiringSoon => {
-            let cls = match days {
-                Some(d) if d <= CRITICAL_DAYS => "badge--danger",
-                _ => "badge--warning",
+            let tone = match days {
+                Some(d) if d <= CRITICAL_DAYS => BadgeTone::Danger,
+                _ => BadgeTone::Warning,
             };
             let label = days
                 .map(|d| format!("{d}d left"))
                 .unwrap_or_else(|| "Expiring".to_string());
-            (label, cls)
+            (label, tone)
         }
         CredentialStatus::Active => {
             let label = days
                 .map(|d| format!("{d}d left"))
                 .unwrap_or_else(|| "Active".to_string());
-            (label, "badge--ok")
+            (label, BadgeTone::Ok)
         }
-        CredentialStatus::Unknown => ("No expiry".to_string(), "badge--unknown"),
+        CredentialStatus::Unknown => ("No expiry".to_string(), BadgeTone::Unknown),
     }
 }

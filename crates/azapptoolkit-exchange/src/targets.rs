@@ -23,7 +23,8 @@ use azapptoolkit_core::models::{AppRoleAssignment, Application};
 use crate::models::ExoRoleAssignment;
 
 use crate::roles::{
-    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, exchange_role_for_resource_permission,
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    exchange_role_for_resource_permission, is_aap_confinable_permission,
 };
 
 /// One resource's appRole index: its service-principal object id (what an
@@ -202,8 +203,17 @@ pub fn targets_from_declared(
 }
 
 /// Targets derived from the app's *granted* Entra app-role assignments, across
-/// **every** mailbox-bearing resource. Used during migration, where the app
-/// already holds org-wide grants.
+/// **every** mailbox-bearing resource. Used during the Application Access
+/// Policy migration, where the app already holds org-wide grants.
+///
+/// The migration's targets are **only what a policy could have been
+/// confining** ([`is_aap_confinable_permission`]), not everything RBAC can
+/// scope. A grant RBAC can scope but an AAP never governed (`MailboxItem.*`,
+/// `Mail-Advanced.*`, …) is already org-wide today; the migration would assign
+/// it a scoped role and then strip its org-wide grant, silently *narrowing*
+/// live access — the one thing the fail-closed migration must never do. Such
+/// grants stay untouched here and are surfaced by the audit's org-wide mailbox
+/// finding, where the operator chooses to scope them explicitly.
 pub fn targets_from_grants(
     assignments: &[AppRoleAssignment],
     resources: &[ResourceRoles],
@@ -212,6 +222,7 @@ pub fn targets_from_grants(
     for a in assignments {
         if let Some((resource_app_id, resource_sp_id, value)) =
             resolve_grant(resources, &a.resource_id, &a.app_role_id)
+            && is_aap_confinable_permission(resource_app_id, value)
             && let Some(t) = exchange_target(
                 resource_app_id,
                 resource_sp_id,
@@ -484,9 +495,33 @@ impl ScopeGroups {
     /// proof then tells the operator the scope was NOT repointed, after the
     /// filter has already been applied to every role assignment on it, which is
     /// the worst direction for that message to be wrong in.
+    ///
+    /// Each DN folds through [`fold_dn`], the one definition every "same group"
+    /// comparison in the crate and the desktop commands shares.
     pub fn folded_dns(&self) -> HashSet<String> {
-        self.dns.iter().map(|d| d.to_ascii_lowercase()).collect()
+        self.dns.iter().map(|d| fold_dn(d)).collect()
     }
+
+    /// Same confinement: BOTH fully read and equal case-folded DN sets. An
+    /// incomplete parse is never equal, not even to itself — its unread
+    /// remainder is exactly what could differ.
+    pub fn same_groups_as(&self, other: &ScopeGroups) -> bool {
+        self.complete && other.complete && self.folded_dns() == other.folded_dns()
+    }
+}
+
+/// Case-folds one group DN for comparison (Exchange echoes DNs in its own
+/// casing). Unicode lowercase rather than ASCII, so a `CN=Zürich,…` DN folds
+/// too; folding more can only turn a false refusal into agreement, never widen
+/// anything, because AD distinguished names are unique case-insensitively.
+pub fn fold_dn(dn: &str) -> String {
+    dn.to_lowercase()
+}
+
+/// True when two group DNs name the same group, ignoring the casing Exchange
+/// echoes them back in. See [`fold_dn`].
+pub fn same_dn(a: &str, b: &str) -> bool {
+    fold_dn(a) == fold_dn(b)
 }
 
 /// Parses a management scope's recipient filter into the group DNs it names.
@@ -713,7 +748,12 @@ pub fn plan_consolidation(
         return Err(Refusal::UnverifiedMembers(unverified_members));
     }
     Ok(ConsolidationPlan {
-        repoint: !(source_dns.len() == 1 && source_dns[0] == managed_dn),
+        // Case-folded: the source DNs are parsed from the filter Exchange
+        // echoed, the managed DN comes from a group object, and the two can
+        // differ only in casing. `all` (not `len() == 1`) also covers a filter
+        // naming the managed group twice in different casings. `source_dns` is
+        // non-empty: `rewritable_scope_dns` refuses a filter with no clause.
+        repoint: !source_dns.iter().all(|d| same_dn(d, managed_dn)),
         scope_dns: vec![managed_dn.to_string()],
     })
 }
@@ -747,7 +787,15 @@ mod tests {
             ResourceRoles {
                 app_id: MICROSOFT_GRAPH_APP_ID,
                 sp_object_id: "graph-sp".to_string(),
-                role_value_by_id: index(&["Mail.Read", "Mail.Send", "User.Read.All"]),
+                // `MailboxItem.ReadWrite.All` is RBAC-scopable but was never
+                // governed by an Application Access Policy (AAP) — the
+                // migration-parity case in the grants test.
+                role_value_by_id: index(&[
+                    "Mail.Read",
+                    "Mail.Send",
+                    "User.Read.All",
+                    "MailboxItem.ReadWrite.All",
+                ]),
             },
             ResourceRoles {
                 app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
@@ -783,6 +831,15 @@ mod tests {
         targets.iter().map(|t| t.graph_value.as_str()).collect()
     }
 
+    fn grant(resource_sp_id: &str, app_role_id: &str) -> AppRoleAssignment {
+        AppRoleAssignment {
+            id: format!("assign-{app_role_id}"),
+            resource_id: resource_sp_id.to_string(),
+            app_role_id: app_role_id.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn empty_target_set_is_refused() {
         // Regression: the app-registration entry point used to push a warning
@@ -799,9 +856,17 @@ mod tests {
 
     #[test]
     fn declared_targets_span_graph_and_the_legacy_ews_scope() {
+        // The EWS `full_access_as_app` scope is the one non-Graph permission an
+        // Application Access Policy could confine. Deriving targets from
+        // Microsoft Graph alone made it invisible: no `Application
+        // EWS.AccessAsApp` was ever assigned and its org-wide grant was never
+        // stripped. A non-mail value beside them resolves no target.
         let app = Application {
             required_resource_access: vec![
-                declared(MICROSOFT_GRAPH_APP_ID, &["role-Mail.Read"]),
+                declared(
+                    MICROSOFT_GRAPH_APP_ID,
+                    &["role-Mail.Read", "role-User.Read.All"],
+                ),
                 declared(
                     OFFICE365_EXCHANGE_ONLINE_APP_ID,
                     &[&format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")],
@@ -814,6 +879,18 @@ mod tests {
         got.sort_unstable();
         // ASCII sort: uppercase `M` sorts before lowercase `f`.
         assert_eq!(got, vec!["Mail.Read", EWS_FULL_ACCESS_AS_APP]);
+        // Each target carries the resource SP its grant lives on, so the strip
+        // can't hit the wrong resource.
+        let by_value = |v: &str| {
+            targets
+                .iter()
+                .find(|t| t.graph_value == v)
+                .expect("target present")
+        };
+        assert_eq!(by_value("Mail.Read").resource_sp_object_id, "graph-sp");
+        let ews = by_value(EWS_FULL_ACCESS_AS_APP);
+        assert_eq!(ews.resource_sp_object_id, "exo-sp");
+        assert_eq!(ews.exchange_role, "Application EWS.AccessAsApp");
     }
 
     #[test]
@@ -848,30 +925,41 @@ mod tests {
     }
 
     #[test]
-    fn granted_targets_keep_the_two_resources_apart() {
-        // Both resources expose an appRole named Mail.Read; a grant must resolve
-        // against the resource it was actually made on.
-        let grants = vec![
-            AppRoleAssignment {
-                id: "a1".into(),
-                resource_id: "graph-sp".into(),
-                app_role_id: "role-Mail.Read".into(),
-                ..Default::default()
-            },
-            AppRoleAssignment {
-                id: "a2".into(),
-                resource_id: "exo-sp".into(),
-                app_role_id: format!("exo-role-{EWS_FULL_ACCESS_AS_APP}"),
-                ..Default::default()
-            },
+    fn granted_targets_span_both_resources_and_keep_resources_apart() {
+        // Migration derives its targets from held grants. Both resources expose
+        // an appRole named `Mail.Read`; each target must point at the resource
+        // its own grant was made on.
+        let assignments = vec![
+            grant("graph-sp", "role-Mail.Send"),
+            grant("exo-sp", &format!("exo-role-{EWS_FULL_ACCESS_AS_APP}")),
+            grant("exo-sp", "exo-role-Mail.Read"), // not RBAC-scopable
+            grant("other-sp", "role-Mail.Read"),   // unrelated resource
+            // RBAC-scopable, but no Application Access Policy ever governed it:
+            // it is org-wide today and must stay org-wide through a migration,
+            // which would otherwise scope it and strip its grant — a silent
+            // narrowing of live access.
+            grant("graph-sp", "role-MailboxItem.ReadWrite.All"),
         ];
-        let targets = targets_from_grants(&grants, &mailbox_resources());
-        let mut got: Vec<&str> = targets
-            .iter()
-            .map(|t| t.resource_sp_object_id.as_str())
-            .collect();
-        got.sort_unstable();
-        assert_eq!(got, vec!["exo-sp", "graph-sp"]);
+        let targets = targets_from_grants(&assignments, &mailbox_resources());
+        assert_eq!(values(&targets), ["Mail.Send", EWS_FULL_ACCESS_AS_APP]);
+        assert_eq!(targets[0].resource_sp_object_id, "graph-sp");
+        assert_eq!(targets[1].resource_sp_object_id, "exo-sp");
+
+        // The same permission IS a target on the Grant-access / Scope-fix path,
+        // which derives from what the operator asked to scope, not from a policy.
+        let app = Application {
+            required_resource_access: vec![declared(
+                MICROSOFT_GRAPH_APP_ID,
+                &["role-MailboxItem.ReadWrite.All"],
+            )],
+            ..Default::default()
+        };
+        let declared_targets = targets_from_declared(&app, &mailbox_resources());
+        assert_eq!(values(&declared_targets), ["MailboxItem.ReadWrite.All"]);
+        assert_eq!(
+            declared_targets[0].exchange_role,
+            "Application MailboxItem.ReadWrite"
+        );
     }
 
     /// A target on a named Exchange role, so a batch can mix roles.
@@ -891,6 +979,9 @@ mod tests {
             role_assignee_name: None,
             custom_resource_scope: scope.map(str::to_string),
             identity: None,
+            recipient_write_scope: None,
+            custom_recipient_write_scope: None,
+            recipient_administrative_unit_scope: None,
         }
     }
 
@@ -1140,6 +1231,14 @@ mod tests {
                 RoleStep::Assign,
             ]
         );
+        // The fixture's premise, pinned to the real role map: both values do
+        // map to one Exchange role.
+        let basic = exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic");
+        assert!(basic.is_some());
+        assert_eq!(
+            basic,
+            exchange_role_for_resource_permission(MICROSOFT_GRAPH_APP_ID, "Mail.ReadBasic.All")
+        );
     }
 
     #[test]
@@ -1167,6 +1266,14 @@ mod tests {
             vec!["Mail.Read"],
             "a failed scoped assignment must keep its org-wide grant"
         );
+        assert!(
+            targets_safe_to_strip(vec![
+                (target("Mail.Read"), false),
+                (target("Mail.Send"), false)
+            ])
+            .is_empty(),
+            "nothing landed ⇒ nothing is stripped"
+        );
     }
 
     #[test]
@@ -1178,6 +1285,8 @@ mod tests {
             vec!["Mail.Send"]
         );
         assert_eq!(values(&filter_targets_by_value(all, None)).len(), 2);
+        // An explicit empty request scopes nothing, never everything.
+        assert!(filter_targets_by_value(vec![target("Mail.Read")], Some(&[])).is_empty());
     }
 
     #[test]
@@ -1188,12 +1297,38 @@ mod tests {
         assert!(policies_safe_to_remove(0, 0, true));
         assert!(policies_safe_to_remove(2, 2, true));
         assert!(!policies_safe_to_remove(2, 1, true));
+        // Nothing stripped keeps the policy.
+        assert!(!policies_safe_to_remove(1, 0, true));
+        // An incomplete view never authorizes deletion, even when fully re-scoped.
+        assert!(!policies_safe_to_remove(2, 2, false));
     }
 
     #[test]
     fn resource_completeness_requires_both_mailbox_resources() {
         assert!(mailbox_resources_complete(&mailbox_resources()));
         assert!(!mailbox_resources_complete(&mailbox_resources()[..1]));
+        assert!(!mailbox_resources_complete(&[]));
+    }
+
+    #[test]
+    fn group_dns_in_filter_round_trips_and_ignores_formatting() {
+        // Round-trips what `member_of_group_filter` produces, set-wise.
+        let dns = ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()];
+        assert_eq!(
+            group_dns_in_filter(&crate::client::member_of_group_filter(&dns)),
+            dns.iter().cloned().collect()
+        );
+        // Exchange may echo the filter with extra parens/whitespace; the group
+        // *set* is what is compared, so those differences don't count.
+        assert_eq!(
+            group_dns_in_filter("(MemberOfGroup  -eq  'CN=a,DC=x')"),
+            group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'")
+        );
+        // A genuinely different group set is detected.
+        assert_ne!(
+            group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'"),
+            group_dns_in_filter("MemberOfGroup -eq 'CN=b,DC=y'"),
+        );
     }
 
     #[test]
@@ -1354,5 +1489,66 @@ mod tests {
         let already = crate::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
         let plan = plan_consolidation(&already, managed(), &[], 0).unwrap();
         assert!(!plan.repoint, "no rewrite when the scope already names it");
+
+        // Exchange echoes DNs in its own casing: still the managed group.
+        let echoed = crate::client::member_of_group_filter(&["cn=managed,dc=X".to_string()]);
+        let plan = plan_consolidation(&echoed, managed(), &[], 0).unwrap();
+        assert!(!plan.repoint, "a case-only difference is not a repoint");
+
+        // The same group named twice in two casings is still only that group.
+        let twice = crate::client::member_of_group_filter(&[
+            "CN=Managed,DC=x".to_string(),
+            "CN=MANAGED,DC=X".to_string(),
+        ]);
+        let plan = plan_consolidation(&twice, managed(), &[], 0).unwrap();
+        assert!(
+            !plan.repoint,
+            "case variants of the managed group are one group"
+        );
+
+        // A second, different group still has to be folded away.
+        let extra = crate::client::member_of_group_filter(&[
+            "CN=Managed,DC=x".to_string(),
+            "CN=Other,DC=x".to_string(),
+        ]);
+        let plan = plan_consolidation(&extra, managed(), &[], 0).unwrap();
+        assert!(
+            plan.repoint,
+            "another group in the filter still needs a rewrite"
+        );
+    }
+
+    #[test]
+    fn same_groups_as_folds_case_and_refuses_incomplete() {
+        let a = scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x'");
+        assert!(a.same_groups_as(&scope_groups_in_filter("MemberOfGroup -eq 'cn=a,DC=X'")));
+        assert!(same_dn("CN=A,DC=x", "cn=a,dc=X"));
+
+        // Unicode folding, not ASCII-only.
+        assert!(
+            scope_groups_in_filter("MemberOfGroup -eq 'CN=Zürich,DC=x'").same_groups_as(
+                &scope_groups_in_filter("MemberOfGroup -eq 'cn=ZÜRICH,DC=x'")
+            )
+        );
+
+        let ab = scope_groups_in_filter(
+            "(MemberOfGroup -eq 'CN=A,DC=x') -or (MemberOfGroup -eq 'CN=B,DC=x')",
+        );
+        assert!(ab.complete);
+        assert!(
+            !a.same_groups_as(&ab),
+            "a different group set is not the same"
+        );
+        assert!(!ab.same_groups_as(&a));
+
+        let partial =
+            scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x' -or MemberOfGroup -like 'CN=B*'");
+        assert!(!partial.complete);
+        assert!(
+            !partial.same_groups_as(&partial),
+            "an incomplete parse is never the same, not even as itself"
+        );
+        assert!(!partial.same_groups_as(&a));
+        assert!(!a.same_groups_as(&partial));
     }
 }

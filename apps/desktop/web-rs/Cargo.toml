@@ -25,12 +25,25 @@ unsafe_code = "deny"
 azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto" }
 
+# `just future-incompat` lists proc-macro-error2 2.0.1 (E0365), used by leptos_macro directly,
+# by syn_derive (via rstml 0.12), and by reactive_stores_macro 0.4 (leptos/tachys) and 0.2
+# (thaw_utils). Clearing it needs a fixed proc-macro-error2 or leptos AND thaw both dropping it;
+# the justfile `future-incompat` comment has the full chain and the `[patch]` fallback.
 leptos = { version = "0.8", features = ["csr"] }
 thaw = { version = "0.5.0-beta", features = ["csr"] }
 
 # Pinned to an exact rev (not the `v2` branch) so WASM builds are reproducible —
 # a branch pin silently absorbs whatever upstream pushes. Bump deliberately.
-tauri-sys = { git = "https://github.com/JonasKruckenberg/tauri-sys", rev = "289bd29fcbce1ee86c45089477898dbdf23f8fca", features = ["core", "event"] }
+# Reviewed 2026-09-27 against upstream v2 HEAD (0.2.5). This rev decodes every
+# reply and event through `JSON.stringify` + `serde_json` — upstream's
+# workaround for wasm-bindgen#5324, a reported (still open) "Out of bounds table
+# access" function-table exhaustion under repeated `serde_wasm_bindgen::from_value`
+# inside listener closures, which is our per-app progress-stream path. An event
+# that fails to decode is now dropped with `log::error!` (nothing in web-rs
+# prints it) where it used to panic, and the mock bridge must emit JSON-shaped
+# values (see `src/ipc_mock`). Re-check at release time with
+# `git ls-remote https://github.com/JonasKruckenberg/tauri-sys refs/heads/v2`.
+tauri-sys = { git = "https://github.com/JonasKruckenberg/tauri-sys", rev = "571cef48b216ce5dcd0e487a1184a32d77a88452", features = ["core", "event"] }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -54,13 +67,13 @@ futures = "0.3"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Used by the `mock-ipc` bridge (test harness + GitHub Pages demo) to build/read
-# mock IPC payloads. Pinned to the version tauri-sys deserializes with so fixtures
-# round-trip identically.
+# Used by the `mock-ipc` bridge (test harness + GitHub Pages demo) to read the
+# recorded call args, which tauri-sys still encodes with `serde_wasm_bindgen::to_value`
+# — so this tracks the version tauri-sys depends on. Replies and events are built
+# as JSON instead (`serde_json` -> `JSON.parse`), the shape Tauri delivers.
 serde-wasm-bindgen = { version = "0.6.5", optional = true }
 
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
-tracing = "0.1"
 
 [features]
 # The shared mock Tauri IPC bridge (`src/ipc_mock/`): installs a fake
@@ -110,13 +123,15 @@ strip = true
 [profile.dev]
 debug = "line-tables-only"
 
-# The browser GUI tests (`just web-itest`) are the slowest CI step. Each of the
-# ~21 integration-test binaries is a full debug wasm — and DWARF debuginfo is
-# ~96% of it (measured: 1954 MB → 78 MB stripped). wasm-bindgen-test-runner must
-# decode that whole module before it can run, which cost ~24s PER binary (~10 min
-# across the suite). Stripping debuginfo from the linked test wasm cuts that
-# decode to near-nothing; the runner strips debuginfo from the served module
-# anyway, so the in-browser behaviour is unchanged, and test panics assert on
+# The browser GUI tests (`just web-itest`) are the slowest CI step. Each test
+# binary — today the four GUI shards (`tests/gui_N.rs`) plus the host-only
+# `demo_fixture_coverage` — is a full debug wasm, and DWARF debuginfo is ~96% of
+# it (measured at opt-level 0, when the suite was ~21 per-view binaries: 1954 MB
+# → 78 MB stripped). wasm-bindgen-test-runner must decode that whole module
+# before it can run, which then cost ~24s PER binary (~10 min across the suite).
+# Stripping debuginfo from the linked test wasm cuts that decode to
+# near-nothing; the runner strips debuginfo from the served module anyway, so
+# the in-browser behaviour is unchanged, and test panics assert on
 # messages (kept by console_error_panic_hook), not on wasm stack frames. Still
 # scoped to `test`, but the contrast with `profile.dev` is now line tables vs
 # none rather than line tables vs full DWARF — see the `profile.dev` block above.
@@ -130,7 +145,9 @@ strip = "debuginfo"
 # the workspace and therefore links all three detail panes) measured **63 MB on
 # its own** — already past what headless Chrome will instantiate, so NO grouping
 # of modules into shards could have fixed it. At opt-level 1 the same module is
-# 19 MB and all 24 modules merged are 29 MB.
+# 19 MB, and all 24 modules that existed then, merged, were 29 MB. The suite has
+# since grown to 42 modules in four shards — `just web-itest-size` prints
+# today's per-shard sizes.
 #
 # Level 1 specifically: it is enough to collapse the generic/closure bloat that
 # dominates a debug Leptos build, without the compile-time cost of 2/3/"s".

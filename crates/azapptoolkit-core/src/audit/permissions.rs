@@ -26,6 +26,10 @@ pub const STALE_APP_DAYS: i64 = 90;
 pub const UNUSED_APP_DAYS: i64 = 90;
 
 /// Long-lived secret threshold. `Credential-Analysis.ps1:169`.
+///
+/// Applies to certificates as well as secrets: Rule 7 checks every credential
+/// kind against it, and names the two kinds on separate issue lines. The name
+/// keeps its ported spelling because it is public and re-exported.
 pub const LONG_LIVED_SECRET_DAYS: i64 = 365;
 
 /// Score increments.
@@ -91,21 +95,16 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     // assignments, app role assignments and API permissions. Both scored ZERO.
     "Application.ReadWrite.OwnedBy",
     "EntitlementManagement.ReadWrite.All",
-    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
-    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
-    // resource grants full access to *every* mailbox in the tenant — strictly
-    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
-    // zero before because the risk tables only ever listed Microsoft Graph
-    // names. Unambiguous as a bare value: no other resource exposes it (see
-    // `scoping::EWS_FULL_ACCESS_AS_APP`).
-    // Net-new, and all nine additions here share one origin: they appear in
+    // Net-new, and every addition in this batch shares one origin: they appear in
     // `SUBSUMED_APP_PERMISSIONS` as the BROADER side of a subsumption pair — the
     // file already names them, and `subsuming_app_permissions` already advises
     // operators to downgrade *to* the narrower one — yet none was in either risk
-    // table, so each scored ZERO. Weights follow the split the tables already
-    // use for every other family: tenant-wide WRITE is high, tenant-wide READ is
-    // medium (`Mail.ReadWrite`/`Mail.Read`, `Files.ReadWrite.All`/
-    // `Files.Read.All`, `Sites.ReadWrite.All`/`Sites.Read.All`).
+    // table, so each scored ZERO. Every family this file adds is weighted by the
+    // split the ported tables mostly use: tenant-wide WRITE is high, tenant-wide
+    // READ is medium (`Mail.ReadWrite`/`Mail.Read`, `Files.ReadWrite.All`/
+    // `Files.Read.All`, `Sites.ReadWrite.All`/`Sites.Read.All`). The read halves
+    // sit in the medium list below. The one ported exception is
+    // `Calendars.ReadWrite`, which keeps its legacy medium tier (see its entry).
     //
     // `MailboxSettings.ReadWrite` is the one to note: it sets mail forwarding on
     // every mailbox in the tenant, which is the classic exfiltration primitive
@@ -123,6 +122,31 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Contacts.ReadWrite",
     // Tenant-wide write over OneNote content, matching `Files.ReadWrite.All`.
     "Notes.ReadWrite.All",
+    // Net-new (not in the PowerShell `Constants.ps1:104-115` source): the
+    // newer Microsoft Graph mailbox permissions that RBAC for Applications
+    // exposes a scoped role for (Learn, "Supported Application Roles"). Each
+    // of these reaches every mailbox in the tenant and scored ZERO because no
+    // risk table named them. Tenant-wide write/delete of every mailbox item
+    // (`MailboxItem.ReadWrite.All`, `MailboxFolder.ReadWrite.All`) is at least
+    // `Mail.ReadWrite`; `Mail-Advanced.ReadWrite.All` additionally edits the
+    // contents of non-draft messages (Microsoft's own description); Export and
+    // ImportExport are the bulk-exfiltration primitives backup vendors request.
+    // `MailboxConfigItem.*` (UserConfiguration objects) and
+    // `MailTips.ReadBasic.All` (MailTips metadata, no message content) are
+    // deliberately in NEITHER table: they reach mailboxes, so they enter the
+    // org-wide mailbox advisory, but they do not read or write mailbox content.
+    "MailboxItem.ReadWrite.All",
+    "MailboxItem.Export.All",
+    "MailboxItem.ImportExport.All",
+    "MailboxFolder.ReadWrite.All",
+    "Mail-Advanced.ReadWrite.All",
+    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
+    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
+    // resource grants full access to *every* mailbox in the tenant — strictly
+    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
+    // zero before because the risk tables only ever listed Microsoft Graph
+    // names. Unambiguous as a bare value: no other resource exposes it (see
+    // `scoping::EWS_FULL_ACCESS_AS_APP`).
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
 
@@ -142,6 +166,13 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // So the entry could never match a real grant: an application holding
     // org-wide `Calendars.ReadWrite` — create, read, update and delete events in
     // EVERY mailbox — scored zero and could rank Low.
+    //
+    // Its MEDIUM tier is deliberate parity with `Constants.ps1:123-130`; the
+    // typo fix kept that tier. The write = high split described at the high
+    // list governs the families this file ADDED, not ported weights, so this
+    // entry is the one mailbox-family write that stays medium. Promoting it is
+    // a ranking decision that needs a CHANGELOG note. Pinned by
+    // `tests::mailbox_family_writes_are_high_unless_ported_otherwise`.
     "Calendars.ReadWrite",
     // Net-new. Microsoft describes this as "the highest privileged read-only
     // permission for Microsoft Entra ID resources", ranked immediately below
@@ -150,10 +181,40 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // one, which is reserved for write and impersonation — but it reads strictly
     // more than either of them and scored zero.
     "Directory.Read.All",
-    // Net-new — the read halves of the two families added to the high list
-    // above, weighted like `Mail.Read` rather than their write counterparts.
+    // Net-new — read halves weighted like `Mail.Read` rather than their write
+    // counterparts: `Chat.Read.All` pairs with the high `Chat.ReadWrite.All`,
+    // `Calendars.Read` with the ported `Calendars.ReadWrite` above.
     "Chat.Read.All",
     "Calendars.Read",
+    // Net-new — the read halves of the newer RBAC-scopable mailbox families
+    // (see the high list), weighted like `Mail.Read` per the read/write split
+    // `Constants.ps1:123-130` uses for every other family.
+    "MailboxItem.Read.All",
+    "MailboxFolder.Read.All",
+    // Net-new (no PowerShell origin) — the read halves of the families weighted
+    // HIGH above, following the same tenant-wide read = medium split. Each is
+    // the narrower side of a subsumption pair and scored ZERO until
+    // `tests::every_narrower_subsumed_permission_carries_a_risk_weight` forced
+    // the decision. A mailbox-family read confined through RBAC for Applications
+    // takes `PTS_SCOPED_MEDIUM_RISK_MAIL` like `Mail.Read` does.
+    //
+    // Reads every contact in every mailbox; Rule 11 already raised the org-wide
+    // mailbox advisory for it while it added no points.
+    "Contacts.Read",
+    // Reads every mailbox's forwarding, auto-reply and delegate-facing settings.
+    "MailboxSettings.Read",
+    // Reads every user's OneNote notebooks.
+    "Notes.Read.All",
+    // Tenant-wide read of device objects, on par with `Group.Read.All`.
+    "Device.Read.All",
+    // Tenant-wide read of every application and service principal, including
+    // their credential metadata and granted permissions.
+    "Application.Read.All",
+    // Tenant-wide read of every group's membership.
+    "GroupMember.Read.All",
+    // Tenant-wide read of Entra role definitions and assignments, which maps
+    // who holds privileged roles.
+    "RoleManagement.Read.Directory",
 ];
 
 /// High-risk delegated permissions (by scope `value`). Ported from
@@ -219,7 +280,7 @@ pub fn is_risky_delegated_scope(scope: &str) -> bool {
     if HIGH_RISK_DELEGATED_PERMISSIONS.contains(&scope) {
         return true;
     }
-    if scope == "Sites.Selected" {
+    if scope == crate::scoping::SP_SITES_SELECTED {
         return false;
     }
     scope.starts_with("Sites.")
@@ -242,16 +303,16 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
     }
 }
 
-/// A least-privilege alternative to a broad application permission, as an
-/// advisory pointer shown at grant time — never an automatic rewrite. Returns
-/// `None` when the permission is already least-privilege or has no narrower
-/// equivalent. Derives from the shared scope predicates so it stays consistent
-/// with Rule 11/12 and the scope badges.
-pub fn least_privilege_alternative(value: &str) -> Option<&'static str> {
-    least_privilege_alternative_for(Some(crate::scoping::MICROSOFT_GRAPH_APP_ID), value)
-}
-
-/// [`least_privilege_alternative`] for a permission whose resource is known.
+/// A least-privilege alternative to a broad application permission on
+/// `resource_app_id`, as an advisory pointer shown at grant time — never an
+/// automatic rewrite. Returns `None` when the permission is already
+/// least-privilege or has no narrower equivalent. Derives from the shared
+/// resource-aware scope predicates so it stays consistent with Rule 11/12 and
+/// the scope badges.
+///
+/// There is deliberately no value-only form: one defaulted the resource to
+/// Microsoft Graph, so the permission picker offered mailbox-scoping advice for
+/// Office 365 Exchange Online's mail appRoles.
 ///
 /// The resource decides whether the Exchange advice is even true: RBAC for
 /// Applications confines Microsoft Graph's mail family (and the EWS scope), not
@@ -260,14 +321,17 @@ pub fn least_privilege_alternative(value: &str) -> Option<&'static str> {
 /// an operator after a remediation that cannot be applied, and quietly implies
 /// the grant is containable when the only remedy is removing it.
 ///
-/// A `None` resource yields no Exchange advice for the same reason.
+/// A `None` resource yields no Exchange advice for the same reason. The
+/// SharePoint advice follows [`crate::scoping::is_sharepoint_orgwide_permission`]:
+/// both SharePoint resources expose `Sites.Selected`, but another API's
+/// `Sites.`-named role is not SharePoint site access.
 pub fn least_privilege_alternative_for(
     resource_app_id: Option<&str>,
     value: &str,
 ) -> Option<&'static str> {
-    if crate::scoping::is_sharepoint_orgwide(value) {
+    if crate::scoping::is_sharepoint_orgwide_permission(resource_app_id, value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
-        Some("Sites.Selected")
+        Some(crate::scoping::SP_SITES_SELECTED)
     } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
         // Mail/calendar/contacts can be confined to mailboxes via Exchange RBAC.
         Some("Scope to specific mailboxes (Exchange RBAC)")
@@ -555,6 +619,20 @@ mod tests {
             risk_level_for_app_permission("Mail.Read"),
             Some(RiskLevel::Medium)
         );
+        // Net-new read halves of high-weighted families (see the medium list).
+        for read_half in [
+            "Contacts.Read",
+            "MailboxSettings.Read",
+            "Application.Read.All",
+        ] {
+            assert_eq!(
+                risk_level_for_app_permission(read_half),
+                Some(RiskLevel::Medium),
+                "{read_half}"
+            );
+        }
+        // Metadata-only mail read: deliberately unscored (INTENTIONALLY_UNSCORED).
+        assert_eq!(risk_level_for_app_permission("Mail.ReadBasic.All"), None);
         // Sites.Selected is the least-privilege model — not on any risk list.
         assert_eq!(risk_level_for_app_permission("Sites.Selected"), None);
         assert_eq!(risk_level_for_app_permission("User.Read"), None);
@@ -562,25 +640,46 @@ mod tests {
 
     #[test]
     fn least_privilege_alternative_points_to_the_scoped_model() {
+        use crate::scoping::{
+            MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+        };
+        let graph = |v| least_privilege_alternative_for(Some(MICROSOFT_GRAPH_APP_ID), v);
         // Broad Sites.* -> Sites.Selected (Rule 12 scoped model).
-        assert_eq!(
-            least_privilege_alternative("Sites.ReadWrite.All"),
-            Some("Sites.Selected")
-        );
-        assert_eq!(
-            least_privilege_alternative("Sites.FullControl.All"),
-            Some("Sites.Selected")
-        );
+        assert_eq!(graph("Sites.ReadWrite.All"), Some("Sites.Selected"));
+        assert_eq!(graph("Sites.FullControl.All"), Some("Sites.Selected"));
         // Exchange-scopable mail -> RBAC pointer; a lookalike with no Exchange
         // role does not (parallels scoping::loose_mail_lookalikes_are_not_scopable).
         assert_eq!(
-            least_privilege_alternative("Mail.Send"),
+            graph("Mail.Send"),
             Some("Scope to specific mailboxes (Exchange RBAC)")
         );
-        assert_eq!(least_privilege_alternative("Mail.ReadWrite.Shared"), None);
+        assert_eq!(graph("Mail.ReadWrite.Shared"), None);
         // Already least-privilege / no narrower equivalent.
-        assert_eq!(least_privilege_alternative("Sites.Selected"), None);
-        assert_eq!(least_privilege_alternative("Directory.ReadWrite.All"), None);
+        assert_eq!(graph("Sites.Selected"), None);
+        assert_eq!(graph("Directory.ReadWrite.All"), None);
+
+        // The resource decides: RBAC for Applications cannot confine Office 365
+        // Exchange Online's mail appRoles, and an unknown resource gets no
+        // mailbox advice either.
+        assert_eq!(
+            least_privilege_alternative_for(Some(OFFICE365_EXCHANGE_ONLINE_APP_ID), "Mail.Read"),
+            None
+        );
+        assert_eq!(least_privilege_alternative_for(None, "Mail.Send"), None);
+        // Office 365 SharePoint Online exposes Sites.Selected too.
+        assert_eq!(
+            least_privilege_alternative_for(
+                Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+                "Sites.Read.All"
+            ),
+            Some("Sites.Selected")
+        );
+        // Another API's `Sites.`-named role is not SharePoint site access.
+        assert_eq!(
+            least_privilege_alternative_for(Some("custom-api"), "Sites.Read.All"),
+            None
+        );
     }
 
     /// Every mailbox-family name in the risk tables must be one `scoping.rs`
@@ -600,8 +699,11 @@ mod tests {
     /// Directory/Application/Sites names that `scoping.rs` has no opinion on.
     #[test]
     fn mailbox_family_risk_entries_agree_with_the_scoping_role_map() {
+        // `Mail` unterminated on purpose: it has to see `Mailbox*` and `Mail-*`
+        // as well as `Mail.*`, or the newer RBAC-scopable entries are invisible
+        // to this typo guard.
         let mailbox_family = |v: &str| {
-            v.starts_with("Mail.") || v.starts_with("Calendar") || v.starts_with("Contacts.")
+            v.starts_with("Mail") || v.starts_with("Calendar") || v.starts_with("Contacts.")
         };
         let mut unmapped: Vec<&str> = Vec::new();
         let mut checked = 0usize;
@@ -636,6 +738,48 @@ mod tests {
         );
     }
 
+    /// Subsumption-table values that deliberately carry no risk weight, shared
+    /// by the broader-side and narrower-side weight walks below. An entry here
+    /// is a claim that holding this permission tenant-wide is not itself a risk
+    /// signal — write the reason next to it.
+    const INTENTIONALLY_UNSCORED: &[(&str, &str)] = &[
+        (
+            "Sites.Manage.All",
+            "Rule 12 already raises the org-wide SharePoint advisory for any broad `Sites.*`, \
+             and `scoring::tests::broad_sharepoint_manage_flags_issue_without_score` pins that \
+             the advisory fires INDEPENDENTLY of risk-list weighting — using this value as its \
+             example. Giving it points would make that test's example unrepresentative and \
+             double-count reach the advisory already reports. Left to the owner as a risk-model \
+             call; the permission is surfaced either way.",
+        ),
+        (
+            "Mail.ReadBasic",
+            "Message metadata only (sender, subject, dates) — no body, no attachments. Rule 11 \
+             still raises the org-wide mailbox advisory and offers the Scope fix, so the grant \
+             is surfaced without points.",
+        ),
+        (
+            "Mail.ReadBasic.All",
+            "Message metadata only (sender, subject, dates) — no body, no attachments. Rule 11 \
+             still raises the org-wide mailbox advisory and offers the Scope fix, so the grant \
+             is surfaced without points.",
+        ),
+        (
+            "Calendars.ReadBasic",
+            "Event metadata (times, subject, location) without the event body; the \
+             least-privileged calendar read.",
+        ),
+        (
+            "User.ReadBasic.All",
+            "Basic profile fields only (name, mail, photo) — the minimal directory read every \
+             people-picker needs.",
+        ),
+        (
+            "Chat.ReadBasic.All",
+            "Chat metadata (names, members) without any message content.",
+        ),
+    ];
+
     /// The reverse of the rule above, and the one that was missing.
     ///
     /// `mailbox_family_risk_entries_agree_with_the_scoping_role_map` scans
@@ -654,19 +798,6 @@ mod tests {
     /// with a reason, which keeps the decision visible instead of silent.
     #[test]
     fn every_broader_subsuming_permission_carries_a_risk_weight() {
-        /// Empty on purpose. An entry here is a claim that holding this
-        /// permission tenant-wide is not itself a risk signal — write the
-        /// reason next to it.
-        const INTENTIONALLY_UNSCORED: &[(&str, &str)] = &[(
-            "Sites.Manage.All",
-            "Rule 12 already raises the org-wide SharePoint advisory for any broad `Sites.*`, \
-             and `scoring::tests::broad_sharepoint_manage_flags_issue_without_score` pins that \
-             the advisory fires INDEPENDENTLY of risk-list weighting — using this value as its \
-             example. Giving it points would make that test's example unrepresentative and \
-             double-count reach the advisory already reports. Left to the owner as a risk-model \
-             call; the permission is surfaced either way.",
-        )];
-
         let scored = |v: &str| {
             HIGH_RISK_APP_PERMISSIONS.contains(&v) || MEDIUM_RISK_APP_PERMISSIONS.contains(&v)
         };
@@ -686,12 +817,125 @@ mod tests {
 
         assert!(
             checked >= 20,
-            "only {checked} broader-side values walked — the subsumption table or this walk is              broken, and the rule would pass vacuously"
+            "only {checked} broader-side values walked — the subsumption table or this walk is \
+             broken, and the rule would pass vacuously"
         );
         assert!(
             unscored.is_empty(),
-            "these permissions are named as the BROADER side of a subsumption pair — this file              tells operators to downgrade away from them — yet they carry no risk weight and so              score zero: {unscored:?}\nAdd them to HIGH_RISK_APP_PERMISSIONS or              MEDIUM_RISK_APP_PERMISSIONS (tenant-wide write is high, tenant-wide read is medium),              or list them in INTENTIONALLY_UNSCORED with a reason."
+            "these permissions are named as the BROADER side of a subsumption pair — this file \
+             tells operators to downgrade away from them — yet they carry no risk weight and so \
+             score zero: {unscored:?}\nAdd them to HIGH_RISK_APP_PERMISSIONS or \
+             MEDIUM_RISK_APP_PERMISSIONS (tenant-wide write is high, tenant-wide read is medium), \
+             or list them in INTENTIONALLY_UNSCORED with a reason."
         );
+    }
+
+    /// The narrower side of the same table. The broader walk above cannot see a
+    /// read half left unweighted: `Contacts.Read`, `MailboxSettings.Read`,
+    /// `Notes.Read.All`, `Device.Read.All`, `Application.Read.All`,
+    /// `GroupMember.Read.All` and `RoleManagement.Read.Directory` all scored
+    /// zero while their write halves scored high — `Contacts.Read` even raised
+    /// the org-wide mailbox advisory and still added nothing. Every narrower
+    /// value must carry a weight or a written `INTENTIONALLY_UNSCORED` reason.
+    #[test]
+    fn every_narrower_subsumed_permission_carries_a_risk_weight() {
+        let scored = |v: &str| {
+            HIGH_RISK_APP_PERMISSIONS.contains(&v) || MEDIUM_RISK_APP_PERMISSIONS.contains(&v)
+        };
+        let mut unscored: Vec<&str> = Vec::new();
+        let mut checked = 0usize;
+        for (narrower, _) in SUBSUMED_APP_PERMISSIONS {
+            checked += 1;
+            if scored(narrower) || INTENTIONALLY_UNSCORED.iter().any(|(v, _)| v == narrower) {
+                continue;
+            }
+            unscored.push(narrower);
+        }
+
+        assert!(
+            checked >= 20,
+            "only {checked} narrower-side values walked — the subsumption table or this walk is \
+             broken, and the rule would pass vacuously"
+        );
+        assert!(
+            unscored.is_empty(),
+            "these permissions are the NARROWER side of a subsumption pair whose broader side is \
+             weighted, yet they carry no risk weight and so score zero: {unscored:?}\nAdd them to \
+             MEDIUM_RISK_APP_PERMISSIONS (tenant-wide read is medium) or HIGH_RISK_APP_PERMISSIONS, \
+             or list them in INTENTIONALLY_UNSCORED with a reason."
+        );
+
+        // The exemption list must not go stale: an exempted value that later
+        // gained a weight makes its written reason a lie.
+        let stale: Vec<&str> = INTENTIONALLY_UNSCORED
+            .iter()
+            .map(|(v, _)| *v)
+            .filter(|v| scored(v))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "INTENTIONALLY_UNSCORED lists values that now carry a risk weight: {stale:?} — \
+             remove them from the exemption list"
+        );
+    }
+
+    /// Mailbox-family WRITE permissions are high-risk: each writes to every
+    /// mailbox in the tenant. The one ported exception is `Calendars.ReadWrite`,
+    /// whose medium tier is parity with the legacy module — kept visible here so
+    /// a new medium write cannot slip in silently, and so promoting the exception
+    /// is a deliberate edit that removes it from this list.
+    #[test]
+    fn mailbox_family_writes_are_high_unless_ported_otherwise() {
+        const INTENTIONALLY_MEDIUM_WRITES: &[(&str, &str)] = &[(
+            "Calendars.ReadWrite",
+            "PowerShell parity: `Constants.ps1:123-130` lists it in the medium tier, and the \
+             `Calendar.ReadWrite` typo fix kept that tier. Promoting it shifts risk ranking and \
+             needs a CHANGELOG note.",
+        )];
+        // Same predicate as `mailbox_family_risk_entries_agree_with_the_scoping_role_map`.
+        let mailbox_family = |v: &str| {
+            v.starts_with("Mail") || v.starts_with("Calendar") || v.starts_with("Contacts.")
+        };
+        let mut values: Vec<&str> = HIGH_RISK_APP_PERMISSIONS
+            .iter()
+            .chain(MEDIUM_RISK_APP_PERMISSIONS.iter())
+            .copied()
+            .chain(
+                SUBSUMED_APP_PERMISSIONS
+                    .iter()
+                    .flat_map(|(n, broaders)| std::iter::once(*n).chain(broaders.iter().copied())),
+            )
+            .filter(|v| mailbox_family(v) && v.contains("ReadWrite"))
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+
+        let not_high: Vec<&str> = values
+            .iter()
+            .copied()
+            .filter(|v| {
+                !HIGH_RISK_APP_PERMISSIONS.contains(v)
+                    && !INTENTIONALLY_MEDIUM_WRITES.iter().any(|(e, _)| e == v)
+            })
+            .collect();
+        assert!(
+            values.len() >= 6,
+            "only {} mailbox-family write values found — the predicate or the tables are broken, \
+             and this rule would pass vacuously",
+            values.len()
+        );
+        assert!(
+            not_high.is_empty(),
+            "mailbox-family write permissions that are not high-risk: {not_high:?}\nTenant-wide \
+             mailbox write is high; list a deliberate exception in INTENTIONALLY_MEDIUM_WRITES \
+             with its reason."
+        );
+        for (exempt, _) in INTENTIONALLY_MEDIUM_WRITES {
+            assert!(
+                MEDIUM_RISK_APP_PERMISSIONS.contains(exempt),
+                "{exempt} is exempted as a medium write but is not in MEDIUM_RISK_APP_PERMISSIONS"
+            );
+        }
     }
 
     #[test]

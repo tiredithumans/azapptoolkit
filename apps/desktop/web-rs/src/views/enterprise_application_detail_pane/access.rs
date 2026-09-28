@@ -1,8 +1,12 @@
 use super::*;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError, SearchInput};
+use crate::constants::LIST_FILTER_DEBOUNCE_MS;
+use crate::util::contains_ignore_case;
+use azapptoolkit_core::models::AppRole;
+use enterprise_application::AppAssignmentDto;
 
 #[component]
-pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
+pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
@@ -37,6 +41,23 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
             }
         }
     });
+
+    // Principals already holding the SELECTED role, hidden from the search so
+    // they can't be assigned it twice (Graph rejects only a duplicate
+    // principal + role pair, so someone on another role stays pickable). Read
+    // here, outside the Suspend below — a signal write inside that render loops.
+    let exclude = Signal::derive(move || {
+        let role = selected_role.get();
+        assignments.with(|r| match r {
+            Some(Ok(list)) => assigned_to_role(list, &role),
+            _ => HashSet::new(),
+        })
+    });
+
+    // Client-side filter over the loaded assignments. Component-local, not on
+    // `Session.tenant_ui`: the pane unmounts on a tenant switch.
+    let filter = RwSignal::new(String::new());
+    let filter_q = use_debounced(filter.into(), LIST_FILTER_DEBOUNCE_MS);
 
     // Switching between Users and Groups clears the query. `candidates` already
     // re-runs on `principal_kind`, so this is not for correctness — it is the
@@ -125,6 +146,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
     view! {
         <div class="ent-access">
             <h4>"Assigned users & groups"</h4>
+            <SearchInput value=filter placeholder="Filter by name, type, or role…" />
             <Suspense fallback=move || {
                 view! { <SkeletonList rows=6 /> }
             }>
@@ -133,65 +155,108 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                     Suspend::new(async move {
                         match assignments.await {
                             Ok(list) => {
-                                view! {
-                                    <DataTable
-                                        headers=vec!["Principal", "Type", "Role", ""]
-                                        rows=list
-                                        empty_message="No users or groups are assigned to this application."
-                                        row=move |a: enterprise_application::AppAssignmentDto| {
-                                            let principal = a
-                                                .principal_display_name
-                                                .clone()
-                                                .unwrap_or_else(|| "—".into());
-                                            let ptype = a
-                                                .principal_type
-                                                .clone()
-                                                .unwrap_or_else(|| "—".into());
-                                            let role = resolve_role(&roles, &a.app_role_id);
-                                            let aid_click = a.assignment_id.clone();
-                                            let aid_busy = a.assignment_id.clone();
-                                            // The Principal cell, staged for the dialog's subject.
-                                            // A nameless assignment stages nothing rather than the
-                                            // "—" placeholder, which would name no one.
-                                            let principal_label = a
-                                                .principal_display_name
-                                                .clone()
-                                                .unwrap_or_default();
-                                            view! {
-                                                <tr>
-                                                    <td class="cell-mid">{principal}</td>
-                                                    <td class="cell-mid">{ptype}</td>
-                                                    <td class="cell-mid">{role}</td>
-                                                    <td class="cell-mid">
-                                                        <Button
-                                                            class="button--danger"
-                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                            disabled=Signal::derive(move || {
-                                                                busy.with(|b| b.as_deref() == Some(aid_busy.as_str()))
-                                                            })
-                                                            on_click=Box::new(move |_| {
-                                                                pending_remove
-                                                                    .set(
-                                                                        Some((aid_click.clone(), principal_label.clone())),
-                                                                    )
-                                                            })
-                                                        >
-                                                            "Remove"
-                                                        </Button>
-                                                    </td>
-                                                </tr>
+                                let empty = if list.is_empty() {
+                                    "No users or groups are assigned to this application."
+                                } else {
+                                    "No assignments match the filter."
+                                };
+                                // Stored so the filter closure below re-reads them per
+                                // keystroke without cloning the whole set each render.
+                                let list = StoredValue::new(list);
+                                let roles = StoredValue::new(roles);
+                                // DataTable takes its rows by value, so a reactive
+                                // caller rebuilds it inside its own `move ||`.
+                                let table = move || {
+                                    let needle = filter_q.get().trim().to_lowercase();
+                                    let rows: Vec<AppAssignmentDto> = list
+                                        .with_value(|l| {
+                                            roles
+                                                .with_value(|rs| {
+                                                    l.iter()
+                                                        .filter(|a| {
+                                                            assignment_matches(
+                                                                a,
+                                                                &resolve_role(rs, &a.app_role_id),
+                                                                &needle,
+                                                            )
+                                                        })
+                                                        .cloned()
+                                                        .collect()
+                                                })
+                                        });
+                                    view! {
+                                        <DataTable
+                                            headers=vec!["Principal", "Type", "Role", ""]
+                                            rows=rows
+                                            empty_message=empty
+                                            row=move |a: AppAssignmentDto| {
+                                                let principal = a
+                                                    .principal_display_name
+                                                    .clone()
+                                                    .unwrap_or_else(|| "—".into());
+                                                let ptype = a
+                                                    .principal_type
+                                                    .clone()
+                                                    .unwrap_or_else(|| "—".into());
+                                                let role = roles
+                                                    .with_value(|rs| resolve_role(rs, &a.app_role_id));
+                                                let aid_click = a.assignment_id.clone();
+                                                let aid_busy = a.assignment_id.clone();
+                                                // The Principal cell, staged for the dialog's subject.
+                                                // A nameless assignment stages nothing rather than the
+                                                // "—" placeholder, which would name no one.
+                                                let principal_label = a
+                                                    .principal_display_name
+                                                    .clone()
+                                                    .unwrap_or_default();
+                                                // The row's accessible name: who, and in which
+                                                // role (one principal can hold several).
+                                                let remove_aria = format!(
+                                                    "Remove {} ({role})",
+                                                    if principal_label.is_empty() {
+                                                        a.principal_id.as_str()
+                                                    } else {
+                                                        principal_label.as_str()
+                                                    },
+                                                );
+                                                view! {
+                                                    <tr>
+                                                        <td class="cell-mid">{principal}</td>
+                                                        <td class="cell-mid">{ptype}</td>
+                                                        <td class="cell-mid">{role}</td>
+                                                        <td class="cell-mid">
+                                                            <Button
+                                                                class="button--danger"
+                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                                attr:aria-label=remove_aria
+                                                                disabled=Signal::derive(move || {
+                                                                    busy.with(|b| b.as_deref() == Some(aid_busy.as_str()))
+                                                                })
+                                                                on_click=Box::new(move |_| {
+                                                                    pending_remove
+                                                                        .set(
+                                                                            Some((aid_click.clone(), principal_label.clone())),
+                                                                        )
+                                                                })
+                                                            >
+                                                                "Remove"
+                                                            </Button>
+                                                        </td>
+                                                    </tr>
+                                                }
+                                                    .into_any()
                                             }
-                                                .into_any()
-                                        }
-                                    />
-                                }
-                                    .into_any()
+                                        />
+                                    }
+                                };
+                                view! { {table} }.into_any()
                             }
                             Err(e) => {
                                 view! {
-                                    <Body1 class="form-error">
-                                        {format!("error [{}]: {}", e.code, e.message)}
-                                    </Body1>
+                                    <DetailLoadError
+                                        error=e
+                                        on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                    />
                                 }
                                     .into_any()
                             }
@@ -216,7 +281,16 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                             } else {
                                 r.display_name.clone()
                             };
-                            view! { <option value=r.id.clone()>{label}</option> }
+                            // An Application-only role is listed (so it stays
+                            // discoverable) but unpickable: Graph rejects it for a
+                            // user or group, and only after the confirm dialog.
+                            let ok = assignable_to_users_and_groups(&r);
+                            let label = if ok { label } else { format!("{label} (applications only)") };
+                            view! {
+                                <option value=r.id.clone() disabled=!ok>
+                                    {label}
+                                </option>
+                            }
                         })
                         .collect_view()}
                 </select>
@@ -256,6 +330,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                         .unwrap_or_default();
                     pending_assign.set(Some((o.id, label)));
                 })
+                exclude=exclude
                 query=raw_query
                 clear_on_pick=false
                 label="Search by name (2+ chars)"
@@ -265,7 +340,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                 })
             />
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <GroupMembershipSection sp_id=sp_id />
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
@@ -401,7 +476,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     reload.update(|n| *n += 1);
                 }
                 Err(e) => {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         retry_op.set(Some((add, group_id)));
                     }
                     error.set(Some(e));
@@ -469,6 +544,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                     // modal covers them both — so the name goes
                                     // with the id to be the dialog's subject.
                                     let gname = g.display_name.clone();
+                                    let remove_aria = format!("Remove group {}", g.display_name);
                                     view! {
                                         <tr>
                                             // Two-line identity cell: stays top-aligned
@@ -488,6 +564,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                                                                 class="button--danger"
                                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                                 disabled=Signal::derive(move || busy.get())
+                                                                attr:aria-label=remove_aria
                                                                 on_click=Box::new(move |_| {
                                                                     pending_remove
                                                                         .set(Some((gid.clone(), gname.clone())))
@@ -508,9 +585,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     }
                     Err(e) => {
                         view! {
-                            <Body1 class="form-error">
-                                {format!("error [{}]: {}", e.code, e.message)}
-                            </Body1>
+                            <DetailLoadError
+                                error=e
+                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                            />
                         }
                             .into_any()
                     }
@@ -536,7 +614,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             error
                 .get()
                 .map(|e| {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         view! {
                             <Callout tone="warn">
                                 <Body1>
@@ -555,12 +633,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                         }
                             .into_any()
                     } else {
-                        view! {
-                            <Body1 class="form-error">
-                                {format!("error [{}]: {}", e.code, e.message)}
-                            </Body1>
-                        }
-                            .into_any()
+                        view! { <FormError>{e.message}</FormError> }.into_any()
                     }
                 })
         }}
@@ -620,9 +693,107 @@ fn resolve_role(roles: &[azapptoolkit_core::models::AppRole], id: &str) -> Strin
         .unwrap_or_else(|| id.to_string())
 }
 
+/// Principals already holding `role_id` — Graph rejects only a duplicate
+/// (principal, role) pair, so a principal on another role stays pickable.
+fn assigned_to_role(list: &[AppAssignmentDto], role_id: &str) -> HashSet<String> {
+    list.iter()
+        .filter(|a| a.app_role_id.eq_ignore_ascii_case(role_id))
+        .map(|a| a.principal_id.clone())
+        .collect()
+}
+
+/// The Access tab's client-side filter over name / type / resolved role name.
+/// `needle_lower` is already lowercased (once per keystroke).
+fn assignment_matches(a: &AppAssignmentDto, role_name: &str, needle_lower: &str) -> bool {
+    needle_lower.is_empty()
+        || a.principal_display_name
+            .as_deref()
+            .is_some_and(|n| contains_ignore_case(n, needle_lower))
+        || a.principal_type
+            .as_deref()
+            .is_some_and(|t| contains_ignore_case(t, needle_lower))
+        || contains_ignore_case(role_name, needle_lower)
+}
+
+/// Roles a user or group can hold. Graph's `User` member type covers groups
+/// too; an empty list is unknown and left for Graph to judge (the permission
+/// picker's stance).
+fn assignable_to_users_and_groups(r: &AppRole) -> bool {
+    r.allowed_member_types.is_empty()
+        || r.allowed_member_types
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("User"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::group_type_label;
+    use std::collections::HashSet;
+
+    use azapptoolkit_core::models::AppRole;
+    use azapptoolkit_dto::enterprise_application::AppAssignmentDto;
+
+    use super::{
+        assignable_to_users_and_groups, assigned_to_role, assignment_matches, group_type_label,
+    };
+
+    const DEFAULT: &str = "00000000-0000-0000-0000-000000000000";
+
+    fn assignment(principal: &str, name: &str, ptype: &str, role: &str) -> AppAssignmentDto {
+        AppAssignmentDto {
+            assignment_id: format!("assign:{principal}:{role}"),
+            principal_id: principal.to_string(),
+            principal_display_name: Some(name.to_string()),
+            principal_type: Some(ptype.to_string()),
+            app_role_id: role.to_string(),
+        }
+    }
+
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn assigned_to_role_keys_on_principal_and_role() {
+        let list = vec![
+            assignment("p1", "Alice", "User", "role-a"),
+            assignment("p1", "Alice", "User", DEFAULT),
+            assignment("p2", "Finance", "Group", "role-b"),
+        ];
+        assert_eq!(assigned_to_role(&list, "role-a"), set(&["p1"]));
+        assert_eq!(assigned_to_role(&list, DEFAULT), set(&["p1"]));
+        // p1 holds other roles but not B, so it stays pickable for B.
+        assert_eq!(assigned_to_role(&list, "role-b"), set(&["p2"]));
+        assert!(assigned_to_role(&list, "role-c").is_empty());
+        // Role ids are GUIDs; case must not matter.
+        assert_eq!(assigned_to_role(&list, "ROLE-A"), set(&["p1"]));
+    }
+
+    #[test]
+    fn assignment_matches_name_type_and_role() {
+        let a = assignment("p2", "Finance Team", "Group", "role-b");
+        assert!(assignment_matches(&a, "Approver", ""));
+        assert!(assignment_matches(&a, "Approver", "finance"));
+        assert!(assignment_matches(&a, "Approver", "group"));
+        assert!(assignment_matches(&a, "Approver", "approv"));
+        assert!(!assignment_matches(&a, "Approver", "zzz-nothing"));
+    }
+
+    #[test]
+    fn assignable_to_users_and_groups_predicate() {
+        let role = |types: &[&str]| AppRole {
+            allowed_member_types: types.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(assignable_to_users_and_groups(&role(&["User"])));
+        assert!(assignable_to_users_and_groups(&role(&[
+            "User",
+            "Application"
+        ])));
+        assert!(!assignable_to_users_and_groups(&role(&["Application"])));
+        // Unknown member types: left for Graph to judge.
+        assert!(assignable_to_users_and_groups(&role(&[])));
+        assert!(assignable_to_users_and_groups(&role(&["user"])));
+    }
 
     fn types(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

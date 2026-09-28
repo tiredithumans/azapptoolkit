@@ -3,7 +3,8 @@
 //! signed-in user holds the Entra Exchange-administrator role but lacks the
 //! effective EXO "Role Management" RBAC role, or `Exchange.ManageAsApp` isn't
 //! consented. Offers "Grant consent & retry" when the failure is
-//! `consent_required`, plus a plain Retry. Shared by the managed-identity and
+//! `consent_required`, "Verify identity & retry" when it is
+//! `interaction_required` (an Exchange MFA policy), plus a plain Retry. Shared by the managed-identity and
 //! enterprise-app held-permission views so the affordance stays identical.
 
 use azapptoolkit_dto::UiError;
@@ -11,7 +12,8 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::auth;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_command::use_command;
 
 #[component]
@@ -23,15 +25,24 @@ pub fn ScopeUnavailableBanner(
     #[prop(into)]
     on_retry: Callback<()>,
 ) -> impl IntoView {
-    let cmd = use_command();
-    let needs_consent = error.code == "consent_required";
-    let message = error.message.clone();
+    // The feature key is stated once: it is both what this banner's button
+    // consents and what `cmd.run`'s own recovery toast would offer.
+    let cmd = use_command().with_consent_feature("exchange");
+    let needs_consent = error.is_consent_required();
+    // A Conditional Access step-up for Exchange (`interaction_required`): our
+    // wording, not the AADSTS text, and the Exchange step-up as its lever.
+    let needs_step_up = error.is_interaction_required();
+    let message = if needs_step_up {
+        VERIFY_IDENTITY_MESSAGE.to_string()
+    } else {
+        error.message.clone()
+    };
 
     let on_consent = move |_| {
         cmd.run(
             move |()| on_retry.run(()),
             move |tenant_id| async move {
-                auth::request_scope_consent(&tenant_id, "exchange").await
+                auth::request_scope_consent(&tenant_id, cmd.consent_feature).await
             },
         );
     };
@@ -64,8 +75,12 @@ pub fn ScopeUnavailableBanner(
                     "Retry"
                 </Button>
             </div>
+            {needs_step_up
+                .then(|| {
+                    view! { <VerifyIdentityButton features=&["exchange"] on_verified=on_retry /> }
+                })}
             {move || {
-                cmd.error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                cmd.error.get().map(|m| view! { <FormError>{m}</FormError> })
             }}
         </Callout>
     }

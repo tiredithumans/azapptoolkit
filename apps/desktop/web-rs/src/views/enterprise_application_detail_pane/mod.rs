@@ -1,8 +1,8 @@
 #![allow(clippy::unnecessary_wraps)]
 
-//! Detail pane for a selected enterprise application service principal.
-//! Header strip + tab list (Overview, Credentials, Owners, Permissions) with
-//! per-tab content. Mirrors the App Registrations detail pane structure.
+//! Detail pane for a selected enterprise application service principal: header
+//! strip, then the tab bar (the tab list is `views::tabs::EnterpriseTab::ALL`)
+//! with per-tab content. Mirrors the App Registrations detail pane structure.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -11,10 +11,9 @@ use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, SpinnerSize, Textarea};
 
-use crate::bindings::applications;
 use crate::bindings::auth;
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDetail};
-use crate::bindings::sso::{self, OidcSsoSummary, SamlSsoSummary, SsoConfigDto};
+use crate::bindings::sso::{self, SsoConfigDto, SsoMode, SsoSummary};
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::detail_header::DetailHeader;
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
@@ -22,25 +21,29 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
 };
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::keep_alive;
+use crate::util::{fmt_date, keep_alive, no_tenant};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
 use crate::views::tabs::activity_tab::ActivityPanel;
 use crate::views::tabs::conditional_access_tab::ConditionalAccessPanel;
 
-mod access;
+// `pub` for the same reason as `panels`: the GUI tests mount the Access tab
+// directly to drive its failed-load Retry.
+pub mod access;
 mod app_roles;
 mod credentials;
 mod overview;
 mod owners;
-mod panels;
+// `pub` for the same reason as `sso_tab`: the GUI tests mount the Provisioning
+// tab directly to drive its consent round trip.
+pub mod panels;
 mod permissions;
 // `pub` so the GUI tests can mount the SSO tab (and its rollover panel)
 // directly, the same way `AuthenticationTab` is mounted — driving the pane to a
@@ -58,32 +61,6 @@ use sso_tab::SsoContent;
 
 /// Entra's "default access" app-role id (no specific role).
 const DEFAULT_ACCESS_ROLE: &str = "00000000-0000-0000-0000-000000000000";
-
-/// Expiry label + badge class for a credential end date. Mirrors the per-app
-/// Credentials tab so enterprise-app credentials (incl. SAML signing certs) show
-/// the same urgency colours.
-fn cred_status(end: Option<chrono::DateTime<chrono::Utc>>) -> (String, &'static str) {
-    match end {
-        None => ("No expiry".to_string(), "badge"),
-        Some(e) => {
-            let days = (e - chrono::Utc::now()).num_days();
-            if days < 0 {
-                ("Expired".to_string(), "badge badge--danger")
-            } else if days <= 7 {
-                (format!("{days}d left"), "badge badge--danger")
-            } else if days <= 30 {
-                (format!("{days}d left"), "badge badge--warning")
-            } else {
-                (format!("{days}d left"), "badge badge--ok")
-            }
-        }
-    }
-}
-
-fn fmt_date(d: Option<chrono::DateTime<chrono::Utc>>) -> String {
-    d.map(|d| d.date_naive().to_string())
-        .unwrap_or_else(|| "—".to_string())
-}
 
 #[component]
 pub fn EnterpriseApplicationDetailPane(
@@ -109,11 +86,7 @@ pub fn EnterpriseApplicationDetailPane(
             if let Some(t) = tenant {
                 enterprise_application::get_enterprise_application_detail(&t.tenant_id, &id).await
             } else {
-                Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                })
+                Err(no_tenant())
             }
         }
     });
@@ -257,7 +230,7 @@ fn EnterpriseAppPanel(
                 {move || {
                     ro_signal
                         .with(|d| d.service_principal.is_foreign_tenant)
-                        .then(|| view! { <Badge label="Foreign tenant" tone="warning" /> })
+                        .then(|| view! { <Badge label="Foreign tenant" tone=BadgeTone::Warning /> })
                 }}
                 {move || {
                     ro_signal

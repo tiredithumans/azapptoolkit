@@ -1,6 +1,5 @@
-//! Searchable, virtualized list of app registrations. Mirrors
-//! `apps/desktop/web/src/views/ApplicationList.tsx`. Hand-rolled fixed-row
-//! windowing replaces `@tanstack/react-virtual` (no Rust port exists).
+//! Searchable, virtualized list of app registrations, with hand-rolled
+//! fixed-row windowing.
 //!
 //! All filtering (search, creation-date range, credential facet) runs **in
 //! memory** over the loaded rows through the shared [`use_filtered_list`] memos
@@ -17,7 +16,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::applications::{self, ApplicationListRowDto};
+use crate::bindings::applications::{self, APPS_MAX, ApplicationListRowDto};
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::date_range_filter::DateRangeFilter;
@@ -28,15 +27,18 @@ use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
-use crate::components::virtual_list::VirtualList;
+use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::use_list_export;
 use crate::state::{ActiveView, OpenItemKind, use_session};
-use crate::util::{contains_ignore_case, created_in_range, relative_time};
+use crate::util::{
+    contains_ignore_case, created_in_range, expiry_label, floored_days_until, fmt_day,
+    relative_time,
+};
 use crate::views::pairing::jump_to_paired_enterprise;
 
 /// A sortable App Registrations column.
@@ -122,12 +124,12 @@ fn sort_rows(rows: &mut [ApplicationListRowDto], col: AppSortCol, desc: bool) {
 /// it.
 ///
 /// Tones are the Credential-expiry dashboard's `status_badge` vocabulary
-/// (`danger` / `warning` / `ok` / `unknown`), because a row and that dashboard
+/// (`BadgeTone::Danger` / `Warning` / `Ok` / `Unknown`), because a row and that dashboard
 /// describe the same credential — two colour languages for one fact is how an
 /// operator learns to trust neither.
 struct CredentialMeta {
     label: &'static str,
-    tone: &'static str,
+    tone: BadgeTone,
     /// `"12d left"` / `"3 days ago"`. `None` when nothing on the app carries an
     /// end date, where the badge already says all there is to say.
     expiry: Option<String>,
@@ -142,10 +144,10 @@ fn credential_meta(
     now: DateTime<Utc>,
 ) -> CredentialMeta {
     let (label, tone) = match status {
-        ListCredentialStatus::Active => ("Active", "ok"),
-        ListCredentialStatus::Expiring => ("Expiring", "warning"),
-        ListCredentialStatus::Expired => ("Expired", "danger"),
-        ListCredentialStatus::None => ("No creds", "unknown"),
+        ListCredentialStatus::Active => ("Active", BadgeTone::Ok),
+        ListCredentialStatus::Expiring => ("Expiring", BadgeTone::Warning),
+        ListCredentialStatus::Expired => ("Expired", BadgeTone::Danger),
+        ListCredentialStatus::None => ("No creds", BadgeTone::Unknown),
     };
     CredentialMeta {
         label,
@@ -155,11 +157,11 @@ fn credential_meta(
                 // Already gone: `relative_time` is the app's one past-tense phrase.
                 relative_time(now, end)
             } else {
-                // Still to come, in the Credential-expiry dashboard's own words.
-                format!("{}d left", (end - now).num_days())
+                // Still to come, in the app's one expiry phrase ("12d left").
+                expiry_label(floored_days_until(end, now))
             }
         }),
-        exact: soonest.map(|end| end.date_naive().to_string()),
+        exact: soonest.map(fmt_day),
     }
 }
 
@@ -179,15 +181,16 @@ pub fn ApplicationList() -> impl IntoView {
     // Client-side filters over the loaded rows. "any" disables the credential
     // filter; an unset date picker (None) leaves that side of the creation-date
     // range open — together they bound creation date to an inclusive window.
-    // (Local, not lifted: no Home metric drills into the apps credential facet —
-    // the Credential Health card drills into the per-credential Security surface.)
-    let cred_filter = RwSignal::new("any".to_string());
-    let created_after: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
-    let created_before: RwSignal<Option<NaiveDate>> = RwSignal::new(None);
+    // Both are lifted to `TenantScopedUi`: the credential facet because Home's
+    // "With secrets" / "With certs" metrics seed it (`open_apps_with_facet`),
+    // and both so they reset on tenant switch — this view stays mounted, and a
+    // leftover filter would silently narrow the next tenant's list.
+    let cred_filter = session.tenant_ui.apps_facet;
+    let created_after = session.tenant_ui.apps_created_after;
+    let created_before = session.tenant_ui.apps_created_before;
 
     // Row order. `None` keeps the order Graph returned. Local rather than
-    // lifted to `TenantScopedUi` for the same reason as `cred_filter`: nothing
-    // outside this view seeds it, and it lives above `LoadedApps` so a Refresh
+    // lifted to `TenantScopedUi`: nothing outside this view seeds it, and it lives above `LoadedApps` so a Refresh
     // doesn't silently drop the operator back into Graph order.
     let sort: RwSignal<Option<(AppSortCol, bool)>> = RwSignal::new(None);
 
@@ -196,6 +199,16 @@ pub fn ApplicationList() -> impl IntoView {
     // to reclaim list space; the toggle badges the active-filter count so a
     // filter hidden behind it stays discoverable.
     let filters_open = RwSignal::new(false);
+    // A Home drill (`open_apps_with_facet`) lands here pre-filtered with the
+    // drawer collapsed, hiding the active chip. Consume the one-shot flag — only
+    // when it names THIS list; the Enterprise list consumes the same flag — to
+    // expand the drawer once.
+    Effect::new(move |_| {
+        if session.tenant_ui.pending_open_filters.get() == Some(ActiveView::Apps) {
+            filters_open.set(true);
+            session.tenant_ui.pending_open_filters.set(None);
+        }
+    });
     let active_filters = Signal::derive(move || {
         (cred_filter.get() != "any") as usize
             + created_after.get().is_some() as usize
@@ -242,12 +255,11 @@ pub fn ApplicationList() -> impl IntoView {
             return;
         };
         refreshing.set(true);
-        // Bump immediately *before* awaiting so the resource refetches on
-        // the next tick (after the backend has had a chance to drop its cache).
-        reload.update(|n| *n = n.wrapping_add(1));
         leptos::task::spawn_local(async move {
-            let _ = diagnostics::invalidate_list_cache(t.tenant_id.clone(), ListCacheKindDto::Apps)
-                .await;
+            diagnostics::invalidate_list_cache(t.tenant_id.clone(), ListCacheKindDto::Apps).await;
+            // Only now: the backend's cache-hit path is synchronous, so a
+            // refetch started first could re-serve the list being dropped.
+            reload.update(|n| *n = n.wrapping_add(1));
         });
     };
 
@@ -317,7 +329,9 @@ pub fn ApplicationList() -> impl IntoView {
                             // Re-runs only on an actual refetch (tenant switch / reload
                             // bump): the filters are read inside `LoadedApps`' memos,
                             // not here, so typing or a chip click never tears the
-                            // loaded subtree down.
+                            // loaded subtree down. A refetch does remount it;
+                            // `tenant_ui.apps_scroll_top` carries the scroll position
+                            // across that.
                             Suspend::new(async move {
                                 match apps.await {
                                     Ok(items) => {
@@ -420,9 +434,12 @@ fn LoadedApps(
         },
         facet: cred_filter,
         facet_any: "any",
-        // The credential chips partition the base set; each chip's predicate is
+        // The four status chips partition the base set; each one's predicate is
         // the same `as_facet` test the count and the partition share, so a
-        // chip's count always agrees with what clicking it shows.
+        // chip's count always agrees with what clicking it shows. The two kind
+        // chips (With secrets / With certs) overlap them, as the Enterprise
+        // list's Disabled/Foreign chips do, and carry the Home metrics' labels
+        // and predicates so the chip a drill lands on matches what was clicked.
         facets: vec![
             Facet::new("Active", "active", |row: &ApplicationListRowDto| {
                 row.credential_status.as_facet() == "active"
@@ -436,22 +453,31 @@ fn LoadedApps(
             Facet::new("No creds", "none", |row: &ApplicationListRowDto| {
                 row.credential_status.as_facet() == "none"
             }),
+            Facet::new(
+                "With secrets",
+                "secrets",
+                ApplicationListRowDto::has_secrets,
+            ),
+            Facet::new("With certs", "certs", ApplicationListRowDto::has_certs),
         ],
         // The export snapshot is taken from `sorted` below instead, so what you
         // export matches what you see down to the row order.
         export_rows: None,
     });
 
-    // The backend paginates to completion (bounded by APPS_HARD_CAP). `total`
-    // is the full tenant count, taken before client-side filters shrink the view.
+    // The backend paginates to completion (bounded by the `APPS_MAX` it shares
+    // with this crate through azapptoolkit-dto). `total` is the full tenant
+    // count, taken before client-side filters shrink the view.
     let total = list.total;
-    let capped = total >= APPS_HARD_CAP;
+    let capped = total >= APPS_MAX;
     let shown = list.shown;
     let base_total = list.base_total();
     let active = list.count_of("active");
     let expiring = list.count_of("expiring");
     let expired = list.count_of("expired");
     let none = list.count_of("none");
+    let secrets = list.count_of("secrets");
+    let certs = list.count_of("certs");
 
     // The sort sits BETWEEN the filtered set and the `VirtualList`: the scroller
     // is handed an already-ordered `Arc<Vec<_>>` exactly as it is handed the
@@ -549,6 +575,8 @@ fn LoadedApps(
                 <FilterChip label="Expiring" value="expiring" count=expiring facet=cred_filter />
                 <FilterChip label="Expired" value="expired" count=expired facet=cred_filter />
                 <FilterChip label="No creds" value="none" count=none facet=cred_filter />
+                <FilterChip label="With secrets" value="secrets" count=secrets facet=cred_filter />
+                <FilterChip label="With certs" value="certs" count=certs facet=cred_filter />
             </div>
         </Show>
         <SelectAllBar
@@ -573,7 +601,7 @@ fn LoadedApps(
                 view! {
                     <Callout tone="warn" class="app-list__cap-notice">
                         {format!(
-                            "Loaded the first {APPS_HARD_CAP} apps — search and filters apply within this set.",
+                            "Loaded the first {APPS_MAX} apps — search and filters apply within this set.",
                         )}
                     </Callout>
                 }
@@ -611,6 +639,9 @@ fn VirtualRows(
     total: usize,
 ) -> impl IntoView {
     let session = use_session();
+    // Here, not in `VirtualList`: the `<Show>` below unmounts the list when a
+    // search matches nothing, and the carried offset must still reset then.
+    reset_scroll_offset_on_change(items, session.tenant_ui.apps_scroll_top);
     // One clock for the whole window rather than one per row: the backend
     // classified `credential_status` at fetch time, so a row's relative expiry
     // is already a snapshot of that moment — re-reading the clock per row would
@@ -659,6 +690,7 @@ fn VirtualRows(
                 row_selector=".app-list__row"
                 key=|row: &ApplicationListRowDto| row.id.clone()
                 render_row=move |idx, row| view_row(idx, row, session, now).into_any()
+                scroll_offset=session.tenant_ui.apps_scroll_top
             />
         </Show>
     }
@@ -854,10 +886,10 @@ mod tests {
     #[test]
     fn credential_meta_reuses_the_dashboard_badge_vocabulary() {
         let tone = |s| credential_meta(s, None, at(0)).tone;
-        assert_eq!(tone(ListCredentialStatus::Active), "ok");
-        assert_eq!(tone(ListCredentialStatus::Expiring), "warning");
-        assert_eq!(tone(ListCredentialStatus::Expired), "danger");
-        assert_eq!(tone(ListCredentialStatus::None), "unknown");
+        assert_eq!(tone(ListCredentialStatus::Active), BadgeTone::Ok);
+        assert_eq!(tone(ListCredentialStatus::Expiring), BadgeTone::Warning);
+        assert_eq!(tone(ListCredentialStatus::Expired), BadgeTone::Danger);
+        assert_eq!(tone(ListCredentialStatus::None), BadgeTone::Unknown);
     }
 
     #[test]

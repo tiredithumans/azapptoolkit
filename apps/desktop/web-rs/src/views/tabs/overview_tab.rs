@@ -4,12 +4,15 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
+use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
 
-const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
+/// The sign-in audiences, as `(Graph value, label)` in display order — the one
+/// list: this tab's editor and `create_app_dialog` both render from it.
+pub(crate) const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
     ("AzureADMyOrg", "Single tenant (this directory only)"),
     (
         "AzureADMultipleOrgs",
@@ -148,7 +151,7 @@ pub fn OverviewTab(
                                 cmd.error
                                     .get()
                                     .map(|e| {
-                                        view! { <Body1 class="form-error">{e}</Body1> }
+                                        view! { <FormError>{e}</FormError> }
                                     })
                             }}
                             <div class="actions-row">

@@ -9,26 +9,31 @@
 use std::collections::HashMap;
 
 use azapptoolkit_core::audit::{
-    downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative,
+    downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative_for,
 };
 use azapptoolkit_core::scoping::{
-    SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, is_sharepoint_orgwide,
+    SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, SP_SITES_SELECTED,
+    is_sharepoint_orgwide,
 };
 use leptos::prelude::*;
-use thaw::{Body1, Input};
+use thaw::Input;
 
 use crate::bindings::permissions::{
     self, CatalogResourceSummary, PermissionKind, ResourcePermissions,
 };
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Badge, Card, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, Card, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
+use crate::util::{count_noun, no_tenant};
 
-/// Microsoft Graph's first-party app id — the natural default for both
-/// the App Registration and Managed Identity grant flows.
-pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+// Microsoft Graph's first-party app id — the natural default for both the App
+// Registration and Managed Identity grant flows. Re-exported from its one
+// definition in `azapptoolkit_core::scoping`, never re-spelled here.
+pub use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerMode {
@@ -122,16 +127,15 @@ pub fn PermissionPicker(
         });
     });
 
+    // Bumped by the load-failure Retry to re-run the same resource's read.
+    let reload = RwSignal::new(0_u32);
     let permissions_res = LocalResource::new(move || {
         let tenant = tenant_id.get();
         let resource = resource_app_id.get();
+        let _ = reload.get();
         async move {
             let Some(t) = tenant else {
-                return Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                });
+                return Err(no_tenant());
             };
             permissions::list_resource_permissions(&t, &resource).await
         }
@@ -169,8 +173,7 @@ pub fn PermissionPicker(
                                 .into_iter()
                                 .map(|r: CatalogResourceSummary| {
                                     let label = counts
-                                        .get()
-                                        .get(&r.app_id)
+                                        .with(|c| c.get(&r.app_id).copied())
                                         .map(|(roles, scopes)| {
                                             format!(
                                                 "{} ({} app / {} delegated)",
@@ -191,15 +194,11 @@ pub fn PermissionPicker(
                                             {apps
                                                 .into_iter()
                                                 .map(|r: CatalogResourceSummary| {
-                                                    let label = if r.role_count == 1 {
-                                                        format!("{} (1 app role)", r.display_name)
-                                                    } else {
-                                                        format!(
-                                                            "{} ({} app roles)",
-                                                            r.display_name,
-                                                            r.role_count,
-                                                        )
-                                                    };
+                                                    let label = format!(
+                                                        "{} ({})",
+                                                        r.display_name,
+                                                        count_noun(r.role_count, "app role", "app roles"),
+                                                    );
                                                     view! {
                                                         <option value=r.app_id.clone()>{label}</option>
                                                     }
@@ -218,7 +217,7 @@ pub fn PermissionPicker(
             </div>
             {(matches!(mode, PickerMode::AppAndDelegated))
                 .then(|| view! { <TabBar items=tabs.clone() selected=active_kind /> })}
-            <Suspense fallback=|| view! { <Body1>"Loading permissions…"</Body1> }>
+            <Suspense fallback=|| view! { <SkeletonList rows=6 /> }>
                 {move || {
                     let needle = filter_debounced.get().to_lowercase();
                     let kind = active_kind.get();
@@ -240,9 +239,10 @@ pub fn PermissionPicker(
                             }
                                 .into_any(),
                             Err(err) => view! {
-                                <Body1 class="form-error">
-                                    {format!("Failed to load: {}", err.message)}
-                                </Body1>
+                                <DetailLoadError
+                                    error=err
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
                             }
                                 .into_any(),
                         }
@@ -253,17 +253,18 @@ pub fn PermissionPicker(
     }
 }
 
-/// Contextual least-privilege note shown under an application permission at
-/// grant time: flags tenant-wide reach and points at the scoped alternative
-/// (Rule 11/12). Advisory only — the Grant button is never blocked.
-fn scope_hint(value: &str) -> AnyView {
-    if value == "Sites.Selected" {
-        return view! {
-            <span class="permission-picker__row-note permission-picker__row-note--ok">
-                "Scoped — per-site access (least privilege)"
-            </span>
-        }
-        .into_any();
+/// The text of the contextual least-privilege note shown under an application
+/// permission at grant time, as `(scoped, text)`: `scoped` picks the "ok" tone,
+/// otherwise it is a warning. Flags tenant-wide reach and points at the scoped
+/// alternative (Rule 11/12) — only where that alternative exists on this
+/// `resource_app_id` (Office 365 Exchange Online's mail appRoles cannot be
+/// confined by RBAC for Applications). `None` when there is nothing to say.
+fn scope_hint_note(resource_app_id: &str, value: &str) -> Option<(bool, String)> {
+    if value == SP_SITES_SELECTED {
+        return Some((
+            true,
+            "Scoped — per-site access (least privilege)".to_string(),
+        ));
     }
     // The sub-site Selected family. Named individually rather than by prefix so
     // the note can say which securable each one confines to — "Selected" alone
@@ -275,26 +276,37 @@ fn scope_hint(value: &str) -> AnyView {
         SP_FILES_SELECTED => Some("individual files and library folders"),
         _ => None,
     } {
-        return view! {
-            <span class="permission-picker__row-note permission-picker__row-note--ok">
-                {format!("Scoped — grants nothing until you pick {target} (least privilege)")}
-            </span>
-        }
-        .into_any();
+        return Some((
+            true,
+            format!("Scoped — grants nothing until you pick {target} (least privilege)"),
+        ));
     }
-    let Some(alt) = least_privilege_alternative(value) else {
-        return ().into_any();
-    };
-    let note = if is_sharepoint_orgwide(value) {
+    let alt = least_privilege_alternative_for(Some(resource_app_id), value)?;
+    // Worded off the helper's own answer, so the two can never disagree.
+    let note = if alt == SP_SITES_SELECTED {
         format!("Org-wide — reaches every site. Prefer {alt}.")
     } else {
         // Exchange-scopable mail/calendar/contacts.
         format!("Org-wide — tenant-wide reach. {alt}.")
     };
-    view! {
-        <span class="permission-picker__row-note permission-picker__row-note--warn">{note}</span>
+    Some((false, note))
+}
+
+/// Contextual least-privilege note shown under an application permission at
+/// grant time (see [`scope_hint_note`]). Advisory only — the Grant button is
+/// never blocked.
+fn scope_hint(resource_app_id: &str, value: &str) -> AnyView {
+    match scope_hint_note(resource_app_id, value) {
+        Some((true, note)) => view! {
+            <span class="permission-picker__row-note permission-picker__row-note--ok">{note}</span>
+        }
+        .into_any(),
+        Some((false, note)) => view! {
+            <span class="permission-picker__row-note permission-picker__row-note--warn">{note}</span>
+        }
+        .into_any(),
+        None => ().into_any(),
     }
-    .into_any()
 }
 
 /// Grant-time downgrade pointer for an application permission: names the
@@ -322,7 +334,7 @@ fn delegated_risk_badge(value: &str) -> AnyView {
         view! {
             <Badge
                 label="Broad scope"
-                tone="warning"
+                tone=BadgeTone::Warning
                 title="Broad delegated scope — prefer the narrowest scope and user consent where possible"
             />
         }
@@ -336,7 +348,7 @@ fn delegated_risk_badge(value: &str) -> AnyView {
 /// mailbox-scoping pointer is application-permission-only, so it is not shown
 /// for delegated scopes — only the name-based `Sites.Selected` guidance is.)
 fn delegated_scope_hint(value: &str) -> AnyView {
-    if value == "Sites.Selected" {
+    if value == SP_SITES_SELECTED {
         return view! {
             <span class="permission-picker__row-note permission-picker__row-note--ok">
                 "Scoped — per-site access (least privilege)"
@@ -391,6 +403,9 @@ fn PermissionList(
                 let payload_value = s.value.clone();
                 // Delegated grant-time hints (advisory). Computed before s.value moves.
                 let drisk = delegated_risk_badge(&s.value);
+                // One name per row: ~400 Graph permissions all announcing
+                // "Select permission" left the list unusable by screen reader.
+                let check_label = format!("Select {}", s.value);
                 let dhint = delegated_scope_hint(&s.value);
                 let sel = PickerSelection {
                     resource_app_id,
@@ -417,7 +432,7 @@ fn PermissionList(
                         <input
                             type="checkbox"
                             class="permission-picker__check"
-                            aria-label="Select permission"
+                            aria-label=check_label
                             prop:checked=checked
                             on:change=on_change
                         />
@@ -445,7 +460,8 @@ fn PermissionList(
                 // Grant-time least-privilege hints (advisory; the Grant button is
                 // never blocked). Computed before `r.value` is moved below.
                 let risk = app_permission_risk_badge(&r.value);
-                let hint = scope_hint(&r.value);
+                let check_label = format!("Select {}", r.value);
+                let hint = scope_hint(&resource_app_id, &r.value);
                 let downgrade = downgrade_hint(&r.value);
                 let sel = PickerSelection {
                     resource_app_id,
@@ -473,7 +489,7 @@ fn PermissionList(
                         <input
                             type="checkbox"
                             class="permission-picker__check"
-                            aria-label="Select permission"
+                            aria-label=check_label
                             prop:checked=checked
                             on:change=on_change
                         />
@@ -482,5 +498,39 @@ fn PermissionList(
             })
             .collect();
         view! { <ul class="permission-picker__list">{rows}</ul> }.into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID};
+
+    #[test]
+    fn scope_hint_offers_mailbox_scoping_only_where_rbac_applies() {
+        let (scoped, text) =
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Mail.Read").expect("Graph mail is scopable");
+        assert!(!scoped);
+        assert!(text.contains("Exchange RBAC"), "{text}");
+        // Office 365 Exchange Online's identically-named appRole cannot be
+        // confined by RBAC for Applications: no advice it cannot follow.
+        assert_eq!(
+            scope_hint_note(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Mail.Read"),
+            None
+        );
+    }
+
+    #[test]
+    fn scope_hint_points_broad_sites_at_sites_selected() {
+        assert_eq!(
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Sites.ReadWrite.All"),
+            Some((
+                false,
+                "Org-wide — reaches every site. Prefer Sites.Selected.".to_string()
+            ))
+        );
+        let (scoped, _) = scope_hint_note(MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED)
+            .expect("Sites.Selected gets the scoped note");
+        assert!(scoped);
     }
 }

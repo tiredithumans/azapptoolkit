@@ -174,15 +174,78 @@ async fn list_all_sites_follows_next_link_on_sharepoint_scope() {
         .mount(&server)
         .await;
     let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
-    let sites = client.list_all_sites(100).await.unwrap();
+    let (sites, truncated) = client.list_all_sites(100).await.unwrap();
     assert_eq!(
         sites.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
         ["site-1", "site-2"]
     );
+    assert!(!truncated, "exhausted within the cap is full coverage");
 
-    // The cap stops the walk without erroring (page 1 already satisfies it).
-    let capped = client.list_all_sites(1).await.unwrap();
+    // The cap stops the walk without erroring — and says so: page 1 satisfies
+    // it but still carries a nextLink, so sites exist beyond the prefix.
+    let (capped, truncated) = client.list_all_sites(1).await.unwrap();
     assert_eq!(capped.len(), 1);
+    assert!(
+        truncated,
+        "a pending nextLink at the cap means the tenant has more sites"
+    );
+}
+
+/// The cap signal when the FIRST page already overshoots it — the case the
+/// sweep meets on a large tenant (`$top=200` against a 5000 cap is 25 pages,
+/// but the last one usually overshoots). Until this the client silently
+/// `truncate(max)`-ed and the sweep reported the prefix as the whole tenant,
+/// so a `Sites.Selected` grant on site 5001 read as "no per-site grants".
+///
+/// The exact-fit sibling is the one a naive `len() >= max` check gets wrong:
+/// three sites under a cap of three is full coverage, not truncation.
+#[tokio::test]
+async fn list_all_sites_reports_truncation_when_page_one_overshoots_the_cap() {
+    let site = |n: u8| {
+        serde_json::json!({
+            "id": format!("site-{n}"),
+            "displayName": format!("Site {n}"),
+            "webUrl": format!("https://x/sites/{n}")
+        })
+    };
+
+    let overshoot = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sites"))
+        .and(query_param("search", "*"))
+        .and(header(AUTHORIZATION.as_str(), "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [site(1), site(2), site(3)]
+        })))
+        .mount(&overshoot)
+        .await;
+    let client =
+        make_client(&overshoot.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let (sites, truncated) = client.list_all_sites(2).await.unwrap();
+    assert_eq!(
+        sites.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        ["site-1", "site-2"],
+        "the prefix is cut to the cap"
+    );
+    assert!(truncated, "a third site existed beyond the cap");
+
+    let exact = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sites"))
+        .and(query_param("search", "*"))
+        .and(header(AUTHORIZATION.as_str(), "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [site(1), site(2)]
+        })))
+        .mount(&exact)
+        .await;
+    let client = make_client(&exact.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let (sites, truncated) = client.list_all_sites(2).await.unwrap();
+    assert_eq!(sites.len(), 2);
+    assert!(
+        !truncated,
+        "exactly filling the cap with no nextLink is full coverage"
+    );
 }
 
 #[tokio::test]
@@ -340,6 +403,91 @@ async fn resolve_sharepoint_resource_maps_a_library_root_to_its_list() {
     assert_eq!(resolved.item_id, None);
 }
 
+/// A subsite probe that the caller lacks rights on. The parent site holds no
+/// library or list matching the URL, so the resolver descends one segment and
+/// asks SharePoint for `/sites/Finance/Reports` — which answers 403. That is a
+/// fact about the caller, not the URL, and it must reach the command typed as
+/// `Forbidden` so `map_sharepoint_err` can splice the Full-Control remediation.
+/// Until this every probe error collapsed into "did not resolve to a list,
+/// library or item", steering the operator to fix a URL that was fine.
+///
+/// 403 is outside the retry budget (`http_retry` retries 5xx/429/network only),
+/// so this resolves in one round trip.
+#[tokio::test]
+async fn resolve_sharepoint_resource_propagates_a_forbidden_subsite_probe() {
+    let server = MockServer::start().await;
+    mount_empty_finance_site(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/sites/contoso.sharepoint.com:/sites/Finance/Reports"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": { "code": "accessDenied", "message": "Access denied" }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let err = client
+        .resolve_sharepoint_resource(
+            "https://contoso.sharepoint.com/sites/Finance/Reports/Shared Documents",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}
+
+/// The intended 404 path still yields the operator-facing sentence: a probe
+/// that finds no subsite means the URL names nothing this toolkit can grant
+/// against, and that is what the message should say.
+#[tokio::test]
+async fn resolve_sharepoint_resource_reports_a_missing_subsite_as_unresolved() {
+    let server = MockServer::start().await;
+    mount_empty_finance_site(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/sites/contoso.sharepoint.com:/sites/Finance/Reports"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": { "code": "itemNotFound", "message": "Requested site could not be found" }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let err = client
+        .resolve_sharepoint_resource(
+            "https://contoso.sharepoint.com/sites/Finance/Reports/Shared Documents",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Protocol(m) if m.contains("did not resolve")),
+        "got {err:?}"
+    );
+}
+
+/// `/sites/Finance` with no drives and no lists, so a deeper URL forces the
+/// resolver to descend into a subsite probe (`path()` ignores the `$select` /
+/// `$top` query on the two collection reads).
+async fn mount_empty_finance_site(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/sites/contoso.sharepoint.com:/sites/Finance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "site-1",
+            "displayName": "Finance",
+            "webUrl": "https://contoso.sharepoint.com/sites/Finance"
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sites/site-1/drives"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sites/site-1/lists"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .mount(server)
+        .await;
+}
+
 /// The sub-site grant posts `grantedToV2` — the singular form these endpoints
 /// require. The site endpoint's `grantedToIdentities` array is rejected here,
 /// so wiremock's exact body match is the guard against reusing the wrong builder.
@@ -407,4 +555,44 @@ async fn a_non_application_permission_reports_no_app_id() {
     assert_eq!(perms.len(), 2);
     assert_eq!(perms[0].app_id(), None, "a site group is not an app grant");
     assert_eq!(perms[1].app_id(), Some("app-1"));
+}
+
+/// A batched site read whose grant list overflows continues page 2 on the
+/// SharePoint token, not the verb-selected read token (`tok`), which lacks
+/// `Sites.FullControl.All` — that fallback made page 2 a 403 while page 1
+/// succeeded.
+#[tokio::test]
+async fn batch_list_site_permissions_continues_page_two_on_the_sharepoint_token() {
+    let server = MockServer::start().await;
+    let next = format!("{}/sites/site-1/permissions?page=2", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .and(header("authorization", "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [{ "id": "0", "status": 200, "body": {
+                "value": [{ "id": "perm-1", "roles": ["read"] }],
+                "@odata.nextLink": next,
+            }}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sites/site-1/permissions"))
+        .and(query_param("page", "2"))
+        .and(header("authorization", "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "perm-2", "roles": ["write"] }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let out = client
+        .batch_list_site_permissions(&["site-1".to_string()])
+        .await
+        .unwrap();
+    let perms = out[0].as_ref().expect("page 2 rides the SharePoint bearer");
+    assert_eq!(perms.len(), 2);
+    assert_eq!(perms[0].id, "perm-1");
+    assert_eq!(perms[1].id, "perm-2");
 }

@@ -17,13 +17,15 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 # test: the runner polls the page until it prints `test result:`, so every test
 # in a shard shares one 60s deadline.
 #
-# That is the reason the GUI tests stay sharded (tests/gui_N.rs, 8-21 MB each,
-# 16-21 tests apiece) rather than merging into one binary — four independent 60s
-# budgets, not one shared by all 72 tests. Merging was measured and is not a win
-# anyway: a single binary is 29 MB vs 53 MB across four, but builds *slower*
-# (49-50s vs 46-47s) because cargo links the four in parallel and the merged one
-# is a single serial link. `just`'s `export` puts it in every recipe's
-# environment cross-platform; only wasm-pack's runner reads it.
+# That is the reason the GUI tests stay sharded (tests/gui_N.rs) rather than
+# merging into one binary — four independent 60s budgets, not one shared by
+# every test. As of 2026-09-28: ~213 tests, 37-69 apiece, 12-28 MB per shard
+# (`just web-itest-size` prints today's sizes). Merging was measured, when the
+# suite was 72 tests, and was not a win anyway: a single binary was 29 MB vs
+# 53 MB across four, but built *slower* (49-50s vs 46-47s) because cargo links
+# the four in parallel and the merged one is a single serial link. `just`'s
+# `export` puts it in every recipe's environment cross-platform; only wasm-pack's
+# runner reads it.
 export WASM_BINDGEN_TEST_TIMEOUT := "60"
 
 # Show the recipe list when run with no arguments.
@@ -130,18 +132,23 @@ web-itest-auto:
 
 # Enforce the per-shard wasm size ceiling the whole GUI-test strategy rests on.
 #
-# A single merged test binary (~78 MB) exceeds what headless Chrome will
-# instantiate, so `tests/gui_N.rs` shards exist to stay under ~52 MB each. That
-# number lived ONLY in comments here and in Cargo.toml — nothing measured it. A
-# shard drifting past the ceiling does not fail with "too big"; it fails as an
-# opaque 60s `Failed to detect test as having been run` timeout, which reads like
-# a flaky browser and sends you looking in the wrong place. Measured, it is one
-# line of output naming the shard.
+# At opt-level 0 a merged test binary (~78 MB stripped) exceeded what headless
+# Chrome will instantiate; `[profile.test] opt-level = 1` (web-rs/Cargo.toml)
+# brought the merge to ~29 MB when the suite had 24 modules. The
+# `tests/gui_N.rs` shards also exist for the per-binary 60s runner budget
+# (`WASM_BINDGEN_TEST_TIMEOUT`, top of this file), and each must still stay
+# under ~52 MB. That number lived ONLY in comments here and in Cargo.toml —
+# nothing measured it. A shard drifting past the ceiling does not fail with "too
+# big"; it fails as an opaque 60s `Failed to detect test as having been run`
+# timeout, which reads like a flaky browser and sends you looking in the wrong
+# place. Measured, it is one line of output naming the shard.
 #
-# Unix/CI only (bash shebang, like `setup`): this is a size gate on the Linux CI
-# runner, not something a Windows dev box needs to reproduce.
+# Unix/CI only (bash shebang): this is a size gate on the Linux CI runner, not
+# something a Windows dev box needs to reproduce. The `[windows]` twin below
+# loud-skips it so `verify-full` still completes there.
 
 # Enforce the per-shard wasm ceiling headless Chrome can instantiate (CI/Unix).
+[unix]
 [working-directory('apps/desktop/web-rs')]
 web-itest-size:
     #!/usr/bin/env bash
@@ -184,6 +191,70 @@ web-itest-size:
       exit 1
     fi
 
+# On Windows the shard ceiling stays a CI/Unix gate (bash recipe), so
+# `verify-full` still completes — loudly, never silently.
+[windows]
+web-itest-size:
+    @echo ""
+    @echo "  !! SKIPPED: web-itest-size — the shard-size ceiling runs in CI (Linux) only."
+    @echo "  !! A GUI test shard grown past the ceiling will fail CI, not this run."
+    @echo ""
+
+# Size of the SHIPPED frontend bundle: raw and gzip bytes of the built
+# `dist/*.wasm`, `*.js` and `*.css`, as a markdown table (so CI appends it
+# verbatim to `$GITHUB_STEP_SUMMARY`). `web-itest-size` above only measures the
+# debug GUI-test shards; nothing else put a number on what the webview loads at
+# every launch, so a dependency bump or a view that doubled it landed unnoticed.
+# It measures whatever `dist/` holds: run `just web-build-release` (or
+# `web-build-pages`) first. Deliberately NOT in `verify-full`, which builds the
+# frontend in debug and mirrors CI's debug-only `web` job; pages.yml and the
+# release workflow's Linux leg, which already run the release Trunk build, call
+# it instead. WASM_WARN_KB is a soft ceiling (~1.5x the release wasm recorded in
+# docs/architecture/release-updater-demo.md): past it the recipe prints a WARN
+# line and still exits 0. Unix/CI only (bash), with a loud Windows skip below.
+
+# Report the built frontend bundle's raw + gzip sizes (run a release build first).
+[unix]
+[working-directory('apps/desktop/web-rs')]
+web-size:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    WASM_WARN_KB=7300
+    files=(dist/*.wasm dist/*.js dist/*.css)
+    if [ ${#files[@]} -eq 0 ]; then
+      echo "no built bundle in dist/ — run \`just web-build-release\` (or web-build-pages) first" >&2
+      exit 1
+    fi
+    total=0
+    total_gz=0
+    warn=""
+    echo "| file | bytes | gzip -9 |"
+    echo "|---|---:|---:|"
+    for f in "${files[@]}"; do
+      bytes=$(wc -c < "$f")
+      gz=$(gzip -9 -c "$f" | wc -c)
+      total=$(( total + bytes ))
+      total_gz=$(( total_gz + gz ))
+      printf '| %s | %d | %d |\n' "$(basename "$f")" "$bytes" "$gz"
+      if [[ "$f" == *.wasm ]] && [ $(( bytes / 1024 )) -gt "$WASM_WARN_KB" ]; then
+        warn="$(basename "$f") is $(( bytes / 1024 )) KB, past the ${WASM_WARN_KB} KB soft ceiling"
+      fi
+    done
+    printf '| **total** | **%d** | **%d** |\n' "$total" "$total_gz"
+    if [ -n "$warn" ]; then
+      echo ""
+      echo "WARN: $warn — check what grew before raising it (see release-updater-demo.md)."
+    fi
+
+# On Windows the bundle-size report stays a CI/Unix recipe (bash), so it
+# completes — loudly, never silently.
+[windows]
+web-size:
+    @echo ""
+    @echo "  !! SKIPPED: web-size — the bundle-size report runs on Linux/macOS (and in CI) only."
+    @echo ""
+
 # --- Housekeeping ------------------------------------------------------------
 
 # Delete every cargo build artifact to reclaim disk. There are TWO independent
@@ -192,7 +263,7 @@ web-itest-size:
 # `web-rs/target/` is by far the larger of the two. `--manifest-path` cleans it
 # without a chdir, keeping the recipe one plain `cargo` call per tree (works
 # under both sh and PowerShell). The next build recompiles from scratch. The
-# committed dist/ stub is left alone (verify recreates it via _stub-frontend-dist).
+# dist/ placeholder (gitignored; `_stub-frontend-dist` recreates it) is left alone.
 
 # cargo clean BOTH build trees (root workspace + the excluded web-rs).
 clean:
@@ -243,12 +314,46 @@ test: _stub-frontend-dist
 # The inner loop while iterating: type-check BOTH trees (the root workspace incl.
 # every test target, and the wasm frontend) with no codegen and no tests. Not a
 # CI gate — `verify` is — but it catches the compile error `verify` would take
-# minutes to reach, and it keeps skills off hand-typed `cargo`.
+# minutes to reach, and it keeps skills off hand-typed `cargo`. The wasm tree is
+# checked with `--all-targets --features test-support`, the configuration
+# `web-clippy` gates, so src/test_support, src/ipc_mock and the gui_N shards are
+# type-checked too. Trade-off (the same one `web-clippy` makes): the shipped
+# feature set's `cfg(not(feature = "test-support"))` paths are not re-checked
+# here; `web-build` in `verify` covers them.
 
 # Type-check both trees (no codegen, no tests) — the fast inner loop.
 check: _stub-frontend-dist
     cargo check --locked --workspace --all-targets
-    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown
+    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown --all-targets --features test-support
+
+# Future-incompatibility report for BOTH trees: code the pinned toolchain still
+# accepts but a later Rust will reject. Not a gate (nothing here is ours to fix
+# in place, and the pinned toolchain keeps it a warning) — run it before bumping
+# `rust-toolchain.toml` (docs/DEVELOPMENT.md, "Bumping the Rust toolchain"), so a
+# listed crate is planned for instead of surfacing as a hard error in a
+# transitive proc-macro on the bump PR. Same two invocations as `check`, plus
+# `--future-incompat-report`, which names every affected crate even on a cached
+# build ("0 dependencies" for a clean tree). For the detailed lint text, run
+# `cargo report future-incompatibilities` inside that tree afterwards — it takes
+# no `--manifest-path` and errors on a tree with no report, so it is not used here.
+#
+# Known today (web-rs only): proc-macro-error2 2.0.1, E0365 "extern crate
+# `proc_macro` is private" (rust#127909). Four proc-macros depend on it (from
+# `cargo tree -i proc-macro-error2 --target all` in web-rs):
+#   - leptos_macro 0.8.17 directly (leptos's `view!`);
+#   - syn_derive 0.2 <- rstml 0.12 <- leptos_macro / leptos_hot_reload;
+#   - reactive_stores_macro 0.4.3 <- reactive_stores 0.4.3 <- tachys (leptos's own);
+#   - reactive_stores_macro 0.2.6 <- reactive_stores 0.2.5 <- thaw_utils.
+# No semver update removes it. The exits are a fixed proc-macro-error2 release,
+# or leptos (leptos_macro, rstml, reactive_stores) AND thaw all dropping it —
+# one upstream alone does not clear the warning. The fallback is a
+# `[patch.crates-io]` of proc-macro-error2 to a fixed fork (plus a deny.toml
+# `allow-git` entry), which covers all four paths at once.
+
+# Future-incompat report for both trees (not a gate) — run before a toolchain bump.
+future-incompat: _stub-frontend-dist
+    cargo check --locked --workspace --all-targets --future-incompat-report
+    cargo check --locked --manifest-path apps/desktop/web-rs/Cargo.toml --target wasm32-unknown-unknown --all-targets --features test-support --future-incompat-report
 
 # One crate's tests, e.g. `just test-crate azapptoolkit-core` or
 # `just test-crate desktop -- repo_invariants` (args after `--` go to cargo test).
@@ -279,10 +384,15 @@ web-clippy:
 # the committed web-rs Cargo.lock (this gate runs before web-build, so it pins the
 # frontend lockfile that Trunk's build then reuses).
 
+# The second line runs the Pages demo's own consistency tests (`src/demo/`,
+# compiled only under the `demo` feature). Nothing else builds that feature
+# except pages.yml, so this is also the demo's only compile gate before deploy.
+
 # Run the frontend unit tests on the host target (CI gate).
 [working-directory('apps/desktop/web-rs')]
 web-test:
     cargo test --locked
+    cargo test --locked --features demo --lib demo::
 
 # The machine-independent gates, shared by `verify` / `verify-ui` /
 # `verify-full` so the browser suite is named exactly once per entry point and
@@ -295,15 +405,16 @@ _verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
 # Run the core CI gates locally, in order. Run this before declaring a change
 # done. The browser GUI tests run too WHEN this box can (see `web-itest-auto`)
 # and announce loudly when they cannot. Still not the whole of CI: the
-# dependency audit/deny gates are covered by `verify-full`; actionlint stays
-# CI-side unless installed locally.
+# dependency audit/deny gates and the per-shard wasm ceiling (`web-itest-size`,
+# a full wasm test build when web-itest did not just run) are covered by
+# `verify-full`; actionlint stays CI-side unless installed locally.
 
 # The CI gates in CI order + the browser tests when this box can run them. Run before "done".
 verify: _verify-core web-itest-auto
     @echo ""
-    @echo "verify OK — NOT run (needs network): audit, web-audit, deny, web-deny."
+    @echo "verify OK — NOT run: audit, web-audit, deny, web-deny (need network), machete (needs cargo-machete) and web-itest-size (shard-size ceiling)."
     @echo "  just verify-ui    = verify with the GUI tests REQUIRED (fails without a browser)"
-    @echo "  just verify-full  = full CI parity (adds the dependency audit/deny gates)"
+    @echo "  just verify-full  = full CI parity (adds the audit/deny/machete gates + the shard-size ceiling)"
     @echo "If web-itest reported SKIPPED above, frontend behavior is still unproven:"
     @echo "renaming a CSS class, aria-label, or on-screen text a GUI test references"
     @echo "passes verify and fails CI."
@@ -316,17 +427,17 @@ verify: _verify-core web-itest-auto
 verify-ui: _verify-core web-itest
 
 # Full CI parity: the core gates + both RustSec scans + both deny policies + the
-# browser GUI tests + the per-shard wasm ceiling. web-itest runs LAST because it
-# needs a local browser + matching WebDriver (see its recipe) — the
-# machine-independent gates fail first on a box without one.
+# unused-dependency scan + the browser GUI tests + the per-shard wasm ceiling.
+# web-itest runs LAST because it needs a local browser + matching WebDriver (see
+# its recipe) — the machine-independent gates fail first on a box without one.
 #
 # `web-itest-size` is here because ci.yml runs it and this recipe claims CI
 # parity. It was missing, so a shard that had grown past the ceiling passed
 # `just verify-full` locally and failed in CI — the exact failure mode the
 # recipe exists to prevent.
 
-# Full CI parity: core gates + audit/deny for both trees + browser tests + shard ceiling.
-verify-full: _verify-core audit web-audit deny web-deny web-itest web-itest-size
+# Full CI parity: core gates + audit/deny for both trees + unused-dep scan + browser tests + shard ceiling.
+verify-full: _verify-core audit web-audit deny web-deny machete web-itest web-itest-size
 
 # --- Dependency policy (CI audit/deny jobs) ---------------------------------
 
@@ -365,6 +476,19 @@ deny:
 web-deny:
     cargo deny --config ../../../deny.toml check advisories bans licenses sources
 
+# Unused-dependency scan over BOTH trees. cargo-machete walks directories, not the
+# cargo workspace, so this one root run also covers the excluded apps/desktop/web-rs.
+# It needs no build and no network. A dependency used only inside a macro expansion
+# is invisible to it: list it under that crate's `[package.metadata.cargo-machete]
+# ignored` with a comment saying why (today: `thiserror` in arm/graph/keyvault,
+# named only by `core::http_error_enum!`). Plain mode, not `--with-metadata`: that
+# shells out to `cargo metadata`, which may rewrite a lockfile, and every other
+# gate here runs `--locked`. CI pins the matching version in ci.yml.
+
+# Fail on a declared-but-unused dependency in either tree (cargo-machete).
+machete:
+    cargo machete --skip-target-dir
+
 # --- Release / packaging ----------------------------------------------------
 
 # Build the Windows MSI + NSIS installers (release; auto-builds the frontend).
@@ -398,6 +522,11 @@ build-windows-updater:
 # leg can be added later). `--bundles app,dmg` keeps deb/rpm/etc. off the macOS
 # leg. Same updater-key contract as `build-windows-updater`.
 
+# macOS .app + .dmg for local use (Apple Silicon), no updater signing key needed.
+[working-directory('apps/desktop/src-tauri')]
+build-macos:
+    cargo tauri build --target aarch64-apple-darwin --bundles app,dmg -- --locked
+
 # macOS .dmg + .app.tar.gz with signed updater artifacts (Apple Silicon).
 [working-directory('apps/desktop/src-tauri')]
 build-macos-updater:
@@ -407,6 +536,11 @@ build-macos-updater:
 # with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
 # patchelf on the build host (CI installs them). `--bundles appimage,deb` — rpm
 # is omitted for now. Same updater-key contract as `build-windows-updater`.
+
+# Linux AppImage + .deb for local use, no updater signing key needed.
+[working-directory('apps/desktop/src-tauri')]
+build-linux:
+    cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb -- --locked
 
 # Linux AppImage + .deb with signed updater artifacts.
 [working-directory('apps/desktop/src-tauri')]
@@ -423,9 +557,10 @@ icon:
 # here once, which doubled this file and made `just --list` unreadable; `just
 # setup` stays the single entry point). Each verifies the Rust toolchain, adds
 # the wasm target + rustfmt/clippy, installs the Tauri CLI, trunk and wasm-pack
-# if missing, checks OS-specific build deps + the browser-test prerequisites,
-# then runs a compile + frontend-build smoke test. Run `cargo install just` (or
-# your package manager) first, then `just setup`.
+# if missing, checks OS-specific build deps (incl. a C toolchain) + the
+# browser-test prerequisites, then runs `just check` + `just web-build` as a
+# smoke test. Run `cargo install just` (or your package manager) first, then
+# `just setup`.
 
 # One-time, idempotent developer bootstrap (toolchain, targets, CLIs, browser test deps).
 [unix]

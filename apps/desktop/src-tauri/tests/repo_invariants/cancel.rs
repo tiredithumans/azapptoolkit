@@ -31,8 +31,8 @@
 ///    tenant-wide writers purely because a helper below them mentioned a
 ///    tenant-wide read).
 ///
-/// `run_audit`'s claim placement is a rule of its own — see
-/// [`the_audit_claims_its_token_before_the_prefetch`].
+/// Claim *placement* is the sibling rule
+/// [`every_long_running_command_claims_before_its_first_await`].
 #[test]
 fn every_long_running_command_claims_exactly_one_cancel_token() {
     let mut missing: Vec<String> = Vec::new();
@@ -135,4 +135,162 @@ fn every_long_running_command_claims_before_its_first_await() {
          `is_cancelled()` (`cancelled >= generation`) never sees it and the run carries on. Move \
          `let cancel = state.<flag>_cancel.claim();` above the first `.await` in the body."
     );
+}
+
+/// The identifiers immediately before each `call` (`".claim()"` /
+/// `".cancel()"`) in `body`: `state.bulk_cancel.claim()` yields `bulk_cancel`.
+fn flags_before(body: &str, call: &str) -> Vec<String> {
+    body.match_indices(call)
+        .map(|(at, _)| {
+            let ident: String = body[..at]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            ident.chars().rev().collect()
+        })
+        .collect()
+}
+
+/// One `CancelFlag` per run kind, and exactly one `cancel_*` command per flag.
+///
+/// `CancelFlag::cancel` stamps the flag's CURRENT generation, so it stops every
+/// run on that flag, not just the newest one. The views that start these runs
+/// stay mounted (keep-alive views, display-toggled panels), so runs of different
+/// kinds overlap — and a flag shared between kinds let one kind's Cancel stop
+/// the other: cancelling a read-only audit halted a bulk delete, a mailbox
+/// probe's Cancel threw away a multi-minute site sweep, a backup's Cancel
+/// stopped a restore between passes. Each of those shared flags was justified
+/// by a doc comment saying the two runs "never run at once".
+///
+/// Derived from the source rather than a hand-kept table (see `sources.rs` for
+/// why a list is not a ratchet): the flags a command claims and cancels are read
+/// off its body. Two bulk runs started from different bulk action bars share
+/// `bulk_cancel` — the one sanctioned multi-claimer, and it is one run kind.
+#[test]
+fn every_cancel_flag_belongs_to_one_run_kind_and_one_cancel_command() {
+    use std::collections::BTreeMap;
+
+    let mut claimers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut cancellers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut bad_shape: Vec<String> = Vec::new();
+    let mut bad_canceller: Vec<String> = Vec::new();
+
+    for cmd in super::sources::commands() {
+        for flag in flags_before(&cmd.body, ".claim()") {
+            if !flag.ends_with("_cancel") {
+                bad_shape.push(format!("{}::{} claims `{flag}`", cmd.module, cmd.name));
+            }
+            claimers.entry(flag).or_default().push(cmd.name.clone());
+        }
+        let cancelled = flags_before(&cmd.body, ".cancel()");
+        for flag in &cancelled {
+            if !flag.ends_with("_cancel") {
+                bad_shape.push(format!("{}::{} cancels `{flag}`", cmd.module, cmd.name));
+            }
+            cancellers
+                .entry(flag.clone())
+                .or_default()
+                .push(cmd.name.clone());
+        }
+        if !cancelled.is_empty() && (!cmd.name.starts_with("cancel_") || cancelled.len() != 1) {
+            bad_canceller.push(format!(
+                "{}::{} cancels {cancelled:?} — a canceller is a `cancel_*` command that \
+                 cancels exactly one flag",
+                cmd.module, cmd.name
+            ));
+        }
+    }
+
+    assert!(
+        bad_shape.is_empty(),
+        "unrecognised claim/cancel shape: {bad_shape:#?}\n\
+         Claim and cancel through a named `AppState.<kind>_cancel` field so this rule can read \
+         which run kind a command belongs to."
+    );
+    assert!(bad_canceller.is_empty(), "{bad_canceller:#?}");
+    assert!(
+        claimers.len() >= 8,
+        "only {} claimed cancel flag(s) found — the source walk or the call-shape detector is \
+         broken, and a rule that scans nothing passes vacuously",
+        claimers.len()
+    );
+
+    // One run kind per flag. The bulk commands are one kind (the bulk action
+    // bar's runs), and every one of them rides `bulk_cancel`.
+    for (flag, cmds) in &claimers {
+        let is_bulk_kind = cmds.iter().all(|c| c.starts_with("bulk_"));
+        assert!(
+            cmds.len() == 1 || (is_bulk_kind && flag == "bulk_cancel"),
+            "flag `{flag}` is shared by run kinds {cmds:?} — one kind's Cancel stops the others \
+             (CancelFlag::cancel stamps every generation). Give each run kind its own \
+             `AppState` flag and `cancel_*` command."
+        );
+        for cmd in cmds.iter().filter(|c| c.starts_with("bulk_")) {
+            assert_eq!(
+                flag, "bulk_cancel",
+                "bulk command `{cmd}` claims `{flag}` — every `bulk_*` command rides `bulk_cancel`, \
+                 which `cancel_bulk` stops"
+            );
+        }
+    }
+
+    // Exactly one Cancel command per claimed flag, and no orphan cancel.
+    for (flag, cmds) in &claimers {
+        let stoppers = cancellers.get(flag).map(Vec::as_slice).unwrap_or_default();
+        assert!(
+            stoppers.len() == 1,
+            "flag `{flag}` (claimed by {cmds:?}) is cancelled by {stoppers:?} — it needs exactly \
+             one `cancel_*` command, or its run has no Cancel (or two buttons that disagree)"
+        );
+    }
+    for (flag, cmds) in &cancellers {
+        assert!(
+            claimers.contains_key(flag),
+            "{cmds:?} cancel `{flag}`, which no command claims — an orphan Cancel stops nothing"
+        );
+    }
+
+    // Every canceller is registered and has a typed binding, so the Cancel
+    // button the flag exists for can actually be wired.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = std::fs::read_to_string(manifest.join("src/lib.rs")).expect("read src/lib.rs");
+    let bindings_root = manifest
+        .parent()
+        .expect("apps/desktop")
+        .join("web-rs/src/bindings");
+    let mut bindings = String::new();
+    let mut stack = vec![bindings_root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(src) = std::fs::read_to_string(&path)
+            {
+                bindings.push_str(&src);
+            }
+        }
+    }
+    assert!(
+        !bindings.is_empty(),
+        "read no bindings from {} — the walk is broken",
+        bindings_root.display()
+    );
+    for name in cancellers.values().flatten() {
+        assert!(
+            lib.contains(&format!("::{name},")),
+            "`{name}` is not in `generate_handler![]` (src/lib.rs) — its Cancel button would \
+             reject at runtime"
+        );
+        assert!(
+            bindings.contains(&format!("\"{name}\"")),
+            "`{name}` has no typed binding under web-rs/src/bindings — nothing in the frontend \
+             can press this Cancel"
+        );
+    }
 }

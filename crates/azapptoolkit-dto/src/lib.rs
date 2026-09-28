@@ -5,9 +5,29 @@
 //! a few `azapptoolkit-core` domain types (`Application`, `Organization`,
 //! `AuditItem` + its remediation/scope subtree) also cross IPC by direct
 //! re-use, embedded in or alongside the DTOs here, because both sides share
-//! the same Rust definitions. Kept dependency-light (just `serde`) so it
+//! the same Rust definitions. Kept dependency-light (`serde` + `chrono`) so it
 //! compiles cleanly to `wasm32-unknown-unknown`. Backend-only
 //! `From<…Error>` conversions are gated behind the `backend` feature.
+//!
+//! # Timestamps
+//!
+//! A timestamp crosses IPC in one of two Rust types, which put identical
+//! RFC3339 UTC text on the wire (chrono's `DateTime<Utc>` serializes to
+//! exactly that):
+//!
+//! - **`DateTime<Utc>`** — the default for a **new** field whenever the
+//!   backend holds a parsed value: a typed Graph model (`credentials.rs`) or a
+//!   stamp the backend mints itself (`backup.rs` `created_at`).
+//! - **`String`, documented as RFC3339 UTC** — kept where one bad value must
+//!   degrade just that field instead of failing deserialization of the whole
+//!   payload: values lifted verbatim from untyped upstream JSON (the SAML
+//!   `keyCredentials` read as `serde_json::Value`, Key Vault attributes), and
+//!   payloads that outlive a build (the cached audit `completed_at`). The
+//!   frontend parses these only through `util::time_ago` (a stamp it can't
+//!   read renders nothing), or takes the date part for display.
+//!
+//! Existing `String` stamps are grandfathered. Converting one is a per-module
+//! change that must keep the wire text and every frontend consumer in step.
 
 pub mod activity;
 pub mod applications;
@@ -99,6 +119,59 @@ impl UiError {
         azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
     }
 
+    /// True when the failure is a missing admin/user consent for one resource
+    /// (`consent_required`, from `AuthError::ConsentRequired` — AADSTS65001/65004),
+    /// read from the one literal in [`azapptoolkit_core::reauth::CONSENT_REQUIRED`].
+    ///
+    /// Not re-auth-fatal (the session is fine, a fan-out carries on) and not
+    /// retryable (a silent grant cannot obtain consent): the recovery is the
+    /// interactive `request_scope_consent`, which is what every "Grant consent"
+    /// affordance branches on this to offer.
+    pub fn is_consent_required(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::CONSENT_REQUIRED
+    }
+
+    /// True when a Conditional Access policy demands an interactive step
+    /// (MFA, registration, an external challenge) for one resource
+    /// (`interaction_required`, from `AuthError::InteractionRequired`), read
+    /// from the one literal in [`azapptoolkit_core::reauth::INTERACTION_REQUIRED`].
+    ///
+    /// Not re-auth-fatal (the refresh token is fine for every other audience)
+    /// and not retryable (a silent grant cannot satisfy the challenge): the
+    /// recovery is the interactive `request_scope_step_up` behind the "Verify
+    /// identity" toast, or — for the Graph read scopes — `reauthenticate`.
+    pub fn is_interaction_required(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::INTERACTION_REQUIRED
+    }
+
+    /// True for a rejected access token (`unauthorized`, a client 401), read
+    /// from the one literal in [`azapptoolkit_core::reauth::UNAUTHORIZED`].
+    ///
+    /// Not re-auth-fatal (one 401 does not prove the session is dead) and not
+    /// retryable as-is: the recovery is the in-place token refresh the top bar
+    /// and the 401 toast offer.
+    pub fn is_unauthorized(&self) -> bool {
+        self.code == azapptoolkit_core::reauth::UNAUTHORIZED
+    }
+
+    /// For a rejected token, the curated guidance its message carries beyond
+    /// the bare status line ([`azapptoolkit_core::reauth::UNAUTHORIZED_STATUS`])
+    /// — Exchange, Key Vault and ARM append what to check if a refresh doesn't
+    /// help; a Graph surface may replace the line entirely. `None` when the
+    /// message is only the status line (nothing to show but a generic lead), or
+    /// when this is not a rejected token at all.
+    pub fn unauthorized_guidance(&self) -> Option<&str> {
+        if !self.is_unauthorized() {
+            return None;
+        }
+        let msg = self.message.trim();
+        let rest = msg
+            .strip_prefix(azapptoolkit_core::reauth::UNAUTHORIZED_STATUS)
+            .unwrap_or(msg)
+            .trim();
+        (!rest.is_empty()).then_some(rest)
+    }
+
     /// (De)serialization error: fixed `serde` code, never retryable.
     pub fn serde(message: impl Into<String>) -> Self {
         UiError::new("serde", message, false)
@@ -155,22 +228,25 @@ mod backend_conv {
 
     impl From<AuthError> for UiError {
         fn from(err: AuthError) -> Self {
+            // Exhaustive on purpose (no wildcard): a new `AuthError` variant
+            // must be given a code here before the workspace compiles.
             let (code, retryable) = match &err {
                 AuthError::NotSignedIn => ("not_signed_in", false),
                 AuthError::RefreshTokenMissing(_) => ("refresh_missing", false),
                 AuthError::InvalidGrant(_) => ("refresh_missing", false),
                 AuthError::ConsentRequired(_) => ("consent_required", false),
+                AuthError::InteractionRequired(_) => ("interaction_required", false),
                 AuthError::TokenExchange(_) => ("token_exchange", true),
                 AuthError::Authorization(_) => ("authorization", true),
                 AuthError::Loopback(_) => ("loopback", true),
                 AuthError::StateMismatch => ("state_mismatch", false),
                 AuthError::Cancelled => ("cancelled", false),
                 AuthError::Keyring(_) => ("keyring", false),
+                AuthError::KeyringUnavailable(_) => ("keyring_unavailable", false),
                 AuthError::Http(_) => ("network", true),
                 AuthError::Url(_) => ("url", false),
                 AuthError::Serde(_) => ("serde", false),
                 AuthError::Io(_) => ("io", true),
-                _ => ("unknown_auth", false),
             };
             UiError {
                 code: code.to_string(),
@@ -188,10 +264,13 @@ mod backend_conv {
         /// Pins the machine-readable `code` + `retryable` the front-end branches
         /// on for every constructible `AuthError` variant. These strings are a
         /// wire contract — `not_signed_in` drives the re-auth flow, and the
-        /// `consent_required` vs `refresh_missing` split is load-bearing
-        /// (AGENTS.md): `InvalidGrant` must purge the refresh token while
-        /// `ConsentRequired` must not. A silent change here breaks a UI branch
-        /// with no compile error, so lock it down.
+        /// `consent_required` / `interaction_required` vs `refresh_missing`
+        /// split is load-bearing (AGENTS.md): `InvalidGrant` must purge the
+        /// refresh token while `ConsentRequired` and `InteractionRequired` (a
+        /// per-resource Conditional Access step-up) must not. A silent change here breaks a UI branch
+        /// with no compile error, so lock it down. Completeness is enforced by
+        /// the compiler (the `From` match is exhaustive, `AuthError` is not
+        /// `#[non_exhaustive]`); this test pins the values.
         #[test]
         fn auth_error_maps_to_stable_code_and_retryable() {
             let cases: Vec<(AuthError, &str, bool)> = vec![
@@ -212,6 +291,11 @@ mod backend_conv {
                     false,
                 ),
                 (
+                    AuthError::InteractionRequired("AADSTS50076".into()),
+                    "interaction_required",
+                    false,
+                ),
+                (
                     AuthError::TokenExchange("boom".into()),
                     "token_exchange",
                     true,
@@ -225,6 +309,11 @@ mod backend_conv {
                 (AuthError::StateMismatch, "state_mismatch", false),
                 (AuthError::Cancelled, "cancelled", false),
                 (AuthError::Keyring("locked".into()), "keyring", false),
+                (
+                    AuthError::KeyringUnavailable("no session bus".into()),
+                    "keyring_unavailable",
+                    false,
+                ),
                 (
                     AuthError::Url(url::Url::parse("http://[bad").unwrap_err()),
                     "url",
@@ -245,8 +334,104 @@ mod backend_conv {
                 assert!(!ui.message.is_empty(), "empty message for `{code}`");
             }
             // `AuthError::Http(reqwest::Error)` is the only variant omitted —
-            // `reqwest::Error` has no public constructor — but its arm maps to
-            // ("network", true).
+            // `reqwest::Error` has no public constructor and this crate has no
+            // reqwest dependency — but its arm maps to ("network", true).
+            // `token_adapter`'s tests in the desktop crate construct one and pin
+            // it end to end (auth-plane `network` → client-plane `network_error`).
+        }
+
+        /// A classified `TokenError` crossing a client's `Token` arm keeps its
+        /// code — and its retryability — in every client's `UiError`. Before,
+        /// only the re-auth-fatal codes survived: `consent_required` became a
+        /// generic `token_error` (so no "Grant consent" action could appear) and
+        /// a refresh-time network outage became a non-retryable `token_error`.
+        #[test]
+        fn classified_token_codes_survive_every_client_error() {
+            use azapptoolkit_core::token::TokenError;
+
+            let cases: [(TokenError, &str, bool); 6] = [
+                (
+                    TokenError::new("refresh_missing", "m"),
+                    "refresh_missing",
+                    false,
+                ),
+                (
+                    TokenError::new("not_signed_in", "m"),
+                    "not_signed_in",
+                    false,
+                ),
+                (
+                    TokenError::new("consent_required", "m"),
+                    "consent_required",
+                    false,
+                ),
+                (
+                    TokenError::new("interaction_required", "m"),
+                    "interaction_required",
+                    false,
+                ),
+                (TokenError::new("network_error", "m"), "network_error", true),
+                (TokenError::opaque("m"), "token_error", false),
+            ];
+            for (tok, code, retryable) in cases {
+                let uis = [
+                    UiError::from(GraphError::Token(tok.clone())),
+                    UiError::from(ExchangeError::Token(tok.clone())),
+                    UiError::from(ArmError::Token(tok.clone())),
+                    UiError::from(KeyVaultError::Token(tok.clone())),
+                ];
+                for ui in uis {
+                    assert_eq!(ui.code, code, "code for token `{code}`");
+                    assert_eq!(ui.retryable, retryable, "retryable for token `{code}`");
+                }
+            }
+        }
+
+        /// The front end's 401 toast shows a client's curated guidance (what to
+        /// check if a refresh doesn't help) and falls back to a generic lead
+        /// only for a bare status line. That split reads the shared
+        /// `UNAUTHORIZED_STATUS` prefix, so pin it for every client.
+        #[test]
+        fn a_401_keeps_its_curated_guidance_past_the_status_line() {
+            use azapptoolkit_core::reauth::{UNAUTHORIZED, UNAUTHORIZED_STATUS};
+
+            let graph = UiError::from(GraphError::Unauthorized);
+            assert_eq!(graph.code, UNAUTHORIZED);
+            assert_eq!(graph.message, UNAUTHORIZED_STATUS);
+            assert!(graph.is_unauthorized());
+            assert_eq!(graph.unauthorized_guidance(), None, "a bare 401");
+
+            for ui in [
+                UiError::from(ExchangeError::Unauthorized),
+                UiError::from(KeyVaultError::Unauthorized),
+                UiError::from(ArmError::Unauthorized),
+            ] {
+                assert_eq!(ui.code, UNAUTHORIZED);
+                assert!(
+                    ui.message.starts_with(UNAUTHORIZED_STATUS),
+                    "{}",
+                    ui.message
+                );
+                let guidance = ui.unauthorized_guidance().expect("a guided 401");
+                assert!(!guidance.starts_with(UNAUTHORIZED_STATUS), "{guidance}");
+                assert!(guidance.contains("if it persists"), "{guidance}");
+            }
+
+            // A Graph surface that replaced the status line entirely.
+            let curated = UiError::new(
+                UNAUTHORIZED,
+                "Your access token was rejected. Retry.",
+                false,
+            );
+            assert_eq!(
+                curated.unauthorized_guidance(),
+                Some("Your access token was rejected. Retry.")
+            );
+            // Not a 401 at all.
+            assert_eq!(
+                UiError::new("forbidden", "x", false).unauthorized_guidance(),
+                None
+            );
         }
     }
 }
@@ -293,6 +478,19 @@ mod reauth_agreement_tests {
         ] {
             assert!(!UiError::new(code, "m", true).is_reauth_fatal());
             assert!(!TokenError::new(code, "m").is_reauth_fatal());
+        }
+    }
+
+    #[test]
+    fn consent_required_is_its_own_non_fatal_class() {
+        let consent = UiError::new("consent_required", "needs consent", false);
+        assert!(consent.is_consent_required());
+        assert!(!consent.is_reauth_fatal());
+        for code in ["refresh_missing", "token_error", "forbidden"] {
+            assert!(
+                !UiError::new(code, "m", false).is_consent_required(),
+                "{code} is not a missing consent"
+            );
         }
     }
 }

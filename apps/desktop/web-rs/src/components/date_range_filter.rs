@@ -51,7 +51,9 @@ pub fn DateRangeFilter(
 }
 
 /// One labeled native date input bound to `value`, with an explicit clear
-/// button shown only when set. Setting the signal to `None` clears the input
+/// button shown only when set. The visible label is not associated with the
+/// input (no `for`/`id`: both list views stay mounted, so a fixed id would
+/// collide), so the input carries its name itself via `aria-label`. Setting the signal to `None` clears the input
 /// (a native date input honors an empty controlled `value`).
 fn date_field(
     label: &'static str,
@@ -65,6 +67,7 @@ fn date_field(
                 <input
                     type="date"
                     class="date-range-field__native"
+                    aria-label=label
                     prop:value=move || {
                         value.get().map(|d| d.format(ISO).to_string()).unwrap_or_default()
                     }

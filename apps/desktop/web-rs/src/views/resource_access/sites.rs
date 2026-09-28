@@ -9,18 +9,18 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
+use crate::components::app_site_access_panel::site_sweep_cap_message;
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, SearchInput, ShowMore};
-use crate::constants::*;
-use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::plural;
 
 /// Lowercased haystack of a row's site + app facets, newline-joined so one
 /// search box serves both lookup directions without cross-field false matches.
-/// Built once per sweep result (see `corpus`), never per keystroke.
+/// Built once per sweep result (see `super::use_sweep_filter`), never per keystroke.
 fn row_haystack(row: &SiteAppGrantRow) -> String {
     let mut hay = String::new();
     for field in [
@@ -49,52 +49,8 @@ pub(super) fn SitesPanel() -> impl IntoView {
     let consent_required = RwSignal::new(false);
     let search = RwSignal::new(String::new());
 
-    // Filtered rows + summary derived with `.with()` over the debounced query
-    // — previously every keystroke deep-cloned the whole SiteSweepResult
-    // (≤5k rows) and rebuilt the entire table.
-    let search_debounced = use_debounced(search.into(), LIST_FILTER_DEBOUNCE_MS);
-    // Lowercased search haystack per row, rebuilt once per sweep result (it reads
-    // `result`, not the query) so filtering is allocation-free. Previously the
-    // filter lowercased all four fields of every row (≤5k) on each settled
-    // keystroke (~20k allocations); now a keystroke just runs `contains` over the
-    // prebuilt corpus. Indices align with `result.rows` (both derive from `result`).
-    let corpus: Memo<Vec<String>> = Memo::new(move |_| {
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| r.rows.iter().map(row_haystack).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
-    let filtered_rows = Memo::new(move |_| {
-        let needle = search_debounced.get().trim().to_lowercase();
-        result.with(|r| {
-            r.as_ref()
-                .map(|r| {
-                    if needle.is_empty() {
-                        return r.rows.clone();
-                    }
-                    corpus.with(|hays| {
-                        r.rows
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| hays.get(*i).is_some_and(|h| h.contains(&needle)))
-                            .map(|(_, row)| row.clone())
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default()
-        })
-    });
-    // Render window — draw the first page and grow on demand so a ≤5k-row sweep
-    // doesn't build every <tr> at once. Reset when the filter or scan changes.
-    let render_limit = RwSignal::new(RENDER_PAGE);
-    Effect::new(move |prev: Option<()>| {
-        search_debounced.track();
-        let _ = filtered_rows.with(|r| r.len());
-        if prev.is_some() {
-            render_limit.set(RENDER_PAGE);
-        }
-    });
+    let (filtered_rows, render_limit) =
+        super::use_sweep_filter(result, search, |r| &r.rows, row_haystack);
     // Roving-tabindex keyboard nav over the result rows (matches the audit table).
     let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
     let on_grid_key = use_grid_keynav(tbody_ref, move || {
@@ -112,15 +68,25 @@ pub(super) fn SitesPanel() -> impl IntoView {
                         ids.len()
                     };
                     format!(
-                        "{} app grant{} across {} site{} — scanned {} of {} sites{}{}",
+                        "{} app grant{} across {} site{} — scanned {} of {} sites{}{}{}",
                         rows.len(),
-                        if rows.len() == 1 { "" } else { "s" },
+                        plural(rows.len()),
                         distinct_sites,
-                        if distinct_sites == 1 { "" } else { "s" },
+                        plural(distinct_sites),
                         r.sites_scanned,
                         r.total_sites,
                         if r.sites_failed > 0 {
                             format!(" ({} failed — coverage is partial)", r.sites_failed)
+                        } else {
+                            String::new()
+                        },
+                        // The export ships this sentence, so the cap caveat
+                        // reaches the CSV/JSON coverage line through it.
+                        if r.truncated {
+                            format!(
+                                " — stopped at the {}-site scan cap, coverage is partial",
+                                r.total_sites
+                            )
                         } else {
                             String::new()
                         },
@@ -206,8 +172,12 @@ pub(super) fn SitesPanel() -> impl IntoView {
             match sharepoint::sweep_site_permissions(&t.tenant_id).await {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
-                    consent_required.set(e.code == "consent_required");
-                    error.set(Some(e.message));
+                    consent_required.set(e.is_consent_required());
+                    // A dead session gets the Re-authenticate lever instead of a
+                    // dead-end line; consent keeps this panel's own button.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
             scanning.set(false);
@@ -225,14 +195,18 @@ pub(super) fn SitesPanel() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
                 Ok(()) => do_run(),
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
+                }
             }
         });
     };
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = sharepoint::cancel_site_sweep().await;
         });
     };
 
@@ -350,6 +324,11 @@ pub(super) fn SitesPanel() -> impl IntoView {
             // reactive closure stays `Fn` (only borrows the captured handler).
             let on_grid_key = on_grid_key.clone();
             view! {
+                {move || {
+                    result
+                        .with(|r| r.as_ref().filter(|r| r.truncated).map(|r| r.total_sites))
+                        .map(|cap| view! { <Callout tone="warn">{site_sweep_cap_message(cap)}</Callout> })
+                }}
                 <Body1 class="page__summary">{move || summary.get().unwrap_or_default()}</Body1>
                 <Show
                     when=move || filtered_rows.with(|r| !r.is_empty())

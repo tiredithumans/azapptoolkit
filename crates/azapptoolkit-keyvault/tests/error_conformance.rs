@@ -110,3 +110,84 @@ fn forbidden_carries_role_guidance_from_the_capabilities_catalog() {
     );
     assert!(KeyVaultError::NotFound("gone".into()).ui_hint().is_none());
 }
+
+/// A throttled request that outlived the retries tells the operator how long
+/// to wait, in words.
+///
+/// The Display used to interpolate `{retry_after_secs:?}`, so the UI read
+/// "throttled (429); retry after Some(30)s" or "retry after Nones".
+#[test]
+fn throttled_message_is_readable() {
+    assert_eq!(
+        KeyVaultError::Throttled {
+            retry_after_secs: Some(30),
+        }
+        .to_string(),
+        "throttled (429): the service is limiting requests. Wait 30 seconds, then try again."
+    );
+    assert_eq!(
+        KeyVaultError::Throttled {
+            retry_after_secs: None,
+        }
+        .to_string(),
+        "throttled (429): the service is limiting requests. Wait a moment, then try again."
+    );
+    for err in every_variant() {
+        let shown = err.to_string();
+        assert!(
+            !shown.contains("Some(") && !shown.contains("None"),
+            "{err:?} leaks Rust Debug formatting into its message: {shown}"
+        );
+    }
+}
+
+/// The macro's `HttpStatusError` impl builds the variant each constructor
+/// names, so the shared `failed_response` status table lands on this crate's
+/// own wire codes.
+#[test]
+fn status_constructors_build_the_matching_variant() {
+    use azapptoolkit_core::http_error::HttpStatusError;
+    let cases: [(KeyVaultError, &str); 7] = [
+        (
+            <KeyVaultError as HttpStatusError>::unauthorized(),
+            "unauthorized",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::forbidden("x".into()),
+            "forbidden",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::not_found("x".into()),
+            "not_found",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::api(409, "x".into()),
+            "vault_error",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::throttled(Some(3)),
+            "throttled",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::server(503, "x".into()),
+            "server_error",
+        ),
+        (
+            <KeyVaultError as HttpStatusError>::network("reset".into()),
+            "network_error",
+        ),
+    ];
+    for (err, code) in cases {
+        assert_eq!(err.ui_code(), code, "{err:?}");
+    }
+    assert!(matches!(
+        <KeyVaultError as HttpStatusError>::api(409, "x".into()),
+        KeyVaultError::Api { status: 409, .. }
+    ));
+    assert!(matches!(
+        <KeyVaultError as HttpStatusError>::throttled(Some(3)),
+        KeyVaultError::Throttled {
+            retry_after_secs: Some(3)
+        }
+    ));
+}

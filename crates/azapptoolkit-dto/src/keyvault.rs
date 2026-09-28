@@ -13,7 +13,9 @@ pub struct KeyVaultSweepProgress {
     pub cancelled: bool,
 }
 
-/// One direct Azure-RBAC role assignment on a Key Vault — the reverse-lookup's
+/// One Azure-RBAC role assignment that applies to a Key Vault — made on the
+/// vault itself or inherited from its resource group / subscription /
+/// management group (`inherited`) — the reverse-lookup's
 /// row unit ("which principal holds which role on which vault"). `principal_id`
 /// resolves to `principal_display_name` for service principals (apps + managed
 /// identities); users/groups carry only `principal_type` + the id.
@@ -22,7 +24,8 @@ pub struct KeyVaultSweepProgress {
 pub struct KeyVaultAccessRow {
     pub vault_id: String,
     pub vault_name: Option<String>,
-    /// The ARM scope the assignment sits at (the vault resource path).
+    /// The ARM scope the assignment was made at (the vault path, or an
+    /// ancestor's when `inherited`).
     pub scope: String,
     pub role_name: String,
     pub principal_id: String,
@@ -32,6 +35,10 @@ pub struct KeyVaultAccessRow {
     pub principal_display_name: Option<String>,
     /// True for broadly-privileged roles (Owner, Key Vault Administrator, …).
     pub high_privilege: bool,
+    /// True when the assignment was made at an ancestor scope (resource group,
+    /// subscription, management group, root), not on the vault itself.
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 /// Result of a tenant-wide Key Vault RBAC sweep, with coverage so the UI can
@@ -73,41 +80,6 @@ impl std::fmt::Debug for KvSecretValueDto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KvSecretValueDto")
             .field("name", &self.name)
-            .field("value", &"<redacted>")
-            .field("content_type", &self.content_type)
-            .field("expires", &self.expires)
-            .finish()
-    }
-}
-
-/// Returned by `kv_set_secret` — metadata only, never the secret value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KvSecretMetadataDto {
-    pub name: String,
-    pub content_type: Option<String>,
-    pub expires: Option<String>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KvSetSecretInput {
-    pub vault_name: String,
-    pub secret_name: String,
-    pub value: String,
-    pub content_type: Option<String>,
-    /// RFC3339 timestamp.
-    pub expires: Option<String>,
-}
-// Hand-written rather than derived: the workspace treats a derived `Debug` on
-// a secret as a defect, because any `?dto` in a `tracing` macro puts the
-// plaintext straight into the daily rolling log file. Mirrors
-// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
-// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
-impl std::fmt::Debug for KvSetSecretInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvSetSecretInput")
-            .field("vault_name", &self.vault_name)
-            .field("secret_name", &self.secret_name)
             .field("value", &"<redacted>")
             .field("content_type", &self.content_type)
             .field("expires", &self.expires)
@@ -170,15 +142,5 @@ mod tests {
         assert!(dbg.contains("<redacted>"), "{dbg}");
         // Non-secret fields stay useful for diagnosis.
         assert!(dbg.contains("app-secret"), "{dbg}");
-
-        let write = KvSetSecretInput {
-            vault_name: "kv-contoso".into(),
-            secret_name: "app-secret".into(),
-            value: "s3cr3t-value".into(),
-            ..Default::default()
-        };
-        let dbg = format!("{write:?}");
-        assert!(!dbg.contains("s3cr3t-value"), "{dbg}");
-        assert!(dbg.contains("kv-contoso"), "{dbg}");
     }
 }

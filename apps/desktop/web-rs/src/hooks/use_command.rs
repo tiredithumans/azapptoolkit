@@ -12,8 +12,11 @@
 //! // read `cmd.busy` to disable a button, `cmd.error` to surface the message.
 //! ```
 
+use std::rc::Rc;
+
 use leptos::prelude::*;
 
+use crate::components::toast::{ToastAction, ToastKind};
 use crate::state::{Session, use_session};
 
 /// Busy/error state plus a runner for tenant-scoped command mutations. `Copy`,
@@ -51,7 +54,9 @@ impl CommandState {
         Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
         T: 'static,
     {
-        if self.busy.get_untracked() {
+        // `try_`: a handle whose owning component is gone (a sticky Retry
+        // toast outlives the pane that made it) reads as busy, never panics.
+        if self.busy.try_get_untracked().unwrap_or(true) {
             return;
         }
         let busy = self.busy;
@@ -77,11 +82,15 @@ impl CommandState {
     /// Run a mutating command, storing any error message in `error` (cleared at
     /// start). On `Ok` runs `on_ok(value)`. The common case.
     ///
-    /// A missing admin consent additionally raises the shared sink's "Grant
-    /// consent" toast: it is the one failure the inline message can never
-    /// resolve — the scope exists only after an interactive round trip — so
-    /// leaving it as `error` text alone is a dead end, which is exactly what
-    /// every write-scope failure used to be.
+    /// Three failures additionally raise the shared sink's recovery toast
+    /// (`Session::report_recovery_action`): a dead session ("Re-authenticate"),
+    /// a rejected token ("Refresh token") and a missing admin consent ("Grant
+    /// consent"). The inline message can never resolve any of them — each needs
+    /// an out-of-band round trip — so leaving them as `error` text alone is a
+    /// dead end, which is exactly what every expired session and write-scope
+    /// failure used to be here. It follows the sink's own rule
+    /// (`report_if_session_dead`: surfaces with their own error affordance call
+    /// it first). See [`fail_inline`](Self::fail_inline).
     pub fn run<T, Fut>(
         &self,
         on_ok: impl FnOnce(T) + 'static,
@@ -90,44 +99,107 @@ impl CommandState {
         Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
         T: 'static,
     {
-        let error = self.error;
-        let session = self.session;
-        let feature = self.consent_feature;
-        error.set(None);
+        let this = *self;
+        self.error.set(None);
+        self.run_with(on_ok, move |e| this.fail_inline(e), op);
+    }
+
+    /// The inline-error failure path of [`run`](Self::run): the recovery toast
+    /// (dead session → rejected token → consent) when one applies — never a
+    /// plain toast, the inline `error` IS this surface's message — and always
+    /// the inline text. Synchronous so it is testable without spawning.
+    pub(crate) fn fail_inline(self, e: azapptoolkit_dto::UiError) {
+        self.session
+            .report_recovery_action(&e, self.consent_feature);
+        self.error.set(Some(e.message));
+    }
+
+    /// Like [`run`](Self::run) but reports failures via a toast instead of the
+    /// `error` signal — for handlers that surface errors as toasts and keep no
+    /// inline error signal (so this never touches `self.error`).
+    ///
+    /// A failure goes through the central sink: a recovery lever when one
+    /// applies (Re-authenticate, Refresh token, Grant consent, Verify
+    /// identity), else an error toast that — when the backend marks the
+    /// failure transient (`UiError::retryable`: throttled, a 5xx, a network
+    /// error) — carries a sticky **Retry** that re-runs this same call. That is
+    /// why `on_ok` and `op` are `Clone`: every run, the first and each retry,
+    /// consumes a fresh clone. See [`fail_toast`](Self::fail_toast).
+    ///
+    /// A retry goes through this runner again, so it resolves the tenant anew
+    /// (pinned to the one the call first ran for), and it is refused — with an
+    /// info toast saying why — while the same handle is busy or once the
+    /// component that owns it is gone (see `fail_toast`). An op
+    /// that reads a signal when called (the enterprise-app notes text) retries
+    /// with the value current at the click, not the one that failed.
+    pub fn run_toast_err<T, Fut>(
+        &self,
+        on_ok: impl FnOnce(T) + Clone + 'static,
+        op: impl FnOnce(String) -> Fut + Clone + 'static,
+    ) where
+        Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
+        T: 'static,
+    {
+        let this = *self;
+        let started_for = self
+            .session
+            .active_tenant
+            .get_untracked()
+            .map(|t| t.tenant_id);
+        let (again_ok, again_op) = (on_ok.clone(), op.clone());
         self.run_with(
             on_ok,
             move |e| {
-                session.report_consent_required(&e, feature);
-                error.set(Some(e.message));
+                this.fail_toast(e, started_for, move || {
+                    this.run_toast_err(again_ok.clone(), again_op.clone())
+                });
             },
             op,
         );
     }
 
-    /// Like [`run`](Self::run) but reports failures via a `toast_error` instead
-    /// of the `error` signal — for handlers that surface errors as toasts and
-    /// keep no inline error signal (so this never touches `self.error`).
-    pub fn run_toast_err<T, Fut>(
-        &self,
-        on_ok: impl FnOnce(T) + 'static,
-        op: impl FnOnce(String) -> Fut + 'static,
-    ) where
-        Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
-        T: 'static,
-    {
-        let session = self.session;
-        let feature = self.consent_feature;
-        self.run_with(
-            on_ok,
-            move |e| {
-                // Routes through the central sink so a dead session
-                // (`refresh_missing` / `not_signed_in`) gets a "Re-authenticate"
-                // action and a missing admin consent a "Grant consent" one,
-                // instead of a dead-end error toast.
-                session.report_command_error_for(&e, feature);
-            },
-            op,
-        );
+    /// The toast failure path of [`run_toast_err`](Self::run_toast_err), the
+    /// twin of [`fail_inline`](Self::fail_inline): hands `rerun` to
+    /// `Session::report_command_error_with_retry`, which offers it as Retry
+    /// only for a transient failure with no recovery lever to use first.
+    ///
+    /// The Retry is **pinned to `started_for`**, the tenant the failed call ran
+    /// for. Toasts survive a tenant switch, and a re-run resolves the tenant
+    /// active at the click — so without the pin a Retry clicked after a switch
+    /// would send tenant A's captured object ids to tenant B. After a switch it
+    /// says so instead.
+    ///
+    /// It is also **bounded by the owning component's lifetime**. The toast
+    /// lives on the shell's `Session` and, being sticky, outlives the detail
+    /// pane that raised it (closing the dock chip, "Close all", a tenant
+    /// A → B → A switch all dispose the pane), while `rerun` reads that pane's
+    /// signals and stored values — reading a disposed one panics the app. So a
+    /// Retry whose handle is disposed says the view was closed instead, and one
+    /// clicked while the same handle is still busy (another action on that pane
+    /// is in flight) says so rather than vanishing silently. Synchronous so it
+    /// is testable without spawning.
+    pub(crate) fn fail_toast(
+        self,
+        e: azapptoolkit_dto::UiError,
+        started_for: Option<String>,
+        rerun: impl Fn() + 'static,
+    ) {
+        let (session, busy) = (self.session, self.busy);
+        let retry: ToastAction = Rc::new(move || {
+            let not_retried = if busy.is_disposed() {
+                "That view was closed, so the action wasn't retried."
+            } else if session.active_tenant.get_untracked().map(|t| t.tenant_id) != started_for {
+                "You switched tenants, so that action wasn't retried."
+            } else if busy.try_get_untracked().unwrap_or(true) {
+                "Another action is still running there, so that one wasn't retried. \
+                 Try again when it finishes."
+            } else {
+                rerun();
+                return;
+            };
+            session.push_toast(ToastKind::Info, not_retried, None, None);
+        });
+        session.report_command_error_with_retry(&e, self.consent_feature, Some(retry));
     }
 
     /// Point this handle's consent recovery at a feature other than the Graph
@@ -195,5 +267,193 @@ mod tests {
                 "exchange"
             );
         });
+    }
+
+    fn inline_failure(
+        code: &str,
+        cmd: impl FnOnce() -> CommandState,
+    ) -> (Vec<Option<String>>, Option<String>) {
+        Owner::new().with(|| {
+            provide_session();
+            let cmd = cmd();
+            cmd.fail_inline(azapptoolkit_dto::UiError::new(code, "gone", false));
+            let labels = use_session()
+                .toasts
+                .with_untracked(|list| list.iter().map(|t| t.action_label.clone()).collect());
+            (labels, cmd.error.get_untracked())
+        })
+    }
+
+    #[test]
+    fn an_inline_failure_on_a_dead_session_offers_reauthenticate() {
+        let (labels, error) = inline_failure("refresh_missing", use_command);
+        assert_eq!(labels, vec![Some("Re-authenticate".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"), "the inline text stays");
+    }
+
+    #[test]
+    fn an_inline_failure_on_a_rejected_token_offers_refresh() {
+        let (labels, error) = inline_failure("unauthorized", use_command);
+        assert_eq!(labels, vec![Some("Refresh token".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn an_inline_consent_failure_uses_the_handles_feature() {
+        let (labels, error) = inline_failure("consent_required", || {
+            use_command().with_consent_feature("exchange")
+        });
+        assert_eq!(labels, vec![Some("Grant consent".to_string())]);
+        assert_eq!(error.as_deref(), Some("gone"));
+    }
+
+    fn tenant(id: &str) -> crate::bindings::TenantContext {
+        crate::bindings::TenantContext {
+            tenant_id: id.to_string(),
+            account_oid: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: None,
+            display_name: None,
+        }
+    }
+
+    /// `fail_toast` for `e` with a counting re-run, then click the toast's
+    /// action after `between` ran. Returns (re-runs, toast messages).
+    fn click_retry(
+        e: azapptoolkit_dto::UiError,
+        between: impl FnOnce(Session),
+    ) -> (u32, Vec<String>) {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let runs = Rc::new(std::cell::Cell::new(0));
+            let count = runs.clone();
+            use_command().fail_toast(e, Some("tenant-a".to_string()), move || {
+                count.set(count.get() + 1)
+            });
+            let action = session.toasts.with_untracked(|list| {
+                assert_eq!(list[0].action_label.as_deref(), Some("Retry"));
+                list[0].action.clone().expect("a retry action")
+            });
+            between(session);
+            action();
+            let messages = session
+                .toasts
+                .with_untracked(|list| list.iter().map(|t| t.message.clone()).collect());
+            (runs.get(), messages)
+        })
+    }
+
+    #[test]
+    fn a_transient_toast_failure_retries_the_same_op() {
+        let (runs, _) = click_retry(
+            azapptoolkit_dto::UiError::new("network_error", "offline", true),
+            |_| {},
+        );
+        assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn a_retry_never_crosses_tenants() {
+        // Toasts survive a tenant switch; the re-run would resolve the new
+        // tenant and send the old one's object ids to it.
+        let (runs, messages) = click_retry(
+            azapptoolkit_dto::UiError::new("throttled", "slow down", true),
+            |session| session.set_active_tenant(Some(tenant("tenant-b"))),
+        );
+        assert_eq!(runs, 0, "a retry ran against another tenant");
+        assert!(
+            messages.iter().any(|m| m.contains("switched tenants")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_retry_after_its_view_closed_never_runs() {
+        // The sticky toast outlives the pane that owns the handle; the re-run
+        // reads that pane's (now disposed) signals, which would panic.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let pane = Owner::new();
+            let cmd = pane.with(use_command);
+            cmd.fail_toast(
+                azapptoolkit_dto::UiError::new("throttled", "slow down", true),
+                Some("tenant-a".to_string()),
+                || panic!("a retry ran for a closed view"),
+            );
+            let action = session
+                .toasts
+                .with_untracked(|list| list[0].action.clone().expect("a retry action"));
+            pane.cleanup();
+            assert!(cmd.busy.is_disposed());
+            action();
+            let messages: Vec<String> = session
+                .toasts
+                .with_untracked(|list| list.iter().map(|t| t.message.clone()).collect());
+            assert!(
+                messages.iter().any(|m| m.contains("view was closed")),
+                "{messages:?}"
+            );
+            // The runner's own guard is disposal-safe too: no panic, no spawn.
+            cmd.run_with(
+                |()| panic!("ran"),
+                |_| panic!("ran"),
+                |_| async { Err(azapptoolkit_dto::UiError::new("x", "ran", false)) },
+            );
+        });
+    }
+
+    #[test]
+    fn a_retry_while_the_handle_is_busy_says_so() {
+        // The runner's guard drops a click on a busy handle (sso_tab shares
+        // one handle across five actions); the operator must hear why.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let cmd = use_command();
+            cmd.fail_toast(
+                azapptoolkit_dto::UiError::new("server_error", "try later", true),
+                None,
+                || panic!("a busy handle re-ran"),
+            );
+            let action = session
+                .toasts
+                .with_untracked(|list| list[0].action.clone().expect("a retry action"));
+            cmd.busy.set(true);
+            action();
+            session.toasts.with_untracked(|list| {
+                assert!(
+                    list.iter().any(|t| t.message.contains("still running")),
+                    "the lever vanished silently"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn an_ordinary_toast_failure_has_no_retry() {
+        Owner::new().with(|| {
+            provide_session();
+            use_command().fail_toast(
+                azapptoolkit_dto::UiError::new("forbidden", "denied", false),
+                None,
+                || panic!("never re-run"),
+            );
+            use_session().toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                assert!(list[0].action.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn an_ordinary_inline_failure_raises_no_toast() {
+        // The inline `error` is this surface's message: an ordinary failure
+        // must not also be reported as a toast.
+        let (labels, error) = inline_failure("forbidden", use_command);
+        assert!(labels.is_empty(), "no double report: {labels:?}");
+        assert_eq!(error.as_deref(), Some("gone"));
     }
 }

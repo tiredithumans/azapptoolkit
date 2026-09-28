@@ -1,14 +1,18 @@
 //! Access- and refresh-token storage.
 //!
-//! Access tokens stay in memory (never written to disk) and are keyed by the
-//! pair `(tenant_id, scope_key)` so multi-audience apps (Graph + Key Vault +
-//! ARM) can keep a fresh token per resource without evicting the others.
+//! Access tokens stay in memory (never written to disk) and are keyed by
+//! `(tenant_id, scope_key, cae)` so multi-audience apps (Graph + Key Vault +
+//! ARM) can keep a fresh token per resource without evicting the others, and a
+//! token minted without the `cp1` client capability is never served to a
+//! Continuous Access Evaluation consumer (or vice versa).
 //! Refresh tokens, which are scope-agnostic, live in the OS secret store via
-//! [`keyring`] — Windows Credential Manager / macOS Keychain / Secret
-//! Service — and are shared across audiences for the same account.
+//! [`keyring_core`] — Windows Credential Manager / macOS Keychain / the D-Bus
+//! Secret Service on Linux (a hard requirement there: without a provider,
+//! sign-in fails with [`AuthError::KeyringUnavailable`]) — and are shared
+//! across audiences for the same account.
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
@@ -20,9 +24,13 @@ pub const KEYRING_SERVICE: &str = "azapptoolkit";
 /// keyring v4 split out `keyring-core` and no longer auto-installs a platform
 /// credential store, so the first `Entry::new` fails with "No default store has
 /// been set" until one is registered. Register the OS-native store (macOS
-/// Keychain / Windows Credential Manager / Linux keyutils) exactly once, on
-/// first use, memoizing the outcome so a registration failure surfaces the same
-/// error on every subsequent call.
+/// Keychain / Windows Credential Manager / the Secret Service via zbus on
+/// Linux/BSD) exactly once, on first use, memoizing the outcome so a
+/// registration failure surfaces the same error on every subsequent call.
+///
+/// A registration failure is [`AuthError::KeyringUnavailable`] — there is no
+/// store at all (on Linux: no Secret Service provider on the session bus) —
+/// never [`AuthError::Keyring`], which means a store that exists but refused.
 fn ensure_keyring_store() -> Result<()> {
     static STORE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     STORE
@@ -38,7 +46,7 @@ fn ensure_keyring_store() -> Result<()> {
             }
         })
         .clone()
-        .map_err(AuthError::Keyring)
+        .map_err(AuthError::KeyringUnavailable)
 }
 
 /// Registers the OS-native credential store as `keyring_core`'s default store.
@@ -124,10 +132,17 @@ pub fn scope_key(scopes: &[String]) -> String {
     owned.join(" ")
 }
 
-/// Token storage keyed by `(tenant_id, scope_key)`.
+/// Token storage keyed by `(tenant_id, scope_key, cae)`.
+///
+/// CAE-ness is part of the key because the same scope set is consumed both
+/// ways: the Graph adapters (`ScopedTokenAdapter::new_cae`) need a token minted
+/// with the `cp1` claims (revoked promptly on a password reset, disabled user
+/// or risky sign-in), while a plain probe or a non-Graph audience does not. A
+/// key without it let whichever flow seeded the slot first decide for both, so
+/// a mismatch now costs one extra silent refresh instead of a wrong token.
 #[derive(Default)]
 pub struct TokenCache {
-    by_key: RwLock<HashMap<(String, String), AccessToken>>,
+    by_key: RwLock<HashMap<(String, String, bool), AccessToken>>,
 }
 
 impl TokenCache {
@@ -135,19 +150,23 @@ impl TokenCache {
         Arc::new(Self::default())
     }
 
-    pub fn get(&self, tenant_id: &str, scopes: &[String]) -> Option<AccessToken> {
-        let key = (tenant_id.to_string(), scope_key(scopes));
+    /// The cached token for `scopes`, minted with (`cae = true`) or without
+    /// the `cp1` CAE client capability.
+    pub fn get(&self, tenant_id: &str, scopes: &[String], cae: bool) -> Option<AccessToken> {
+        let key = (tenant_id.to_string(), scope_key(scopes), cae);
         self.by_key.read().get(&key).cloned()
     }
 
-    pub fn put(&self, tenant_id: String, scopes: &[String], token: AccessToken) {
-        let key = (tenant_id, scope_key(scopes));
+    /// Caches `token` for `scopes` in the CAE (`cae = true`) or non-CAE slot.
+    pub fn put(&self, tenant_id: String, scopes: &[String], cae: bool, token: AccessToken) {
+        let key = (tenant_id, scope_key(scopes), cae);
         self.by_key.write().insert(key, token);
     }
 
-    /// Drops every cached access token for `tenant_id`, across all scopes.
+    /// Drops every cached access token for `tenant_id`, across all scopes and
+    /// both CAE slots.
     pub fn invalidate_tenant(&self, tenant_id: &str) {
-        self.by_key.write().retain(|(t, _), _| t != tenant_id);
+        self.by_key.write().retain(|(t, _, _), _| t != tenant_id);
     }
 }
 
@@ -236,20 +255,16 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
 /// A single global mutex rather than a per-account map: these are OS keyring
 /// syscalls on a blocking thread, contention is a handful of writers, and a map
 /// is one more thing to get wrong for no measurable gain.
-static CHUNK_SET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Takes [`CHUNK_SET_LOCK`], recovering from poisoning.
 ///
-/// A panic mid-write leaves the store possibly torn — which is the state the
-/// load path already fails closed on — so refusing every later read and write
-/// would turn a recoverable "sign in again" into a permanently broken keyring.
-fn chunk_set_guard() -> std::sync::MutexGuard<'static, ()> {
-    CHUNK_SET_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+/// `parking_lot`, so no poisoning — which is correct here: a panic mid-write
+/// leaves the store possibly torn, the state the load path already fails
+/// closed on, so later reads and writes proceed instead of turning a
+/// recoverable "sign in again" into a permanently broken keyring.
+static CHUNK_SET_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     // A refresh token is stored across N keyring entries, and `load` simply
     // concatenates entries 0, 1, 2, … until one is missing. There is no length,
     // no checksum, and nothing marking where this token ends — so a write that
@@ -281,11 +296,13 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
         // set from a torn one. Written FIRST, so a crash part-way through leaves
         // a count that exceeds what is actually stored — which fails closed —
         // rather than a plausible-looking short set.
-        let value = if idx == 0 {
+        // Wiped once written, mirroring `load_chunks`: each chunk copy is
+        // plaintext token material.
+        let value = Zeroizing::new(if idx == 0 {
             encode_chunk_zero(chunks.len(), chunk)
         } else {
             (*chunk).to_string()
-        };
+        });
         keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(&value)?;
     }
     let mut idx = chunks.len();
@@ -315,7 +332,13 @@ pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Z
     ensure_keyring_store()?;
     // Held for the read too: without it a load can observe a half-written set
     // and return a splice of two tokens as though it were one.
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
+    load_chunks(tenant_id, account_oid)
+}
+
+/// The read itself, without taking the lock — for callers already holding it
+/// (`delete_refresh_token_if_current` compares and deletes under one guard).
+fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<String>>> {
     // Preallocated so the common one-or-two-chunk token never reallocates and
     // leaves a plaintext copy behind.
     let mut combined = Zeroizing::new(String::with_capacity(MAX_CHUNK_UTF16_BYTES * 2));
@@ -375,8 +398,50 @@ pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Z
 
 pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     ensure_keyring_store()?;
-    let _guard = chunk_set_guard();
+    let _guard = CHUNK_SET_LOCK.lock();
     delete_chunks(tenant_id, account_oid)
+}
+
+/// What [`delete_refresh_token_if_current`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeOutcome {
+    /// The store still held the rejected token; it is gone now.
+    Deleted,
+    /// Nothing (or only a torn set, now cleared) was stored.
+    AlreadyGone,
+    /// A different token replaced the rejected one — a `reauthenticate` or
+    /// consent that completed while the failing refresh was in flight. Kept.
+    Superseded,
+}
+
+/// Deletes the stored refresh token only if it is still `rejected` — the one
+/// that just failed `invalid_grant`.
+///
+/// Refreshes for different audiences run concurrently, so a slow one can fail
+/// with the OLD token after the operator already re-authenticated and stored a
+/// new one; an unconditional purge would erase that fresh session. The check
+/// and the delete share [`CHUNK_SET_LOCK`] with every save, so no write can land
+/// between them.
+pub fn delete_refresh_token_if_current(
+    tenant_id: &str,
+    account_oid: &str,
+    rejected: &str,
+) -> Result<PurgeOutcome> {
+    ensure_keyring_store()?;
+    let _guard = CHUNK_SET_LOCK.lock();
+    match load_chunks(tenant_id, account_oid)? {
+        Some(current) if current.as_str() != rejected => Ok(PurgeOutcome::Superseded),
+        Some(_) => {
+            delete_chunks(tenant_id, account_oid)?;
+            Ok(PurgeOutcome::Deleted)
+        }
+        // `load_chunks` reads a torn set as `None`; clearing it keeps the old
+        // "purge whatever is there" behaviour for that case.
+        None => {
+            delete_chunks(tenant_id, account_oid)?;
+            Ok(PurgeOutcome::AlreadyGone)
+        }
+    }
 }
 
 /// The deletion itself, without taking the lock — for callers already holding
@@ -407,6 +472,28 @@ pub(crate) fn init_mock_keyring() {
     INIT.call_once(|| {
         keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
     });
+}
+
+/// Test-only: make the NEXT keyring operation on chunk `chunk` of
+/// `(tenant_id, account_oid)` fail, as a locked credential store would. The mock
+/// store hands out the same credential for the same service/user and consumes
+/// the error on the next call, so exactly one operation fails.
+#[cfg(test)]
+pub(crate) fn fail_next_keyring_op(tenant_id: &str, account_oid: &str, chunk: usize) {
+    init_mock_keyring();
+    let entry = keyring_core::Entry::new(
+        KEYRING_SERVICE,
+        &chunk_account(tenant_id, account_oid, chunk),
+    )
+    .unwrap();
+    entry
+        .as_any()
+        .downcast_ref::<keyring_core::mock::Cred>()
+        .expect("the mock keyring store is installed")
+        .set_error(keyring_core::Error::Invalid(
+            "mock".into(),
+            "credential store locked".into(),
+        ));
 }
 
 #[cfg(test)]
@@ -547,6 +634,37 @@ mod tests {
     }
 
     #[test]
+    fn conditional_delete_only_removes_the_rejected_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("cond-tenant", "cond-oid");
+        save_refresh_token(tenant, oid, "a").unwrap();
+
+        // A newer token replaced the rejected one: it must survive.
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "b").unwrap(),
+            PurgeOutcome::Superseded
+        );
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("a")
+        );
+
+        // The rejected token is still the stored one: it goes.
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "a").unwrap(),
+            PurgeOutcome::Deleted
+        );
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+        assert_eq!(
+            delete_refresh_token_if_current(tenant, oid, "a").unwrap(),
+            PurgeOutcome::AlreadyGone
+        );
+    }
+
+    #[test]
     fn scope_key_is_canonical() {
         let a = scope_key(&["b".into(), "a".into(), "a".into()]);
         let b = scope_key(&["a".into(), "b".into()]);
@@ -562,6 +680,7 @@ mod tests {
         cache.put(
             "tenant".into(),
             &graph_scopes,
+            false,
             AccessToken {
                 token: "graph".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -571,14 +690,40 @@ mod tests {
         cache.put(
             "tenant".into(),
             &kv_scopes,
+            false,
             AccessToken {
                 token: "kv".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
                 scopes: kv_scopes.clone(),
             },
         );
-        assert_eq!(cache.get("tenant", &graph_scopes).unwrap().token, "graph");
-        assert_eq!(cache.get("tenant", &kv_scopes).unwrap().token, "kv");
+        assert_eq!(
+            cache.get("tenant", &graph_scopes, false).unwrap().token,
+            "graph"
+        );
+        assert_eq!(cache.get("tenant", &kv_scopes, false).unwrap().token, "kv");
+    }
+
+    #[test]
+    fn token_cache_separates_cae_from_non_cae() {
+        let cache = TokenCache::new();
+        let scopes = vec!["https://graph.microsoft.com/Directory.Read.All".to_string()];
+        let token = |t: &str| AccessToken {
+            token: t.into(),
+            expires_at: Utc::now() + Duration::seconds(3600),
+            scopes: scopes.clone(),
+        };
+        // A non-CAE seed is never served to a CAE consumer.
+        cache.put("tenant".into(), &scopes, false, token("plain"));
+        assert!(cache.get("tenant", &scopes, true).is_none());
+        // Both slots coexist, each returning its own token.
+        cache.put("tenant".into(), &scopes, true, token("cae"));
+        assert_eq!(cache.get("tenant", &scopes, false).unwrap().token, "plain");
+        assert_eq!(cache.get("tenant", &scopes, true).unwrap().token, "cae");
+        // Sign-out / refresh drops both.
+        cache.invalidate_tenant("tenant");
+        assert!(cache.get("tenant", &scopes, false).is_none());
+        assert!(cache.get("tenant", &scopes, true).is_none());
     }
 
     #[test]
@@ -588,6 +733,7 @@ mod tests {
         cache.put(
             "tenant".into(),
             &scopes,
+            true,
             AccessToken {
                 token: "t".into(),
                 expires_at: Utc::now() + Duration::seconds(3600),
@@ -595,7 +741,7 @@ mod tests {
             },
         );
         cache.invalidate_tenant("tenant");
-        assert!(cache.get("tenant", &scopes).is_none());
+        assert!(cache.get("tenant", &scopes, true).is_none());
     }
 
     /// A set whose chunks do not match its own declared count must load as "no

@@ -7,10 +7,12 @@
 //! the "New SSO application" wizard (create) and the enterprise-app detail "SSO"
 //! tab (edit existing).
 //!
-//! Both protocols instantiate the generic custom application template
-//! ([`CUSTOM_TEMPLATE_ID`]) so a paired service principal (the Enterprise App)
+//! Both protocols instantiate the configured cloud's generic custom application
+//! template ([`CloudEnvironment::custom_app_template_id`]) so a paired service
+//! principal (the Enterprise App)
 //! always appears in the list. The multi-step Graph flow races against directory
-//! replication, so the PATCH steps right after instantiate are wrapped in
+//! replication, so every write against the freshly created app/SP (steps 2–5b,
+//! and the OIDC redirect/secret writes) is wrapped in
 //! [`with_replication_retry`] (retries `NotFound` only).
 
 use std::future::Future;
@@ -27,21 +29,20 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 mod claims;
 use claims::{build_claims_definition, parse_claims_definition};
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{
+    MAX_SECRET_LIFETIME_DAYS, augment_with_object_id, invalidate_app_details, invalidate_app_lists,
+};
+use crate::commands::graph_err::forbidden_remediation;
+use crate::commands::guid::is_guid;
 use crate::dto::UiError;
 use crate::dto::sso::{
     ClaimsPolicyDto, MetadataProbeDto, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput,
     SamlSsoSummary, SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
+    SsoMode, SsoSummary,
 };
 use crate::state::AppState;
 use azapptoolkit_core::cache::CacheKind;
-
-/// The Microsoft Entra generic **custom** (non-gallery) application template.
-/// Instantiating it creates a blank app + service principal we then configure.
-const CUSTOM_TEMPLATE_ID: &str = "8adf8e6e-67b2-4cf2-a259-e3dc5476c621";
-
-/// Login authority host used to build the app-owner output URLs.
-const LOGIN_HOST: &str = "https://login.microsoftonline.com";
+use azapptoolkit_core::cloud::CloudEnvironment;
 
 // ---------------- helpers ----------------
 
@@ -84,20 +85,27 @@ fn sanitize_notification_emails(input: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Static SAML output URLs that the app owner needs, derived from the tenant id.
-fn saml_summary_urls(tenant_id: &str, app_id: &str) -> (String, String, String, String) {
-    let issuer = format!("https://sts.windows.net/{tenant_id}/");
-    let login = format!("{LOGIN_HOST}/{tenant_id}/saml2");
+/// Static SAML output URLs that the app owner needs, derived from the tenant id
+/// and `cloud` (issuer root and login host differ per sovereign cloud).
+fn saml_summary_urls(
+    cloud: CloudEnvironment,
+    tenant_id: &str,
+    app_id: &str,
+) -> (String, String, String, String) {
+    let login_root = cloud.login_authority_root();
+    let issuer = format!("{}/{tenant_id}/", cloud.saml_issuer_root());
+    let login = format!("{login_root}/{tenant_id}/saml2");
     let logout = login.clone();
     let metadata = format!(
-        "{LOGIN_HOST}/{tenant_id}/federationmetadata/2007-06/federationmetadata.xml?appid={app_id}"
+        "{login_root}/{tenant_id}/federationmetadata/2007-06/federationmetadata.xml?appid={app_id}"
     );
     (issuer, login, logout, metadata)
 }
 
-/// Static OIDC output URLs (authority + discovery document) for the tenant.
-fn oidc_summary_urls(tenant_id: &str) -> (String, String) {
-    let authority = format!("{LOGIN_HOST}/{tenant_id}/v2.0");
+/// Static OIDC output URLs (authority + discovery document) for the tenant in
+/// `cloud`.
+fn oidc_summary_urls(cloud: CloudEnvironment, tenant_id: &str) -> (String, String) {
+    let authority = format!("{}/{tenant_id}/v2.0", cloud.login_authority_root());
     let discovery = format!("{authority}/.well-known/openid-configuration");
     (authority, discovery)
 }
@@ -105,6 +113,10 @@ fn oidc_summary_urls(tenant_id: &str) -> (String, String) {
 /// Creates and assigns a claims-mapping policy for `policy`, returning the new
 /// policy id. The caller must have pre-acquired the policy-write token (so a
 /// missing consent surfaces as the typed `consent_required`).
+///
+/// A failed assign deletes the policy just minted (best effort — it has no
+/// subjects, so no ownership check is needed) instead of leaving an orphan in
+/// the tenant; the original assign error is returned either way.
 async fn apply_claims_policy(
     client: &GraphClient,
     service_principal_id: &str,
@@ -115,17 +127,86 @@ async fn apply_claims_policy(
     let created = client
         .create_claims_mapping_policy(&definition, display_name)
         .await?;
-    client
+    if let Err(err) = client
         .assign_claims_mapping_policy(service_principal_id, &created.id)
-        .await?;
+        .await
+    {
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
+    }
     Ok(created.id)
+}
+
+/// Best-effort delete of a claims-mapping policy this call just created and
+/// never managed to assign — it has no subjects, so deleting it touches no app.
+/// A failure only leaves the orphan the delete was trying to avoid, so it is
+/// logged, never surfaced over the error that got us here.
+async fn discard_unassigned_claims_policy(client: &GraphClient, policy_id: &str) {
+    if let Err(err) = client.delete_claims_mapping_policy(policy_id).await {
+        tracing::warn!(?err, policy = %policy_id, "failed to delete an unassigned claims policy");
+    }
+}
+
+/// What saving the claims editor does to Graph, decided from live state before
+/// any write (see [`plan_claims_write`]).
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimsWrite {
+    /// No policy assigned and none wanted.
+    Nothing,
+    /// No policy assigned: create one and assign it.
+    Create,
+    /// This SP is the policy's only subject: replace its definition in place.
+    PatchInPlace(String),
+    /// The assigned policy is shared with other subjects: give this SP its own
+    /// copy (create, unassign `detach`, assign the copy) and leave the shared
+    /// policy untouched for everyone else.
+    Fork { detach: String },
+    /// An empty editor: unassign the policy, and delete it too when this SP was
+    /// its only subject (nothing else would ever use it again).
+    Detach { policy_id: String, delete: bool },
+}
+
+/// Decides how to save a claims policy. `assigned` is the ids of the policies
+/// assigned to `sp_id`; `subjects` is the `appliesTo` ids of the one assigned
+/// policy (`None` when none is assigned). Any subject other than `sp_id` — a
+/// second SP, or an application object — makes the policy shared, and a shared
+/// policy is never edited in place or deleted; so is an empty or missing
+/// `appliesTo`, which proves nothing about who else uses it. More than one assigned policy
+/// should be impossible (Graph allows one per SP); it fails closed, no writes.
+fn plan_claims_write(
+    sp_id: &str,
+    assigned: &[String],
+    subjects: Option<&[String]>,
+    empty: bool,
+) -> Result<ClaimsWrite, UiError> {
+    // Sole ownership needs positive proof: `appliesTo` lists this SP and
+    // nothing else. An empty list (replication lag, an odd response) is not
+    // proof — the assignment listing just said this SP has the policy — and
+    // `all()` over nothing would be vacuously true.
+    let sole = subjects.is_some_and(|subs| !subs.is_empty() && subs.iter().all(|s| s == sp_id));
+    match assigned {
+        [] if empty => Ok(ClaimsWrite::Nothing),
+        [] => Ok(ClaimsWrite::Create),
+        [id] if empty => Ok(ClaimsWrite::Detach {
+            policy_id: id.clone(),
+            delete: sole,
+        }),
+        [id] if sole => Ok(ClaimsWrite::PatchInPlace(id.clone())),
+        [id] => Ok(ClaimsWrite::Fork { detach: id.clone() }),
+        _ => Err(UiError::validation(
+            "multiple_claims_policies",
+            "This application has more than one claims-mapping policy assigned. Resolve it in the \
+             Entra admin center before editing claims here.",
+        )),
+    }
 }
 
 // ---------------- create ----------------
 
 /// Creates a SAML SSO enterprise application end to end and returns the
 /// app-owner summary. Steps 1–5 use the standard write scope; the optional
-/// claims step (6) needs `Policy.ReadWrite.ApplicationConfiguration` and is
+/// claims step (6) needs the claims-mapping policy token
+/// (`Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`) and is
 /// skipped entirely when no custom claims are requested.
 #[tauri::command]
 pub async fn create_saml_sso_application(
@@ -161,10 +242,11 @@ pub async fn create_saml_sso_application(
     }
 
     let client = state.graph_for(&tenant_id);
+    let cloud = state.auth.cloud();
 
-    // 1. Instantiate the generic custom template → app + SP.
+    // 1. Instantiate the cloud's generic custom template → app + SP.
     let pair = client
-        .instantiate_application_template(CUSTOM_TEMPLATE_ID, &input.display_name)
+        .instantiate_application_template(cloud.custom_app_template_id(), &input.display_name)
         .await?;
     let object_id = pair.application.id.clone();
     let app_id = pair.application.app_id.clone();
@@ -173,21 +255,29 @@ pub async fn create_saml_sso_application(
     // From here a failure leaves a half-configured app the user can finish in
     // the SSO tab; we never auto-delete. Bust caches on any early return that
     // got past instantiate so the new (paired) SP shows up in the lists.
-    let result = configure_saml(&client, &object_id, &sp_id, &tenant_id, &app_id, &input).await;
+    let result = configure_saml(
+        &client, cloud, &object_id, &sp_id, &tenant_id, &app_id, &input,
+    )
+    .await;
     invalidate_app_lists(&state.cache, &tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 
 /// Steps 2–6 of the SAML flow, factored out so the caller can always invalidate
-/// caches once instantiate succeeded.
+/// caches once instantiate succeeded. Steps 5b (notification emails) and 6
+/// (custom claims) are best-effort: non-fatal, reported in `warnings` so the
+/// summary never reads as a clean success when one of them did not land.
 async fn configure_saml(
     client: &GraphClient,
+    cloud: CloudEnvironment,
     object_id: &str,
     sp_id: &str,
     tenant_id: &str,
     app_id: &str,
     input: &SamlSsoConfigInput,
 ) -> Result<SamlSsoSummary, UiError> {
+    let mut warnings: Vec<String> = Vec::new();
+
     // 2. SSO mode = saml.
     let sso_mode_body = ServicePrincipalSsoModePatch {
         preferred_single_sign_on_mode: "saml".to_string(),
@@ -218,22 +308,20 @@ async fn configure_saml(
         .unwrap_or_else(|| format!("CN={}", input.display_name));
     let days = resolve_cert_lifetime_days(input.cert_lifetime_days)?;
     let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
-    let cert = client
-        .add_token_signing_certificate(sp_id, &subject, end)
-        .await?;
+    // Retrying the POST on NotFound is safe: NotFound means nothing was minted.
+    let cert =
+        with_replication_retry(|| client.add_token_signing_certificate(sp_id, &subject, end))
+            .await?;
 
     // 5. Activate it as the preferred signing key.
-    client
-        .patch_service_principal(
-            sp_id,
-            &ServicePrincipalSigningKeyPatch {
-                preferred_token_signing_key_thumbprint: cert.thumbprint.clone(),
-            },
-        )
-        .await?;
+    let signing_key_body = ServicePrincipalSigningKeyPatch {
+        preferred_token_signing_key_thumbprint: cert.thumbprint.clone(),
+    };
+    with_replication_retry(|| client.patch_service_principal(sp_id, &signing_key_body)).await?;
 
     // 5b. Optional SAML cert-expiry notification recipients. Best-effort —
-    // Entra already seeds the creating admin, so a failure here isn't fatal.
+    // Entra already seeds the creating admin — so a failure is non-fatal,
+    // reported in `warnings`.
     let emails = sanitize_notification_emails(&input.notification_emails);
     if !emails.is_empty() {
         let body = serde_json::json!({ "notificationEmailAddresses": emails });
@@ -241,12 +329,17 @@ async fn configure_saml(
             with_replication_retry(|| client.patch_service_principal(sp_id, &body)).await
         {
             tracing::warn!(?err, "failed to set notification emails on new SSO app");
+            warnings.push(format!(
+                "Certificate-expiry notification emails were not saved: {} Add them on the \
+                 app's SSO tab (Save notification emails).",
+                UiError::from(err).message
+            ));
         }
     }
 
-    // 6. Optional custom claims. A failure here is non-fatal: the SSO app is
-    // already usable, so we degrade to "no custom claims" rather than failing
-    // the whole create.
+    // 6. Optional custom claims. Non-fatal, reported in `warnings`: the SSO
+    // app is already usable, so we degrade to "no custom claims" rather than
+    // failing the whole create.
     let claims_policy_id = match &input.claims_policy {
         Some(policy) if !policy.is_empty() => {
             match apply_claims_policy(
@@ -263,6 +356,11 @@ async fn configure_saml(
                         ?err,
                         "claims-mapping policy failed; SSO app created without it"
                     );
+                    warnings.push(format!(
+                        "Custom claims were not applied: {} Open the app's SSO tab and \
+                         select Save claims to retry.",
+                        claims_policy_err(UiError::from(err)).message
+                    ));
                     None
                 }
             }
@@ -271,7 +369,7 @@ async fn configure_saml(
     };
 
     let (issuer, login_url, logout_url, federation_metadata_url) =
-        saml_summary_urls(tenant_id, app_id);
+        saml_summary_urls(cloud, tenant_id, app_id);
     Ok(SamlSsoSummary {
         object_id: object_id.to_string(),
         service_principal_id: sp_id.to_string(),
@@ -286,6 +384,7 @@ async fn configure_saml(
         signing_cert_thumbprint: Some(cert.thumbprint.clone()),
         signing_cert_expiry: cert.end_date_time.map(|d| d.to_rfc3339()),
         claims_policy_id,
+        warnings,
     })
 }
 
@@ -297,6 +396,16 @@ pub async fn create_oidc_sso_application(
     tenant_id: String,
     input: OidcSsoConfigInput,
 ) -> Result<OidcSsoSummary, UiError> {
+    create_oidc_sso_application_core(&state, &tenant_id, input).await
+}
+
+/// Body of [`create_oidc_sso_application`], taking `&AppState` so the
+/// before-instantiate gates are testable against a mock Graph.
+async fn create_oidc_sso_application_core(
+    state: &AppState,
+    tenant_id: &str,
+    input: OidcSsoConfigInput,
+) -> Result<OidcSsoSummary, UiError> {
     // Reject wildcard / insecure redirect URIs (web + SPA) before creating
     // anything (MS app-registration security best practices).
     for uri in input
@@ -306,23 +415,39 @@ pub async fn create_oidc_sso_application(
     {
         azapptoolkit_core::redirect::validate_redirect_uri(uri).map_err(invalid_redirect_uri)?;
     }
+    // Same reason as the SAML certificate lifetime: the secret is only minted
+    // after instantiate, so an out-of-range lifetime is rejected here rather
+    // than after the app + SP exist. `configure_oidc` resolves it again to get
+    // the value — it is a pure function of the input, and this call is the gate.
+    if input
+        .secret_display_name
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
+    {
+        resolve_secret_lifetime_days(input.secret_lifetime_days)?;
+    }
 
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
+    let cloud = state.auth.cloud();
 
     let pair = client
-        .instantiate_application_template(CUSTOM_TEMPLATE_ID, &input.display_name)
+        .instantiate_application_template(cloud.custom_app_template_id(), &input.display_name)
         .await?;
     let object_id = pair.application.id.clone();
     let app_id = pair.application.app_id.clone();
     let sp_id = pair.service_principal.id.clone();
 
-    let result = configure_oidc(&client, &object_id, &app_id, &sp_id, &tenant_id, &input).await;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    let result = configure_oidc(
+        &client, cloud, &object_id, &app_id, &sp_id, tenant_id, &input,
+    )
+    .await;
+    invalidate_app_lists(&state.cache, tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 
 async fn configure_oidc(
     client: &GraphClient,
+    cloud: CloudEnvironment,
     object_id: &str,
     app_id: &str,
     sp_id: &str,
@@ -353,8 +478,8 @@ async fn configure_oidc(
         .as_deref()
         .filter(|s| !s.is_empty())
     {
-        let days = input.secret_lifetime_days.unwrap_or(180);
-        let lifetime = Duration::from_secs(days as u64 * 86_400);
+        let days = resolve_secret_lifetime_days(input.secret_lifetime_days)?;
+        let lifetime = Duration::from_secs(u64::from(days) * 86_400);
         let secret =
             with_replication_retry(|| client.add_password(object_id, name, lifetime)).await?;
         (
@@ -365,7 +490,7 @@ async fn configure_oidc(
         (None, None)
     };
 
-    let (authority, discovery_url) = oidc_summary_urls(tenant_id);
+    let (authority, discovery_url) = oidc_summary_urls(cloud, tenant_id);
     Ok(OidcSsoSummary {
         object_id: object_id.to_string(),
         service_principal_id: sp_id.to_string(),
@@ -429,35 +554,70 @@ fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
         return Err(UiError::validation(
             "invalid_cert_lifetime",
             format!(
-                "certificate lifetime must be between 1 and {MAX_CERT_LIFETIME_DAYS} days                  (3 years, Entra's maximum); got {days}"
+                "certificate lifetime must be between 1 and {MAX_CERT_LIFETIME_DAYS} days \
+                 (3 years, Entra's maximum); got {days}"
             ),
         ));
     }
     Ok(days)
 }
 
-/// Annotates an error message with the created object id so a partial failure
-/// after instantiate tells the user which half-configured app to finish/clean up.
-fn augment_with_object_id(mut err: UiError, object_id: &str) -> UiError {
-    err.message = format!(
-        "{} (the application was created — object id {object_id}; you can finish or delete it from the list).",
-        err.message
-    );
-    err
+/// Default OIDC client-secret lifetime when the caller supplies none — the
+/// portal's recommended preset.
+const DEFAULT_SECRET_LIFETIME_DAYS: u32 = 180;
+
+/// Bounds a caller-supplied OIDC client-secret lifetime to
+/// `1..=`[`MAX_SECRET_LIFETIME_DAYS`] (the portal's 24-month cap, the same
+/// bound the Credentials tab applies).
+///
+/// `0` would mint a secret that has already expired when the summary shows
+/// it; a large value reaches Graph only after `instantiate_application_template`
+/// has created the app and service principal, leaving a half-configured app —
+/// and `u32::MAX` days overflows `chrono` inside `GraphClient::add_password`.
+/// Checking here turns all of that into a typed rejection *before* any mutation.
+fn resolve_secret_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
+    let days = days.unwrap_or(DEFAULT_SECRET_LIFETIME_DAYS);
+    if days == 0 || i64::from(days) > MAX_SECRET_LIFETIME_DAYS {
+        return Err(UiError::validation(
+            "invalid_secret_lifetime",
+            format!(
+                "client secret lifetime must be between 1 and {MAX_SECRET_LIFETIME_DAYS} days \
+                 (24 months, Entra's maximum); got {days}"
+            ),
+        ));
+    }
+    Ok(days)
 }
 
 // ---------------- read / edit (detail tab) ----------------
 
 /// Reads the current SSO configuration of an existing enterprise app to drive
 /// the detail-pane "SSO" tab. The claims read degrades gracefully — it never
-/// forces a consent prompt (that only happens via an explicit edit).
+/// forces a consent prompt (that only happens via an explicit edit). A failed
+/// claims read sets `claims_read_failed`, so the tab can tell "no policy" from
+/// "couldn't read it" and refuse to save over claims it never loaded.
+///
+/// One read fills the whole tab: the app-owner [`SsoSummary`] and (for SAML)
+/// the rollover panel's initial [`SigningCertRolloverDto`] are projected from
+/// the same service-principal read, so opening the tab reads the SP once.
 #[tauri::command]
 pub async fn get_sso_config(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<SsoConfigDto, UiError> {
-    let client = state.graph_for(&tenant_id);
+    get_sso_config_core(&state, &tenant_id, service_principal_id).await
+}
+
+/// [`get_sso_config`] without the Tauri `State` wrapper, so a handler test can
+/// drive it against a mock Graph.
+pub(crate) async fn get_sso_config_core(
+    state: &AppState,
+    tenant_id: &str,
+    service_principal_id: String,
+) -> Result<SsoConfigDto, UiError> {
+    let cloud = state.auth.cloud();
+    let client = state.graph_for(tenant_id);
 
     // The SP SSO fields and the assigned claims-mapping policy both key off the
     // input service_principal_id and are independent of each other (and of the
@@ -468,9 +628,22 @@ pub async fn get_sso_config(
         client.list_assigned_claims_mapping_policies(&service_principal_id),
     );
 
-    let sp = sp?.ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+    let sp =
+        sp?.ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
     let (app_id, sso_mode, signing_thumbprint, signing_expiry, notification_emails) =
         extract_sp_sso_fields(&sp);
+    // The rollover panel's initial state: the same pure projection
+    // `get_signing_cert_rollover` runs, over this same live read — so the
+    // phase still derives from live SP state and nothing is stored.
+    let rollover = (SsoMode::from_graph(sso_mode.as_deref()) == SsoMode::Saml).then(|| {
+        build_rollover(
+            &sp,
+            &service_principal_id,
+            tenant_id,
+            cloud,
+            chrono::Utc::now(),
+        )
+    });
 
     // Resolve the paired application object id, then read its SSO web fields.
     // Web `redirectUris` double as the SAML reply URLs and the OIDC redirect
@@ -494,8 +667,9 @@ pub async fn get_sso_config(
     let redirect_uris = web_redirects;
 
     // Claims: best-effort (read concurrently in the first wave above). A missing
-    // scope/consent leaves the policy unset.
-    let (claims_policy, claims_policy_id) = match claims_result {
+    // scope/consent leaves the policy unset AND flags the read as failed, so the
+    // tab never offers a save over a policy it couldn't see.
+    let (claims_policy, claims_policy_id, claims_read_failed) = match claims_result {
         Ok(policies) => match policies.into_iter().next() {
             Some(policy) => {
                 let parsed = policy
@@ -503,17 +677,20 @@ pub async fn get_sso_config(
                     .first()
                     .map(|d| parse_claims_definition(d))
                     .unwrap_or_default();
-                (Some(parsed), Some(policy.id))
+                (Some(parsed), Some(policy.id), false)
             }
-            None => (None, None),
+            None => (None, None, false),
         },
         Err(err) => {
-            tracing::debug!(?err, "claims policy read skipped (scope/consent)");
-            (None, None)
+            tracing::debug!(
+                ?err,
+                "claims policy unreadable; SSO tab will block claims edits"
+            );
+            (None, None, true)
         }
     };
 
-    Ok(SsoConfigDto {
+    let mut dto = SsoConfigDto {
         object_id,
         service_principal_id,
         app_id,
@@ -529,7 +706,62 @@ pub async fn get_sso_config(
         notification_emails,
         claims_policy,
         claims_policy_id,
-    })
+        claims_read_failed,
+        summary: None,
+        rollover,
+    };
+    dto.summary = build_sso_summary(cloud, tenant_id, &dto);
+    Ok(dto)
+}
+
+/// The app-owner output summary ("Details for the application owner") for the
+/// saved mode, projected from an already-read [`SsoConfigDto`] plus the cloud's
+/// static URL formulas. SAML omits the signing cert base64 (only available at
+/// creation/rotation time); OIDC omits the show-once secret. `None` when SSO is
+/// not SAML or OIDC. Pure, so the URL formulas are table-testable.
+fn build_sso_summary(
+    cloud: CloudEnvironment,
+    tenant_id: &str,
+    cfg: &SsoConfigDto,
+) -> Option<SsoSummary> {
+    match SsoMode::from_graph(cfg.sso_mode.as_deref()) {
+        SsoMode::Oidc => {
+            let (authority, discovery_url) = oidc_summary_urls(cloud, tenant_id);
+            Some(SsoSummary::Oidc(OidcSsoSummary {
+                object_id: cfg.object_id.clone(),
+                service_principal_id: cfg.service_principal_id.clone(),
+                client_id: cfg.app_id.clone(),
+                tenant_id: tenant_id.to_string(),
+                authority,
+                discovery_url,
+                redirect_uris: cfg.redirect_uris.clone(),
+                spa_redirect_uris: cfg.spa_redirect_uris.clone(),
+                client_secret: None,
+                client_secret_expiry: None,
+            }))
+        }
+        SsoMode::Saml => {
+            let (issuer, login_url, logout_url, federation_metadata_url) =
+                saml_summary_urls(cloud, tenant_id, &cfg.app_id);
+            Some(SsoSummary::Saml(SamlSsoSummary {
+                object_id: cfg.object_id.clone(),
+                service_principal_id: cfg.service_principal_id.clone(),
+                app_id: cfg.app_id.clone(),
+                entity_id_issuer: issuer,
+                login_url,
+                logout_url,
+                federation_metadata_url,
+                sp_entity_id: cfg.entity_id.clone().unwrap_or_default(),
+                reply_url: cfg.reply_urls.first().cloned().unwrap_or_default(),
+                signing_cert_base64: None,
+                signing_cert_thumbprint: cfg.signing_cert_thumbprint.clone(),
+                signing_cert_expiry: cfg.signing_cert_expiry.clone(),
+                claims_policy_id: cfg.claims_policy_id.clone(),
+                warnings: Vec::new(),
+            }))
+        }
+        SsoMode::Disabled => None,
+    }
 }
 
 /// Pulls the SSO-relevant fields out of a service principal's raw JSON:
@@ -557,10 +789,7 @@ fn extract_sp_sso_fields(
         .get("preferredSingleSignOnMode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let signing_thumbprint = sp
-        .get("preferredTokenSigningKeyThumbprint")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let signing_thumbprint = preferred_thumbprint(sp);
     let signing_expiry = signing_thumbprint.as_deref().and_then(|tp| {
         sp.get("keyCredentials")
             .and_then(|v| v.as_array())
@@ -626,25 +855,24 @@ fn extract_app_sso_fields(
     )
 }
 
-/// Sets a service principal's `preferredSingleSignOnMode`. `mode` is `"saml"` or
-/// `"oidc"`; any other value (e.g. `""`, `"disabled"`, `"none"`) clears it to
-/// `null` (SSO disabled). Password-based and linked SSO aren't settable here —
-/// they require portal-only configuration — so the UI only offers SAML/OIDC/off.
-/// No cache bust: the mode is read live on the (uncached) SSO tab and is on no
-/// cached list/audit payload.
+/// Sets a service principal's `preferredSingleSignOnMode`. `mode` is a typed
+/// [`SsoMode`]: an unknown or mis-cased value fails IPC deserialisation before
+/// any PATCH is sent, and [`SsoMode::Disabled`] clears the preference to `null`
+/// (SSO disabled). Password-based and linked SSO aren't settable here — they
+/// require portal-only configuration — so the UI only offers SAML/OIDC/off.
+/// Busts only the SSO-certificate expiry board (`invalidate_sso_cert_board`):
+/// the mode decides whether the app is on the board at all. The SSO tab reads
+/// the mode live and no other cached payload carries it.
 #[tauri::command]
 pub async fn set_sso_mode(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
-    mode: String,
+    mode: SsoMode,
 ) -> Result<(), UiError> {
-    let value = match mode.as_str() {
-        "saml" => serde_json::Value::String("saml".into()),
-        "oidc" => serde_json::Value::String("oidc".into()),
-        // Anything else disables SSO (clears the preference).
-        _ => serde_json::Value::Null,
-    };
+    let value = mode.graph_value().map_or(serde_json::Value::Null, |m| {
+        serde_json::Value::String(m.into())
+    });
     let client = state.graph_for(&tenant_id);
     let body = serde_json::json!({ "preferredSingleSignOnMode": value });
     client
@@ -704,7 +932,12 @@ pub async fn set_saml_urls(
         spa: None,
     };
     client.patch_application_web(&object_id, &body).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // An in-place PATCH of one app's identifier/reply URLs adds, removes or
+    // renames nothing, so nothing in the list tier (`sp_index`,
+    // `app_name_index`, the enterprise list, the search corpus) changes; the SSO
+    // tab reads live. The detail sweep is the can't-miss cheap tier (same as
+    // the Expose-an-API and App roles PATCHes of this resource).
+    invalidate_app_details(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -766,11 +999,12 @@ pub async fn get_signing_cert_rollover(
     let sp = client
         .get_service_principal_sso_fields(&service_principal_id)
         .await?
-        .ok_or_else(|| UiError::validation("not_found", "Service principal not found."))?;
+        .ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
     Ok(build_rollover(
         &sp,
         &service_principal_id,
         &tenant_id,
+        state.auth.cloud(),
         chrono::Utc::now(),
     ))
 }
@@ -826,7 +1060,15 @@ pub async fn probe_federation_metadata(
             format!("not signed in to tenant {tenant_id}"),
         )
     })?;
-    let (_, _, _, metadata_url) = saml_summary_urls(&tenant_id, &app_id);
+    // The id lands in the metadata URL's query string; anything but a GUID is
+    // not an application (client) id.
+    if !is_guid(&app_id) {
+        return Err(UiError::validation(
+            "invalid_app_id",
+            "The application (client) ID must be a GUID.",
+        ));
+    }
+    let (_, _, _, metadata_url) = saml_summary_urls(state.auth.cloud(), &tenant_id, &app_id);
     let fetched_at = chrono::Utc::now().to_rfc3339();
 
     let response = metadata_http_client().get(&metadata_url).send().await;
@@ -927,35 +1169,7 @@ pub async fn retire_saml_signing_certificate(
     )
     .await?;
 
-    let target = before
-        .certs
-        .iter()
-        .find(|c| c.key_id == key_id)
-        .ok_or_else(|| {
-            UiError::validation(
-                "cert_not_found",
-                "That certificate is no longer on the service principal.",
-            )
-        })?;
-    if target.is_active {
-        // An expired-but-still-nominated certificate isn't signing anything —
-        // Entra already promoted the staged one — but removing it while
-        // `preferredTokenSigningKeyThumbprint` still points at it would leave
-        // the nomination dangling. Same guard, honest message.
-        let message = if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
-            "That certificate has expired but is still nominated as the signing key. \
-             Activate its replacement first — then it can be removed."
-        } else {
-            "That certificate is signing assertions right now. Activate its replacement first."
-        };
-        return Err(UiError::validation("cert_is_active", message));
-    }
-    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
-        return Err(UiError::validation(
-            "cert_is_staged",
-            "That certificate is staged for the next rollover, not retired. Activate it or let it expire.",
-        ));
-    }
+    retire_target(&before, &key_id)?;
 
     client
         .remove_service_principal_key_credential(&service_principal_id, &key_id)
@@ -1001,6 +1215,7 @@ pub async fn list_sso_certificate_expirations(
     // thousand SAML SSO applications does not exist in practice.
     let (sps, _truncated) = client.list_saml_sso_service_principals().await?;
     let now = chrono::Utc::now();
+    let cloud = state.auth.cloud();
 
     let mut rows: Vec<SsoCertificateRowDto> = sps
         .iter()
@@ -1010,7 +1225,7 @@ pub async fn list_sso_certificate_expirations(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let roll = build_rollover(sp, &sp_id, &tenant_id, now);
+            let roll = build_rollover(sp, &sp_id, &tenant_id, cloud, now);
             // The row is about the certificate that signs *today* — the active
             // one. `build_rollover` keeps it flagged `is_active` even once
             // expired, which is exactly the row worth showing loudest.
@@ -1108,7 +1323,7 @@ fn sso_certificates_to_csv(rows: &[SsoCertificateRowDto]) -> String {
 fn sso_cert_status(
     active: Option<&azapptoolkit_dto::sso::SigningCertDto>,
 ) -> azapptoolkit_core::audit::CredentialStatus {
-    use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
+    use azapptoolkit_core::audit::CredentialStatus;
     use azapptoolkit_dto::sso::CertStatus;
     let Some(cert) = active else {
         return CredentialStatus::Unknown;
@@ -1116,12 +1331,8 @@ fn sso_cert_status(
     if matches!(cert.status, CertStatus::Expired) {
         return CredentialStatus::Expired;
     }
-    match cert.days_to_expiry {
-        None => CredentialStatus::Unknown,
-        Some(d) if d < 0 => CredentialStatus::Expired,
-        Some(d) if d <= EXPIRY_WARNING_DAYS => CredentialStatus::ExpiringSoon,
-        Some(_) => CredentialStatus::Active,
-    }
+    // The audit's own day bucketing, not a copy of it.
+    CredentialStatus::from_days_to_expiry(cert.days_to_expiry)
 }
 
 /// Cache key for [`list_sso_certificate_expirations`]. Tenant-scoped like every
@@ -1239,33 +1450,18 @@ async fn set_preferred_signing_key(
     )
     .await?;
 
-    let target = before
-        .certs
-        .iter()
-        .find(|c| c.thumbprint.eq_ignore_ascii_case(&thumbprint))
-        .ok_or_else(|| {
-            UiError::validation(
-                "cert_not_staged",
-                "That certificate is no longer on the service principal — stage a new one.",
-            )
-        })?;
-    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
-        return Err(UiError::validation(
-            "cert_expired",
-            "That certificate has expired. Entra won't sign with it — stage a new one instead.",
-        ));
-    }
-    // Idempotent: a double-click shouldn't read as a failure.
-    if target.is_active {
-        return Ok(before);
-    }
+    let thumb = match activation_target(&before, &thumbprint)? {
+        // Idempotent: a double-click shouldn't read as a failure.
+        None => return Ok(before),
+        Some(target) => target.thumbprint.clone(),
+    };
 
     state
         .graph_for(&tenant_id)
         .patch_service_principal(
             &service_principal_id,
             &ServicePrincipalSigningKeyPatch {
-                preferred_token_signing_key_thumbprint: target.thumbprint.clone(),
+                preferred_token_signing_key_thumbprint: thumb,
             },
         )
         .await?;
@@ -1279,10 +1475,13 @@ async fn set_preferred_signing_key(
 fn metadata_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
+        // `expect`, not `unwrap_or_default()`: the default client has no
+        // timeout at all, so a failed build would silently lose both budgets.
         reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
-            .unwrap_or_default()
+            .expect("reqwest client builds")
     })
 }
 
@@ -1444,6 +1643,20 @@ fn is_preferred_key(custom_key_identifier: &str, preferred: &str) -> bool {
     }
 }
 
+/// `preferredTokenSigningKeyThumbprint`, upper-cased through
+/// [`canonical_thumbprint`] when it is the hex thumbprint it should be; raw
+/// otherwise, never re-decoded. `canonical` reads anything that is not 40 hex
+/// characters as base64, so feeding it a malformed nomination would invent a
+/// different thumbprint instead of keeping the broken value visible.
+fn preferred_thumbprint(sp: &serde_json::Value) -> Option<String> {
+    let raw = sp.get("preferredTokenSigningKeyThumbprint")?.as_str()?;
+    Some(
+        canonical_thumbprint(raw)
+            .filter(|c| c.eq_ignore_ascii_case(raw.trim()))
+            .unwrap_or_else(|| raw.to_string()),
+    )
+}
+
 /// Projects a service principal's raw JSON into the rollover view.
 ///
 /// Pure (no Graph, no `State`) so the phase machine is table-testable — mirrors
@@ -1459,6 +1672,7 @@ fn build_rollover(
     sp: &serde_json::Value,
     service_principal_id: &str,
     tenant_id: &str,
+    cloud: CloudEnvironment,
     now: chrono::DateTime<chrono::Utc>,
 ) -> SigningCertRolloverDto {
     use azapptoolkit_dto::sso::{CertStatus, RolloverPhase, SigningCertDto};
@@ -1468,10 +1682,7 @@ fn build_rollover(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let preferred = sp
-        .get("preferredTokenSigningKeyThumbprint")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let preferred = preferred_thumbprint(sp);
 
     let parse_time = |v: Option<&serde_json::Value>| -> Option<chrono::DateTime<chrono::Utc>> {
         v.and_then(|x| x.as_str())
@@ -1607,7 +1818,7 @@ fn build_rollover(
         })
         .flatten();
 
-    let (_, _, _, federation_metadata_url) = saml_summary_urls(tenant_id, &app_id);
+    let (_, _, _, federation_metadata_url) = saml_summary_urls(cloud, tenant_id, &app_id);
     SigningCertRolloverDto {
         service_principal_id: service_principal_id.to_string(),
         app_id,
@@ -1620,10 +1831,94 @@ fn build_rollover(
     }
 }
 
-/// Replaces the claims-mapping policy on an existing app. Removes any existing
-/// assignment first (claims-mapping definitions are effectively replace-only),
-/// then creates + assigns a fresh policy. Passing an empty `policy` (no schema
-/// entries and no transformations) just removes the current policy.
+/// The **retire** guard (see *Guards* in `docs/architecture/auth-and-consent.md`):
+/// picks the certificate `key_id` names out of the live rollover, refusing one
+/// that is gone (`cert_not_found`), the nominated one (`cert_is_active` — with an
+/// honest message when it has expired but is still nominated) and the staged
+/// one (`cert_is_staged`, a pending rollover rather than a leftover). An expired,
+/// non-nominated certificate passes — that is the per-row Remove.
+///
+/// Pure, so every code is table-tested; [`retire_saml_signing_certificate`] is
+/// its only caller.
+fn retire_target<'a>(
+    roll: &'a SigningCertRolloverDto,
+    key_id: &str,
+) -> Result<&'a azapptoolkit_dto::sso::SigningCertDto, UiError> {
+    let target = roll
+        .certs
+        .iter()
+        .find(|c| c.key_id == key_id)
+        .ok_or_else(|| {
+            UiError::not_found(
+                "cert",
+                "That certificate is no longer on the service principal.",
+            )
+        })?;
+    if target.is_active {
+        // An expired-but-still-nominated certificate isn't signing anything —
+        // Entra already promoted the staged one — but removing it while
+        // `preferredTokenSigningKeyThumbprint` still points at it would leave
+        // the nomination dangling. Same guard, honest message.
+        let message = if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+            "That certificate has expired but is still nominated as the signing key. \
+             Activate its replacement first — then it can be removed."
+        } else {
+            "That certificate is signing assertions right now. Activate its replacement first."
+        };
+        return Err(UiError::validation("cert_is_active", message));
+    }
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Staged) {
+        return Err(UiError::validation(
+            "cert_is_staged",
+            "That certificate is staged for the next rollover, not retired. Activate it or let it expire.",
+        ));
+    }
+    Ok(target)
+}
+
+/// The **activate / revert** guard (see *Guards* in
+/// `docs/architecture/auth-and-consent.md`): resolves `thumbprint`
+/// (case-insensitively) against the live rollover, refusing one that is gone
+/// (`cert_not_staged`) or expired (`cert_expired` — checked before the no-op,
+/// so an expired-but-nominated certificate is refused rather than "already
+/// active"). `Ok(None)` means it is already the active key: activating it again
+/// is a no-op, not an error.
+///
+/// Pure, so every code is table-tested; [`set_preferred_signing_key`] is its
+/// only caller.
+fn activation_target<'a>(
+    roll: &'a SigningCertRolloverDto,
+    thumbprint: &str,
+) -> Result<Option<&'a azapptoolkit_dto::sso::SigningCertDto>, UiError> {
+    let target = roll
+        .certs
+        .iter()
+        .find(|c| c.thumbprint.eq_ignore_ascii_case(thumbprint))
+        .ok_or_else(|| {
+            UiError::validation(
+                "cert_not_staged",
+                "That certificate is no longer on the service principal — stage a new one.",
+            )
+        })?;
+    if matches!(target.status, azapptoolkit_dto::sso::CertStatus::Expired) {
+        return Err(UiError::validation(
+            "cert_expired",
+            "That certificate has expired. Entra won't sign with it — stage a new one instead.",
+        ));
+    }
+    if target.is_active {
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
+/// Saves the claims-mapping policy of an existing app. When this SP is the
+/// policy's only subject the definition is PATCHed in place (no unassign window,
+/// no new object); when the policy is shared with other apps, this app gets a
+/// private copy and the shared policy is left as it was for everyone else. An
+/// empty `policy` (Entra's defaults) unassigns the policy and deletes it once
+/// nothing else uses it. A failure to read the current assignment is returned
+/// and nothing is written.
 #[tauri::command]
 pub async fn set_claims_mapping(
     state: State<'_, AppState>,
@@ -1633,34 +1928,140 @@ pub async fn set_claims_mapping(
     policy: ClaimsPolicyDto,
 ) -> Result<Option<String>, UiError> {
     // Pre-acquire so a missing consent surfaces typed (the UI's "Grant consent").
+    // Stays in the command, not the core: silent grants can't obtain consent.
     state
         .ensure_policy_write_token(&tenant_id)
         .await
         .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    set_claims_mapping_core(
+        &state,
+        &tenant_id,
+        &service_principal_id,
+        &display_name,
+        &policy,
+    )
+    .await
+    .map_err(claims_policy_err)
+}
 
-    // Remove existing assignment(s) so the new policy fully replaces them.
-    if let Ok(existing) = client
-        .list_assigned_claims_mapping_policies(&service_principal_id)
+/// Appends the `sso_claims_mapping` catalog remediation to a 403 from a claims
+/// save — which role can manage application policies. Spliced at the command,
+/// not in the core: the core's error stays the plain Graph classification its
+/// tests assert on.
+fn claims_policy_err(mut err: UiError) -> UiError {
+    if let Some(remediation) = forbidden_remediation(&err, "sso_claims_mapping") {
+        err.message = format!("{} {remediation}", err.message);
+    }
+    err
+}
+
+/// The handler body, taking `&AppState` so a test can drive it against a mock
+/// Graph — the seam [`set_oidc_redirect_uris_core`] uses. Reads the live
+/// assignment and the policy's `appliesTo` first, plans with
+/// [`plan_claims_write`], then writes.
+pub(crate) async fn set_claims_mapping_core(
+    state: &AppState,
+    tenant_id: &str,
+    service_principal_id: &str,
+    display_name: &str,
+    policy: &ClaimsPolicyDto,
+) -> Result<Option<String>, UiError> {
+    let client = state.graph_for(tenant_id);
+
+    // A listing failure propagates: guessing "nothing assigned" would assign a
+    // second policy (Graph rejects it) or skip the ownership proof.
+    let assigned: Vec<String> = client
+        .list_assigned_claims_mapping_policies(service_principal_id)
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let subjects = match assigned.as_slice() {
+        [id] => Some(client.list_claims_mapping_policy_subjects(id).await?),
+        _ => None,
+    };
+    let plan = plan_claims_write(
+        service_principal_id,
+        &assigned,
+        subjects.as_deref(),
+        policy.is_empty(),
+    )?;
+
+    let result = match plan {
+        ClaimsWrite::Nothing => None,
+        ClaimsWrite::Create => {
+            Some(apply_claims_policy(&client, service_principal_id, display_name, policy).await?)
+        }
+        ClaimsWrite::PatchInPlace(id) => {
+            client
+                .update_claims_mapping_policy(&id, &build_claims_definition(policy))
+                .await?;
+            Some(id)
+        }
+        ClaimsWrite::Fork { detach } => Some(
+            fork_claims_policy(&client, service_principal_id, display_name, policy, &detach)
+                .await?,
+        ),
+        ClaimsWrite::Detach { policy_id, delete } => {
+            client
+                .remove_claims_mapping_policy(service_principal_id, &policy_id)
+                .await?;
+            if delete {
+                // The operator's intent (no custom claims) is already live, and
+                // a retry would find nothing assigned — so an orphan is logged,
+                // not surfaced as a failed save.
+                if let Err(err) = client.delete_claims_mapping_policy(&policy_id).await {
+                    tracing::warn!(?err, policy = %policy_id, "failed to delete the detached claims policy");
+                }
+            }
+            None
+        }
+    };
+    // Saving one SP's claims-mapping policy adds, removes or renames no app or
+    // SP, so the list tier is untouched; the SSO tab reads the policy live.
+    // Detail tier only (see `set_saml_urls`).
+    invalidate_app_details(&state.cache, tenant_id);
+    Ok(result)
+}
+
+/// Gives `service_principal_id` its own copy of a SHARED claims policy: the new
+/// policy is created first (a failure there changes nothing), then the shared
+/// one is unassigned from this SP only, then the copy is assigned. A failed
+/// assign re-assigns the shared policy (best effort) and deletes the copy, so
+/// the app is left as it started. The shared policy's other subjects are never
+/// touched. Create-first (rather than unassign then [`apply_claims_policy`])
+/// keeps the window with no policy assigned to one round trip.
+async fn fork_claims_policy(
+    client: &GraphClient,
+    service_principal_id: &str,
+    display_name: &str,
+    policy: &ClaimsPolicyDto,
+    shared_id: &str,
+) -> Result<String, GraphError> {
+    let created = client
+        .create_claims_mapping_policy(&build_claims_definition(policy), display_name)
+        .await?;
+    if let Err(err) = client
+        .remove_claims_mapping_policy(service_principal_id, shared_id)
         .await
     {
-        for assigned in existing {
-            if let Err(err) = client
-                .remove_claims_mapping_policy(&service_principal_id, &assigned.id)
-                .await
-            {
-                tracing::warn!(?err, policy = %assigned.id, "failed to detach old claims policy");
-            }
-        }
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
     }
-
-    let policy_id = if policy.is_empty() {
-        None
-    } else {
-        Some(apply_claims_policy(&client, &service_principal_id, &display_name, &policy).await?)
-    };
-    invalidate_app_lists(&state.cache, &tenant_id);
-    Ok(policy_id)
+    if let Err(err) = client
+        .assign_claims_mapping_policy(service_principal_id, &created.id)
+        .await
+    {
+        if let Err(rollback) = client
+            .assign_claims_mapping_policy(service_principal_id, shared_id)
+            .await
+        {
+            tracing::warn!(?rollback, policy = %shared_id, "failed to re-assign the shared claims policy");
+        }
+        discard_unassigned_claims_policy(client, &created.id).await;
+        return Err(err);
+    }
+    Ok(created.id)
 }
 
 /// Sets the SAML signing-certificate expiry notification recipients
@@ -1709,10 +2110,32 @@ pub async fn set_oidc_redirect_uris(
     redirect_uris: Vec<String>,
     spa_redirect_uris: Vec<String>,
 ) -> Result<(), UiError> {
+    set_oidc_redirect_uris_core(
+        &state,
+        &tenant_id,
+        &object_id,
+        redirect_uris,
+        spa_redirect_uris,
+    )
+    .await
+}
+
+/// The handler body, taking `&AppState` so a test can drive it against a mock
+/// Graph (`tauri::State` is only constructible by the runtime — the same seam
+/// `applications::credentials::add_password_core` uses, and for the same
+/// reason: the rules that live here, invalidate only on `Ok` and only the
+/// detail tier, had never been exercised by a test).
+pub(crate) async fn set_oidc_redirect_uris_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+    redirect_uris: Vec<String>,
+    spa_redirect_uris: Vec<String>,
+) -> Result<(), UiError> {
     azapptoolkit_core::redirect::validate_redirect_uris(&redirect_uris)
         .and_then(|()| azapptoolkit_core::redirect::validate_redirect_uris(&spa_redirect_uris))
         .map_err(invalid_redirect_uri)?;
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let body = ApplicationSsoPatch {
         identifier_uris: None,
         web: Some(ApplicationWebPatch {
@@ -1724,64 +2147,818 @@ pub async fn set_oidc_redirect_uris(
             redirect_uris: Some(spa_redirect_uris),
         }),
     };
-    client.patch_application_web(&object_id, &body).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    client.patch_application_web(object_id, &body).await?;
+    // An in-place PATCH of one app's redirect URIs adds, removes or renames
+    // nothing, so the list tier (`sp_index`, `app_name_index`, the enterprise
+    // list, the search corpus) is untouched and the tens-of-seconds tenant
+    // re-scan dropping it costs is avoided; the SSO tab reads live. Detail tier
+    // only (see `set_saml_urls`).
+    invalidate_app_details(&state.cache, tenant_id);
     Ok(())
 }
 
-/// Recomputes the app-owner output summary for an existing enterprise app.
-/// `protocol` is `"saml"` or `"oidc"`. SAML returns a [`SamlSsoSummary`]
-/// (without the signing cert base64 — that's only available at creation/rotation
-/// time); OIDC returns an [`OidcSsoSummary`] without the show-once secret. The
-/// two are returned as untagged JSON; the front-end branches on `protocol`.
-#[tauri::command]
-pub async fn get_sso_summary(
-    state: State<'_, AppState>,
-    tenant_id: String,
-    service_principal_id: String,
-    protocol: String,
-) -> Result<serde_json::Value, UiError> {
-    let config = get_sso_config(state, tenant_id.clone(), service_principal_id).await?;
-    if protocol == "oidc" {
-        let (authority, discovery_url) = oidc_summary_urls(&tenant_id);
-        let summary = OidcSsoSummary {
-            object_id: config.object_id,
-            service_principal_id: config.service_principal_id,
-            client_id: config.app_id,
-            tenant_id,
-            authority,
-            discovery_url,
-            redirect_uris: config.redirect_uris,
-            spa_redirect_uris: config.spa_redirect_uris,
-            client_secret: None,
-            client_secret_expiry: None,
-        };
-        serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
-    } else {
-        let (issuer, login_url, logout_url, federation_metadata_url) =
-            saml_summary_urls(&tenant_id, &config.app_id);
-        let summary = SamlSsoSummary {
-            object_id: config.object_id,
-            service_principal_id: config.service_principal_id,
-            app_id: config.app_id,
-            entity_id_issuer: issuer,
-            login_url,
-            logout_url,
-            federation_metadata_url,
-            sp_entity_id: config.entity_id.unwrap_or_default(),
-            reply_url: config.reply_urls.into_iter().next().unwrap_or_default(),
-            signing_cert_base64: None,
-            signing_cert_thumbprint: config.signing_cert_thumbprint,
-            signing_cert_expiry: config.signing_cert_expiry,
-            claims_policy_id: config.claims_policy_id,
-        };
-        serde_json::to_value(summary).map_err(|e| UiError::serde(e.to_string()))
+/// End-to-end handler tests against a mock Graph — the shape
+/// `applications::credentials::handler_tests` established. Kept apart from
+/// `tests` below (pure helpers) so the mock-server fixtures don't grow into it.
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+
+    use azapptoolkit_core::cache::CacheKind;
+    use azapptoolkit_core::models::{Application, ServicePrincipal};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::commands::applications::{
+        app_detail_key, app_name_index_hit, app_name_index_store, sp_index_hit, sp_index_store,
+    };
+
+    const TENANT: &str = "t1";
+    const OBJECT: &str = "obj-1";
+
+    /// Seeds what an in-place PATCH must NOT drop (the two pinned tenant-wide
+    /// indexes) alongside what it must drop (the app's detail row).
+    fn seed(state: &AppState) {
+        sp_index_store(&state.cache, TENANT, vec![ServicePrincipal::default()]);
+        app_name_index_store(&state.cache, TENANT, vec![Application::default()]);
+        state.cache.put(
+            CacheKind::Lists,
+            app_detail_key(TENANT, OBJECT),
+            &serde_json::json!({"id": OBJECT}),
+        );
+    }
+
+    fn detail_cached(state: &AppState) -> bool {
+        state
+            .cache
+            .get::<serde_json::Value>(CacheKind::Lists, &app_detail_key(TENANT, OBJECT))
+            .is_some()
+    }
+
+    /// Opening the SSO tab reads the service principal ONCE: the owner summary
+    /// and the rollover panel's initial state ride on `get_sso_config` instead
+    /// of re-running the SP→app chain (`get_sso_summary`) and re-reading the SP
+    /// (`get_signing_cert_rollover`). The mock's `expect(1)` is the pin.
+    #[tokio::test]
+    async fn an_sso_tab_open_reads_the_service_principal_once() {
+        // Real encoding pair (base64 customKeyIdentifier / hex nomination) —
+        // see the rollover fixtures in `tests`.
+        const A_B64: &str = "ATKoPe8CbYUF5PKRSLDOvhutu7A=";
+        const A_HEX: &str = "0132A83DEF026D8505E4F29148B0CEBE1BADBBB0";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp-1",
+                "appId": "app-1",
+                "preferredSingleSignOnMode": "saml",
+                "preferredTokenSigningKeyThumbprint": A_HEX.to_ascii_lowercase(),
+                "keyCredentials": [
+                    { "keyId": "k1", "customKeyIdentifier": A_B64, "usage": "Sign",
+                      "endDateTime": "2099-01-01T00:00:00Z" },
+                    { "keyId": "k2", "customKeyIdentifier": A_B64, "usage": "Verify",
+                      "endDateTime": "2099-01-01T00:00:00Z" }
+                ],
+                "notificationEmailAddresses": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        // The claims list is left unmocked: it 404s and degrades to
+        // `claims_read_failed`, which is what a missing consent looks like.
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        let cfg = get_sso_config_core(&state, TENANT, "sp-1".into())
+            .await
+            .expect("the SSO config reads");
+
+        assert!(cfg.claims_read_failed);
+        assert_eq!(cfg.signing_cert_thumbprint.as_deref(), Some(A_HEX));
+        match cfg.summary {
+            Some(SsoSummary::Saml(ref s)) => {
+                assert!(
+                    s.federation_metadata_url.ends_with("appid=app-1"),
+                    "{}",
+                    s.federation_metadata_url
+                );
+                assert!(s.login_url.ends_with(&format!("/{TENANT}/saml2")));
+            }
+            ref other => panic!("a SAML app must carry a SAML summary, got {other:?}"),
+        }
+        let roll = cfg.rollover.expect("a SAML app carries its rollover state");
+        assert_eq!(roll.phase, azapptoolkit_dto::sso::RolloverPhase::Steady);
+        assert_eq!(
+            roll.certs.len(),
+            1,
+            "the Sign/Verify pair is one certificate"
+        );
+        assert_eq!(roll.active_thumbprint.as_deref(), Some(A_HEX));
+        // Dropping the server verifies `expect(1)`.
+    }
+
+    #[tokio::test]
+    async fn a_redirect_uri_patch_busts_the_detail_tier_and_keeps_the_indexes() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["https://app.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect("the mocked PATCH succeeds");
+
+        assert!(
+            !detail_cached(&state),
+            "the app's detail row must be busted — the Authentication tab reads it"
+        );
+        // The point of the detail tier: a redirect-URI edit adds, removes or
+        // renames no app or SP, so the two indexes (a full directory scan each
+        // to rebuild) must survive it.
+        assert!(
+            sp_index_hit(&state.cache, TENANT).is_some(),
+            "the SP index must survive an in-place app PATCH"
+        );
+        assert!(
+            app_name_index_hit(&state.cache, TENANT).is_some(),
+            "the app-registration index must survive an in-place app PATCH"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_redirect_uri_patch_invalidates_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let err = set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["https://app.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect_err("a 403 must surface as an error");
+        assert_eq!(err.code, "forbidden");
+
+        // "Invalidate caches only on `Ok`".
+        assert!(
+            detail_cached(&state),
+            "a failed mutation must leave the cached detail row alone"
+        );
+        assert!(sp_index_hit(&state.cache, TENANT).is_some());
+        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_invalid_redirect_uri_never_reaches_graph() {
+        // No mock mounted: any request would 404 and fail the test differently.
+        let server = MockServer::start().await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+
+        let err = set_oidc_redirect_uris_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["http://insecure.example/cb".into()],
+            Vec::new(),
+        )
+        .await
+        .expect_err("an insecure redirect URI is rejected locally");
+        assert_eq!(err.code, "invalid_redirect_uri");
+        assert!(
+            detail_cached(&state),
+            "a rejected input invalidates nothing"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    // ---- claims-mapping policy saves ----
+
+    const SP: &str = "sp-1";
+
+    fn claims_policy() -> ClaimsPolicyDto {
+        ClaimsPolicyDto {
+            schema: vec![crate::dto::sso::ClaimSchemaEntryDto {
+                source: Some("user".into()),
+                id: Some("mail".into()),
+                jwt_claim_type: Some("email".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn mount_assigned(server: &MockServer, ids: &[&str]) {
+        let value: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "definition": ["{}"]}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_subjects(server: &MockServer, policy: &str, subjects: &[&str]) {
+        let value: Vec<serde_json::Value> = subjects
+            .iter()
+            .map(|id| serde_json::json!({ "id": id }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/policies/claimsMappingPolicies/{policy}/appliesTo"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// Mounts every claims write with the expected call count.
+    async fn mount_writes(
+        server: &MockServer,
+        patch: u64,
+        create: u64,
+        unassign: u64,
+        assign: u64,
+        delete: u64,
+    ) {
+        Mock::given(method("PATCH"))
+            .and(path("/v1.0/policies/claimsMappingPolicies/pol-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(patch)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "pol-new", "displayName": "Custom claims", "definition": ["{}"]
+            })))
+            .expect(create)
+            .mount(server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/pol-1/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(unassign)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(assign)
+            .mount(server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1.0/policies/claimsMappingPolicies/pol-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(delete)
+            .mount(server)
+            .await;
+    }
+
+    fn assert_detail_tier_only(state: &AppState) {
+        assert!(!detail_cached(state), "a claims save busts the detail tier");
+        assert!(
+            sp_index_hit(&state.cache, TENANT).is_some(),
+            "the SP index must survive a claims save"
+        );
+        assert!(
+            app_name_index_hit(&state.cache, TENANT).is_some(),
+            "the app-registration index must survive a claims save"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claims_save_patches_a_policy_this_app_owns_in_place() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP]).await;
+        mount_writes(&server, 1, 0, 0, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect("the mocked PATCH succeeds");
+        assert_eq!(id.as_deref(), Some("pol-1"), "same policy, edited in place");
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn a_claims_save_on_a_shared_policy_forks_a_private_copy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP, "other-sp"]).await;
+        // Never PATCH (it would change the other app's claims), never delete.
+        mount_writes(&server, 0, 1, 1, 1, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect("the mocked fork succeeds");
+        assert_eq!(id.as_deref(), Some("pol-new"));
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn a_failed_claims_listing_writes_nothing_and_invalidates_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies"
+            )))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+        mount_writes(&server, 0, 0, 0, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let err = set_claims_mapping_core(&state, TENANT, SP, "Custom claims", &claims_policy())
+            .await
+            .expect_err("a failed listing surfaces instead of being guessed around");
+        assert_eq!(err.code, "forbidden");
+        assert!(detail_cached(&state), "a failed save invalidates nothing");
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.iter().all(|r| r.method.as_str() == "GET"),
+            "no write may follow a failed listing: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_claims_unassigns_and_deletes_an_orphaned_policy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP]).await;
+        mount_writes(&server, 0, 0, 1, 0, 1).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(
+            &state,
+            TENANT,
+            SP,
+            "Custom claims",
+            &ClaimsPolicyDto::default(),
+        )
+        .await
+        .expect("the mocked detach succeeds");
+        assert_eq!(id, None);
+        assert_detail_tier_only(&state);
+    }
+
+    #[tokio::test]
+    async fn clearing_claims_never_deletes_a_shared_policy() {
+        let server = MockServer::start().await;
+        mount_assigned(&server, &["pol-1"]).await;
+        mount_subjects(&server, "pol-1", &[SP, "other-sp"]).await;
+        mount_writes(&server, 0, 0, 1, 0, 0).await;
+
+        let state = AppState::for_test(TENANT, &server.uri());
+        seed(&state);
+        let id = set_claims_mapping_core(
+            &state,
+            TENANT,
+            SP,
+            "Custom claims",
+            &ClaimsPolicyDto::default(),
+        )
+        .await
+        .expect("the mocked unassign succeeds");
+        assert_eq!(id, None);
+    }
+
+    // ---- SAML create orchestration (`configure_saml`, steps 2–6) ----
+
+    const CERT_PATH: &str = "/v1.0/servicePrincipals/sp-1/addTokenSigningCertificate";
+
+    /// Mounts the always-succeeding writes of a SAML create: both PATCHes and
+    /// the certificate mint. Individual tests layer higher-priority failures on
+    /// top.
+    async fn mount_saml_create(server: &MockServer) {
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(CERT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "thumbprint": "C2DDD8044C956ACD0269A75A64B7862DB9DDAC3E",
+                "key": "MIIC-test",
+                "endDateTime": "2027-01-01T00:00:00Z"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Mounts a claims-policy create + assign that succeed.
+    async fn mount_claims_create_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "pol-new", "displayName": "Contoso claims", "definition": ["{}"]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/claimsMappingPolicies/$ref"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    fn saml_input() -> SamlSsoConfigInput {
+        SamlSsoConfigInput {
+            display_name: "Contoso".into(),
+            entity_id: "https://sp.example".into(),
+            reply_url: "https://sp.example/acs".into(),
+            claims_policy: Some(claims_policy()),
+            notification_emails: vec!["ops@example.com".into()],
+            ..Default::default()
+        }
+    }
+
+    async fn run_saml_create(server: &MockServer) -> Result<SamlSsoSummary, UiError> {
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+        configure_saml(
+            &client,
+            CloudEnvironment::Commercial,
+            OBJECT,
+            SP,
+            TENANT,
+            "app-1",
+            &saml_input(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_clean_saml_create_has_no_warnings() {
+        let server = MockServer::start().await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server).await.expect("every step succeeds");
+        assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
+        assert_eq!(summary.claims_policy_id.as_deref(), Some("pol-new"));
+        assert_eq!(summary.signing_cert_base64.as_deref(), Some("MIIC-test"));
+    }
+
+    #[tokio::test]
+    async fn a_saml_create_reports_a_failed_claims_step_as_a_warning() {
+        let server = MockServer::start().await;
+        mount_saml_create(&server).await;
+        // 403, not 5xx: `http_retry` would retry a 5xx.
+        Mock::given(method("POST"))
+            .and(path("/v1.0/policies/claimsMappingPolicies"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("the claims step is best-effort; the create still succeeds");
+        assert_eq!(summary.claims_policy_id, None);
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        let w = &summary.warnings[0];
+        assert!(w.starts_with("Custom claims were not applied"), "{w}");
+        // The 403 carries the role remediation, like the SSO tab's save.
+        assert!(w.contains("Application Administrator"), "{w}");
+        assert!(w.contains("Save claims"), "{w}");
+    }
+
+    #[tokio::test]
+    async fn a_saml_create_reports_failed_notification_emails_as_a_warning() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .and(wiremock::matchers::body_string_contains(
+                "notificationEmailAddresses",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Invalid address"))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("the email step is best-effort; the create still succeeds");
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        assert!(
+            summary.warnings[0]
+                .starts_with("Certificate-expiry notification emails were not saved"),
+            "{}",
+            summary.warnings[0]
+        );
+        assert_eq!(summary.claims_policy_id.as_deref(), Some("pol-new"));
+    }
+
+    #[tokio::test]
+    async fn a_lagging_replica_at_certificate_mint_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(CERT_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        let summary = run_saml_create(&server)
+            .await
+            .expect("a NotFound right after instantiate is replication lag");
+        assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
+        let mints = server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == CERT_PATH)
+            .count();
+        assert_eq!(mints, 2, "one 404, then the retry that landed");
+    }
+
+    #[tokio::test]
+    async fn a_lagging_replica_at_certificate_activation_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/servicePrincipals/{SP}")))
+            .and(wiremock::matchers::body_string_contains(
+                "preferredTokenSigningKeyThumbprint",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_saml_create(&server).await;
+        mount_claims_create_ok(&server).await;
+
+        run_saml_create(&server)
+            .await
+            .expect("the activation PATCH waits out replication lag");
+        let activations = server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|r| {
+                r.method.as_str() == "PATCH"
+                    && String::from_utf8_lossy(&r.body)
+                        .contains("preferredTokenSigningKeyThumbprint")
+            })
+            .count();
+        assert_eq!(activations, 2, "one 404, then the retry that landed");
+    }
+
+    fn oidc_input(secret_lifetime_days: Option<u32>) -> OidcSsoConfigInput {
+        OidcSsoConfigInput {
+            display_name: "x".into(),
+            secret_display_name: Some("oidc".into()),
+            secret_lifetime_days,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oidc_secret_is_minted_inside_the_two_year_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "k1",
+                "displayName": "oidc",
+                "secretText": "s3cret"
+            })))
+            .mount(&server)
+            .await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+
+        let summary = configure_oidc(
+            &client,
+            CloudEnvironment::Commercial,
+            OBJECT,
+            "app-1",
+            SP,
+            TENANT,
+            &oidc_input(Some(730)),
+        )
+        .await
+        .expect("the secret is minted");
+        assert!(summary.client_secret.is_some());
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording is on");
+        assert_eq!(requests.len(), 1, "only addPassword — no redirect PATCH");
+        let body: serde_json::Value = requests[0].body_json().expect("JSON body");
+        let end = body["passwordCredential"]["endDateTime"]
+            .as_str()
+            .expect("endDateTime is sent");
+        let end = chrono::DateTime::parse_from_rfc3339(end).expect("RFC 3339 endDateTime");
+        let want = chrono::Utc::now() + chrono::Duration::days(730);
+        let drift = (end.with_timezone(&chrono::Utc) - want).num_seconds().abs();
+        assert!(drift <= 300, "endDateTime {end} is not now + 730 days");
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_secret_lifetime_never_reaches_graph() {
+        // No mocks: any request would be recorded (and 404).
+        let server = MockServer::start().await;
+        let state = AppState::for_test(TENANT, &server.uri());
+        let client = state.graph_for(TENANT);
+
+        for days in [Some(0), Some(731), Some(u32::MAX)] {
+            // The create gate: rejected before instantiate, so no app or
+            // service principal is left half-configured.
+            let err = create_oidc_sso_application_core(&state, TENANT, oidc_input(days))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_secret_lifetime", "{days:?}");
+            // And `configure_oidc` resolves through the same gate.
+            let err = configure_oidc(
+                &client,
+                CloudEnvironment::Commercial,
+                OBJECT,
+                "app-1",
+                SP,
+                TENANT,
+                &oidc_input(days),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "invalid_secret_lifetime", "{days:?}");
+        }
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording is on");
+        assert!(
+            requests.is_empty(),
+            "{} request(s) reached Graph",
+            requests.len()
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claims_policy_403_names_the_claims_roles() {
+        let forbidden = UiError {
+            code: "forbidden".into(),
+            message: "graph said no".into(),
+            retryable: false,
+        };
+        let err = claims_policy_err(forbidden);
+        assert!(err.message.starts_with("graph said no "));
+        assert!(err.message.contains("Application Administrator"));
+        let other = UiError {
+            code: "graph_error".into(),
+            message: "boom".into(),
+            retryable: false,
+        };
+        assert_eq!(claims_policy_err(other).message, "boom");
+    }
+
+    #[test]
+    fn a_claims_save_plan_never_edits_or_deletes_a_shared_policy() {
+        let sp = "sp";
+        let one = vec!["p".to_string()];
+        let sole = vec!["sp".to_string()];
+        let shared = vec!["sp".to_string(), "other".to_string()];
+        /// (assigned, appliesTo, editor empty, expected plan)
+        type Case<'a> = (&'a [String], Option<&'a [String]>, bool, ClaimsWrite);
+        let none: Vec<String> = Vec::new();
+        let cases: [Case; 9] = [
+            (&[], None, true, ClaimsWrite::Nothing),
+            (&[], None, false, ClaimsWrite::Create),
+            (
+                &one,
+                Some(&sole),
+                false,
+                ClaimsWrite::PatchInPlace("p".into()),
+            ),
+            (
+                &one,
+                Some(&shared),
+                false,
+                ClaimsWrite::Fork { detach: "p".into() },
+            ),
+            (
+                &one,
+                Some(&sole),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: true,
+                },
+            ),
+            (
+                &one,
+                Some(&shared),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: false,
+                },
+            ),
+            // No appliesTo proof ⇒ never treated as owned.
+            (&one, None, false, ClaimsWrite::Fork { detach: "p".into() }),
+            // An empty appliesTo is inconsistent state, not proof of ownership:
+            // never patched in place, never deleted.
+            (
+                &one,
+                Some(&none),
+                false,
+                ClaimsWrite::Fork { detach: "p".into() },
+            ),
+            (
+                &one,
+                Some(&none),
+                true,
+                ClaimsWrite::Detach {
+                    policy_id: "p".into(),
+                    delete: false,
+                },
+            ),
+        ];
+        for (assigned, subjects, empty, want) in cases {
+            assert_eq!(
+                plan_claims_write(sp, assigned, subjects, empty).unwrap(),
+                want,
+                "assigned={assigned:?} subjects={subjects:?} empty={empty}"
+            );
+        }
+        // More than one assigned policy fails closed, empty or not.
+        let two = vec!["a".to_string(), "b".to_string()];
+        for empty in [true, false] {
+            let err = plan_claims_write(sp, &two, None, empty).unwrap_err();
+            assert_eq!(err.code, "multiple_claims_policies");
+        }
+    }
 
     #[test]
     fn a_signing_certificate_lifetime_is_bounded_by_entras_three_year_ceiling() {
@@ -1801,6 +2978,24 @@ mod tests {
         // And an absurd value never reaches `chrono::Duration::days`, which
         // panics rather than saturating.
         assert!(resolve_cert_lifetime_days(Some(u32::MAX)).is_err());
+    }
+
+    #[test]
+    fn a_client_secret_lifetime_is_bounded_by_entras_two_year_cap() {
+        // Default when none is supplied — the portal's recommended preset.
+        assert_eq!(resolve_secret_lifetime_days(None).unwrap(), 180);
+        assert_eq!(resolve_secret_lifetime_days(Some(1)).unwrap(), 1);
+        assert_eq!(resolve_secret_lifetime_days(Some(730)).unwrap(), 730);
+        // The same 24-month cap the Credentials tab applies.
+        let err = resolve_secret_lifetime_days(Some(731)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
+        // Zero would mint an already-expired secret.
+        let err = resolve_secret_lifetime_days(Some(0)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
+        // And an absurd value never reaches `chrono` inside `add_password`,
+        // whose `now + Duration` panics rather than saturating.
+        let err = resolve_secret_lifetime_days(Some(u32::MAX)).unwrap_err();
+        assert_eq!(err.code, "invalid_secret_lifetime");
     }
 
     #[test]
@@ -1828,7 +3023,8 @@ mod tests {
 
     #[test]
     fn saml_urls_match_spec() {
-        let (issuer, login, logout, metadata) = saml_summary_urls("tid", "aid");
+        let (issuer, login, logout, metadata) =
+            saml_summary_urls(CloudEnvironment::Commercial, "tid", "aid");
         assert_eq!(issuer, "https://sts.windows.net/tid/");
         assert_eq!(login, "https://login.microsoftonline.com/tid/saml2");
         assert_eq!(logout, login);
@@ -1839,8 +3035,40 @@ mod tests {
     }
 
     #[test]
+    fn saml_and_oidc_urls_follow_the_cloud() {
+        let (issuer, login, logout, metadata) =
+            saml_summary_urls(CloudEnvironment::UsGov, "tid", "aid");
+        assert_eq!(issuer, "https://sts.windows.net/tid/");
+        assert_eq!(login, "https://login.microsoftonline.us/tid/saml2");
+        assert_eq!(logout, login);
+        assert_eq!(
+            metadata,
+            "https://login.microsoftonline.us/tid/federationmetadata/2007-06/federationmetadata.xml?appid=aid"
+        );
+        let (authority, _) = oidc_summary_urls(CloudEnvironment::UsGov, "tid");
+        assert_eq!(authority, "https://login.microsoftonline.us/tid/v2.0");
+
+        let (issuer, login, _, metadata) = saml_summary_urls(CloudEnvironment::China, "tid", "aid");
+        assert_eq!(issuer, "https://sts.chinacloudapi.cn/tid/");
+        assert_eq!(login, "https://login.partner.microsoftonline.cn/tid/saml2");
+        assert!(
+            metadata.starts_with("https://login.partner.microsoftonline.cn/tid/"),
+            "{metadata}"
+        );
+        let (authority, discovery) = oidc_summary_urls(CloudEnvironment::China, "tid");
+        assert_eq!(
+            authority,
+            "https://login.partner.microsoftonline.cn/tid/v2.0"
+        );
+        assert!(discovery.starts_with(&authority), "{discovery}");
+
+        let (_, dod_login, _, _) = saml_summary_urls(CloudEnvironment::UsGovDod, "tid", "aid");
+        assert_eq!(dod_login, "https://login.microsoftonline.us/tid/saml2");
+    }
+
+    #[test]
     fn oidc_urls_match_spec() {
-        let (authority, discovery) = oidc_summary_urls("tid");
+        let (authority, discovery) = oidc_summary_urls(CloudEnvironment::Commercial, "tid");
         assert_eq!(authority, "https://login.microsoftonline.com/tid/v2.0");
         assert_eq!(
             discovery,
@@ -1974,6 +3202,26 @@ mod tests {
     }
 
     #[test]
+    fn rollover_metadata_url_follows_the_cloud() {
+        let roll = build_rollover(
+            &sp_with(
+                Some(A_HEX),
+                vec![cred("k1", A_B64, "2027-01-01T00:00:00Z", "Verify")],
+            ),
+            "sp-1",
+            "tid",
+            CloudEnvironment::UsGov,
+            now(),
+        );
+        assert!(
+            roll.federation_metadata_url
+                .starts_with("https://login.microsoftonline.us/"),
+            "{}",
+            roll.federation_metadata_url
+        );
+    }
+
+    #[test]
     fn rollover_phase_reads_the_four_states_off_live_sp_state() {
         // Steady: one valid certificate, and it's the preferred one.
         let roll = build_rollover(
@@ -1983,6 +3231,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Steady);
@@ -2001,6 +3250,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
@@ -2024,6 +3274,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::PendingRetire);
@@ -2043,6 +3294,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Unconfigured);
@@ -2063,6 +3315,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.phase, RolloverPhase::Staged);
@@ -2093,6 +3346,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.certs.len(), 1);
@@ -2115,13 +3369,113 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         assert_eq!(roll.certs[0].thumbprint, B_HEX, "newest first");
         assert!(roll.certs[0].is_active);
         assert_eq!(roll.certs[0].status, CertStatus::Active);
+        // The nomination is canonical too, so the expiry board's Thumbprint
+        // column shows the same upper-case value as the SSO tab.
+        assert_eq!(roll.active_thumbprint.as_deref(), Some(B_HEX));
         // The metadata URL is the app's own, so the panel can link it directly.
         assert!(roll.federation_metadata_url.ends_with("appid=app-1"));
+    }
+
+    #[test]
+    fn the_preferred_thumbprint_is_upper_cased_but_a_malformed_one_is_kept_verbatim() {
+        // Lower-case hex through the SSO tab's read: canonical upper case.
+        let sp = serde_json::json!({
+            "appId": "app-1",
+            "preferredTokenSigningKeyThumbprint": A_HEX.to_ascii_lowercase(),
+            "keyCredentials": [ cred("k1", A_B64, "2030-06-01T00:00:00Z", "Verify") ],
+        });
+        let (_, _, thumbprint, expiry, _) = extract_sp_sso_fields(&sp);
+        assert_eq!(thumbprint.as_deref(), Some(A_HEX));
+        assert_eq!(expiry.as_deref(), Some("2030-06-01T00:00:00Z"));
+
+        // A nomination that is not a hex thumbprint stays visible as-is:
+        // `canonical` would read "ABCD" as base64 and invent a different value.
+        for bad in ["ABCD", "not-a-thumbprint"] {
+            let roll = build_rollover(
+                &sp_with(
+                    Some(bad),
+                    vec![cred("k1", A_B64, "2029-01-01T00:00:00Z", "Verify")],
+                ),
+                "sp-1",
+                "tid",
+                CloudEnvironment::Commercial,
+                now(),
+            );
+            assert_eq!(roll.active_thumbprint.as_deref(), Some(bad));
+            assert!(roll.certs.iter().all(|c| !c.is_active), "{bad}");
+            let (_, _, thumbprint, _, _) = extract_sp_sso_fields(&sp_with(Some(bad), vec![]));
+            assert_eq!(thumbprint.as_deref(), Some(bad));
+        }
+    }
+
+    #[test]
+    fn the_owner_summary_follows_the_saved_mode() {
+        let cfg = |mode: Option<&str>| SsoConfigDto {
+            object_id: "obj-1".into(),
+            service_principal_id: "sp-1".into(),
+            app_id: "app-1".into(),
+            sso_mode: mode.map(str::to_string),
+            entity_id: Some("https://app/saml".into()),
+            reply_urls: vec!["https://app/acs".into(), "https://app/acs2".into()],
+            redirect_uris: vec!["https://app/acs".into(), "https://app/acs2".into()],
+            spa_redirect_uris: vec!["https://app/spa".into()],
+            signing_cert_thumbprint: Some(A_HEX.into()),
+            claims_policy_id: Some("pol-1".into()),
+            ..Default::default()
+        };
+
+        match build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(Some("saml"))) {
+            Some(SsoSummary::Saml(s)) => {
+                assert!(s.login_url.ends_with("/tid/saml2"), "{}", s.login_url);
+                assert!(
+                    s.federation_metadata_url.ends_with("appid=app-1"),
+                    "{}",
+                    s.federation_metadata_url
+                );
+                assert_eq!(s.sp_entity_id, "https://app/saml");
+                assert_eq!(s.reply_url, "https://app/acs");
+                assert_eq!(s.signing_cert_base64, None);
+                assert_eq!(s.signing_cert_thumbprint.as_deref(), Some(A_HEX));
+                assert_eq!(s.claims_policy_id.as_deref(), Some("pol-1"));
+                assert!(s.warnings.is_empty());
+            }
+            other => panic!("a SAML app must get a SAML summary, got {other:?}"),
+        }
+        match build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(Some("oidc"))) {
+            Some(SsoSummary::Oidc(s)) => {
+                assert!(s.authority.ends_with("/tid/v2.0"), "{}", s.authority);
+                assert_eq!(s.client_id, "app-1");
+                assert_eq!(s.tenant_id, "tid");
+                assert_eq!(s.redirect_uris.len(), 2);
+                assert_eq!(s.client_secret, None);
+            }
+            other => panic!("an OIDC app must get an OIDC summary, got {other:?}"),
+        }
+        for mode in [Some("password"), Some("SAML"), None] {
+            assert!(
+                build_sso_summary(CloudEnvironment::Commercial, "tid", &cfg(mode)).is_none(),
+                "{mode:?}"
+            );
+        }
+        // The URLs follow the configured cloud.
+        match build_sso_summary(CloudEnvironment::UsGov, "tid", &cfg(Some("saml"))) {
+            Some(SsoSummary::Saml(s)) => {
+                assert_eq!(s.login_url, "https://login.microsoftonline.us/tid/saml2");
+            }
+            other => panic!("{other:?}"),
+        }
+        match build_sso_summary(CloudEnvironment::UsGov, "tid", &cfg(Some("oidc"))) {
+            Some(SsoSummary::Oidc(s)) => {
+                assert_eq!(s.authority, "https://login.microsoftonline.us/tid/v2.0");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A hand-built active cert for the [`sso_cert_status`] table below.
@@ -2191,6 +3545,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         let active = roll.certs.iter().find(|c| c.is_active);
@@ -2210,6 +3565,7 @@ mod tests {
             ),
             "sp-1",
             "tid",
+            CloudEnvironment::Commercial,
             now(),
         );
         let active = roll.certs.iter().find(|c| c.is_active);
@@ -2345,5 +3701,123 @@ mod tests {
         assert_eq!(thumbprint, None);
         assert_eq!(expiry, None);
         assert!(emails.is_empty());
+    }
+
+    // ---------------- rollover guards ----------------
+
+    fn roll(preferred: &str, creds: Vec<serde_json::Value>) -> SigningCertRolloverDto {
+        build_rollover(
+            &sp_with(Some(preferred), creds),
+            "sp-1",
+            "tid",
+            CloudEnvironment::Commercial,
+            now(),
+        )
+    }
+
+    /// A preferred and valid, B newer and not yet nominated.
+    fn staged() -> SigningCertRolloverDto {
+        roll(
+            A_HEX,
+            vec![
+                cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// A still nominated but expired; B valid.
+    fn expired_active() -> SigningCertRolloverDto {
+        roll(
+            A_HEX,
+            vec![
+                cred("k1", A_B64, "2025-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// B activated, A still valid — the rollback.
+    fn pending_retire() -> SigningCertRolloverDto {
+        roll(
+            B_HEX,
+            vec![
+                cred("k1", A_B64, "2026-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    /// B nominated, A expired and no longer nominated.
+    fn expired_leftover() -> SigningCertRolloverDto {
+        roll(
+            B_HEX,
+            vec![
+                cred("k1", A_B64, "2025-06-01T00:00:00Z", "Verify"),
+                cred("k2", B_B64, "2029-01-01T00:00:00Z", "Verify"),
+            ],
+        )
+    }
+
+    #[test]
+    fn retire_guard_refuses_the_active_the_staged_and_a_missing_certificate() {
+        let r = staged();
+        let err = retire_target(&r, "k1").expect_err("the active cert signs today");
+        assert_eq!(err.code, "cert_is_active");
+        assert!(
+            err.message.contains("signing assertions right now"),
+            "{}",
+            err.message
+        );
+        let err = retire_target(&r, "k2").expect_err("the staged cert is a pending rollover");
+        assert_eq!(err.code, "cert_is_staged");
+        let err = retire_target(&r, "nope").expect_err("a vanished cert");
+        assert_eq!(err.code, "cert_not_found");
+
+        // Expired but still nominated: same code, the honest message.
+        let r = expired_active();
+        let err = retire_target(&r, "k1").expect_err("the nomination would dangle");
+        assert_eq!(err.code, "cert_is_active");
+        assert!(
+            err.message.contains("has expired but is still nominated"),
+            "{}",
+            err.message
+        );
+
+        // The superseded certificate after activation is what retire is for.
+        let r = pending_retire();
+        assert_eq!(retire_target(&r, "k1").expect("superseded").key_id, "k1");
+
+        // An expired, non-nominated certificate passes — the per-row Remove.
+        let r = expired_leftover();
+        assert_eq!(
+            retire_target(&r, "k1").expect("expired leftover").key_id,
+            "k1"
+        );
+    }
+
+    #[test]
+    fn activation_guard_refuses_missing_and_expired_and_is_a_no_op_when_active() {
+        let r = staged();
+        let hit = activation_target(&r, B_HEX).expect("staged cert activates");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k2"));
+        let hit = activation_target(&r, &B_HEX.to_ascii_lowercase())
+            .expect("the thumbprint match is case-insensitive");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k2"));
+        // Idempotent: activating the active key is a no-op, not an error.
+        assert!(activation_target(&r, A_HEX).expect("no-op").is_none());
+        let err = activation_target(&r, "DEADBEEF").expect_err("not on the SP");
+        assert_eq!(err.code, "cert_not_staged");
+
+        // Revert: the superseded certificate can be re-nominated.
+        let r = pending_retire();
+        let hit = activation_target(&r, A_HEX).expect("revert");
+        assert_eq!(hit.map(|c| c.key_id.as_str()), Some("k1"));
+
+        // Expired wins over the "already active" no-op.
+        let err = activation_target(&expired_active(), A_HEX).expect_err("expired + nominated");
+        assert_eq!(err.code, "cert_expired");
+        let err = activation_target(&expired_leftover(), A_HEX).expect_err("expired");
+        assert_eq!(err.code, "cert_expired");
     }
 }

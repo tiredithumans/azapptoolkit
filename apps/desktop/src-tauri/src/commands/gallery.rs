@@ -154,6 +154,10 @@ pub async fn prefetch_application_gallery(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<(), UiError> {
+    // The corpus answers from cache before any request is sent. The catalog is
+    // tenant-independent, but its key is tenant-prefixed and the proof is a map
+    // lookup — cheaper than an exemption in the rule.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     load_gallery_corpus(&state, &tenant_id).await.map(|_| ())
 }
 
@@ -178,6 +182,9 @@ pub async fn search_application_templates(
     tenant_id: String,
     query: String,
 ) -> Result<GallerySearchResultsDto, UiError> {
+    // The corpus answers from cache before any request is sent — see
+    // `prefetch_application_gallery`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let trimmed = query.trim();
     if trimmed.chars().count() < GALLERY_MIN_QUERY_CHARS {
         return Ok(GallerySearchResultsDto::default());
@@ -185,7 +192,7 @@ pub async fn search_application_templates(
     let corpus = load_gallery_corpus(&state, &tenant_id).await?;
     // The corpus holds the whole catalog, so the counts are exact and the
     // catalog is never partial (a short fetch is an `Err`, not a partial `Ok`).
-    Ok(rank_gallery(&corpus, trimmed, false))
+    Ok(rank_gallery(&corpus, trimmed))
 }
 
 /// Ranks `rows` against `query` and packages the best [`GALLERY_TOP`] with the
@@ -193,11 +200,7 @@ pub async fn search_application_templates(
 /// and a live `AppState`) so the ranking, the cap, and the truncation signal are
 /// unit-testable — the counts are shown to operators verbatim, so "showing the
 /// closest 50 of 200" being wrong is a user-visible lie.
-fn rank_gallery(
-    rows: &[GalleryRow],
-    query: &str,
-    partial_catalog: bool,
-) -> GallerySearchResultsDto {
+fn rank_gallery(rows: &[GalleryRow], query: &str) -> GallerySearchResultsDto {
     let needle = query.trim().to_lowercase();
     let tokens: Vec<&str> = needle.split_whitespace().collect();
 
@@ -224,7 +227,6 @@ fn rank_gallery(
             .collect(),
         total_matches,
         truncated: total_matches > GALLERY_TOP,
-        partial_catalog,
     }
 }
 
@@ -398,7 +400,7 @@ mod tests {
             grow("t2", "Salesforce Sandbox", "Salesforce.com"),
             grow("t3", "Salesforce", "Salesforce.com"),
         ];
-        let out = rank_gallery(&rows, "salesforce", false);
+        let out = rank_gallery(&rows, "salesforce");
 
         // Both Salesforce rows surface and the exact match leads. The old path
         // ordered by `$orderby=displayName`, which would have put "Salesforce
@@ -407,7 +409,6 @@ mod tests {
         assert_eq!(out.results[0].display_name, "Salesforce");
         assert_eq!(out.results[1].display_name, "Salesforce Sandbox");
         assert!(!out.truncated);
-        assert!(!out.partial_catalog);
     }
 
     #[test]
@@ -417,9 +418,9 @@ mod tests {
             grow("t2", "Widget", "Okta Inc"),
         ];
         // Mid-word: unreachable under the old prefix filter.
-        assert_eq!(rank_gallery(&rows, "force", false).total_matches, 1);
+        assert_eq!(rank_gallery(&rows, "force").total_matches, 1);
         // Publisher-only: an operator searching a vendor finds its apps.
-        let by_pub = rank_gallery(&rows, "okta", false);
+        let by_pub = rank_gallery(&rows, "okta");
         assert_eq!(by_pub.total_matches, 1);
         assert_eq!(by_pub.results[0].display_name, "Widget");
     }
@@ -431,7 +432,7 @@ mod tests {
         let rows: Vec<GalleryRow> = (0..GALLERY_TOP + 7)
             .map(|i| grow(&format!("t{i}"), &format!("Contoso App {i:03}"), "Contoso"))
             .collect();
-        let out = rank_gallery(&rows, "contoso", false);
+        let out = rank_gallery(&rows, "contoso");
 
         assert_eq!(out.results.len(), GALLERY_TOP, "results are capped");
         assert_eq!(
@@ -445,18 +446,10 @@ mod tests {
     #[test]
     fn rank_gallery_reports_no_matches_without_claiming_truncation() {
         let rows = vec![grow("t1", "Salesforce", "Salesforce.com")];
-        let out = rank_gallery(&rows, "nonesuch", false);
+        let out = rank_gallery(&rows, "nonesuch");
         assert!(out.results.is_empty());
         assert_eq!(out.total_matches, 0);
         assert!(!out.truncated);
-    }
-
-    #[test]
-    fn rank_gallery_propagates_partial_catalog() {
-        // A partial catalog must ride along even on a hit, so an operator who
-        // can't find their app learns the gallery was only partly loaded.
-        let rows = vec![grow("t1", "Salesforce", "Salesforce.com")];
-        assert!(rank_gallery(&rows, "sales", true).partial_catalog);
     }
 
     #[test]

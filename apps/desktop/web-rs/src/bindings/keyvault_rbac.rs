@@ -1,9 +1,10 @@
 //! Key Vault Azure-RBAC reverse-lookup IPC bindings. DTOs come from the shared
-//! `azapptoolkit-dto` crate (re-exported here for callers). Cancellation reuses
-//! `sharepoint::cancel_resource_sweep` (the backend shares one `sweep_cancel`).
+//! `azapptoolkit-dto` crate (re-exported here for callers). The sweep has its
+//! own Cancel, [`cancel_key_vault_sweep`], so it stops no other Resource Access
+//! scan and none of theirs stops it.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::keyvault::{
@@ -21,6 +22,11 @@ pub async fn get_cached_key_vault_access(
     tenant_id: &str,
 ) -> Result<Option<KeyVaultSweepResult>, UiError> {
     invoke_result("get_cached_key_vault_access", TenantArg { tenant_id }).await
+}
+
+/// Signals an in-progress Key Vault sweep to stop at the next dispatch boundary.
+pub async fn cancel_key_vault_sweep() -> Result<(), UiError> {
+    invoke_result("cancel_key_vault_sweep", ()).await
 }
 
 // ---------------- Vault-access export ----------------

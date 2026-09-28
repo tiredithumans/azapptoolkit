@@ -22,6 +22,49 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value.to_string()))
 }
 
+/// The `cargo:rustc-env` name a `.env` key is baked under, or `None` for a
+/// key the build does not bake. `state.rs` reads each back with `option_env!`;
+/// a runtime env var of the `.env` key's name still overrides it.
+fn baked_env_name(key: &str) -> Option<&'static str> {
+    match key {
+        "AZAPPTOOLKIT_CLIENT_ID" => Some("AZAPPTOOLKIT_BUILD_CLIENT_ID"),
+        "AZAPPTOOLKIT_TENANT_ID" => Some("AZAPPTOOLKIT_BUILD_TENANT_ID"),
+        // A cloud name (`usgov`, `usgovdod`, `china`), not a secret; validated
+        // at runtime by `CloudEnvironment::parse`, the one vocabulary.
+        "AZAPPTOOLKIT_CLOUD" => Some("AZAPPTOOLKIT_BUILD_CLOUD"),
+        _ => None,
+    }
+}
+
+/// A `cargo:warning` for a baked client/tenant id that cannot work, so a
+/// mistyped team-build `.env` is caught at build time instead of at sign-in.
+/// `None` for a usable value and for every other key (`AZAPPTOOLKIT_CLOUD` is
+/// validated at runtime). Never echoes the value.
+fn bake_warning(key: &str, value: &str) -> Option<String> {
+    if !matches!(key, "AZAPPTOOLKIT_CLIENT_ID" | "AZAPPTOOLKIT_TENANT_ID") {
+        return None;
+    }
+    if value.is_empty() {
+        return Some(format!("{key} is empty in .env and was not baked"));
+    }
+    if !is_guid_shape(value) {
+        return Some(format!("{key} in .env is not a GUID; sign-in will fail"));
+    }
+    None
+}
+
+/// Strict 8-4-4-4-12 hex check (case-insensitive). A local copy because a
+/// build script cannot import `commands::guid::is_guid`; a conformance test
+/// keeps the two in step.
+fn is_guid_shape(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Removes one matching pair of surrounding single or double quotes.
 fn strip_quotes(s: &str) -> &str {
     let bytes = s.as_bytes();
@@ -38,6 +81,24 @@ fn strip_quotes(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_tenant_and_cloud_keys_are_baked_and_nothing_else() {
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_CLIENT_ID"),
+            Some("AZAPPTOOLKIT_BUILD_CLIENT_ID")
+        );
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_TENANT_ID"),
+            Some("AZAPPTOOLKIT_BUILD_TENANT_ID")
+        );
+        assert_eq!(
+            baked_env_name("AZAPPTOOLKIT_CLOUD"),
+            Some("AZAPPTOOLKIT_BUILD_CLOUD")
+        );
+        assert_eq!(baked_env_name("TAURI_SIGNING_PRIVATE_KEY"), None);
+        assert_eq!(baked_env_name("AZAPPTOOLKIT_BUILD_CLOUD"), None);
+    }
 
     #[test]
     fn blank_and_comment_lines_are_skipped() {
@@ -99,5 +160,47 @@ mod tests {
             parse_env_line("KEY=\"\""),
             Some(("KEY".into(), String::new()))
         );
+    }
+
+    #[test]
+    fn an_empty_or_malformed_baked_id_warns_without_echoing_it() {
+        let guid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        for key in ["AZAPPTOOLKIT_CLIENT_ID", "AZAPPTOOLKIT_TENANT_ID"] {
+            assert_eq!(bake_warning(key, guid), None, "{key}");
+            let empty = bake_warning(key, "").expect("empty warns");
+            assert!(empty.contains(key) && empty.contains("empty"), "{empty}");
+            let bad = bake_warning(key, "not-a-guid-value").expect("non-GUID warns");
+            assert!(bad.contains(key) && bad.contains("not a GUID"), "{bad}");
+            assert!(
+                !bad.contains("not-a-guid-value"),
+                "the value is never echoed"
+            );
+        }
+        // Only the two ids are checked; the cloud name is validated at runtime.
+        assert_eq!(bake_warning("AZAPPTOOLKIT_CLOUD", "usgov"), None);
+        assert_eq!(bake_warning("OTHER", ""), None);
+    }
+
+    /// The build script's local GUID check must agree with the command layer's
+    /// `is_guid`, the one the config screen validates with.
+    #[test]
+    fn the_local_guid_check_matches_the_command_layer() {
+        for s in [
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+            "{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0}",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f00",
+            "0f1e2d3c4b5a-6978-8796-a5b4c3d2e1f0-",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1fg",
+            "contoso.onmicrosoft.com",
+            "",
+        ] {
+            assert_eq!(
+                is_guid_shape(s),
+                crate::commands::guid::is_guid(s),
+                "disagree on {s:?}"
+            );
+        }
     }
 }

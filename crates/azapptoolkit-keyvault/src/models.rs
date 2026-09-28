@@ -38,7 +38,14 @@ pub struct SecretAttributes {
 }
 
 /// `GET /secrets/{name}` — full value included.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// Deserialize-only on purpose. Nothing serializes a fetched secret: the IPC
+/// boundary maps it field by field into `KvSecretValueDto`. A derived
+/// `Serialize` would be a plaintext path (`serde_json::to_string`, a JSON
+/// tracing layer) around the redacted `Debug` below; if one is ever needed,
+/// hand-write it with the value redacted. Pinned by
+/// `secret_value_has_no_serialize_path`.
+#[derive(Clone, Deserialize)]
 pub struct SecretValue {
     pub value: String,
     pub id: String,
@@ -162,7 +169,7 @@ mod optional_unix_timestamp_ser {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Paged<T> {
     pub value: Vec<T>,
     #[serde(rename = "nextLink", default)]
@@ -172,6 +179,29 @@ pub(crate) struct Paged<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SecretValue` carries a fetched secret in plaintext; its `Debug` is
+    /// redacted, and a `Serialize` (derived or hand-written) would bypass that.
+    /// Source-scanned because a missing trait cannot be asserted at runtime.
+    #[test]
+    fn secret_value_has_no_serialize_path() {
+        let src = include_str!("models.rs");
+        let decl = src
+            .find("pub struct SecretValue")
+            .expect("SecretValue declaration");
+        let derive = src[..decl].rfind("#[derive(").expect("SecretValue derive");
+        let derive_list = &src[derive..decl];
+        assert!(
+            !derive_list
+                .split(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace())
+                .any(|t| t == "Serialize" || t.ends_with("::Serialize")),
+            "SecretValue must not derive Serialize: {derive_list}"
+        );
+        assert!(
+            !src.contains(concat!("Serialize for ", "SecretValue")),
+            "SecretValue must not implement Serialize"
+        );
+    }
 
     #[test]
     fn secret_item_extracts_name_from_id() {
@@ -203,5 +233,29 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"value":"v"}"#);
+    }
+
+    /// The rotation write sends `exp` (and may send `nbf`) under `attributes`
+    /// as Unix **seconds** — a rename slip or a millisecond/RFC 3339 encoding
+    /// would leave every rotated secret without an expiry Key Vault honours.
+    #[test]
+    fn set_request_serialises_exp_and_nbf_as_unix_seconds() {
+        use chrono::TimeZone;
+        // Explicit fields: the Drop (zeroize) impl forbids `..Default::default()`.
+        let req = SecretSetRequest {
+            value: "v".into(),
+            content_type: None,
+            tags: None,
+            attributes: Some(SecretAttributesRequest {
+                enabled: Some(true),
+                expires: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+                not_before: Some(Utc.with_ymd_and_hms(2025, 12, 31, 0, 0, 0).unwrap()),
+            }),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            s,
+            r#"{"value":"v","attributes":{"enabled":true,"exp":1767225600,"nbf":1767139200}}"#
+        );
     }
 }

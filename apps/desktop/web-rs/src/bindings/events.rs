@@ -80,6 +80,18 @@ pub async fn updater_progress() -> Result<impl Stream<Item = UpdateProgress>, Js
     Ok(stream.map(|ev: Event<UpdateProgress>| ev.payload))
 }
 
+/// Subscribes to `auth-browser-fallback`: `Some(authorize_url)` while an
+/// interactive sign-in / consent / step-up flow is waiting on a browser the
+/// backend couldn't open, `None` once that flow ended (however it ended). The
+/// URL is single-use and only redeemable through this process's loopback
+/// listener.
+pub async fn auth_browser_fallback() -> Result<impl Stream<Item = Option<String>>, JsErrString> {
+    let stream = listen::<Option<String>>("auth-browser-fallback")
+        .await
+        .map_err(|e| JsErrString(format!("{e:?}")))?;
+    Ok(stream.map(|ev: Event<Option<String>>| ev.payload))
+}
+
 /// Lossy `String`-typed wrapper for `tauri_sys::Error`. The underlying error
 /// type does not implement `Clone`/`PartialEq`, so we capture its `Debug` form
 /// at the point of failure and let callers display it.

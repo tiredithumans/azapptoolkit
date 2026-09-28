@@ -1,13 +1,9 @@
-// The toast push API is intentionally complete (success/info/error); not every
-// kind/helper has a call site yet, mirroring the icon catalog in `icon.rs`.
-#![allow(dead_code)]
-
 //! In-app toast notifications. A single `ToastHost` is mounted near the
 //! shell root and renders the live stack from `Session::toasts`; toasts are
 //! pushed from anywhere via the `Session` helpers (`toast_success`,
 //! `toast_error`, …) and auto-dismiss after a timeout — errors linger longer
-//! than successes/info so they aren't missed; error toasts that carry a retry
-//! action stay until acted on or dismissed. Errors announce assertively
+//! than successes/info so they aren't missed; error toasts that carry an
+//! action stay until acted on or dismissed ([`Toast::is_sticky`]). Errors announce assertively
 //! (`role="alert"`), the rest politely (`role="status"`).
 
 use std::collections::HashMap;
@@ -48,6 +44,22 @@ pub struct Toast {
     /// Label + handler for an action button (only rendered when present).
     pub action_label: Option<String>,
     pub action: Option<ToastAction>,
+    /// Identity of a recovery toast (the lever plus what it recovers, e.g.
+    /// `"reauth"`, `"consent:exchange"`): a second push with the same key while
+    /// one is showing is a no-op, so a burst of failures raises one lever, not
+    /// a stack of copies. `None` (every other toast) never merges — two Retry
+    /// toasts with the same text re-run different operations.
+    pub dedupe_key: Option<String>,
+}
+
+impl Toast {
+    /// The one definition of "sticky": an error that carries an action (Retry,
+    /// Re-authenticate, Grant consent, …) stays until acted on or dismissed.
+    /// `ToastHost` never auto-dismisses one, and the stack cap evicts one only
+    /// once no transient toast is left to drop.
+    pub fn is_sticky(&self) -> bool {
+        matches!(self.kind, ToastKind::Error) && self.action.is_some()
+    }
 }
 
 impl ToastKind {
@@ -103,12 +115,9 @@ pub fn ToastHost() -> impl IntoView {
             Some(w) => w,
             None => return,
         };
-        // Snapshot the (id, kind, has-action) of the currently-present toasts.
-        let present: Vec<(u64, ToastKind, bool)> = toasts.with(|list| {
-            list.iter()
-                .map(|t| (t.id, t.kind, t.action.is_some()))
-                .collect()
-        });
+        // Snapshot the (id, kind, sticky) of the currently-present toasts.
+        let present: Vec<(u64, ToastKind, bool)> =
+            toasts.with(|list| list.iter().map(|t| (t.id, t.kind, t.is_sticky())).collect());
 
         handles.update_value(|map| {
             // Cancel + drop timers for toasts that are gone.
@@ -124,9 +133,8 @@ pub fn ToastHost() -> impl IntoView {
                 }
             }
             // Schedule timers for new auto-dismissable toasts.
-            for (id, kind, has_action) in present {
-                // Errors with a retry action are sticky; everything else expires.
-                let sticky = matches!(kind, ToastKind::Error) && has_action;
+            for (id, kind, sticky) in present {
+                // Sticky toasts (`Toast::is_sticky`) stay; everything else expires.
                 if sticky || map.contains_key(&id) {
                     continue;
                 }
@@ -207,4 +215,44 @@ pub fn ToastHost() -> impl IntoView {
     // (alert ⇒ assertive, status ⇒ polite), so a wrapping live region would
     // just nest redundantly.
     view! { <div class="toast-host">{stack}</div> }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The stylesheet, as shipped. The browser GUI tests mount views without
+    /// it, so they cannot see a `white-space` rule; this reads the CSS itself.
+    const STYLES: &str = include_str!("../../styles.css");
+
+    /// The declarations of the top-level rule `selector { … }`, or `None` when
+    /// the stylesheet has no such rule.
+    fn rule_body(selector: &str) -> Option<&'static str> {
+        let open = STYLES.find(&format!("\n{selector} {{"))?;
+        let body = &STYLES[open..];
+        let close = body.find('}')?;
+        Some(&body[..close])
+    }
+
+    /// Backend `UiError`s put their actionable guidance after a blank line
+    /// (`{err}\n\n{hint}`); HTML collapses that to a single space unless the
+    /// sink preserves whitespace. The admin-consent 403 toasts its remediation
+    /// steps, and they ran together into one paragraph because
+    /// `.toast__message` — unlike `.form-error` — had no `pre-wrap`. Every
+    /// class that renders a backend error message keeps the breaks.
+    #[test]
+    fn every_error_sink_keeps_the_guidance_on_its_own_lines() {
+        for selector in [
+            ".form-error",
+            ".alert",
+            ".signin-error",
+            ".toast__message",
+            ".app-detail__error",
+        ] {
+            let body = rule_body(selector)
+                .unwrap_or_else(|| panic!("styles.css has no top-level `{selector} {{` rule"));
+            assert!(
+                body.contains("white-space: pre-wrap"),
+                "`{selector}` renders backend error text but collapses its \\n\\n guidance: {body}"
+            );
+        }
+    }
 }

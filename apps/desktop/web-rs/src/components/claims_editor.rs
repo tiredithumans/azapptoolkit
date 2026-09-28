@@ -3,11 +3,13 @@
 //! "New SSO application" wizard so the (large) editing surface isn't duplicated.
 //!
 //! This is **pure presentation + state**: the caller owns the save action (and
-//! the `Policy.ReadWrite.ApplicationConfiguration` consent flow). It builds a
+//! the claims-mapping policy consent flow). It builds a
 //! [`ClaimsEditorState`] from the loaded [`ClaimsPolicyDto`], renders the editor,
 //! and on save reads `state.to_dto()` back. Policy-level fields the editor
 //! doesn't model (group filter / issuer / audience overrides) ride along in
 //! `preserved_options` and are surfaced as a read-only note.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Select};
@@ -94,6 +96,7 @@ fn seed_basic_override(
             key: next_key(seq),
             source: RwSignal::new("user".to_string()),
             attribute: RwSignal::new(attribute.to_string()),
+            transformation_id: RwSignal::new(String::new()),
             extension_id: RwSignal::new(String::new()),
             value: RwSignal::new(String::new()),
             saml_claim_type: RwSignal::new(saml_uri.to_string()),
@@ -101,6 +104,31 @@ fn seed_basic_override(
             saml_name_form: RwSignal::new(String::new()),
         })
     });
+}
+
+/// Distinguishes the generated `id`s of every [`LabelledInput`] in the DOM: the
+/// wizard and an open SSO tab (one per open enterprise app) can each mount an
+/// editor, so a per-row key alone would collide across editors.
+static NEXT_FIELD_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// A thaw `Input` named by a visually-hidden `<label for>`. A placeholder alone
+/// vanishes on the first keystroke and is not a reliable accessible name, and
+/// `attr:aria-label` on thaw's `Input` lands on its wrapper `<span>`, not the
+/// `<input>` — the `id` prop is the one thaw forwards to the real control.
+#[component]
+fn LabelledInput(
+    value: RwSignal<String>,
+    #[prop(into)] label: String,
+    #[prop(into)] placeholder: String,
+) -> impl IntoView {
+    let id = format!(
+        "claims-field-{}",
+        NEXT_FIELD_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    view! {
+        <label class="visually-hidden" for=id.clone()>{label}</label>
+        <Input id=id value=value placeholder=placeholder />
+    }
 }
 
 /// Returns the next monotonically increasing key and advances the counter. Keys
@@ -124,8 +152,12 @@ struct SchemaRow {
     key: usize,
     /// One of [`SOURCE_OPTIONS`] (directory source or `constant`).
     source: RwSignal<String>,
-    /// Source attribute, or the transformation id when `source == transformation`.
+    /// Source attribute; for `source == transformation`, the claim's own id
+    /// (Graph `ID`, what the transformation's output claim references).
     attribute: RwSignal<String>,
+    /// The generating transformation's id (Graph `TransformationID`) — only
+    /// sent when `source == transformation`.
+    transformation_id: RwSignal<String>,
     /// Directory extension attribute (alternative to `attribute`).
     extension_id: RwSignal<String>,
     /// Static value (when `source == constant`).
@@ -158,6 +190,8 @@ struct TParamRow {
     key: usize,
     id: RwSignal<String>,
     value: RwSignal<String>,
+    /// `DataType` as loaded — not editable, preserved so a save never drops it.
+    data_type: RwSignal<Option<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +232,9 @@ impl ClaimsEditorState {
                     key: next_key(seq),
                     source: RwSignal::new(source),
                     attribute: RwSignal::new(e.id.clone().unwrap_or_default()),
+                    transformation_id: RwSignal::new(
+                        e.transformation_id.clone().unwrap_or_default(),
+                    ),
                     extension_id: RwSignal::new(e.extension_id.clone().unwrap_or_default()),
                     value: RwSignal::new(e.value.clone().unwrap_or_default()),
                     saml_claim_type: RwSignal::new(e.saml_claim_type.clone().unwrap_or_default()),
@@ -231,6 +268,7 @@ impl ClaimsEditorState {
                             key: next_key(seq),
                             id: RwSignal::new(p.id.clone()),
                             value: RwSignal::new(p.value.clone()),
+                            data_type: RwSignal::new(p.data_type.clone()),
                         })
                         .collect(),
                 ),
@@ -258,21 +296,6 @@ impl ClaimsEditorState {
     /// Empty editor state (the "New SSO application" wizard's initial value).
     pub fn empty() -> Self {
         Self::from_dto(&ClaimsPolicyDto::default())
-    }
-
-    /// Clears all rows back to empty (the wizard reuses one instance across
-    /// opens and resets it on close).
-    pub fn reset(&self) {
-        // Restore the same defaults as `empty()`. Critically `include_basic`
-        // follows the DTO default (true), not `false`: the wizard reuses one
-        // instance across opens, so resetting it to `false` on close made a
-        // reopened wizard start with the basic claim set unchecked — silently
-        // suppressing Entra's default claims on the next save.
-        let defaults = ClaimsPolicyDto::default();
-        self.include_basic.set(defaults.include_basic_claim_set);
-        self.schema.set(Vec::new());
-        self.transforms.set(Vec::new());
-        self.preserved.set(None);
     }
 
     /// Reads the edited policy back. Fully-empty schema/transformation rows are
@@ -306,6 +329,7 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         ClaimSchemaEntryDto {
             source: None,
             id: None,
+            transformation_id: None,
             extension_id: None,
             value: opt(row.value),
             saml_claim_type: opt(row.saml_claim_type),
@@ -316,6 +340,10 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         ClaimSchemaEntryDto {
             source: (!source.is_empty()).then_some(source.clone()),
             id: opt(row.attribute),
+            // Only a transformation-sourced claim names a transformation.
+            transformation_id: (source == "transformation")
+                .then(|| opt(row.transformation_id))
+                .flatten(),
             // Extension attributes only apply to directory sources.
             extension_id: (source != "transformation")
                 .then(|| opt(row.extension_id))
@@ -327,6 +355,7 @@ fn schema_row_to_dto(row: SchemaRow) -> Option<ClaimSchemaEntryDto> {
         }
     };
     let empty = entry.id.is_none()
+        && entry.transformation_id.is_none()
         && entry.extension_id.is_none()
         && entry.value.is_none()
         && entry.saml_claim_type.is_none()
@@ -362,7 +391,11 @@ fn transform_row_to_dto(row: TransformRow) -> Option<ClaimsTransformationDto> {
         .filter_map(|p| {
             let pid = p.id.get_untracked().trim().to_string();
             let value = p.value.get_untracked().trim().to_string();
-            (!pid.is_empty() || !value.is_empty()).then_some(TransformParamDto { id: pid, value })
+            (!pid.is_empty() || !value.is_empty()).then_some(TransformParamDto {
+                id: pid,
+                value,
+                data_type: p.data_type.get_untracked(),
+            })
         })
         .collect();
     let output_claims = row
@@ -407,6 +440,7 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
                 key: next_key(seq),
                 source: RwSignal::new("user".to_string()),
                 attribute: RwSignal::new(String::new()),
+                transformation_id: RwSignal::new(String::new()),
                 extension_id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
                 saml_claim_type: RwSignal::new(String::new()),
@@ -505,7 +539,7 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
             // ---- transformations ----
             <div class="row-between claims-editor__transforms-head">
                 <Body1 class="hint">
-                    "Transformations generate a claim's value (Join, ExtractMailPrefix, case, RegexReplace). Reference one from a claim whose source is \"Transformation\" by matching its id."
+                    "Transformations generate a claim's value (Join, ExtractMailPrefix, case, RegexReplace). A claim whose source is \"Transformation\" names the transformation in its Transformation id; the transformation's output claim references that claim's id."
                 </Body1>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -555,37 +589,78 @@ fn SchemaRowView(row: SchemaRow, schema: RwSignal<Vec<SchemaRow>>) -> impl IntoV
                 is_directory()
                     .then(|| {
                         view! {
-                            <Input value=row.attribute placeholder="Source attribute (e.g. userprincipalname)" />
+                            <LabelledInput
+                                value=row.attribute
+                                label="Source attribute"
+                                placeholder="Source attribute (e.g. userprincipalname)"
+                            />
                         }
                     })
             }}
             {move || {
                 is_transformation()
                     .then(|| {
-                        view! { <Input value=row.attribute placeholder="Transformation id" /> }
+                        view! {
+                            <LabelledInput
+                                value=row.attribute
+                                label="Claim id"
+                                placeholder="Claim id (output claims reference this)"
+                            />
+                            <LabelledInput
+                                value=row.transformation_id
+                                label="Transformation id"
+                                placeholder="Transformation id"
+                            />
+                        }
                     })
             }}
             {move || {
                 is_constant()
-                    .then(|| view! { <Input value=row.value placeholder="Constant value" /> })
+                    .then(|| view! {
+                        <LabelledInput
+                            value=row.value
+                            label="Constant value"
+                            placeholder="Constant value"
+                        />
+                    })
             }}
             {move || {
                 is_directory()
                     .then(|| {
                         view! {
-                            <Input
+                            <LabelledInput
                                 value=row.extension_id
+                                label="Extension attribute"
                                 placeholder="Extension attribute (optional)"
                             />
                         }
                     })
             }}
-            <Input value=row.saml_claim_type placeholder="SAML claim URI" />
-            <Input value=row.jwt_claim_type placeholder="JWT (token) claim name" />
-            <Input value=row.saml_name_form placeholder="SAML name format (optional)" />
+            <LabelledInput value=row.saml_claim_type label="SAML claim URI" placeholder="SAML claim URI" />
+            <LabelledInput
+                value=row.jwt_claim_type
+                label="JWT claim name"
+                placeholder="JWT (token) claim name"
+            />
+            <LabelledInput
+                value=row.saml_name_form
+                label="SAML name format"
+                placeholder="SAML name format (optional)"
+            />
             <Button
                 class="button--danger"
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                // Names the claim the row emits (SAML URI, else JWT name), so
+                // a list of rows is not N identical "Remove"s.
+                attr:aria-label=move || {
+                    let saml = row.saml_claim_type.get();
+                    let claim = if saml.trim().is_empty() { row.jwt_claim_type.get() } else { saml };
+                    if claim.trim().is_empty() {
+                        "Remove claim".to_string()
+                    } else {
+                        format!("Remove claim {}", claim.trim())
+                    }
+                }
                 on_click=Box::new(move |_| {
                     schema.update(|rows| rows.retain(|r| r.key != key));
                 })
@@ -652,6 +727,7 @@ fn TransformRowView(
                 key: next_key(seq),
                 id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
+                data_type: RwSignal::new(None),
             })
         });
     };
@@ -668,7 +744,7 @@ fn TransformRowView(
     view! {
         <div class="claims-editor__transform">
             <div class="claims-editor__transform-head">
-                <Input value=row.id placeholder="Transformation id" />
+                <LabelledInput value=row.id label="Transformation id" placeholder="Transformation id" />
                 <Select value=row.method>
                     {TRANSFORM_METHODS
                         .iter()
@@ -678,6 +754,14 @@ fn TransformRowView(
                 <Button
                     class="button--danger"
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    attr:aria-label=move || {
+                        let id = row.id.get();
+                        if id.trim().is_empty() {
+                            "Remove transformation".to_string()
+                        } else {
+                            format!("Remove transformation {}", id.trim())
+                        }
+                    }
                     on_click=Box::new(move |_| {
                         transforms.update(|rows| rows.retain(|r| r.key != key));
                     })
@@ -696,9 +780,14 @@ fn TransformRowView(
                     let ikey = ir.key;
                     view! {
                         <div class="claims-editor__sub-row">
-                            <Input value=ir.reference_id placeholder="ClaimTypeReferenceId" />
-                            <Input
+                            <LabelledInput
+                                value=ir.reference_id
+                                label="Input claim ClaimTypeReferenceId"
+                                placeholder="ClaimTypeReferenceId"
+                            />
+                            <LabelledInput
                                 value=ir.claim_type
+                                label="Input claim TransformationClaimType"
                                 placeholder="TransformationClaimType (e.g. string1)"
                             />
                             <label class="claims-editor__multi">
@@ -711,11 +800,20 @@ fn TransformRowView(
                             </label>
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                attr:aria-label=move || {
+                                    let id = ir.reference_id.get();
+                                    if id.trim().is_empty() {
+                                        "Remove input claim".to_string()
+                                    } else {
+                                        format!("Remove input claim {}", id.trim())
+                                    }
+                                }
+                                attr:title="Remove"
                                 on_click=Box::new(move |_| {
                                     row.inputs.update(|v| v.retain(|x| x.key != ikey));
                                 })
                             >
-                                "✕"
+                                <span aria-hidden="true">"✕"</span>
                             </Button>
                         </div>
                     }
@@ -733,15 +831,28 @@ fn TransformRowView(
                     let pkey = pr.key;
                     view! {
                         <div class="claims-editor__sub-row">
-                            <Input value=pr.id placeholder="Parameter id (e.g. separator)" />
-                            <Input value=pr.value placeholder="Value" />
+                            <LabelledInput
+                                value=pr.id
+                                label="Parameter id"
+                                placeholder="Parameter id (e.g. separator)"
+                            />
+                            <LabelledInput value=pr.value label="Parameter value" placeholder="Value" />
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                attr:aria-label=move || {
+                                    let id = pr.id.get();
+                                    if id.trim().is_empty() {
+                                        "Remove input parameter".to_string()
+                                    } else {
+                                        format!("Remove input parameter {}", id.trim())
+                                    }
+                                }
+                                attr:title="Remove"
                                 on_click=Box::new(move |_| {
                                     row.params.update(|v| v.retain(|x| x.key != pkey));
                                 })
                             >
-                                "✕"
+                                <span aria-hidden="true">"✕"</span>
                             </Button>
                         </div>
                     }
@@ -759,18 +870,32 @@ fn TransformRowView(
                     let okey = or.key;
                     view! {
                         <div class="claims-editor__sub-row">
-                            <Input value=or.reference_id placeholder="ClaimTypeReferenceId" />
-                            <Input
+                            <LabelledInput
+                                value=or.reference_id
+                                label="Output claim ClaimTypeReferenceId"
+                                placeholder="ClaimTypeReferenceId"
+                            />
+                            <LabelledInput
                                 value=or.claim_type
+                                label="Output claim TransformationClaimType"
                                 placeholder="TransformationClaimType (e.g. outputClaim)"
                             />
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                attr:aria-label=move || {
+                                    let id = or.reference_id.get();
+                                    if id.trim().is_empty() {
+                                        "Remove output claim".to_string()
+                                    } else {
+                                        format!("Remove output claim {}", id.trim())
+                                    }
+                                }
+                                attr:title="Remove"
                                 on_click=Box::new(move |_| {
                                     row.outputs.update(|v| v.retain(|x| x.key != okey));
                                 })
                             >
-                                "✕"
+                                <span aria-hidden="true">"✕"</span>
                             </Button>
                         </div>
                     }
@@ -798,6 +923,7 @@ mod tests {
             key: 0,
             source: RwSignal::new(source.to_string()),
             attribute: RwSignal::new(attribute.to_string()),
+            transformation_id: RwSignal::new(String::new()),
             extension_id: RwSignal::new(String::new()),
             value: RwSignal::new(value.to_string()),
             saml_claim_type: RwSignal::new(saml.to_string()),
@@ -839,11 +965,39 @@ mod tests {
             row.extension_id = RwSignal::new("extension_abc_dept".to_string());
             let dto = schema_row_to_dto(row).expect("transformation row is real");
             assert!(dto.extension_id.is_none());
+            assert_eq!(dto.id.as_deref(), Some("t1"));
 
             let mut user_row = schema_row("user", "", "", "urn:x");
             user_row.extension_id = RwSignal::new("extension_abc_dept".to_string());
             let dto = schema_row_to_dto(user_row).expect("user row is real");
             assert_eq!(dto.extension_id.as_deref(), Some("extension_abc_dept"));
+        });
+    }
+
+    #[test]
+    fn a_transformation_row_sends_its_own_id_and_the_transformation_id_separately() {
+        // Graph joins the transformation's output claim to the entry's own `ID`
+        // and finds the transformation by `TransformationID` — two ids, never one.
+        with_owner(|| {
+            let row = schema_row("transformation", "DataJoin", "", "");
+            row.transformation_id.set(" JoinTheData ".to_string());
+            row.jwt_claim_type.set("JoinedData".to_string());
+            let dto = schema_row_to_dto(row).expect("transformation row is real");
+            assert_eq!(dto.id.as_deref(), Some("DataJoin"));
+            assert_eq!(dto.transformation_id.as_deref(), Some("JoinTheData"));
+        });
+    }
+
+    #[test]
+    fn a_transformation_id_is_dropped_for_a_directory_source() {
+        // A directory claim has no generating transformation; a stale id left
+        // behind by switching the source would point Graph at one.
+        with_owner(|| {
+            let row = schema_row("user", "mail", "", "urn:x");
+            row.transformation_id.set("JoinTheData".to_string());
+            let dto = schema_row_to_dto(row).expect("user row is real");
+            assert!(dto.transformation_id.is_none());
+            assert_eq!(dto.id.as_deref(), Some("mail"));
         });
     }
 
@@ -901,6 +1055,7 @@ mod tests {
                 key: 0,
                 id: RwSignal::new(String::new()),
                 value: RwSignal::new(String::new()),
+                data_type: RwSignal::new(None),
             }]);
             let dto = transform_row_to_dto(row).expect("real transform");
             assert_eq!(dto.input_claims.len(), 1);
@@ -919,27 +1074,48 @@ mod tests {
     fn seeding_a_basic_override_fills_a_user_sourced_row_from_the_table() {
         // The "override this basic claim" buttons are the only writers of these
         // rows, and a wrong SAML URI silently produces a claim the relying party
-        // never sees.
+        // never sees. Only the `overridable` rows get a button, so those are the
+        // rows pinned here — Name ID's "URI" is a descriptive placeholder that
+        // must never be seeded.
         with_owner(|| {
-            let schema = RwSignal::new(Vec::<SchemaRow>::new());
-            let seq = RwSignal::new(0usize);
-            let (_, saml_uri, attribute, _) = BASIC_CLAIM_SET[0];
-            seed_basic_override(schema, seq, attribute, saml_uri);
+            let overridable: Vec<_> = BASIC_CLAIM_SET.iter().filter(|r| r.3).collect();
+            assert_eq!(
+                overridable.len(),
+                4,
+                "every basic claim but Name ID is overridable"
+            );
+            for &&(name, saml_uri, attribute, _) in &overridable {
+                assert!(
+                    saml_uri.starts_with("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/"),
+                    "{name}: an overridable basic claim needs its real SAML URI, got {saml_uri}"
+                );
+                let schema = RwSignal::new(Vec::<SchemaRow>::new());
+                let seq = RwSignal::new(0usize);
+                seed_basic_override(schema, seq, attribute, saml_uri);
 
-            let dto = schema
-                .with_untracked(|rows| {
-                    assert_eq!(rows.len(), 1);
-                    schema_row_to_dto(rows[0])
-                })
-                .expect("a seeded override is a real entry");
-            assert_eq!(dto.source.as_deref(), Some("user"));
-            assert_eq!(dto.id.as_deref(), Some(attribute));
-            assert_eq!(dto.saml_claim_type.as_deref(), Some(saml_uri));
-            assert!(dto.value.is_none(), "an override is not a constant");
+                let dto = schema
+                    .with_untracked(|rows| {
+                        assert_eq!(rows.len(), 1);
+                        schema_row_to_dto(rows[0])
+                    })
+                    .expect("a seeded override is a real entry");
+                assert_eq!(dto.source.as_deref(), Some("user"), "{name}");
+                assert_eq!(dto.id.as_deref(), Some(attribute), "{name}");
+                assert_eq!(dto.saml_claim_type.as_deref(), Some(saml_uri), "{name}");
+                assert!(dto.value.is_none(), "{name}: an override is not a constant");
 
-            // Keys stay unique so removing one row cannot take out another.
-            seed_basic_override(schema, seq, attribute, saml_uri);
-            schema.with_untracked(|rows| assert_ne!(rows[0].key, rows[1].key));
+                // Keys stay unique so removing one row cannot take out another.
+                seed_basic_override(schema, seq, attribute, saml_uri);
+                schema.with_untracked(|rows| assert_ne!(rows[0].key, rows[1].key));
+            }
+
+            // The one non-overridable row is the placeholder-URI Name ID.
+            let fixed: Vec<_> = BASIC_CLAIM_SET.iter().filter(|r| !r.3).collect();
+            assert_eq!(fixed.len(), 1);
+            assert!(
+                !fixed[0].1.starts_with("http"),
+                "Name ID's URI is a placeholder"
+            );
         });
     }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tauri::State;
 
-use azapptoolkit_core::cache::CacheKind;
+use azapptoolkit_core::cache::{Cache, CacheKind};
 
 use crate::dto::UiError;
 use crate::dto::diagnostics::{CacheKindDto, CacheStatsDto, ListCacheKindDto, SetCacheConfigInput};
@@ -54,56 +54,75 @@ pub fn invalidate_list_cache(
     tenant_id: String,
     kind: ListCacheKindDto,
 ) {
+    invalidate_list_cache_in(&state.cache, &tenant_id, kind);
+}
+
+/// The body of [`invalidate_list_cache`], on a bare [`Cache`] so the per-kind
+/// key sets are unit-testable.
+///
+/// Every list derived from the shared SP index must drop that index too:
+/// dropping only the derived list re-derives it from the same stale index, so
+/// Refresh would be a no-op for a principal created since the index was built.
+pub(crate) fn invalidate_list_cache_in(cache: &Cache, tenant_id: &str, kind: ListCacheKindDto) {
     match kind {
         // The App Registrations and Enterprise Apps lists both join against the
         // shared SP index, so a manual refresh of either must also drop it to
         // re-pull service principals.
         ListCacheKindDto::Apps => {
-            state
-                .cache
-                .invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|apps_pairing"));
-            state.cache.invalidate(
+            cache.invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|apps_pairing"));
+            cache.invalidate(
                 CacheKind::Lists,
-                &crate::commands::applications::sp_index_key(&tenant_id),
+                &crate::commands::applications::sp_index_key(tenant_id),
             );
             // The global-search corpus is derived from the SP index + the
             // app-name index; an app create/rename only reaches search once both
             // fall, so a manual Apps refresh must drop them too (matching what
             // the mutation paths do via `invalidate_app_lists`).
-            state.cache.invalidate(
+            cache.invalidate(
                 CacheKind::Lists,
-                &crate::commands::applications::app_name_index_key(&tenant_id),
+                &crate::commands::applications::app_name_index_key(tenant_id),
             );
-            state.cache.invalidate(
+            cache.invalidate(
                 CacheKind::Lists,
-                &crate::commands::applications::search_corpus_key(&tenant_id),
+                &crate::commands::applications::search_corpus_key(tenant_id),
             );
         }
         ListCacheKindDto::Enterprise => {
-            state
-                .cache
-                .invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|enterprise"));
-            state.cache.invalidate(
+            cache.invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|enterprise"));
+            cache.invalidate(
                 CacheKind::Lists,
-                &crate::commands::applications::sp_index_key(&tenant_id),
+                &crate::commands::applications::sp_index_key(tenant_id),
             );
             // Dropping the shared SP index leaves the search corpus (built from
             // it) stale; bust it so the next global search rebuilds.
-            state.cache.invalidate(
+            cache.invalidate(
                 CacheKind::Lists,
-                &crate::commands::applications::search_corpus_key(&tenant_id),
+                &crate::commands::applications::search_corpus_key(tenant_id),
             );
         }
         ListCacheKindDto::ManagedIdentities => {
-            state
-                .cache
-                .invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|mi"));
+            // The exact key: a prefix would also catch any future `|mi…` key.
+            cache.invalidate(
+                CacheKind::Lists,
+                &crate::commands::managed_identity::mi_key(tenant_id),
+            );
+            // The MI list is a filtered projection of the shared SP index
+            // (`list_managed_identities` reads `sp_index_cached`), so dropping
+            // only `{tenant}|mi` re-derives it from the same stale index and a
+            // just-created managed identity stays missing. Drop the index, and
+            // the search corpus built from it — mirroring the Enterprise arm.
+            cache.invalidate(
+                CacheKind::Lists,
+                &crate::commands::applications::sp_index_key(tenant_id),
+            );
+            cache.invalidate(
+                CacheKind::Lists,
+                &crate::commands::applications::search_corpus_key(tenant_id),
+            );
         }
         // The whole-tenant prefix already covers the shared SP index.
         ListCacheKindDto::All => {
-            state
-                .cache
-                .invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|"));
+            cache.invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|"));
         }
     }
 }
@@ -169,4 +188,58 @@ pub fn set_cache_config(
         max_size,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalidate_list_cache_in;
+    use crate::commands::applications::{search_corpus_key, sp_index_hit, sp_index_store};
+    use crate::commands::managed_identity::mi_key;
+    use crate::dto::diagnostics::ListCacheKindDto;
+    use azapptoolkit_core::cache::{Cache, CacheKind};
+
+    /// Every list rebuilt from the shared SP index must drop the index on
+    /// Refresh, and the search corpus built from it; otherwise the list is
+    /// re-derived from the same stale index. The Managed Identities arm had
+    /// dropped only its own list. Scoped to the tenant being refreshed.
+    #[test]
+    fn every_refresh_of_an_sp_index_derived_list_drops_the_index() {
+        for kind in [
+            ListCacheKindDto::Apps,
+            ListCacheKindDto::Enterprise,
+            ListCacheKindDto::ManagedIdentities,
+            ListCacheKindDto::All,
+        ] {
+            let label = format!("{kind:?}");
+            let cache = Cache::new();
+            sp_index_store(&cache, "t1", Vec::new());
+            sp_index_store(&cache, "t2", Vec::new());
+            cache.put(CacheKind::Lists, search_corpus_key("t1"), &1u32);
+
+            invalidate_list_cache_in(&cache, "t1", kind);
+
+            assert!(
+                sp_index_hit(&cache, "t1").is_none(),
+                "{label}: SP index kept"
+            );
+            assert!(
+                cache
+                    .get::<u32>(CacheKind::Lists, &search_corpus_key("t1"))
+                    .is_none(),
+                "{label}: search corpus kept"
+            );
+            assert!(
+                sp_index_hit(&cache, "t2").is_some(),
+                "{label}: another tenant's SP index was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_identity_refresh_drops_its_own_list() {
+        let cache = Cache::new();
+        cache.put(CacheKind::Lists, mi_key("t1"), &1u32);
+        invalidate_list_cache_in(&cache, "t1", ListCacheKindDto::ManagedIdentities);
+        assert!(cache.get::<u32>(CacheKind::Lists, &mi_key("t1")).is_none());
+    }
 }

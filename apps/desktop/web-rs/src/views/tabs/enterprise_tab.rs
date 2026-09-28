@@ -24,7 +24,7 @@ pub enum EnterpriseTab {
 }
 
 impl EnterpriseTab {
-    /// All tabs in display order — used to build the `TabList`.
+    /// All tabs in display order — used to build the `TabBar`.
     pub const ALL: &'static [Self] = &[
         Self::Overview,
         Self::Sso,
@@ -61,7 +61,8 @@ impl EnterpriseTab {
         }
     }
 
-    /// The string value used by Thaw's `Tab` component (and persisted state).
+    /// The value `TabBar` binds to (its `TabBarItem::value`) and the persisted
+    /// state.
     pub fn value(&self) -> &'static str {
         match self {
             Self::Overview => "overview",

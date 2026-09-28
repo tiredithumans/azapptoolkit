@@ -7,6 +7,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::state::OpenItemKind;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dialogs::gallery_dialog::GalleryDialog;
 
@@ -25,7 +26,7 @@ async fn browse_pick_and_create_from_gallery() {
         &fixtures::gallery_app_summary(),
     );
 
-    let _m = ts::mount_view(|| {
+    let m = ts::mount_view(|| {
         view! {
             <GalleryDialog
                 open=Signal::derive(|| true)
@@ -54,6 +55,25 @@ async fn browse_pick_and_create_from_gallery() {
         "the picked template id is sent"
     );
     assert_eq!(call.arg_str("displayName").as_deref(), Some("Salesforce"));
+
+    // …and the new enterprise app opens on its SSO tab, where the dialog's
+    // hint says single sign-on is finished.
+    let sp = fixtures::gallery_app_summary().service_principal_id;
+    ts::wait_for(|| {
+        m.session.open_items.with_untracked(|v| {
+            v.iter()
+                .any(|i| i.kind == OpenItemKind::Enterprise && i.entity_id == sp)
+        })
+    })
+    .await;
+    assert_eq!(
+        m.session
+            .tenant_ui
+            .pending_enterprise_tab
+            .get_untracked()
+            .as_deref(),
+        Some("sso")
+    );
 }
 
 /// A search that matched nothing must SAY so. It previously fell back to "Type

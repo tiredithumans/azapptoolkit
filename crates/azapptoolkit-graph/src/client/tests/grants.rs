@@ -188,6 +188,28 @@ async fn upsert_admin_oauth2_grant_in_reads_no_grants_of_its_own() {
     assert!(grant.scope.split_whitespace().any(|s| s == "email"));
 }
 
+/// A matching pre-read grant without an `id` is a client-side contract
+/// violation, reported as `Protocol` — never a fabricated Graph 500. No mocks:
+/// any request would fall through to wiremock's 404 and come back `NotFound`.
+#[tokio::test]
+async fn upsert_in_refuses_a_matching_grant_without_an_id() {
+    let server = MockServer::start().await;
+    let existing = vec![azapptoolkit_core::models::OAuth2PermissionGrant {
+        id: None,
+        client_id: "sp-client".into(),
+        resource_id: "sp-graph".into(),
+        consent_type: "AllPrincipals".into(),
+        principal_id: None,
+        scope: "User.Read".into(),
+    }];
+    let client = make_client(&server.uri());
+    let err = client
+        .upsert_admin_oauth2_grant_in("sp-client", "sp-graph", &["email"], &existing)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::GraphError::Protocol(_)), "got {err:?}");
+}
+
 /// With no matching grant in the pre-read list, the variant creates one — and
 /// still makes no read.
 #[tokio::test]
@@ -328,4 +350,125 @@ async fn the_grant_sweep_spares_the_sign_in_activity_cache() {
         .list_service_principal_sign_in_activities()
         .await
         .unwrap();
+}
+
+/// One inbound app-role assignment on the Microsoft Graph SP.
+fn assigned_to_page() -> serde_json::Value {
+    serde_json::json!({
+        "value": [{
+            "id": "ara-1",
+            "principalId": "sp-client",
+            "resourceId": "sp-graph",
+            "appRoleId": "role-1"
+        }]
+    })
+}
+
+/// The tenant-wide inbound read (`appRoleAssignedTo` on the Graph SP) is the
+/// one the audit and the consent view both walk end to end, so they read it
+/// through the cached variant. `expect(1)` is the assertion.
+#[tokio::test]
+async fn the_tenant_wide_assigned_to_read_is_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-graph/appRoleAssignedTo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(assigned_to_page()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    assert_eq!(
+        client
+            .list_app_role_assigned_to_cached("sp-graph")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        client
+            .list_app_role_assigned_to_cached("sp-graph")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A grant write sweeps the cached inbound read, so a new or revoked
+/// application permission is never hidden behind the cache.
+#[tokio::test]
+async fn a_grant_write_invalidates_the_cached_assigned_to_read() {
+    let server = MockServer::start().await;
+    // The cold read, then the re-read after the write.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-graph/appRoleAssignedTo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(assigned_to_page()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/servicePrincipals/sp-client/appRoleAssignments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "ara-2",
+            "principalId": "sp-client",
+            "resourceId": "sp-graph",
+            "appRoleId": "role-2",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
+    client
+        .grant_app_role("sp-client", "sp-graph", "role-2")
+        .await
+        .unwrap();
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
+}
+
+/// The plain inbound read stays live: the Enterprise Access tab, the
+/// permission tester, the EWS check and the backup fallback must see a grant
+/// made in the portal on their next reload. `expect(3)` pins the absence of a
+/// cache (one cold cached read, then two live reads) even after the cached
+/// variant has seeded the same key.
+#[tokio::test]
+async fn the_plain_assigned_to_read_is_live() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-graph/appRoleAssignedTo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(assigned_to_page()))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client
+        .list_app_role_assigned_to_cached("sp-graph")
+        .await
+        .unwrap();
+    client.list_app_role_assigned_to("sp-graph").await.unwrap();
+    client.list_app_role_assigned_to("sp-graph").await.unwrap();
+}
+
+/// What one SP holds (`appRoleAssignments`) is read live every time: the
+/// pre-write `existing` checks read it, and they must see current state, not a
+/// copy up to the Permissions TTL old. `expect(2)` pins the absence of a cache.
+#[tokio::test]
+async fn per_sp_app_role_assignments_are_read_live() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/appRoleAssignments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(assigned_to_page()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client.list_app_role_assignments("sp-1").await.unwrap();
+    client.list_app_role_assignments("sp-1").await.unwrap();
 }

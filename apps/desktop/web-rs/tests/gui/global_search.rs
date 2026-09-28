@@ -1,15 +1,52 @@
 //! GUI tests for the global-search bar: the dropdown's keyboard navigation
 //! (both the "Go to" destinations and the record hits are reachable via the one
-//! roving Arrow/Enter selection, and Enter activates the highlighted row) and
-//! the focus-time corpus prewarm.
+//! roving Arrow/Enter selection, and Enter activates the highlighted row), the
+//! focus-time corpus prewarm, and what the dropdown admits it left out — a
+//! capped group's "N of M" footer, the index-cap notice, and the warning for a
+//! GUID lookup that failed rather than missed.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_web_rs::components::global_search::GlobalSearch;
+use azapptoolkit_web_rs::components::global_search::{
+    GlobalSearch, LOOKUP_DEGRADED_NOTICE, SEARCH_SESSION_EXPIRED,
+};
+use azapptoolkit_web_rs::components::index_cap_notice::corpus_cap_message;
 use azapptoolkit_web_rs::state::ActiveView;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
+
+/// The listbox's text, and its two sibling status regions': the non-option
+/// text belongs to those — the cap and lookup notices to the one above the
+/// listbox, loading / empty / failure to the one below it.
+fn listbox_text() -> String {
+    ts::query("#global-search-listbox")
+        .and_then(|e| e.text_content())
+        .unwrap_or_default()
+}
+
+fn notices_text() -> String {
+    ts::query(".global-search__results > .global-search__notices[role=status]")
+        .and_then(|e| e.text_content())
+        .unwrap_or_default()
+}
+
+fn status_text() -> String {
+    ts::query(".global-search__results > .global-search__status[role=status]")
+        .and_then(|e| e.text_content())
+        .unwrap_or_default()
+}
+
+/// The truncation / failed-lookup notices are the first thing in the (scrolling)
+/// panel, ahead of every result row — below the listbox they would sit under
+/// the fold on exactly the tenants big enough to trip the cap.
+fn assert_notices_lead_the_panel() {
+    let first = ts::query(".global-search__results")
+        .and_then(|r| r.first_element_child())
+        .expect("the results panel has children");
+    assert_eq!(first.get_attribute("role").as_deref(), Some("status"));
+    assert!(first.class_name().contains("global-search__notices"));
+}
 
 fn is_active(selector: &str) -> bool {
     ts::query(selector)
@@ -37,6 +74,11 @@ async fn arrow_down_moves_selection_through_record_hits_and_enter_opens() {
     // selection, not click-only) and the selection starts on the first.
     ts::wait_for(|| ts::query("#gs-rec-0").is_some() && ts::query("#gs-rec-1").is_some()).await;
     ts::wait_for(|| is_active("#gs-rec-0")).await;
+
+    // A whole answer admits nothing: no "N of M" footer, no index-cap notice.
+    // The negative half of `a_capped_result_renders_the_group_footer_and_the_cap_notice`.
+    assert!(ts::query(".global-search__more").is_none());
+    assert!(!ts::body_contains(&corpus_cap_message(10_000)));
 
     // The regression this guards: ArrowDown must *advance* the highlight to the
     // next record, not stay put — exercises both the record count seen by the
@@ -101,4 +143,116 @@ async fn focusing_the_bar_prewarms_the_search_corpus() {
 
     ts::focus(".global-search__field");
     ts::wait_for(|| ts::call_count("prefetch_search_corpus") == 1).await;
+}
+
+/// A capped group and a truncated corpus both have to be SAID. Their logic is
+/// unit-tested natively (`more_matches_label`, `flatten_hits`); this is the DOM
+/// wiring: the footer and the notice render, and neither joins the options.
+#[wasm_bindgen_test]
+async fn a_capped_result_renders_the_group_footer_and_the_cap_notice() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_ok(
+        "global_search",
+        &fixtures::global_search_capped(&["Contoso API", "Fabrikam Web"], 250),
+    );
+
+    let _m = ts::mount_view(|| view! { <GlobalSearch /> });
+    // "zqx" matches no destination, so every option on screen is a record.
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+
+    ts::wait_for(|| ts::query("#gs-rec-1").is_some()).await;
+    assert!(ts::body_contains("2 of 250 — keep typing to narrow"));
+    let footer = ts::query(".global-search__more").expect("the capped group's footer");
+    assert_eq!(
+        footer.get_attribute("role").as_deref(),
+        Some("presentation"),
+        "the footer is text, not something Enter could open"
+    );
+    assert_eq!(
+        ts::query_all("[role=option]").len(),
+        2,
+        "the footer must not join the roving options"
+    );
+    assert!(ts::body_contains(&corpus_cap_message(10_000)));
+
+    // A listbox holds only options or groups of them: each heading's rows sit
+    // in a `role="group"` named by that heading, and the cap notice lives in
+    // the sibling status region, not among the results.
+    let listbox = ts::query("#global-search-listbox").expect("the listbox");
+    let children = listbox.children();
+    assert!(children.length() > 0);
+    let mut labels = Vec::new();
+    for i in 0..children.length() {
+        let group = children.item(i).unwrap();
+        assert_eq!(group.get_attribute("role").as_deref(), Some("group"));
+        let id = group
+            .get_attribute("aria-labelledby")
+            .expect("each group is named by its heading");
+        let label = ts::query(&format!("#{id}")).expect("aria-labelledby resolves");
+        assert!(label.class_name().contains("global-search__group-label"));
+        labels.push(label.text_content().unwrap_or_default());
+    }
+    assert_eq!(labels, ["App Registrations"]);
+    assert!(!listbox_text().contains(&corpus_cap_message(10_000)));
+    assert!(notices_text().contains(&corpus_cap_message(10_000)));
+    assert_notices_lead_the_panel();
+}
+
+/// A GUID search whose lookups did not all answer must not read as "not in
+/// this tenant": the empty dropdown carries the failed-lookup warning.
+#[wasm_bindgen_test]
+async fn a_failed_guid_lookup_warns_instead_of_reading_as_no_match() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_ok("global_search", &fixtures::global_search_lookup_degraded());
+
+    let _m = ts::mount_view(|| view! { <GlobalSearch /> });
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+
+    ts::wait_for(|| ts::body_contains("No matching records.")).await;
+    assert!(ts::body_contains(LOOKUP_DEGRADED_NOTICE));
+    // Neither is a result: both are in a status region, outside the listbox —
+    // the warning in the one that leads the panel.
+    assert!(status_text().contains("No matching records."));
+    assert!(notices_text().contains(LOOKUP_DEGRADED_NOTICE));
+    assert!(!status_text().contains(LOOKUP_DEGRADED_NOTICE));
+    assert_notices_lead_the_panel();
+    assert!(!listbox_text().contains("No matching records."));
+    assert!(!listbox_text().contains(LOOKUP_DEGRADED_NOTICE));
+}
+
+/// A dead session used to re-render "Search failed: …" on every settled
+/// keystroke with no way forward. It now points at the Re-authenticate
+/// notification — raised once, however many keystrokes fail.
+#[wasm_bindgen_test]
+async fn a_dead_session_search_offers_reauthenticate_once() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_err(
+        "global_search",
+        &fixtures::ui_error("refresh_missing", "session expired"),
+    );
+
+    let m = ts::mount_view(|| view! { <GlobalSearch /> });
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+    ts::wait_for(|| status_text().contains(SEARCH_SESSION_EXPIRED)).await;
+    assert!(
+        !status_text().contains("Search failed"),
+        "{}",
+        status_text()
+    );
+
+    // Another settled keystroke fails the same way (past the 250 ms debounce).
+    ts::set_input_value(".global-search__field", "zqxy");
+    ts::wait_for(|| ts::call_count("global_search") == 2).await;
+    ts::tick().await;
+
+    m.session.toasts.with_untracked(|list| {
+        assert_eq!(list.len(), 1, "one lever, not one per keystroke");
+        assert_eq!(list[0].action_label.as_deref(), Some("Re-authenticate"));
+    });
 }

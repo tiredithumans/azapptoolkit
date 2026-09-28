@@ -60,7 +60,10 @@ root of inheritance.
 
 ## Declare, then assign
 
-Both SharePoint apply paths run `declare_graph_role` before granting the appRole: it patches the app
+Both SharePoint apply paths reach `declare_graph_role` through `declare_and_grant_graph_role`, which
+also owns the idempotent assign; the `Sites.Selected` conversion's org-wide strip is
+`graph_roles::strip_app_role_grants`, shared with the Exchange core. `declare_graph_role` runs
+before the appRole is granted: it patches the app
 registration's `requiredResourceAccess`, exactly as `permissions::grant_single_permission_core`
 does. This is not cosmetic. The Permissions tab renders **declarations** and joins runtime
 assignments *onto* those rows (`applications::permissions_resolve` iterates `declared`), so an

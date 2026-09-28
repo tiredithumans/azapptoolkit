@@ -17,11 +17,6 @@ use super::permissions::{
     RedundantPermission,
 };
 
-/// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
-/// caller is responsible for turning Graph IDs into permission name strings
-/// (via the bundled catalog or a live lookup).
-///
-/// `now` is a parameter so tests can use deterministic timestamps.
 /// One scoring rule's contribution: a risk-score delta plus the issues and
 /// recommendations it raises. Each `rule_*` helper returns one; `score_application`
 /// folds them in rule order so the issue / recommendation ordering is preserved
@@ -130,9 +125,9 @@ fn push_scoped_risk_issue(
 }
 
 /// Rules 5/6 (expired), 8/9 (expiring-soon, only when nothing is expired), and
-/// 7 (long-lived secrets), emitted in that order. Takes the precomputed
-/// credential subsets — `expired` is also consumed by the remediation block, so
-/// it is resolved once in `score_application`.
+/// 7 (long-lived credentials: secrets and certificates alike), emitted in that
+/// order. Takes the precomputed credential subsets — `expired` is also consumed
+/// by the remediation block, so it is resolved once in `score_application`.
 fn rule_credentials(
     expired: &[&CredentialSummary],
     expiring: &[&CredentialSummary],
@@ -186,11 +181,25 @@ fn rule_credentials(
         }
     }
     if !long_lived.is_empty() {
+        // Scored flat and once, whatever the mix of kinds; only the wording
+        // splits, so a multi-year certificate is not filed as a "secret".
         c.score += PTS_LONG_LIVED;
-        c.issues.push(format!(
-            "Long-lived secrets (>1 year): {}",
-            join_names(long_lived)
-        ));
+        let (secrets, certs): (Vec<&CredentialSummary>, Vec<&CredentialSummary>) = long_lived
+            .iter()
+            .copied()
+            .partition(|cred| cred.kind == CredentialKind::Secret);
+        if !secrets.is_empty() {
+            c.issues.push(format!(
+                "Long-lived secrets (>1 year): {}",
+                join_names(&secrets)
+            ));
+        }
+        if !certs.is_empty() {
+            c.issues.push(format!(
+                "Long-lived certificates (>1 year): {}",
+                join_names(&certs)
+            ));
+        }
         c.recommendations
             .push("Consider shorter credential lifespans and automated rotation".to_string());
     }
@@ -247,7 +256,7 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 /// - **confirmed scoped by a legacy Application Access Policy** → its own
 ///   finding plus the `MigrateApplicationAccessPolicy` fix. The access really is
 ///   confined (so it keeps the reduced scoped weight the risk rules give it —
-///   this is not an org-wide finding), but the mechanism is deprecated: AAPs are
+///   this is not an org-wide finding), but the mechanism is legacy: AAPs are
 ///   an all-or-nothing per-app gate that only constrains Entra grants, and
 ///   Microsoft's replacement is RBAC for Applications;
 /// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation. Decided
@@ -363,7 +372,7 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     }
     // Confined access, split by the mechanism doing the confining: RBAC for
     // Applications is the end state, a legacy Application Access Policy is a
-    // deprecated one to migrate off. Both keep the reduced scoped weight the
+    // legacy one to migrate off. Both keep the reduced scoped weight the
     // risk rules already applied — the policy really does confine the grant.
     let (scoped_legacy, scoped_rbac): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         mailbox_scoped.into_iter().partition(|g| {
@@ -380,7 +389,8 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
         ));
         c.recommendations.push(
             "Migrate this app to RBAC for Applications. An Application Access Policy is a \
-             deprecated per-app gate that constrains only Microsoft Entra grants — it cannot \
+             legacy per-app gate (replaced by RBAC for Applications; Microsoft has said its \
+             deprecation will be announced) that constrains only Microsoft Entra grants — it cannot \
              confine access granted through Exchange RBAC, applies to every mailbox permission \
              the app holds at once, and Microsoft's replacement is a management scope plus \
              scoped role assignments."
@@ -399,9 +409,13 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
 /// Rule 12 (advisory, no score): organization-wide SharePoint access. SharePoint
 /// scoping is encoded by the permission itself (`Sites.Selected` is scoped,
 /// every other `Sites.*` is org-wide), so no live lookup is needed. Returns the
-/// org-wide set for the ScopeSharePointAccess remediation.
-/// Takes the resource-stripped values: SharePoint scoping is encoded by the
-/// permission name alone, so unlike the mailbox rule it needs no resource.
+/// Graph (confinable) org-wide set for the ScopeSharePointAccess remediation.
+///
+/// Takes the grants and gates on each one's resource: only a Microsoft Graph
+/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries
+/// the `ScopeSharePointAccess` fix, Office 365 SharePoint Online's goes to
+/// `UNCONFINABLE_SHAREPOINT`, and the healthy note needs
+/// `is_scoped_sharepoint_resource_permission`.
 fn rule_sharepoint_advisory(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<&ResourcePermission>) {
@@ -466,26 +480,45 @@ fn rule_sharepoint_advisory(
 /// Rule 13 (advisory, no score): high-risk delegated permissions. The legacy
 /// module weighted delegated permissions only via the admin-consent check
 /// (Rule 3), so this surfaces the specific scopes without altering the score.
-fn rule_high_risk_delegated(perms: &AppPermissions) -> RuleContribution {
+///
+/// Two halves, gated differently:
+/// - the ported pair [`HIGH_RISK_DELEGATED_PERMISSIONS`] (`Constants.ps1:104-130`)
+///   is reported whenever the app requests it, consented or not;
+/// - the net-new broad-reach prefixes ([`is_risky_delegated_scope`]: `Mail.`,
+///   `Files.`, `Directory.`, `Group.`, `Sites.`, …) are reported only when an
+///   admin consented to the scope for every user (an AllPrincipals grant). A
+///   delegated scope a user consented to reaches only that user's data, so a
+///   merely declared `Mail.Read` is not the tenant-wide reach this finding names.
+///
+/// `declared` is the principal's requested scopes; `admin_consented` is the
+/// scope set its service principal holds under AllPrincipals grants.
+/// Consented-but-undeclared scopes (dynamic consent) are included. `None` means
+/// the consent state is unknown (the grants read failed): the broad prefixes
+/// then fall back to the declared scopes — over-reporting rather than hiding.
+fn rule_high_risk_delegated(
+    declared: &[String],
+    admin_consented: Option<&[String]>,
+) -> RuleContribution {
     let mut c = RuleContribution::default();
-    // The module's OWN broader predicate, not just the two-entry exact list.
-    //
-    // `is_risky_delegated_scope` already encodes what "risky delegated scope"
-    // means here — the two named scopes PLUS the broad-reach prefixes (Mail.,
-    // Files., Directory., Group., AppRoleAssignment., RoleManagement., Sites.)
-    // — and the consent-grant audit uses it. This rule matched only the exact
-    // pair, so an admin-consented `Mail.ReadWrite` or `Directory.ReadWrite.All`
-    // DELEGATED scope produced no advisory at all: two definitions of the same
-    // idea, and the narrower one was in front of the operator.
-    let high_risk_delegated: Vec<&String> = perms
-        .scope_values
-        .iter()
-        .filter(|v| is_risky_delegated_scope(v))
-        .collect();
-    if !high_risk_delegated.is_empty() {
+    // The module's OWN broader predicate, not just the two-entry exact list:
+    // `is_risky_delegated_scope` is what "risky delegated scope" means here, and
+    // the consent-grant audit uses it. Declared order first, then any consented
+    // scope the manifest does not declare, each named once.
+    let mut hits: Vec<&str> = Vec::new();
+    for v in declared.iter().chain(admin_consented.unwrap_or_default()) {
+        let v = v.as_str();
+        let flagged = HIGH_RISK_DELEGATED_PERMISSIONS.contains(&v)
+            || (is_risky_delegated_scope(v)
+                && admin_consented.is_none_or(|set| set.iter().any(|s| s == v)));
+        if flagged && !hits.contains(&v) {
+            hits.push(v);
+        }
+    }
+    if !hits.is_empty() {
         c.issues.push(format!(
-            "High-risk delegated permissions: {}",
-            join_refs(&high_risk_delegated)
+            "{} {}",
+            issue::HIGH_RISK_DELEGATED_PERMS,
+            join_refs(&hits)
         ));
         c.recommendations.push(
             "Review high-risk delegated permissions; prefer narrowly-scoped delegated permissions and user consent where appropriate"
@@ -593,31 +626,33 @@ fn rule_external_exposure(
 ) -> RuleContribution {
     let mut c = RuleContribution::default();
     let audience = app.sign_in_audience.as_deref().unwrap_or_default();
-    let (multitenant, personal) = match audience {
-        "AzureADMultipleOrgs" => (true, false),
-        "AzureADandPersonalMicrosoftAccount" | "PersonalMicrosoftAccount" => (true, true),
+    let reach = match audience {
+        "AzureADMultipleOrgs" => "any Entra tenant",
+        "AzureADandPersonalMicrosoftAccount" => "any Entra tenant and personal Microsoft accounts",
+        // Personal Microsoft accounts ONLY — no other Entra directory can
+        // consent, so naming "any Entra tenant" here would be false.
+        "PersonalMicrosoftAccount" => "personal Microsoft accounts",
         // "AzureADMyOrg" and anything unrecognised: treat as single-tenant. An
         // unknown value must never *inflate* a score.
-        _ => (false, false),
+        _ => return c,
     };
-    if !multitenant || !(has_app_permissions || has_credentials) {
+    if !(has_app_permissions || has_credentials) {
         return c;
     }
 
     c.score += PTS_MULTITENANT_EXPOSURE;
-    let reach = if personal {
-        "any Entra tenant and personal Microsoft accounts"
-    } else {
-        "any Entra tenant"
-    };
     c.issues.push(format!(
         "{} — this app can be consented to from {reach}, so its permissions and credentials are not confined to this directory",
         issue::MULTITENANT_AUDIENCE
     ));
-    c.recommendations.push(
-        "Confirm this app is intended to be multi-tenant. If it is only used by this organization, set its sign-in audience to 'Accounts in this organizational directory only' (AzureADMyOrg)"
-            .to_string(),
-    );
+    let intent = if audience == "PersonalMicrosoftAccount" {
+        "to accept personal Microsoft accounts"
+    } else {
+        "to be multi-tenant"
+    };
+    c.recommendations.push(format!(
+        "Confirm this app is intended {intent}. If it is only used by this organization, set its sign-in audience to 'Accounts in this organizational directory only' (AzureADMyOrg)"
+    ));
 
     if app.verified_publisher.as_ref().is_none_or(|p| {
         p.verified_publisher_id
@@ -649,7 +684,7 @@ fn rule_redundant_permissions(
     // confines the narrower one if EVERY grant of that name is confined. A
     // `Mail.ReadWrite` scoped on Graph while its unscopable legacy Exchange
     // Online namesake survives still reaches every mailbox.
-    // The GRANTS, not `perms.app_role_values()`: stripping the resource here
+    // The GRANTS, not a resource-stripped value list: stripping the resource here
     // let a Graph permission pair with a same-named one on the legacy Office 365
     // resource, which covers nothing of it. See `redundant_app_permissions`.
     let redundant =
@@ -687,7 +722,7 @@ fn rule_redundant_permissions(
 /// permission so the Rule-1/2 advice is actionable. Admin-judged, so never a
 /// one-click remediation.
 /// Takes the GRANTS, not bare values. It was the last rule reading
-/// `perms.app_role_values()`, and stripping the resource made it wrong twice
+/// a resource-stripped value list, and stripping the resource made it wrong twice
 /// over: the narrower alternatives in [`SUBSUMED_APP_PERMISSIONS`] are Microsoft
 /// Graph permissions, so pointing an Office 365 Exchange Online `Mail.Read` at
 /// "Mail.ReadBasic" named a permission that resource does not expose; and a
@@ -868,6 +903,11 @@ pub fn disable_sign_in_remediation() -> RemediationAction {
     }
 }
 
+/// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
+/// caller is responsible for turning Graph IDs into permission name strings
+/// (via a live resource-SP lookup).
+///
+/// `now` is a parameter so tests can use deterministic timestamps.
 pub fn score_application(
     app: &Application,
     sp_enabled: Option<bool>,
@@ -907,12 +947,13 @@ pub fn score_application(
         .collect();
     // Credentials that STILL WORK — which includes one with no end date.
     //
-    // `credential_status(None)` is `Unknown`, and counting only `Active` meant a
-    // never-expiring credential counted as nothing: an app holding one expired
-    // secret plus one that never expires reported "All credentials expired" and
-    // scored as though it had no working credential at all. That reads as a dead
-    // app, so an operator stops looking — while the app in fact holds a
-    // permanent, never-rotating credential, which is the one most worth finding.
+    // `CredentialStatus::from_days_to_expiry(None)` is `Unknown`, and counting
+    // only `Active` meant a never-expiring credential counted as nothing: an
+    // app holding one expired secret plus one that never expires reported "All
+    // credentials expired" and scored as though it had no working credential at
+    // all. That reads as a dead app, so an operator stops looking — while the
+    // app in fact holds a permanent, never-rotating credential, which is the one
+    // most worth finding.
     // `ExpiringSoon` is deliberately NOT counted here: the branches below use
     // `active_count == 0` to mean "nothing but expiring credentials left", and
     // folding it in would silence that warning entirely.
@@ -951,7 +992,10 @@ pub fn score_application(
     acc.merge(mail_contrib);
     let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
     acc.merge(sharepoint_contrib);
-    acc.merge(rule_high_risk_delegated(perms)); // Rule 13
+    acc.merge(rule_high_risk_delegated(
+        &perms.scope_values,
+        perms.admin_consented_scopes.as_deref(),
+    )); // Rule 13
 
     let has_app_permissions = !perms.app_role_grants.is_empty();
     let has_credentials = !all_creds.is_empty();
@@ -1010,6 +1054,9 @@ pub fn score_application(
         unused: false,
         sign_in_report_available: false,
         principal_kind: AuditPrincipalKind::Application,
+        // An application lives in this tenant; the owner-tenant column is for
+        // SP-only rows.
+        app_owner_organization_id: None,
     }
 }
 
@@ -1026,7 +1073,8 @@ pub struct SpAuditInput {
     pub created_date_time: Option<DateTime<Utc>>,
     pub account_enabled: Option<bool>,
     /// Home tenant of the owning application — surfaced as the item's
-    /// `publisher` so the table/CSV show where a foreign app lives.
+    /// `app_owner_organization_id` (its own export column), not `publisher`,
+    /// which is an application's verified publisher domain.
     pub app_owner_organization_id: Option<String>,
     /// Graph `servicePrincipalType`; `ManagedIdentity` selects
     /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
@@ -1040,8 +1088,10 @@ pub struct SpAuditInput {
 /// Credential rules (5-9) and manifest rules (10, 14-18, downgrade pointers)
 /// are deliberately absent — credentials and the manifest live on the
 /// application object in its home tenant, which this tenant can neither see
-/// nor fix. `perms.app_role_values` are the SP's *granted* app roles (its
-/// `appRoleAssignments`), not a declared manifest.
+/// nor fix. `perms.app_role_grants` are the SP's *granted* app roles (its
+/// `appRoleAssignments`), not a declared manifest, and `perms.scope_values`
+/// are its admin-consented (AllPrincipals) delegated scopes — so Rule 13 treats
+/// them as the consented set and ignores `perms.admin_consented_scopes`.
 pub fn score_service_principal(
     sp: &SpAuditInput,
     perms: &AppPermissions,
@@ -1062,7 +1112,11 @@ pub fn score_service_principal(
     acc.merge(mail_contrib);
     let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
     acc.merge(sharepoint_contrib);
-    acc.merge(rule_high_risk_delegated(perms)); // Rule 13
+    // An SP row's `scope_values` already ARE its AllPrincipals grant set.
+    acc.merge(rule_high_risk_delegated(
+        &perms.scope_values,
+        Some(&perms.scope_values),
+    )); // Rule 13
 
     // No expired credentials (unknowable), no redundant-permission removal
     // (its remediation edits the application manifest), and no add-owner
@@ -1083,7 +1137,10 @@ pub fn score_service_principal(
         app_id: sp.app_id.clone(),
         object_id: sp.sp_object_id.clone(),
         created_date: sp.created_date_time,
-        publisher: sp.app_owner_organization_id.clone(),
+        // The owner tenant is a GUID, not a publisher domain: it rides its own
+        // field so the Publisher column means one thing on every row.
+        publisher: None,
+        app_owner_organization_id: sp.app_owner_organization_id.clone(),
         sign_in_audience: None,
         risk_score: acc.score,
         risk_level: RiskLevel::from_score(acc.score),

@@ -17,7 +17,6 @@ linked doc before editing that subsystem.**
 | **Task runner** | `just` — recipes in `/justfile`, `just --list` describes each; Tauri's hooks call them too, so flags never drift. |
 | **Setup / Dev** | `just setup` (idempotent OS-aware bootstrap; bodies in `scripts/`) · `just dev` (`cargo tauri dev`) |
 | **Inner loop** | `just check` (type-check both trees, no codegen) · `just test-crate <crate> [-- <filter>]` |
-| **Verify** | `just verify` = the CI gates in CI order, plus the browser GUI tests when Chrome + chromedriver are present (LOUD skip otherwise). `just verify-ui` makes them mandatory; `just verify-full` adds the audit/deny gates (network). |
 | **Workspace** | 9 crates (8 in `crates/` + `src-tauri`); the frontend (`web-rs`) is excluded, builds via Trunk, own lockfile. |
 
 Deep-dives in `docs/architecture/` — read the one for the subsystem you touch:
@@ -45,7 +44,7 @@ crates/                              # shared Rust libraries
 ├── azapptoolkit-exchange/           # Exchange Admin API; `verdict.rs` = pure mailbox-scope decisions
 ├── azapptoolkit-keyvault/           # Azure Key Vault secrets client
 ├── azapptoolkit-arm/                # ARM + Azure Monitor Logs query (managed-identity)
-└── azapptoolkit-permissions/        # bundled permissions catalog (data/) + Graph fallback
+└── azapptoolkit-permissions/        # resource directory (data/); permissions resolve live
 
 apps/desktop/
 ├── src-tauri/                       # backend (main process)
@@ -84,7 +83,7 @@ docs/CHANGELOG-archive.md            # releases <= 0.26.3 (split out of CHANGELO
 
 ## Canonical commands
 
-Every build/dev/verify command is a `just` recipe (`just --list` describes each; never hand-type `cargo`). Day to day:
+Every build/dev/verify command is a `just` recipe (never hand-type `cargo`). Day to day:
 `just check` · `just test-crate <crate>` · `just verify` (before declaring a change done) ·
 `just verify-full` (CI parity) · `just clean` (both build trees). Browser-gated: `just web-itest`,
 `just web-itest-size`. Pages demo: `just web-build-pages [BASE]`. Release builds are per-host
@@ -98,18 +97,18 @@ bake them via `.env`).
 
 - **Tauri commands:** `#[tauri::command] async fn` → `State<'_, AppState>` → `Result<T, UiError>`; frontend args use `#[serde(rename_all = "camelCase")]`.
 - **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, sign-out sweeps every kind, the two tenant-wide indexes are read only through their typed accessors, and a cache-only command must prove the session. → [caching-and-search.md](docs/architecture/caching-and-search.md)
-- **Invalidate caches only on `Ok`** (`invalidate_app_lists` / `invalidate_app_credentials` / `invalidate_app_details`); a pinned index takes `generation_for` before the fetch and stores via `*_if_current`. Pinned in `repo_invariants/cache.rs`. → [caching-and-search.md](docs/architecture/caching-and-search.md)
+- **Invalidate caches only on `Ok`** (tiers: `invalidate_app_lists` / `_credentials` / `_detail_state` / `_details`); a pinned index takes `generation_for` before the fetch and stores via `*_if_current`. Pinned in `repo_invariants/cache.rs`. → [caching-and-search.md](docs/architecture/caching-and-search.md)
 - **`CacheKind::ServicePrincipal` self-invalidates in the graph client**, never in the command aggregators.
 - **Long-running writes stop on Cancel AND on a dead session:** `claim()` a `CancelToken` before the first await, latch `dispatch::SessionDead`, flag the result incomplete; fan-outs never return a partial result. Pinned per call site in `repo_invariants/{cancel,fanout}.rs`. → [caching-and-search.md](docs/architecture/caching-and-search.md)
 - **Batched Graph fan-out + adaptive throttle** (`$batch` + `ConcurrencyThrottle` via `ThrottleGuard::attach`, degrading to per-object reads); never a hand-rolled loop; `$expand` + advanced query fails silently. → [caching-and-search.md](docs/architecture/caching-and-search.md)
 - **Every paged read sends `$top`** (`client::MAX_PAGE_SIZE`; `/applications` sends `DEFAULT_APP_PAGE_SIZE`) — paging is serial.
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`:** re-read live, mutate, write the whole array back; disable then remove; exposed app roles edit the paired application as raw JSON; bust with `invalidate_app_details` only.
 - **camelCase vs snake_case:** Graph domain models are camel (no serde rename), DTOs/bindings snake; `Application` + `AuditItem` cross IPC as-is, so a rename is a wire-format change.
-- **One definition per policy:** HTTP error taxonomy from `core::http_error_enum!`, retry budget from `core::http_retry` (incl. `$batch`), re-auth-fatal codes only in `core::reauth::REAUTH_FATAL_CODES`.
+- **One definition per policy:** HTTP errors from `core::http_error_enum!` (Exchange: hand-rolled, conformance-tested), retries from `core::http_retry` (incl. `$batch`), re-auth-fatal codes only in `core::reauth::REAUTH_FATAL_CODES`.
 - **The `BearerProvider` boundary carries the auth classification** as `core::token::TokenError { code, message }` — never a bare `String` — with `token_adapter::token_error` as the sole mapping.
-- **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); two writers read-modify-write via `UserSettings::stored`; `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
+- **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); writers use only `UserSettings::mutate` (fails closed); `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
 - **Build-time config baking:** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override. **CSP governs the webview only** — backend reqwest egress needs no `connect-src` change.
-- **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
+- **Permission definitions resolve live** via `resolve_resource_sp()`; `azapptoolkit-permissions/data/` bundles only the picker's resource directory.
 
 ### Auth
 
@@ -130,7 +129,7 @@ bake them via `.env`).
 - **AAP migration is guarded, not mechanical:** `RestrictAccess` only, one batch per app, fail closed; planner `azapptoolkit-exchange::aap`. → [exchange-scoping.md](docs/architecture/exchange-scoping.md)
 - **Scoped grants reuse shared cores** and grant scoped access before stripping org-wide; scope + group names come from the two per-tenant patterns via `load_tenant_defaults`; membership changes don't invalidate caches. → [exchange-scoping.md](docs/architecture/exchange-scoping.md)
 - **Repointing a management scope is explicit and fail-closed:** `ensure_management_scope` is create-only, `set_management_scope_filter` the sole filter mutator, only for a proven `MemberOfGroup` OR-chain. → [exchange-scoping.md](docs/architecture/exchange-scoping.md)
-- **Unified "Grant access" wizard** (`ScopeWizard`): `mechanism` is `Some(kind)` only when every cart item is an Application permission of one `ScopeKind`; adding a mechanism touches exactly three places. → [audit-findings-and-remediation.md](docs/architecture/audit-findings-and-remediation.md)
+- **Unified "Grant access" wizard** (`ScopeWizard`): `mechanism` is `Some(kind)` only when every cart item is an Application permission of one `ScopeKind`; a new mechanism's touch points are listed there. → [audit-findings-and-remediation.md](docs/architecture/audit-findings-and-remediation.md)
 - **Audit signals are structured, not text:** facets/cards/groups key off `AuditItem` fields; a cancelled/truncated/degraded run is never cached nor shown as all-clear, and its export says so; a backup records what it missed. → [audit-findings-and-remediation.md](docs/architecture/audit-findings-and-remediation.md)
 - **SP-only principals are scored but are NOT bulk targets:** `AuditItem.principal_kind` routes to the SP-only cores, never `remediate_scope_*`. → [audit-findings-and-remediation.md](docs/architecture/audit-findings-and-remediation.md)
 - **Bulk remediations run the single-app cores sequentially** via `run_bulk_seq` (not `dispatch_capped`), claim a `CancelToken`, degrade to `BulkError`, stop on a re-auth-fatal code. → [audit-findings-and-remediation.md](docs/architecture/audit-findings-and-remediation.md)
@@ -170,7 +169,7 @@ bake them via `.env`).
 Run the gates CI runs before declaring a change done, via the `just` recipes:
 
 1. `just verify` — fmt → clippy → test → web-fmt → web-clippy → web-test → web-build, then the browser GUI tests when this box can run them (`just verify-ui` to require them).
-2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny` (required CI checks) and the shard-size ceiling.
+2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny`/`machete` (required CI checks) + the shard ceiling.
 3. CI-side only: actionlint, shellcheck of `.claude/hooks/` + a whole-history secrets scan (never gated on the change detector), CodeQL (build-mode `none`; macro expansion is a known gap).
 
 The browser GUI tests (`just web-itest`) are the frontend's only behavioural gate: renaming a CSS class, aria-label, or on-screen text a test references fails CI. Sharding + footguns: [frontend-workspace.md](docs/architecture/frontend-workspace.md). For behaviour no test can prove, run `just dev` and exercise the view.

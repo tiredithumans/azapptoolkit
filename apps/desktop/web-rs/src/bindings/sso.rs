@@ -1,10 +1,10 @@
 //! Single-sign-on (SAML / OIDC) setup IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
-use crate::bindings::ServicePrincipalIdArgs;
+use crate::bindings::{AppIdArgs, ServicePrincipalIdArgs, TenantArg};
 pub use azapptoolkit_dto::sso::*;
 
 #[derive(Serialize)]
@@ -62,15 +62,15 @@ pub async fn get_sso_config(
 struct SetSsoModeArgs<'a> {
     tenant_id: &'a str,
     service_principal_id: &'a str,
-    mode: &'a str,
+    mode: SsoMode,
 }
 
-/// Sets `preferredSingleSignOnMode`: `"saml"`, `"oidc"`, or anything else
-/// (e.g. `""`) to disable SSO.
+/// Sets `preferredSingleSignOnMode`: [`SsoMode::Saml`] or [`SsoMode::Oidc`];
+/// [`SsoMode::Disabled`] clears it (SSO off).
 pub async fn set_sso_mode(
     tenant_id: &str,
     service_principal_id: &str,
-    mode: &str,
+    mode: SsoMode,
 ) -> Result<(), UiError> {
     invoke_result(
         "set_sso_mode",
@@ -175,17 +175,11 @@ pub async fn stage_saml_signing_certificate(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TenantArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Tenant-wide SAML signing-certificate expiry board, soonest first.
 pub async fn list_sso_certificate_expirations(
     tenant_id: &str,
 ) -> Result<Vec<SsoCertificateRowDto>, UiError> {
-    invoke_result("list_sso_certificate_expirations", TenantArgs { tenant_id }).await
+    invoke_result("list_sso_certificate_expirations", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]
@@ -207,23 +201,12 @@ pub async fn save_sso_certificates_to_file(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProbeMetadataArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
-}
-
 /// Phase 2 — reads what the app's federation metadata endpoint publishes.
 pub async fn probe_federation_metadata(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<MetadataProbeDto, UiError> {
-    invoke_result(
-        "probe_federation_metadata",
-        ProbeMetadataArgs { tenant_id, app_id },
-    )
-    .await
+    invoke_result("probe_federation_metadata", AppIdArgs { tenant_id, app_id }).await
 }
 
 #[derive(Serialize)]
@@ -370,33 +353,6 @@ pub async fn set_oidc_redirect_uris(
             object_id,
             redirect_uris,
             spa_redirect_uris,
-        },
-    )
-    .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SummaryArgs<'a> {
-    tenant_id: &'a str,
-    service_principal_id: &'a str,
-    protocol: &'a str,
-}
-
-/// Recomputes the app-owner summary for an existing app. The backend returns an
-/// untagged JSON object; callers deserialize into [`SamlSsoSummary`] or
-/// [`OidcSsoSummary`] based on `protocol`.
-pub async fn get_sso_summary(
-    tenant_id: &str,
-    service_principal_id: &str,
-    protocol: &str,
-) -> Result<serde_json::Value, UiError> {
-    invoke_result(
-        "get_sso_summary",
-        SummaryArgs {
-            tenant_id,
-            service_principal_id,
-            protocol,
         },
     )
     .await

@@ -19,11 +19,12 @@ use azapptoolkit_auth::AuthError;
 use azapptoolkit_core::capabilities::{
     CAPABILITIES, Capability, RoleDetect, matched_directory_role,
 };
+use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::ActiveDirectoryRole;
 
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
-use crate::state::AppState;
+use crate::state::{AppState, ConsentFeature};
 
 /// Max concurrent ARM calls for the per-subscription role-assignment sweep.
 /// Matches the Key Vault / managed-identity sweeps so a large estate stays
@@ -82,6 +83,7 @@ pub async fn check_readiness(
     let active_roles = active_roles.unwrap_or_default();
     let scope_verdicts: HashMap<&'static str, Verdict> = scope_verdicts.into_iter().collect();
 
+    let cloud = state.auth.cloud();
     let mut items = Vec::with_capacity(CAPABILITIES.len());
     for cap in CAPABILITIES {
         let (role_verdict, role_detail) = role_for(
@@ -97,7 +99,7 @@ pub async fn check_readiness(
                     .get(feature)
                     .copied()
                     .unwrap_or(Verdict::Unknown);
-                (verdict, scope_detail_text(cap, verdict))
+                (verdict, scope_detail_text(cap, verdict, cloud))
             }
             None => (Verdict::Have, "Included in the sign-in scopes.".to_string()),
         };
@@ -119,6 +121,7 @@ pub async fn check_readiness(
     Ok(ReadinessReport {
         items,
         directory_roles_indeterminate,
+        pim_activation_url: Some(state.auth.cloud().pim_my_roles_url()),
     })
 }
 
@@ -144,12 +147,17 @@ fn role_for(
             // Matched by roleTemplateId (with a name fallback) — a name-only
             // match reported active roles as missing in tenants whose
             // directoryRole objects carry legacy display names.
+            // Missing covers two states `/me` can't tell apart: PIM-eligible
+            // (activate it) and not assigned (ask for an assignment). Telling
+            // them apart needs `RoleEligibilitySchedule.Read.Directory`, a scope
+            // the app deliberately doesn't request, so the text names both.
             match matched_directory_role(cap, active_roles) {
                 Some(matched) => (Verdict::Have, format!("Active role: {matched}.")),
                 None => (
                     Verdict::Missing,
                     format!(
-                        "Activate one of: {}.",
+                        "Not active. If you're eligible in PIM, activate one of: {}. Otherwise \
+                         ask your role administrator for an assignment.",
                         cap.role_names().collect::<Vec<_>>().join(", ")
                     ),
                 ),
@@ -253,10 +261,12 @@ async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<H
     Some(ids)
 }
 
-fn scope_detail_text(cap: &Capability, verdict: Verdict) -> String {
+/// The scope half's detail line. A missing scope is named in `cloud`'s form
+/// ([`Capability::display_scopes`]) — the audience the probe actually asked for.
+fn scope_detail_text(cap: &Capability, verdict: Verdict, cloud: CloudEnvironment) -> String {
     match verdict {
         Verdict::Have => "Scope consented.".to_string(),
-        Verdict::Missing => format!("Not consented: {}.", cap.scopes.join(", ")),
+        Verdict::Missing => format!("Not consented: {}.", cap.display_scopes(cloud).join(", ")),
         Verdict::Unknown => "Couldn't determine scope consent.".to_string(),
     }
 }
@@ -266,27 +276,17 @@ fn scope_detail_text(cap: &Capability, verdict: Verdict) -> String {
 /// ([`Verdict::Missing`]); anything else ⇒ indeterminate ([`Verdict::Unknown`]).
 /// This is a *silent* refresh-token acquisition — it never prompts and never
 /// purges the refresh token on a `consent_required` (the AGENTS.md invariant), so
-/// probing an un-consented optional scope is side-effect-free. Graph scopes use
-/// the CAE path (matching the Graph adapter) so the cached token is reused;
-/// resource audiences (ARM / Key Vault / Exchange) don't.
+/// probing an un-consented optional scope is side-effect-free. It goes through
+/// [`AppState::ensure_feature_token`] — the same [`ConsentFeature`] scope set and
+/// CAE derivation the `ensure_*` wrappers use — so a readiness pre-warm can
+/// never seed a token in a different CAE slot from the adapter that later reuses
+/// it (a hand-kept feature list here once probed `group_membership` non-CAE).
 async fn probe_scope(state: &AppState, tenant_id: &str, feature: &str) -> Verdict {
-    let Some(scopes) = state.consent_scopes_for(feature) else {
+    let Some(feature) = ConsentFeature::parse(feature) else {
         return Verdict::Unknown;
     };
-    let is_graph = matches!(
-        feature,
-        "write" | "sync" | "audit_log" | "policy" | "policy_write" | "sharepoint"
-    );
-    let result = if is_graph {
-        state
-            .auth
-            .access_token_for_scopes_cae(tenant_id, &scopes, None)
-            .await
-    } else {
-        state.auth.access_token_for_scopes(tenant_id, &scopes).await
-    };
-    match result {
-        Ok(_) => Verdict::Have,
+    match state.ensure_feature_token(tenant_id, feature).await {
+        Ok(()) => Verdict::Have,
         Err(AuthError::ConsentRequired(_)) => Verdict::Missing,
         Err(_) => Verdict::Unknown,
     }
@@ -355,6 +355,15 @@ mod tests {
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Cloud Application Administrator"));
+    }
+
+    #[test]
+    fn missing_role_detail_covers_eligible_and_unassigned() {
+        let (v, detail) = role_for(capability("provisioning_read").unwrap(), &[], false, None);
+        assert_eq!(v, Verdict::Missing);
+        assert!(detail.contains("PIM"), "{detail}");
+        assert!(detail.contains("assignment"), "{detail}");
+        assert!(detail.contains("Hybrid Identity Administrator"), "{detail}");
     }
 
     #[test]
@@ -451,7 +460,42 @@ mod tests {
     #[test]
     fn scope_detail_names_missing_scopes() {
         let cap = capability("audit_reports").unwrap();
-        let text = scope_detail_text(cap, Verdict::Missing);
+        let text = scope_detail_text(cap, Verdict::Missing, CloudEnvironment::Commercial);
         assert!(text.contains("AuditLog.Read.All"));
+    }
+
+    #[test]
+    fn scope_detail_names_the_configured_clouds_audience() {
+        let cap = capability("keyvault_secrets").unwrap();
+        let text = scope_detail_text(cap, Verdict::Missing, CloudEnvironment::UsGov);
+        assert!(text.contains("vault.usgovcloudapi.net"), "{text}");
+        assert!(!text.contains("vault.azure.net"), "{text}");
+    }
+
+    /// The checklist's "Not consented: …" text names exactly the resource
+    /// audience the probe requests, so the two can't drift apart again.
+    #[test]
+    fn displayed_resource_scopes_are_the_probed_ones() {
+        let state = AppState::for_test("t", "http://127.0.0.1:1");
+        let cloud = state.auth.cloud();
+        let mut checked = 0;
+        for cap in CAPABILITIES {
+            let Some(feature) = cap.scope_feature else {
+                continue;
+            };
+            if !matches!(feature, "keyvault" | "arm" | "log_analytics" | "exchange") {
+                continue;
+            }
+            let probed = state.consent_scopes_for(feature).unwrap();
+            for shown in cap.display_scopes(cloud) {
+                assert!(
+                    probed.contains(&shown),
+                    "{}: shows {shown} but probes {probed:?}",
+                    cap.key
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "only {checked} resource scopes checked");
     }
 }

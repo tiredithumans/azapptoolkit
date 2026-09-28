@@ -18,12 +18,19 @@
 //! palette.
 //!
 //! The dropdown says what it left out. The backend caps each kind at ten rows
-//! and filters a corpus built from the capped service-principal index, so
-//! without the per-group "10 of 47" footer and the index-cap `Callout` this is
-//! the fastest input in the app *and* the one that can quietly lie: ten rows
-//! reads as "there are ten", and a bare "No matches." reads as "not in this
-//! tenant". Neither annotation is focusable or part of the roving selection —
-//! see `render_group`.
+//! and filters a corpus built from the two capped tenant-wide indexes, and a
+//! pasted GUID runs exact lookups that can fail for reasons other than "not
+//! found". So without the per-group "10 of 47" footer, the index-cap `Callout`
+//! and the failed-lookup `Callout` this is the fastest input in the app *and*
+//! the one that can quietly lie: ten rows reads as "there are ten", and a bare
+//! "No matches." reads as "not in this tenant". None of these annotations is
+//! focusable or part of the roving selection — see `render_group`. None of the
+//! non-result text renders inside the listbox, whose children are only
+//! `role="group"`s (one per heading, named via `aria-labelledby`) of
+//! `role="option"`s: the two notices sit in a `role="status"` region *above*
+//! it — first in the scrolling panel, so a capped tenant's warning is never
+//! below the fold — and "Searching…" / "No matching records." / "Search
+//! failed" in a second `role="status"` region below it.
 //!
 //! **The roving index spans both kinds.** Destinations are selectable, so
 //! unlike the group footers they *do* enter `flatten_hits`, and the record
@@ -39,10 +46,12 @@ use web_sys::HtmlInputElement;
 
 use crate::bindings::search::{self, GlobalSearchResults, SearchHit};
 use crate::components::icon::{Icon, IconName};
-use crate::components::index_cap_notice::index_cap_message;
+use crate::components::index_cap_notice::corpus_cap_message;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::Callout;
+use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_deferred_blur::use_deferred_blur;
 use crate::state::{ActiveView, OpenItemKind, use_session};
 
 /// How many "Go to" rows the group renders before the footer takes over.
@@ -55,14 +64,29 @@ use crate::state::{ActiveView, OpenItemKind, use_session};
 /// capped record group does.
 const GOTO_LIMIT: usize = 8;
 
+/// The warning a GUID search shows when one of its exact lookups failed for a
+/// reason other than "not found" (`GlobalSearchResults::lookup_degraded`) — the
+/// one home for the wording, which the GUI test reads too.
+pub const LOOKUP_DEGRADED_NOTICE: &str = "A directory lookup failed, so these results may be \
+     incomplete — try the search again in a moment.";
+
+/// What the status row shows when a search failed because the session is dead
+/// (`UiError::is_reauth_fatal`): the lever is the Re-authenticate notification
+/// the failure raised, so the row points at it instead of echoing the raw
+/// error. The one home for the wording, which the GUI test reads too.
+pub const SEARCH_SESSION_EXPIRED: &str =
+    "Your session has expired — use Re-authenticate in the notification, then search again.";
+
 #[component]
 pub fn GlobalSearch() -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
 
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 250);
+    let query = use_debounced(raw_query.into(), TYPEAHEAD_DEBOUNCE_MS);
     let focused = RwSignal::new(false);
+    // Delay closing so a click on a result registers first.
+    let on_blur = use_deferred_blur(focused);
     // Keyboard roving selection over the destination + record hits (Arrow/Enter).
     let selected = RwSignal::new(0usize);
     let input_ref = NodeRef::<leptos::html::Input>::new();
@@ -94,10 +118,19 @@ pub fn GlobalSearch() -> impl IntoView {
                     return None;
                 }
                 let t = tenant?;
+                // A dead session raises the Re-authenticate lever — once, however
+                // many keystrokes fail: the recovery toast dedupes on its key.
+                // Written after the await, so it tracks nothing.
                 Some(
                     search::global_search(&t.tenant_id, trimmed)
                         .await
-                        .map_err(|e| e.message),
+                        .map_err(|e| {
+                            if session.report_if_session_dead(&e) {
+                                SEARCH_SESSION_EXPIRED.to_string()
+                            } else {
+                                e.message
+                            }
+                        }),
                 )
             }
         });
@@ -216,19 +249,7 @@ pub fn GlobalSearch() -> impl IntoView {
                         focused.set(true);
                         warm_corpus();
                     }
-                    on:blur=move |_| {
-                        let win = web_sys::window();
-                        if let Some(w) = win {
-                            let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
-                                focused.set(false);
-                            });
-                            let _ = w
-                                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    cb.unchecked_ref::<js_sys::Function>(),
-                                    150,
-                                );
-                        }
-                    }
+                    on:blur=on_blur
                     on:keydown=on_keydown
                 />
                 // Clear (×) — shown only when the field has text. `mousedown` +
@@ -259,40 +280,85 @@ pub fn GlobalSearch() -> impl IntoView {
                 if !dropdown_visible.get() {
                     return ().into_any();
                 }
+                // The positioned dropdown holds three siblings: a `role="status"`
+                // region for the cap / lookup notices, the listbox, whose
+                // children are only `role="group"`s of `role="option"`s, and a
+                // second `role="status"` region for the rest of what is not a
+                // result (loading, empty, failure). ARIA allows nothing else
+                // inside a listbox, and a screen reader would otherwise announce
+                // "Searching…" as if it were a hit. The notices come FIRST: the
+                // panel scrolls (up to ~40 rows), and a truncation warning below
+                // the fold is one nobody reads.
                 view! {
-                    <div class="global-search__results" role="listbox" id="global-search-listbox">
-                        // Destinations first, and outside the `Suspense`: they
-                        // are a local table match, so making them wait on the
-                        // directory search would be latency for nothing.
-                        {move || {
-                            let (rows, total) = goto_rows(&raw_query.get());
-                            render_goto_group(rows, total, session, raw_query, selected)
-                        }}
-                        // Record hits (App Registrations / Enterprise Applications /
-                        // Managed Identities), resolved from the async search.
-                        <Suspense fallback=move || {
-                            view! { <div class="global-search__empty">"Searching…"</div> }
-                        }>
-                            {move || Suspend::new(async move {
-                                match results.await {
-                                    None => view! {
-                                        <div class="global-search__empty">
-                                            "Type a name or GUID."
-                                        </div>
+                    <div class="global-search__results">
+                        <div class="global-search__notices" role="status">
+                            <Suspense fallback=|| ()>
+                                {move || Suspend::new(async move {
+                                    match results.await {
+                                        Some(Ok(r)) => view_result_notices(&r),
+                                        None | Some(Err(_)) => ().into_any(),
                                     }
-                                        .into_any(),
-                                    Some(Err(msg)) => view! {
-                                        <div class="global-search__empty">
-                                            {format!("Search failed: {msg}")}
-                                        </div>
+                                })}
+                            </Suspense>
+                        </div>
+                        <div role="listbox" id="global-search-listbox">
+                            // Destinations first, and outside the `Suspense`:
+                            // they are a local table match, so making them wait
+                            // on the directory search would be latency for
+                            // nothing.
+                            {move || {
+                                let (rows, total) = goto_rows(&raw_query.get());
+                                render_goto_group(rows, total, session, raw_query, selected)
+                            }}
+                            // Record hits (App Registrations / Enterprise
+                            // Applications / Managed Identities), resolved from
+                            // the async search. The loading text lives in the
+                            // status region below, not here.
+                            <Suspense fallback=|| ()>
+                                {move || Suspend::new(async move {
+                                    match results.await {
+                                        Some(Ok(r)) => {
+                                            view_result_groups(
+                                                r,
+                                                session,
+                                                raw_query,
+                                                selected,
+                                                goto_n,
+                                            )
+                                        }
+                                        None | Some(Err(_)) => ().into_any(),
                                     }
-                                        .into_any(),
-                                    Some(Ok(r)) => {
-                                        view_results(r, session, raw_query, selected, goto_n)
+                                })}
+                            </Suspense>
+                        </div>
+                        <div class="global-search__status" role="status">
+                            <Suspense fallback=move || {
+                                view! { <div class="global-search__empty">"Searching…"</div> }
+                            }>
+                                {move || Suspend::new(async move {
+                                    match results.await {
+                                        None => view! {
+                                            <div class="global-search__empty">
+                                                "Type a name or GUID."
+                                            </div>
+                                        }
+                                            .into_any(),
+                                        Some(Err(msg)) => {
+                                            let text = if msg == SEARCH_SESSION_EXPIRED {
+                                                msg
+                                            } else {
+                                                format!("Search failed: {msg}")
+                                            };
+                                            view! {
+                                                <div class="global-search__empty">{text}</div>
+                                            }
+                                                .into_any()
+                                        }
+                                        Some(Ok(r)) => view_no_records(&r),
                                     }
-                                }
-                            })}
-                        </Suspense>
+                                })}
+                            </Suspense>
+                        </div>
                     </div>
                 }
                     .into_any()
@@ -301,7 +367,62 @@ pub fn GlobalSearch() -> impl IntoView {
     }
 }
 
-fn view_results(
+/// The honesty notices of a resolved search, rendered in the dropdown's first
+/// `role="status"` region (above the listbox, never inside it): the index-cap
+/// and failed-lookup `Callout`s.
+fn view_result_notices(results: &GlobalSearchResults) -> leptos::prelude::AnyView {
+    // The corpus this query filtered is itself a truncated view of the tenant,
+    // so every answer below — "No matching records." emphatically included — is
+    // a claim about a subset. Same cap as the three inventory lists
+    // (`IndexCapNotice`), plus the app-registration one, worded beside theirs;
+    // the sizing class is theirs too, so the two truncation notices read as one
+    // thing said twice, not two things.
+    let cap_message = corpus_cap_message(results.corpus_cap);
+    let cap_notice = results.corpus_truncated.then(|| {
+        view! {
+            <Callout tone="warn" class="app-list__cap-notice">
+                {cap_message}
+            </Callout>
+        }
+    });
+    // A GUID lookup that failed (throttled, forbidden, network) is an unanswered
+    // question, not a miss. Like the cap notice it is not a roving option, so
+    // `flatten_hits` never sees it.
+    let lookup_notice = results.lookup_degraded.then(|| {
+        view! {
+            <Callout tone="warn" class="app-list__cap-notice">
+                {LOOKUP_DEGRADED_NOTICE}
+            </Callout>
+        }
+    });
+
+    view! {
+        {cap_notice}
+        {lookup_notice}
+    }
+    .into_any()
+}
+
+/// "No matching records." when every record group of a resolved search is
+/// empty, rendered in the dropdown's second `role="status"` region (below the
+/// listbox).
+fn view_no_records(results: &GlobalSearchResults) -> leptos::prelude::AnyView {
+    let empty = results.app_registrations.is_empty()
+        && results.enterprise_apps.is_empty()
+        && results.managed_identities.is_empty();
+    // "records", not a bare "No matches": the "Go to" group above may well have
+    // matched, and a flat denial over a list of visible hits is the one thing
+    // worse than an over-broad claim.
+    empty
+        .then(|| view! { <div class="global-search__empty">"No matching records."</div> })
+        .into_any()
+}
+
+/// The record groups of a resolved search, rendered inside the listbox. Their
+/// notices (cap and failed lookup: [`view_result_notices`], above it; "No
+/// matching records.": [`view_no_records`], below it) are not options, so they
+/// live outside it.
+fn view_result_groups(
     results: GlobalSearchResults,
     session: crate::state::Session,
     raw_query: RwSignal<String>,
@@ -311,40 +432,12 @@ fn view_results(
     // these rows track the (debounced, async) search result.
     goto_n: Memo<usize>,
 ) -> leptos::prelude::AnyView {
-    // The corpus this query filtered is itself a truncated view of the tenant,
-    // so every answer below — "No matching records." emphatically included — is
-    // a claim about a subset. Same cap, same warning, same wording as the three
-    // inventory lists (`IndexCapNotice`); the sizing class is theirs too, so the
-    // two truncation notices read as one thing said twice, not two things.
-    let cap_notice = results.corpus_truncated.then(|| {
-        view! {
-            <Callout tone="warn" class="app-list__cap-notice">
-                {index_cap_message(results.corpus_cap, "record")}
-            </Callout>
-        }
-    });
-
-    let empty = results.app_registrations.is_empty()
-        && results.enterprise_apps.is_empty()
-        && results.managed_identities.is_empty();
-    if empty {
-        // "records", not a bare "No matches": the "Go to" group above may well
-        // have matched, and a flat denial over a list of visible hits is the
-        // one thing worse than an over-broad claim.
-        return view! {
-            {cap_notice}
-            <div class="global-search__empty">"No matching records."</div>
-        }
-        .into_any();
-    }
-
     // Roving indices run across the groups: destinations, then apps, then
     // enterprise, then MIs. They count *rendered rows* only, so the group
     // footers below stay outside them by construction.
     let apps_n = results.app_registrations.len();
     let ent_n = results.enterprise_apps.len();
     view! {
-        {cap_notice}
         {render_group(
             "App Registrations",
             AppKind::AppRegistration,
@@ -686,61 +779,82 @@ fn render_goto_group(
         return ().into_any();
     }
     let more = more_matches_label(rows.len(), total);
+    // A `role="group"` named by its heading: a listbox's children may only be
+    // options or groups of options, and the group lets assistive tech say
+    // "Go to" as the roving index crosses into it.
     view! {
-        <div class="global-search__group-label">"Go to"</div>
-        {rows
-            .into_iter()
-            .enumerate()
-            .map(move |(idx, dest)| {
-                // Destinations render first, so their roving index IS their
-                // position in the group — the record groups are the ones that
-                // shift.
-                let route = dest.route;
-                view! {
-                    <button
-                        class="global-search__row"
-                        class:global-search__row--active=move || selected.get() == idx
-                        type="button"
-                        id=format!("gs-goto-{idx}")
-                        role="option"
-                        aria-selected=move || (selected.get() == idx).to_string()
-                        on:mousedown=move |_| go_to(session, route, raw_query)
-                        on:mouseenter=move |_| selected.set(idx)
-                    >
-                        <span class="global-search__row-icon">
-                            <Icon name=dest.icon size=14 />
-                        </span>
-                        <span class="global-search__row-title">{dest.label}</span>
-                        {(!dest.context.is_empty())
-                            .then(|| {
-                                view! {
-                                    <span class="global-search__row-hint">{dest.context}</span>
-                                }
-                            })}
-                    </button>
-                }
-            })
-            .collect_view()}
-        // Capped-group footer — same construction (and the same reason) as the
-        // record groups': a plain `role="presentation"` div, outside the option
-        // set, because `flatten_hits` never sees it.
-        {more
-            .map(|text| {
-                view! {
-                    <div class="global-search__empty global-search__more" role="presentation">
-                        {text}
-                    </div>
-                }
-            })}
+        <div class="global-search__group" role="group" aria-labelledby=GOTO_LABEL_ID>
+            <div class="global-search__group-label" id=GOTO_LABEL_ID>"Go to"</div>
+            {rows
+                .into_iter()
+                .enumerate()
+                .map(move |(idx, dest)| {
+                    // Destinations render first, so their roving index IS their
+                    // position in the group — the record groups are the ones that
+                    // shift.
+                    let route = dest.route;
+                    view! {
+                        <button
+                            class="global-search__row"
+                            class:global-search__row--active=move || selected.get() == idx
+                            type="button"
+                            id=format!("gs-goto-{idx}")
+                            role="option"
+                            aria-selected=move || (selected.get() == idx).to_string()
+                            on:mousedown=move |_| go_to(session, route, raw_query)
+                            on:mouseenter=move |_| selected.set(idx)
+                        >
+                            <span class="global-search__row-icon">
+                                <Icon name=dest.icon size=14 />
+                            </span>
+                            <span class="global-search__row-title">{dest.label}</span>
+                            {(!dest.context.is_empty())
+                                .then(|| {
+                                    view! {
+                                        <span class="global-search__row-hint">{dest.context}</span>
+                                    }
+                                })}
+                        </button>
+                    }
+                })
+                .collect_view()}
+            // Capped-group footer — same construction (and the same reason) as the
+            // record groups': a plain `role="presentation"` div, outside the option
+            // set, because `flatten_hits` never sees it.
+            {more
+                .map(|text| {
+                    view! {
+                        <div class="global-search__empty global-search__more" role="presentation">
+                            {text}
+                        </div>
+                    }
+                })}
+        </div>
     }
     .into_any()
 }
+
+/// The "Go to" group heading's id, which its `role="group"` points
+/// `aria-labelledby` at. One `GlobalSearch` per shell, so a fixed id is unique.
+const GOTO_LABEL_ID: &str = "gs-group-goto";
 
 #[derive(Clone, Copy)]
 enum SelectionKind {
     AppReg,
     EntApp,
     Mi,
+}
+
+impl SelectionKind {
+    /// The id of this record group's heading, which its `role="group"` points
+    /// `aria-labelledby` at (see [`GOTO_LABEL_ID`]).
+    fn label_id(self) -> &'static str {
+        match self {
+            Self::AppReg => "gs-group-apps",
+            Self::EntApp => "gs-group-ent",
+            Self::Mi => "gs-group-mi",
+        }
+    }
 }
 
 /// One selectable dropdown row, in render order: the "Go to" destinations, then
@@ -791,55 +905,58 @@ fn render_group(
         return ().into_any();
     }
     let more = more_matches_label(hits.len(), total);
+    let label_id = selection.label_id();
     view! {
-        <div class="global-search__group-label">{label}</div>
-        {hits
-            .into_iter()
-            .enumerate()
-            .map(move |(i, hit)| {
-                // Roving index: destinations, then this group's offset, then the
-                // row. Computed per read rather than captured, so a keystroke
-                // that changes the destination count re-labels these rows in the
-                // same tick `flatten_hits` re-indexes them.
-                let idx = move || goto_n.get() + offset + i;
-                let app_id = hit.app_id.clone();
-                let display = hit.display_name.clone();
-                let hit_for_pick = hit.clone();
-                view! {
-                    <button
-                        class="global-search__row"
-                        class:global-search__row--active=move || selected.get() == idx()
-                        type="button"
-                        id=move || format!("gs-rec-{}", idx())
-                        role="option"
-                        aria-selected=move || (selected.get() == idx()).to_string()
-                        on:mousedown=move |_| pick_hit(session, &hit_for_pick, selection, raw_query)
-                        on:mouseenter=move |_| selected.set(idx())
-                    >
-                        <TypeChip kind=chip_kind compact=true />
-                        <span class="global-search__row-title">{display}</span>
-                        <span class="global-search__row-appid">
-                            {app_id.unwrap_or_default()}
-                        </span>
-                    </button>
-                }
-            })
-            .collect_view()}
-        // Capped-group footer. Deliberately a plain div, not a `<button
-        // role="option">`: the combobox drives `aria-activedescendant` and its
-        // Arrow/Enter roving index off `flatten_hits`, which sees only the
-        // destination table and the hit vectors, so anything that entered the
-        // option set here would either desynchronize the two or hand the
-        // operator an "Enter" that opens nothing. `role="presentation"` states
-        // that to assistive tech as well, while leaving the text itself readable.
-        {more
-            .map(|text| {
-                view! {
-                    <div class="global-search__empty global-search__more" role="presentation">
-                        {text}
-                    </div>
-                }
-            })}
+        <div class="global-search__group" role="group" aria-labelledby=label_id>
+            <div class="global-search__group-label" id=label_id>{label}</div>
+            {hits
+                .into_iter()
+                .enumerate()
+                .map(move |(i, hit)| {
+                    // Roving index: destinations, then this group's offset, then the
+                    // row. Computed per read rather than captured, so a keystroke
+                    // that changes the destination count re-labels these rows in the
+                    // same tick `flatten_hits` re-indexes them.
+                    let idx = move || goto_n.get() + offset + i;
+                    let app_id = hit.app_id.clone();
+                    let display = hit.display_name.clone();
+                    let hit_for_pick = hit.clone();
+                    view! {
+                        <button
+                            class="global-search__row"
+                            class:global-search__row--active=move || selected.get() == idx()
+                            type="button"
+                            id=move || format!("gs-rec-{}", idx())
+                            role="option"
+                            aria-selected=move || (selected.get() == idx()).to_string()
+                            on:mousedown=move |_| pick_hit(session, &hit_for_pick, selection, raw_query)
+                            on:mouseenter=move |_| selected.set(idx())
+                        >
+                            <TypeChip kind=chip_kind compact=true />
+                            <span class="global-search__row-title">{display}</span>
+                            <span class="global-search__row-appid">
+                                {app_id.unwrap_or_default()}
+                            </span>
+                        </button>
+                    }
+                })
+                .collect_view()}
+            // Capped-group footer. Deliberately a plain div, not a `<button
+            // role="option">`: the combobox drives `aria-activedescendant` and its
+            // Arrow/Enter roving index off `flatten_hits`, which sees only the
+            // destination table and the hit vectors, so anything that entered the
+            // option set here would either desynchronize the two or hand the
+            // operator an "Enter" that opens nothing. `role="presentation"` states
+            // that to assistive tech as well, while leaving the text itself readable.
+            {more
+                .map(|text| {
+                    view! {
+                        <div class="global-search__empty global-search__more" role="presentation">
+                            {text}
+                        </div>
+                    }
+                })}
+        </div>
     }
     .into_any()
 }

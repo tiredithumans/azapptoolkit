@@ -20,8 +20,9 @@ use crate::bindings::bulk;
 use crate::bindings::events;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure, BulkProgressRow};
 use crate::components::icon::IconName;
-use crate::components::ui::{Callout, EmptyState, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
+use crate::util::count_noun;
 
 #[component]
 pub fn BulkActionsView() -> impl IntoView {
@@ -102,13 +103,13 @@ pub fn BulkActionsView() -> impl IntoView {
                         .collect();
                     let ok = r.outcomes.len() - fails.len();
                     summary.set(Some(format!(
-                        "{}: {ok} ok, {} problem(s){}.",
+                        "{}: {ok} ok, {}{}.",
                         if r.validate_only {
                             "Validated"
                         } else {
                             "Created"
                         },
-                        fails.len(),
+                        count_noun(fails.len(), "problem", "problems"),
                         if r.cancelled { " (cancelled)" } else { "" }
                     )));
                     failures.set(fails);
@@ -190,7 +191,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                             view! {
                                                 <div class="bulk-failures">
                                                     <Body1 class="bulk-failures__title">
-                                                        {format!("{} item(s) failed:", fs.len())}
+                                                        {format!("{} failed:", count_noun(fs.len(), "item", "items"))}
                                                     </Body1>
                                                     <ul class="bulk-failures__list">
                                                         {fs
@@ -210,7 +211,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                             }
                                         })
                                 }}
-                                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                             </div>
                         }
                             .into_any()

@@ -10,10 +10,9 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
 use crate::components::icon::{Icon, IconName};
-use crate::components::ui::{DetailLoadError, SectionHeader, Skeleton};
+use crate::components::ui::{BadgeTone, DetailLoadError, SectionHeader, Skeleton};
 use crate::state::{ActiveView, Session, use_session};
 use crate::util::{TimeAgo, time_ago};
-use crate::views::audit_view::posture::{PostureCounts, posture_counts};
 use crate::views::audit_view::ranked_actionable_findings;
 
 #[component]
@@ -86,10 +85,13 @@ pub fn HomeDashboard() -> impl IntoView {
         // Refetch after an audit run: this dashboard stays mounted across view
         // switches (keep-alive panes), so without tracking this bump the tile
         // would keep its first value (e.g. "No audit has been run yet").
+        // The counts-only summary, never the run: the card shows a dozen
+        // numbers, and the run is up to 10k scored principals the Security
+        // view already holds its own copy of.
         let _ = session.audit_reload.get();
         async move {
             match tenant {
-                Some(t) => audit::get_cached_audit(&t.tenant_id).await,
+                Some(t) => audit::get_cached_audit_summary(&t.tenant_id).await,
                 None => None,
             }
         }
@@ -109,19 +111,27 @@ pub fn HomeDashboard() -> impl IntoView {
                             match apps.await {
                                 Some(Ok(rows)) => {
                                     let total = rows.len();
-                                    let with_secrets = rows
-                                        .iter()
-                                        .filter(|r| r.password_credential_count > 0)
-                                        .count();
-                                    let with_certs = rows
-                                        .iter()
-                                        .filter(|r| r.key_credential_count > 0)
-                                        .count();
+                                    let with_secrets =
+                                        rows.iter().filter(|r| r.has_secrets()).count();
+                                    let with_certs =
+                                        rows.iter().filter(|r| r.has_certs()).count();
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
-                                            {metric(with_secrets, "With secrets", "warning")}
-                                            {metric(with_certs, "With certs", "warning")}
+                                            // Drill into the App Registrations
+                                            // chip of the same name.
+                                            {metric_link(
+                                                with_secrets,
+                                                "With secrets",
+                                                "warning",
+                                                move || session.open_apps_with_facet("secrets"),
+                                            )}
+                                            {metric_link(
+                                                with_certs,
+                                                "With certs",
+                                                "warning",
+                                                move || session.open_apps_with_facet("certs"),
+                                            )}
                                         </div>
                                         <div class="dash-card__actions">
                                             <Button
@@ -410,22 +420,23 @@ pub fn HomeDashboard() -> impl IntoView {
                         {move || Suspend::new(async move {
                             match cached_audit.await {
                                 Some(r) => {
-                                    // One shared count source with the Security
-                                    // workbench's posture strip — the numbers
-                                    // here and there can never disagree.
-                                    let c = posture_counts(&r.items);
-                                    // Ranked finding order from the workbench's
-                                    // Findings pane (impact desc) — imported, not
-                                    // re-hardcoded — so the card rhymes with what
-                                    // it opens. Keep only the findings the card
-                                    // drills into, and only non-empty ones (a
-                                    // zero-count line is noise, mirroring the pane
-                                    // hiding empty Actionable groups).
-                                    let findings: Vec<_> = ranked_actionable_findings(&r.items)
+                                    // Counted by the backend with core's
+                                    // `posture_counts` — the function the
+                                    // Security workbench's posture strip runs
+                                    // over its own copy — so the numbers here
+                                    // and there can never disagree.
+                                    let c = r.posture;
+                                    // Ranked with the workbench Findings pane's
+                                    // own ordering (imported, not re-hardcoded)
+                                    // so the card rhymes with what it opens.
+                                    // Only the findings the card drills into;
+                                    // zero-count ones are dropped.
+                                    let findings: Vec<_> = ranked_actionable_findings(|key| {
+                                            card_lists(key).then(|| r.finding_tally(key)).flatten()
+                                        })
                                         .into_iter()
-                                        .filter_map(|(key, title, tone)| {
-                                            let n = posture_count_for(&c, key).filter(|n| *n > 0)?;
-                                            Some(finding_row(n, title, tone, key, session))
+                                        .map(|(key, title, tone, n)| {
+                                            finding_row(n, title, tone, key, session)
                                         })
                                         .collect();
                                     let clean = findings.is_empty();
@@ -551,22 +562,26 @@ fn card_skeleton() -> impl IntoView {
     }
 }
 
-/// The posture count the card surfaces for a finding key — `None` for the
-/// findings the card doesn't drill into (redundant / delegated / no-local-app),
-/// so they're dropped from the ranked list (SAME drill targets as before).
-/// Counts come from `PostureCounts`, the one shared source, so the card and the
-/// Security workbench can't disagree.
-fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
-    Some(match key {
-        "expired" => c.expired,
-        "orgwide_mailbox" => c.orgwide_mailbox,
-        "legacy_mailbox_scope" => c.legacy_mailbox_scope,
-        "orgwide_sharepoint" => c.orgwide_sharepoint,
-        "high_risk_perms" => c.over_privileged,
-        "ownership" => c.unowned,
-        "unused" => c.unused,
-        _ => return None,
-    })
+/// Whether the card lists a finding — `false` for the ones it doesn't drill
+/// into (redundant / delegated / external exposure / no-local-app), so they're
+/// dropped from the ranked list. The two unconfinable-reach groups are listed:
+/// an app that reaches every mailbox or site must not leave the card reading
+/// "the tenant looks healthy". The counts themselves come from the summary's
+/// `PostureCounts`, the one shared source, so the card and the Security
+/// workbench can't disagree.
+fn card_lists(key: &str) -> bool {
+    matches!(
+        key,
+        "expired"
+            | "orgwide_mailbox"
+            | "legacy_mailbox_scope"
+            | "unscopable_legacy_mailbox"
+            | "unconfinable_orgwide"
+            | "orgwide_sharepoint"
+            | "high_risk_perms"
+            | "ownership"
+            | "unused"
+    )
 }
 
 /// One ranked "Top findings" line: tone dot · title · count · chevron, drilling
@@ -575,7 +590,7 @@ fn posture_count_for(c: &PostureCounts, key: &str) -> Option<usize> {
 fn finding_row(
     n: usize,
     title: &'static str,
-    tone: &'static str,
+    tone: BadgeTone,
     key: &'static str,
     session: Session,
 ) -> impl IntoView {
@@ -593,21 +608,6 @@ fn finding_row(
             )>{n}</span>
             <Icon name=IconName::ChevronRight size=16 class="posture-finding__chevron" />
         </button>
-    }
-}
-
-fn metric(n: usize, label: &'static str, tone: &'static str) -> impl IntoView {
-    // Zero counts are muted; non-zero use the tone colour.
-    let num_class = if n == 0 {
-        "dash-metric__num".to_string()
-    } else {
-        format!("dash-metric__num dash-metric__num--{tone}")
-    };
-    view! {
-        <div class="dash-metric">
-            <span class=num_class>{n}</span>
-            <span class="dash-metric__label">{label}</span>
-        </div>
     }
 }
 

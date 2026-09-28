@@ -16,18 +16,24 @@ use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
+use crate::bindings::audit::MAILBOX_SCOPING_UNRESOLVED;
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{Callout, ShowMore};
+use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
+use crate::util::count_noun;
 
 use super::controller::AuditController;
 use super::filter::issue_lines_for;
-use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings};
+use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings, tone};
 use super::row::AuditRowActions;
-use super::{last_sign_in_cell, risk_class};
+use super::{last_sign_in_cell, risk_tone};
+
+/// The revealed "Healthy configuration" groups' container — the target of the
+/// section header's `aria-controls`. The pane mounts once, so it is unique.
+const HEALTHY_SECTION_ID: &str = "finding-section-healthy";
 
 #[component]
 pub(crate) fn FindingsPane() -> impl IntoView {
@@ -61,36 +67,6 @@ pub(crate) fn FindingsPane() -> impl IntoView {
 
     view! {
         <div class="findings-pane">
-            // A run whose tenant-wide reads partly failed under-reports risk,
-            // and every other signal on this pane looks identical to a clean
-            // scan. Unconditional (not folded into the no-findings case below):
-            // the dangerous outcome is a run that DOES show findings while
-            // silently omitting whole categories of them.
-            {move || {
-                let gaps = ctrl
-                    .result
-                    .with(|r| r.as_ref().map(|r| r.degraded.clone()).unwrap_or_default());
-                (!gaps.is_empty())
-                    .then(|| {
-                        view! {
-                            <Callout tone="warn">
-                                // Deliberately not "reached every application":
-                                // `PerPrincipalScoring` is exactly the gap where
-                                // it did not, so a lede claiming full coverage
-                                // would contradict the item below it.
-                                <p class="findings-pane__degraded-lede">
-                                    "Part of this scan could not run — treat the results as incomplete and re-run."
-                                </p>
-                                <ul class="findings-pane__degraded-list">
-                                    {gaps
-                                        .into_iter()
-                                        .map(|g| view! { <li>{g.description()}</li> })
-                                        .collect_view()}
-                                </ul>
-                            </Callout>
-                        }
-                    })
-            }}
             {move || {
                 let Some(gs) = groups.get() else {
                     return view! {
@@ -162,27 +138,38 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                             <button
                                 type="button"
                                 class="finding-group__header finding-group__header--section"
+                                // A string, never a bare bool (see
+                                // `finding_group_view`).
+                                aria-expanded=move || healthy_open.get().to_string()
+                                // Only while the body is rendered — a collapsed
+                                // section's body is not in the DOM, so the
+                                // reference would dangle (as for the groups).
+                                aria-controls=move || {
+                                    healthy_open.get().then_some(HEALTHY_SECTION_ID)
+                                }
                                 on:click=move |_| healthy_open.update(|o| *o = !*o)
                             >
-                                <span class="finding-group__chevron">
+                                <span class="finding-group__chevron" aria-hidden="true">
                                     {move || if healthy_open.get() { "▾" } else { "▸" }}
                                 </span>
                                 "Healthy configuration"
                             </button>
                             <Show when=move || healthy_open.get()>
-                                {healthy
-                                    .iter()
-                                    .map(|g| {
-                                        finding_group_view(
-                                            g.clone(),
-                                            ctrl,
-                                            expanded,
-                                            selection,
-                                            render_limit,
-                                            false,
-                                        )
-                                    })
-                                    .collect_view()}
+                                <div class="finding-groups__healthy-body" id=HEALTHY_SECTION_ID>
+                                    {healthy
+                                        .iter()
+                                        .map(|g| {
+                                            finding_group_view(
+                                                g.clone(),
+                                                ctrl,
+                                                expanded,
+                                                selection,
+                                                render_limit,
+                                                false,
+                                            )
+                                        })
+                                        .collect_view()}
+                                </div>
                             </Show>
                         </div>
                     </div>
@@ -277,20 +264,21 @@ fn finding_group_view(
         let _ = ctrl.result.with(|r| r.as_ref().map(|r| r.items.len()));
     });
 
-    let tone = match g.worst {
-        azapptoolkit_core::audit::RiskLevel::Critical => "critical",
-        azapptoolkit_core::audit::RiskLevel::High => "danger",
-        azapptoolkit_core::audit::RiskLevel::Medium => "warning",
-        azapptoolkit_core::audit::RiskLevel::Low => "ok",
-    };
+    let tone = tone(g.worst);
     // The dot is the collapsed header's only severity signal, so the tier has to
     // survive being unable to see colour: `role="img"` + `aria-label` folds it
     // into the header button's accessible name (which was otherwise just
-    // "{title} {count} principals ▾"), and `title` gives the same word to a
+    // "{title} {count} principals"; the ▾/▸ chevron is `aria-hidden`, the
+    // open state is `aria-expanded`), and `title` gives the same word to a
     // sighted operator who can't separate two reds. It deliberately does NOT go
     // in `.finding-group__title` — a GUI test reads that element's text as the
     // group's name.
     let worst_label = format!("Worst: {}", g.worst.as_str());
+    // Group keys are unique static snake_case strings and the pane mounts once,
+    // so this id cannot collide. `aria-controls` points at it only while the
+    // body is rendered (it sits inside `<Show>`), so it never dangles.
+    let body_id = format!("finding-group-body-{key}");
+    let controls_id = body_id.clone();
     let head_class = if actionable {
         "finding-group"
     } else {
@@ -318,7 +306,16 @@ fn finding_group_view(
     view! {
         <section class=head_class>
             <div class="finding-group__head">
-                <button type="button" class="finding-group__header" on:click=toggle>
+                <button
+                    type="button"
+                    class="finding-group__header"
+                    // A *string*, never a bare `bool`: Leptos renders a bool as
+                    // a boolean attribute, and neither `aria-expanded=""` nor an
+                    // absent one is a valid ARIA value.
+                    aria-expanded=move || is_open().to_string()
+                    aria-controls=move || is_open().then(|| controls_id.clone())
+                    on:click=toggle
+                >
                     <span
                         class=format!("finding-group__tone finding-group__tone--{tone}")
                         role="img"
@@ -327,12 +324,9 @@ fn finding_group_view(
                     ></span>
                     <span class="finding-group__title">{title}</span>
                     <span class="finding-group__count">
-                        {format!(
-                            "{count} {}",
-                            if count == 1 { "principal" } else { "principals" },
-                        )}
+                        {count_noun(count, "principal", "principals")}
                     </span>
-                    <span class="finding-group__chevron">
+                    <span class="finding-group__chevron" aria-hidden="true">
                         {move || if is_open() { "▾" } else { "▸" }}
                     </span>
                 </button>
@@ -354,7 +348,7 @@ fn finding_group_view(
                     })}
             </div>
             <Show when=is_open>
-                <div class="finding-group__body">
+                <div class="finding-group__body" id=body_id.clone()>
                     <p class="muted finding-group__blurb">{blurb}</p>
                     {(key == "unused" && !ctrl.report_available.get())
                         .then(|| {
@@ -363,6 +357,11 @@ fn finding_group_view(
                                     "The sign-in activity report wasn't available for this run, so unused detection carries no signal — grant consent above and re-run."
                                 </Callout>
                             }
+                        })}
+                    // The same sentence the export's coverage notes carry.
+                    {(key == "orgwide_mailbox" && !ctrl.mailbox_scoping_resolved.get())
+                        .then(|| {
+                            view! { <Callout tone="warn">{MAILBOX_SCOPING_UNRESOLVED}</Callout> }
                         })}
                     {has_bulk
                         .then(|| {
@@ -504,10 +503,10 @@ fn finding_group_view(
                                                 }}
                                             </td>
                                             <td>
-                                                <span class=format!(
-                                                    "badge {}",
-                                                    risk_class(&i.risk_level),
-                                                )>{i.risk_level.as_str()}</span>
+                                                <Badge
+                                                    label=i.risk_level.as_str()
+                                                    tone=risk_tone(&i.risk_level)
+                                                />
                                             </td>
                                             <td>{i.risk_score}</td>
                                             {shows_last_sign_in

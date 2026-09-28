@@ -68,7 +68,7 @@ for segment in re.split(r"&&|\|\||;|\|", cmd):
             continue
         if any(a in NEW_BRANCH_FLAGS for a in args):
             continue
-        targets = [a for a in args if not a.startswith("-")]
+        targets = [a for a in args if a == "-" or not a.startswith("-")]
         if targets:
             print(targets[0])
             sys.exit(0)

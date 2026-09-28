@@ -409,7 +409,7 @@ pub async fn delete_exchange_scope_group(
 
     let Some(group) = exo.get_distribution_group(&group_identity).await? else {
         return Err(UiError::not_found(
-            "group_not_found",
+            "group",
             format!(
                 "no distribution or mail-enabled security group matches '{group_identity}' — it \
                  may already have been deleted."
@@ -535,9 +535,14 @@ pub(super) fn scope_filter_decision(
 /// NEVER agreement — an unstatable reach cannot be asserted equal to an intended
 /// one, and treating "cannot read" as "matches" is exactly how a stale scope
 /// would slip past the guard below.
+///
+/// DNs are case-FOLDED (`ScopeGroups::same_groups_as`), like the post-write
+/// proof in `set_management_scope_filter`: Exchange echoes DNs in its own
+/// casing, so a raw comparison refused a scope that had just been repointed
+/// correctly. `wanted` must be fully readable too — `member_of_group_filter`
+/// output always is.
 pub(super) fn scope_filter_agrees(current: &str, wanted: &str) -> bool {
-    let g = scope_groups_in_filter(current);
-    g.complete && g.dns == group_dns_in_filter(wanted)
+    scope_groups_in_filter(current).same_groups_as(&scope_groups_in_filter(wanted))
 }
 
 /// Establishes the recipient filter Exchange **actually has** on `scope_name`,
@@ -653,7 +658,15 @@ pub(super) async fn repoint_scope_if_stale(
             return;
         }
     };
-    if current_dns.iter().cloned().collect::<HashSet<_>>() == group_dns_in_filter(wanted_filter) {
+    // Case-folded: a scope Exchange echoes in its own casing already names the
+    // wanted groups, and a redundant `Set-ManagementScope` is a write to every
+    // role assignment on it. `current_dns` is proven rewritable, so complete.
+    if current_dns
+        .iter()
+        .map(|d| fold_dn(d))
+        .collect::<HashSet<_>>()
+        == scope_groups_in_filter(wanted_filter).folded_dns()
+    {
         return;
     }
     match exo
@@ -737,11 +750,13 @@ pub async fn move_exchange_scope_to_managed_group(
 
     // Already on the managed group: nothing to do. Resolving the group by name
     // (rather than trusting the filter's DN) keeps this honest if the group was
-    // recreated and its DN changed.
+    // recreated and its DN changed. Case-folded: the filter's DNs are Exchange's
+    // echo, `dn` comes from the group object, and the two can differ only in
+    // casing — a raw compare repointed the scope again and then listed the
+    // managed group itself as a retired cleanup candidate.
     if let Ok(Some(managed)) = exo.get_distribution_group(&group_name).await
         && let Some(dn) = managed.distinguished_name.as_deref()
-        && source_dns.len() == 1
-        && source_dns[0] == dn
+        && source_dns.iter().all(|s| same_dn(s, dn))
     {
         return Ok(ExchangeScopeConsolidationResult {
             app_id,

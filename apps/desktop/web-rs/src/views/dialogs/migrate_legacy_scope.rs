@@ -25,8 +25,9 @@ use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 use azapptoolkit_core::audit::RemediationAction;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
-use crate::components::aap_migration_report::AapMigrationReportView;
+use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::FormError;
 use crate::state::use_session;
 
 #[component]
@@ -77,11 +78,10 @@ pub fn MigrateLegacyScopeButton(
                     Ok(r) => {
                         // A clean run is the only one that closes: `partial`
                         // means the fail-closed guards held something back, and
-                        // those notes are the point of the flow.
-                        let clean = !dry_run
-                            && r.failures.is_empty()
-                            && !r.items.is_empty()
-                            && r.items.iter().all(|i| i.status == "migrated");
+                        // those notes are the point of the flow. A stopped run
+                        // (cancelled, or the session died) stays open too, so
+                        // the apps it never reached stay named.
+                        let clean = r.is_clean();
                         if clean {
                             open.set(false);
                             session.toast_success(
@@ -136,11 +136,12 @@ pub fn MigrateLegacyScopeButton(
                                 <div class="actions-row">
                                     <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
                                     <Body1>"Working…"</Body1>
+                                    <AapMigrationStop />
                                 </div>
                             }
                         })
                 }}
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                 {move || {
                     report.get().map(|r| view! { <AapMigrationReportView report=r /> })
                 }}

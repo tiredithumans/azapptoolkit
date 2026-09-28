@@ -17,10 +17,11 @@ use std::future::Future;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::expired_password_key_ids;
+use azapptoolkit_core::models::Application;
 use azapptoolkit_graph::client::AppListQuery;
 
-use crate::commands::dispatch::{SessionDead, dispatch_capped};
-use crate::commands::progress::emit_progress;
+use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
+use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
@@ -34,24 +35,6 @@ use crate::dto::bulk::{
 use crate::state::{AppState, CancelToken};
 
 const CONCURRENCY: usize = 4;
-
-/// Where [`run_bulk_seq`] sends its progress events.
-///
-/// The driver took an `&AppHandle`, which made it untestable without a Tauri
-/// runtime — and `tauri`'s `test` feature (for `mock_app()`) breaks the Windows
-/// test binary with STATUS_ENTRYPOINT_NOT_FOUND, since enabling it alongside the
-/// WebView2 runtime mismatches an entrypoint at link time. The driver never
-/// needed a runtime, only a sink; this is the narrower dependency, and it lets
-/// the tests assert the progress sequence as well as the loop control.
-trait ProgressSink {
-    fn emit(&self, payload: BulkProgress);
-}
-
-impl<R: tauri::Runtime> ProgressSink for AppHandle<R> {
-    fn emit(&self, payload: BulkProgress) {
-        emit_progress(self, "bulk-progress", payload);
-    }
-}
 
 /// Lets [`run_bulk_seq`] ask an opaque outcome whether the run should stop.
 ///
@@ -122,26 +105,32 @@ const VALID_AUDIENCES: &[&str] = &[
     "PersonalMicrosoftAccount",
 ];
 
-/// Signals an in-progress bulk action (delete / grant / create / expired-secret
-/// sweep) to stop at the next item boundary. Shares [`AppState::audit_cancel`]
-/// with the security audit — the two long-running loops never run at once, so
-/// one flag covers both; this intent-named command lets the Bulk Actions view
-/// wire its own Cancel button without reaching for `cancel_audit`. Already
-/// in-flight per-item work finishes so partial results stay clean.
+/// Signals every in-flight bulk action (delete / grant / create / expired-secret
+/// sweep / scoping / owner / sign-in) to stop at the next item boundary. Runs
+/// started from different bulk action bars share the kind flag
+/// [`AppState::bulk_cancel`], so one Cancel stops all of them; it never touches
+/// the security audit or the AAP migration, which have flags of their own.
+/// Already in-flight per-item work finishes so partial results stay clean.
 #[tauri::command]
 pub fn cancel_bulk(state: State<'_, AppState>) {
-    state.audit_cancel.cancel();
+    state.bulk_cancel.cancel();
 }
 
 /// Sweeps app registrations and deletes any password credential (secret) that
 /// is expired per [`expired_password_key_ids`]'s whole-day rule. Note this is
 /// **secrets-only** by design; the per-app one-click fix
 /// (`commands::remediation::remediate_remove_expired_credentials`)
-/// also removes expired *certificates*. When `object_ids` is `Some`, only those apps
-/// are scanned (the UI scopes the sweep to the user's selection); when `None`,
-/// every app in the tenant is swept. Cancellation flows through
-/// [`AppState::audit_cancel`] — the audit and bulk loops share it so the UI
-/// only needs one Cancel button concept.
+/// also removes expired *certificates*.
+///
+/// Two read paths. When `object_ids` is `Some` (the UI scopes the sweep to the
+/// user's selection — the Findings pane's "Fix all" and the App Registrations
+/// bulk bar always do), exactly those apps are fetched by id in one `$batch`
+/// per 20 (per-id reads if a whole batch fails), never a tenant walk; an app
+/// that cannot be read is reported as a failure row rather than silently left
+/// out. When `None`, every app in the tenant is walked, capped at
+/// [`APPS_MAX`](super::applications::APPS_MAX) like every other tenant-wide
+/// enumeration. Cancellation flows through [`AppState::bulk_cancel`], stopped by
+/// [`cancel_bulk`].
 #[tauri::command]
 pub async fn bulk_remove_expired_credentials(
     app_handle: AppHandle,
@@ -149,34 +138,77 @@ pub async fn bulk_remove_expired_credentials(
     tenant_id: String,
     object_ids: Option<Vec<String>>,
 ) -> Result<BulkRemoveExpiredResult, UiError> {
-    // Claimed before the first await: the tenant-wide app list below can walk
-    // 10 000 apps, and a token claimed after it carries a higher generation
-    // than a cancel issued during it, which `is_cancelled()` then discards.
-    // Pinned by `repo_invariants::cancel`.
-    let cancel = state.audit_cancel.claim();
+    // Claimed before the first await: the tenant walk below can cover 10 000
+    // apps (and the batched selection read is an await too), and a token
+    // claimed after it carries a higher generation than a cancel issued during
+    // it, which `is_cancelled()` then discards. Pinned by
+    // `repo_invariants::cancel`.
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
-    // Project only what the sweep reads (`expired_password_key_ids` touches
-    // `passwordCredentials`); the default projection drags in
+    let session = SessionDead::new();
+    let mut summaries: Vec<AppRemovalSummary> = Vec::new();
+
+    // Both paths project only what the sweep reads (`expired_password_key_ids`
+    // touches `passwordCredentials`); the default projection drags in
     // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
-    // payload, multiplied across a full-tenant scan. Mirrors
-    // `list_credential_expirations`.
-    // `_truncated`: the sweep is either scoped to an explicit `object_ids` set
-    // (below, where the cap cannot matter) or is a best-effort tenant sweep whose
-    // per-app outcomes are all reported individually — it never claims to have
-    // covered every app.
-    let (mut apps, _truncated) = client
-        .list_applications_all(
-            AppListQuery::default()
-                .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
-                .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
-            Some(10_000),
-        )
-        .await?;
-    // Scope the sweep to the selected apps, if any were provided. Reuses the
-    // same list path so credential semantics stay identical to the full sweep.
-    if let Some(ids) = &object_ids {
-        apps.retain(|app| ids.contains(&app.id));
-    }
+    // payload, multiplied across a full-tenant scan.
+    let apps: Vec<Application> = match &object_ids {
+        Some(ids) => {
+            // The selection path fetches exactly the selected ids. It used to
+            // walk every page of `/applications` and then `retain` the
+            // selection — tens of seconds on a large tenant for a "Fix all 12".
+            let graph = client.as_ref();
+            let batched = graph.batch_get_applications_credentials(ids).await;
+            let fetched = batch_or_serial(
+                "expired-credential sweep app",
+                ids,
+                batched,
+                |oid: String| async move { graph.get_application(&oid).await },
+            )
+            .await;
+            let mut apps = Vec::with_capacity(ids.len());
+            for (id, read) in ids.iter().zip(fetched) {
+                match read {
+                    Ok(app) => apps.push(app),
+                    Err(err) => {
+                        // A selected app that could not be read is a failure
+                        // row (the frontend lists it under its id), not a
+                        // silent thinning of the operator's selection. A
+                        // re-auth-fatal code latches the session so the
+                        // dispatch below spawns nothing and the command returns
+                        // the dead-session error instead of a partial result.
+                        let ui = UiError::from(err);
+                        session.note_code(&ui.code);
+                        summaries.push(AppRemovalSummary {
+                            object_id: id.clone(),
+                            display_name: id.clone(),
+                            removed_key_ids: Vec::new(),
+                            failed_key_ids: Vec::new(),
+                            error: Some(ui.into()),
+                        });
+                    }
+                }
+            }
+            apps
+        }
+        None => {
+            // `_truncated`: the cap applies only to this best-effort tenant
+            // sweep, whose per-app outcomes are all reported individually — it
+            // never claims to have covered every app. The selection path above
+            // fetches exactly the selected ids, so the cap cannot apply there.
+            let (apps, _truncated) = client
+                .list_applications_all(
+                    AppListQuery::default()
+                        .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
+                        .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
+                    Some(super::applications::APPS_MAX),
+                )
+                .await?;
+            apps
+        }
+    };
+    // Apps actually evaluated; a selected app that failed to read is counted in
+    // `summaries`, not here.
     let total = apps.len();
 
     // Adaptive 429 backoff (was a fixed `CONCURRENCY` cap with no observer): the
@@ -198,8 +230,6 @@ pub async fn bulk_remove_expired_credentials(
 
     let now = chrono::Utc::now();
 
-    let mut summaries: Vec<AppRemovalSummary> = Vec::new();
-    let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         apps,
         || meter.limit(),
@@ -246,7 +276,7 @@ pub async fn bulk_remove_expired_credentials(
                     }
                 }
 
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
@@ -279,13 +309,35 @@ pub async fn bulk_remove_expired_credentials(
     )
     .await;
 
+    // Terminal event, same contract as the delete/grant fan-outs: `done` is the
+    // number of apps actually processed (every spawned task has joined).
+    emit_progress(
+        &app_handle,
+        "bulk-progress",
+        BulkProgress {
+            done: meter.done(),
+            total,
+            current_app: None,
+            cancelled: cancelled_early || cancel.is_cancelled(),
+            in_flight_cap: Some(meter.limit()),
+        },
+    );
+
     // Invalidate BEFORE the dead-session check: the removals that already
-    // landed are real, so the list caches are stale either way. Returning the
-    // error without busting them would leave the UI showing credentials this
-    // run deleted.
-    let any_removed = summaries.iter().any(|s| !s.removed_key_ids.is_empty());
-    if any_removed {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    // landed are real, so the caches are stale either way. Returning the error
+    // without busting them would leave the UI showing credentials this run
+    // deleted. The only mutation here is `remove_password` — a credential-only
+    // change — so each mutated app takes the credential tier, which keeps the
+    // shared SP/app-name indexes, the enterprise list and every mailbox-scope
+    // verdict intact (`applications::cache::invalidate_app_credentials` explains
+    // the cost of dropping them: a full tenant re-enumeration). The shared keys
+    // it does drop are hash removals, so repeating them per app is free.
+    for mutated in summaries.iter().filter(|s| !s.removed_key_ids.is_empty()) {
+        super::applications::invalidate_app_credentials(
+            &state.cache,
+            &tenant_id,
+            &mutated.object_id,
+        );
     }
     // A partial sweep reads as a complete one — the caller cannot tell "no
     // expired credentials left" from "the session died on app 40 of 900".
@@ -316,7 +368,7 @@ pub async fn bulk_delete_applications(
 ) -> Result<BulkDeleteResult, UiError> {
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause (which slowed the healthy case yet never
@@ -342,7 +394,7 @@ pub async fn bulk_delete_applications(
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let result = client.delete_application(&id).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
@@ -379,7 +431,10 @@ pub async fn bulk_delete_applications(
         &app_handle,
         "bulk-progress",
         BulkProgress {
-            done: total,
+            // Items actually processed: `dispatch_capped` has joined every
+            // spawned task, so the meter's count is final. Equal to `total`
+            // only for a run that finished.
+            done: meter.done(),
             total,
             current_app: None,
             cancelled: cancelled_early || cancel.is_cancelled(),
@@ -405,7 +460,8 @@ pub async fn bulk_delete_applications(
 /// Grants admin consent to each application in `object_ids`, reusing the same
 /// orchestration as the single-app command. Bounded-concurrency fan-out with
 /// adaptive 429 backoff (each app issues several Graph writes, so the throttle
-/// matters); cancellation and progress share the audit/bulk plumbing.
+/// matters); cancellation rides [`AppState::bulk_cancel`] and progress the
+/// shared `bulk-progress` stream.
 #[tauri::command]
 pub async fn bulk_grant_permissions(
     app_handle: AppHandle,
@@ -415,7 +471,7 @@ pub async fn bulk_grant_permissions(
 ) -> Result<BulkGrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
     let total = object_ids.len();
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause. Each grant is a multi-write orchestration,
@@ -442,7 +498,7 @@ pub async fn bulk_grant_permissions(
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let res = super::permissions::grant_admin_consent_core(&client, &id).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = BulkProgress {
                     done,
                     total,
@@ -452,21 +508,44 @@ pub async fn bulk_grant_permissions(
                 };
                 emit_progress(&app_handle, "bulk-progress", progress);
                 match res {
-                    Ok((r, sp_created)) => (
-                        BulkGrantOutcome {
-                            object_id: id,
-                            granted: r.role_assignments_created.len()
-                                + r.scope_grants_upserted.len(),
-                            skipped: r.role_assignments_skipped.len(),
-                            failed: r.failures.len(),
-                            error: r.failures.first().map(|f| BulkError {
-                                code: "partial_failure".into(),
-                                message: f.message.clone(),
-                                retryable: false,
-                            }),
-                        },
+                    // The client SP was created and a later step failed: the
+                    // row reports the error, and `sp_created` still reaches
+                    // `any_sp_created` so the new Enterprise App row is busted.
+                    Ok(super::permissions::GrantRun {
+                        error: Some(e),
                         sp_created,
-                    ),
+                        ..
+                    }) => {
+                        session.note_code(&e.code);
+                        (
+                            BulkGrantOutcome {
+                                object_id: id,
+                                granted: 0,
+                                skipped: 0,
+                                failed: 0,
+                                error: Some(e.into()),
+                            },
+                            sp_created,
+                        )
+                    }
+                    Ok(run) => {
+                        let r = run.result;
+                        (
+                            BulkGrantOutcome {
+                                object_id: id,
+                                granted: r.role_assignments_created.len()
+                                    + r.scope_grants_upserted.len(),
+                                skipped: r.role_assignments_skipped.len(),
+                                failed: r.failures.len(),
+                                error: r.failures.first().map(|f| BulkError {
+                                    code: "partial_failure".into(),
+                                    message: f.message.clone(),
+                                    retryable: false,
+                                }),
+                            },
+                            run.sp_created,
+                        )
+                    }
                     Err(e) => {
                         session.note_code(&e.code);
                         (
@@ -497,7 +576,10 @@ pub async fn bulk_grant_permissions(
         &app_handle,
         "bulk-progress",
         BulkProgress {
-            done: total,
+            // Items actually processed: `dispatch_capped` has joined every
+            // spawned task, so the meter's count is final. Equal to `total`
+            // only for a run that finished.
+            done: meter.done(),
             total,
             current_app: None,
             cancelled: cancelled_early || cancel.is_cancelled(),
@@ -538,7 +620,7 @@ pub async fn bulk_create_applications(
     specs: Vec<BulkCreateSpec>,
     validate_only: bool,
 ) -> Result<BulkCreateResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -568,12 +650,23 @@ pub async fn bulk_create_applications(
                     ..Default::default()
                 };
                 match super::applications::create_application_core(&client, input).await {
-                    Ok(r) => BulkCreateOutcome {
+                    Ok((r, None)) => BulkCreateOutcome {
                         display_name: r.application.display_name,
                         status: "created".into(),
                         app_id: Some(r.application.app_id),
                         message: None,
                         error: None,
+                    },
+                    // The registration landed and a later step failed: the app
+                    // exists (so `any_created` busts the list tier below) and
+                    // the error still reaches the row — and `run_bulk_seq`,
+                    // which stops on a re-auth-fatal code.
+                    Ok((r, Some(e))) => BulkCreateOutcome {
+                        display_name: r.application.display_name,
+                        status: "created".into(),
+                        app_id: Some(r.application.app_id),
+                        message: Some(e.message.clone()),
+                        error: Some(e.into()),
                     },
                     Err(e) => BulkCreateOutcome {
                         display_name: spec.display_name,
@@ -600,11 +693,11 @@ pub async fn bulk_create_applications(
 }
 
 /// Removes each selected app's *redundant* application permissions, reusing the
-/// single-app remediation core ([`remediation::remediate_remove_redundant_permissions`])
+/// single-app remediation core ([`remediation::remediate_remove_redundant_permissions_core`])
 /// so the live re-resolution + safety rules + per-app cache invalidation are
 /// identical to the one-click fix. Runs sequentially (each call is a multi-read
 /// manifest re-plan, and the selection is the admin's hand-picked set), polling
-/// the shared cancel flag between apps and degrading to a per-app `error` rather
+/// [`AppState::bulk_cancel`] between apps and degrading to a per-app `error` rather
 /// than aborting. No `in_flight_cap` — there's no concurrent fan-out to back off.
 #[tauri::command]
 pub async fn bulk_remove_redundant_permissions(
@@ -613,7 +706,7 @@ pub async fn bulk_remove_redundant_permissions(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkRemoveRedundantResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -624,10 +717,8 @@ pub async fn bulk_remove_redundant_permissions(
             let state = state.clone();
             let tenant_id = tenant_id.clone();
             async move {
-                match super::remediation::remediate_remove_redundant_permissions(
-                    state,
-                    tenant_id,
-                    object_id.clone(),
+                match super::remediation::remediate_remove_redundant_permissions_core(
+                    &state, &tenant_id, &object_id,
                 )
                 .await
                 {
@@ -671,7 +762,7 @@ pub async fn bulk_scope_mailbox_access(
     object_ids: Vec<String>,
     groups: Vec<String>,
 ) -> Result<BulkScopeResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -721,7 +812,7 @@ pub async fn bulk_scope_sharepoint_access(
     site_urls: Vec<String>,
     role: String,
 ) -> Result<BulkScopeResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -771,7 +862,7 @@ pub async fn bulk_add_owner(
     object_ids: Vec<String>,
     principal_id: String,
 ) -> Result<BulkAddOwnerResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
 
     let (outcomes, cancelled) = run_bulk_seq(
@@ -839,7 +930,7 @@ pub async fn bulk_disable_sign_in(
     tenant_id: String,
     object_ids: Vec<String>,
 ) -> Result<BulkDisableSignInResult, UiError> {
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -902,7 +993,7 @@ pub async fn bulk_stage_sso_certificates(
     // Claimed once, before any suspension point: a token claimed later carries a
     // higher generation than a cancel issued in the meantime, which
     // `is_cancelled()` then discards. Pinned by `repo_invariants::cancel`.
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.bulk_cancel.claim();
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -968,11 +1059,17 @@ pub async fn bulk_stage_sso_certificates(
 ///
 /// Runs `per_item` on each `items` element in order, emitting a `bulk-progress`
 /// event (`done = i`, `in_flight_cap: None` — there's no fan-out to back off)
-/// with `label(&item)` as the current app *before* each item, then a final
-/// `done = total` event. Polls the shared cancel flag between items (already
-/// in-flight work finishes). Returns `(outcomes, cancelled)`; callers apply their
-/// own cache invalidation from the outcomes. The caller resets the flag and
-/// clones it (the `reset()` must stay at the command top, the AGENTS.md footgun).
+/// with `label(&item)` as the current app *before* each item, then a terminal
+/// event whose `done` is the number of items actually processed (equal to
+/// `total` only for a run that finished; a cancelled or session-halted run
+/// reports how far it got). Polls the run's `CancelToken` between items
+/// (already in-flight work finishes). Returns `(outcomes, cancelled)`; callers
+/// apply their own cache invalidation from the outcomes. The caller claims the
+/// token once, before its first await (pinned by `repo_invariants::cancel`),
+/// and passes it in.
+///
+/// Takes a [`ProgressSink`] rather than an `&AppHandle` so the loop runs in a
+/// test; see `progress::ProgressSink` for why that is the seam.
 async fn run_bulk_seq<S: ProgressSink, T, O, Fut>(
     progress: &S,
     cancel: &CancelToken,
@@ -990,13 +1087,17 @@ where
         if cancel.is_cancelled() {
             break;
         }
-        progress.emit(BulkProgress {
-            done: i,
-            total,
-            current_app: Some(label(&item)),
-            cancelled: false,
-            in_flight_cap: None,
-        });
+        emit_progress(
+            progress,
+            "bulk-progress",
+            BulkProgress {
+                done: i,
+                total,
+                current_app: Some(label(&item)),
+                cancelled: false,
+                in_flight_cap: None,
+            },
+        );
         let outcome = per_item(item).await;
         // Stop the run when the SESSION died rather than this item. A dead
         // refresh token can't be re-minted silently, so every remaining item
@@ -1011,13 +1112,17 @@ where
             break;
         }
     }
-    progress.emit(BulkProgress {
-        done: total,
-        total,
-        current_app: None,
-        cancelled: cancel.is_cancelled(),
-        in_flight_cap: None,
-    });
+    emit_progress(
+        progress,
+        "bulk-progress",
+        BulkProgress {
+            done: outcomes.len(),
+            total,
+            current_app: None,
+            cancelled: cancel.is_cancelled(),
+            in_flight_cap: None,
+        },
+    );
     (outcomes, cancel.is_cancelled())
 }
 
@@ -1025,6 +1130,7 @@ where
 mod tests {
     use super::*;
     // Tests build their own runs; the commands only ever hold a token.
+    use crate::commands::test_support::Recorder;
     use crate::state::CancelFlag;
 
     fn err(code: &str) -> BulkError {
@@ -1042,26 +1148,12 @@ mod tests {
         }
     }
 
-    /// Records what the driver would have emitted over IPC.
-    #[derive(Default)]
-    struct Recorder(std::sync::Mutex<Vec<BulkProgress>>);
-
-    impl ProgressSink for Recorder {
-        fn emit(&self, payload: BulkProgress) {
-            self.0.lock().unwrap().push(payload);
-        }
-    }
-
-    impl Recorder {
-        /// `(done, current_app)` per event, in order.
-        fn events(&self) -> Vec<(usize, Option<String>)> {
-            self.0
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|p| (p.done, p.current_app.clone()))
-                .collect()
-        }
+    /// `(done, current_app)` per `bulk-progress` event, in order.
+    fn events(rec: &Recorder) -> Vec<(usize, Option<String>)> {
+        rec.payloads::<BulkProgress>("bulk-progress")
+            .into_iter()
+            .map(|p| (p.done, p.current_app))
+            .collect()
     }
 
     async fn drive_with(
@@ -1106,7 +1198,7 @@ mod tests {
         // shows what is happening, not what already happened), then a final
         // done == total with no current app.
         assert_eq!(
-            rec.events(),
+            events(&rec),
             vec![
                 (0, Some("a".into())),
                 (1, Some("b".into())),
@@ -1114,6 +1206,10 @@ mod tests {
                 (3, None),
             ]
         );
+        // The channel name lives in the driver now, not in a per-sink impl:
+        // every event it emits rides the one `bulk-progress` channel.
+        assert!(rec.names().iter().all(|n| *n == "bulk-progress"));
+        assert_eq!(rec.names().len(), 4);
     }
 
     #[tokio::test]
@@ -1128,9 +1224,53 @@ mod tests {
         let (out, cancelled) = drive_with(&rec, &cancel, vec![scope_outcome("a", None)]).await;
         assert!(out.is_empty(), "cancelled before item 1 ⇒ nothing ran");
         assert!(cancelled);
-        // Only the terminal event, and it reports the cancellation.
-        assert_eq!(rec.events(), vec![(1, None)]);
-        assert!(rec.0.lock().unwrap()[0].cancelled);
+        // Only the terminal event: it reports nothing processed, and the
+        // cancellation.
+        assert_eq!(events(&rec), vec![(0, None)]);
+        assert!(rec.payloads::<BulkProgress>("bulk-progress")[0].cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_mid_run_reports_how_far_it_got() {
+        // The terminal event's `done` is the processed count, not `total`, so a
+        // stopped run's bar shows how far it got instead of snapping to 100%.
+        let flag = CancelFlag::new();
+        let cancel = flag.claim();
+        let rec = Recorder::default();
+        let (out, cancelled) = run_bulk_seq(
+            &rec,
+            &cancel,
+            vec![
+                scope_outcome("a", None),
+                scope_outcome("b", None),
+                scope_outcome("c", None),
+                scope_outcome("d", None),
+            ],
+            |o| o.object_id.clone(),
+            |o| {
+                if o.object_id == "b" {
+                    flag.cancel();
+                }
+                async move { o }
+            },
+        )
+        .await;
+        assert_eq!(
+            out.iter().map(|o| o.object_id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"],
+            "the in-flight item finishes, the next one never starts"
+        );
+        assert!(cancelled);
+        assert_eq!(
+            events(&rec),
+            vec![(0, Some("a".into())), (1, Some("b".into())), (2, None)]
+        );
+        assert!(
+            rec.payloads::<BulkProgress>("bulk-progress")
+                .last()
+                .unwrap()
+                .cancelled
+        );
     }
 
     #[tokio::test]
@@ -1181,6 +1321,11 @@ mod tests {
         );
         // Not a user cancellation — the distinction drives different UI copy.
         assert!(!cancelled);
+        assert_eq!(
+            events(&rec).last(),
+            Some(&(2, None)),
+            "the terminal event reports how far the run got"
+        );
     }
 
     #[test]

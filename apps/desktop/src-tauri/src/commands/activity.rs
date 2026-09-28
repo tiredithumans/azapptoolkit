@@ -98,7 +98,7 @@ pub async fn get_app_sign_in_activity(
     // up front (mirrors `run_audit`).
     if let Err(err) = state.ensure_audit_log_token(&tenant_id).await {
         let ui = UiError::from(err);
-        if ui.code == "consent_required" {
+        if ui.is_consent_required() {
             return Ok(SignInActivityDto {
                 available: false,
                 consent_required: true,
@@ -166,9 +166,9 @@ fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
         GraphError::Token(_) => sign_in_unavailable(
             "Couldn't acquire AuditLog.Read.All for sign-in activity; it needs admin consent (and Entra ID P1/P2).",
         ),
-        GraphError::Unauthorized => {
-            sign_in_unavailable("Your session expired. Sign in again to view sign-in activity.")
-        }
+        GraphError::Unauthorized => sign_in_unavailable(
+            "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen sign-in activity.",
+        ),
         GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => {
             sign_in_unavailable(
                 "Couldn't reach the sign-in activity report just now. Try Refresh in a moment.",
@@ -418,5 +418,14 @@ mod tests {
                 .unwrap()
                 .contains("secret-internal-detail")
         );
+    }
+
+    #[test]
+    fn sign_in_err_rejected_token_points_at_refresh_token() {
+        let rejected = map_sign_in_err(GraphError::Unauthorized);
+        assert!(!rejected.available);
+        let message = rejected.message.unwrap();
+        assert!(message.contains("Refresh token"), "{message}");
+        assert!(!message.contains("Sign in again"), "{message}");
     }
 }

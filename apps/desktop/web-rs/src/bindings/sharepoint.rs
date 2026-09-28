@@ -1,11 +1,11 @@
 //! SharePoint Selected-permission IPC bindings. DTOs come from the shared
 //! `azapptoolkit-dto` crate (re-exported here for callers).
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
-use crate::bindings::TenantArg;
+use crate::bindings::{AppIdArgs, TenantArg};
 pub use azapptoolkit_dto::sharepoint::*;
 
 #[derive(Serialize)]
@@ -45,22 +45,16 @@ pub async fn sweep_site_permissions(tenant_id: &str) -> Result<SiteSweepResult, 
     invoke_result("sweep_site_permissions", TenantArg { tenant_id }).await
 }
 
-/// Signals the in-progress resource sweep/probe (site sweep or mailbox probe)
-/// to stop at the next dispatch boundary.
-pub async fn cancel_resource_sweep() -> Result<(), UiError> {
-    invoke_result("cancel_resource_sweep", ()).await
+/// Signals an in-progress site-permission sweep to stop at the next dispatch
+/// boundary. Covers both the Resource Access Sites tab and the per-app site
+/// panel: same sweep, same flag.
+pub async fn cancel_site_sweep() -> Result<(), UiError> {
+    invoke_result("cancel_site_sweep", ()).await
 }
 
 /// The cached sweep for this tenant, if one completed within the cache TTL.
 pub async fn get_cached_site_sweep(tenant_id: &str) -> Result<Option<SiteSweepResult>, UiError> {
     invoke_result("get_cached_site_sweep", TenantArg { tenant_id }).await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppSiteAccessArgs<'a> {
-    tenant_id: &'a str,
-    app_id: &'a str,
 }
 
 /// The sites this principal can reach under `Sites.Selected`, with the roles it
@@ -72,11 +66,7 @@ pub async fn get_app_site_access(
     tenant_id: &str,
     app_id: &str,
 ) -> Result<Option<AppSiteAccessDto>, UiError> {
-    invoke_result(
-        "get_app_site_access",
-        AppSiteAccessArgs { tenant_id, app_id },
-    )
-    .await
+    invoke_result("get_app_site_access", AppIdArgs { tenant_id, app_id }).await
 }
 
 #[derive(Serialize)]

@@ -19,6 +19,7 @@ use crate::components::shortcuts_help::ShortcutsHelp;
 use crate::components::toast::{ToastHost, ToastKind};
 use crate::components::update_splash::UpdateSplash;
 use crate::hooks::use_escape::use_escape;
+use crate::hooks::use_menu_keynav::use_menu_keynav;
 use crate::hooks::use_shortcuts::use_shortcuts;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
@@ -97,82 +98,51 @@ pub fn AppShell(children: Children) -> impl IntoView {
 
     // Re-mints the session's tokens in place (no sign-out) so a role activated
     // after sign-in — e.g. an "Exchange Administrator" PIM role — takes effect.
-    // Tries the silent refresh first; if the session is dead (an expired/revoked
-    // or missing refresh token, surfaced as `refresh_missing`/`not_signed_in`),
-    // it falls back to one interactive browser round trip — still no sign-out, so
-    // the cached lists + audit run survive. The in-flight guard prevents a
-    // double-click from racing two refreshes; `reauthing` flips the label while
-    // the browser flow is open.
-    let refreshing = RwSignal::new(false);
-    let reauthing = RwSignal::new(false);
-    let on_refresh_token = move |_| {
-        let session = session;
-        if refreshing.get() {
-            return;
-        }
-        if let Some(t) = tenant.get() {
-            refreshing.set(true);
-            leptos::task::spawn_local(async move {
-                match crate::bindings::auth::refresh_session(&t.tenant_id).await {
-                    Ok(()) => {
-                        // Re-applied roles may change access, so re-run a mounted
-                        // Access Readiness checklist (this is its only re-check).
-                        session.bump_readiness_reload();
-                        session.toast_success(
-                            "Token refreshed — roles activated since sign-in now apply. \
-                             Retry the action that failed.",
-                        );
-                    }
-                    Err(e) if e.is_reauth_fatal() => {
-                        // Silent re-mint can't fix a dead refresh token; re-auth
-                        // interactively in place rather than dumping the user to
-                        // the sign-in screen.
-                        reauthing.set(true);
-                        match crate::bindings::auth::reauthenticate(&t).await {
-                            Ok(_) => {
-                                session.bump_readiness_reload();
-                                session.toast_success(
-                                    "Re-authenticated — retry the action that failed.",
-                                )
-                            }
-                            Err(e) => session.toast_error(
-                                format!("Couldn't re-authenticate: {}", e.message),
-                                None,
-                            ),
-                        };
-                        reauthing.set(false);
-                    }
-                    Err(e) => {
-                        session.toast_error(format!("Couldn't refresh token: {}", e.message), None);
-                    }
-                }
-                refreshing.set(false);
-            });
-        }
-    };
+    // `Session::spawn_refresh_token` tries the silent refresh first and, on a
+    // dead session, falls back to one interactive browser round trip — still no
+    // sign-out, so the cached lists + audit run survive. Its in-flight guard
+    // lives on the session (shared with the 401 toast's action), so neither a
+    // double-click nor a toast can race a second refresh; `token_reauthing`
+    // flips the label while the browser flow is open.
+    let refreshing = session.token_refreshing;
+    let reauthing = session.token_reauthing;
+    let on_refresh_token = move |_| session.spawn_refresh_token();
 
     // Auto-update: the pending update (if any) + the changelog-splash open flag.
     // The launch check (once on mount) toasts a notification whose action opens
     // the splash; the nav "Check for updates" button opens it directly.
     let update_info: RwSignal<Option<updater::UpdateInfo>> = RwSignal::new(None);
     let update_open = RwSignal::new(false);
+    // Why the backend's update gate made no check (opt-out, MSI, .deb/.rpm) —
+    // install-level, not tenant state, so a local signal rather than
+    // `Session.tenant_ui`. Relabels the account-menu item instead of offering
+    // a check that would never be made.
+    let updates_disabled: RwSignal<Option<updater::UpdatesDisabled>> = RwSignal::new(None);
     // "What's new" for the version already installed — the notes baked into
     // this build, reachable from the account menu after the splash is gone.
     let release_notes_open = RwSignal::new(false);
     Effect::new(move |_| {
         // Runs once (no tracked reads). A check failure — e.g. a dev build with
         // no updater, or GitHub being unreachable — is swallowed silently; the
-        // user can still trigger a manual check from the nav.
+        // user can still trigger a manual check from the nav. A check the
+        // backend's update gate refused (opt-out / MSI / .deb) is recorded
+        // silently too: it only relabels the account-menu item.
         leptos::task::spawn_local(async move {
-            if let Ok(Some(info)) = updater::check_for_update().await {
-                let version = info.version.clone();
-                update_info.set(Some(info));
-                session.push_toast(
-                    ToastKind::Info,
-                    format!("Update available: v{version}"),
-                    Some("View changelog".to_string()),
-                    Some(Rc::new(move || update_open.set(true))),
-                );
+            match updater::check_for_update().await {
+                Ok(updater::UpdateCheck::Available { info }) => {
+                    let version = info.version.clone();
+                    update_info.set(Some(info));
+                    session.push_toast(
+                        ToastKind::Info,
+                        format!("Update available: v{version}"),
+                        Some("View changelog".to_string()),
+                        Some(Rc::new(move || update_open.set(true))),
+                    );
+                }
+                Ok(updater::UpdateCheck::Disabled { reason }) => {
+                    updates_disabled.set(Some(reason));
+                }
+                Ok(updater::UpdateCheck::UpToDate) | Err(_) => {}
             }
         });
     });
@@ -187,12 +157,18 @@ pub fn AppShell(children: Children) -> impl IntoView {
         checking.set(true);
         leptos::task::spawn_local(async move {
             match updater::check_for_update().await {
-                Ok(Some(info)) => {
+                Ok(updater::UpdateCheck::Available { info }) => {
                     update_info.set(Some(info));
                     update_open.set(true);
                 }
-                Ok(None) => {
+                Ok(updater::UpdateCheck::UpToDate) => {
                     session.toast_success("You're on the latest version.");
+                }
+                // Only reachable when the click lands before the launch check
+                // has returned; afterwards the item is disabled.
+                Ok(updater::UpdateCheck::Disabled { reason }) => {
+                    updates_disabled.set(Some(reason));
+                    session.push_toast(ToastKind::Info, reason.description(), None, None);
                 }
                 Err(e) => {
                     session.toast_error(format!("Update check failed: {}", e.message), None);
@@ -227,6 +203,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
         move || menu_open.get_untracked(),
         move || menu_open.set(false),
     );
+    // `role="menu"` keyboard contract (shared with `ExportMenu`): focus the
+    // first item on open, Arrow/Home/End between items, focus back to the chip
+    // however the menu closes.
+    let menu_ref = NodeRef::<leptos::html::Div>::new();
+    let on_menu_key = use_menu_keynav(menu_ref, menu_open.into());
 
     // A menu row that navigates to `target` and closes the menu. Marks the active
     // view with `aria-current` + a selected class (mirrors `nav_row_view`).
@@ -340,7 +321,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 type="button"
                                 title="Account — access readiness, settings, sign out"
                                 aria-haspopup="menu"
-                                aria-expanded=move || menu_open.get()
+                                aria-expanded=move || menu_open.get().to_string()
                                 on:click=move |_| menu_open.update(|o| *o = !*o)
                             >
                                 <span class="shell__tenant-chip-icon">
@@ -388,7 +369,12 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 </span>
                             </button>
                             <Show when=move || menu_open.get()>
-                                <div class="shell__account-menu" role="menu">
+                                <div
+                                    class="shell__account-menu"
+                                    role="menu"
+                                    node_ref=menu_ref
+                                    on:keydown=on_menu_key.clone()
+                                >
                                     <div class="shell__account-menu-header">
                                         <span class="shell__account-menu-label">"Signed in as"</span>
                                         <span class="shell__account-menu-user">
@@ -412,18 +398,22 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         type="button"
                                         role="menuitem"
                                         on:click=move |_| {
-                                            session.tenant_ui.cache_open.set(true);
+                                            // Close the menu FIRST, so its focus
+                                            // return to the chip runs before the
+                                            // dialog's trap records and places focus.
                                             menu_open.set(false);
+                                            session.tenant_ui.cache_open.set(true);
                                         }
                                     >
                                         <span class="nav__icon"><Icon name=IconName::Activity size=16 /></span>
                                         <span>"Cache diagnostics"</span>
                                     </button>
                                     <button
-                                        class="shell__account-item"
+                                        class="shell__account-item shell__account-item--update"
                                         type="button"
                                         role="menuitem"
-                                        disabled=move || checking.get()
+                                        disabled=move || checking.get() || updates_disabled.get().is_some()
+                                        title=move || updates_disabled.get().map(|r| r.description())
                                         on:click=move |ev| {
                                             on_check_updates(ev);
                                             menu_open.set(false);
@@ -440,7 +430,15 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                             }}
                                         </span>
                                         <span>
-                                            {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                                            {move || {
+                                                if checking.get() {
+                                                    "Checking…"
+                                                } else if let Some(reason) = updates_disabled.get() {
+                                                    reason.menu_label()
+                                                } else {
+                                                    "Check for updates"
+                                                }
+                                            }}
                                         </span>
                                     </button>
                                     <div class="shell__account-divider" role="separator"></div>
@@ -476,8 +474,9 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                             type="button"
                                             role="menuitem"
                                             on:click=move |_| {
-                                                release_notes_open.set(true);
+                                                // Menu first — see "Cache diagnostics".
                                                 menu_open.set(false);
+                                                release_notes_open.set(true);
                                             }
                                         >
                                             "What's new"

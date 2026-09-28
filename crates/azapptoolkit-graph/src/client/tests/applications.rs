@@ -181,6 +181,9 @@ async fn list_owners_follows_next_link() {
     Mock::given(method("GET"))
         .and(path("/applications/obj-1/owners"))
         .and(query_param("page", "2"))
+        // Page 1 was a plain read, so page 2 is too — not an advanced query
+        // served from the eventually-consistent index.
+        .and(header_is_missing("consistencylevel"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{"id": "u2", "displayName": "Bob"}, {"id": "u3", "displayName": "Cara"}]
         })))
@@ -215,10 +218,82 @@ async fn create_application_posts_body_and_returns_app() {
         display_name: "my-new-app".into(),
         sign_in_audience: Some("AzureADMyOrg".into()),
         description: None,
+        tags: Vec::new(),
     };
     let app = client.create_application(&req).await.unwrap();
     assert_eq!(app.id, "obj-99");
     assert_eq!(app.display_name, "my-new-app");
+}
+
+#[tokio::test]
+async fn create_application_sends_tags_in_the_create_body() {
+    // The DR restore marker must ride the POST itself: a follow-up PATCH would
+    // leave an untagged app behind if the run died in between.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/applications"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "displayName": "restored-app",
+            "tags": ["azapptoolkit:restoredFrom:x"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "obj-1",
+            "appId": "app-1",
+            "displayName": "restored-app"
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let req = CreateApplicationRequest {
+        display_name: "restored-app".into(),
+        tags: vec!["azapptoolkit:restoredFrom:x".into()],
+        ..Default::default()
+    };
+    let app = client.create_application(&req).await.unwrap();
+    assert_eq!(app.id, "obj-1");
+}
+
+#[tokio::test]
+async fn find_applications_by_tag_filters_on_the_exact_tag() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param(
+            "$filter",
+            "tags/any(t:t eq 'azapptoolkit:restoredFrom:o''brien')",
+        ))
+        .and(query_param("$top", "10"))
+        .and(query_param(
+            "$select",
+            "id,appId,displayName,createdDateTime,passwordCredentials",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "obj-1",
+                "appId": "app-1",
+                "displayName": "Restored",
+                "createdDateTime": "2026-01-02T03:04:05Z",
+                "passwordCredentials": [{ "keyId": "k1", "displayName": "ci" }]
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let hits = client
+        .find_applications_by_tag("azapptoolkit:restoredFrom:o'brien")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].app_id, "app-1");
+    // The restore's provenance check compares this against the backup time.
+    assert_eq!(
+        hits[0].created_date_time.map(|t| t.to_rfc3339()).as_deref(),
+        Some("2026-01-02T03:04:05+00:00")
+    );
+    assert_eq!(
+        hits[0].password_credentials[0].display_name.as_deref(),
+        Some("ci")
+    );
 }
 
 #[tokio::test]
@@ -458,4 +533,192 @@ async fn patch_application_web_sends_identifier_and_reply_urls() {
         )
         .await
         .unwrap();
+}
+
+/// The regression behind `get_json_absolute_with`'s history: an `$expand`
+/// enumeration paged as an advanced query gets a 200 with `owners` silently
+/// missing from page two onward. Every page of the audit's expanding scan
+/// must be a plain read.
+#[tokio::test]
+async fn list_applications_all_keeps_an_expand_scan_off_the_advanced_query_on_page_two() {
+    let server = MockServer::start().await;
+    let page2_link = format!("{}/applications?page=2", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param("$expand", "owners($select=id)"))
+        .and(header_is_missing("consistencylevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": page2_link,
+            "value": [{ "id": "a1", "appId": "app-1", "displayName": "one" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param("page", "2"))
+        .and(header_is_missing("consistencylevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "a2", "appId": "app-2", "displayName": "two" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let (apps, truncated) = client
+        .list_applications_all(
+            AppListQuery::default().with_expand("owners($select=id)"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(apps.len(), 2, "page 2 answered only as a plain read");
+    assert!(!truncated);
+}
+
+/// The whole-gallery fetch asks for large pages on the FIRST request only: the
+/// effective page size rides the `nextLink`, and restating `Prefer` (or
+/// turning the continuation into an advanced query) is not the contract.
+#[tokio::test]
+async fn application_gallery_asks_for_large_pages_on_the_first_request_only() {
+    let server = MockServer::start().await;
+    let page2_link = format!("{}/applicationTemplates?page=2", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(header("prefer", "odata.maxpagesize=2800"))
+        .and(query_param_is_missing("page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": page2_link,
+            "value": [{ "id": "t1" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/applicationTemplates"))
+        .and(query_param("page", "2"))
+        .and(header_is_missing("prefer"))
+        .and(header_is_missing("consistencylevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "t2" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let templates = client.list_all_application_templates().await.unwrap();
+    assert_eq!(templates.len(), 2);
+    assert_eq!(templates[1].id, "t2");
+}
+
+/// The DR backup read captures an app's whole configuration: the exact shared
+/// projection, a plain `$expand=owners`, and no advanced-query header (which
+/// would drop the expansion silently).
+#[tokio::test]
+async fn backup_read_selects_the_full_projection_and_expands_owners_plainly() {
+    use super::super::applications::APP_BACKUP_SELECT;
+    for field in [
+        "web",
+        "spa",
+        "publicClient",
+        "identifierUris",
+        "api",
+        "keyCredentials",
+        "passwordCredentials",
+        "requiredResourceAccess",
+    ] {
+        assert!(
+            APP_BACKUP_SELECT.split(',').any(|f| f.trim() == field),
+            "the backup projection lost `{field}` — a restore would not recreate it"
+        );
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-1"))
+        .and(query_param("$select", APP_BACKUP_SELECT))
+        .and(query_param("$expand", "owners"))
+        .and(header_is_missing("consistencylevel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "obj-1", "appId": "app-1", "owners": [{ "id": "u1" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let app = client.get_application_backup_json("obj-1").await.unwrap();
+    assert_eq!(app["owners"][0]["id"], "u1");
+}
+
+/// Seeds the two `Permissions` families an app-side exposure write must tell
+/// apart: the cached resource definitions (must go) and a grant matrix (must
+/// survive).
+fn seed_resource_and_grant_caches(client: &GraphClient) {
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|resource:api-app-id".to_string(),
+        &serde_json::json!({ "appRoles": [] }),
+    );
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:oauth2_all".to_string(),
+        &serde_json::json!([]),
+    );
+}
+
+fn assert_only_resource_definitions_dropped(client: &GraphClient) {
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|resource:api-app-id")
+            .is_none(),
+        "the stale resource definition would leave the new exposure out of the picker"
+    );
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|grants:oauth2_all")
+            .is_some(),
+        "an unrelated family was swept; the key segmenting is not working"
+    );
+}
+
+/// The app-side twin of `publishing_app_roles_drops_the_cached_resource_definitions`
+/// (service principals): publishing scopes on the application drops the cached
+/// `resource:` definitions and nothing else.
+#[tokio::test]
+async fn exposing_an_api_drops_the_cached_resource_definitions() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    seed_resource_and_grant_caches(&client);
+
+    client
+        .patch_application_expose_api("obj-1", &ApplicationExposeApiPatch::default())
+        .await
+        .unwrap();
+
+    assert_only_resource_definitions_dropped(&client);
+}
+
+/// Same contract for app roles published on the application.
+#[tokio::test]
+async fn publishing_application_app_roles_drops_the_cached_resource_definitions() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    seed_resource_and_grant_caches(&client);
+
+    client
+        .set_application_app_roles("obj-1", &[serde_json::json!({ "value": "Orders.Read" })])
+        .await
+        .unwrap();
+
+    assert_only_resource_definitions_dropped(&client);
 }

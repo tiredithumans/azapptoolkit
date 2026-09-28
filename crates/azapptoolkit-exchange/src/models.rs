@@ -32,6 +32,16 @@ pub struct ExoManagementScope {
 }
 
 /// A management role assignment created via `New-ManagementRoleAssignment`.
+///
+/// `custom_resource_scope` is the toolkit's management scope, and the only
+/// field the planners (`roles_already_scoped`, `plan_role_assignments`) key on.
+/// The three recipient-write-scope fields are read only so the listing does not
+/// mislabel an assignment made with `-RecipientAdministrativeUnitScope` as
+/// org-wide. Their names are the ExchangeRoleAssignment properties and have not
+/// been confirmed against a captured AU-scoped envelope, so each is read
+/// tolerantly (a non-string value is `None`, never a failed row) and kept as
+/// its own field: a `#[serde(alias)]` merge would fail the whole list with a
+/// duplicate-field error if two of the keys arrived together.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExoRoleAssignment {
     #[serde(rename = "Name", default)]
@@ -44,6 +54,29 @@ pub struct ExoRoleAssignment {
     pub custom_resource_scope: Option<String>,
     #[serde(rename = "Identity", default)]
     pub identity: Option<String>,
+    /// The recipient write-scope type, e.g. `AdministrativeUnit`.
+    #[serde(
+        rename = "RecipientWriteScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub recipient_write_scope: Option<String>,
+    /// The identity behind a custom recipient write scope (for an AU scope,
+    /// the administrative unit's ID).
+    #[serde(
+        rename = "CustomRecipientWriteScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub custom_recipient_write_scope: Option<String>,
+    /// The `-RecipientAdministrativeUnitScope` value, should the gateway echo
+    /// the parameter name as a property.
+    #[serde(
+        rename = "RecipientAdministrativeUnitScope",
+        default,
+        deserialize_with = "ps_optional_string"
+    )]
+    pub recipient_administrative_unit_scope: Option<String>,
 }
 
 /// A recipient group (mail-enabled security group, M365 group, or
@@ -93,10 +126,110 @@ pub struct ExoApplicationAccessPolicy {
     pub scope_name: Option<String>,
     #[serde(rename = "ScopeIdentity", default)]
     pub scope_identity: Option<String>,
-    #[serde(rename = "AccessRight", default)]
-    pub access_right: Option<String>,
+    /// `None` when Exchange reported no readable `AccessRight` (absent, blank,
+    /// or not a string) — never guessed at in either direction.
+    #[serde(rename = "AccessRight", default, deserialize_with = "ps_access_right")]
+    pub access_right: Option<AapAccessRight>,
     #[serde(rename = "Description", default)]
     pub description: Option<String>,
+}
+
+impl ExoApplicationAccessPolicy {
+    /// Whether this is a `RestrictAccess` (allow-list) policy — the single
+    /// definition the migration planner (`aap.rs`) and the audit / permission
+    /// tester verdict (`verdict.rs`) share. They used to spell it separately,
+    /// and only one trimmed, so a padded `" RestrictAccess "` was migrated as
+    /// confining by one and reported org-wide by the other.
+    pub fn is_restrict_access(&self) -> bool {
+        self.access_right
+            .as_ref()
+            .is_some_and(AapAccessRight::is_restrict)
+    }
+}
+
+/// `AccessRight` of a legacy Application Access Policy. `RestrictAccess`
+/// (allow-list) vs `DenyAccess` (blocklist) is the migration's most
+/// consequential decision — rebuilding a blocklist as a management scope
+/// inverts it — so it is parsed ONCE, trimmed and case-folded, here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AapAccessRight {
+    RestrictAccess,
+    DenyAccess,
+    /// Any other non-blank value, trimmed, as Exchange reported it.
+    Other(String),
+}
+
+impl AapAccessRight {
+    /// Tolerant parse: trims, folds ASCII case, and maps a blank value to
+    /// `None` ("no readable AccessRight").
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.eq_ignore_ascii_case("RestrictAccess") {
+            Some(Self::RestrictAccess)
+        } else if trimmed.eq_ignore_ascii_case("DenyAccess") {
+            Some(Self::DenyAccess)
+        } else {
+            Some(Self::Other(trimmed.to_string()))
+        }
+    }
+
+    pub fn is_restrict(&self) -> bool {
+        matches!(self, Self::RestrictAccess)
+    }
+
+    /// The canonical spelling (`RestrictAccess` / `DenyAccess`), or the
+    /// unrecognised text as reported.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::RestrictAccess => "RestrictAccess",
+            Self::DenyAccess => "DenyAccess",
+            Self::Other(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Display for AapAccessRight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Serializes as the plain string, so the policy keeps its wire shape.
+impl Serialize for AapAccessRight {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// For builders; a blank value becomes `Other("")`, which is never
+/// `RestrictAccess` (the wire path maps blank to `None` instead).
+impl From<&str> for AapAccessRight {
+    fn from(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or_else(|| Self::Other(String::new()))
+    }
+}
+
+impl From<String> for AapAccessRight {
+    fn from(raw: String) -> Self {
+        Self::from(raw.as_str())
+    }
+}
+
+/// Tolerant parse of `AccessRight`, following [`ps_access_check`]: a string
+/// goes through [`AapAccessRight::parse`]; anything else (null, a number, a
+/// bool) is `None` — no readable AccessRight, which every caller fails closed
+/// on.
+fn ps_access_right<'de, D>(deserializer: D) -> Result<Option<AapAccessRight>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(s)) => AapAccessRight::parse(&s),
+        _ => None,
+    })
 }
 
 /// Result of `Test-ApplicationAccessPolicy` — the live evaluation of the
@@ -180,9 +313,77 @@ where
     })
 }
 
+/// Tolerant string for a cmdlet property whose wire shape is unconfirmed: a
+/// JSON string becomes `Some` (trimmed; blank is `None`), and anything else —
+/// a number (an enum serialized by value), an object, `null` — is `None`
+/// instead of failing the whole response.
+fn ps_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn role_assignment_of(json: serde_json::Value) -> ExoRoleAssignment {
+        serde_json::from_value(json).expect("role assignment deserializes")
+    }
+
+    #[test]
+    fn an_administrative_unit_scoped_assignment_reads_its_scope() {
+        let a = role_assignment_of(serde_json::json!({
+            "Name": "Application Mail.Read-app",
+            "Role": "Application Mail.Read",
+            "RecipientWriteScope": "AdministrativeUnit",
+            "CustomRecipientWriteScope": "4d819ce9-5d1f-4b3e-9a6c-0d2b7e8f1a23"
+        }));
+        assert_eq!(
+            a.recipient_write_scope.as_deref(),
+            Some("AdministrativeUnit")
+        );
+        assert_eq!(
+            a.custom_recipient_write_scope.as_deref(),
+            Some("4d819ce9-5d1f-4b3e-9a6c-0d2b7e8f1a23")
+        );
+        assert_eq!(a.custom_resource_scope, None);
+    }
+
+    #[test]
+    fn an_unexpected_write_scope_shape_never_fails_the_row() {
+        // An enum serialized by value, not name: the row still parses.
+        let a = role_assignment_of(serde_json::json!({
+            "Role": "Application Mail.Read",
+            "RecipientWriteScope": 11,
+            "CustomRecipientWriteScope": { "Name": "x" },
+            "RecipientAdministrativeUnitScope": "   "
+        }));
+        assert_eq!(a.role.as_deref(), Some("Application Mail.Read"));
+        assert_eq!(a.recipient_write_scope, None);
+        assert_eq!(a.custom_recipient_write_scope, None);
+        assert_eq!(a.recipient_administrative_unit_scope, None);
+    }
+
+    #[test]
+    fn a_row_without_write_scope_keys_reads_none() {
+        let a = role_assignment_of(serde_json::json!({
+            "Role": "Application Mail.Read",
+            "CustomResourceScope": "app_scope_x"
+        }));
+        assert_eq!(a.custom_resource_scope.as_deref(), Some("app_scope_x"));
+        assert_eq!(a.recipient_write_scope, None);
+        assert_eq!(a.custom_recipient_write_scope, None);
+        assert_eq!(a.recipient_administrative_unit_scope, None);
+    }
 
     fn in_scope_of(json: serde_json::Value) -> Option<bool> {
         serde_json::from_value::<ExoAuthorizationResult>(json)
@@ -241,6 +442,48 @@ mod tests {
             access_check_of(serde_json::json!({ "AccessCheckResult": true })),
             Some(true)
         );
+    }
+
+    #[test]
+    fn access_right_parses_tolerantly_and_round_trips() {
+        fn right_of(json: serde_json::Value) -> Option<AapAccessRight> {
+            serde_json::from_value::<ExoApplicationAccessPolicy>(json)
+                .expect("policy deserializes")
+                .access_right
+        }
+        for raw in ["RestrictAccess", " restrictaccess ", "RESTRICTACCESS\t"] {
+            assert_eq!(
+                right_of(serde_json::json!({ "AccessRight": raw })),
+                Some(AapAccessRight::RestrictAccess),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            right_of(serde_json::json!({ "AccessRight": " DenyAccess" })),
+            Some(AapAccessRight::DenyAccess)
+        );
+        assert_eq!(
+            right_of(serde_json::json!({ "AccessRight": "Weird" })),
+            Some(AapAccessRight::Other("Weird".into()))
+        );
+        // No readable AccessRight: never guessed at.
+        for json in [
+            serde_json::json!({ "AccessRight": "" }),
+            serde_json::json!({ "AccessRight": "  " }),
+            serde_json::json!({ "AccessRight": null }),
+            serde_json::json!({}),
+            serde_json::json!({ "AccessRight": 1 }),
+        ] {
+            assert_eq!(right_of(json.clone()), None, "{json}");
+        }
+
+        // The wire shape is unchanged: a plain string, canonically spelled.
+        let policy: ExoApplicationAccessPolicy =
+            serde_json::from_value(serde_json::json!({ "AccessRight": " restrictaccess " }))
+                .unwrap();
+        assert!(policy.is_restrict_access());
+        let out = serde_json::to_value(&policy).unwrap();
+        assert_eq!(out["AccessRight"], "RestrictAccess");
     }
 
     #[test]

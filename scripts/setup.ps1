@@ -23,6 +23,31 @@ if (Get-Command rustup -ErrorAction SilentlyContinue) {
     Write-WarnMsg "rustup not found — ensure rustfmt, clippy, and the wasm32-unknown-unknown target are installed some other way"
 }
 
+# rustc cannot link without the MSVC C++ build tools, and the cargo installs
+# below are the first thing that needs them — so probe before them. Non-fatal,
+# like the WiX check. link.exe is normally NOT on PATH (rustc finds it via
+# vswhere, and Git ships an unrelated usr\bin\link.exe), so ask vswhere too.
+# The -requires component is the x64 toolset; an ARM64-only install may warn
+# falsely here, which is harmless.
+Write-Info "Checking the MSVC C++ build tools (linker)"
+$rustHost = ((rustc -vV) | Where-Object { $_ -like 'host:*' }) -replace '^host:\s*', ''
+if ($rustHost -like '*-msvc') {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $vc = $null
+    if (Test-Path $vswhere) {
+        $vc = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    }
+    if ($vc) {
+        Write-Ok "MSVC build tools found ($vc)"
+    } elseif (Get-Command cl.exe -ErrorAction SilentlyContinue) {
+        Write-Ok "cl.exe on PATH (Developer prompt)"
+    } else {
+        Write-WarnMsg "MSVC C++ build tools not found — Rust cannot link (error: linker 'link.exe' not found)."
+        Write-WarnMsg "  Install Visual Studio Build Tools with the 'Desktop development with C++' workload:"
+        Write-WarnMsg "  https://visualstudio.microsoft.com/visual-cpp-build-tools/"
+    }
+}
+
 Write-Info "Checking Tauri CLI"
 if (Get-Command cargo-tauri -ErrorAction SilentlyContinue) {
     Write-Ok (cargo tauri --version 2>$null)
@@ -70,13 +95,20 @@ if (Get-Command chromedriver -ErrorAction SilentlyContinue) {
     Write-WarnMsg "No chromedriver found — 'just web-itest' (browser GUI tests) needs Chrome + a matching chromedriver on PATH."
 }
 
-Write-Info "cargo check --workspace"
-cargo check --workspace
-Write-Ok "Rust workspace compiles"
+# Smoke test through the same recipes CI and 'just verify' use, so the flags
+# never drift. 'just check' first: it drops the placeholder web-rs/dist that
+# Tauri's generate_context! needs on a fresh clone (dist/ is gitignored) and
+# fails fast on a Rust error; 'just web-build' (trunk build --locked) then
+# replaces the placeholder with the real bundle. A native command's non-zero
+# exit does not throw under $ErrorActionPreference, so check $LASTEXITCODE.
+Write-Info "Type-check both trees (just check)"
+just check
+if ($LASTEXITCODE -ne 0) { Write-Fail "just check failed" }
+Write-Ok "Rust workspace + frontend type-check"
 
-Write-Info "Frontend build (apps/desktop/web-rs)"
-Push-Location apps/desktop/web-rs
-try { trunk build } finally { Pop-Location }
+Write-Info "Frontend build (just web-build)"
+just web-build
+if ($LASTEXITCODE -ne 0) { Write-Fail "just web-build failed" }
 Write-Ok "Frontend builds"
 
 Write-Host ""

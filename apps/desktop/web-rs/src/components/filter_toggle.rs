@@ -21,7 +21,10 @@ pub fn FilterToggle(
         <button
             class="filter-toggle"
             type="button"
-            aria-expanded=move || open.get()
+            // A *string*, never a bare `bool`: Leptos renders a bool as a
+            // boolean attribute, and neither `aria-expanded=""` nor an absent
+            // one is a valid ARIA value.
+            aria-expanded=move || open.get().to_string()
             on:click=move |_| open.update(|o| *o = !*o)
         >
             <Icon name=IconName::Filter size=16 />

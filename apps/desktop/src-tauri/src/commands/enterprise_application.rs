@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::{ServicePrincipal, SynchronizationJob};
+use azapptoolkit_core::models::{AppRoleAssignment, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{enterprise_key, invalidate_app_lists};
@@ -71,10 +71,10 @@ pub async fn list_enterprise_applications(
         .cache
         .get::<Vec<EnterpriseApplicationDto>>(CacheKind::Lists, &key)
     {
-        tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
     }
-    tracing::debug!(target = "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
     let client = state.graph_for(&tenant_id);
 
@@ -122,6 +122,9 @@ pub async fn get_enterprise_application_detail(
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<EnterpriseApplicationDetail, UiError> {
+    // The pairing lookup below reads the cached app-registration index;
+    // `graph_for` only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
 
     // The SP read and the owners read both key off the input
@@ -189,15 +192,20 @@ pub async fn list_enterprise_app_assignments(
     let assignments = client
         .list_app_role_assigned_to(&service_principal_id)
         .await?;
-    Ok(assignments
-        .into_iter()
-        .map(|a| AppAssignmentDto {
-            assignment_id: a.id,
-            principal_display_name: a.principal_display_name,
-            principal_type: a.principal_type,
-            app_role_id: a.app_role_id,
-        })
-        .collect())
+    Ok(assignments.into_iter().map(assignment_dto).collect())
+}
+
+/// Projects one `appRoleAssignedTo` row onto the Access tab's DTO. The
+/// `principal_id` is what lets the tab's search hide a principal that already
+/// holds the selected role.
+fn assignment_dto(a: AppRoleAssignment) -> AppAssignmentDto {
+    AppAssignmentDto {
+        assignment_id: a.id,
+        principal_id: a.principal_id,
+        principal_display_name: a.principal_display_name,
+        principal_type: a.principal_type,
+        app_role_id: a.app_role_id,
+    }
 }
 
 /// Grants a principal (user/group) access to an enterprise application by
@@ -261,8 +269,9 @@ pub async fn list_sp_group_memberships(
 
 /// Adds the service principal as a member of `group_id`. Pre-acquires the
 /// `GroupMember.ReadWrite.All` token with a typed call so a not-yet-consented
-/// scope reaches the UI as `consent_required` (the panel offers "Grant
-/// consent & retry") instead of a flattened `token_error`.
+/// scope reaches the UI as `consent_required` before the membership write,
+/// bound to the `group_membership` feature the panel's "Grant consent & retry"
+/// requests.
 #[tauri::command]
 pub async fn add_sp_to_group(
     state: State<'_, AppState>,
@@ -328,15 +337,21 @@ fn map_group_membership(g: azapptoolkit_core::models::GroupSummary) -> GroupMemb
 }
 
 /// Returns the enterprise application's SCIM provisioning job status (best
-/// effort). An empty list means provisioning isn't configured (Graph 404); a
-/// hard error means the `Synchronization.Read.All` scope / license is missing,
-/// which the UI surfaces as a graceful "unavailable" message.
+/// effort). An empty list means provisioning isn't configured (Graph 404). The
+/// `Synchronization.Read.All` token is pre-acquired, so a missing consent
+/// arrives typed as `consent_required` and the Provisioning tab offers its
+/// "Grant consent & retry" button; a 403 (no role that can read provisioning, or
+/// no P1/P2 license) carries the `provisioning_read` catalog remediation.
 #[tauri::command]
 pub async fn get_enterprise_app_provisioning(
     state: State<'_, AppState>,
     tenant_id: String,
     service_principal_id: String,
 ) -> Result<Vec<ProvisioningJobDto>, UiError> {
+    state
+        .ensure_sync_token(&tenant_id)
+        .await
+        .map_err(UiError::from)?;
     let client = state.graph_for(&tenant_id);
     match client
         .list_synchronization_jobs(&service_principal_id)
@@ -345,8 +360,19 @@ pub async fn get_enterprise_app_provisioning(
         Ok(jobs) => Ok(jobs.into_iter().map(map_provisioning_job).collect()),
         // Not configured for this SP — surface as "no provisioning", not an error.
         Err(GraphError::NotFound(_)) => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(provisioning_err(e)),
     }
+}
+
+/// Maps a provisioning-read Graph failure to a `UiError`, appending the
+/// `provisioning_read` catalog remediation to a 403 (the
+/// [`group_membership_err`] shape).
+fn provisioning_err(e: GraphError) -> UiError {
+    let mut err = UiError::from(e);
+    if let Some(remediation) = forbidden_remediation(&err, "provisioning_read") {
+        err.message = format!("{} {remediation}", err.message);
+    }
+    err
 }
 
 /// Hides or shows the enterprise application on the My Apps portal by toggling
@@ -584,6 +610,40 @@ mod tests {
         SynchronizationExecution, SynchronizationQuarantine, SynchronizationStatus,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn assignment_dto_carries_the_principal_id() {
+        let dto = assignment_dto(AppRoleAssignment {
+            id: "assign-1".into(),
+            principal_id: "p-1".into(),
+            app_role_id: "role-1".into(),
+            principal_display_name: Some("Alice".into()),
+            principal_type: Some("User".into()),
+            ..Default::default()
+        });
+        assert_eq!(dto.principal_id, "p-1");
+        assert_eq!(dto.assignment_id, "assign-1");
+        assert_eq!(dto.app_role_id, "role-1");
+        assert_eq!(dto.principal_display_name.as_deref(), Some("Alice"));
+        assert_eq!(dto.principal_type.as_deref(), Some("User"));
+    }
+
+    #[test]
+    fn provisioning_403_appends_the_catalog_remediation() {
+        let err = provisioning_err(GraphError::Forbidden("x".into()));
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            err.message.contains("Hybrid Identity Administrator"),
+            "{}",
+            err.message
+        );
+        // Anything but a 403 is left alone.
+        let err = provisioning_err(GraphError::Api {
+            status: 500,
+            body: "boom".into(),
+        });
+        assert!(!err.message.contains("Hybrid Identity Administrator"));
+    }
 
     #[test]
     fn maps_a_fully_populated_provisioning_job() {

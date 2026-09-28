@@ -3,18 +3,23 @@
 //! (`api.oauth2PermissionScopes`), and pre-authorized client applications
 //! (`api.preAuthorizedApplications`).
 //!
-//! Graph treats both `api` arrays as **full replacements** on PATCH, so every
-//! mutation here re-reads live state, applies the change to the fetched list,
-//! and writes the whole array back — the cached detail payload is never used
-//! as the merge base. Deleting a scope follows the portal's two-step contract:
+//! Graph treats `identifierUris` and both `api` arrays as **full
+//! replacements** on PATCH, so every mutation here takes a delta (one URI, one
+//! scope, one client), re-reads live state, applies the change to the fetched
+//! list, and writes the whole array back — neither the cached detail payload
+//! nor the tab's loaded snapshot is ever the merge base, so a change another
+//! admin made since the tab opened survives. Deleting a scope follows the portal's two-step contract:
 //! Graph rejects removing a scope that is still enabled, so an enabled scope
 //! is disabled in its own PATCH first, then removed (and stripped from any
 //! pre-authorized clients) in a second.
+
+use std::collections::BTreeMap;
 
 use tauri::State;
 
 use azapptoolkit_core::models::{
     ApiApplication, ApplicationExposeApi, OAuth2PermissionScope, PreAuthorizedApplication,
+    ServicePrincipal,
 };
 use azapptoolkit_graph::client::{ApiApplicationPatch, ApplicationExposeApiPatch};
 
@@ -229,46 +234,138 @@ fn upsert_pre_authorized(
     list
 }
 
+/// Adds one Application ID URI to the LIVE list. Only the new URI is
+/// validated: a legacy entry Graph already holds (say, one without a scheme)
+/// must not block every later edit. A duplicate (case-insensitive — Entra
+/// treats URIs that way) is rejected rather than silently written twice.
+fn plan_uri_add(mut live: Vec<String>, uri: &str) -> Result<Vec<String>, UiError> {
+    let uri = uri.trim();
+    validate_identifier_uri(uri)?;
+    if live.iter().any(|u| u.trim().eq_ignore_ascii_case(uri)) {
+        return Err(UiError::validation(
+            "duplicate_identifier_uri",
+            format!("Application ID URI '{uri}' is already set."),
+        ));
+    }
+    live.push(uri.to_string());
+    Ok(live)
+}
+
+/// Removes one Application ID URI from the LIVE list, keeping every other
+/// entry as Graph has it. `None` when the URI is already gone (the removal's
+/// goal state — treated as success, like `remove_pre_authorized_app`).
+fn plan_uri_removal(live: Vec<String>, uri: &str) -> Option<Vec<String>> {
+    let uri = uri.trim();
+    let before = live.len();
+    let kept: Vec<String> = live
+        .into_iter()
+        .filter(|u| !u.trim().eq_ignore_ascii_case(uri))
+        .collect();
+    (kept.len() != before).then_some(kept)
+}
+
+/// Display name per pre-authorized client, keyed by lowercased appId, joined
+/// from the tenant SP index. Only the listed clients are resolved; a client
+/// without a service principal in this tenant (or with an empty name) is
+/// absent, and the tab falls back to the bare id.
+fn client_display_names(
+    sps: &[ServicePrincipal],
+    clients: &[PreAuthorizedApplication],
+) -> BTreeMap<String, String> {
+    let wanted: std::collections::HashSet<String> = clients
+        .iter()
+        .map(|c| c.app_id.to_ascii_lowercase())
+        .collect();
+    sps.iter()
+        .filter_map(|sp| {
+            let key = sp.app_id.to_ascii_lowercase();
+            (wanted.contains(&key) && !sp.display_name.trim().is_empty())
+                .then(|| (key, sp.display_name.clone()))
+        })
+        .collect()
+}
+
 // ---------------- Commands ----------------
 
 /// Reads the app's Expose-an-API state (Application ID URIs, defined scopes,
 /// pre-authorized clients). A live read — these fields aren't on the cached
 /// list shape, so the tab fetches them on demand.
+///
+/// Pre-authorized clients are named from the shared tenant SP index. It is
+/// usually warm (the App Registrations list reads it for its pairing join);
+/// when cold this is the shared single-flight scan. Names are best-effort: an
+/// unreadable index leaves them empty and the tab shows the client ids — the
+/// tab never fails over a name.
 #[tauri::command]
 pub async fn get_expose_api(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
 ) -> Result<ExposeApiDto, UiError> {
+    // First: the SP index read below can answer from cache alone.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let info = fetch_expose_api(&client, &object_id).await?;
+    let clients = info.api.pre_authorized_applications;
+    let client_display_names = if clients.is_empty() {
+        BTreeMap::new()
+    } else {
+        match crate::commands::applications::sp_index_cached(&state, &client, &tenant_id).await {
+            Ok(sps) => client_display_names(&sps, &clients),
+            Err(err) => {
+                tracing::warn!(?err, "expose api: SP index unavailable; showing client ids");
+                BTreeMap::new()
+            }
+        }
+    };
     Ok(ExposeApiDto {
         identifier_uris: info.identifier_uris,
         scopes: info.api.oauth2_permission_scopes,
-        pre_authorized_applications: info.api.pre_authorized_applications,
+        pre_authorized_applications: clients,
+        client_display_names,
     })
 }
 
-/// Full-replace write of the app's `identifierUris` (the Application ID URIs).
-/// The editor loads the current list and sends the complete desired set.
+/// Adds one Application ID URI: re-reads the live `identifierUris`, appends
+/// the new one and writes the whole list back, so a URI added elsewhere since
+/// the tab loaded is kept.
 #[tauri::command]
-pub async fn set_identifier_uris(
+pub async fn add_identifier_uri(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
-    uris: Vec<String>,
+    uri: String,
 ) -> Result<(), UiError> {
-    let uris: Vec<String> = uris.iter().map(|u| u.trim().to_string()).collect();
-    for (i, uri) in uris.iter().enumerate() {
-        validate_identifier_uri(uri)?;
-        if uris[..i].iter().any(|u| u.eq_ignore_ascii_case(uri)) {
-            return Err(UiError::validation(
-                "duplicate_identifier_uri",
-                format!("Application ID URI '{uri}' is listed twice."),
-            ));
-        }
-    }
     let client = state.graph_for(&tenant_id);
+    let live = fetch_expose_api(&client, &object_id).await?;
+    let uris = plan_uri_add(live.identifier_uris, &uri)?;
+    let body = ApplicationExposeApiPatch {
+        identifier_uris: Some(uris),
+        api: None,
+    };
+    client
+        .patch_application_expose_api(&object_id, &body)
+        .await?;
+    // No cache invalidation: identifierUris isn't carried by any cached
+    // payload (the typed Application / ServicePrincipal shapes omit it); the
+    // tab and the SSO views re-read it live.
+    Ok(())
+}
+
+/// Removes one Application ID URI from the live `identifierUris`, keeping the
+/// rest. Idempotent: a URI that's already gone is success.
+#[tauri::command]
+pub async fn remove_identifier_uri(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_id: String,
+    uri: String,
+) -> Result<(), UiError> {
+    let client = state.graph_for(&tenant_id);
+    let live = fetch_expose_api(&client, &object_id).await?;
+    let Some(uris) = plan_uri_removal(live.identifier_uris, &uri) else {
+        return Ok(());
+    };
     let body = ApplicationExposeApiPatch {
         identifier_uris: Some(uris),
         api: None,
@@ -639,6 +736,76 @@ mod tests {
         // New client ⇒ append.
         let updated = upsert_pre_authorized(list, "BBBB", vec!["a".into()]);
         assert_eq!(updated.len(), 2);
+    }
+
+    #[test]
+    fn plan_uri_add_merges_into_the_live_list() {
+        let live = vec!["api://a".to_string(), "api://other-admin".to_string()];
+        // The URI another admin added since the tab loaded survives the write.
+        let merged = plan_uri_add(live.clone(), " https://contoso.com/api ").unwrap();
+        assert_eq!(
+            merged,
+            vec!["api://a", "api://other-admin", "https://contoso.com/api"]
+        );
+        assert_eq!(
+            plan_uri_add(live.clone(), "API://A").unwrap_err().code,
+            "duplicate_identifier_uri"
+        );
+        assert_eq!(
+            plan_uri_add(live, "no-scheme").unwrap_err().code,
+            "invalid_identifier_uri"
+        );
+        // A legacy live entry that fails validation doesn't block a new add.
+        assert!(plan_uri_add(vec!["legacy".into()], "api://new").is_ok());
+    }
+
+    #[test]
+    fn plan_uri_removal_keeps_other_live_uris_and_is_idempotent() {
+        let live = vec!["api://a".to_string(), "api://b".to_string()];
+        assert_eq!(
+            plan_uri_removal(live.clone(), "API://A"),
+            Some(vec!["api://b".to_string()])
+        );
+        assert_eq!(plan_uri_removal(live, "api://zz"), None);
+        assert_eq!(
+            plan_uri_removal(vec!["api://a".into()], "api://a"),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn client_display_names_join_only_listed_named_clients() {
+        let sp = |app_id: &str, name: &str| ServicePrincipal {
+            app_id: app_id.into(),
+            display_name: name.into(),
+            ..Default::default()
+        };
+        let sps = vec![
+            sp("aaaa-1111", "Contoso Portal"),
+            sp("bbbb-2222", ""),
+            sp("cccc-3333", "Not a client"),
+        ];
+        let clients = vec![
+            PreAuthorizedApplication {
+                app_id: "AAAA-1111".into(),
+                delegated_permission_ids: vec!["s".into()],
+            },
+            PreAuthorizedApplication {
+                app_id: "bbbb-2222".into(),
+                delegated_permission_ids: vec!["s".into()],
+            },
+            PreAuthorizedApplication {
+                app_id: "dddd-4444".into(),
+                delegated_permission_ids: vec!["s".into()],
+            },
+        ];
+        let names = client_display_names(&sps, &clients);
+        assert_eq!(
+            names.get("aaaa-1111").map(String::as_str),
+            Some("Contoso Portal")
+        );
+        // Empty name, unknown client and unlisted SP are all absent.
+        assert_eq!(names.len(), 1);
     }
 
     #[test]

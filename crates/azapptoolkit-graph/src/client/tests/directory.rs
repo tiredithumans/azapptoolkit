@@ -179,12 +179,69 @@ async fn sign_in_activities_are_cached_per_tenant() {
 }
 
 #[tokio::test]
+async fn sign_in_activities_follow_next_link_on_the_audit_token() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param_is_missing("page"))
+        .and(query_param("$top", "999"))
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-1"}],
+            "@odata.nextLink": format!("{uri}/reports/servicePrincipalSignInActivities?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param("page", "2"))
+        // The continuation rides the same scoped `AuditLog.Read.All` bearer.
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-2"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&uri).with_audit_log_token(StaticTokenProvider::new("a"));
+    let rows = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+    let ids: Vec<_> = rows.iter().filter_map(|r| r.app_id.as_deref()).collect();
+    assert_eq!(ids, ["app-1", "app-2"]);
+
+    // A fresh server and client (the first result is cached per tenant): a
+    // nextLink to a foreign origin is refused before the bearer is attached.
+    let evil = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-1"}],
+            "@odata.nextLink": "https://evil.example.com/reports/servicePrincipalSignInActivities?page=2"
+        })))
+        .mount(&evil)
+        .await;
+    let client = make_client(&evil.uri()).with_audit_log_token(StaticTokenProvider::new("a"));
+    let err = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Protocol(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn conditional_access_policies_parse_and_follow_paging() {
     let server = MockServer::start().await;
     let uri = server.uri();
     Mock::given(method("GET"))
             .and(path("/identity/conditionalAccess/policies"))
             .and(query_param_is_missing("page"))
+            // Every paged read sends `$top`: paging is serial, so Graph's
+            // default page is a round-trip multiplier on a large tenant.
+            .and(query_param("$top", "999"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{
                     "id": "ca-1",

@@ -33,18 +33,72 @@ impl GraphClient {
             &format!("{}|grants:", self.tenant_id),
         );
     }
+    /// The application permissions **held by** one service principal
+    /// (`appRoleAssignments`, the outbound direction).
+    ///
+    /// Deliberately uncached. It is per-SP and small, and it is what the
+    /// pre-write `existing` checks read (the grant paths in permissions,
+    /// SharePoint, Exchange and remediation), which must see live state rather
+    /// than a copy up to the Permissions TTL old. The read-through cache belongs
+    /// to the tenant-wide inbound read, [`Self::list_app_role_assigned_to_cached`].
     pub async fn list_app_role_assignments(
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<AppRoleAssignment>> {
         let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignments");
-        // Read-through cache. Pointed at the Microsoft Graph SP this is the
-        // heaviest paged read in the app, and BOTH the security audit's
-        // `prefetch_graph_app_roles` and the Application-permissions consent lens
-        // walk it end to end — so browsing between those two surfaces paid for
-        // the same full-tenant scan twice. Every mutator below sweeps this
-        // prefix on `Ok`, so a revoked grant can never survive the TTL here (see
-        // `invalidate_grant_cache`).
+        let params: [(&str, &str); 2] = [
+            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+            ("$top", MAX_PAGE_SIZE),
+        ];
+        let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
+        self.collect_all_pages(page, false).await
+    }
+
+    /// Principals (users/groups/SPs) assigned **to** this service principal's
+    /// app roles — the inbound "who has access" direction (`appRoleAssignedTo`),
+    /// as opposed to what the SP itself has been granted (`appRoleAssignments`).
+    ///
+    /// Read live, every time. The Enterprise Access tab, the permission tester,
+    /// the audit's EWS full-access check and the DR backup's per-SP fallback
+    /// read it, and each of them must reflect a grant made outside the app (the
+    /// portal) the moment it is re-run — a reload that serves a copy up to the
+    /// Permissions TTL old would be a no-op Refresh. The two surfaces that walk
+    /// the tenant-wide collection end to end use
+    /// [`Self::list_app_role_assigned_to_cached`] instead.
+    pub async fn list_app_role_assigned_to(
+        &self,
+        service_principal_id: &str,
+    ) -> Result<Vec<AppRoleAssignment>> {
+        let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignedTo");
+        let params: [(&str, &str); 2] = [
+            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+            ("$top", MAX_PAGE_SIZE),
+        ];
+        let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
+        self.collect_all_pages(page, false).await
+    }
+
+    /// [`Self::list_app_role_assigned_to`] read through the cache
+    /// (`{tenant}|grants:assigned_to:{sp}`, Permissions kind).
+    ///
+    /// The heaviest paged read in the app: pointed at the Microsoft Graph SP
+    /// this collection holds every app-permission grant in the tenant, so the
+    /// page size decides how many serial round trips run before a surface can
+    /// score anything (see [`MAX_PAGE_SIZE`]). The audit's
+    /// `prefetch_graph_app_roles` and the consent view's Application-permissions
+    /// scan BOTH walk it end to end, so browsing between them paid for the same
+    /// full-tenant scan twice. Those two are its ONLY callers; every other
+    /// reader stays on the live method.
+    ///
+    /// Every in-app grant writer sweeps the `grants:` prefix on `Ok`
+    /// ([`Self::invalidate_grant_cache`]), so an in-app revoke never survives
+    /// here. A grant changed OUTSIDE the app can lag by up to the Permissions
+    /// TTL — the same contract as `grants:oauth2_all`; the Cache dialog's
+    /// Permissions clear resets it.
+    pub async fn list_app_role_assigned_to_cached(
+        &self,
+        service_principal_id: &str,
+    ) -> Result<Vec<AppRoleAssignment>> {
         let cache_key = Self::grant_cache_key(
             &self.tenant_id,
             &format!("assigned_to:{service_principal_id}"),
@@ -55,35 +109,9 @@ impl GraphClient {
         {
             return Ok(cached);
         }
-        let params: [(&str, &str); 2] = [
-            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
-            ("$top", MAX_PAGE_SIZE),
-        ];
-        let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
-        let all = self.collect_all_pages(page).await?;
+        let all = self.list_app_role_assigned_to(service_principal_id).await?;
         self.cache.put(CacheKind::Permissions, cache_key, &all);
         Ok(all)
-    }
-
-    /// Principals (users/groups) assigned **to** this service principal's app
-    /// roles — the inbound "who has access" direction (`appRoleAssignedTo`), as
-    /// opposed to what the SP itself has been granted (`appRoleAssignments`).
-    pub async fn list_app_role_assigned_to(
-        &self,
-        service_principal_id: &str,
-    ) -> Result<Vec<AppRoleAssignment>> {
-        let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignedTo");
-        // The heaviest paged read in the app: pointed at the Microsoft Graph SP
-        // (the audit's `prefetch_graph_app_roles`, the consent view's tenant-wide
-        // scan) this collection holds every app-permission grant in the tenant,
-        // so the page size decides how many serial round trips run before either
-        // surface can score anything. See [`MAX_PAGE_SIZE`].
-        let params: [(&str, &str); 2] = [
-            ("$select", APP_ROLE_ASSIGNMENT_SELECT),
-            ("$top", MAX_PAGE_SIZE),
-        ];
-        let page: Paged<AppRoleAssignment> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
     }
 
     /// Batched [`Self::list_app_role_assigned_to`]: inbound role assignments for
@@ -107,7 +135,7 @@ impl GraphClient {
             })
             .collect();
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, false).await
     }
 
     /// Batched [`Self::list_app_role_assignments`]: the application permissions
@@ -130,7 +158,7 @@ impl GraphClient {
             })
             .collect();
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages).await
+        self.finish_paged_batch(pages, false).await
     }
 
     /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants
@@ -181,15 +209,16 @@ impl GraphClient {
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
     /// unfiltered). Used by the consent-grant audit. Follows `@odata.nextLink`.
     pub async fn list_all_oauth2_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
-        // Read-through cache, same reasoning as `list_app_role_assigned_to`: the
-        // audit's `prefetch_admin_consent_grants` and the Delegated-grants lens
-        // each walked this tenant-wide collection independently.
+        // Read-through cache, same reasoning as
+        // `list_app_role_assigned_to_cached`: the audit's
+        // `prefetch_admin_consent_grants` and the Delegated-grants lens each
+        // walked this tenant-wide collection independently.
         let cache_key = Self::grant_cache_key(&self.tenant_id, "oauth2_all");
         if let Some(cached) = self
             .cache
@@ -201,7 +230,7 @@ impl GraphClient {
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
-        let all = self.collect_all_pages(page).await?;
+        let all = self.collect_all_pages(page, false).await?;
         self.cache.put(CacheKind::Permissions, cache_key, &all);
         Ok(all)
     }
@@ -339,9 +368,9 @@ impl GraphClient {
             let grant_id = existing
                 .id
                 .as_ref()
-                .ok_or_else(|| GraphError::Api {
-                    status: 500,
-                    body: "existing grant missing id".to_string(),
+                // A client-side contract violation, not a Graph server error.
+                .ok_or_else(|| {
+                    GraphError::Protocol("existing oauth2PermissionGrant has no id".into())
                 })?
                 .clone();
             self.update_oauth2_grant_scope(&grant_id, &scope_str)

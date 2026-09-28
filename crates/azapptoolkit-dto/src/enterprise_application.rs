@@ -116,6 +116,9 @@ pub struct AppRolesView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppAssignmentDto {
     pub assignment_id: String,
+    /// Object id of the assigned user/group — what the Access tab's search
+    /// excludes (per role: Graph rejects only a duplicate principal + role pair).
+    pub principal_id: String,
     pub principal_display_name: Option<String>,
     pub principal_type: Option<String>,
     /// The assigned app role's id. The all-zero GUID is the "default access"
@@ -154,9 +157,6 @@ pub struct GallerySearchResultsDto {
     /// `true` when `total_matches` exceeded the display cap, so the picker can
     /// say results were narrowed rather than silently showing a subset.
     pub truncated: bool,
-    /// `true` when the gallery itself exceeded the fetch cap, so matching ran
-    /// over a partial catalog and a missing app might exist beyond it.
-    pub partial_catalog: bool,
 }
 
 /// Result of creating an enterprise application from a gallery template

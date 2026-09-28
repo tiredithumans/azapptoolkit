@@ -18,6 +18,12 @@
 //! per-client pass-through arms, each maintained by hand.
 //!
 //! **Adding a code is one edit: this slice.** Everything else derives from it.
+//!
+//! A second, disjoint slice — [`PASSTHROUGH_NON_FATAL_CODES`] — lists the
+//! classifications that must ALSO survive a client's `Token` arm (so the UI can
+//! offer its recovery action, or `is_retryable` can see a transient failure)
+//! but must never halt a run. A non-fatal classification is a one-slice edit
+//! there; [`passthrough_code`] consults both.
 
 /// Codes meaning the session cannot be revived without one interactive round
 /// trip (`reauthenticate`) — never a sign-out, which would drop every data
@@ -37,15 +43,68 @@ pub fn is_reauth_fatal(code: &str) -> bool {
     REAUTH_FATAL_CODES.contains(&code)
 }
 
-/// The `&'static str` for `code` when it is re-auth-fatal, for the client
-/// `ui_code()` implementations that pass an auth classification through their
-/// own error enum instead of flattening it to `token_error`.
+/// The wire code for a missing admin/user consent (`AuthError::ConsentRequired`,
+/// AADSTS65001/65004). One literal, read by the pass-through set below and by
+/// `UiError::is_consent_required`.
+pub const CONSENT_REQUIRED: &str = "consent_required";
+
+/// The wire code for a Conditional Access step-up on one resource
+/// (`AuthError::InteractionRequired` — `interaction_required` /
+/// `login_required`, AADSTS50074/50076/50079/50158: MFA, registration, an
+/// external challenge). Per-resource, not fatal: the refresh token stays valid
+/// for every other audience, so it is deliberately NOT in
+/// [`REAUTH_FATAL_CODES`]. Not retryable either — a silent grant cannot satisfy
+/// the challenge; the recovery is an interactive step-up. One literal, read by
+/// the pass-through set below and by `UiError::is_interaction_required`.
+pub const INTERACTION_REQUIRED: &str = "interaction_required";
+
+/// The wire code for a rejected access token — a client 401 (a revoked token,
+/// or a Continuous Access Evaluation claims challenge the silent re-mint
+/// couldn't satisfy). Deliberately NOT in [`REAUTH_FATAL_CODES`]: one 401 does
+/// not prove the session is dead. One literal, read by every client's
+/// `ui_code()` (`http_error_enum!`) and by `UiError::is_unauthorized`.
+pub const UNAUTHORIZED: &str = "unauthorized";
+
+/// The `Display` of every client's `Unauthorized` variant — the bare status
+/// line, which names nothing to do. A client whose 401 carries curated
+/// guidance (Exchange, Key Vault, ARM) appends it after this line, so the UI
+/// can tell a bare 401 from a guided one without matching on prose.
+pub const UNAUTHORIZED_STATUS: &str = "unauthorized (401)";
+
+/// Token classifications a client's `Token` arm passes through WITHOUT them
+/// meaning the session is dead — disjoint from [`REAUTH_FATAL_CODES`], so
+/// [`is_reauth_fatal`] never fires for them and a fan-out keeps going.
+///
+/// * `consent_required` — per-resource: one scope is missing consent, the
+///   session is fine. A fan-out treats it as per-item (`bulk.rs`
+///   `only_session_death_is_fatal`); it is not retryable (consent needs an
+///   interactive grant). Passing it through is what lets the UI's shared
+///   "Grant consent" fallback fire for a scoped client call.
+/// * `network_error` — the lazy token refresh could not reach the token
+///   endpoint. Spelt in the client plane (not the auth plane's `network`) so
+///   `http_retry::is_retryable_code` sees it as the transient failure it is,
+///   exactly like the same outage one line later during the API call.
+/// * `interaction_required` — per-resource, like consent: a Conditional
+///   Access policy wants MFA (or another interactive step) for this audience.
+///   Not retryable; passing it through lets the UI offer "Verify identity".
+pub const PASSTHROUGH_NON_FATAL_CODES: &[&str] =
+    &[CONSENT_REQUIRED, "network_error", INTERACTION_REQUIRED];
+
+/// The `&'static str` for `code` when it is a classification a client's
+/// `ui_code()` passes through its own error enum instead of flattening it to
+/// `token_error`: every [`REAUTH_FATAL_CODES`] entry (which halt a fan-out) and
+/// every [`PASSTHROUGH_NON_FATAL_CODES`] entry (which do not).
 ///
 /// Flattening is what previously made `is_reauth_fatal` unfirable for every
-/// client call, so each client kept its own copy of these arms. This returns
-/// the borrowed slice entry, so a new code reaches all of them at once.
+/// client call, and hid a missing consent behind a generic `token_error`, so
+/// each client kept its own copy of these arms. This returns the borrowed
+/// slice entry, so a new code reaches all of them at once.
 pub fn passthrough_code(code: &str) -> Option<&'static str> {
-    REAUTH_FATAL_CODES.iter().copied().find(|c| *c == code)
+    REAUTH_FATAL_CODES
+        .iter()
+        .chain(PASSTHROUGH_NON_FATAL_CODES)
+        .copied()
+        .find(|c| *c == code)
 }
 
 #[cfg(test)]
@@ -72,12 +131,54 @@ mod tests {
             "server_error",
             "network_error",
             "consent_required",
+            "interaction_required",
             "cancelled",
             "",
         ] {
             assert!(!is_reauth_fatal(code), "{code} must NOT be re-auth-fatal");
-            assert_eq!(passthrough_code(code), None);
         }
+        // ...and of those, only the classified non-fatal codes cross a
+        // client's `Token` arm; everything else is (rightly) `token_error`.
+        for code in [
+            "token_error",
+            "unauthorized",
+            "forbidden",
+            "throttled",
+            "server_error",
+            "cancelled",
+            "",
+        ] {
+            assert_eq!(passthrough_code(code), None, "{code} must not pass through");
+        }
+    }
+
+    #[test]
+    fn non_fatal_passthrough_codes_pass_through_but_never_halt_a_run() {
+        for code in PASSTHROUGH_NON_FATAL_CODES {
+            assert_eq!(passthrough_code(code), Some(*code));
+            assert!(!is_reauth_fatal(code), "{code} must NOT be re-auth-fatal");
+        }
+        assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&CONSENT_REQUIRED));
+        assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&"network_error"));
+        assert!(PASSTHROUGH_NON_FATAL_CODES.contains(&INTERACTION_REQUIRED));
+    }
+
+    #[test]
+    fn the_two_slices_are_disjoint() {
+        for code in PASSTHROUGH_NON_FATAL_CODES {
+            assert!(
+                !REAUTH_FATAL_CODES.contains(code),
+                "{code} is in both slices"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_passed_through_refresh_outage_is_retryable_but_consent_is_not() {
+        assert!(crate::http_retry::is_retryable_code("network_error"));
+        assert!(!crate::http_retry::is_retryable_code(CONSENT_REQUIRED));
+        assert!(!crate::http_retry::is_retryable_code(INTERACTION_REQUIRED));
     }
 
     #[test]

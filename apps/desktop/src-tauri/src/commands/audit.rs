@@ -5,13 +5,16 @@
 //! service-principal state + consent flags, feeds them into
 //! [`azapptoolkit_core::audit::score_application`], and emits `audit-progress`
 //! Tauri events after each app. Completed results land in the shared cache
-//! under [`CacheKind::Audit`] keyed `{tenant_id}|audit_run` so the dashboard
-//! can re-render without re-scanning.
+//! under [`CacheKind::Audit`] keyed `{tenant_id}|audit_run` — stored typed
+//! (`put_typed`), so every read is a refcount clone — so the Security view can
+//! re-render without re-scanning and the dashboard can read a counts-only
+//! [`CachedAuditSummary`] instead of the run.
 //!
 //! Adaptive concurrency: a [`ConcurrencyThrottle`](crate::commands::throttle)
 //! wired as the Graph client's `ThrottleObserver` decrements the in-flight cap
 //! on every 429 and gradually recovers it after 30s of quiet. Cancellation is
-//! signalled via `AppState.audit_cancel`; the loop polls it between dispatches.
+//! signalled via `AppState.audit_cancel` (cancelled only by `cancel_audit`); the
+//! loop polls it between dispatches.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,7 +31,7 @@ use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
-    is_scopable_exchange_resource_permission,
+    exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
 };
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError};
 use azapptoolkit_graph::GraphClient;
@@ -42,7 +45,10 @@ use crate::commands::graph_roles::graph_role_index;
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
-use crate::dto::audit::{AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult};
+use crate::dto::audit::{
+    AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
+    MAILBOX_SCOPING_UNRESOLVED,
+};
 use crate::state::AppState;
 use azapptoolkit_exchange::verdict::{aap_verdict_for, apply_legacy_policy_verdict};
 
@@ -96,11 +102,19 @@ pub(crate) fn audit_cache_key(tenant_id: &str) -> String {
 /// in-process with a 60-minute TTL, so "read time" and "run time" differ by up
 /// to an hour, and a cache hit stamped on read would tell an operator a
 /// 59-minute-old posture was current.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// Stored with `put_typed` and read ONLY with `get_typed::<CachedAuditRun>`:
+/// the entry is in-process, never serialized, and an untyped `cache.get` on it
+/// reads `Null` and misses — which would surface as "no audit run".
 struct CachedAuditRun {
     /// RFC3339 UTC.
     completed_at: String,
     items: Vec<AuditItem>,
+    /// [`AuditRunResult::mailbox_scoping_resolved`] — stored with the items
+    /// because an unresolved run is still cacheable (it over-reports, never
+    /// under-reports), so a cache hit and its export must still carry the
+    /// caveat.
+    mailbox_scoping_resolved: bool,
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -129,6 +143,8 @@ pub async fn run_audit(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<AuditRunResult, UiError> {
+    let started = std::time::Instant::now();
+    tracing::info!(tenant = %tenant_id, "audit started");
     let client = state.graph_for(&tenant_id);
     let meter = FanOutMeter::attach(client.clone(), INITIAL_CONCURRENCY);
     // Detach the observer however the run exits — an early `?` return (e.g. app
@@ -149,6 +165,21 @@ pub async fn run_audit(
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
     let exo = audit_exchange_client(&state, &tenant_id);
+
+    // The prefetch below is the longest phase of a large run, and until now the
+    // first event came only after it. `total == 0` is what tells the webview to
+    // render this as a phase label rather than a "0 / 0" fraction.
+    emit_progress(
+        &app_handle,
+        "audit-progress",
+        AuditProgress {
+            done: 0,
+            total: 0,
+            current_app: Some("Reading tenant-wide directory data…".to_string()),
+            in_flight_cap: meter.limit(),
+            cancelled: false,
+        },
+    );
 
     // These six tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
@@ -232,8 +263,9 @@ pub async fn run_audit(
     // capped at MAX_APPS_PER_RUN has not seen every app, so "no findings" from
     // it is "nothing found YET", exactly like a cancelled run.
     let (apps, truncated) = apps?;
-    let (admin_consent_clients, delegated_scopes_by_client) = consent_grants;
+    let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
     // the scan reached every app, but with part of the analysis switched off
     // because a tenant-wide read failed. Collected here so the result can say
@@ -252,6 +284,7 @@ pub async fn run_audit(
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
 
     let admin_consent_clients = Arc::new(admin_consent_clients);
+    let delegated_scopes_by_client = Arc::new(delegated_scopes_by_client);
     let legacy_policies = Arc::new(legacy_policies);
     let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(
         &graph_roles_by_sp,
@@ -298,9 +331,12 @@ pub async fn run_audit(
         resolver: Arc::new(ResourceResolver::new(client.clone())),
         exo,
         admin_consent_clients,
+        admin_consented_scopes_by_client: consent_grants_read
+            .then(|| delegated_scopes_by_client.clone()),
         orgwide_mail_by_sp,
         legacy_policies,
         exo_tripped,
+        mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available,
         sign_in_map,
     });
@@ -335,7 +371,7 @@ pub async fn run_audit(
                 }
                 let last_sign_in = ctx.last_sign_in_for(&app.app_id);
                 let result = score_one(&ctx, &app, last_sign_in).await;
-                let (done, in_flight_cap) = ticker.tick().await;
+                let (done, in_flight_cap) = ticker.tick();
                 let progress = AuditProgress {
                     done,
                     total,
@@ -401,9 +437,10 @@ pub async fn run_audit(
     // tenant-wide, so `score_sp_only` is pure scoring — no per-item Graph
     // traffic, no fan-out needed.
     if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
-        let mut done_count = meter.done().await;
         let now = chrono::Utc::now();
-        for sp in sp_candidates {
+        // `done` continues from the fan-out's completion count; each scored SP
+        // is one more item done.
+        for (done_count, sp) in (meter.done() + 1..).zip(sp_candidates) {
             if cancel.is_cancelled() {
                 break;
             }
@@ -415,7 +452,6 @@ pub async fn run_audit(
                 &ews_full_access_sps,
                 now,
             );
-            done_count += 1;
             emit_progress(
                 &app_handle,
                 "audit-progress",
@@ -432,25 +468,49 @@ pub async fn run_audit(
     }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
+    // Whether every mail permission was actually checked against Exchange
+    // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
+    // which over-reports — but the operator has to be told, because the
+    // "Org-wide mailbox access" group then includes apps Exchange may already
+    // confine, each offering a Scope fix that needs the same Exchange access.
+    let mailbox_scoping_resolved = ctx.exo.is_some()
+        && !legacy_read_failed
+        && !ctx.mail_scoping_unresolved.load(Ordering::Acquire);
     items.sort_by_key(|i| std::cmp::Reverse(i.risk_score));
+    // One summary line per run, like the site sweep's `site sweep complete`:
+    // "it took 40 minutes / stopped at 60% / found less than yesterday" is
+    // answerable from the log only if the run records its shape.
+    tracing::info!(
+        total,
+        scored = items.len(),
+        unscored,
+        truncated,
+        cancelled,
+        degraded = ?degraded,
+        mailbox_scoping_resolved,
+        cached = run_is_cacheable(cancelled, truncated, &degraded),
+        elapsed_secs = started.elapsed().as_secs(),
+        "audit complete",
+    );
 
-    // Built BEFORE the cache write and destructured back out for the result, so
-    // the cached run and the one returned to the caller carry byte-identical
-    // items and the same completion stamp — and so the multi-MB item vector is
-    // moved through, never cloned.
-    let run = CachedAuditRun {
-        completed_at: Utc::now().to_rfc3339(),
-        items,
-    };
+    // One stamp for both, so the cached run and the one returned to the caller
+    // carry the same completion time. The cache holds its own copy of the items:
+    // one clone per completed, cacheable run is cheaper than the whole-tree
+    // `serde_json::to_value` walk an untyped `put` did, and it makes every later
+    // read (`get_cached_audit`, the Home summary, export) a refcount clone
+    // instead of a full deserialize.
+    let completed_at = Utc::now().to_rfc3339();
     if run_is_cacheable(cancelled, truncated, &degraded) {
-        state
-            .cache
-            .put(CacheKind::Audit, audit_cache_key(&tenant_id), &run);
+        state.cache.put_typed(
+            CacheKind::Audit,
+            audit_cache_key(&tenant_id),
+            Arc::new(CachedAuditRun {
+                completed_at: completed_at.clone(),
+                items: items.clone(),
+                mailbox_scoping_resolved,
+            }),
+        );
     }
-    let CachedAuditRun {
-        completed_at,
-        items,
-    } = run;
 
     Ok(AuditRunResult {
         tenant_id,
@@ -467,6 +527,7 @@ pub async fn run_audit(
         truncated,
         degraded,
         completed_at: Some(completed_at),
+        mailbox_scoping_resolved,
     })
 }
 
@@ -489,10 +550,10 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 /// Returns the cached audit for this tenant, if one was run within the last
 /// 60 minutes.
 ///
-/// **The only command that answers from cache alone**, which is why it is also
-/// the only one that has to check the session itself. Every other read reaches
-/// Graph through `graph_for`, so a tenant with no session fails at the token
-/// and never returns data. Here the `tenant_id` argument alone decided which
+/// **Answers from cache alone** (as does [`get_cached_audit_summary`]), which
+/// is why both check the session themselves. A read that reaches Graph goes
+/// through `graph_for`, so a tenant with no session fails at the token and
+/// never returns data. Here the `tenant_id` argument alone decided which
 /// tenant's directory data came back — a stale or wrong id from the webview
 /// (a tenant switch mid-flight is the realistic one) served the *other*
 /// tenant's audit, which is the cross-tenant leak this codebase treats as its
@@ -501,8 +562,12 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option<AuditRunResult> {
     state.auth.tenant_context(&tenant_id)?;
     let key = audit_cache_key(&tenant_id);
-    let run: CachedAuditRun = state.cache.get(CacheKind::Audit, &key)?;
-    let items = run.items;
+    let run = state
+        .cache
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)?;
+    let items = run.items.clone();
+    let completed_at = run.completed_at.clone();
+    let mailbox_scoping_resolved = run.mailbox_scoping_resolved;
     // Report availability is reconstructed from the cached items (every item
     // carries the run's `sign_in_report_available`); a cached run never re-prompts
     // for consent, so `sign_in_consent_required` is false on a cache hit.
@@ -522,16 +587,44 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         // The stamp the RUN wrote, not this read: a cache hit is what the
         // dashboard shows after a relaunch-free hour, and "scanned just now"
         // about an hour-old scan is the false claim this field exists to stop.
-        completed_at: Some(run.completed_at),
+        completed_at: Some(completed_at),
+        // Cached WITH the items: an unresolved run is cacheable, and its
+        // caveat must survive the round trip.
+        mailbox_scoping_resolved,
     })
+}
+
+/// The Home dashboard's view of the cached audit: the posture counts and each
+/// finding's worst severity, never the items (see [`CachedAuditSummary`]).
+/// `None` when no run is cached — or when `tenant_id` has no session, exactly
+/// like [`get_cached_audit`], since this too answers from the cache alone.
+///
+/// `completed_at` is the stamp the run wrote, not this read's time: the card
+/// says "Scanned 40 minutes ago" from it, and a cache hit re-stamped on read
+/// would present an hour-old posture as current.
+#[tauri::command]
+pub fn get_cached_audit_summary(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Option<CachedAuditSummary> {
+    state.auth.tenant_context(&tenant_id)?;
+    let run = state
+        .cache
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))?;
+    Some(CachedAuditSummary::from_items(
+        &run.items,
+        Some(run.completed_at.clone()),
+    ))
 }
 
 /// Opens the OS save-file dialog and writes the audit in the requested
 /// `format` (`csv`, `json`, or `html`) to the chosen path. Returns the path,
 /// or `None` if the user cancelled. Exports **by reference**: with
 /// `items: None` the backend serves its own cached run, so the multi-MB item
-/// vector never round-trips the IPC bridge; a *cancelled* run — which is
-/// never cached — passes its items explicitly.
+/// vector never round-trips the IPC bridge; any run the backend did not
+/// cache (cancelled, truncated or degraded — see `run_is_cacheable`) passes
+/// its items explicitly, since the cache holds nothing for it or, worse, an
+/// earlier complete run that would be exported in its place.
 ///
 /// `coverage` describes the run those explicit items came from, and every
 /// writer opens with it: the exported file is the artifact that leaves the app,
@@ -555,9 +648,9 @@ pub async fn save_audit_to_file(
     let (items, coverage): (Vec<AuditItem>, AuditExportCoverage) = match items {
         Some(items) => (items, coverage),
         None => {
-            let run: CachedAuditRun = state
+            let run = state
                 .cache
-                .get(CacheKind::Audit, &audit_cache_key(&tenant_id))
+                .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))
                 .ok_or_else(|| {
                     UiError::validation(
                         "no_cached_audit",
@@ -565,7 +658,7 @@ pub async fn save_audit_to_file(
                     )
                 })?;
             let coverage = cached_run_coverage(&run);
-            (run.items, coverage)
+            (run.items.clone(), coverage)
         }
     };
     let (content, ext, filter_name) = match format.as_str() {
@@ -598,6 +691,8 @@ fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
         degraded: Vec::new(),
         sign_in_report_available: run.items.iter().any(|i| i.sign_in_report_available),
         completed_at: Some(run.completed_at.clone()),
+        // The one caveat a cacheable run can still carry.
+        mailbox_scoping_resolved: run.mailbox_scoping_resolved,
     }
 }
 
@@ -605,8 +700,7 @@ fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
 /// was complete.
 ///
 /// Deliberately the **same wording** the Security workbench uses (the posture
-/// strip's cancelled callout, the Findings pane's truncated callout and
-/// degraded lede): an operator who read the caveat on screen must recognize it
+/// strip's cancelled, truncated and degraded callouts): an operator who read the caveat on screen must recognize it
 /// in the file, and a second set of words would eventually drift into a milder
 /// claim. `scored` is the exported item count, so the fraction is always about
 /// the rows actually in this file.
@@ -640,6 +734,9 @@ fn coverage_sentences(scored: usize, coverage: &AuditExportCoverage) -> Vec<Stri
              unused."
                 .to_string(),
         );
+    }
+    if !coverage.mailbox_scoping_resolved {
+        out.push(MAILBOX_SCOPING_UNRESOLVED.to_string());
     }
     out
 }
@@ -676,6 +773,7 @@ fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<
         truncated: bool,
         degraded: &'a [AuditCoverageGap],
         sign_in_report_available: bool,
+        mailbox_scoping_resolved: bool,
         /// The caveat sentences, so a consumer that renders the file doesn't
         /// have to re-derive the prose from the flags above.
         coverage_notes: Vec<String>,
@@ -691,6 +789,7 @@ fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<
         truncated: coverage.truncated,
         degraded: &coverage.degraded,
         sign_in_report_available: coverage.sign_in_report_available,
+        mailbox_scoping_resolved: coverage.mailbox_scoping_resolved,
         coverage_notes: coverage_sentences(items.len(), coverage),
         items,
     };
@@ -816,7 +915,7 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
     for gap in &coverage.degraded {
         out.push_str(&format!("# - {}\n", gap.description()));
     }
-    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind\n");
+    out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind,AppOwnerOrgId\n");
     for item in items {
         let row = [
             csv_field(&item.application_name),
@@ -843,6 +942,9 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
             csv_field(&item.issues.join("; ")),
             csv_field(&item.recommendations.join("; ")),
             csv_field(item.principal_kind.as_str()),
+            // Appended last, like PrincipalKind, so positional parsers keep
+            // working. Named as in the Enterprise Applications export.
+            csv_field(item.app_owner_organization_id.as_deref().unwrap_or("")),
         ]
         .join(",");
         out.push_str(&row);
@@ -866,6 +968,13 @@ struct ScoreCtx {
     /// every mail permission to full org-wide weight.
     exo: Option<Arc<ExchangeClient>>,
     admin_consent_clients: Arc<HashSet<String>>,
+    /// `spObjectId -> AllPrincipals delegated scope values`, the same map the
+    /// SP-only phase scores from. Phase 1 copies an app's entry into
+    /// `AppPermissions::admin_consented_scopes` so Rule 13 reports a broad
+    /// delegated scope only when an admin consented to it for every user.
+    /// `None` = the tenant-wide grants read failed: consent is unknown, and
+    /// Rule 13 falls back to the declared scopes rather than hiding them.
+    admin_consented_scopes_by_client: Option<Arc<HashMap<String, Vec<String>>>>,
     orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>>,
     /// `appId -> Scoped { LegacyApplicationAccessPolicy }` for every app a
     /// `RestrictAccess` Application Access Policy confines, from the run's one
@@ -875,6 +984,11 @@ struct ScoreCtx {
     /// Exchange circuit breaker — flipped once an auth failure recurs, skipping
     /// the doomed cmdlet probes for the rest of the run.
     exo_tripped: Arc<AtomicBool>,
+    /// Set when an app declaring a scopable mail permission was scored without
+    /// a mailbox-scope answer (no Exchange client, an open breaker, or a failed
+    /// probe) — it then scored at org-wide weight. Feeds
+    /// `AuditRunResult::mailbox_scoping_resolved`.
+    mail_scoping_unresolved: AtomicBool,
     sign_in_available: bool,
     sign_in_map: Arc<HashMap<String, Option<DateTime<Utc>>>>,
 }
@@ -907,13 +1021,15 @@ fn audit_exchange_client(state: &AppState, tenant_id: &str) -> Option<Arc<Exchan
 }
 
 /// ONE tenant-wide `oauth2PermissionGrants` read → (AllPrincipals client ids,
-/// per-client delegated scope values). The scope strings are kept per client so
-/// the SP-only phase can score high-risk delegated permissions (an SP has no
-/// manifest to resolve them from). Best-effort: on failure no principal gets the
-/// admin-consent flag and the audit proceeds.
+/// per-client delegated scope values, whether the read succeeded). The scope
+/// strings are kept per client so the SP-only phase can score high-risk
+/// delegated permissions (an SP has no manifest to resolve them from), and so
+/// phase 1 can tell an admin-consented scope from a merely declared one.
+/// Best-effort: on failure no principal gets the admin-consent flag, the flag
+/// is `false` (consent unknown, not "none") and the audit proceeds.
 async fn prefetch_admin_consent_grants(
     client: &GraphClient,
-) -> (HashSet<String>, HashMap<String, Vec<String>>) {
+) -> (HashSet<String>, HashMap<String, Vec<String>>, bool) {
     match client.list_all_oauth2_grants().await {
         Ok(grants) => {
             let mut clients: HashSet<String> = HashSet::new();
@@ -928,14 +1044,14 @@ async fn prefetch_admin_consent_grants(
                     .extend(g.scope.split_whitespace().map(str::to_string));
                 clients.insert(g.client_id);
             }
-            (clients, scopes)
+            (clients, scopes, true)
         }
         Err(err) => {
             tracing::info!(
                 ?err,
                 "audit: tenant-wide grants read failed; admin-consent flags unavailable"
             );
-            (HashSet::new(), HashMap::new())
+            (HashSet::new(), HashMap::new(), false)
         }
     }
 }
@@ -954,7 +1070,7 @@ async fn prefetch_graph_app_roles(
 ) -> (HashMap<String, Vec<String>>, Option<AuditCoverageGap>) {
     let mut graph_roles_by_sp: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok((graph_sp_id, role_value_by_id)) = graph_role_index(client).await {
-        match client.list_app_role_assigned_to(&graph_sp_id).await {
+        match client.list_app_role_assigned_to_cached(&graph_sp_id).await {
             Ok(assigned) => {
                 for a in assigned {
                     // App permissions held by an app's SP — Users/Groups can't
@@ -1066,12 +1182,16 @@ async fn prefetch_ews_full_access_grants(
 /// Best-effort: no Exchange client, no Exchange-admin rights, or a failed read
 /// all yield an empty map — every mail permission then scores at its full
 /// org-wide weight, the same never-under-report degradation the rest of the
-/// Exchange path takes.
+/// Exchange path takes. The `bool` is `true` only when a client existed and the
+/// read FAILED: an app confined only by a policy then reads org-wide, which
+/// the run reports as unresolved mailbox scoping.
 async fn prefetch_legacy_access_policies(
     exo: Option<&ExchangeClient>,
-) -> HashMap<String, MailPermissionScope> {
+) -> (HashMap<String, MailPermissionScope>, bool) {
     let mut out = HashMap::new();
-    let Some(exo) = exo else { return out };
+    let Some(exo) = exo else {
+        return (out, false);
+    };
     let policies = match exo.get_application_access_policies().await {
         Ok(policies) => policies,
         Err(err) => {
@@ -1079,7 +1199,7 @@ async fn prefetch_legacy_access_policies(
                 code = err.ui_code(),
                 "audit: legacy Application Access Policy read failed; legacy-scoping findings unavailable"
             );
-            return out;
+            return (out, true);
         }
     };
     for app_id in policies.iter().filter_map(|p| p.app_id.clone()) {
@@ -1090,7 +1210,7 @@ async fn prefetch_legacy_access_policies(
             out.insert(app_id, verdict);
         }
     }
-    out
+    (out, false)
 }
 
 /// The org-wide-granted mailbox permissions `score_one` reconciles against a
@@ -1211,7 +1331,7 @@ async fn prefetch_sign_in_activity(
         },
         Err(err) => {
             let ui = UiError::from(err);
-            let consent_required = ui.code == "consent_required";
+            let consent_required = ui.is_consent_required();
             tracing::info!(
                 code = %ui.code,
                 "AuditLog.Read.All token unavailable; skipping unused-app detection"
@@ -1266,6 +1386,9 @@ fn score_sp_only(
             .cloned()
             .unwrap_or_default(),
         has_admin_consent: ctx.admin_consent_clients.contains(&sp.id),
+        // The SP scorer treats `scope_values` (already the AllPrincipals set)
+        // as the consented set, so this per-scope copy would be redundant.
+        admin_consented_scopes: None,
         mail_scopes: HashMap::new(),
     };
     let granted_grants = perms.app_role_grants.clone();
@@ -1487,17 +1610,28 @@ async fn score_one(
 ) -> Result<AuditItem, UiError> {
     // Lean lookup: the audit reads only `sp.id` and `sp.account_enabled`. The
     // prewarm above seeds the matching `|lean` cache key, so this is a hit.
-    let sp = match ctx
+    //
+    // A FAILED lookup is an error, never `None`. `Ok(None)` means the app truly
+    // has no service principal; mapping a failed read to that same `None` took
+    // away the input of the admin-consent and disabled-SP rules and emptied
+    // `orgwide` below, so a `Scoped { Rbac }` verdict was never reconciled
+    // against a surviving org-wide grant — and the run, with nothing in
+    // `degraded`, was cached as a clean complete scan. Propagated, the error
+    // reaches the run's collector: a transient failure counts the app as
+    // unscored (→ `PerPrincipalScoring`, never cached), a dead session stops
+    // the run for re-auth.
+    let sp = ctx
         .client
         .get_service_principal_by_app_id_lean(&app.app_id)
         .await
-    {
-        Ok(sp) => sp,
-        Err(err) => {
-            tracing::warn!(app = %app.display_name, ?err, "audit: SP lookup failed");
-            None
-        }
-    };
+        .map_err(|err| {
+            tracing::warn!(
+                app = %app.display_name,
+                ?err,
+                "audit: SP lookup failed; app left unscored"
+            );
+            UiError::from(err)
+        })?;
 
     let mut perms = resolve_permissions(&ctx.resolver, &app.required_resource_access).await;
 
@@ -1506,6 +1640,19 @@ async fn score_one(
     if let Some(ref sp) = sp {
         perms.has_admin_consent = ctx.admin_consent_clients.contains(&sp.id);
     }
+    // Per-scope consent state for Rule 13: the scopes this app's SP holds under
+    // AllPrincipals grants. An app with no SP can hold no grant (`Some(empty)`);
+    // a failed grants read leaves it `None` (unknown — Rule 13 falls back to the
+    // declared scopes rather than hiding them).
+    perms.admin_consented_scopes = ctx
+        .admin_consented_scopes_by_client
+        .as_ref()
+        .map(|by_client| {
+            sp.as_ref()
+                .and_then(|sp| by_client.get(&sp.id))
+                .cloned()
+                .unwrap_or_default()
+        });
 
     // Resolve effective Exchange mailbox scoping so a mail permission confined to
     // specific mailboxes scores below an org-wide one. Skips the Exchange round
@@ -1520,7 +1667,20 @@ async fn score_one(
     } else {
         ctx.exo.as_deref()
     };
-    let declared_values = perms.app_role_values();
+    // The Exchange-scopable declared grants with the role each one's OWN
+    // resource maps it to: Microsoft Graph's mail family and the EWS
+    // `full_access_as_app` scope on Office 365 Exchange Online. Carrying the
+    // role from here is what lets the resolver see the EWS row — re-deriving
+    // it against Graph dropped that row, so a correctly RBAC-scoped EWS grant
+    // scored at full org-wide weight.
+    let scopable: Vec<(String, &'static str)> = perms
+        .app_role_grants
+        .iter()
+        .filter_map(|g| {
+            exchange_role_for_resource_permission(g.resource_app_id.as_deref()?, &g.value)
+                .map(|role| (g.value.clone(), role))
+        })
+        .collect();
     if let Some(exo) = exo {
         // Reconcile a scoped RBAC verdict against an un-stripped org-wide Entra
         // grant — `Test-ServicePrincipalAuthorization` can't see Entra grants, so
@@ -1528,11 +1688,7 @@ async fn score_one(
         // mailbox. Only worth the extra read when the app declares a scopable mail
         // permission and its SP resolved.
         let orgwide = match &sp {
-            Some(sp)
-                if perms.app_role_grants.iter().any(|g| {
-                    is_scopable_exchange_resource_permission(g.resource_app_id.as_deref(), &g.value)
-                }) =>
-            {
+            Some(sp) if !scopable.is_empty() => {
                 // One tenant-wide read (above) replaces the former per-app
                 // appRoleAssignments GET; a map miss ⇒ empty set, same as before.
                 ctx.orgwide_mail_by_sp
@@ -1555,13 +1711,16 @@ async fn score_one(
             &ctx.tenant_id,
             exo,
             &app.app_id,
-            &declared_values,
+            &scopable,
             &orgwide,
         )
         .await
         {
             Ok(scopes) => scopes,
             Err(err) => {
+                // Unconditionally, before the breaker test: any failed probe
+                // left this app's mail permissions at org-wide weight.
+                ctx.mail_scoping_unresolved.store(true, Ordering::Release);
                 if matches!(
                     err,
                     ExchangeError::Unauthorized | ExchangeError::Forbidden { .. }
@@ -1575,6 +1734,10 @@ async fn score_one(
                 HashMap::new()
             }
         };
+    } else if !scopable.is_empty() {
+        // No Exchange client, or the breaker is open: a scopable mail
+        // permission scores at org-wide weight without being checked.
+        ctx.mail_scoping_unresolved.store(true, Ordering::Release);
     }
 
     // Fold in the run's tenant-wide legacy-policy verdict. Outside the Exchange
@@ -1727,7 +1890,45 @@ mod tests {
             unused: false,
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
+            app_owner_organization_id: None,
         }
+    }
+
+    /// The run entry is stored typed, so every reader must use `get_typed` —
+    /// an untyped `get` on it misses, which would read as "no audit run" on
+    /// Home and fail the by-reference export. And the Home summary carries the
+    /// stamp the run wrote, never the read time.
+    #[test]
+    fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
+        let cache = Cache::new();
+        let key = audit_cache_key("t1");
+        cache.put_typed(
+            CacheKind::Audit,
+            key.clone(),
+            Arc::new(CachedAuditRun {
+                completed_at: "2026-01-01T00:00:00Z".into(),
+                items: vec![sample("A"), sample("B")],
+                mailbox_scoping_resolved: true,
+            }),
+        );
+        let run = cache
+            .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)
+            .expect("typed read hits");
+        assert_eq!(run.items.len(), 2);
+        // The wrong door: `CachedAuditRun` is no longer `Deserialize`, so probe
+        // with the item vector the untyped path would have to decode.
+        assert!(
+            cache
+                .get::<Vec<AuditItem>>(CacheKind::Audit, &key)
+                .is_none(),
+            "an untyped read of the typed run entry must miss"
+        );
+        let summary = CachedAuditSummary::from_items(&run.items, Some(run.completed_at.clone()));
+        assert_eq!(
+            summary.completed_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(summary.posture.medium, 2);
     }
 
     fn sp(id: &str, app_id: &str, sp_type: Option<&str>) -> ServicePrincipal {
@@ -1842,6 +2043,7 @@ mod tests {
             degraded: Vec::new(),
             sign_in_report_available: true,
             completed_at: Some("2026-09-02T09:00:00+00:00".to_string()),
+            mailbox_scoping_resolved: true,
         }
     }
 
@@ -1860,13 +2062,14 @@ mod tests {
     }
 
     #[test]
-    fn export_audit_csv_ends_rows_with_principal_kind() {
+    fn export_audit_csv_appends_new_columns_last() {
         let mut item = sample("SP App");
         item.principal_kind = AuditPrincipalKind::ServicePrincipal;
+        item.app_owner_organization_id = Some("tenant-x".to_string());
         let csv = export_audit_csv(vec![item], &complete(1));
         let lines = csv_data_lines(&csv);
-        assert!(lines[0].ends_with(",PrincipalKind"));
-        assert!(lines[1].ends_with(",ServicePrincipal"));
+        assert!(lines[0].ends_with(",PrincipalKind,AppOwnerOrgId"));
+        assert!(lines[1].ends_with(",ServicePrincipal,tenant-x"));
     }
 
     #[test]
@@ -1944,6 +2147,46 @@ mod tests {
         assert!(json.contains("permissionResolution"));
     }
 
+    /// Unresolved mailbox scoping is a caveat, not a gap: the run is complete
+    /// and cacheable, yet every export has to carry the sentence the org-wide
+    /// mailbox group shows, or an over-reported finding reads as confirmed.
+    #[test]
+    fn an_unresolved_mailbox_scoping_run_says_so_in_every_export() {
+        let items = vec![sample("App A")];
+        let coverage = AuditExportCoverage {
+            mailbox_scoping_resolved: false,
+            ..complete(1)
+        };
+        assert!(coverage.is_complete());
+
+        let csv = export_audit_csv(items.clone(), &coverage);
+        assert!(
+            csv.contains(&format!("# {MAILBOX_SCOPING_UNRESOLVED}")),
+            "csv preamble missing the caveat:\n{csv}"
+        );
+
+        let json = audit_to_json(&items, &coverage).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["mailbox_scoping_resolved"], serde_json::json!(false));
+        assert!(
+            v["coverage_notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == MAILBOX_SCOPING_UNRESOLVED)
+        );
+
+        let html = audit_to_html(&items, &coverage);
+        assert!(html.contains(&html_escape(MAILBOX_SCOPING_UNRESOLVED)));
+
+        // Still cacheable: it is not one of the three completeness flags.
+        assert!(run_is_cacheable(false, false, &[]));
+
+        // …and a resolved run carries none of it.
+        let clean = audit_to_json(&items, &complete(1)).expect("serialize");
+        assert!(!clean.contains(MAILBOX_SCOPING_UNRESOLVED));
+    }
+
     /// The positive case must stay boring: a complete run's export carries the
     /// counts and the run time, and none of the caveat prose.
     #[test]
@@ -2007,5 +2250,267 @@ mod tests {
             v["completed_at"],
             serde_json::json!("2026-09-02T09:00:00+00:00")
         );
+    }
+
+    // ── Producers of `degraded` ────────────────────────────────────────────
+    //
+    // `only_a_complete_undegraded_run_is_cacheable` pins the guard; these pin
+    // what FEEDS it from `score_one`. A failed SP lookup used to come back as
+    // a clean `Ok(AuditItem)`, invisible to the guard.
+
+    use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider, TokenError};
+
+    /// A `ScoreCtx` with every tenant-wide input empty and Exchange off — the
+    /// shape of a run whose prefetch found nothing, so only the per-app SP
+    /// lookup reaches the (mock) Graph.
+    fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
+        ScoreCtx {
+            resolver: Arc::new(ResourceResolver::new(client.clone())),
+            client,
+            cache,
+            tenant_id: "tenant-test".to_string(),
+            exo: None,
+            admin_consent_clients: Arc::default(),
+            admin_consented_scopes_by_client: None,
+            orgwide_mail_by_sp: Arc::default(),
+            legacy_policies: Arc::default(),
+            exo_tripped: Arc::new(AtomicBool::new(false)),
+            mail_scoping_unresolved: AtomicBool::new(false),
+            sign_in_available: false,
+            sign_in_map: Arc::default(),
+        }
+    }
+
+    /// An app declaring no permissions, so the resolver makes no Graph call.
+    fn bare_app() -> Application {
+        Application {
+            app_id: "app-1".into(),
+            display_name: "Demo".into(),
+            ..Default::default()
+        }
+    }
+
+    async fn mock_sp_lookup(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path, query_param};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn graph_over(server: &wiremock::MockServer, token: Arc<dyn BearerProvider>) -> ScoreCtx {
+        let cache = Cache::new();
+        let client = Arc::new(GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            cache.clone(),
+            server.uri(),
+        ));
+        score_ctx(client, cache)
+    }
+
+    #[tokio::test]
+    async fn a_failed_sp_lookup_leaves_the_app_unscored_instead_of_clean() {
+        let server = wiremock::MockServer::start().await;
+        // `Retry-After: 0` keeps the retry budget from sleeping out its backoff.
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let err = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect_err("a failed SP read must not score the app as holding nothing");
+        // → `unscored += 1` → `PerPrincipalScoring` in the collector …
+        assert_eq!(classify_audit_failure(&err), AuditFailure::Transient);
+        // … and a run carrying that gap is never cached as a clean scan.
+        assert!(!run_is_cacheable(
+            false,
+            false,
+            &[AuditCoverageGap::PerPrincipalScoring]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tenant_without_the_sp_still_scores() {
+        // Control: a real "no service principal" answer is not a gap.
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let item = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect("an app with no SP scores normally");
+        assert_eq!(item.service_principal_enabled, None);
+        // No mail permission, so nothing was left unprobed.
+        assert!(!ctx.mail_scoping_unresolved.load(Ordering::Acquire));
+    }
+
+    // A scopable mail permission scored with no Exchange client is left at
+    // org-wide weight unchecked — the run must say its scoping is unresolved.
+    #[tokio::test]
+    async fn an_unprobed_mail_permission_marks_scoping_unresolved() {
+        use wiremock::matchers::{method, path, query_param};
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        )
+        .await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param(
+                "$filter",
+                format!("appId eq '{MICROSOFT_GRAPH_APP_ID}'"),
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{
+                        "id": "graph-sp",
+                        "appId": MICROSOFT_GRAPH_APP_ID,
+                        "appRoles": [{"id": "role-mail-read", "value": "Mail.Read"}],
+                    }]
+                })),
+            )
+            .mount(&server)
+            .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+        let app = Application {
+            required_resource_access: vec![RequiredResourceAccess {
+                resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+                resource_access: vec![azapptoolkit_core::models::ResourceAccess {
+                    id: "role-mail-read".into(),
+                    r#type: "Role".into(),
+                }],
+            }],
+            ..bare_app()
+        };
+
+        score_one(&ctx, &app, None).await.expect("scores");
+        assert!(
+            !ctx.resolver.had_unresolved(),
+            "the Graph index must resolve, or the flag proves nothing"
+        );
+        assert!(ctx.mail_scoping_unresolved.load(Ordering::Acquire));
+    }
+
+    async fn mock_grants(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("GET"))
+            .and(path("/oauth2PermissionGrants"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_grants_read_reports_consent_as_unknown() {
+        let server = wiremock::MockServer::start().await;
+        mock_grants(&server, wiremock::ResponseTemplate::new(403)).await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
+        // Empty maps alone read as "nothing admin-consented"; the flag is what
+        // lets Rule 13 fall back to the declared scopes instead of hiding them.
+        assert!(
+            !read,
+            "a failed read must not claim the consent state is known"
+        );
+        assert!(clients.is_empty() && scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_grants_read_keeps_only_all_principals_scopes() {
+        let server = wiremock::MockServer::start().await;
+        mock_grants(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {"id": "g1", "clientId": "sp-1", "resourceId": "graph-sp",
+                     "consentType": "AllPrincipals", "principalId": null,
+                     "scope": "Mail.Read  User.Read"},
+                    {"id": "g2", "clientId": "sp-1", "resourceId": "graph-sp",
+                     "consentType": "Principal", "principalId": "user-1",
+                     "scope": "Files.ReadWrite.All"},
+                    {"id": "g3", "clientId": "sp-2", "resourceId": "graph-sp",
+                     "consentType": "Principal", "principalId": "user-1",
+                     "scope": "Mail.ReadWrite"},
+                ]
+            })),
+        )
+        .await;
+        let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+        let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
+        assert!(read);
+        assert_eq!(clients, HashSet::from(["sp-1".to_string()]));
+        assert_eq!(
+            scopes.len(),
+            1,
+            "a user-consented grant is not admin consent"
+        );
+        assert_eq!(
+            scopes["sp-1"],
+            vec!["Mail.Read".to_string(), "User.Read".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_one_hands_rule_13_the_apps_admin_consented_scopes() {
+        let server = wiremock::MockServer::start().await;
+        mock_sp_lookup(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"id": "sp-1", "appId": "app-1", "accountEnabled": true}]
+            })),
+        )
+        .await;
+        let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+        ctx.admin_consented_scopes_by_client = Some(Arc::new(HashMap::from([(
+            "sp-1".to_string(),
+            vec!["Mail.ReadWrite".to_string()],
+        )])));
+
+        // The app declares nothing, so the only way the broad scope can reach
+        // Rule 13 is through its SP's AllPrincipals grant (dynamic consent).
+        let item = score_one(&ctx, &bare_app(), None).await.expect("scores");
+        assert!(
+            item.issues.iter().any(|i| i
+                == &format!(
+                    "{} Mail.ReadWrite",
+                    azapptoolkit_core::audit::issue::HIGH_RISK_DELEGATED_PERMS
+                )),
+            "{:?}",
+            item.issues
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_session_during_the_sp_lookup_stops_the_run() {
+        struct DeadSession;
+        #[async_trait::async_trait]
+        impl BearerProvider for DeadSession {
+            async fn bearer(&self) -> Result<String, TokenError> {
+                Err(TokenError::new("refresh_missing", "gone"))
+            }
+        }
+        // Never answered: the token fails before any request is sent.
+        let server = wiremock::MockServer::start().await;
+        let ctx = graph_over(&server, Arc::new(DeadSession));
+
+        let err = score_one(&ctx, &bare_app(), None)
+            .await
+            .expect_err("a dead session must surface, not score the app");
+        // Swallowed to `None` before, this now stops the run for re-auth.
+        assert_eq!(classify_audit_failure(&err), AuditFailure::SessionDead);
     }
 }

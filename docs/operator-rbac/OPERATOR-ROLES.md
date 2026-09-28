@@ -13,7 +13,7 @@ Graph, the Exchange Online Admin API, Azure Key Vault, and Azure Resource Manage
 | Plane | What it governs here | Role | PIM flavor | File |
 |---|---|---|---|---|
 | **Entra ID directory roles** | App registrations, enterprise apps, credentials, owners, API-permission **admin consent**, sign-in/audit reports, Conditional Access (read) | Custom directory role (`microsoft.directory/*`) | **PIM for Microsoft Entra roles** | [`entra-custom-role.ps1`](./entra-custom-role.ps1) |
-| **Azure RBAC** | ARM managed-identity role **reads** + **Key Vault secrets** CRUD | Custom Azure role (`Actions`/`DataActions`) | **PIM for Azure resources** | [`azure-custom-role.json`](./azure-custom-role.json) |
+| **Azure RBAC** | ARM managed-identity role **reads** + **Key Vault secrets** list/read/write (rotation) | Custom Azure role (`Actions`/`DataActions`) | **PIM for Azure resources** | [`azure-custom-role.json`](./azure-custom-role.json) |
 | **Exchange Online RBAC** | RBAC-for-Applications: mailbox access grants, management scopes/role assignments | Built-in **Exchange Administrator** | **PIM for Microsoft Entra roles** | (built-in — no file) |
 
 So: **two custom roles + one built-in role**.
@@ -28,8 +28,9 @@ So: **two custom roles + one built-in role**.
 ## 1. Azure RBAC custom role (ARM + Key Vault)
 
 ARM usage is **read-mostly** (subscriptions, role assignments, role definitions — the Managed Identity
-→ Azure-roles view); Key Vault is full secret CRUD (the credential-rotation feature). One ARM **write**
-path — assigning an Azure role to a managed identity — needs
+→ Azure-roles view); Key Vault lists and reads secrets and writes new secret versions (the
+credential-rotation feature); it never deletes a secret. One ARM **write** path — assigning an Azure
+role to a managed identity — needs
 `Microsoft.Authorization/roleAssignments/write`, which this least-privilege role deliberately **omits**;
 see caveat 4.
 
@@ -44,13 +45,12 @@ az role definition create --role-definition azure-custom-role.json
 | App operation | Permission |
 |---|---|
 | List subscriptions | `Microsoft.Resources/subscriptions/read` (Action) |
-| Read MI role assignments | `Microsoft.Authorization/roleAssignments/read` (Action) |
+| Read MI role assignments; Resource Access → Vault access reverse lookup | `Microsoft.Authorization/roleAssignments/read` (Action) |
 | Resolve role-definition GUIDs → names | `Microsoft.Authorization/roleDefinitions/read` (Action) |
 | List Key Vaults (management plane) | `Microsoft.KeyVault/vaults/read` (Action) |
 | List secrets | `Microsoft.KeyVault/vaults/secrets/readMetadata/action` (DataAction) |
 | Read secret value | `Microsoft.KeyVault/vaults/secrets/getSecret/action` (DataAction) |
 | Create/update secret | `Microsoft.KeyVault/vaults/secrets/setSecret/action` (DataAction) |
-| Delete secret | `Microsoft.KeyVault/vaults/secrets/deleteSecret/action` (DataAction) |
 
 Notes:
 - **Key Vault must be in RBAC permission mode** (not legacy access policies) for `DataActions` to
@@ -59,7 +59,7 @@ Notes:
   `Microsoft.Authorization/roleAssignments/write` — grant a separate **User Access Administrator**
   (or **Owner**) on the target scope only for operators who use it (caveat 4).
 - Built-in equivalent if you'd rather not maintain a custom role: **Reader** + **Key Vault Secrets
-  Officer**.
+  Officer** (which also grants delete).
 
 ---
 
@@ -77,7 +77,7 @@ Administrator or Global Administrator), then make it PIM-eligible in **Entra PIM
 | App owners | `applications/owners/update` |
 | Enterprise apps create/read/update | `servicePrincipals/create`, `.../allProperties/read`, `.../basic/update` |
 | Assign users/groups to app roles | `servicePrincipals/appRoleAssignedTo/update` |
-| SCIM provisioning tab | `servicePrincipals/synchronization/standard/read` |
+| SCIM provisioning tab | `servicePrincipals/synchronization/standard/read` (built-in alternative: **Hybrid Identity Administrator**) |
 | **Admin consent** (delegated + app-role grants) | `servicePrincipals/managePermissionGrantsForAll.<consentPolicyId>` |
 | Owner/assignee pickers, org header | `users/standard/read`, `groups/standard/read`, `organization/standard/read` |
 | Activity tab | `auditLogs/allProperties/read` |
@@ -135,6 +135,11 @@ then sign out and back in so a fresh token is issued.
    Graph `Application.ReadWrite.All`) still requires **Privileged Role Administrator** or **Global
    Administrator** — no custom role substitutes. If operators must grant arbitrary high-privilege
    consent, plan a PIM-eligible **Privileged Role Administrator** assignment for that path.
+   **Application Administrator / Cloud Application Administrator** can grant consent for any API
+   except Microsoft Graph (and Azure AD Graph) app roles — so they cover grants to the tenant's own
+   APIs, SharePoint or Exchange Online, and the readiness checklist accepts them for `admin_consent`.
+   **Disaster-recovery restore** re-grants every restored app's admin consent, so it hits the same
+   gate, and it regenerates credentials that are shown only once in the restore report.
 
 2. **SharePoint `Sites.Selected` grants** (the `Sites.FullControl.All` write path,
    `POST /sites/{id}/permissions`) are governed by SharePoint, not a clean `microsoft.directory/*`
@@ -162,7 +167,8 @@ then sign out and back in so a fresh token is issued.
    `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,
    `GroupMember.ReadWrite.All`,
    `https://outlook.office365.com/Exchange.Manage`, `https://management.azure.com/.default`,
-   `https://vault.azure.net/.default`, `https://api.loganalytics.azure.com/.default`.
+   `https://vault.azure.net/.default`, `https://api.loganalytics.azure.com/.default`
+   (commercial-cloud audiences; a sovereign build uses that cloud's hosts).
 
 4. **Group-membership changes** (adding/removing a service principal as a security-group member —
    the access model for group-gated APIs like Power BI / Fabric tenant settings) need
@@ -191,7 +197,7 @@ then sign out and back in so a fresh token is issued.
 ## Verification
 
 - **Azure role:** `az role definition create --role-definition azure-custom-role.json`, assign at a
-  test subscription, confirm Key Vault list/get/set/delete and the Managed-Identity Azure-roles view
+  test subscription, confirm Key Vault list/get/set and the Managed-Identity Azure-roles view
   work.
 - **Entra role:** run `entra-custom-role.ps1` against a test tenant, assign PIM-eligible to a
   non-admin test account, confirm app create/update/credential/owner flows and the

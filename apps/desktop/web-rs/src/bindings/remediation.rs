@@ -1,21 +1,14 @@
 //! Audit remediation IPC bindings — one-click fixes invoked from the audit view.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
+
+use crate::bindings::ObjectIdArgs;
 
 pub use azapptoolkit_dto::exchange::ExchangeAccessResult;
 pub use azapptoolkit_dto::remediation::{RedundantPermissionsOutcome, RemediationOutcome};
 pub use azapptoolkit_dto::sharepoint::SiteScopeResult;
-
-/// Args shared by the fixes that target one app registration and re-resolve
-/// everything else live (remove-expired-credentials, remove-redundant-permissions).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppTargetArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
 
 /// Removes every currently-expired secret/certificate from one app registration.
 /// The backend re-resolves the live expired set before acting, so a stale audit
@@ -26,7 +19,7 @@ pub async fn remediate_remove_expired_credentials(
 ) -> Result<RemediationOutcome, UiError> {
     invoke_result(
         "remediate_remove_expired_credentials",
-        AppTargetArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },
@@ -44,7 +37,7 @@ pub async fn remediate_remove_redundant_permissions(
 ) -> Result<RedundantPermissionsOutcome, UiError> {
     invoke_result(
         "remediate_remove_redundant_permissions",
-        AppTargetArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },
@@ -58,7 +51,7 @@ pub async fn remediate_remove_redundant_permissions(
 pub async fn remediate_disable_sign_in(tenant_id: &str, object_id: &str) -> Result<(), UiError> {
     invoke_result(
         "remediate_disable_sign_in",
-        AppTargetArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },

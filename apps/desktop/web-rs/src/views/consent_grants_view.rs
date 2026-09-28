@@ -11,9 +11,9 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::{Callout, CopyableId};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::contains_ignore_case;
+use crate::util::{contains_ignore_case, count_noun};
 
 #[component]
 pub fn ConsentGrantsView() -> impl IntoView {
@@ -33,7 +33,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             search_placeholder="Filter by client name…"
             refresh_label="Refresh consent grants"
             view_key="consent"
-            noun="grant(s)"
+            noun="grants"
             empty_message="No grants match this filter."
             facets=vec![("all", "All"), ("risky", "High-risk"), ("admin", "Admin consent")]
             headers=vec!["Client", "Resource", "Consent", "Scopes", ""]
@@ -50,7 +50,8 @@ pub fn ConsentGrantsView() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{risky} grant(s) include high-risk scopes ({admin_risky} admin-consented for all users).",
+                                    "{} high-risk scopes ({admin_risky} admin-consented for all users).",
+                                    count_noun(risky, "grant includes", "grants include"),
                                 )}
                             </Callout>
                         }
@@ -67,22 +68,22 @@ pub fn ConsentGrantsView() -> impl IntoView {
 }
 
 fn grant_row(session: crate::state::Session, r: OAuth2GrantDto) -> impl IntoView {
-    let (consent_label, consent_class) = if r.consent_type == "AllPrincipals" {
-        ("Admin (all users)", "badge badge--warning")
+    let (consent_label, consent_tone) = if r.consent_type == "AllPrincipals" {
+        ("Admin (all users)", BadgeTone::Warning)
     } else {
-        ("User", "badge")
+        ("User", BadgeTone::Neutral)
     };
     let risky: std::collections::HashSet<String> = r.risky_scopes.iter().cloned().collect();
     let scope_chips = r
         .scopes
         .iter()
         .map(|s| {
-            let cls = if risky.contains(s) {
-                "badge badge--danger"
+            let tone = if risky.contains(s) {
+                BadgeTone::Danger
             } else {
-                "badge"
+                BadgeTone::Neutral
             };
-            view! { <span class=cls>{s.clone()}</span> }
+            view! { <Badge label=s.clone() tone=tone /> }
         })
         .collect_view();
     let client_app_id = r.client_app_id.clone().unwrap_or_default();
@@ -97,12 +98,12 @@ fn grant_row(session: crate::state::Session, r: OAuth2GrantDto) -> impl IntoView
             </td>
             <td>{r.resource_display_name.clone()}</td>
             <td>
-                <span class=consent_class>{consent_label}</span>
+                <Badge label=consent_label tone=consent_tone />
             </td>
             <td>
                 <div class="scope-chips">{scope_chips}</div>
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {

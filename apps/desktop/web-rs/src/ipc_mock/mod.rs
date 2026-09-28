@@ -1,6 +1,6 @@
 //! Shared mock Tauri IPC bridge. Installs a fake `window.__TAURI_INTERNALS__`
 //! and answers `invoke()` from canned fixtures, so the real bindings and the
-//! real `serde-wasm-bindgen` wire format run unchanged with **no backend**.
+//! real IPC wire format run unchanged with **no backend**.
 //!
 //! Two consumers, behind the `mock-ipc` feature:
 //! - `test_support` (the headless-browser GUI tests) — registers per-test routes
@@ -14,9 +14,12 @@
 //! bottoms out at `tauri-sys`'s bundled `core.js`, which calls three methods on
 //! `window.__TAURI_INTERNALS__` — `invoke(cmd, args)`, `transformCallback`, and
 //! `convertFileSrc`. We install our own before mounting; fixtures are built from
-//! the shared DTO types and serialized with the *same* `serde-wasm-bindgen` the
-//! bindings deserialize with, so a fixture that drifts from the wire format is
-//! caught immediately.
+//! the shared DTO types, serialized to JSON and parsed back ([`wire_value`]) —
+//! the exact shape real Tauri delivers (the backend's `serde_json` output,
+//! `JSON.parse`d in the webview) and `tauri-sys` decodes (`JSON.stringify` +
+//! `serde_json`) — so a fixture that drifts from the wire format is still
+//! caught. Call args arrive encoded by `tauri-sys` with `serde_wasm_bindgen`,
+//! so the recorded args are read back with it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -99,6 +102,16 @@ pub fn document() -> web_sys::Document {
     window().document().expect("no document")
 }
 
+/// A reply/event value exactly as real Tauri hands it to the webview: the
+/// backend's `serde_json` output, `JSON.parse`d. Never `serde_wasm_bindgen`
+/// here — its `()`/`None` are `undefined` (which `tauri-sys`'s
+/// `JSON.stringify` decode panics on) and its maps are JS `Map`s (which
+/// stringify to `{}`, silently dropping the entries).
+fn wire_value<T: Serialize>(v: &T) -> JsValue {
+    js_sys::JSON::parse(&serde_json::to_string(v).expect("serialize mock value"))
+        .expect("mock value is valid JSON")
+}
+
 /// Install `window.__TAURI_INTERNALS__` once. Idempotent — the registry it reads
 /// is cleared by [`reset`], so the closures stay valid across tests.
 pub fn ensure_installed() {
@@ -166,22 +179,20 @@ pub fn ensure_installed() {
                 // Test harness: surface the gap instead of hanging on a
                 // never-resolving resource.
                 Unmocked::LoudReject => {
-                    let err = swb::to_value(&fixtures::ui_error(
+                    let err = wire_value(&fixtures::ui_error(
                         "unmocked",
                         &format!("test_support: no mock for command `{cmd}`"),
-                    ))
-                    .unwrap();
+                    ));
                     Promise::reject(&err).into()
                 }
                 // Demo: every unregistered read (and every mutation) degrades to
                 // a friendly error toast / empty state rather than a hang.
                 Unmocked::DemoFriendly => {
-                    let err = swb::to_value(&fixtures::ui_error(
+                    let err = wire_value(&fixtures::ui_error(
                         "demo_unsupported",
                         "This action isn't available in the live demo — \
                          download the app to use it for real.",
-                    ))
-                    .unwrap();
+                    ));
                     Promise::reject(&err).into()
                 }
             },
@@ -254,11 +265,11 @@ pub fn set_unmocked_mode(mode: Unmocked) {
     UNMOCKED.with(|u| *u.borrow_mut() = mode);
 }
 
-/// Mock `cmd` to resolve with `value` (serialized via the same serde path the
-/// bindings deserialize with). Use `&()` for commands that return `()`.
+/// Mock `cmd` to resolve with `value` (as Tauri's JSON wire value, see
+/// [`wire_value`]). Use `&()` for commands that return `()` (resolves `null`).
 pub fn mock_ok<T: Serialize>(cmd: &str, value: &T) {
     ensure_installed();
-    let v = swb::to_value(value).expect("serialize mock value");
+    let v = wire_value(value);
     ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), RouteResult::Ok(v)));
 }
 
@@ -266,7 +277,7 @@ pub fn mock_ok<T: Serialize>(cmd: &str, value: &T) {
 /// rendering (`invoke_result` maps a rejected Promise to `Err(UiError)`).
 pub fn mock_err(cmd: &str, err: &azapptoolkit_dto::UiError) {
     ensure_installed();
-    let e = swb::to_value(err).expect("serialize UiError");
+    let e = wire_value(err);
     ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), RouteResult::Err(e)));
 }
 
@@ -280,8 +291,7 @@ where
     F: Fn(&serde_json::Value) -> T + 'static,
 {
     ensure_installed();
-    let handler: DynRoute =
-        Box::new(move |args| swb::to_value(&f(args)).expect("serialize mock value"));
+    let handler: DynRoute = Box::new(move |args| wire_value(&f(args)));
     FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
 }
 
@@ -320,7 +330,7 @@ pub fn emit_event<T: Serialize>(name: &str, payload: &T) {
         Reflect::set(
             &envelope,
             &JsValue::from_str("payload"),
-            &swb::to_value(payload).unwrap(),
+            &wire_value(payload),
         )
         .unwrap();
         let _ = func.call1(&JsValue::NULL, &envelope);

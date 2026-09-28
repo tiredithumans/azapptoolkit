@@ -10,16 +10,16 @@ use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar};
 
 use crate::bindings::events;
 use crate::bindings::permission_tester::{
-    self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
+    self, AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
-use crate::bindings::sharepoint;
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, ShowMore};
+use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::{Session, use_session};
+use crate::util::plural;
 
 use super::{verdict_badge, verdict_tooltip};
 
@@ -28,20 +28,22 @@ use super::{verdict_badge, verdict_tooltip};
 /// A free function rather than prose built inline, because the export ships it
 /// verbatim: an `unknown` verdict means an Exchange RBAC check could not be
 /// evaluated, and an Exchange outage leaves every verdict deriving from the
-/// Entra grants alone. Both caveats are stated on screen, and a file that
-/// dropped either would read as an audited all-clear.
+/// Entra grants alone. An unread Exchange SP store means apps granted access
+/// only through Exchange RBAC were never candidates at all. Every caveat is
+/// stated on screen, and a file that dropped one would read as an audited
+/// all-clear.
 fn summary_line(r: &MailboxReachersResult) -> String {
-    let reachers = r
+    let reachers = r.rows.iter().filter(|x| x.verdict.reaches()).count();
+    let unknowns = r
         .rows
         .iter()
-        .filter(|x| x.verdict == "org_wide" || x.verdict == "scoped")
+        .filter(|x| x.verdict == AccessVerdict::Unknown)
         .count();
-    let unknowns = r.rows.iter().filter(|x| x.verdict == "unknown").count();
     let mut summary = format!(
         "{} of {} candidate app{} can reach “{}”",
         reachers,
         r.total_candidates,
-        if r.total_candidates == 1 { "" } else { "s" },
+        plural(r.total_candidates),
         r.mailbox,
     );
     if unknowns > 0 {
@@ -53,7 +55,11 @@ fn summary_line(r: &MailboxReachersResult) -> String {
     }
     if !r.exchange_available {
         summary.push_str(
-            " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported)",
+            " — Exchange was unavailable, so verdicts derive from the Entra grants alone (org-wide unless scoped; never under-reported); apps granted access only through Exchange RBAC could not be listed",
+        );
+    } else if !r.exchange_sp_store_read {
+        summary.push_str(
+            " — Exchange's service-principal list couldn't be read, so apps granted access only through Exchange RBAC may be missing",
         );
     }
     if r.cancelled {
@@ -126,7 +132,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                 .map(|r| {
                     r.rows
                         .iter()
-                        .filter(|x| show_na || x.verdict != "no_access")
+                        .filter(|x| show_na || x.verdict != AccessVerdict::NoAccess)
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -172,6 +178,15 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
         }
         probing.set(true);
         error.set(None);
+        // A probe is per-target: a table for a *different* mailbox must not sit
+        // under the progress bar (or beneath an error) while this one runs.
+        // Re-checking the same mailbox keeps it until the new result lands.
+        if result.with_untracked(|r| {
+            r.as_ref()
+                .is_some_and(|r| !r.mailbox.eq_ignore_ascii_case(&mb))
+        }) {
+            result.set(None);
+        }
         progress.set(Some(MailboxProbeProgress {
             done: 0,
             total: 0,
@@ -186,7 +201,14 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             };
             match permission_tester::find_mailbox_reachers(&t.tenant_id, &mb).await {
                 Ok(r) => result.set(Some(r)),
-                Err(e) => error.set(Some(e.message)),
+                // This panel has no consent / step-up button of its own, so it
+                // takes the shared sink's whole ladder (dead session, rejected
+                // token, Exchange consent, step-up) before the inline line.
+                Err(e) => {
+                    if !session.report_recovery_action(&e, "exchange") {
+                        error.set(Some(e.message));
+                    }
+                }
             }
             probing.set(false);
             progress.set(None);
@@ -195,7 +217,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
 
     let cancel = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = sharepoint::cancel_resource_sweep().await;
+            let _ = permission_tester::cancel_mailbox_probe().await;
         });
     };
 
@@ -273,7 +295,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             let Some(r) = result.get() else {
                 return ().into_any();
             };
-            let no_access = r.rows.iter().filter(|x| x.verdict == "no_access").count();
+            let no_access = r.rows.iter().filter(|x| x.verdict == AccessVerdict::NoAccess).count();
             // From the same memo the export reads, so the sentence on screen and
             // the one in the file are one string, not two that can drift apart.
             let summary = summary.get().unwrap_or_default();
@@ -307,7 +329,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                         "No application can reach “{}” — all {} candidate{} were checked and have no access.",
                                         r.mailbox,
                                         no_access,
-                                        if no_access == 1 { "" } else { "s" },
+                                        plural(no_access),
                                     )}
                                 </Body1>
                             }
@@ -327,8 +349,8 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                         {rows
                                             .into_iter()
                                             .map(|row| {
-                                                let (badge_class, badge_label) = verdict_badge(&row.verdict);
-                                                let badge_title = verdict_tooltip(&row.verdict);
+                                                let (badge_tone, badge_label) = verdict_badge(row.verdict);
+                                                let badge_title = verdict_tooltip(row.verdict);
                                                 let app_primary = row
                                                     .display_name
                                                     .clone()
@@ -361,7 +383,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                                         </td>
                                                         <td class="cell-mid">{row.held_permissions.join(", ")}</td>
                                                         <td class="cell-mid">
-                                                            <span class=badge_class title=badge_title>{badge_label}</span>
+                                                            <Badge label=badge_label tone=badge_tone title=badge_title />
                                                         </td>
                                                         <td>{format!("{}{roles}", row.detail.unwrap_or_default())}</td>
                                                     </tr>
@@ -406,5 +428,47 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             }
                 .into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(exchange_available: bool, exchange_sp_store_read: bool) -> MailboxReachersResult {
+        MailboxReachersResult {
+            tenant_id: "t".into(),
+            mailbox: "shared@contoso.com".into(),
+            total_candidates: 0,
+            rows: Vec::new(),
+            exchange_available,
+            exchange_sp_store_read,
+            cancelled: false,
+        }
+    }
+
+    // The caveat travels with the export verbatim, so a probe that could not
+    // enumerate the RBAC-only principals must say so in this one sentence.
+    #[test]
+    fn summary_flags_unavailable_exchange() {
+        let s = summary_line(&result(false, false));
+        assert!(s.contains("Exchange was unavailable"));
+        assert!(s.contains("only through Exchange RBAC could not be listed"));
+        // One caveat, not two stacked versions of the same gap.
+        assert!(!s.contains("service-principal list"));
+    }
+
+    #[test]
+    fn summary_flags_an_unread_exchange_sp_store() {
+        let s = summary_line(&result(true, false));
+        assert!(s.contains("Exchange's service-principal list couldn't be read"));
+        assert!(s.contains("may be missing"));
+        assert!(!s.contains("Exchange was unavailable"));
+    }
+
+    #[test]
+    fn a_fully_covered_probe_has_no_coverage_caveat() {
+        let s = summary_line(&result(true, true));
+        assert_eq!(s, "0 of 0 candidate apps can reach “shared@contoso.com”");
     }
 }

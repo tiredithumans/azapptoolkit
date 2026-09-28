@@ -108,8 +108,32 @@ pub(crate) async fn write_bytes_via_dialog(
     .map_err(|e| UiError::io(e.to_string()))?
 }
 
-/// [`write_bytes_via_dialog`] for the text exports — every CSV/JSON caller.
-/// `into_bytes` is a move, not a copy.
+/// UTF-8 byte-order mark written at the head of every CSV export.
+///
+/// Excel sniffs a CSV's encoding by its BOM and, without one, decodes UTF-8 as
+/// the ANSI code page — so a display name like `Zürich Finanz` opens garbled.
+/// The formula-injection guard ([`csv_field`]) already targets Excel, so this
+/// does too. Trade-off: pandas strips the BOM on its own, but base R's
+/// `read.csv` needs `fileEncoding = "UTF-8-BOM"` to keep it out of the first
+/// `#` comment line.
+const UTF8_BOM: &str = "\u{FEFF}";
+
+/// The bytes a text export is written as: the content, prefixed with
+/// [`UTF8_BOM`] when (and only when) it is a CSV. JSON stays BOM-less (RFC 8259
+/// forbids emitting one).
+fn text_export_bytes(ext: &str, content: String) -> Vec<u8> {
+    if ext == "csv" {
+        let mut bytes = Vec::with_capacity(UTF8_BOM.len() + content.len());
+        bytes.extend_from_slice(UTF8_BOM.as_bytes());
+        bytes.extend_from_slice(content.as_bytes());
+        bytes
+    } else {
+        content.into_bytes()
+    }
+}
+
+/// [`write_bytes_via_dialog`] for the text exports — every CSV/JSON caller, so
+/// the one place a CSV gains its [`UTF8_BOM`].
 pub(crate) async fn write_via_dialog(
     app_handle: AppHandle,
     filter_name: &'static str,
@@ -122,7 +146,7 @@ pub(crate) async fn write_via_dialog(
         filter_name,
         ext,
         default_name,
-        content.into_bytes(),
+        text_export_bytes(ext, content),
     )
     .await
 }
@@ -235,6 +259,16 @@ pub(crate) fn csv_columns(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_exports_start_with_a_utf8_bom_and_json_does_not() {
+        let csv = text_export_bytes("csv", "name,id\nZürich Finanz,1\n".to_string());
+        assert_eq!(&csv[..3], &[0xEF, 0xBB, 0xBF]);
+        let text = std::str::from_utf8(&csv[3..]).expect("utf-8 after the BOM");
+        assert_eq!(csv_columns(text.lines().next().unwrap()), 2);
+        let json = text_export_bytes("json", "{}".to_string());
+        assert_eq!(json, b"{}");
+    }
 
     #[test]
     fn csv_columns_ignores_commas_inside_a_quoted_field() {

@@ -6,6 +6,9 @@
 //! + create, 3 = output summary. Step state is a plain `RwSignal<u8>` matched in
 //!   the view (the codebase has no Thaw stepper). Mirrors `create_app_dialog.rs`
 //!   for the modal shell and `secret_reveal_dialog.rs` for show-once output.
+//!
+//! Mounted in the shell only while its open flag is set, so each open is a
+//! fresh component — no manual state reset needed.
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
@@ -16,7 +19,7 @@ use crate::bindings::sso::{
 };
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -72,16 +75,10 @@ pub fn SsoWizardDialog(
     let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
-    // Seed the SAML notification emails from the tenant default when the wizard
-    // opens — but only if the field is still empty, so a user's edit is never
-    // clobbered (and a manually-cleared field isn't re-filled mid-session).
-    Effect::new(move |_| {
-        if !open.get() || !notification_emails.get_untracked().trim().is_empty() {
-            return;
-        }
-        let Some(t) = session.active_tenant.get_untracked() else {
-            return;
-        };
+    // Seed the SAML notification emails from the tenant default. One-shot at
+    // construction: the shell mounts this dialog only while it is open, so each
+    // open is a fresh component with an empty field.
+    if let Some(t) = session.active_tenant.get_untracked() {
         leptos::task::spawn_local(async move {
             let d = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
             let emails = d.enterprise_application.default_notification_emails;
@@ -89,34 +86,9 @@ pub fn SsoWizardDialog(
                 notification_emails.set(emails.join("\n"));
             }
         });
-    });
+    }
 
-    // Reset everything to a clean slate (called on close / done).
-    let reset = move || {
-        step.set(0);
-        protocol.set("saml".to_string());
-        display_name.set(String::new());
-        entity_id.set(String::new());
-        reply_url.set(String::new());
-        logout_url.set(String::new());
-        cert_subject.set(String::new());
-        cert_days.set("365".to_string());
-        notification_emails.set(String::new());
-        claims_state.reset();
-        redirect_uris.set(String::new());
-        spa_uris.set(String::new());
-        secret_name.set(String::new());
-        secret_days.set("180".to_string());
-        error.set(None);
-        needs_consent.set(false);
-        saml_result.set(None);
-        oidc_result.set(None);
-    };
-
-    let close = move || {
-        reset();
-        on_close.run(());
-    };
+    let close = move || on_close.run(());
 
     // Runs the create command for the chosen protocol. Reused by the Create
     // button and by the retry-after-consent button.
@@ -136,7 +108,8 @@ pub fn SsoWizardDialog(
         if is_saml {
             // Validate notification emails up front (same rule as the backend's
             // `set_notification_emails`) so the create flow — where the step is
-            // best-effort and swallows errors — gives the user feedback.
+            // best-effort and reports a failure as a warning — gives the user
+            // feedback before anything is created.
             let emails = lines_to_vec(&notification_emails.get_untracked());
             if emails.len() > 5 {
                 error.set(Some(
@@ -175,7 +148,7 @@ pub fn SsoWizardDialog(
                         on_created.run(());
                     }
                     Err(e) => {
-                        if e.code == "consent_required" {
+                        if e.is_consent_required() {
                             needs_consent.set(true);
                         }
                         error.set(Some(e.message));
@@ -232,6 +205,25 @@ pub fn SsoWizardDialog(
                 }
             }
         });
+    };
+
+    // Step 3's "Open application": the new enterprise app, on the tab where its
+    // setup continues. SAML lands on SSO (where a warned-about claims or email
+    // step is retried); OIDC on Overview, since `configure_oidc` never sets
+    // `preferredSingleSignOnMode` and the SSO tab would read "not configured".
+    let open_created = move |_| {
+        let target = saml_result
+            .get_untracked()
+            .map(|s| (s.service_principal_id, "sso"))
+            .or_else(|| {
+                oidc_result
+                    .get_untracked()
+                    .map(|s| (s.service_principal_id, "overview"))
+            });
+        if let Some((sp, tab)) = target {
+            session.open_enterprise_on_tab(sp, tab);
+        }
+        close();
     };
 
     // Step-1 "Next" is allowed when the protocol-specific required fields are set.
@@ -300,7 +292,7 @@ pub fn SsoWizardDialog(
                         <div class="sso-claims">
                             <span class="sso-field__label">"Attributes & claims (optional)"</span>
                             <Body1 class="hint">
-                                "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration. Leave empty to use Entra's default claim set."
+                                "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All. Leave empty to use Entra's default claim set."
                             </Body1>
                             <ClaimsEditor state=claims_state />
                         </div>
@@ -347,7 +339,7 @@ pub fn SsoWizardDialog(
                                 .then(|| {
                                     view! {
                                         <Callout tone="warn">
-                                            "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration."
+                                            "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
                                             <Button
                                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
                                                 on_click=Box::new(grant_and_retry)
@@ -367,7 +359,7 @@ pub fn SsoWizardDialog(
                         {move || oidc_result.get().map(|s| view! { <OidcSummaryView summary=s /> })}
                     </Show>
 
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
                     // ---- Footer actions ----
                     <div class="actions-row">
@@ -419,7 +411,14 @@ pub fn SsoWizardDialog(
                             }
                         }>
                             <Button
+                                class="sso-wizard-open"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                on_click=Box::new(open_created)
+                            >
+                                "Open application"
+                            </Button>
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                 on_click=Box::new(move |_| close())
                             >
                                 "Done"

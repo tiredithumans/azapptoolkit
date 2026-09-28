@@ -10,6 +10,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::permissions::ResolvedPermission;
 
+/// Safety cap on total apps materialized for the App Registrations browse list,
+/// mirroring the audit/credential scans. Well above real-world app-registration
+/// counts.
+///
+/// Shared by every tenant-wide enumeration so the caps can't drift: the browse
+/// list, the Enterprise Apps pairing join, the audit, the credential sweep and
+/// the backup must all reach the same depth, or one view silently knows about
+/// apps another does not. (The Enterprise Apps join previously capped at 5000
+/// and dropped pairings the App Registrations list had.) Defined here rather
+/// than in the backend so the frontend's cap notice reads the same constant.
+pub const APPS_MAX: usize = 10_000;
+
+/// Coverage of the shared per-tenant service-principal index, for the surfaces
+/// that render a filtered *subset* of it.
+///
+/// The App Registrations list can detect its own truncation (`total >=
+/// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
+/// and Managed Identities lists cannot: both filter the SP index down (dropping
+/// managed identities / keeping only them), so their row counts sit below the
+/// cap even on a tenant whose index truncated — a `len() >= cap` check there
+/// would never fire. They ask this instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryIndexStatus {
+    /// The SP index hit its row cap, so every surface reading it covers only
+    /// the first `sp_index_cap` service principals (the graph client's
+    /// `SP_INDEX_MAX`).
+    pub sp_index_truncated: bool,
+    /// The cap itself, so the notice can name the number without the frontend
+    /// keeping its own copy in sync.
+    pub sp_index_cap: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationDetail {
     pub application: Application,
@@ -23,6 +55,13 @@ pub struct ApplicationDetail {
     /// flattened: one entry per `(resource, permission)` pair.
     #[serde(default)]
     pub resolved_permissions: Vec<ResolvedPermission>,
+    /// `true` when a declared resource's service principal couldn't be read
+    /// (throttling / a transient Graph error): that resource's rows carry no
+    /// runtime grant ids and read as "Not granted" whether or not they are.
+    /// Such a detail is never cached. `false` on payloads cached before the
+    /// field existed.
+    #[serde(default)]
+    pub resolution_degraded: bool,
 }
 
 /// Lean App Registrations list row, flattened to the scalars the list and the
@@ -79,14 +118,18 @@ impl ApplicationListRowDto {
             paired_service_principal_id,
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionDescriptor {
-    pub display_name: String,
-    pub kind: String,
-    pub resource_display_name: String,
-    pub source: String,
+    /// Holds at least one client secret. The one predicate behind Home's
+    /// "With secrets" count and the list's matching filter chip, so the count
+    /// you click and the rows you land on can't disagree.
+    pub fn has_secrets(&self) -> bool {
+        self.password_credential_count > 0
+    }
+
+    /// Holds at least one certificate — the "With certs" count and chip.
+    pub fn has_certs(&self) -> bool {
+        self.key_credential_count > 0
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,7 +144,8 @@ pub struct CreateApplicationInput {
     pub initial_owner_ids: Vec<String>,
     pub initial_secret_display_name: Option<String>,
     /// When `initial_secret_display_name` is set, create a secret valid for
-    /// this many days. Defaults to 180 on the caller side when omitted.
+    /// this many days. Defaults to 180; clamped to `1..=730` like
+    /// `add_password`.
     pub initial_secret_lifetime_days: Option<u32>,
 }
 
@@ -170,13 +214,16 @@ pub struct AddCertificateInput {
 }
 
 /// A federated identity credential (workload identity federation) on an app.
+///
+/// `subject` is `None` for a flexible (claims-matching expression) credential,
+/// which has no subject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FederatedCredentialDto {
     pub id: String,
     pub name: String,
     pub issuer: String,
-    pub subject: String,
+    pub subject: Option<String>,
     pub description: Option<String>,
     pub audiences: Vec<String>,
 }
@@ -218,6 +265,18 @@ pub struct GenerateCertificateInput {
     pub subject: String,
     /// Certificate validity in days (default 365, clamped 1..=1095).
     pub validity_days: Option<u32>,
+}
+
+/// What `add_certificate_credential` uploaded, read from the certificate
+/// itself before it was sent — so the operator can confirm which certificate
+/// went up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadedCertificate {
+    /// SHA-1 thumbprint, uppercase hex — the value Entra stores as
+    /// `customKeyIdentifier` and the portal lists as Thumbprint.
+    pub thumbprint: String,
+    /// The certificate's notAfter.
+    pub not_after: DateTime<Utc>,
 }
 
 /// Result of generating a self-signed certificate. `private_key_pem`,
@@ -266,10 +325,25 @@ impl std::fmt::Debug for GeneratedCertificateResult {
     }
 }
 
+/// One expired secret `remove_expired_passwords` could not remove.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFailure {
     pub key_id: String,
+    /// The [`UiError`](crate::UiError) code of the failure. A re-auth-fatal
+    /// code ([`Self::is_reauth_fatal`]) means the sweep **stopped here**: the
+    /// session is dead, so the secrets after this one were not attempted.
+    /// Empty from a payload that predates the field.
+    #[serde(default)]
+    pub code: String,
     pub message: String,
+}
+
+impl KeyFailure {
+    /// See [`UiError::is_reauth_fatal`](crate::UiError::is_reauth_fatal) —
+    /// reads the one code set in `core::reauth::REAUTH_FATAL_CODES`.
+    pub fn is_reauth_fatal(&self) -> bool {
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
+    }
 }
 
 /// One owner add/remove that failed while applying a replace-all-owners
@@ -279,7 +353,22 @@ pub struct KeyFailure {
 pub struct OwnerChangeFailure {
     pub principal_id: String,
     pub action: String,
+    /// The [`UiError`](crate::UiError) code of the failure. A re-auth-fatal
+    /// code ([`Self::is_reauth_fatal`]) means the reconcile **stopped here**:
+    /// the session is dead, so the later owner changes (and, after a failed
+    /// add, every removal) were not attempted. Empty from a payload that
+    /// predates the field.
+    #[serde(default)]
+    pub code: String,
     pub message: String,
+}
+
+impl OwnerChangeFailure {
+    /// See [`UiError::is_reauth_fatal`](crate::UiError::is_reauth_fatal) —
+    /// reads the one code set in `core::reauth::REAUTH_FATAL_CODES`.
+    pub fn is_reauth_fatal(&self) -> bool {
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
+    }
 }
 
 /// Result of `set_application_owners`: the owner set was reconciled to exactly
@@ -369,6 +458,33 @@ mod tests {
         assert_eq!(back, row);
     }
 
+    /// `code` is additive: a failure serialized before it existed still
+    /// decodes (as a non-fatal empty code), and a fatal one reads as fatal.
+    #[test]
+    fn per_item_failures_default_their_code_and_read_the_fatal_set() {
+        let key: KeyFailure =
+            serde_json::from_value(serde_json::json!({ "key_id": "k", "message": "m" })).unwrap();
+        assert_eq!(key.code, "");
+        assert!(!key.is_reauth_fatal());
+        let owner: OwnerChangeFailure = serde_json::from_value(
+            serde_json::json!({ "principalId": "u", "action": "add", "message": "m" }),
+        )
+        .unwrap();
+        assert_eq!(owner.code, "");
+        assert!(!owner.is_reauth_fatal());
+
+        let key = KeyFailure {
+            code: "refresh_missing".into(),
+            ..key
+        };
+        assert!(key.is_reauth_fatal());
+        let owner = OwnerChangeFailure {
+            code: "forbidden".into(),
+            ..owner
+        };
+        assert!(!owner.is_reauth_fatal());
+    }
+
     #[test]
     fn create_application_input_uses_camel_case_and_defaults() {
         let input = CreateApplicationInput {
@@ -403,6 +519,22 @@ mod tests {
         assert_eq!(minimal.display_name, "Only");
         assert!(!minimal.create_service_principal);
         assert!(minimal.initial_owner_ids.is_empty());
+    }
+
+    #[test]
+    fn directory_index_status_is_snake_case_on_the_wire() {
+        let status = DirectoryIndexStatus {
+            sp_index_truncated: true,
+            sp_index_cap: 10_000,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "sp_index_truncated": true, "sp_index_cap": 10_000 })
+        );
+        let back: DirectoryIndexStatus = serde_json::from_value(json).unwrap();
+        assert!(back.sp_index_truncated);
+        assert_eq!(back.sp_index_cap, 10_000);
     }
 
     #[test]
@@ -487,5 +619,15 @@ mod tests {
         let back: UpdateFederatedCredentialInput = serde_json::from_value(json).unwrap();
         assert_eq!(back.audiences, update.audiences);
         assert_eq!(back.subject, update.subject);
+    }
+
+    #[test]
+    fn federated_credential_dto_carries_a_null_subject() {
+        let dto: FederatedCredentialDto = serde_json::from_value(serde_json::json!({
+            "id": "f-1", "name": "gh-flex", "issuer": "i", "subject": null,
+            "description": null, "audiences": ["api://AzureADTokenExchange"]
+        }))
+        .unwrap();
+        assert!(dto.subject.is_none());
     }
 }

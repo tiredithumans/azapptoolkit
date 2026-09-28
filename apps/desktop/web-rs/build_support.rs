@@ -1,19 +1,23 @@
 // Pure CHANGELOG parsing for `build.rs`, kept in its own file so it can be
 // tested.
 //
-// A build script is compiled into no test target, so this parser had no
-// coverage — while being one of TWO independent implementations of the same
-// extraction (the other is PowerShell, in `release.yml`). The two are expected
-// to produce identical text for a release; nothing checks that, so the least
-// this side can do is pin its own edge cases.
+// A build script is compiled into no test target, and this parser is one of
+// TWO independent implementations of the same extraction (the other is
+// PowerShell, in `release.yml`). The two must produce identical text for a
+// release: `both_changelog_extractors_produce_the_same_notes` in
+// `apps/desktop/src-tauri/tests/repo_invariants/release.rs` mounts this file and
+// checks they agree over every version header in the real CHANGELOG. The tests
+// below pin this side's own edge cases.
 //
-// `include!`d by `build.rs` and mounted again under `#[cfg(test)]` by
-// `src/lib.rs`, so the same source is both used and tested.
+// `include!`d by `build.rs`, mounted under `#[cfg(test)]` by `src/lib.rs`, and
+// mounted by the repo_invariants test binary — so the same source is both used
+// and tested. Its `#[cfg(test)] mod tests` therefore also runs in that binary,
+// which is harmless: they are pure string tests with no crate-relative paths.
 
 /// The body of `## [version]`, up to the next `## [` header. `None` when the
 /// version has no section (or an empty one) — e.g. a local build whose manifest
 /// version was bumped before the changelog was finalized.
-fn section_for(changelog: &str, version: &str) -> Option<String> {
+pub(crate) fn section_for(changelog: &str, version: &str) -> Option<String> {
     // The closing bracket is part of the match, so `[0.2.4]` cannot hit
     // `[0.2.41]`.
     let header = format!("## [{version}]");
@@ -106,16 +110,9 @@ mod tests {
         assert_eq!(body, "- work in progress");
     }
 
-    #[test]
-    fn the_repos_own_changelog_has_a_section_for_the_current_version() {
-        // The bake is silent on failure by design, so without this a release
-        // could ship with an empty "What's new" and nothing would say so.
-        let changelog = include_str!("../../../CHANGELOG.md");
-        let version = env!("CARGO_PKG_VERSION");
-        assert!(
-            section_for(changelog, version).is_some(),
-            "CHANGELOG.md has no non-empty `## [{version}]` section, so this build \
-             would bake empty release notes. Finalize the section before releasing."
-        );
-    }
+    // The "this version has a CHANGELOG section" check lives on the bake side:
+    // `components/release_notes.rs::the_running_versions_changelog_section_is_baked_in`,
+    // which is strictly stronger (it also catches a broken build.rs path or
+    // OUT_DIR write). If that test fails while the edge-case tests here pass,
+    // look at the bake, not the parser.
 }

@@ -3,8 +3,11 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
+use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS;
 use leptos::prelude::*;
 use wasm_bindgen_futures::JsFuture;
+
+use crate::components::ui::BadgeTone;
 
 /// Keep-alive wrapper for a tab/view: the body mounts on first visit (tracked in
 /// `visited`) and thereafter stays in the DOM, toggled via `display` so its
@@ -73,15 +76,26 @@ pub fn ls_set(key: &str, value: &str) {
     }
 }
 
+/// Writes `value` to the system clipboard and reports whether it landed.
+///
+/// `writeText` can reject (the webview lost focus, clipboard permission denied),
+/// so a caller that shows "Copied" — above all on a one-time reveal, whose value
+/// is gone once the dialog closes — must honour this result rather than assume
+/// success. `false` also when there is no window.
+pub async fn write_clipboard(value: &str) -> bool {
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
+    let promise = win.navigator().clipboard().write_text(value);
+    JsFuture::from(promise).await.is_ok()
+}
+
 /// Copies `value` to the system clipboard (fire-and-forget). Shared by the
 /// detail panes and the SSO summary, all of which surface copy-to-clipboard
-/// fields.
+/// fields. One clipboard implementation: this rides [`write_clipboard`].
 pub fn copy_text(value: String) {
     leptos::task::spawn_local(async move {
-        if let Some(win) = web_sys::window() {
-            let promise = win.navigator().clipboard().write_text(&value);
-            let _ = JsFuture::from(promise).await;
-        }
+        let _ = write_clipboard(&value).await;
     });
 }
 
@@ -178,23 +192,101 @@ pub fn relative_time(
     format!("{days} day{} ago", plural(days))
 }
 
-fn plural(n: i64) -> &'static str {
-    if n == 1 { "" } else { "s" }
+/// `""` for exactly one, `"s"` otherwise — the regular English plural suffix,
+/// so a count line reads "1 app" / "3 apps" and never the ticket-unfriendly
+/// "app(s)". Generic over the integer types the DTOs carry.
+pub fn plural<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    if n == N::from(1) { "" } else { "s" }
 }
 
-/// Parses an RFC3339 timestamp (as every backend DTO carries one) into its
-/// display pair. `None` when the string isn't a timestamp — the caller renders
-/// nothing at all, because a stamp we can't read is a bug on our side, not a
-/// state an operator can act on.
+/// `"{n} {one}"` or `"{n} {many}"`: a count with its agreeing noun, for
+/// irregular plurals (mailbox/mailboxes, identity/identities) and for a phrase
+/// whose verb must agree too (`count_noun(n, "app was", "apps were")`).
+pub fn count_noun<N: std::fmt::Display + PartialEq + From<u8>>(
+    n: N,
+    one: &str,
+    many: &str,
+) -> String {
+    let noun = if n == N::from(1) { one } else { many };
+    format!("{n} {noun}")
+}
+
+/// Parses an RFC3339 timestamp into its display pair — for the RFC3339
+/// `String` stamps the DTO crate carries where a bad value must degrade only
+/// its own field (see the `azapptoolkit-dto` crate doc; `DateTime<Utc>`
+/// fields arrive already parsed). `None` when the string isn't a timestamp —
+/// the caller renders nothing at all, because a stamp we can't read is a bug
+/// on our side, not a state an operator can act on.
 pub fn time_ago(rfc3339: &str) -> Option<TimeAgo> {
     let then = chrono::DateTime::parse_from_rfc3339(rfc3339)
         .ok()?
         .with_timezone(&chrono::Utc);
     Some(TimeAgo {
         relative: relative_time(chrono::Utc::now(), then),
-        // The same absolute format the Activity tab uses for a last sign-in.
-        exact: then.format("%Y-%m-%d %H:%M UTC").to_string(),
+        exact: fmt_datetime(then),
     })
+}
+
+/// Display-only "critical" expiry tier (the legacy `Constants.ps1:203` 7-day
+/// tier). The audit's `CredentialStatus` has no such bucket
+/// (`core/audit/permissions.rs:15-18`), so it lives here, beside the one shared
+/// warning threshold ([`EXPIRY_WARNING_DAYS`]).
+pub const EXPIRY_CRITICAL_DAYS: i64 = 7;
+
+/// Whole days until `end`, **floored** (`div_euclid`) — the rule the SSO
+/// certificate backend uses (`commands/sso/mod.rs` "Floored, not truncated";
+/// `auth-and-consent.md`). A credential that lapsed 12 hours ago is `-1`, never
+/// a `0` indistinguishable from "expires today".
+///
+/// Not for the audit's whole-day `is_expired` surfaces (the Credentials
+/// dashboard, the app-registration Credentials tab), which truncate on purpose
+/// so their counts match what the removal sweeps delete.
+pub fn floored_days_until(
+    end: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    (end - now).num_seconds().div_euclid(86_400)
+}
+
+/// The one expiry phrase, for a **floored** day count: "12d left" / "0d left" /
+/// "Expired" / "Expired 3d ago". The past magnitude is whole days elapsed
+/// (`-days - 1`), truncated like [`relative_time`], so it never claims a
+/// credential died earlier than it did.
+pub fn expiry_label(days: i64) -> String {
+    if days >= 0 {
+        return format!("{days}d left");
+    }
+    match -days - 1 {
+        0 => "Expired".to_string(),
+        k => format!("Expired {k}d ago"),
+    }
+}
+
+/// Badge tone (`Danger` / `Warning` / `Ok`) for a floored day count.
+pub fn expiry_tone(days: i64) -> BadgeTone {
+    if days <= EXPIRY_CRITICAL_DAYS {
+        BadgeTone::Danger
+    } else if days <= EXPIRY_WARNING_DAYS {
+        BadgeTone::Warning
+    } else {
+        BadgeTone::Ok
+    }
+}
+
+/// Date-only display (`YYYY-MM-DD`) — the app's one day format.
+pub fn fmt_day(d: chrono::DateTime<chrono::Utc>) -> String {
+    d.date_naive().to_string()
+}
+
+/// [`fmt_day`], or "—" when there is no date.
+pub fn fmt_date(d: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    d.map(fmt_day).unwrap_or_else(|| "—".to_string())
+}
+
+/// Absolute timestamp display — `%Y-%m-%d %H:%M UTC` (a last sign-in, an
+/// activity row, [`time_ago`]'s exact stamp).
+pub fn fmt_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
+    d.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
 /// Inclusive `[after, before]` creation-date filter shared by the App
@@ -218,6 +310,27 @@ pub fn created_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plural_drops_the_suffix_only_for_exactly_one() {
+        assert_eq!(plural(0usize), "s");
+        assert_eq!(plural(1usize), "");
+        assert_eq!(plural(2usize), "s");
+        assert_eq!(plural(0i64), "s");
+        assert_eq!(plural(1i64), "");
+        assert_eq!(plural(2i64), "s");
+        assert_eq!(plural(0u32), "s");
+        assert_eq!(plural(1u32), "");
+        assert_eq!(plural(2u32), "s");
+    }
+
+    #[test]
+    fn count_noun_pairs_the_count_with_its_agreeing_noun() {
+        assert_eq!(count_noun(1usize, "identity", "identities"), "1 identity");
+        assert_eq!(count_noun(4u32, "identity", "identities"), "4 identities");
+        assert_eq!(count_noun(0i64, "app", "apps"), "0 apps");
+        assert_eq!(count_noun(1usize, "app was", "apps were"), "1 app was");
+    }
 
     #[test]
     fn parse_lines_splits_on_newline_comma_semicolon_and_trims() {
@@ -349,6 +462,56 @@ mod tests {
         assert_eq!(offset.exact, "2026-09-02 09:30 UTC");
         // Unparseable input renders nothing at all.
         assert!(time_ago("not a timestamp").is_none());
+    }
+
+    #[test]
+    fn floored_days_until_floors_rather_than_truncates() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
+        let d = |delta: Duration| floored_days_until(now + delta, now);
+        // The regression: lapsed 12h ago is -1, not a truncated 0 ("0d left").
+        assert_eq!(d(-Duration::hours(12)), -1);
+        assert_eq!(d(Duration::hours(12)), 0);
+        assert_eq!(d(-Duration::hours(24)), -1);
+        assert_eq!(d(-Duration::hours(24) - Duration::seconds(1)), -2);
+        assert_eq!(d(Duration::days(7)), 7);
+        assert_eq!(d(Duration::days(7) - Duration::seconds(1)), 6);
+    }
+
+    #[test]
+    fn expiry_label_one_vocabulary() {
+        use chrono::{Duration, TimeZone, Utc};
+        assert_eq!(expiry_label(12), "12d left");
+        assert_eq!(expiry_label(0), "0d left");
+        assert_eq!(expiry_label(1), "1d left");
+        assert_eq!(expiry_label(-1), "Expired");
+        assert_eq!(expiry_label(-2), "Expired 1d ago");
+        assert_eq!(expiry_label(-4), "Expired 3d ago");
+        // An end 12h in the past renders "Expired", never "0d left".
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
+        assert_eq!(
+            expiry_label(floored_days_until(now - Duration::hours(12), now)),
+            "Expired"
+        );
+    }
+
+    #[test]
+    fn expiry_tone_thresholds() {
+        assert_eq!(expiry_tone(-1), BadgeTone::Danger);
+        assert_eq!(expiry_tone(7), BadgeTone::Danger);
+        assert_eq!(expiry_tone(8), BadgeTone::Warning);
+        assert_eq!(expiry_tone(30), BadgeTone::Warning);
+        assert_eq!(expiry_tone(31), BadgeTone::Ok);
+    }
+
+    #[test]
+    fn fmt_helpers() {
+        use chrono::{TimeZone, Utc};
+        let t = Utc.with_ymd_and_hms(2026, 9, 2, 9, 30, 0).unwrap();
+        assert_eq!(fmt_date(None), "—");
+        assert_eq!(fmt_date(Some(t)), "2026-09-02");
+        assert_eq!(fmt_day(t), "2026-09-02");
+        assert_eq!(fmt_datetime(t), "2026-09-02 09:30 UTC");
     }
 }
 

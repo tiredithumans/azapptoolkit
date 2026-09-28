@@ -160,10 +160,11 @@ pub async fn rotate_app_credential(
             vault_name: input.vault_name.clone(),
             secret_name: Some(input.secret_name.clone()),
         };
-        // Serialized with the other two writers: this binding is what the next
-        // rotation uses to find the secret again, and it was the write most
-        // likely to be lost — it lands while the operator may well be saving
-        // defaults on the main thread.
+        // Serialized with every other settings.json writer (all go through
+        // `UserSettings::mutate`): this binding is what the next rotation uses
+        // to find the secret again, and it was the write most likely to be
+        // lost — it lands while the operator may well be saving defaults on
+        // the main thread.
         if let Err(e) = UserSettings::mutate(&config_dir, |settings| {
             settings.set_app_vault_binding(&tenant_id, app_id, binding);
         }) {

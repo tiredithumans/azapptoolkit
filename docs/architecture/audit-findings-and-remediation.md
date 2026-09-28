@@ -6,6 +6,37 @@ Deep-dive companion to the audit gotchas in [AGENTS.md](../../AGENTS.md). Read t
 about are in [exchange-scoping.md](./exchange-scoping.md) and
 [sharepoint-selected.md](./sharepoint-selected.md).
 
+## Rule catalog
+
+`score_application` folds the numbered rules in this order (helpers in `audit/scoring.rs`, markers
+in `audit::issue`, finding keys in `audit/finding.rs`, weights in `audit/permissions.rs`). A rule
+that is "advisory" adds issues/recommendations but no score. Provenance says only what the code or
+tests cite — the legacy PowerShell module is not vendored here (see `audit/mod.rs`).
+
+| Rule | Helper | Score | Issue marker | Finding key | Fix | Provenance |
+|---|---|---|---|---|---|---|
+| 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
+| 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
+| 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
+| 4 | `rule_sp_disabled` | +2 | none | — | — | not cited |
+| 5 / 6 | `rule_credentials` | +8 all expired / +4 mixed | none (structured `credential_status`) | `expired` | `RemoveExpiredCredentials` | not cited |
+| 7 | same | +3 flat (secrets and certificates) | none | — | — | `Credential-Analysis.ps1:169` |
+| 8 / 9 | same | +3 all expiring / +2 mixed (only when none expired) | none | — | — | threshold `Constants.ps1:202` |
+| 10 | `rule_stale_app` | +2 (older than `STALE_APP_DAYS`) | none | — | — | `MaxAuditHistoryDays` in `Constants.ps1` |
+| 11 | `rule_mailbox_advisory` | advisory | `ORG_WIDE_MAILBOX`, `LEGACY_MAILBOX_POLICY`, `UNSCOPABLE_LEGACY_MAILBOX`, `UNCONFINABLE_MAILBOX`, `SCOPED_VIA_RBAC` (contains) | `orgwide_mailbox`, `legacy_mailbox_scope`, `unscopable_legacy_mailbox`, `unconfinable_orgwide`, `scoped_mailbox` | `ScopeMailboxAccess`, `MigrateApplicationAccessPolicy` | `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis` |
+| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `scoped_sites` | `ScopeSharePointAccess` | not cited |
+| 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130` |
+| 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
+| 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
+| 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
+| 19 / 20 | `rule_external_exposure` | +3 audience / +2 unverified publisher | `MULTITENANT_AUDIENCE`, `UNVERIFIED_PUBLISHER` | `external_exposure` | — | not cited |
+| — | `rule_downgrade_pointers` | recommendation only | none | — | — (Downgrade… is admin-judged) | not cited |
+| runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
+
+Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
+Rules 1–4 and 11–13 plus the sign-in post-pass (see
+[SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
+
 ## Scope-aware audit risk
 
 Mail/calendar/contacts application permissions are scopable via Exchange RBAC for Applications, so
@@ -19,6 +50,18 @@ earns a reduced weight (high 10→3, medium 5→2) and a positive Rule-11 note i
 advisory. An **empty** map (the default) means scoping wasn't resolved — every mail permission
 scores at its full org-wide weight, i.e. byte-for-byte the pre-scope behavior, so the non-mail
 rules keep PowerShell parity.
+
+**Unresolved scoping is said, not hidden (`mailbox_scoping_resolved`).** The degrade below never
+under-reports, but it leaves apps Exchange already confines listed under "Org-wide mailbox
+access" with a Scope fix that needs the same Exchange access. So the run records
+`AuditRunResult.mailbox_scoping_resolved = false` when there was no Exchange client, the legacy
+AAP read failed (`prefetch_legacy_access_policies` reports it), or any app declaring a scopable
+mail permission went unprobed (the breaker was open or its probe failed — `ScoreCtx`'s
+`mail_scoping_unresolved`). It is **not** a `degraded` gap: the fallback over-reports, so the run
+is still cached (the sign-in-report precedent) and `is_complete()` ignores it — but the flag rides
+the cache entry (`CachedAuditRun`), the export coverage and every export format, and the one
+sentence `dto::audit::MAILBOX_SCOPING_UNRESOLVED` is shared by the export's coverage notes and the
+Callout on the org-wide mailbox group.
 
 **Bulk vs. detail resolution.** `run_audit` resolves the map on **every** run (best-effort — it
 degrades to the empty-map org-wide scoring when the signed-in user lacks Exchange-admin rights, so
@@ -92,10 +135,12 @@ migration finding raised for the very same permission.
 
 Scoping is a **family of independent authorities**, unified behind one classifier and one UI shell:
 
-- **Registry** (`azapptoolkit-core::scoping`): `ScopeKind` (Exchange / SharePoint, room to grow) +
-  `scope_kind(value) -> Option<ScopeKind>` (the single "what mechanism, if any?" decision) + metadata
-  (`target_noun` / `capability_key` / `admin_applicable`). `admin_applicable() == false` is the seam
-  for future owner-consented mechanisms (Teams/Chat RSC) — the UI renders guidance, not an apply.
+- **Registry** (`azapptoolkit-core::scoping`): `ScopeKind` (Exchange / SharePoint / SharePointItem,
+  room to grow) + `scope_kind_for(resource, value) -> Option<ScopeKind>` (the single, resource-aware
+  "what mechanism, if any?" decision) + metadata (`capability_key` / `admin_applicable`).
+  `admin_applicable() == false` is reserved as the seam for future owner-consented mechanisms
+  (Teams/Chat RSC), where the UI should render guidance instead of an apply — **the wizard does not
+  read it yet**, so a mechanism that returns `false` must wire that in first.
 - **Wizard** (`web-rs/components/scope_wizard.rs`) — the single **"Grant access"** button on every
   principal's Permissions surface. It **subsumes the old inline "Add permission" picker** — there is
   no separate single-grant picker. Uniform shell: **select permissions → choose access → review &
@@ -132,8 +177,24 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
 exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined
-once in `azapptoolkit-core::scoping`). **To teach the app a new mechanism**: add a `ScopeKind` variant
-+ a target panel + a Step-3 apply arm — nothing else branches on the concrete mechanism.
+once in `azapptoolkit-core::scoping`).
+
+**To teach the app a new mechanism**, touch:
+
+1. **Core** — the `ScopeKind` variant, its arms in `capability_key` / `admin_applicable`, its
+   predicate in `scope_kind_for`, and a capabilities-catalog entry for its key.
+2. **Wizard** — the `ScopeMode` variant(s) and the `mode_options` row(s). The first row is the
+   mechanism's default; org-wide is appended for every mechanism, so no choice is a one-way door.
+   Everything that describes or runs the grant reads `effective_mode`, which forces org-wide when
+   the cart has no mechanism.
+3. **Compiler-enforced** — every per-mechanism branch in `scope_wizard.rs` is an exhaustive match
+   with no `_` arm, so the compiler then demands `mode_panel` (the target panel), the `Plan` arm in
+   `run_apply`, `consent_scope`, and `targets_label` / `review_targets` / `strip_warning` /
+   `review_line`.
+4. **Not compiler-checked** — the step-2 "can't be scoped together" hint and the step-1 intro copy;
+   mechanism-specific cart state in `anchor` / `reset` (like the SharePoint read/write default);
+   and the per-row "Scope…" entry gates `permissions_tab::row_scope_kind` and
+   `held_permissions_panel::is_held_scopable`.
 
 **Discoverability**: the enterprise-app and managed-identity Permissions tabs render the shared
 `OrgwideScopeCallout` (`web-rs/components/orgwide_scope_callout.rs`) above the held-permissions
@@ -212,6 +273,11 @@ Two kinds vary the pattern:
 fully covers narrower one" relationships (transitive closure flattened, e.g. `Sites.Read.All` →
 all three broader `Sites.*` tiers). Rule 18 flags a held narrower permission whose broader sibling
 is also held — advisory, **no score** (the broader permission already carries the risk weight).
+The covered narrower grant still keeps its own Rule 1/2 weight: the risk rules measure surface area
+(every held risk-listed grant), not effective reach, so `Mail.ReadWrite` + `Mail.Read` scores 15
+where `Mail.ReadWrite` alone scores 10. That is deliberate — Rules 1/2 are the ported per-grant
+weights, and dropping covered grants would re-rank apps; the one-click removal is what pays the
+difference back. Pinned by `redundant_permissions_rule_is_advisory_with_remediation`.
 Constraints baked into the table; keep them when extending it:
 
 - **Application permissions only.** Graph authorizes app-only calls by the union of `roles` in the
@@ -230,8 +296,9 @@ Constraints baked into the table; keep them when extending it:
 
 The one-click fix (`RemediationKind::RemoveRedundantPermissions` →
 `commands::remediation::remediate_remove_redundant_permissions`) re-plans from a fresh manifest +
-live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with two rules
-**stricter than the scorer** (which flattens values across resources):
+live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with three rules
+**stricter than the scorer** (the scorer also pairs on `(resource, value)`, but reads an empty
+`mail_scopes` as org-wide):
 
 - The covering broader permission must be declared on the **same resource** (Graph's
   `Mail.ReadWrite` doesn't cover Exchange Online's `Mail.Read` appRole of the same name).
@@ -239,6 +306,10 @@ live `appRoleAssignments` (`plan_redundant_removals`, pure + unit-tested), with 
   if the broader grant has since been revoked or scoped away (Exchange RBAC strips the org-wide
   Entra grant), the value is reported `skipped`, never removed. An ungranted declaration is
   removable whenever the broader is declared — declarations authorize nothing.
+- The covering broader permission must be **confirmed org-wide** from live `mail_scopes`. A
+  `Scoped`/`Unknown` verdict, or Exchange being unreachable (including an operator who isn't an
+  Exchange admin), vetoes it and the value is reported `skipped` — fail closed, whereas the scorer
+  reads an empty `mail_scopes` as org-wide. The Fix stays on the row while anything is `skipped`.
 
 Per removal: revoke the narrower `appRoleAssignment` (when granted), then drop all affected
 declarations in **one** trailing `requiredResourceAccess` patch. A revocation error stops further
@@ -279,7 +350,8 @@ group or filter, prefer a structured flag on `AuditItem` over matching an adviso
 ## Finding groups, filters & bulk-action pairing
 
 The Findings pane renders `groups::group_findings` — the `GROUP_CATALOG`, keyed by the **same**
-finding keys `filter::matches_finding` understands. Classification delegates to
+finding keys `azapptoolkit_core::audit::matches_finding` understands (core, not the workbench,
+because the backend's Home summary classifies with it too). Classification delegates to
 `matches_finding`, so each marker predicate lives exactly once. Actionable groups are ranked by
 their own **worst severity**, then affected-principal count, then catalog order (the sort is stable);
 healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed disclosure.
@@ -299,18 +371,36 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   `SCOPED_VIA_RBAC` out of *both* legacy advisories. It is Actionable with **no bulk action**: the
   migration is per-app and plan-first, so a uniform bulk form would have nothing to show (the same
   shape as `high_risk_perms` / `no_local_app`).
+- **Unconfinable org-wide reach has advisory homes:** `unscopable_legacy_mailbox`
+  (`UNSCOPABLE_LEGACY_MAILBOX` — legacy Office 365 Exchange Online mail roles; advice is remove) and
+  `unconfinable_orgwide` (`UNCONFINABLE_MAILBOX` + `UNCONFINABLE_SHAREPOINT`; advice is review /
+  re-declare on Graph). Both are Actionable with no bulk action and no row Fix, kept out of
+  `orgwide_mailbox` / `orgwide_sharepoint` (whose Fix can't apply to them) and apart from each other
+  because the recommendations differ. `every_reach_marker_has_a_group` pins that every reach/risk
+  marker the scorer emits lands in some group; the three hygiene notes (instance lock, public
+  client, secret-over-cert) are deliberately left to the All-apps issue column.
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
-  `filter.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
+  core `audit/finding.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
   the finding.
-- **Shared counts, one source:** `audit_view/posture.rs::posture_counts` feeds both the Security
-  tab's posture strip and the Home posture card (severity row + Top-findings counts), so the
-  numbers can't disagree. The Home card's ranked Top-findings list reuses
-  `groups::ranked_actionable_findings`, so the finding *order* and tone can't disagree either.
+- **Shared counts, one source:** `azapptoolkit_core::audit::posture_counts` (+ `finding_worst`)
+  feeds both the Security tab's posture strip (over the run it holds) and the Home posture card
+  (severity row + Top-findings counts), so the numbers can't disagree. Home never pulls the run:
+  it reads `get_cached_audit_summary`, a `dto::audit::CachedAuditSummary` of counts and per-finding
+  worst severity the backend computes from the cached entry — the run is up to 10k items, and Home
+  used to ship it over IPC on every audit reload. The buckets classify through `matches_finding`,
+  so a count can't diverge from the group it summarizes (pinned by
+  `posture_counts_agree_with_finding_groups`); `PostureCounts::finding(key)` is the one key→bucket
+  map. The Home card counts the two unconfinable-reach groups too. `groups::tone` is the one
+  `RiskLevel` → tone map (group dots, risk badges, the Home card). The Home card's ranked
+  Top-findings list goes through `groups::ranked_actionable_findings`, which ranks the summary's
+  tallies with the same `rank_key` as `group_findings`, so the finding *order* and tone can't
+  disagree either (pinned by `summary_ranking_matches_the_workbench_ranking`).
 - **Bulk-action pairing:** `groups::group_bulk_actions(key)` pairs each finding group with the
   fix that addresses **that rule**: Expired → RemoveExpired, Org-wide mailbox/SharePoint → Scope,
   Redundant → RemoveRedundant, Ownership → AddOwner, Unused → DisableSignIn + Delete. Advisory
-  groups get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
+  groups (`high_risk_perms`, `high_risk_delegated`, `external_exposure`, `no_local_app`,
+  `unscopable_legacy_mailbox`, `unconfinable_orgwide`) get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
   not reintroduce it. **No Grant consent on audit surfaces.** "Fix all N" only seeds
   `selected_audit_ids` with the group's *eligible* (Application-kind) ids — the
   `BulkActionBar`'s typed-confirm / target forms still gate execution.
@@ -322,7 +412,8 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
 (`remediation::remediate_remove_redundant_permissions`, `exchange::grant_exchange_mailbox_access`
 with `permissions: None` = all, `remediation::remediate_scope_sharepoint_access`) — **not** the
 `dispatch_capped` spawn fan-out, because those cores take `State` (not `Send` into a spawn) and
-the selection is a small admin-chosen set. They `reset()` + poll `audit_cancel`, emit
+the selection is a small admin-chosen set. They `claim()` a `bulk_cancel` token once, before the
+first await, and poll it, emit
 `bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than aborting; each
 per-app core busts its own cache. The scope targets (mailbox groups / site URLs + role) are
 **uniform across the selection**.
@@ -343,8 +434,12 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 - **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
   `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
   subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now
-  also keeps AllPrincipals scope strings per client for Rule 13). Scoring is pure CPU — a plain
-  sequential loop, no `dispatch_capped` fan-out.
+  also keeps AllPrincipals scope strings per client for Rule 13). Phase 1 uses the same map: an app
+  row's broad-prefix delegated scopes (`Mail.`, `Files.`, `Sites.`, …) are reported by Rule 13 only
+  when they are in its SP's AllPrincipals set (`AppPermissions::admin_consented_scopes`), falling
+  back to the declared scopes when the grants read failed; the ported pair
+  (`Directory.AccessAsUser.All`, `user_impersonation`) is reported whenever requested. Scoring is
+  pure CPU — a plain sequential loop, no `dispatch_capped` fan-out.
 - **Applicable rules only**: permission risk (1 & 2), admin consent (3), disabled SP (4),
   mailbox/SharePoint advisories (11, 12), high-risk delegated (13), plus the sign-in post-pass.
   Credential rules (5–9) and manifest rules (10, 14–18, downgrades) are deliberately absent —
@@ -356,9 +451,13 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
   The **legacy AAP verdict is the one exception**, and it costs nothing extra (see
   `apply_legacy_policy_verdict` above): unlike an RBAC scope, a policy *does* constrain the org-wide
   Entra grant these rows are scored from.
-- **Wire shape**: one additive field, `AuditItem.principal_kind`
+- **Wire shape**: two additive fields. `AuditItem.principal_kind`
   (`application` | `service_principal` | `managed_identity`, `#[serde(default)]` so pre-field
-  cached runs deserialize as `Application`). For SP rows `object_id` is the **SP object id**.
+  cached runs deserialize as `Application`), and `AuditItem.app_owner_organization_id`
+  (`#[serde(default)]`): the SP's home tenant, exported as the last CSV column `AppOwnerOrgId`
+  (named as in the Enterprise Applications export). `publisher` is `None` on SP rows — it is an
+  application's verified publisher domain, never a tenant GUID. For SP rows `object_id` is the
+  **SP object id**.
 - **Frontend routing keys off `principal_kind`** (structured-signals rule): the `no_local_app`
   finding group; Open → enterprise / MI detail (`open_enterprise_on_tab` /
   `open_managed_identity_on_tab`); scope Fixes carry a `ScopeFixTarget` — `AppReg` rows call the

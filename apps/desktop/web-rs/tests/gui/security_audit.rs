@@ -14,7 +14,8 @@ use wasm_bindgen_test::*;
 use azapptoolkit_core::audit::{
     AuditPrincipalKind, RemediationAction, RemediationKind, RiskLevel, issue,
 };
-use azapptoolkit_dto::audit::AuditRunResult;
+use azapptoolkit_dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
+use azapptoolkit_dto::exchange::ExchangeAccessResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -48,6 +49,7 @@ fn cached_run() -> AuditRunResult {
         truncated: false,
         degraded: Vec::new(),
         completed_at: None,
+        mailbox_scoping_resolved: true,
     }
 }
 
@@ -58,17 +60,6 @@ async fn mount_security() -> ts::Mounted {
     // The Findings pane (default tab) renders group headers once hydrated.
     ts::wait_for(|| ts::body_contains("Org-wide mailbox access")).await;
     m
-}
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
 }
 
 #[wasm_bindgen_test]
@@ -143,10 +134,10 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
 
-    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(".modal textarea", "Sales Team");
-    click_button("Scope access");
+    ts::click_button_labelled("Scope access");
     ts::wait_for(|| ts::call_count("grant_managed_identity_scoped_exchange_access") == 1).await;
 
     // Never the app-registration wrapper — it would 404 resolving the
@@ -175,5 +166,158 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
             .and_then(|v| v.as_bool()),
         Some(true),
         "the org-wide grant is stripped so RBAC scoping is effective"
+    );
+}
+
+/// A missing Exchange admin-API consent used to leave the mailbox Fix with a
+/// raw message and no way forward, while its SharePoint twin offered consent.
+/// It now swaps the primary action for "Grant consent" on the `exchange`
+/// feature, and the modal stays open for the retry.
+#[wasm_bindgen_test]
+async fn sp_mailbox_fix_offers_exchange_consent_on_consent_required() {
+    let m = mount_security().await;
+    ts::mock_err(
+        "grant_managed_identity_scoped_exchange_access",
+        &fixtures::ui_error("consent_required", "consent required (AADSTS65001)"),
+    );
+    ts::mock_ok("request_scope_consent", &());
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
+
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(".modal textarea", "Sales Team");
+    ts::click_button_labelled("Scope access");
+    ts::wait_for(|| ts::body_contains("Exchange.Manage")).await;
+
+    ts::click_button_labelled("Grant consent");
+    ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;
+    let call = ts::last_call("request_scope_consent").unwrap();
+    assert_eq!(call.arg_str("feature").as_deref(), Some("exchange"));
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert!(
+        ts::query(".modal").is_some(),
+        "the modal stays open so the operator can retry the scoping"
+    );
+}
+
+/// A grant Exchange answered with a warning did not necessarily do what was
+/// asked (the common one: an existing scope with a different group set, so the
+/// requested groups were NOT applied). The modal stays open with the notes and
+/// the row keeps its Fix, rather than a success toast reading a no-op as done.
+#[wasm_bindgen_test]
+async fn sp_mailbox_fix_keeps_a_warned_grant_open() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "grant_managed_identity_scoped_exchange_access",
+        &ExchangeAccessResult {
+            warnings: vec![
+                "A management scope already exists for this app with a different group set".into(),
+            ],
+            ..fixtures::exchange_access_result()
+        },
+    );
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_mailbox".to_string()));
+    ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
+
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(".modal textarea", "Sales Team");
+    ts::click_button_labelled("Scope access");
+    ts::wait_for(|| ts::body_contains("with a different group set")).await;
+
+    assert!(
+        ts::query(".modal").is_some(),
+        "a warned grant keeps the modal open"
+    );
+    assert!(
+        ts::body_contains("may not have been applied"),
+        "the warning is explained, not counted"
+    );
+    assert!(
+        ts::body_contains("Scope 1 mailbox permission to specific mailboxes"),
+        "the row keeps its Fix"
+    );
+}
+
+fn audit_progress(done: usize, total: usize, current: &str, cap: usize) -> AuditProgress {
+    AuditProgress {
+        done,
+        total,
+        current_app: Some(current.to_string()),
+        in_flight_cap: cap,
+        cancelled: false,
+    }
+}
+
+/// The tenant-wide prefetch is the longest phase of a large run and knows no
+/// app count yet: it reads as a phase label, never as "0 / 0 apps". Once the
+/// count lands the fraction takes over, and the rate-limit notice still keys
+/// off the live cap dropping below its peak.
+#[wasm_bindgen_test]
+async fn audit_progress_reads_as_a_phase_until_the_app_count_is_known() {
+    let _m = mount_security().await;
+    // Let `use_progress_stream` register its listener before we emit.
+    ts::tick().await;
+    ts::tick().await;
+
+    ts::emit_event(
+        "audit-progress",
+        &audit_progress(0, 0, "Reading tenant-wide directory data…", 8),
+    );
+    ts::wait_for(|| ts::body_contains("Reading tenant-wide directory data")).await;
+    assert!(
+        !ts::body_contains("0 / 0 apps"),
+        "the preparation phase must not read as a stalled 0 / 0 fraction"
+    );
+
+    ts::emit_event("audit-progress", &audit_progress(3, 10, "App X", 8));
+    ts::wait_for(|| ts::body_contains("3 / 10 apps")).await;
+    assert!(ts::body_contains("App X"));
+    assert!(
+        !ts::body_contains("Reading tenant-wide directory data"),
+        "the phase label gives way to the fraction"
+    );
+    assert!(
+        ts::query(".audit-progress__notice").is_none(),
+        "no back-off notice while the cap is at its peak"
+    );
+
+    ts::emit_event("audit-progress", &audit_progress(4, 10, "App Y", 4));
+    ts::wait_for(|| ts::query(".audit-progress__notice").is_some()).await;
+}
+
+/// A degraded run is never cached backend-side, so exporting it "by reference"
+/// either failed with `no_cached_audit` or wrote an EARLIER complete run in its
+/// place. It must hand the exporter its own items.
+#[wasm_bindgen_test]
+async fn a_degraded_run_exports_its_own_items() {
+    ts::reset();
+    let mut run = cached_run();
+    run.degraded = vec![AuditCoverageGap::PerPrincipalScoring];
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok("save_audit_to_file", &Option::<String>::None);
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Org-wide mailbox access")).await;
+
+    ts::click_button_labelled("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    ts::click_button_labelled("Export as CSV…");
+    ts::wait_for(|| ts::call_count("save_audit_to_file") == 1).await;
+
+    let call = ts::last_call("save_audit_to_file").unwrap();
+    assert_eq!(
+        call.args
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(2),
+        "an uncached run ships its own items instead of exporting by reference"
     );
 }

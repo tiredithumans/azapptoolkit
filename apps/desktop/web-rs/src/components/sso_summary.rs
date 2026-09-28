@@ -6,10 +6,9 @@
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
-use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::sso::{OidcSsoSummary, SamlSsoSummary};
-use crate::components::ui::CopyIconButton;
+use crate::components::ui::{Callout, CopyBlock, CopyIconButton};
 
 /// One labelled value in an app-owner summary.
 ///
@@ -110,46 +109,14 @@ pub fn CopyField(#[prop(into)] label: String, #[prop(into)] value: String) -> im
     }
 }
 
-/// A large monospace block (certificate / secret) with a copy button.
-#[component]
-fn CopyBlock(
-    #[prop(into)] label: String,
-    #[prop(into)] value: String,
-    #[prop(into)] hint: String,
-) -> impl IntoView {
-    let copied = RwSignal::new(false);
-    let copy_value = value.clone();
-    let copy = move |_| {
-        let v = copy_value.clone();
-        copied.set(false);
-        leptos::task::spawn_local(async move {
-            if let Some(win) = web_sys::window() {
-                let promise = win.navigator().clipboard().write_text(&v);
-                let _ = JsFuture::from(promise).await;
-                copied.set(true);
-            }
-        });
-    };
-    view! {
-        <div class="sso-block">
-            <span class="sso-field__label">{label}</span>
-            {(!hint.is_empty()).then(|| view! { <Body1 class="hint">{hint}</Body1> })}
-            <pre class="secret-reveal">{value}</pre>
-            <Button
-                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(copy)
-            >
-                {move || if copied.get() { "Copied" } else { "Copy" }}
-            </Button>
-        </div>
-    }
-}
-
 /// SAML app-owner summary. `signing_cert_base64` is only present right after
 /// creation / certificate rotation (the public certificate is returned once).
 #[component]
 pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
     let cert = summary.signing_cert_base64.clone();
+    // Best-effort create steps that did not land. Shown to the operator only —
+    // they are not part of the "Copy all details" text for the app owner.
+    let warnings = summary.warnings.clone();
     let fields = vec![
         f(
             "Microsoft Entra Identifier (Issuer)",
@@ -184,6 +151,22 @@ pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
     let all_text = owner_summary_text("SAML single sign-on details", &text_fields, None);
     view! {
         <div class="sso-summary">
+            {(!warnings.is_empty())
+                .then(|| {
+                    view! {
+                        <Callout tone="warn" role="status">
+                            <Body1>
+                                "The application was created, but not everything you asked for was applied:"
+                            </Body1>
+                            <ul class="warnings">
+                                {warnings
+                                    .into_iter()
+                                    .map(|w| view! { <li>{w}</li> })
+                                    .collect_view()}
+                            </ul>
+                        </Callout>
+                    }
+                })}
             <Body1 class="hint">
                 "Share these values with the application owner to finish the SAML integration."
             </Body1>

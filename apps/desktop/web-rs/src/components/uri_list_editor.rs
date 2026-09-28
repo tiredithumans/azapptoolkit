@@ -630,6 +630,14 @@ mod tests {
         // Loopback http is fine; a host that merely starts "localhost" is not.
         assert_eq!(redirect_uri_reason("http://localhost:5173/cb"), None);
         assert!(redirect_uri_reason("http://localhost.evil.com/cb").is_some());
+        // Entra's hard limits are flagged on the row too: the IPv6 loopback it
+        // doesn't support, and a URI past 256 characters (whose echo is
+        // stripped like every other).
+        assert!(redirect_uri_reason("http://[::1]:5173/cb").is_some_and(|r| r.contains("[::1]")));
+        let long = format!("https://contoso.com/{}", "a".repeat(280));
+        let reason = redirect_uri_reason(&long).expect("over Entra's limit");
+        assert!(reason.contains("256"), "{reason}");
+        assert!(!reason.contains(&long), "{reason}");
     }
 
     #[test]

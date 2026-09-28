@@ -1,7 +1,8 @@
 //! Typed fixture builders for the mock IPC bridge (the GUI test harness and the
 //! GitHub Pages demo). Built from the shared DTO types (not hand-written JSON),
 //! so they can't drift from the wire format the bindings deserialize — the same
-//! `serde-wasm-bindgen` round-trip the real IPC uses validates them.
+//! JSON round-trip the real IPC uses (`serde_json` → `JSON.parse` → `tauri-sys`'s
+//! `JSON.stringify` + `serde_json`) validates them.
 
 use azapptoolkit_core::audit::{
     AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus, ListCredentialStatus,
@@ -14,11 +15,11 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{
-    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto,
+    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, FederatedCredentialDto,
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
-use azapptoolkit_dto::config::AuthConfigStatus;
+use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
 use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
 use azapptoolkit_dto::credentials::CredentialRowDto;
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
@@ -32,7 +33,7 @@ use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecre
 use azapptoolkit_dto::managed_identity::{
     AppRoleGrantDto, AzureRoleDto, AzureRolesResult, ManagedIdentityDto, MiSubtype,
 };
-use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
+use azapptoolkit_dto::permission_tester::{AccessVerdict, MailboxProbeProgress};
 use azapptoolkit_dto::permissions::{
     CatalogResourceSummary, PermissionKind, ResolvedPermission, ResourcePermissions, RoleEntry,
 };
@@ -40,7 +41,7 @@ use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use azapptoolkit_dto::sharepoint::SiteSweepProgress;
 use azapptoolkit_dto::sso::{
     CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
-    SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto,
+    SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto, SsoSummary,
 };
 use chrono::{DateTime, TimeZone, Utc};
 
@@ -50,6 +51,25 @@ pub fn ui_error(code: &str, message: &str) -> UiError {
         code: code.to_string(),
         message: message.to_string(),
         retryable: false,
+    }
+}
+
+/// The message the backend sends when a request stays throttled after its
+/// retries (`GraphError::Throttled { retry_after_secs: Some(30) }` through
+/// `UiError::from`). Pinned to the real Display by
+/// `repo_invariants/ipc.rs::the_throttled_gui_fixture_is_the_backend_message`,
+/// so the GUI tests render what an operator actually reads — kept on one line
+/// so that pin can find the literal.
+pub const THROTTLED_MESSAGE: &str =
+    "throttled (429): the service is limiting requests. Wait 30 seconds, then try again.";
+
+/// The throttled `UiError` exactly as the backend sends it: code `throttled`,
+/// [`THROTTLED_MESSAGE`], retryable.
+pub fn throttled_error() -> UiError {
+    UiError {
+        code: "throttled".to_string(),
+        message: THROTTLED_MESSAGE.to_string(),
+        retryable: true,
     }
 }
 
@@ -89,10 +109,18 @@ pub fn no_apps() -> Vec<ApplicationListRowDto> {
 /// A "configured" auth-config status (client/tenant IDs already set), so the
 /// app shell proceeds past the first-run config screen.
 pub fn configured() -> AuthConfigStatus {
+    configured_from(ConfigSource::Settings)
+}
+
+/// [`configured`] with both IDs supplied by `source` — drives the Tenant
+/// connection tab's "an env var / the build decides this" note.
+pub fn configured_from(source: ConfigSource) -> AuthConfigStatus {
     AuthConfigStatus {
         configured: true,
         client_id: "11111111-1111-1111-1111-111111111111".to_string(),
         tenant_id: "22222222-2222-2222-2222-222222222222".to_string(),
+        client_id_source: source,
+        tenant_id_source: source,
     }
 }
 
@@ -204,6 +232,10 @@ pub fn readiness_report() -> ReadinessReport {
             },
         ],
         directory_roles_indeterminate: false,
+        pim_activation_url: Some(
+            "https://entra.microsoft.com/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadmigratedroles"
+                .to_string(),
+        ),
     }
 }
 
@@ -226,6 +258,7 @@ pub fn application_detail(object_id: &str, app_id: &str, display_name: &str) -> 
         app_role_assignments: Vec::new(),
         oauth2_permission_grants: Vec::new(),
         resolved_permissions: Vec::new(),
+        resolution_degraded: false,
     }
 }
 
@@ -249,9 +282,24 @@ pub fn application_authentication(
     }
 }
 
+/// A GitHub Actions federated credential on an application. `subject: None`
+/// is a flexible (claims-matching expression) credential, which has no subject.
+pub fn federated_credential(name: &str, subject: Option<&str>) -> FederatedCredentialDto {
+    FederatedCredentialDto {
+        id: format!("fic-{name}"),
+        name: name.to_string(),
+        issuer: "https://token.actions.githubusercontent.com".to_string(),
+        subject: subject.map(str::to_string),
+        description: None,
+        audiences: vec!["api://AzureADTokenExchange".to_string()],
+    }
+}
+
 /// A SAML-configured enterprise app's SSO tab: identifiers, reply URLs, logout,
 /// signing cert and notification recipients. Enough list-shaped fields to show
-/// the SSO tab's editors doing real work in the demo.
+/// the SSO tab's editors doing real work in the demo. Carries the app-owner
+/// summary and the (staged) rollover state the one read projects, as the real
+/// `get_sso_config` does.
 pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
     SsoConfigDto {
         object_id: object_id.to_string(),
@@ -271,10 +319,54 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         redirect_uris: Vec::new(),
         spa_redirect_uris: Vec::new(),
         signing_cert_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
-        signing_cert_expiry: Some("2027-04-30".to_string()),
+        signing_cert_expiry: Some(active_sso_cert_expiry_day()),
         notification_emails: vec!["identity-team@contoso.com".to_string()],
         claims_policy: None,
         claims_policy_id: None,
+        claims_read_failed: false,
+        summary: Some(SsoSummary::Saml(saml_sso_summary(object_id, app_id))),
+        rollover: Some(signing_cert_rollover(object_id, app_id)),
+    }
+}
+
+/// Days from today until the demo SAML app's ACTIVE signing certificate
+/// expires. One offset behind every place that states it — the rollover's
+/// active cert and activation deadline, the SSO tab's expiry, the owner
+/// summary, and the board's "Contoso SSO Portal" row — so they agree with each
+/// other and never age into the past.
+const ACTIVE_SSO_CERT_END_DAYS: i64 = 215;
+
+/// Days from today until the staged replacement certificate expires.
+const STAGED_SSO_CERT_END_DAYS: i64 = 1000;
+
+/// The active SSO certificate's expiry as the date-only string the SSO tab and
+/// owner summary carry (`YYYY-MM-DD`).
+fn active_sso_cert_expiry_day() -> String {
+    days_from_now(ACTIVE_SSO_CERT_END_DAYS)
+        .expect("midnight always exists in UTC")
+        .date_naive()
+        .to_string()
+}
+
+/// A signing certificate for [`signing_cert_rollover`], dated relative to
+/// today with `days_to_expiry` derived from its end date.
+fn signing_cert(
+    key_id: &str,
+    thumbprint: &str,
+    display_name: &str,
+    (start_days, end_days): (i64, i64),
+    is_active: bool,
+    status: CertStatus,
+) -> SigningCertDto {
+    SigningCertDto {
+        key_id: key_id.to_string(),
+        thumbprint: thumbprint.to_string(),
+        display_name: Some(display_name.to_string()),
+        start_date_time: Some(rfc3339_days_from_now(start_days)),
+        end_date_time: Some(rfc3339_days_from_now(end_days)),
+        is_active,
+        days_to_expiry: days_from_now(end_days).map(days_until),
+        status,
     }
 }
 
@@ -282,6 +374,10 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
 /// expiring in months, a staged replacement already published in federation
 /// metadata, and the activation deadline that comes with it. Shows the panel in
 /// the one state worth demonstrating — the other three phases are quiet.
+///
+/// Dated relative to today (see [`ACTIVE_SSO_CERT_END_DAYS`]): the deadline is
+/// the active certificate's expiry, and a fixed one would eventually render a
+/// "deadline" that has already passed.
 pub fn signing_cert_rollover(service_principal_id: &str, app_id: &str) -> SigningCertRolloverDto {
     SigningCertRolloverDto {
         service_principal_id: service_principal_id.to_string(),
@@ -290,31 +386,27 @@ pub fn signing_cert_rollover(service_principal_id: &str, app_id: &str) -> Signin
             "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/federationmetadata/2007-06/federationmetadata.xml?appid=app-demo"
                 .to_string(),
         certs: vec![
-            SigningCertDto {
-                key_id: "key-staged".to_string(),
-                thumbprint: "FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string(),
-                display_name: Some("CN=Contoso SSO 2029".to_string()),
-                start_date_time: Some("2026-07-01T00:00:00Z".to_string()),
-                end_date_time: Some("2029-07-01T00:00:00Z".to_string()),
-                is_active: false,
-                days_to_expiry: Some(1053),
-                status: CertStatus::Staged,
-            },
-            SigningCertDto {
-                key_id: "key-active".to_string(),
-                thumbprint: "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
-                display_name: Some("CN=Contoso SSO".to_string()),
-                start_date_time: Some("2024-04-30T00:00:00Z".to_string()),
-                end_date_time: Some("2027-04-30T00:00:00Z".to_string()),
-                is_active: true,
-                days_to_expiry: Some(261),
-                status: CertStatus::Active,
-            },
+            signing_cert(
+                "key-staged",
+                "FE09D8C7B6A5948372615F4E3D2C1B0A98765432",
+                "CN=Contoso SSO 2029",
+                (-10, STAGED_SSO_CERT_END_DAYS),
+                false,
+                CertStatus::Staged,
+            ),
+            signing_cert(
+                "key-active",
+                "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+                "CN=Contoso SSO",
+                (-880, ACTIVE_SSO_CERT_END_DAYS),
+                true,
+                CertStatus::Active,
+            ),
         ],
         active_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
         staged_thumbprint: Some("FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string()),
         phase: RolloverPhase::Staged,
-        auto_promote_deadline: Some("2027-04-30T00:00:00Z".to_string()),
+        auto_promote_deadline: Some(rfc3339_days_from_now(ACTIVE_SSO_CERT_END_DAYS)),
     }
 }
 
@@ -322,15 +414,21 @@ pub fn signing_cert_rollover(service_principal_id: &str, app_id: &str) -> Signin
 /// make the view worth opening: one expiring with a replacement already staged
 /// (a click away), one expiring with nothing prepared AND nobody on the expiry
 /// notifications — the shape that becomes an outage — and one healthy.
+///
+/// Expiries are relative to today with `days_to_expiry` derived from them, so
+/// the date and the "days left" beside it always agree. The statuses stay
+/// hand-set: the board's work queue keys off them.
 pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
+    let end = |days: i64| Some(rfc3339_days_from_now(days));
+    let left = |days: i64| days_from_now(days).map(days_until);
     vec![
         SsoCertificateRowDto {
             service_principal_id: "sp-payroll".to_string(),
             app_id: "app-payroll".to_string(),
             display_name: "Contoso Payroll".to_string(),
             thumbprint: Some("11B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
-            end_date_time: Some("2026-08-27T00:00:00Z".to_string()),
-            days_to_expiry: Some(15),
+            end_date_time: end(15),
+            days_to_expiry: left(15),
             status: CredentialStatus::ExpiringSoon,
             phase: RolloverPhase::Unconfigured,
             has_staged_replacement: false,
@@ -341,8 +439,8 @@ pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
             app_id: "app-demo".to_string(),
             display_name: "Contoso SSO Portal".to_string(),
             thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
-            end_date_time: Some("2026-09-30T00:00:00Z".to_string()),
-            days_to_expiry: Some(49),
+            end_date_time: end(ACTIVE_SSO_CERT_END_DAYS),
+            days_to_expiry: left(ACTIVE_SSO_CERT_END_DAYS),
             status: CredentialStatus::Active,
             phase: RolloverPhase::Staged,
             has_staged_replacement: true,
@@ -353,8 +451,8 @@ pub fn sso_certificate_rows() -> Vec<SsoCertificateRowDto> {
             app_id: "app-expenses".to_string(),
             display_name: "Contoso Expenses".to_string(),
             thumbprint: Some("77B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
-            end_date_time: Some("2028-02-14T00:00:00Z".to_string()),
-            days_to_expiry: Some(551),
+            end_date_time: end(551),
+            days_to_expiry: left(551),
             status: CredentialStatus::Active,
             phase: RolloverPhase::Steady,
             has_staged_replacement: false,
@@ -369,7 +467,7 @@ pub fn staged_cert_result() -> SsoCertResult {
     SsoCertResult {
         thumbprint: "FE09D8C7B6A5948372615F4E3D2C1B0A98765432".to_string(),
         base64: Some("MIIC-demo-newly-staged-certificate-body".to_string()),
-        expiry: Some("2029-07-01T00:00:00Z".to_string()),
+        expiry: Some(rfc3339_days_from_now(STAGED_SSO_CERT_END_DAYS)),
     }
 }
 
@@ -416,7 +514,9 @@ pub fn bulk_stage_cert_result() -> BulkStageCertResult {
 /// precondition for an app that polls metadata to roll over on its own.
 pub fn metadata_probe() -> MetadataProbeDto {
     MetadataProbeDto {
-        fetched_at: "2026-08-12T09:30:00Z".to_string(),
+        // Just now, like the button press it answers.
+        fetched_at: (Utc::now() - chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         signing_key_count: 2,
         published_certs: vec![
             "MIIC-demo-active-certificate-body".to_string(),
@@ -449,8 +549,23 @@ pub fn saml_sso_summary(object_id: &str, app_id: &str) -> SamlSsoSummary {
         reply_url: "https://saml.contoso.com/acs".to_string(),
         signing_cert_base64: None,
         signing_cert_thumbprint: Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string()),
-        signing_cert_expiry: Some("2027-04-30".to_string()),
+        signing_cert_expiry: Some(active_sso_cert_expiry_day()),
         claims_policy_id: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// [`saml_sso_summary`] as `create_saml_sso_application` returns it when a
+/// best-effort step (here: the custom claims) did not land — the app exists,
+/// but the summary must not read as a clean success.
+pub fn saml_sso_summary_partial(object_id: &str, app_id: &str) -> SamlSsoSummary {
+    SamlSsoSummary {
+        warnings: vec![
+            "Custom claims were not applied: Insufficient privileges to complete the operation. \
+             Open the app's SSO tab and select Save claims to retry."
+                .into(),
+        ],
+        ..saml_sso_summary(object_id, app_id)
     }
 }
 
@@ -488,27 +603,37 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
         unused: false,
         sign_in_report_available: true,
         principal_kind: AuditPrincipalKind::Application,
+        app_owner_organization_id: None,
     }
 }
 
 /// A populated cached audit run spanning every severity + every finding group
 /// the Security workbench renders (expired, org-wide mailbox/SharePoint,
 /// redundant, ownership, unused, over-privileged, high-risk delegated,
-/// SP-only, and the scoped/healthy counterparts), so the Home posture tile and
+/// SP-only, legacy Exchange Online grants, org-wide reach the toolkit can't
+/// confine, and the scoped/healthy counterparts), so the Home posture tile and
 /// every findings group light up. Per-row Fix remediations are attached where
 /// the finding has one (the mutations stay unmocked in the demo and degrade to
 /// the demo-unsupported toast).
+///
+/// The permission, credential and site names each finding cites match what the
+/// demo catalog (`demo::catalog`) gives the same app, so a visitor who opens
+/// the finding sees the thing it names. The ids are this module's synthetic
+/// `obj-<name>`; the demo re-keys them onto its catalog ids.
 pub fn audit_run_result() -> AuditRunResult {
     let mut over_privileged = audit_item(
         "Contoso CRM",
         RiskLevel::Critical,
-        &[format!("{} Mail.ReadWrite.All", issue::HIGH_RISK_APP_PERMS)],
+        &[format!(
+            "{} Application.ReadWrite.All",
+            issue::HIGH_RISK_APP_PERMS
+        )],
     );
     over_privileged.credential_status = CredentialStatus::Expired;
     over_privileged.remediations = vec![RemediationAction {
         kind: RemediationKind::RemoveExpiredCredentials,
         label: "Remove 1 expired credential".to_string(),
-        detail: "Removes: legacy-secret".to_string(),
+        detail: "Removes: crm-legacy-secret".to_string(),
         targets: Vec::new(),
     }];
 
@@ -531,8 +656,8 @@ pub fn audit_run_result() -> AuditRunResult {
     sharepoint.remediations = vec![RemediationAction {
         kind: RemediationKind::ScopeSharePointAccess,
         label: "Restrict 1 SharePoint permission to selected sites".to_string(),
-        detail: "Converts to Sites.Selected: Sites.ReadWrite.All".to_string(),
-        targets: vec!["Sites.ReadWrite.All".to_string()],
+        detail: "Converts to Sites.Selected: Sites.FullControl.All".to_string(),
+        targets: vec!["Sites.FullControl.All".to_string()],
     }];
     let mut redundant = audit_item(
         "Trey Research Sync",
@@ -639,12 +764,30 @@ pub fn audit_run_result() -> AuditRunResult {
         targets: vec!["Mail.Read".to_string()],
     }];
 
+    // Org-wide reach the toolkit can't confine — advisory findings with no
+    // Fix: a legacy Office 365 Exchange Online mail grant (advice: remove it)
+    // and Sites.* on Office 365 SharePoint Online (advice: review / re-declare
+    // on Microsoft Graph).
+    let legacy_exo = audit_item(
+        "Lamna Mail Reader",
+        RiskLevel::Medium,
+        &[format!("{}: Mail.Read", issue::UNSCOPABLE_LEGACY_MAILBOX)],
+    );
+    let unconfinable_spo = audit_item(
+        "Relecloud Records Archive",
+        RiskLevel::High,
+        &[format!(
+            "{}: Sites.Read.All",
+            issue::UNCONFINABLE_SHAREPOINT
+        )],
+    );
+
     let clean_a = audit_item("Proseware Sync", RiskLevel::Low, &[]);
     let clean_b = audit_item("Litware Analytics", RiskLevel::Low, &[]);
 
     AuditRunResult {
         tenant_id: "demo-tenant".to_string(),
-        total_apps: 14,
+        total_apps: 16,
         items: vec![
             over_privileged,
             mailbox,
@@ -656,6 +799,8 @@ pub fn audit_run_result() -> AuditRunResult {
             single_owner,
             second_over,
             legacy_scoped,
+            legacy_exo,
+            unconfinable_spo,
             scoped_mailbox,
             scoped_sharepoint,
             clean_a,
@@ -673,6 +818,8 @@ pub fn audit_run_result() -> AuditRunResult {
         // plausible "Scanned 12 min ago" forever instead of aging into
         // "Scanned 400 days ago" the year after it was written.
         completed_at: Some((Utc::now() - chrono::Duration::minutes(12)).to_rfc3339()),
+        // Fully covered, like the rest of the demo run.
+        mailbox_scoping_resolved: true,
     }
 }
 
@@ -805,27 +952,42 @@ pub fn backup_progress(done: usize, total: usize, in_flight_cap: usize) -> BulkP
     }
 }
 
-/// One app's slice of the site-permission sweep: two `Sites.Selected` grants
-/// with different roles, from a complete scan — so the panel can show the
-/// answer Graph itself can't give (which sites, and with what access) and a
-/// coverage line that doesn't have to hedge.
-pub fn app_site_access(app_id: &str) -> azapptoolkit_dto::sharepoint::AppSiteAccessDto {
-    use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SiteAppGrantRow};
-    let row = |site: &str, roles: &[&str]| SiteAppGrantRow {
+/// One `Sites.Selected` grant as the tenant site sweep records it: `app_id`'s
+/// access to the `site` collection with `roles`. The demo builds its sweep
+/// from these and projects each app's slice with `AppSiteAccessDto::from_sweep`
+/// — the backend's single projection — rather than hand-building the slice.
+pub fn site_grant_row(
+    app_id: &str,
+    app_display_name: &str,
+    site: &str,
+    roles: &[&str],
+) -> azapptoolkit_dto::sharepoint::SiteAppGrantRow {
+    azapptoolkit_dto::sharepoint::SiteAppGrantRow {
         site_id: format!("contoso.sharepoint.com,{}", guid(site)),
         site_display_name: Some(site.to_string()),
         site_url: Some(format!("https://contoso.sharepoint.com/sites/{site}")),
         permission_id: guid(&format!("{app_id}:{site}")),
         roles: roles.iter().map(|r| r.to_string()).collect(),
         app_id: Some(app_id.to_string()),
-        app_display_name: Some("Demo app".to_string()),
-    };
-    AppSiteAccessDto {
-        sites: vec![row("Marketing", &["read"]), row("Projects", &["write"])],
-        total_sites: 42,
-        sites_scanned: 42,
+        app_display_name: Some(app_display_name.to_string()),
+    }
+}
+
+/// A complete (nothing failed, cancelled or truncated) tenant site sweep over
+/// `total_sites` sites that found `rows`.
+pub fn site_sweep(
+    tenant_id: &str,
+    total_sites: usize,
+    rows: Vec<azapptoolkit_dto::sharepoint::SiteAppGrantRow>,
+) -> azapptoolkit_dto::sharepoint::SiteSweepResult {
+    azapptoolkit_dto::sharepoint::SiteSweepResult {
+        tenant_id: tenant_id.to_string(),
+        total_sites,
+        sites_scanned: total_sites,
         sites_failed: 0,
+        rows,
         cancelled: false,
+        truncated: false,
     }
 }
 
@@ -906,13 +1068,284 @@ pub fn mailbox_probe_progress(done: usize, total: usize) -> MailboxProbeProgress
     }
 }
 
+// ---------------- App-registration detail tabs & resource lookups ----------------
+
+/// An app registration's "Expose an API" state: the `api://<appId>` identifier
+/// and one enabled, user-consentable delegated scope per value in `scopes`.
+pub fn expose_api(app_id: &str, scopes: &[&str]) -> azapptoolkit_dto::expose_api::ExposeApiDto {
+    use azapptoolkit_core::models::OAuth2PermissionScope;
+    azapptoolkit_dto::expose_api::ExposeApiDto {
+        identifier_uris: vec![format!("api://{app_id}")],
+        scopes: scopes
+            .iter()
+            .map(|value| OAuth2PermissionScope {
+                id: guid(&format!("{app_id}:scope:{value}")),
+                value: (*value).to_string(),
+                admin_consent_display_name: Some(format!("{value} (admin)")),
+                admin_consent_description: Some(format!(
+                    "Allows the app to call this API as the signed-in user ({value})."
+                )),
+                user_consent_display_name: None,
+                user_consent_description: None,
+                r#type: Some("User".to_string()),
+                is_enabled: Some(true),
+            })
+            .collect(),
+        pre_authorized_applications: Vec::new(),
+        client_display_names: Default::default(),
+    }
+}
+
+/// One Conditional Access policy as the Conditional Access tab lists it.
+pub fn conditional_access_policy(
+    display_name: &str,
+    state: &str,
+    applies_reason: &str,
+    grant_controls: &[&str],
+) -> azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+    azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+        id: guid(&format!("ca:{display_name}")),
+        display_name: display_name.to_string(),
+        state: state.to_string(),
+        applies_reason: applies_reason.to_string(),
+        grant_controls: grant_controls.iter().map(|c| c.to_string()).collect(),
+        grant_operator: Some("OR".to_string()),
+    }
+}
+
+/// The tenant's sample Conditional Access policies: an enforced MFA baseline,
+/// a legacy-auth block, and a report-only policy that only *may* apply.
+pub fn conditional_access_policies()
+-> Vec<azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto> {
+    vec![
+        conditional_access_policy("Require MFA for all users", "enabled", "all", &["mfa"]),
+        conditional_access_policy("Block legacy authentication", "enabled", "all", &["block"]),
+        conditional_access_policy(
+            "Admin portals need a compliant device",
+            "enabledForReportingButNotEnforced",
+            "adminPortals",
+            &["compliantDevice"],
+        ),
+    ]
+}
+
+/// One directory-audit entry for the Activity tab, `days_ago` days back.
+pub fn activity_log_item(
+    activity: &str,
+    days_ago: i64,
+    initiated_by: &str,
+    modified: &[(&str, Option<&str>, Option<&str>)],
+) -> azapptoolkit_dto::activity::ActivityLogItem {
+    use azapptoolkit_dto::activity::{ActivityLogItem, ModifiedPropertyDto};
+    ActivityLogItem {
+        id: guid(&format!("audit:{activity}:{days_ago}")),
+        activity: activity.to_string(),
+        activity_date_time: Some(Utc::now() - chrono::Duration::days(days_ago)),
+        category: Some("ApplicationManagement".to_string()),
+        result: Some("success".to_string()),
+        result_reason: None,
+        initiated_by: initiated_by.to_string(),
+        target_summary: "This application".to_string(),
+        modified_properties: modified
+            .iter()
+            .map(|(name, old, new)| ModifiedPropertyDto {
+                name: (*name).to_string(),
+                old_value: old.map(str::to_string),
+                new_value: new.map(str::to_string),
+            })
+            .collect(),
+    }
+}
+
+/// Recent directory changes for the Activity tab.
+pub fn directory_audits() -> Vec<azapptoolkit_dto::activity::ActivityLogItem> {
+    vec![
+        activity_log_item(
+            "Update application – Certificates and secrets management",
+            2,
+            "alex.johnson@contoso.onmicrosoft.com",
+            &[("KeyDescription", None, Some("[\"prod-secret\"]"))],
+        ),
+        activity_log_item(
+            "Add owner to application",
+            9,
+            "admin@contoso.onmicrosoft.com",
+            &[],
+        ),
+        activity_log_item(
+            "Update application",
+            23,
+            "sam.patel@contoso.onmicrosoft.com",
+            &[("Notes", Some("\"\""), Some("\"Rotate quarterly\""))],
+        ),
+    ]
+}
+
+/// A readable sign-in report whose latest entry for the app is `last`
+/// (`None` = the report holds no sign-in for it — the "unused" signal).
+pub fn sign_in_activity(
+    last: Option<DateTime<Utc>>,
+) -> azapptoolkit_dto::activity::SignInActivityDto {
+    azapptoolkit_dto::activity::SignInActivityDto {
+        available: true,
+        consent_required: false,
+        last_sign_in_date_time: last,
+        message: None,
+    }
+}
+
+/// The granted-vs-used Graph activity summary for `app_id` over `days`, from a
+/// sample Log Analytics workspace: a few small call patterns, recently seen.
+pub fn graph_usage(app_id: &str, days: u32) -> azapptoolkit_dto::usage::GraphUsageResult {
+    use azapptoolkit_dto::usage::{GraphUsageResult, GraphUsageRow};
+    let row = |method: &str, path: &str, count: u64, hours_ago: i64| GraphUsageRow {
+        method: method.to_string(),
+        path: path.to_string(),
+        count,
+        last_seen: Some(
+            (Utc::now() - chrono::Duration::hours(hours_ago))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+    };
+    GraphUsageResult {
+        app_id: app_id.to_string(),
+        days,
+        workspace_name: "law-contoso-prod".to_string(),
+        rows: vec![
+            row("GET", "/v1.0/users", 412, 3),
+            row("GET", "/v1.0/users/{id}", 1_870, 1),
+            row("GET", "/v1.0/groups/{id}/members", 96, 26),
+        ],
+        truncated: false,
+    }
+}
+
+/// An Exchange management-role assignment granting `role` confined to the
+/// management scope `scope_name` (the RBAC-for-Applications pair).
+pub fn exchange_role_assignment(
+    role: &str,
+    scope_name: &str,
+) -> azapptoolkit_dto::exchange::ExchangeRoleAssignmentDto {
+    let name = format!("{role}-{scope_name}");
+    azapptoolkit_dto::exchange::ExchangeRoleAssignmentDto {
+        identity: Some(name.clone()),
+        name: Some(name),
+        role: Some(role.to_string()),
+        custom_resource_scope: Some(scope_name.to_string()),
+        recipient_write_scope: None,
+        custom_recipient_write_scope: None,
+        recipient_administrative_unit_scope: None,
+    }
+}
+
+/// The toolkit-managed Exchange scope group named `group_name`: created with
+/// `members` (display names; mailboxes are derived), or not created yet.
+pub fn exchange_scope_group(
+    group_name: &str,
+    exists: bool,
+    members: &[&str],
+) -> azapptoolkit_dto::exchange::ExchangeScopeGroupDto {
+    use azapptoolkit_dto::exchange::{ExchangeGroupMemberDto, ExchangeScopeGroupDto};
+    ExchangeScopeGroupDto {
+        group_name: group_name.to_string(),
+        exists,
+        primary_smtp_address: exists.then(|| format!("{group_name}@contoso.onmicrosoft.com")),
+        distinguished_name: exists.then(|| {
+            format!("CN={group_name},OU=contoso.onmicrosoft.com,OU=Microsoft Exchange Hosted Organizations,DC=EURPR01A001,DC=prod,DC=outlook,DC=com")
+        }),
+        members: members
+            .iter()
+            .map(|name| ExchangeGroupMemberDto {
+                display_name: Some((*name).to_string()),
+                primary_smtp_address: Some(format!(
+                    "{}@contoso.com",
+                    name.to_lowercase().replace(' ', ".")
+                )),
+                recipient_type: Some("UserMailbox".to_string()),
+            })
+            .collect(),
+    }
+}
+
+/// One Azure RBAC role assignment on a Key Vault, as the tenant sweep records
+/// it. `inherited` = made on an ancestor (here, the vault's resource group).
+pub fn key_vault_access_row(
+    vault: &str,
+    role_name: &str,
+    principal_display_name: &str,
+    principal_id: &str,
+    high_privilege: bool,
+    inherited: bool,
+) -> azapptoolkit_dto::keyvault::KeyVaultAccessRow {
+    let vault_id = format!(
+        "/subscriptions/{}/resourceGroups/rg-prod/providers/Microsoft.KeyVault/vaults/{vault}",
+        guid("sub")
+    );
+    let scope = if inherited {
+        format!("/subscriptions/{}/resourceGroups/rg-prod", guid("sub"))
+    } else {
+        vault_id.clone()
+    };
+    azapptoolkit_dto::keyvault::KeyVaultAccessRow {
+        vault_id,
+        vault_name: Some(vault.to_string()),
+        scope,
+        role_name: role_name.to_string(),
+        principal_id: principal_id.to_string(),
+        principal_type: Some("ServicePrincipal".to_string()),
+        principal_display_name: Some(principal_display_name.to_string()),
+        high_privilege,
+        inherited,
+    }
+}
+
+/// A complete Key Vault sweep over `vaults` that found `rows`.
+pub fn key_vault_access(
+    tenant_id: &str,
+    vaults: usize,
+    rows: Vec<azapptoolkit_dto::keyvault::KeyVaultAccessRow>,
+) -> azapptoolkit_dto::keyvault::KeyVaultSweepResult {
+    azapptoolkit_dto::keyvault::KeyVaultSweepResult {
+        tenant_id: tenant_id.to_string(),
+        total_vaults: vaults,
+        vaults_scanned: vaults,
+        vaults_failed: 0,
+        rows,
+        cancelled: false,
+    }
+}
+
+/// One principal's verdict against a probed mailbox (the mailbox reverse
+/// lookup).
+pub fn mailbox_reacher_row(
+    app_id: &str,
+    object_id: &str,
+    display_name: &str,
+    held_permissions: &[&str],
+    verdict: AccessVerdict,
+    roles: &[&str],
+) -> azapptoolkit_dto::permission_tester::MailboxReacherRow {
+    azapptoolkit_dto::permission_tester::MailboxReacherRow {
+        app_id: app_id.to_string(),
+        principal_id: guid(&format!("{display_name}:sp")),
+        display_name: Some(display_name.to_string()),
+        held_permissions: held_permissions.iter().map(|p| p.to_string()).collect(),
+        verdict,
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+        detail: None,
+        principal_kind: AuditPrincipalKind::Application,
+        object_id: object_id.to_string(),
+    }
+}
+
 /// A `global_search` result carrying only `app_registrations` hits (synthetic
 /// ids/appIds), with no enterprise/MI hits — for the top-bar search dropdown.
 ///
 /// Every match fits on screen here: the per-kind total equals the row count and
 /// the corpus is whole, so the dropdown renders no "N of M" footer and no
 /// index-cap notice. Both of those need a *capped* result to show up, which is
-/// what `global_search_capped` below builds.
+/// what `global_search_capped` below builds. `tests/gui/global_search.rs`
+/// asserts that absence against this fixture.
 pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::GlobalSearchResults {
     azapptoolkit_dto::search::GlobalSearchResults {
         query: String::new(),
@@ -933,6 +1366,7 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
         managed_identities_total: 0,
         corpus_truncated: false,
         corpus_cap: 10_000,
+        lookup_degraded: false,
     }
 }
 
@@ -944,6 +1378,9 @@ pub fn global_search_apps(display_names: &[&str]) -> azapptoolkit_dto::search::G
 /// group presented as the whole answer, and a result set filtered from a partial
 /// directory — so they get a fixture rather than being reachable only against a
 /// >10 000-principal tenant.
+///
+/// Rendered by
+/// `gui::global_search::a_capped_result_renders_the_group_footer_and_the_cap_notice`.
 pub fn global_search_capped(
     display_names: &[&str],
     total: usize,
@@ -952,6 +1389,18 @@ pub fn global_search_capped(
         app_registrations_total: total,
         corpus_truncated: true,
         ..global_search_apps(display_names)
+    }
+}
+
+/// A GUID search whose exact lookups did not all answer (throttled, forbidden,
+/// a network error): every bucket is empty, yet that is NOT "no such object".
+/// Rendered by
+/// `gui::global_search::a_failed_guid_lookup_warns_instead_of_reading_as_no_match`.
+pub fn global_search_lookup_degraded() -> azapptoolkit_dto::search::GlobalSearchResults {
+    azapptoolkit_dto::search::GlobalSearchResults {
+        looked_up_as_guid: true,
+        lookup_degraded: true,
+        ..global_search_apps(&[])
     }
 }
 
@@ -1065,9 +1514,37 @@ pub fn exchange_access_result() -> ExchangeAccessResult {
 
 // ---------------- Detail-pane atoms (credentials, held permissions, scope) ----------------
 
-/// A fixed UTC date — demo data is deterministic (no runtime clock).
+/// A fixed UTC date. For values nothing measures against "now" (a creation or
+/// start date) and for tests that pin a rendered date. Anything the demo shows
+/// as *time left* — a credential or certificate expiry — uses
+/// [`days_from_now`] instead: a fixed expiry ages past today and turns every
+/// "expiring" badge into a contradiction with the tab that computes it live.
 pub fn date(year: i32, month: u32, day: u32) -> Option<DateTime<Utc>> {
     Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()
+}
+
+/// Midnight UTC `days` from today (negative = in the past). Anchored to the
+/// start of the day so every rendered date stays stable within a UTC day, the
+/// way the fixed [`date`]s it replaces were.
+pub fn days_from_now(days: i64) -> Option<DateTime<Utc>> {
+    Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|d| d.and_utc() + chrono::Duration::days(days))
+}
+
+/// [`days_from_now`] as the RFC 3339 string the SSO DTOs carry
+/// (`YYYY-MM-DDT00:00:00Z`, the same shape as the backend's).
+pub fn rfc3339_days_from_now(days: i64) -> String {
+    days_from_now(days)
+        .expect("midnight always exists in UTC")
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Whole days from now until `end` — the backend's `days_to_expiry` arithmetic
+/// (`(end - now).num_days()`), so a fixture's count agrees with its date.
+pub fn days_until(end: DateTime<Utc>) -> i64 {
+    (end - Utc::now()).num_days()
 }
 
 /// A deterministic, synthetic v4-shaped GUID from a seed string: stable across
@@ -1173,6 +1650,29 @@ pub fn mail_scope_scoped(
     }
 }
 
+/// [`mail_scope_scoped`]'s legacy twin: a Graph mail permission confined by a
+/// deprecated **Application Access Policy** rather than RBAC for Applications.
+/// Still effective, so it reads as scoped — but the audit files it under the
+/// legacy-scoping finding with a migrate-to-RBAC fix.
+pub fn mail_scope_legacy_policy(
+    graph_permission: &str,
+    scope_name: &str,
+    group_count: u32,
+) -> MailScopeEntry {
+    let mut entry = mail_scope_scoped(graph_permission, scope_name, group_count);
+    if let MailPermissionScope::Scoped {
+        recipient_filter,
+        mechanism,
+        ..
+    } = &mut entry.scope
+    {
+        // A policy names its group directly; it has no OPATH filter.
+        *recipient_filter = None;
+        *mechanism = ScopeMechanism::LegacyApplicationAccessPolicy;
+    }
+    entry
+}
+
 // ---------------- Enterprise-app & managed-identity detail tabs ----------------
 
 /// A directory object (user/group) — an enterprise-app owner or assigned principal.
@@ -1271,7 +1771,6 @@ pub fn gallery_search_results() -> GallerySearchResultsDto {
         total_matches: results.len(),
         results,
         truncated: false,
-        partial_catalog: false,
     }
 }
 
@@ -1343,11 +1842,6 @@ pub fn gallery_search_for(query: &str) -> GallerySearchResultsDto {
         total_matches: results.len(),
         results,
         truncated: false,
-        // The demo's catalog IS partial — a dozen curated samples of a ~39k
-        // gallery. Admitting that turns a demo no-match into "the gallery was
-        // only partly loaded" instead of the confident "no gallery apps match
-        // X", which reads as a broken search to anyone who knows X exists.
-        partial_catalog: true,
     }
 }
 
@@ -1440,6 +1934,7 @@ pub fn held_exchange_grant(value: &str) -> AppRoleGrantDto {
 pub fn app_assignment(principal: &str, principal_type: &str) -> AppAssignmentDto {
     AppAssignmentDto {
         assignment_id: guid(&format!("assign:{principal}")),
+        principal_id: guid(&format!("principal:{principal}")),
         principal_display_name: Some(principal.to_string()),
         principal_type: Some(principal_type.to_string()),
         // All-zero GUID = "default access" (no specific role).
@@ -1511,7 +2006,6 @@ pub fn azure_role(
 pub fn azure_roles(roles: Vec<AzureRoleDto>) -> AzureRolesResult {
     AzureRolesResult {
         roles,
-        scanned: 2,
         total: 2,
         skipped: 0,
     }

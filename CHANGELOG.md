@@ -1,4 +1,961 @@
+# Changelog
+
+Releases 0.26.3 and earlier are in [docs/CHANGELOG-archive.md](docs/CHANGELOG-archive.md).
+Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `web-rs/build.rs`).
+
 ## [Unreleased]
+
+### Added
+
+- **A managed identity's Azure role form accepts any role, and its consent button says what it does.**
+  A "Custom role definition id…" option takes the GUID of any other built-in or custom Azure role
+  (checked as a GUID before the request), where the form offered only eight common roles; and the
+  Azure Resource Manager consent button now reads "Grant consent to Azure", no longer the same
+  "Grant access" as the permission wizard in the same pane.
+- **Home's "With secrets" and "With certs" counts now open the matching App Registrations.** They
+  were the only numbers on Home you couldn't click, and the list had no way to show every app that
+  holds a client secret or a certificate — the question to answer before moving apps from secrets
+  to certificates. App Registrations has two new filter chips, With secrets and With certs. Its
+  credential filter also now clears when you switch tenants, like the other lists' filters.
+- **Access Readiness now covers SCIM provisioning and SAML claims mapping.** Both features need
+  their own consented scope (`Synchronization.Read.All`, `Policy.ReadWrite.ApplicationConfiguration`)
+  and an app-management role, but the checklist didn't list them, so it couldn't show why the
+  Provisioning tab or a custom-claims save failed. Each now has a row with its roles and scopes, and
+  a 403 when saving claims or reading provisioning now names the role to activate.
+- **The Provisioning tab offers "Grant consent & retry".** It used to name
+  `Synchronization.Read.All` and stop there. It now runs the consent round trip and reloads, as the
+  Group memberships section does, and shows which roles can read provisioning.
+- **Settings → Tenant connection now says when an environment variable or the build decides your
+  tenant.** The tab only warned that an `AZAPPTOOLKIT_CLIENT_ID` / `AZAPPTOOLKIT_TENANT_ID` variable
+  *could* override a saved ID, so after saving and restarting you could see the old tenant come back
+  with no explanation. It now shows when a variable on this computer is supplying either ID, or when
+  the ID is built into your copy of azapptoolkit. A team build made from a `.env` with an empty or
+  mistyped ID also warns at build time instead of failing at sign-in.
+- **A team build can now bake in the sovereign cloud, like the client and tenant IDs.** Add
+  `AZAPPTOOLKIT_CLOUD` to `.env` before building, and the installer targets US Gov, US Gov DoD or
+  China with nothing set on each workstation. Previously every recipient had to set the variable,
+  or the app used the commercial endpoints and sign-in failed with an Entra error. A variable set on
+  the workstation still overrides the baked-in value.
+- **Creating an app from the gallery or the New SSO application wizard now takes you to it.** A
+  gallery app opens on its SSO tab, where its own hint says to finish single sign-on. The wizard's
+  summary has an Open application button. Before, the dialog just closed, and you had to find the
+  new app in the list.
+- **The Access tab can filter its assignments, and its search hides anyone who already has the
+  chosen role.** Type in the new filter box to narrow the list by name, type or role. The user and
+  group search no longer lists someone who already holds the selected role, since assigning it a
+  second time failed with a generic Graph error. People who hold a different role are still listed.
+
+- **Authorized client applications show their names, and you can find a client by name.** The
+  Expose an API tab listed each pre-authorized client by its application ID alone, so you couldn't
+  tell which app skips the consent prompt without looking it up. Each row now shows the app's name
+  from this tenant's directory. The Add dialog searches enterprise apps and app registrations by
+  name or ID. You can still add a client from another tenant by pasting its application ID.
+- **If azapptoolkit can't open your browser to sign in, it shows the sign-in link.** Sign-in,
+  consent and re-authentication used to wait five minutes and then fail when no default browser
+  could be launched (a confined `xdg-open`, or a policy that blocks the browser handler). The link
+  now appears at the top of the window with a Copy button. Paste it into a browser on this computer
+  to continue.
+
+### Fixed
+
+- **Screen readers now name every field and remove button in the SAML claims editor.** Its inputs
+  were named only by placeholders, which vanish once a value is typed, and each input claim,
+  parameter and output claim had an unnamed "✕" remove button; they now carry labels (the remove
+  buttons name the claim they drop). The retired scope group's typed delete confirmation is labelled
+  the same way.
+- **The Permission tester sees org-wide `Sites.*` grants on Office 365 SharePoint Online.** An app
+  holding `Sites.FullControl.All` on the SharePoint REST/CSOM resource reaches every site, but the
+  site test read only Microsoft Graph's grants, so such an app could read as "No access". Both
+  resources are now read, and a SharePoint Online grant is labelled as such in the verdict.
+- **CSV exports open correctly in Excel when names are not plain ASCII.** Every CSV now starts with
+  a UTF-8 byte-order mark, which Excel needs to read `Zürich Finanz` or a Japanese app name
+  without garbling it (pandas strips the mark on its own; base R's `read.csv` wants
+  `fileEncoding = "UTF-8-BOM"`).
+- **Audit coverage caveats no longer carry runs of spaces.** Four "what this run could not
+  determine" sentences, shown on the Security tab and written into the audit export, had lost
+  their line continuations and showed long gaps mid-sentence.
+- **Application Access Policies are called "legacy", not "deprecated".** The Security tab group
+  and the audit recommendation now match Microsoft's wording: the policies are replaced by RBAC
+  for Applications, and a deprecation is yet to be announced.
+- **Resource Access no longer shows the previous mailbox's verdicts while checking a different one.**
+  The old table stayed under the progress bar (and under any error) for a mailbox you were no longer
+  asking about; it now clears when you check a new address. The Permission tester also shows a
+  seeded identity by its display name instead of a bare appId, and clears the mailbox and site URL
+  when you switch tenants.
+
+- **The app-registration Owners tab no longer says "No matches." under an empty search box.** Both
+  Owners tabs and the audit's add-owner dialog now use the same directory search as the Access tab,
+  so the search behaves identically everywhere and only reports "No matches." after an actual search.
+
+- **The keyboard shortcuts sheet draws each key as a filled key cap.** The key style pointed at a
+  colour that was never defined, so in both themes every key showed as an empty outline. The
+  Filters button on the lists also gets a hover highlight, which it was missing for the same reason.
+- **Actions that fail on a throttled or briefly unavailable service now offer Retry.** Saving an
+  enterprise app's settings, SSO configuration or signing certificates showed a red notification
+  that vanished after ten seconds, so the only way back was to find the control and click it again.
+  When the service says the failure is temporary, the notification now has a Retry button and stays
+  until you use or dismiss it. It won't retry after you switch tenants or close that app, or while
+  another action on it is still running; it tells you why instead.
+- **An expired session now offers Re-authenticate everywhere, once.** The Permission Tester, the
+  Resource Access sites, Key Vault and mailbox scans, the Key Vault browser and global search showed
+  the raw error with no way forward, and global search repeated it on every keystroke. Each now
+  raises the Re-authenticate notification. Repeated failures raise it once instead of stacking
+  copies, and a burst of other notifications can no longer push it, or any notification waiting for
+  you to act, off the screen. The Key Vault browser and the mailbox scan likewise offer Refresh
+  token, Grant consent or Verify identity where one of those fixes the failure, instead of the raw
+  error.
+- **An enterprise app's Access, Permissions and App roles tabs, and a SharePoint site's permission
+  list, offer Retry when they fail to load.** A throttled or dropped request left a red line — on
+  the Access tab one that began with the raw code, such as `error [throttled]` — and you had to
+  switch tabs or refresh the app to try again. They now show the same message and Retry button as
+  the other tabs, with the code in small print after the message. Sign-in and Access Readiness
+  errors now lead with the message too.
+- **Screen readers announce errors and the "Copied" confirmation.** A failed save in a dialog, a
+  tab that failed to load, or a failed backup or restore appeared on screen without a sound, so a
+  screen reader user was left on a re-enabled button with no idea why. Each error is now read out as
+  it appears, and copying an ID says "Copied".
+- **Screen readers now hear which filters, findings groups and filter chips are open or selected.**
+  The Filters button on each list and every group header on the Security tab's Findings pane
+  announced no expanded or collapsed state, and a Findings header read its arrow glyph aloud as part
+  of its name. The list filter chips showed the active one by color alone; each chip now says
+  whether it is pressed. Global search and the Permission Tester's app picker no longer announce
+  "Searching…", "No matching records" or the result-limit warning as if they were results, and
+  global search names the group (Go to, App Registrations, …) a result belongs to.
+- **Arrow keys now move between rows in every table.** The keyboard shortcuts sheet promises ↑ ↓ /
+  Home / End in tables, but the Permissions and Expose an API tabs, an enterprise app's App roles
+  and SAML signing-certificate tables, and the observed Graph usage table ignored them. They now
+  work like the other tables. A staged SAML signing certificate also gets its own blue badge, so
+  the certificate waiting to be activated stands out from the others.
+- **Removing an expired SAML signing certificate now asks first.** The SSO tab's Remove button
+  deleted the certificate on a single click, and once the table gained keyboard navigation, Enter
+  on that row did the same. Removal can't be undone, so both now open a confirmation naming the
+  certificate's thumbprint, like Retire previous certificate already did.
+- **The Permissions tab's kind filter can no longer hide every row.** You could switch off both the
+  Application and Delegated toggles and be left with an empty table and no explanation. It is now
+  one All / Application / Delegated choice, and a choice with nothing in it says so. An app with no
+  permissions now points you to Grant access instead of the Entra portal.
+- **The Activity and Conditional Access tabs now name every role that can grant their admin
+  consent.** When Microsoft Graph refused the read for lack of consent, the message said to ask a
+  Global Administrator. A Privileged Role Administrator, Application Administrator or Cloud
+  Application Administrator can grant these delegated permissions too, so the message now lists
+  all of them from the same role catalog Access Readiness uses.
+- **Assigning an Azure role that a managed identity already holds now says so.** ARM rejects a
+  duplicate assignment, and the Assign Azure role form showed its raw reply,
+  `arm error (409): {"error":{"code":"RoleAssignmentExists",…}}`. The form now says the identity
+  already holds that role at that scope and that nothing was changed.
+- **The Vault access tab will keep finding your key vaults after Microsoft retires older Key Vault
+  management APIs.** Microsoft stops accepting Key Vault control-plane API versions older than
+  2026-02-01 on February 27, 2027, and the sweep listed vaults with 2023-07-01. From that date it
+  would have reported no vaults instead of showing an error. It now uses 2026-02-01. Reading and
+  writing secrets uses a different API and is not affected.
+- **Removing expired credentials no longer counts a credential that was already gone.** The
+  audit's one-click Fix rewrote an app's certificate list even when the expired certificate had
+  already been removed (by another admin, or since the audit ran), and counted it as removed. It
+  now skips a secret or certificate that no longer exists and keeps removing the rest. Removing a
+  certificate, or retiring a SAML signing certificate, that is already gone now reports that it
+  wasn't found instead of succeeding without changing anything.
+- **The Exchange scoping section no longer lists an administrative-unit-scoped role assignment as
+  org-wide.** "Current Exchange role assignments" showed "(org-wide)" for any assignment without a
+  management scope, so an assignment created with `-RecipientAdministrativeUnitScope` looked as if it
+  reached every mailbox. It now shows "Administrative unit" and the unit's ID. The mailbox Scope
+  verdicts and audit scoring already read these assignments correctly; only this list was wrong.
+- **Scoping mailbox access now tells you when a permission still reaches every mailbox.** If an
+  Exchange role couldn't be assigned or an org-wide grant couldn't be removed, the result listed each
+  failure but not what it meant. A single note now names the permissions that are still granted
+  organization-wide in Entra ID, where scoping has no effect yet, as the legacy-policy migration
+  already did. A permission the app only declares, with no org-wide grant, isn't listed.
+- **Scoping mailbox access for an app with nothing to scope no longer creates its enterprise app.**
+  The toolkit created the app's service principal before checking that the app declared any
+  mailbox permission it could scope, so a refused request still added an enterprise application,
+  and App Registrations and Enterprise Apps didn't show it until their caches expired. It now checks
+  first, and a new enterprise app created before a later failure refreshes both lists.
+- **Uploading a certificate now refuses a private key and shows which certificate went up.** The
+  upload dialog sent whatever you pasted to Microsoft Graph after checking only that it was base64,
+  so a PEM file that also held the private key sent the key along, and Graph's rejection didn't say
+  why. The toolkit now reads the certificate first: a private key, a paste with more than one
+  certificate, an expired certificate, or anything that isn't an X.509 certificate is refused with
+  the reason, and nothing is sent. After an upload, a confirmation shows the certificate's
+  thumbprint and expiry date as the Entra portal lists them.
+- **Redirect URIs and the front-channel logout URL are checked against Entra's rules before you
+  save.** A redirect URI using the IPv6 loopback address (`http://[::1]`) or longer than 256
+  characters passed the toolkit's check, but Entra supports neither, so the whole save then failed
+  with a generic Graph error. Both are now flagged on the row. The Authentication tab's
+  front-channel logout URL wasn't checked at all; it must now be an https address (or http on
+  localhost), and a bad one is named before anything is saved.
+- **Starting the app offline no longer looks like you were signed out.** If Entra ID can't be
+  reached to restore your last session, the sign-in screen now says so and offers Retry, which
+  picks the session back up once you're online, without a browser sign-in. Before, you got the
+  plain sign-in card, and signing in opened a browser that couldn't load.
+- **On Linux without a credential store, sign-in says what's missing.** azapptoolkit keeps your
+  sign-in in the Secret Service (GNOME Keyring or KWallet). When none is running, the error told
+  you to unlock a keychain that doesn't exist. It now says no credential store is available and how
+  to fix it, and the README lists the requirement.
+- **A sign-in Entra refuses in the browser now shows the step that fixes it, and a stray request
+  can no longer cancel a sign-in.** When you declined consent (AADSTS65004) or a Conditional Access
+  policy blocked you (AADSTS53003), the sign-in card showed only the generic "declined" hint,
+  because the Entra error code was dropped. The code is now kept, so the card shows the specific
+  step. While the app waited for your browser, any program on the machine, or any web page open in
+  your browser, could send a fake reply to its sign-in port. That ended the sign-in with an error
+  of its choosing. Those requests are now ignored, and the real sign-in still completes.
+- **The permission picker no longer tells you to scope Office 365 Exchange Online mail permissions
+  to specific mailboxes.** Picking `Mail.Read` or another mail, calendar or contacts permission on
+  Office 365 Exchange Online showed "Scope to specific mailboxes (Exchange RBAC)". RBAC for
+  Applications only confines the Microsoft Graph versions of these permissions, so there was no way
+  to follow that advice. The note now appears only where it applies, and a `Sites.` role on an API
+  other than SharePoint no longer suggests Sites.Selected.
+- **Legacy Exchange Online mail grants and org-wide access the toolkit can't confine now appear in
+  the Security findings.** The audit already flagged an app holding, for example, `Mail.Read` on
+  Office 365 Exchange Online or `Sites.Read.All` on Office 365 SharePoint Online, but the finding
+  sat in no group and no count, so you only saw it in the All apps issue column or an export. Two
+  new groups, "Legacy Exchange Online mailbox grants" and "Org-wide access that can't be confined
+  here", list these apps with an Open link to the Permissions tab. They have no Fix button, because
+  removing or re-declaring the grant is your call. The Home Security Posture card counts them too.
+- **An audit that stopped at the per-run app limit now says so above the results, even when it
+  found problems.** On a tenant with more than 10,000 app registrations the audit scores at most
+  10,000. The notice only appeared when those came back clean, so the findings and every "Fix all"
+  count looked like a full scan. The notice now sits under the posture counts next to the
+  cancelled-scan notice. The "Part of this scan could not run" notice moved there too, so the All
+  apps view shows both.
+- **`/` now jumps to the filter on the page you're looking at.** Once you had opened App
+  Registrations, pressing `/` on Enterprise Applications, Managed Identities or Security did
+  nothing, because it found the hidden App Registrations filter first. With an app open, it now
+  goes to that app's filter box where it has one. `/` and `?` also work right after you tick a
+  row's checkbox, and `?` no longer opens the shortcut list on top of another dialog, where one
+  Escape closed both.
+- **The account menu and the Export menu now work from the keyboard.** Opening either one moves
+  focus to its first item. The arrow keys, Home and End move between items, and Escape puts you
+  back on the button that opened it. Screen readers announced both as menus, but neither supported
+  this, and the Export button didn't say whether its menu was open.
+- **Deleting apps, removing expired credentials or Refresh no longer sends the App Registrations
+  and Enterprise Apps lists back to the top.** Any change that reloads the list used to drop you
+  back at the first row, so on a large tenant you lost your place. The list now returns to where
+  you were. A new search, filter or sort still starts at the top.
+- **Opening an app that's already open no longer changes which tab the next app opens on.** "Open"
+  from the credential dashboard, a Security finding or a mailbox-scope row asks for a specific tab.
+  If the app was already open, it came to the front on the tab you'd left it on, but the request
+  stayed queued, so the next app you opened from a list landed on Credentials or Permissions
+  instead of your last-used tab. Enterprise applications had the same problem.
+- **Refresh on the App Registrations and Enterprise Applications lists now always fetches fresh
+  rows.** The list could reload before the app had cleared its cached copy, so Refresh spun and
+  showed the same rows. It now clears the cache first, as the detail pane's Refresh already did.
+- **Re-authenticating from the "session has expired" message now re-checks Access Readiness.** The
+  top bar's Refresh token already did this; the message's Re-authenticate button left an open
+  Access Readiness checklist showing your old access.
+- **Sign-in errors for a wrong tenant or client ID now point to the Change link on the sign-in
+  card.** They said to check Settings → Tenant connection, which can't be opened until you've
+  signed in.
+- **Choosing "Org-wide" in the Grant access wizard no longer strands a SharePoint grant.** For a
+  SharePoint site permission, or a library, folder or file permission, picking "Org-wide — no
+  scoping" hid the site or item picker, and nothing on that step brought it back: you had to go
+  back and pick the permission again. These permissions now have a "Specific sites" or "Specific
+  libraries, folders & files" option above the picker, as mailbox permissions already did.
+- **"Grant read" is now the highlighted button in the SharePoint site access section.** "Grant
+  write" was highlighted too, so the broader role looked like the default. It now uses the plain
+  style the audit's Scope fix already gives write access.
+- **The SharePoint site access section no longer opens for a `Sites.*` permission on a
+  non-SharePoint API.** It is shown only for Microsoft Graph or Office 365 SharePoint Online
+  permissions, whose per-site grants it can list.
+- **Adding or removing an Application ID URI no longer undoes a change someone else made.** The
+  Expose an API tab saved the list of URIs it loaded when it opened, with your change applied. So a
+  URI added since then, by another admin or in the Entra portal, was silently deleted. The app now
+  reads the current list when you save and changes only the URI you added or removed, as it already
+  did for scopes and authorized client applications.
+- **The Expose an API, Authentication and Federated credentials tabs, and the permission picker,
+  offer Retry when they fail to load.** A throttled or dropped request used to leave a red error
+  line, and you had to close and reopen the app or the dialog. They now show the same message and
+  Retry button as the other tabs.
+- **An enterprise app's secret or certificate that expired within the last day now shows as
+  expired.** The enterprise Credentials tab dropped partial days, so a SAML signing certificate
+  that had lapsed a few hours earlier showed "0d left". It now rounds down, as the SSO tab does.
+  The SSO tab's certificate list now uses the same wording ("12d left", "Expired 3d ago") instead
+  of "1 days left" and "expired 3 days ago".
+- **The Access tab no longer lets you pick a role that only applications can hold.** Entra rejects
+  those roles for a user or group, and the tab showed the error only after the confirmation
+  dialog. They now appear greyed out and labelled "(applications only)".
+- **The new certificate from "Rotate and activate immediately" now stays on screen.** Entra returns
+  the new signing certificate only once, but the SSO tab reloaded right after the rotation and the
+  certificate vanished before you could copy it. It now stays up through the reload. It, and the
+  certificate shown after staging a replacement, now has a label, a hint and a Copy button that
+  says so when the clipboard write fails.
+- **The SSO certificate board shows thumbprints the way the SSO tab and the Entra portal do.** When
+  Entra stored an app's nominated signing key in lower case, the board's Thumbprint column showed it
+  that way, beside the upper-case value the SSO tab shows for the same certificate. The board and
+  the SSO tab's owner details now show it in upper case.
+- **Restoring group memberships and granting SharePoint access to several sites or lists now
+  waits out Microsoft Graph throttling.** These writes use their own permissions, and unlike every
+  other change the app makes they gave up at the first "too many requests" reply, so a DR restore
+  or a multi-site grant recorded failures you had to redo by hand. They now wait as long as Graph
+  asks and try again, like other writes. A write that creates something is still never re-sent
+  after a server error, so nothing is granted twice.
+- **A brief Microsoft Graph server error on one site no longer leaves the whole SharePoint sweep
+  incomplete.** Reads sent in batches of 20 retried an item that was throttled but not one that hit
+  a server error, though the same read sent on its own was retried. One such reply marked the site
+  sweep incomplete and kept it from being cached, and made a DR backup skip that object. Those
+  items are now retried on the same schedule.
+- **Long lists now read every page the same way.** Owners, permission grants, role assignments and
+  federated credentials read their first page from the directory and later pages from its search
+  index, which can lag behind recent changes, so a grant you had just made could be missing from
+  page two. Every page now uses the same source.
+- **The New SSO application wizard now refuses an OIDC client-secret lifetime outside 1–730 days
+  instead of creating a broken app.** A lifetime of 0 created a secret that had already expired, and
+  a very large one failed only after the application and its service principal existed, leaving a
+  half-configured app. The wizard now says "client secret lifetime must be between 1 and 730 days"
+  and creates nothing, as it already does for a SAML certificate lifetime, and the cap matches the
+  24 months the Credentials tab allows.
+- **A SAML app whose custom claims or notification emails couldn't be saved no longer looks fully
+  set up.** The New SSO application wizard treats those two steps as best-effort. When one failed,
+  the wizard still showed the same success screen, so the missing claims only came to light at the
+  first federated sign-in. The summary now lists what wasn't applied and where to retry it on the
+  app's SSO tab. The certificate and activation steps now also wait out Entra's replication delay,
+  like the steps before them, instead of leaving a half-configured app.
+- **Creating an SSO application now works in US Gov and China tenants, and the URLs it gives app
+  owners point at your cloud.** The New SSO application wizard always used the global cloud's
+  custom-application template, which US Gov and 21Vianet tenants don't have, so creating a SAML or
+  OIDC app failed there. The Login, Logout and Metadata URLs, and the OIDC authority and discovery
+  URLs, always named `login.microsoftonline.com`, and in China the Entra Identifier named
+  `sts.windows.net`. A service provider set up from them couldn't sign anyone in. The metadata check
+  during a staged certificate rollover fetched the same wrong address, so it always read "couldn't
+  check" in a sovereign tenant. All of these now follow `AZAPPTOOLKIT_CLOUD`.
+- **Access Readiness now names the consent scope your cloud actually uses.** A US Gov or China build
+  said, for example, "Not consented: https://vault.azure.net/.default" while the app had asked for
+  the Key Vault, Azure Resource Manager, Log Analytics or Exchange scope at its own cloud's address.
+- **Access Readiness no longer reports Application Administrator or Cloud Application Administrator
+  as missing for admin consent.** Those roles can grant consent for any API except Microsoft Graph
+  (and Azure AD Graph) application roles, which still need Privileged Role Administrator or Global
+  Administrator. The row now says so.
+- **A directory role you don't hold now links to PIM.** A missing role now says to activate it in
+  PIM if you're eligible, or to request an assignment otherwise, and "Open PIM (My roles)" opens the
+  activation page in your cloud's Entra admin center.
+- **A multi-factor prompt required for Azure, Exchange or Log Analytics no longer signs you out of
+  everything.** When a Conditional Access policy required extra verification for one service, the
+  app threw away your whole session. Every view, including browsing Entra ID, then needed
+  Re-authenticate, and when the policy covered only that one service, re-authenticating didn't
+  clear it, so the prompt came back. Your session is now kept, and the error offers "Verify
+  identity", which completes the check for that service in your browser and, where the error is
+  shown in place (Azure RBAC, Key Vault access, Observed Graph activity, mailbox scoping), retries.
+  For Microsoft Graph the check runs on the permissions you signed in with, so it never turns into
+  a consent prompt; Refresh token handles the same prompt by re-authenticating in place.
+- **Microsoft Graph tokens obtained at sign-in, launch, Refresh token and Grant consent now support
+  Continuous Access Evaluation.** The app has always asked Graph for tokens that are revoked
+  promptly when a password is reset, a user is disabled or a sign-in is flagged as risky. Tokens
+  from those flows lacked it for up to their full lifetime.
+- **A busy or briefly unavailable Microsoft sign-in service no longer fails the action or signs you
+  out at launch.** Token requests are now retried after a throttling (429) or server error, waiting
+  as long as the service asks, like every other Microsoft call the app makes, up to 30 seconds (a
+  longer wait fails straight away rather than stalling every sign-in step behind it). Access
+  Readiness no longer shows "Couldn't determine" for a scope just because several token requests
+  ran at once. A brief outage at launch no longer sends you back through the browser sign-in.
+- **Adding or removing an enterprise app from a security group now requests every permission
+  Microsoft Graph requires for it.** Graph needs Application.ReadWrite.All as well as
+  GroupMember.ReadWrite.All to add a service principal to a group. The app asked only for the
+  second, so the change could be refused even though Access Readiness said the scope was consented.
+  You may be asked to consent once; Access Readiness now lists both scopes.
+- **Closing the browser during sign-in, or cancelling at the Microsoft sign-in page, now says so
+  instead of blaming your network or an administrator.** An abandoned sign-in timed out after five
+  minutes with "Check your network and try again". Cancelling showed "The sign-in was declined. An
+  administrator may need to grant the app consent." Both now say the browser sign-in was closed
+  before it finished.
+- **The audit now scores the read-only halves of permission families it already scores high.**
+  Org-wide application grants of `Contacts.Read`, `MailboxSettings.Read`, `Notes.Read.All`,
+  `Device.Read.All`, `Application.Read.All`, `GroupMember.Read.All` and
+  `RoleManagement.Read.Directory` scored zero, while `Mail.Read` and `Calendars.Read` scored as
+  medium risk. `Contacts.Read` and `MailboxSettings.Read` already raised "Organization-wide mailbox
+  access" yet added nothing, so an app holding both could rank Low. They now score as medium risk
+  like the other tenant-wide reads, and permission risk badges show them as medium. A mailbox grant
+  confined through RBAC for Applications keeps the reduced scoped weight. **This shifts risk
+  ranking** for any app holding these grants.
+- **"High-risk delegated permissions" now lists broad delegated scopes only when an admin
+  consented to them for all users.** Any app registration that merely requested a delegated scope
+  such as `Mail.Read` or `Files.Read` joined the finding, whose description says the scopes are
+  admin-consented, although a scope a user consents to reaches only that user's data. The audit now
+  checks the tenant's admin-consent grants for each scope. `Directory.AccessAsUser.All` and
+  `user_impersonation` are still listed whenever an app requests them. If the consent grants can't
+  be read, requested broad scopes are still listed rather than hidden. This finding adds no points,
+  so scores are unchanged.
+- **A certificate valid for more than a year is no longer reported as a "long-lived secret".** The
+  rule checks secrets and certificates alike, but the finding always said "Long-lived secrets (>1
+  year)", so replacing a secret with a normal two-year certificate, as the audit recommends, filed
+  it under secrets. Certificates now get their own "Long-lived certificates (>1 year)" line. The
+  score is unchanged.
+- **An app for personal Microsoft accounts only is no longer described as reachable from any Entra
+  tenant.** For the `PersonalMicrosoftAccount` audience, the finding said the app "can be consented
+  to from any Entra tenant and personal Microsoft accounts". It now names personal Microsoft
+  accounts only, and the recommendation asks whether the app is meant to accept them. The score is
+  unchanged.
+
+- **Apps with a flexible federated credential now open their Federated credentials tab, and DR
+  backups include them.** A flexible credential (one that matches a claims expression instead of a
+  single subject, as GitHub recommends for pull-request and branch workflows) has no subject, and
+  reading one failed with `invalid type: null`, so the tab showed only that error and a backup
+  skipped the whole application. The tab now lists it with "Expression-matched (flexible)" in the
+  Subject column (edit it in the Entra portal). Restore reports that it was not recreated, and the
+  restore preview no longer counts it.
+- **A new app registration now shows up in the list even when a later step of creating it
+  fails.** If the app was created but its enterprise application (service principal) couldn't be
+  (for example a 403, throttling or a directory replication delay), you saw only the error, and the
+  App Registrations list and search kept their cached copy for up to an hour, so trying again
+  created a second app with the same name. The error now says the application was created and
+  gives its object ID, and the list and search show it the next time they load. Granting a
+  permission or admin consent that fails partway now refreshes the app's details and the
+  Enterprise applications list in the same way.
+
+- **Removing expired secrets or replacing an app's owners now stops and offers Re-authenticate if
+  your session expires partway.** Before, every remaining secret or owner failed with the same
+  message and no way to recover.
+
+- **"Rotate & remove existing" now asks before deleting your other client secrets.** In the Rotate
+  secret into Key Vault dialog, this button removed every client secret on the app, including
+  active ones, in a single click, and its label didn't say how many. It now reads "Rotate & remove
+  N existing" and asks for confirmation, naming the app and the count, as removing one secret or
+  sweeping expired ones already did. If an old secret couldn't be removed, the message now names
+  it and gives the reason instead of "see the log".
+
+- **Lifetimes you type for a rotated secret or a generated certificate are no longer silently
+  changed.** Text that wasn't a number became 180 or 365 days, and longer values were cut to 730
+  or 1095 days, without a message. An out-of-range or non-numeric value now shows "Enter a whole
+  number of days between 1 and 730." (1095 for certificates), and nothing is created.
+
+- **The one-time secret and private-key reveals no longer say "Copied" when the copy failed, and
+  Escape no longer closes them.** If the clipboard refused, the new-secret reveal still said
+  "Copied", and "Copy private key" gave no feedback at all. Once the dialog closes the value is
+  gone for good. A failed copy now says so and asks you to copy the text by hand, and both dialogs
+  close only with Done.
+
+- **Row buttons on the Security dashboards and several detail tabs now line up with their row,
+  and the Credentials tab's empty lists match the rest of the app.** The Open, Remove and similar
+  buttons sat a few pixels below the text of their row.
+
+- **Search and the other commands that read the cached directory indexes now check that you are
+  signed in.** Top-bar search, the directory cap notice, DR backup, the delegated-grants audit, the
+  enterprise-app detail, the gallery picker, the Key Vault access sweep, a managed identity's Azure
+  roles and the mailbox-reach lookup could answer from the cached app and service-principal lists
+  without checking the tenant's session. After a session expired they kept serving the cached names
+  instead of reporting "not signed in", as the lists already do. They now check the session before
+  reading the cache.
+
+- **Pasting an ID into search now says when a lookup failed.** A GUID search runs four exact
+  directory lookups, and any lookup that failed (throttled after retries, refused with 403, or a
+  network error) counted as "not found", so the dropdown showed "No matching records." for an app
+  that exists. Only a real "not found" now counts as no match. Any other failure shows a warning
+  that the results may be incomplete.
+
+- **Search now warns when the tenant has more than 10 000 app registrations.** The top-bar search
+  already warned when it could see only the first 10 000 service principals, but not when the
+  app-registration list hit the same cap, so a registration past it searched as "No matching
+  records." Either cap now shows the warning.
+
+- **A damaged settings.json is no longer overwritten with defaults.** If settings.json could not
+  be read or parsed (for example after a hand edit left a stray comma, or while antivirus held the
+  file), the next sign-in, Settings save or secret rotation replaced it with a fresh file,
+  permanently losing your tenant defaults and the Key Vault each app's secret was rotated into.
+  The app now leaves the file untouched and the save reports the problem ("Could not write
+  settings.json: …") so you can fix or remove it. Saves from two running copies of the app also no
+  longer overwrite each other.
+
+- **A throttled request now tells you how long to wait.** When Microsoft Graph, Exchange, Key Vault
+  or Azure kept throttling a request after the app's retries, the error read "throttled (429);
+  retry after Some(30)s" (or "retry after Nones"). It now reads "Wait 30 seconds, then try again".
+
+- **Azure, Key Vault and Exchange requests fail in seconds, not minutes, when a firewall blocks
+  them.** Only Microsoft Graph limited how long it waits to connect. On a network that silently
+  drops traffic to management.azure.com, a key vault, outlook.office365.com or Log Analytics, a
+  read could spin for up to four minutes before failing. Connections now give up after 10 seconds,
+  like Graph.
+
+- **Network errors now say what went wrong.** A failed request showed only "error sending request
+  for url (…)", whether the cause was DNS, a timeout, a refused connection, a proxy or a
+  certificate. The underlying cause is now included, on the sign-in card too.
+
+- **Error pop-ups keep their guidance on separate lines, and long error pages are trimmed.** The
+  admin-consent failure's remediation steps ran together into one paragraph. Error pages returned
+  by Graph, Azure or Key Vault (for example a proxy block page) are now cleaned and capped at 800
+  characters in messages and logs, as Exchange errors already were.
+
+- **A rejected access token now offers "Refresh token" instead of telling you to sign out.** When
+  Microsoft Graph, Exchange, Key Vault or Azure rejected the app's token (for example after a
+  Conditional Access re-check the app couldn't satisfy silently), the error read "unauthorized
+  (401)" with no way forward, and the Exchange, Key Vault and Azure messages said to sign out and
+  back in, which also clears every cached list and the last audit run. An error raised by a
+  command or action now carries a "Refresh token" action that re-mints the token in place and
+  falls back to re-authenticating if the session has expired. The Exchange, Key Vault and Azure
+  messages point to the same control and still say what to check if the error persists. Clicking
+  "Refresh token" again, or on a second error, while a refresh is running no longer starts another.
+
+- **Forms and dialogs now offer "Re-authenticate" when your session has expired.** Most edit
+  dialogs and tab actions showed an expired session only as red text under the form. They now
+  raise the same Re-authenticate action the rest of the app uses, and keep the message where it
+  was.
+
+- **A missing admin consent now offers "Grant consent" wherever it occurs.** When a permission the
+  tenant hadn't consented to was needed partway through an operation, the error reached the screen
+  as a generic token failure, so the "Grant consent" action never appeared. It now does. The
+  Security tab's "Scope … mailbox permission(s) to specific mailboxes" fix also gets the "Grant
+  consent" button its SharePoint counterpart already had.
+
+- **A network drop while the app refreshes its token is reported as a network error you can
+  retry.** A network failure during the hourly token refresh was reported as a permanent token
+  error, while the same outage a moment later was reported as a retryable network error. Both are
+  now treated as network errors.
+
+- **An unexpected reply from the app's backend no longer freezes the window.** If a request was ever
+  rejected with something other than the app's usual error — for example a request the window built
+  in the wrong shape, or a permission the app is not allowed to use — the whole window stopped
+  responding with no message. The failure now shows as an ordinary error on the action that caused
+  it.
+
+- **"Migrate to RBAC for Applications" on the Permissions tab no longer reports success when the
+  legacy policy was kept.** When a grant can't be re-scoped, the migration keeps the app's
+  Application Access Policy, because that policy is the only thing still confining it. The Exchange
+  scoping section checked only for outright failures, so it showed "Migrated 1 policy(ies)" and hid
+  the report explaining what was kept. It now keeps the report on screen whenever an app needs
+  attention or the run left apps unreached, the same as the Security tab's Fix (which now also stays
+  open for a stopped run), and the success message counts apps and removed policies separately.
+
+- **Remove redundant permissions no longer reports "Removed 0" and hides the Fix when it couldn't
+  confirm the covering permission.** If the broader mail permission is scoped with Exchange RBAC, or
+  Exchange can't be checked (for example, you aren't an Exchange administrator), the narrower
+  permission is kept on purpose. It was left out of the result, so the Fix reported success and
+  disappeared while the finding and the permission stayed. The kept permission is now listed with
+  the reason, and the Fix stays on the row.
+
+- **Scoping mailbox access from the Security tab no longer hides Exchange's warnings.** For a
+  foreign enterprise app or a managed identity, warnings were dropped entirely; for an app
+  registration they were only counted. The most common one means the groups you asked for were not
+  applied, because the app already has a management scope with a different group set. Warnings are
+  now listed in the dialog, which stays open, and the Fix stays on the row.
+
+- **Admin consent that partly fails now says so.** "Grant admin consent" on the Permissions tab
+  reported success even when some grants failed. The failure count was shown only in a note that
+  disappeared as the tab reloaded. A partial consent now shows an error naming the failure, and a
+  least-privilege downgrade's outcome is shown the same way instead of vanishing.
+
+- **A throttled lookup no longer shows granted permissions as "Not granted" for an hour.** If
+  Microsoft Graph couldn't return a resource's service principal while an app's details were
+  loading, every permission on that resource read as not granted, and the result was cached for 60
+  minutes. Such a result is no longer cached, and the Permissions tab says the grants couldn't be
+  read and to refresh.
+
+- **The SSO tab no longer overwrites claims it could not read.** When the app had not yet been
+  granted consent to read an enterprise app's claims-mapping policy, "Attributes & claims" showed an
+  empty editor even if the app had custom claims. Clicking "Save claims" then detached the real
+  policy and replaced it with whatever was in the editor, so a single added claim could wipe the
+  rest. The tab now says the claims couldn't be loaded, turns off Save, and offers a "Load claims"
+  button that grants consent and reloads the current policy.
+- **Claims generated by a transformation now appear in tokens.** A transformation-sourced claim
+  needs two ids: its own `ID`, which the transformation's output claim refers to, and a
+  `TransformationID` naming the transformation. The editor wrote only the transformation id, so the
+  claim had nothing to join to and was never issued. Saving an existing policy also rewrote its
+  reference to point at a transformation that didn't exist. Each claim now has a separate
+  Transformation id field. Policies using Microsoft's documented `ClaimsTransformations` /
+  `TransformationId` spelling load correctly, and a transformation parameter's `DataType` is kept
+  on save.
+- **Saving claims no longer leaves an orphaned policy in the tenant each time.** Every "Save claims"
+  unassigned the old claims-mapping policy without deleting it and created a new one, so each save
+  left another unused policy under the tenant's policies. The save now updates the app's policy in
+  place. A policy shared with other apps is left unchanged for them, and this app gets its own copy.
+  Clearing all claims deletes the policy once nothing else uses it. A failure to read the current
+  assignment is now reported instead of being ignored and followed by a second policy assignment
+  that Graph rejected. The claims consent now requests `Application.ReadWrite.All` together with
+  `Policy.ReadWrite.ApplicationConfiguration`, the pair Microsoft documents for assigning and
+  listing these policies.
+- **Scope checks no longer trip over how Exchange capitalises group names.** Exchange returns a
+  group's distinguished name in its own casing. The legacy-policy migration compared these exactly,
+  so it could refuse an app whose management scope already pointed at the right group, with "still
+  does not confine access to the groups this migration computed". "Move to managed group" could
+  also repoint a scope that was already on the managed group and then list that group as a cleanup
+  candidate. Group comparisons now ignore case, as the post-write check already did. Granting scoped
+  access against an existing scope whose filter can't be fully read is now refused instead of
+  treated as matching.
+- **A legacy Application Access Policy reads the same in the audit as in the migration.** A
+  `RestrictAccess` value with stray spaces was migrated as confining, but the security audit and the
+  permission tester reported the app as reaching every mailbox and scored it at full risk. Both now
+  read it as confining, so such apps can rank lower in the audit.
+- **Deleting a retired scope group is refused when Exchange's scope or policy list can't be read.**
+  A rejected read whose message happened to say "not found" was treated as an empty list, so the
+  reference check could report no references to a group that was still in use. It now fails, and
+  the delete is withheld.
+- **Exchange changes are no longer re-sent after a server error or a dropped connection.** The
+  Exchange client ran a retry loop of its own that replayed every cmdlet after a 5xx or network
+  failure, including `New-ManagementRoleAssignment`, `New-ManagementScope`, `New-ServicePrincipal`
+  and `Remove-ApplicationAccessPolicy`. When the first attempt had already taken effect, the replay
+  failed as a duplicate or a missing object. A scoped grant that had landed was reported as "failed
+  to assign" (the org-wide grant was kept and scoping was reported as not effective), and a legacy
+  access policy that was removed was reported as a partial migration. Exchange now uses the same
+  retry policy as Graph, ARM and Key Vault: throttling is still retried for every cmdlet, but only
+  reads and group-membership changes (which are safe to repeat) are replayed after a server or
+  network error. A write that fails that way is reported as that error, and re-running the action
+  finishes it.
+- **A sign-in that expires while Exchange is paging a long list now stops the operation for
+  re-sign-in.** Any failure on the second or later page of an Exchange read was reported as a
+  generic protocol error. An expired session was therefore not recognised, so the security audit and
+  bulk actions carried on against it, and a 401/403 lost its sign-in or role guidance. Only a "not
+  found" on a later page is still reported as a refusal to return a truncated list.
+- **Cancel now stops only the run it belongs to.** The security audit, every bulk action and the
+  legacy-policy migration shared one stop signal. So did the Resource Access site scan, Key Vault
+  scan and mailbox probe, and the Disaster Recovery backup and restore. Because those screens keep
+  running while you work elsewhere, pressing Cancel on one stopped the others as well: cancelling a
+  read-only audit or mailbox probe could halt a bulk delete, a scoping change or a multi-minute site
+  scan part-way, and cancelling a backup could stop a restore between passes. Each kind of run now
+  has its own Cancel. Two bulk actions running at the same time still stop together. The "Migrate
+  to RBAC for Applications" flows gain a Stop migration button: it stops before the next
+  application, and one already being migrated finishes. A stopped or interrupted bulk run's
+  progress bar now shows how far it got instead of jumping to 100%.
+- **Turning off update checks now works.** `AZAPPTOOLKIT_AUTO_UPDATE=0` and `"auto_update": false`
+  in settings.json were documented but never read, so the app still contacted the release endpoint
+  on every launch and offered updates. Both now stop the launch check, the account-menu check and
+  the install before any network call, and the menu item reads "Update checks turned off" instead
+  of offering a check.
+- **MSI and .deb installs are no longer offered the NSIS or AppImage update.** The updater could
+  not tell how the app was installed: an MSI install was prompted on every launch, and accepting
+  installed a second, per-user copy beside the managed one. A .deb install downloaded the whole
+  AppImage only to fail with "invalid updater binary format". These installs now skip the update
+  check, and the account menu says the update comes from your deployment tooling or package
+  manager.
+- **The Linux AppImage and .deb start on Ubuntu 22.04 and Debian 12.** They were built on the
+  newest Ubuntu runner and so required glibc 2.38 or newer, failing at launch with "GLIBC_2.38 not
+  found" (the .deb even installed cleanly first). They are now built against glibc 2.35, the
+  release fails if a build ever needs a newer one, and the README states the floor.
+- **A failed update install is now written to the log.** A download or signature failure during
+  Update & restart left no trace in the log file the README points to.
+- **Running a DR restore again no longer duplicates every app it already created.** The restore
+  report, and the expired-session notice in the Disaster Recovery view, told you to re-run the
+  restore — but each run created every app in the backup afresh, so a second run left a second copy
+  of the estate with new appIds, service principals and live secrets. Restored apps now carry an
+  `azapptoolkit:restoredFrom:<source appId>` tag, and a re-run recognises and finishes them instead
+  of creating them again: a secret that already exists is not re-issued, and an app whose tag is
+  ambiguous, or whose lookup fails, is listed for manual follow-up rather than created. Because
+  anyone who can register apps could plant that tag, a tagged app is only taken over when it was
+  created after the backup and has no owner besides you and the backup's own owners; otherwise it
+  is listed, with the unexpected owners named, and is never granted the backup's permissions or
+  admin consent. After a restore completes, the Restore button is withdrawn until you load a
+  backup file again. Apps restored by earlier versions carry no tag and are not recognised.
+- **A failed directory read during a restore is reported as a failure, not as a missing object.**
+  If listing the destination's managed identities failed, every managed identity was reported "not
+  found — recreate it via your infrastructure-as-code"; a failed service-principal read was reported
+  as "the app had none in the backup". Both now say the read failed, and a session that expires
+  during these steps stops the restore for re-sign-in.
+- **Restore no longer re-issues client secrets that had already expired when the backup was
+  taken.** Each one is named in the report and counted in the plan; a secret that expired after the
+  backup is still re-issued.
+- **The restore plan now shows what blocks a restore, and all the work it will do, before you
+  confirm.** A backup written by a newer version of azapptoolkit was accepted by the plan and
+  refused only after you confirmed; it is now blocked in the plan, as a backup from another cloud
+  already was. Loading a backup into the tenant it was taken from now warns that restoring creates
+  a second copy of every app instead of rolling anything back. The plan also counts the enterprise
+  apps whose access will be re-applied, those that need manual follow-up, the managed identities
+  to re-bind, and the gaps the backup itself recorded.
+- **Restored apps keep their Expose-an-API settings when an identifier URI contains the tenant ID
+  or a custom prefix.** Only `api://{appId}` was rewritten to the new app's ID.
+  `api://{tenantId}/{appId}`, `api://{tenantId}/{name}` and `api://{name}/{appId}` kept the source
+  tenant's IDs and were rejected by the destination tenant, and because the scopes and
+  pre-authorized apps go in the same update, all of them were lost with a single warning. Every
+  `api://` URI now has the source app and tenant IDs replaced.
+- **A tenant backup no longer reads as complete when it could not read a managed identity's
+  permissions or an enterprise app's assignments.** When Graph failed to return a managed
+  identity's held app roles, or an enterprise app's assigned users/groups or group memberships, the
+  backup quietly recorded them as empty — so a restore from it re-bound nothing and re-assigned no
+  one, and neither the backup screen nor the file said so. Each gap is now listed alongside the
+  objects the backup could not capture, and a sign-in that expires while managed identities are
+  being read stops the backup for re-authentication instead of saving a manifest with every
+  identity's permissions missing.
+- **An app whose service principal could not be read during a security audit is no longer
+  scored as clean.** When the per-app service-principal lookup failed (a Graph outage that
+  outlasted the retries), the audit carried on without it: the admin-consent and disabled-sign-in
+  rules lost their input, and a mailbox permission scoped through Exchange RBAC was never checked
+  against a surviving org-wide grant — yet the run reported itself complete and was cached for an
+  hour. The app is now counted among those that could not be scored, the run carries the "some
+  applications could not be scored" caveat and is not cached, and a session that expired during
+  the lookup stops the run for re-sign-in instead of being ignored.
+- **Exporting an incomplete audit writes that run, with its caveats.** Only a cancelled run handed
+  its own results to the exporter; a truncated or degraded run — never cached — was exported from
+  the cache instead, so the file either failed with "no cached audit" or held an earlier complete
+  scan presented as the current one.
+- **The security audit says what it is doing before it starts scoring.** The first phase reads the
+  tenant's app registrations, service principals, consent grants and role assignments, and is the
+  longest part of a large run; during it the progress readout showed "0 / 0 apps (cap: 8)" over an
+  empty bar. It now reads "Reading tenant-wide directory data…" until the app count is known.
+- **A tenant with more than 5,000 SharePoint sites no longer gets its site scan reported — and
+  cached — as complete.** The `Sites.Selected` reverse lookup enumerates sites up to a 5,000-site
+  safety cap and silently stopped there: the Sites tab read "scanned 5000 of 5000 sites", the result
+  was cached for an hour, and "Sites this app can reach" affirmatively answered "no per-site grants"
+  for an app whose grants sat on a site past the cap. The cap is now a stated coverage caveat: the
+  summary line, the per-app panel and the CSV/JSON export say the scan stopped at the cap, an empty
+  per-app list reads as "not proof the app has none", and the cached result carries the caveat
+  instead of posing as a complete answer.
+- **A SharePoint URL you lack rights to is no longer reported as "did not resolve to a list,
+  library or item".** When the Grant-access wizard probed for a subsite and SharePoint answered 403,
+  401 or a throttle, every one of them was collapsed into that message — steering you to fix a URL
+  that was fine and bypassing the Full Control remediation the 403 should have carried. Only a 404
+  now means "not a subsite"; anything else surfaces with its own code and, for a 403, the
+  requirement it actually names.
+- **Editing an app's SAML URLs, OIDC redirect URIs or claims mapping, and the bulk "Remove expired
+  credentials" sweep, no longer force a re-scan of the whole tenant.** Each of those changes one
+  app in place, yet they dropped the two tenant-wide directory indexes (every app registration and
+  every service principal) that the App Registrations, Enterprise Apps and search surfaces join
+  against — so the next list visit re-enumerated the tenant (tens of seconds on a large one) for a
+  change that touched neither. They now bust only what they changed: the affected app's detail
+  payload, its list row, the credential-expiry board and the audit, exactly as the per-app
+  credential actions already did.
+- **"Fix all" and the bulk "Remove expired credentials" action read only the selected apps.** The
+  sweep walked every page of the tenant's app registrations (to the same 10 000-app ceiling the
+  lists use) and then discarded everything but the selection; a selection now arrives in a handful
+  of batched reads, with the full walk reserved for the tenant-wide sweep. An app that could not
+  be read is listed among the failures instead of silently left out.
+- **The Grant-access picker's "Tenant app registrations" group reflects app-role changes at
+  once.** Exposing an app's first Application role (or removing its last) on the App roles tab,
+  and creating or deleting an app, left the cached directory untouched for up to an hour, so a
+  freshly published API was missing and a deleted app lingered. Those writes now refresh it.
+- **Assigning an Azure role to a managed identity refreshes the Key Vault access view.** The "who
+  can touch this vault?" sweep was cached for an hour and not cleared by the app's own role
+  assignment, so a role granted from the Managed Identities pane was invisible there until the
+  cache expired. The assignment now drops the cached sweep; the next visit re-runs it.
+- **The audit now sees the newer mailbox permissions Exchange RBAC can scope — `MailboxItem.*`,
+  `MailboxFolder.*`, `MailboxConfigItem.*`, `MailTips.ReadBasic.All` and
+  `Mail-Advanced.ReadWrite.All`.** An org-wide Microsoft Graph grant of `MailboxItem.ReadWrite.All`
+  or `Mail-Advanced.ReadWrite.All` — read, write and delete every item in every mailbox — raised no
+  mailbox finding, offered no Scope fix and scored zero, because the advisory's name test only knew
+  `Mail.`/`MailboxSettings.`/`Calendars.`/`Contacts.` and the risk tables listed none of them. They
+  now enter the "Organization-wide mailbox access" finding with the one-click Scope fix, appear in
+  the Grant-access wizard and the Permissions-tab Scope column, and the write and export variants
+  score high (`MailboxItem.ReadWrite.All`, `MailboxItem.Export.All`, `MailboxItem.ImportExport.All`,
+  `MailboxFolder.ReadWrite.All`, `Mail-Advanced.ReadWrite.All`) with the read variants medium
+  (`MailboxItem.Read.All`, `MailboxFolder.Read.All`); `MailboxConfigItem.*` and
+  `MailTips.ReadBasic.All` are advisory only. The legacy Application Access Policy migration
+  deliberately still targets only the permissions a policy could confine, so it never narrows a
+  grant the policy never governed. **This shifts risk ranking** for any app holding these grants.
+- **The EWS `full_access_as_app` scope finally gets a mailbox-scope verdict.** The resolver
+  re-derived every permission's Exchange role against Microsoft Graph, which has no such permission,
+  so the row was dropped before the probe: the Permissions tab showed "Unknown" forever for an app
+  declaring only the EWS scope (after paying the Exchange round trip), and the audit scored a
+  correctly RBAC-scoped `Application EWS.AccessAsApp` grant at full org-wide weight. The resolver now
+  carries the role its resource-aware callers already computed, so the row reads Org-wide or Scoped
+  like any Graph row and a scoped EWS grant earns the reduced scoped weight. **Affects audit scores
+  and the Scope column.**
+- **Long-running scans keep backing off for as long as Microsoft Graph keeps throttling them.**
+  The adaptive concurrency cap behind the security audit, bulk actions, the site sweep and the DR
+  backup was meant to halve on every burst of 429s until a single request at a time was left, then
+  recover once the tenant went quiet. In practice it halved exactly once: every throttled reply,
+  including the retries of one hot request, re-opened the two-second "one halving per burst" window,
+  so a sustained storm held the cap at half and burned the retry budget instead of easing off. The
+  window is now anchored on the last actual halving. Separately, two of these runs on the same tenant
+  at once — an audit still scoring while a backup finished, say — shared one observer slot, and the
+  run that finished first switched off the other's back-off for the rest of its life; a finishing
+  run now detaches only its own tracker, and the survivor keeps adapting.
+
+- **The permission tester no longer reports "No access" when it couldn't read the app's grants.**
+  If Microsoft Graph failed while the tester was reading an app's app-role assignments, a mailbox
+  check could answer "No access" and state that no organization-wide mailbox permission was granted,
+  and a SharePoint check could state that the app held no organization-wide SharePoint grant — even
+  for an app holding `Mail.Read` or `Sites.Read.All` tenant-wide. Both now answer "Couldn't
+  determine" and say the assignments couldn't be read. An app with no service principal in the
+  tenant is still reported as having no access.
+
+- **"Who can reach this mailbox?" now finds apps holding EWS `full_access_as_app`.** The Resource
+  Access Mailboxes tab looked for candidates only among Microsoft Graph grants, so an app whose only
+  mailbox grant was the legacy Exchange Web Services full-access permission, which reaches every
+  mailbox, was missing from the list or shown as "No access". Those apps are now listed as
+  organization-wide, matching the permission tester and the security audit.
+
+- **The Mailboxes tab now says when Exchange couldn't be used.** It reported Exchange as available
+  whenever you were signed in, even without Exchange consent, so its "verdicts derive from the Entra
+  grants alone" note never appeared. It now checks the Exchange sign-in first, and also says when
+  Exchange's service-principal list couldn't be read, because apps granted access only through
+  Exchange RBAC are then missing. Both notes are included in CSV and JSON exports.
+
+- **The security audit now says when it couldn't check mailbox scoping.** When Exchange couldn't be
+  queried, every mail permission is scored as organization-wide so risk is never under-reported, but
+  nothing said so: apps already confined through Exchange RBAC were listed under "Org-wide mailbox
+  access" with a Scope fix that needs the same Exchange access. That group now shows a note, and
+  CSV, JSON and HTML exports carry the same sentence. The run is still cached.
+
+- **The tenant setup screen no longer accepts a domain it can't sign in with.** Entering a domain
+  such as contoso.onmicrosoft.com as the Directory (tenant) ID was saved without complaint, but every
+  sign-in then failed after the browser step, because Entra identifies the tenant by its GUID. The
+  screen now asks for the GUID from the app registration's Overview page. An install already set to
+  a domain says so before opening the browser. A GUID typed in capitals now works too: it used to fail
+  the same way, because Entra reports the tenant GUID in lowercase.
+
+- **A failed sign-out no longer leaves the app half signed out.** If the OS credential store refused
+  to delete the saved sign-in, the app had already dropped the session. Every action then failed as
+  "not signed in" while the error said you were still signed in, and the next launch restored the
+  session you had tried to end. The saved sign-in is now deleted first, so a failed sign-out leaves
+  you signed in and Sign out can be retried.
+
+- **Re-authenticating no longer gets undone by a slow request.** A token refresh that was still
+  waiting on the network when you re-authenticated could fail afterwards and delete the new sign-in,
+  putting you back on the Re-authenticate prompt. It now leaves the newer sign-in alone.
+
+- **A managed identity's Azure roles no longer list a management-group role once per
+  subscription.** Azure returns a role assigned at a management group (or the tenant root) with every
+  subscription beneath it, so an identity with Reader on a management group over 20 subscriptions
+  showed 20 identical rows, each labelled with a different subscription, and the high-privilege
+  roles looked 20 times more widespread than they are. Each assignment is now shown once, and one
+  made above the subscription level is labelled "(inherited from above the subscription)" instead
+  of borrowing a subscription's name.
+
+- **Vault access now marks roles inherited from a parent scope instead of calling them direct.**
+  The Key Vault sweep said it listed only roles assigned on the vault itself, but Azure also
+  returns roles inherited from the vault's resource group, subscription and management group, so a
+  subscription Owner appeared as a per-vault grant. Those rows are now marked Inherited (hover for
+  the scope they come from), the export has an Inherited column, and the panel text describes what
+  is actually listed.
+
+- **Observed Graph usage is no longer built on a partial Log Analytics result.** When a usage query
+  hit a Log Analytics limit, the service returned the rows it had with a "PartialError" warning,
+  which the app ignored. The panel could then show fewer call patterns than the app really makes,
+  and suggest removing a permission it still uses. A partial result now shows an error asking you
+  to retry, instead of an incomplete summary.
+
+- **Access Readiness accepts Reader, Contributor or Owner on the Log Analytics workspace for usage
+  analysis.** The guidance already said "Log Analytics Reader (or Reader)", but the checklist
+  counted only the two Log Analytics roles, so an operator with plain Reader saw "?" instead of a
+  confirmed role.
+
+- **Key Vault no longer shows the previous tenant's secrets after you switch tenants.** The Key
+  Vault page kept the last vault name and its list of secret names, content types and expiry dates
+  when you switched tenant or signed out, so the next tenant's Key Vault page opened on another
+  tenant's listing, and Reveal sent the old vault name with the new tenant. Switching tenant or
+  signing out now clears the page, and a listing that finishes after you switched is discarded.
+
+- **The creation-date filter on the App Registrations and Enterprise Applications lists now resets
+  when you switch tenants.** A date range set in one tenant kept filtering the next tenant's list,
+  with the filter drawer collapsed so only the small active-filter badge hinted why apps were
+  missing. It now clears with the search and facet filters.
+
+- **The app now starts when it cannot write its log folder.** If the log folder could not be
+  created or written (a read-only or redirected profile folder, a locked-down kiosk account), the
+  app closed at launch with no window, no error and no log to explain why. It now opens and logs to
+  the console instead.
+
+- **Log and settings folders are readable by your account only on macOS and Linux.** The logs
+  record tenant IDs, app names and Microsoft Graph error details, but their folder was created with
+  default permissions, so on a shared machine other accounts could read two weeks of them. The app
+  now creates both folders, and tightens existing ones, so that only your account can open them.
+
+- **Refresh on the Managed Identities page now shows a managed identity created since the list
+  loaded.** The list is built from the tenant's cached service-principal index, but Refresh cleared
+  only the list itself, so it was rebuilt from that same index and a new managed identity stayed
+  missing for up to an hour, or until you refreshed App Registrations or Enterprise Apps. Refresh now
+  re-reads the service principals, as those two pages' Refresh already did.
+
+- **Adding or removing a secret or certificate while the Credential expiry list is loading no longer
+  leaves the list out of date for an hour.** The list stored the scan it had started before your
+  change, so a removed secret still showed as expiring. That scan is now discarded, and the list is
+  no longer dropped from the cache during heavy browsing on a large tenant.
+
+- **Screen readers can tell repeated row actions and filter fields apart.** Every trash button in a
+  permissions table announced the same name, such as "Revoke application permission", and every
+  Remove in the Expose an API tab just "Remove", so you had to count rows to know which grant or URI
+  you were about to remove.
+  Each now names its row, for example "Revoke application permission Mail.Read on Microsoft Graph",
+  and so do the Remove and Delete buttons on credentials, owners, federated credentials, default
+  owners, claims, app roles, assignments, groups and expired SAML certificates. The Created before
+  and Created after date filters, the saved-view name box and each permission checkbox in the grant
+  picker now have a name too. A table's unlabelled action column, including on the tenant-wide
+  dashboards, is announced as Actions.
+- **The bulk Delete confirmation no longer says deleted apps are gone for good.** It said "This
+  cannot be undone", but Entra keeps a deleted app registration for 30 days, and the Delete dialog on
+  an app's own page already says so. Seeing that warning after deleting the wrong apps, you could
+  recreate them, which gives each a new application ID and breaks everything that signs in with the
+  old one. The bulk panel now says deletion can be undone from the Entra admin center within 30 days.
+
+### Changed
+
+- **Counts in toasts, confirmations, bulk-action summaries and the disaster-recovery plan read "1
+  app" and "3 apps" instead of "app(s)".** These are the lines you paste into a change ticket.
+  Where a verb follows the count it now agrees too, e.g. "1 app was never attempted", "2 enterprise
+  apps need manual follow-up".
+- **Settings, the permission picker, the Cache dialog and the managed scope group panel show
+  placeholder rows while they load,** like the other pages, instead of a spinner or a bare
+  "Loading…".
+- **The sample Azure custom role no longer grants deleting Key Vault secrets.**
+  `docs/operator-rbac/azure-custom-role.json` included
+  `Microsoft.KeyVault/vaults/secrets/deleteSecret/action`, but the app never deletes a secret: it
+  lists and reads secrets and writes a new version when it rotates a credential. If you created the
+  role from that file, you can remove that permission.
+- **Audit CSV exports put a service principal's home tenant in its own column.** For enterprise
+  apps with no local registration, and for managed identities, the Publisher column held the owning
+  tenant's ID. App registrations put their publisher domain there, so filtering or sorting on
+  Publisher mixed the two. Publisher is now empty on those rows, and the tenant ID is in a new last
+  column, AppOwnerOrgId, named as in the Enterprise Applications export.
+- **Rotating a SAML signing certificate immediately, and retiring the previous one, now ask
+  first.** An immediate rotation stops sign-in for any application that holds a single static
+  certificate, and retiring removes your only rollback. Both ran on one click, unlike every other
+  destructive action in the enterprise app pane. Rotating now asks you to type ROTATE; retiring
+  asks for confirmation. Removing an expired certificate is still one click.
+- **The SSO tab opens with about half the Microsoft Graph requests.** Opening it read the service
+  principal, its application and its claims policy, then read them all again for "Details for the
+  application owner", and read the service principal a third time for the signing-certificate
+  panel. One read now fills the whole tab.
+- **Home and the App Registrations list load from one scan of your app registrations instead of
+  three.** On a cold start, the App Registrations, Enterprise Apps and Credential Health cards each
+  paged through every app registration on their own (18 serial requests on a 5,000-app tenant, two
+  of them fetching every secret and certificate). One scan now feeds all three. Opening App
+  Registrations while Home is still loading waits for that scan instead of starting another scan of
+  every app registration and every service principal. Moving between the security audit and the
+  Application permissions consent view also no longer re-reads every application-permission grant
+  in the tenant, and permission changes now always check an app's current grants instead of a copy
+  up to an hour old. Changes made in the app show up in both views at once; an application
+  permission granted or revoked outside the app (for example in the Entra portal) can take up to an
+  hour to appear there, or until you clear Permissions in the Cache dialog. The Enterprise Apps
+  Access tab and the permission tester still read assignments live.
+- **Home's Security Posture card no longer loads the whole security audit.** To show a few counts
+  it received every scored app from the last scan (tens of megabytes on a large tenant), and it
+  loaded it again after every scan, while the Security tab kept a second copy. Home now receives
+  only the counts, so it updates straight after a scan and uses less memory.
+- **Items parked in the Open dock no longer load when you sign in.** Every parked app
+  registration, enterprise app and managed identity used to fetch its full details from Microsoft
+  Graph at launch, for panes you had not opened: up to eight apps' worth of requests competing with
+  Home's scans. A parked item now loads the first time you open its chip, and stays loaded after
+  that.
+
+- **The Cache dialog can clear each cache on its own.** Service principal, permissions, audit and
+  list entries each get a Clear button in their row, so dropping a stale audit result no longer
+  means clearing everything and rebuilding the tenant-wide indexes. The on/off button now says what
+  it will do ("Disable cache" / "Enable cache") instead of "Toggle enabled".
+
+- **On Windows, logs are now written to `%LOCALAPPDATA%\azapptoolkit\logs`.** They were in
+  `%APPDATA%` (Roaming), which roaming profiles copy between machines at every sign-in and sign-out.
+  Settings stay in `%APPDATA%\azapptoolkit`, and the old `%APPDATA%\azapptoolkit\logs` folder can
+  be deleted.
+
+- **Log files now say more about where they came from.** Each line names the component that wrote
+  it, and the first lines of a run record the OS, architecture, build type, cloud, tenant, and
+  whether the client and tenant IDs came from an environment variable, settings.json or the build.
+  A log excerpt attached to a bug report no longer needs these asked for separately.
+
+- **The window reads backend replies and progress updates through JSON.** `tauri-sys`, the
+  frontend's bridge to the backend, moves to upstream `571cef4`. That version decodes every reply
+  and event via JSON instead of `serde-wasm-bindgen` — upstream's workaround for a reported webview
+  crash ("Out of bounds table access") in Tauri + Leptos apps that decode many events, such as the
+  per-app progress of a tenant-wide audit or bulk fix. A progress update the window can't read is
+  now skipped instead of stopping the window.
+
+- **Release builds ship a minified stylesheet and page.** The 121 KB stylesheet was bundled as
+  written; Trunk now minifies it (and `index.html`) in release and Pages builds, taking it to 69 KB
+  (28 KB → 11 KB compressed). The script that loads the app is unchanged: Trunk's minifier cannot
+  parse it and ships it as written.
+- **Bulk "Scope mailbox access" can now search for groups, and so can a permission's advanced "scope
+  to existing groups" form.** The per-app Scope… dialog and the Grant access wizard already had the
+  typeahead; these two were bare text boxes, and the bulk one applies the same groups to every
+  selected app. All four places now use the same search and placeholder.
+
+### Security
+
+- **The app window can no longer contact Microsoft endpoints or install an update by itself.**
+  The app's backend makes every Graph, sign-in, Key Vault and Azure Resource Manager call, but
+  the window's content security policy still allowed it to reach 13 Microsoft hosts. Its
+  permissions also let it download and install an update without the Update & restart prompt.
+  Neither was used. The window can now only talk to the app itself, and update checks and file
+  dialogs still run through the backend as before. A link in the release notes becomes clickable
+  only when it is an https address.
+- **Subscription, workspace and scope IDs that Azure Resource Manager sends back are now checked
+  before the app uses them in a request.** A role-definition ID already had to be a plain ARM path,
+  but a subscription ID, a Log Analytics workspace ID or a Key Vault's resource ID from the same
+  responses went into the request address unchecked, so a `?`, `#` or `..` in one could change
+  which address the app called with your token. Subscription and workspace IDs must now be GUIDs,
+  and scopes must be absolute ARM paths without `?`, `#`, `%`, `\` or `..`. Anything else is
+  refused before the request is sent, and that subscription or vault is skipped.
 
 ## [0.30.2] - 2026-09-25
 

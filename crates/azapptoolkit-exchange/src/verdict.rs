@@ -6,12 +6,10 @@
 //! legacy Application Access Policy confines the app, and how a surviving
 //! org-wide Entra grant defeats a scoped RBAC verdict.
 //!
-//! They lived in `apps/desktop/src-tauri/src/commands/exchange.rs` — the largest
-//! file in the repo at ~3,100 lines — reachable only through a
-//! `#[tauri::command]` and therefore only testable with a Tauri `State`. That is
-//! why the run-7 audit found both of that file's defects here rather than in the
-//! I/O around them: the logic was correct-looking prose with no unit test able
-//! to contradict it.
+//! They moved out of the Tauri command layer (`commands::exchange`) so they are
+//! unit-testable without a Tauri `State`. Reachable only through a
+//! `#[tauri::command]`, the logic was correct-looking prose with no unit test
+//! able to contradict it.
 //!
 //! Nothing here does I/O. The callers fetch (`Test-ServicePrincipalAuthorization`
 //! rows, `Get-ApplicationAccessPolicy` results, the principal's Entra grants) and
@@ -26,6 +24,13 @@ use crate::error::ExchangeError;
 use crate::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
 use crate::roles::is_blanket_mailbox_grant;
 
+/// True when a `Test-ServicePrincipalAuthorization` row is *not* confined to a
+/// recipient scope — i.e. the grant reaches every mailbox in the tenant. The
+/// `ScopeType` enum returned by EXO uses values like `OrganizationConfig` /
+/// `NotApplicable` for org-wide; a custom management scope reports its name in
+/// `AllowedResourceScope` with a `*RecipientScope` type. We treat an empty /
+/// "Not Applicable" `AllowedResourceScope` as org-wide too, and default to
+/// org-wide (the conservative, never-under-report choice) when unsure.
 pub fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
     let allowed = r.allowed_resource_scope.as_deref().unwrap_or("").trim();
     if allowed.is_empty() || allowed.eq_ignore_ascii_case("Not Applicable") {
@@ -100,7 +105,8 @@ pub fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScop
     }
 }
 
-/// Pure decision behind [`legacy_aap_scope`]: does any legacy Application Access
+/// Pure decision behind `commands::exchange::mail_scopes::legacy_aap_scope`
+/// (desktop crate): does any legacy Application Access
 /// Policy *confine* `app_id`'s mailbox access? Only a `RestrictAccess` policy
 /// scopes access to its group; a `DenyAccess` policy is a blocklist (access to
 /// everything *except* the group), which is still effectively org-wide, so it is
@@ -128,9 +134,7 @@ pub fn aap_verdict_for(
             p.app_id
                 .as_deref()
                 .is_some_and(|a| a.eq_ignore_ascii_case(app_id))
-                && p.access_right
-                    .as_deref()
-                    .is_some_and(|r| r.eq_ignore_ascii_case("RestrictAccess"))
+                && p.is_restrict_access()
         })
         .collect();
     if matching.is_empty() {
@@ -166,7 +170,7 @@ pub fn aap_verdict_for(
 
 /// Folds a legacy Application Access Policy verdict over the lean (audit-path)
 /// RBAC verdicts for one principal — the bulk-run equivalent of the per-app
-/// `aap_override` [`resolve_mail_scopes`] applies on the enriched detail path.
+/// `aap_override` `commands::exchange::mail_scopes::resolve_mail_scopes` applies on the enriched detail path.
 ///
 /// Applied by the caller, **after** the cached probe, so
 /// `resolve_mail_scopes_audit_cached` keeps caching the pure RBAC verdict and
@@ -211,7 +215,7 @@ pub fn apply_legacy_policy_verdict(
 
 /// Per-app mailbox-scope fallback when `Test-ServicePrincipalAuthorization`
 /// itself fails (detail/enrich path only). An AAP confines the *whole* app (see
-/// [`legacy_aap_scope`]), so the verdict applies to every scopable permission.
+/// `commands::exchange::mail_scopes::legacy_aap_scope` (desktop crate)), so the verdict applies to every scopable permission.
 /// A `RestrictAccess` AAP keyed on this exact appId is stronger evidence than a
 /// failed probe, so it wins even over a 403. A principal Exchange can't resolve
 /// (the managed-identity case — it isn't in Exchange's SP store) has no RBAC
@@ -339,7 +343,7 @@ mod tests {
             app_id: Some(app_id.to_string()),
             scope_name: Some(scope.to_string()),
             scope_identity: None,
-            access_right: Some(right.to_string()),
+            access_right: Some(right.into()),
             description: Some("desc".to_string()),
         }
     }
@@ -415,6 +419,19 @@ mod tests {
         let dedicated = row(Some("Application Mail.Read"), None, Some("s"), Some("R"));
         assert!(row_grants_permission(
             &dedicated,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+
+        // A permission substring must not match a longer value.
+        let basic = row(
+            Some("Application Mail.ReadBasic"),
+            Some("Mail.ReadBasic"),
+            Some("app_scope_x"),
+            Some("RecipientScope"),
+        );
+        assert!(!row_grants_permission(
+            &basic,
             "Application Mail.Read",
             "Mail.Read"
         ));
@@ -634,6 +651,14 @@ mod tests {
             reconcile_orgwide_grant(scoped_rbac(), "Calendars.Read", &held),
             MailPermissionScope::Scoped { .. }
         ));
+        // Properly stripped: no surviving grant keeps the scoped verdict.
+        assert!(matches!(
+            reconcile_orgwide_grant(scoped_rbac(), "Mail.Read", &HashSet::new()),
+            MailPermissionScope::Scoped {
+                mechanism: ScopeMechanism::Rbac,
+                ..
+            }
+        ));
 
         // A BLANKET grant vetoes every permission's scope, not just its own name:
         // EWS full_access_as_app reaches every mailbox with full access.
@@ -641,10 +666,15 @@ mod tests {
             [azapptoolkit_core::scoping::EWS_FULL_ACCESS_AS_APP.to_string()]
                 .into_iter()
                 .collect();
-        assert!(matches!(
-            reconcile_orgwide_grant(scoped_rbac(), "Calendars.Read", &blanket),
-            MailPermissionScope::OrgWide
-        ));
+        for permission in ["Mail.Read", "Calendars.Read"] {
+            assert!(
+                matches!(
+                    reconcile_orgwide_grant(scoped_rbac(), permission, &blanket),
+                    MailPermissionScope::OrgWide
+                ),
+                "a surviving EWS grant must defeat the {permission} scope"
+            );
+        }
 
         // A legacy policy is exempt.
         let legacy = MailPermissionScope::Scoped {
@@ -822,5 +852,43 @@ mod tests {
         )
         .expect_err("genuine 403 must propagate");
         assert!(matches!(err, ExchangeError::Forbidden { .. }));
+    }
+
+    /// The migration planner and the audit / permission-tester verdict read an
+    /// `AccessRight` through ONE definition, so a policy the migration treats as
+    /// confining is never reported org-wide (full risk) by the audit, and a
+    /// blocklist is never confining in either. Built via the wire path, since
+    /// that is where padding and casing arrive.
+    #[test]
+    fn restrict_access_reads_the_same_in_the_planner_and_the_verdict() {
+        use crate::aap::group_policies_for_migration;
+        for raw in [
+            "RestrictAccess",
+            " RestrictAccess ",
+            "restrictaccess",
+            "DenyAccess",
+            " denyaccess",
+            "Other",
+            "",
+        ] {
+            let p: ExoApplicationAccessPolicy = serde_json::from_value(serde_json::json!({
+                "AppId": "app-1",
+                "ScopeName": "Sales",
+                "AccessRight": raw,
+            }))
+            .expect("policy deserializes");
+            let verdict = aap_verdict_for(std::slice::from_ref(&p), "app-1").is_some();
+            let migratable = !group_policies_for_migration(vec![p]).0.is_empty();
+            assert_eq!(verdict, migratable, "{raw:?}");
+        }
+
+        // The drift this pins: the planner trimmed, the verdict did not.
+        let padded: ExoApplicationAccessPolicy = serde_json::from_value(serde_json::json!({
+            "AppId": "app-1",
+            "ScopeName": "Sales",
+            "AccessRight": " RestrictAccess ",
+        }))
+        .unwrap();
+        assert!(aap_verdict_for(std::slice::from_ref(&padded), "app-1").is_some());
     }
 }

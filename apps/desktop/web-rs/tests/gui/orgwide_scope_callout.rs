@@ -8,24 +8,12 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::exchange::MailScopeEntry;
 use azapptoolkit_dto::managed_identity::AzureRolesResult;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::managed_identities::ManagedIdentityDetailWindow;
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
 
 /// Mount the MI detail window on its Permissions tab with the given held
 /// grants (mail scoping unresolved — the empty map reads org-wide).
@@ -85,7 +73,7 @@ async fn callout_names_orgwide_values_and_scope_opens_the_wizard_preseeded() {
     );
     // Its "Scope…" opens the Grant-access wizard pre-seeded to that permission —
     // the preseed contract jumps straight to the choose-access step.
-    click_button("Scope…");
+    ts::click_button_labelled("Scope…");
     ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
 }
 

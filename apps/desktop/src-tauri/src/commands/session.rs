@@ -12,7 +12,10 @@
 //! Two shapes need this, and both are easy to miss:
 //!
 //! * commands that answer **only** from cache (`get_cached_*`, `save_audit_to_file`);
-//! * read-through commands whose cache **hit** path returns before `graph_for`.
+//! * read-through commands whose cache **hit** path returns before any request is
+//!   sent — `graph_for` only constructs token adapters, so it is not a proof —
+//!   including reads through the index accessors (`sp_index_cached`,
+//!   `search_corpus`, …).
 //!
 //! The second is why the proof must come first in the body, not merely appear
 //! somewhere in it. Pinned by

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chrono::NaiveDate;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -33,15 +34,18 @@ pub enum ActiveView {
     Apps,
     EnterpriseApps,
     ManagedIdentities,
-    /// Unified tenant-wide security surface: the security audit (hero) plus the
-    /// Credential-expiry and Delegated-grants inventory lenses, switched by an
-    /// internal sub-tab (`security_tab`). Replaces sibling nav destinations.
+    /// Unified tenant-wide security surface: the Findings/All-apps audit panes
+    /// plus the four inventory lenses (Credential expiry, SSO certificates,
+    /// Delegated grants, Application permissions), switched by an internal
+    /// sub-tab (`security_tab`). Replaces sibling nav destinations.
     Security,
     PermissionTester,
     /// Tenant-wide resource → identities reverse lookups, one tab per plane:
     /// Sites (sweep every site's app permissions — "which sites can this app
-    /// reach?" / "which apps can touch this site?") and Mailboxes (probe every
-    /// mail-permission holder against one mailbox — "who can read it?").
+    /// reach?" / "which apps can touch this site?"), Mailboxes (probe every
+    /// mail-permission holder against one mailbox — "who can read it?") and
+    /// Vault access (sweep every reachable Key Vault's Azure RBAC assignments —
+    /// "who can touch this vault?").
     ResourceAccess,
     /// Bulk actions over the app-registration multi-selection (a page, not a
     /// modal — the modal used to cover the very list selection it operates on).
@@ -52,8 +56,11 @@ pub enum ActiveView {
     /// Live role/scope readiness checklist for the signed-in user — what they
     /// currently hold vs. what each feature needs, across the three auth planes.
     Readiness,
-    /// Disaster-recovery backup & restore: export a portable manifest of the
-    /// tenant's app estate (and, in later slices, restore it into a new tenant).
+    /// Disaster-recovery backup & restore: back up the tenant's app estate to a
+    /// portable manifest, plan a restore against the current tenant, and restore
+    /// it (app registrations, enterprise apps, managed-identity permissions) —
+    /// typically into a new tenant (`backup_tenant` / `plan_restore` /
+    /// `restore_tenant`).
     DisasterRecovery,
     /// Per-tenant operator defaults (default owners, SSO notification emails,
     /// scope-name pattern). An account-scoped page, not org data.
@@ -126,9 +133,10 @@ pub struct TenantScopedUi {
     // Facet selection for each surface the Home dashboard drills INTO: a metric
     // click seeds it via `open_*_with_facet` so the destination lands
     // pre-filtered to that subset. Defaults are each surface's "show all"
-    // sentinel ("all"). The App Registrations list keeps a local facet — no
-    // metric drills into it (its card's secret/cert counts have no matching
-    // facet).
+    // sentinel — "all", except the App Registrations credential facet, whose
+    // sentinel has always been "any" (kept so saved views stay valid). Home's
+    // "With secrets" / "With certs" metrics drill into `apps_facet`.
+    pub apps_facet: RwSignal<String>,
     pub enterprise_facet: RwSignal<String>,
     pub mi_facet: RwSignal<String>,
     // The All-apps audit pane's ONE filter dimension (risk severity); Home's
@@ -142,13 +150,27 @@ pub struct TenantScopedUi {
     // Lifted so Home's finding drills land with the right group open.
     pub audit_expanded_group: RwSignal<Option<String>>,
     pub credentials_facet: RwSignal<String>,
-    // One-shot "open the filter drawer on arrival" flag. The Enterprise list's
-    // facet chips live in a drawer collapsed by default, so a drill would land
-    // filtered with the active chip hidden; `open_enterprise_with_facet` sets
-    // this and the list consumes it once to expand the drawer (MI shows its
-    // chips unconditionally and the audit/credentials surfaces show tabs, so
-    // neither needs this).
-    pub pending_open_filters: RwSignal<bool>,
+    // Creation-date range of the App Registrations / Enterprise filter drawers
+    // (`None` leaves that side open). Nothing outside the views seeds them, but
+    // the lists stay mounted across a tenant switch (`util::keep_alive`), so a
+    // range set in one tenant would silently keep narrowing the next tenant's
+    // list — with the drawer collapsed and only the badge hinting why rows are
+    // missing.
+    pub apps_created_after: RwSignal<Option<NaiveDate>>,
+    pub apps_created_before: RwSignal<Option<NaiveDate>>,
+    pub enterprise_created_after: RwSignal<Option<NaiveDate>>,
+    pub enterprise_created_before: RwSignal<Option<NaiveDate>>,
+    // One-shot "open the filter drawer on arrival" flag, naming the list it is
+    // for. The App Registrations and Enterprise lists keep their facet chips in
+    // a drawer collapsed by default, so a drill would land filtered with the
+    // active chip hidden; `open_apps_with_facet` / `open_enterprise_with_facet`
+    // set this and the named list consumes it once to expand its drawer. It
+    // carries the destination because both lists stay mounted (keep-alive): a
+    // bare flag would be taken by whichever list's effect ran first, opening
+    // the wrong drawer and leaving the drilled one shut. (MI shows its chips
+    // unconditionally and the audit/credentials surfaces show tabs, so neither
+    // needs this.)
+    pub pending_open_filters: RwSignal<Option<ActiveView>>,
     // One-shot "start a scan on arrival" flag. Home's Security Posture card is
     // the only writer: its call to action used to *navigate* to the Security
     // tab and leave the operator to find and press "Run audit" a second time.
@@ -179,11 +201,13 @@ pub struct TenantScopedUi {
     // Deep-link target tab for the app detail pane. Set by `open_app_on_tab`
     // (e.g. the credential dashboard's "Open" action) and consumed once by the
     // detail pane on mount so it opens directly on that tab instead of
-    // Overview.
+    // Overview. Set only when a new pane will mount to consume it — a
+    // deep-link to an already-open app queues nothing (see `open_app_on_tab`).
     pub pending_app_tab: RwSignal<Option<String>>,
     // Same deep-link mechanism for the enterprise-app detail pane (e.g. a
     // consent-grant "Open" jumping straight to its Permissions tab). Consumed
-    // once by the enterprise pane on mount.
+    // once by the enterprise pane on mount, and likewise set only when a new
+    // pane will mount.
     pub pending_enterprise_tab: RwSignal<Option<String>>,
     // Shell-owned tool dialog flag. Lifted here so the dialog can be mounted by
     // the persistent shell and triggered from the nav rail no matter which view
@@ -210,6 +234,13 @@ pub struct TenantScopedUi {
     // — which owns no rows — label failures the same way. Tenant-scoped by
     // nature: these ids belong to one tenant's directory.
     pub app_names: RwSignal<Arc<HashMap<String, String>>>,
+    // Scroll offset of the App Registrations / Enterprise lists. Those lists
+    // remount on every refetch (their `<Suspense>` bodies re-run after a
+    // delete, a "Fix" or Refresh), so the offset is carried here to survive
+    // that — and, being here, resets on a tenant switch by structure instead
+    // of scrolling the next tenant's list to the previous one's row.
+    pub apps_scroll_top: RwSignal<f64>,
+    pub enterprise_scroll_top: RwSignal<f64>,
 }
 
 impl TenantScopedUi {
@@ -218,12 +249,17 @@ impl TenantScopedUi {
             apps_search: RwSignal::new(String::new()),
             enterprise_search: RwSignal::new(String::new()),
             mi_search: RwSignal::new(String::new()),
+            apps_facet: RwSignal::new(String::from("any")),
             enterprise_facet: RwSignal::new(String::from("all")),
             mi_facet: RwSignal::new(String::from("all")),
             audit_severity: RwSignal::new(String::from("all")),
             audit_expanded_group: RwSignal::new(None),
             credentials_facet: RwSignal::new(String::from("all")),
-            pending_open_filters: RwSignal::new(false),
+            apps_created_after: RwSignal::new(None),
+            apps_created_before: RwSignal::new(None),
+            enterprise_created_after: RwSignal::new(None),
+            enterprise_created_before: RwSignal::new(None),
+            pending_open_filters: RwSignal::new(None),
             pending_audit_run: RwSignal::new(false),
             tester_app_id: RwSignal::new(None),
             selected_app_ids: RwSignal::new(HashSet::new()),
@@ -237,6 +273,8 @@ impl TenantScopedUi {
             new_app_chooser_open: RwSignal::new(false),
             gallery_open: RwSignal::new(false),
             app_names: RwSignal::new(Arc::new(HashMap::new())),
+            apps_scroll_top: RwSignal::new(0.0),
+            enterprise_scroll_top: RwSignal::new(0.0),
         }
     }
 
@@ -250,12 +288,17 @@ impl TenantScopedUi {
         self.apps_search.set(String::new());
         self.enterprise_search.set(String::new());
         self.mi_search.set(String::new());
+        self.apps_facet.set(String::from("any"));
         self.enterprise_facet.set(String::from("all"));
         self.mi_facet.set(String::from("all"));
         self.audit_severity.set(String::from("all"));
         self.audit_expanded_group.set(None);
         self.credentials_facet.set(String::from("all"));
-        self.pending_open_filters.set(false);
+        self.apps_created_after.set(None);
+        self.apps_created_before.set(None);
+        self.enterprise_created_after.set(None);
+        self.enterprise_created_before.set(None);
+        self.pending_open_filters.set(None);
         self.pending_audit_run.set(false);
         self.tester_app_id.set(None);
         self.selected_app_ids.update(HashSet::clear);
@@ -269,6 +312,8 @@ impl TenantScopedUi {
         self.new_app_chooser_open.set(false);
         self.gallery_open.set(false);
         self.app_names.set(Arc::new(HashMap::new()));
+        self.apps_scroll_top.set(0.0);
+        self.enterprise_scroll_top.set(0.0);
     }
 }
 
@@ -304,11 +349,20 @@ pub struct Session {
     // "Security Posture" tile, which stays mounted (keep-alive) across view
     // switches — refetch the freshly cached run instead of showing stale state.
     pub audit_reload: RwSignal<u32>,
-    // Bumped when the operator refreshes their token (re-applying roles activated
-    // since sign-in), so a mounted Access Readiness checklist re-runs its check in
-    // place. The Refresh-token control is the single "re-check my access" trigger —
-    // there is no separate Re-check button.
+    // Bumped after a token refresh (re-applying roles activated since sign-in)
+    // or any in-place re-authentication (`Session::reauth_in_place`), so a
+    // mounted Access Readiness checklist re-runs its check in place. There is no
+    // separate Re-check button.
     pub readiness_reload: RwSignal<u32>,
+    // In-flight flags of the one in-place token refresh
+    // (`Session::spawn_refresh_token`), shared by its two triggers — the top-bar
+    // "Refresh token" button and the 401 toast's action — so neither a
+    // double-click nor several 401 toasts can race concurrent refreshes (or,
+    // on a dead session, concurrent interactive re-auth browser flows).
+    // `token_reauthing` is held while that browser flow is open; the top bar
+    // relabels itself on both, whichever trigger started the refresh.
+    pub token_refreshing: RwSignal<bool>,
+    pub token_reauthing: RwSignal<bool>,
     // Last-viewed detail tab per resource type, so switching between items keeps
     // the admin's working tab (e.g. stay on Permissions across apps) instead of
     // snapping back to Overview. A deep-link via `pending_app_tab` overrides it.
@@ -323,9 +377,10 @@ pub struct Session {
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
     // Active sub-tab of the Security workbench ("findings" | "apps" |
-    // "credentials" | "grants"). Lifted to the session so the Home cards and
-    // command palette can deep-link straight to a sub-tab, and so the choice
-    // survives navigating away and back.
+    // "credentials" | "sso-certificates" | "grants" | "app-permissions").
+    // Lifted to the session so the Home cards and command palette can
+    // deep-link straight to a sub-tab, and so the choice survives navigating
+    // away and back.
     pub security_tab: RwSignal<String>,
     // Active tab of the Resource Access reverse lookups ("mailboxes" | "sites"
     // | "keyvault"). Lifted to the session for the same reason `security_tab`
@@ -361,6 +416,8 @@ pub fn provide_session() {
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),
         readiness_reload: RwSignal::new(0),
+        token_refreshing: RwSignal::new(false),
+        token_reauthing: RwSignal::new(false),
         toasts: RwSignal::new_local(Vec::new()),
         toast_seq: RwSignal::new(0),
     };
@@ -435,12 +492,18 @@ mod tests {
             ui.apps_search.set("query".into());
             ui.enterprise_search.set("query".into());
             ui.mi_search.set("query".into());
+            ui.apps_facet.set("secrets".into());
             ui.enterprise_facet.set("disabled".into());
             ui.mi_facet.set("user".into());
             ui.audit_severity.set("critical".into());
             ui.audit_expanded_group.set(Some("ownership".into()));
             ui.credentials_facet.set("expired".into());
-            ui.pending_open_filters.set(true);
+            let date = |d| NaiveDate::from_ymd_opt(2024, 1, d).unwrap();
+            ui.apps_created_after.set(Some(date(1)));
+            ui.apps_created_before.set(Some(date(2)));
+            ui.enterprise_created_after.set(Some(date(3)));
+            ui.enterprise_created_before.set(Some(date(4)));
+            ui.pending_open_filters.set(Some(ActiveView::Apps));
             ui.pending_audit_run.set(true);
             ui.tester_app_id
                 .set(Some("11111111-2222-3333-4444-555555555555".into()));
@@ -464,18 +527,25 @@ mod tests {
                 "app-1".to_string(),
                 "App One".to_string(),
             )])));
+            ui.apps_scroll_top.set(5200.0);
+            ui.enterprise_scroll_top.set(5200.0);
 
             session.set_active_tenant(None);
 
             assert_eq!(ui.apps_search.get_untracked(), "");
             assert_eq!(ui.enterprise_search.get_untracked(), "");
             assert_eq!(ui.mi_search.get_untracked(), "");
+            assert_eq!(ui.apps_facet.get_untracked(), "any");
             assert_eq!(ui.enterprise_facet.get_untracked(), "all");
             assert_eq!(ui.mi_facet.get_untracked(), "all");
             assert_eq!(ui.audit_severity.get_untracked(), "all");
             assert_eq!(ui.audit_expanded_group.get_untracked(), None);
             assert_eq!(ui.credentials_facet.get_untracked(), "all");
-            assert!(!ui.pending_open_filters.get_untracked());
+            assert_eq!(ui.apps_created_after.get_untracked(), None);
+            assert_eq!(ui.apps_created_before.get_untracked(), None);
+            assert_eq!(ui.enterprise_created_after.get_untracked(), None);
+            assert_eq!(ui.enterprise_created_before.get_untracked(), None);
+            assert_eq!(ui.pending_open_filters.get_untracked(), None);
             assert!(!ui.pending_audit_run.get_untracked());
             assert_eq!(ui.tester_app_id.get_untracked(), None);
             ui.selected_app_ids
@@ -492,6 +562,8 @@ mod tests {
             assert!(!ui.new_app_chooser_open.get_untracked());
             assert!(!ui.gallery_open.get_untracked());
             ui.app_names.with_untracked(|m| assert!(m.is_empty()));
+            assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
+            assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });
@@ -517,6 +589,40 @@ mod tests {
             session
                 .shown_items
                 .with_untracked(|shown| assert_eq!(shown, &vec![a]));
+        });
+    }
+
+    #[test]
+    fn deep_linking_an_open_item_queues_no_tab_for_the_next_pane() {
+        with_session(|session| {
+            let ui = session.tenant_ui;
+            // A new app: the tab is queued for the pane that will mount.
+            session.open_app_on_tab("app-1".into(), "credentials");
+            assert_eq!(
+                ui.pending_app_tab.get_untracked().as_deref(),
+                Some("credentials")
+            );
+            // ...which the mounted pane consumes.
+            ui.pending_app_tab.set(None);
+            // Already open: no pane mounts, so nothing may be queued — it
+            // would land the NEXT app opened from a list on this tab.
+            session.open_app_on_tab("app-1".into(), "permissions");
+            assert_eq!(ui.pending_app_tab.get_untracked(), None);
+
+            // Opened plainly (from a list), then deep-linked: still nothing.
+            session.open_item(OpenItemKind::AppReg, "app-2", "Contoso");
+            session.open_app_on_tab("app-2".into(), "credentials");
+            assert_eq!(ui.pending_app_tab.get_untracked(), None);
+
+            // The enterprise pane's signal behaves the same.
+            session.open_enterprise_on_tab("sp-1".into(), "permissions");
+            assert_eq!(
+                ui.pending_enterprise_tab.get_untracked().as_deref(),
+                Some("permissions")
+            );
+            ui.pending_enterprise_tab.set(None);
+            session.open_enterprise_on_tab("sp-1".into(), "overview");
+            assert_eq!(ui.pending_enterprise_tab.get_untracked(), None);
         });
     }
 
@@ -720,15 +826,37 @@ mod tests {
 
     #[test]
     fn report_command_error_plain_toast_for_other_codes() {
+        // A failure with no out-of-band recovery — a transient one the caller
+        // re-runs itself (the sink never holds the closure to replay it), or a
+        // permanent one no single round trip fixes — stays a plain toast.
+        for code in ["network", "network_error", "forbidden", "token_error"] {
+            with_session(|session| {
+                session.report_command_error(&UiError::new(code, "down", true));
+                session.toasts.with_untracked(|list| {
+                    assert_eq!(list.len(), 1);
+                    let t = &list[0];
+                    assert!(matches!(t.kind, ToastKind::Error));
+                    assert_eq!(t.message, "down");
+                    assert!(
+                        t.action_label.is_none(),
+                        "`{code}`: a failure with no out-of-band recovery gets a plain toast"
+                    );
+                    assert!(t.action.is_none());
+                });
+            });
+        }
+        // The counter-case: a rejected token (401) used to land here too, as a
+        // bare "unauthorized (401)" with no way forward. It now has a lever.
         with_session(|session| {
-            session.report_command_error(&UiError::new("network", "down", true));
+            session.report_command_error(&UiError::new(
+                "unauthorized",
+                "unauthorized (401)",
+                false,
+            ));
             session.toasts.with_untracked(|list| {
                 assert_eq!(list.len(), 1);
-                let t = &list[0];
-                assert!(matches!(t.kind, ToastKind::Error));
-                assert_eq!(t.message, "down");
-                assert!(t.action_label.is_none(), "non-auth error needs no action");
-                assert!(t.action.is_none());
+                assert_eq!(list[0].action_label.as_deref(), Some("Refresh token"));
+                assert!(list[0].action.is_some());
             });
         });
     }

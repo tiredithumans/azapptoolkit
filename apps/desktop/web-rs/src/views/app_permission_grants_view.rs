@@ -17,9 +17,9 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::{self, AppPermissionGrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::Callout;
+use crate::components::ui::{Badge, BadgeTone, Callout};
 use crate::state::use_session;
-use crate::util::contains_ignore_case;
+use crate::util::{contains_ignore_case, count_noun};
 
 #[component]
 pub fn AppPermissionGrantsView() -> impl IntoView {
@@ -39,7 +39,7 @@ pub fn AppPermissionGrantsView() -> impl IntoView {
             search_placeholder="Filter by app, permission, or resource…"
             refresh_label="Refresh application permissions"
             view_key="app-permissions"
-            noun="permission(s)"
+            noun="permissions"
             empty_message="No application permissions match this filter."
             facets=vec![("all", "All"), ("high", "High-risk"), ("medium", "Medium-risk")]
             headers=vec!["Application", "Permission", "Resource", "Risk", ""]
@@ -57,8 +57,13 @@ pub fn AppPermissionGrantsView() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{high} high-risk application permission(s) held by {} app(s). These grant tenant-wide access with no signed-in user.",
-                                    apps.len(),
+                                    "{} held by {}. These grant tenant-wide access with no signed-in user.",
+                                    count_noun(
+                                        high,
+                                        "high-risk application permission",
+                                        "high-risk application permissions",
+                                    ),
+                                    count_noun(apps.len(), "app", "apps"),
                                 )}
                             </Callout>
                         }
@@ -75,10 +80,10 @@ pub fn AppPermissionGrantsView() -> impl IntoView {
 }
 
 fn grant_row(session: crate::state::Session, r: AppPermissionGrantDto) -> impl IntoView {
-    let risk_class = match r.risk.as_str() {
-        "high" => "badge badge--danger",
-        "medium" => "badge badge--warning",
-        _ => "badge",
+    let risk_tone = match r.risk.as_str() {
+        "high" => BadgeTone::Danger,
+        "medium" => BadgeTone::Warning,
+        _ => BadgeTone::Neutral,
     };
     let risk_label = match r.risk.as_str() {
         "high" => "High",
@@ -96,9 +101,9 @@ fn grant_row(session: crate::state::Session, r: AppPermissionGrantDto) -> impl I
             </td>
             <td>{r.resource_display_name.clone()}</td>
             <td>
-                <span class=risk_class>{risk_label}</span>
+                <Badge label=risk_label tone=risk_tone />
             </td>
-            <td>
+            <td class="cell-mid">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                     on_click=Box::new(move |_| {

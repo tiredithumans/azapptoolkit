@@ -3,11 +3,9 @@
 //!
 //! Pure, like its siblings in this crate: it takes the enumerated management
 //! scopes and Application Access Policies and returns reference strings. It
-//! lived in the Tauri command layer, which is where `e853205` began moving the
-//! mailbox-scope *decisions* out of; this is the same move for the reference
-//! matching, so every pure Exchange decision now sits beside the others
-//! (`targets`, `verdict`, `aap`) rather than half here and half in a 2871-line
-//! command file.
+//! moved out of the Tauri command layer so it is testable without a Tauri
+//! `State`, beside the other pure Exchange decisions (`targets`, `verdict`,
+//! `aap`).
 //!
 //! **Fail closed.** Reporting a reference only ever WITHHOLDS an irreversible
 //! delete, so an unreadable filter counts as a possible reference. What this

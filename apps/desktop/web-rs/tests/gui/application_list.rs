@@ -15,6 +15,7 @@ use chrono::{Duration, Utc};
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::ipc_mock;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::application_list::ApplicationList;
 
@@ -109,13 +110,22 @@ async fn sorting_by_name_reorders_the_rows() {
     ts::wait_for(|| ts::text(COUNT) == "3 app registrations").await;
     assert_eq!(ts::text(".app-list__row-title"), "Mike");
 
+    // The toggle's state is a real `"true"`/`"false"` string, never a boolean
+    // attribute (`aria-pressed=""` / absent).
+    let pressed =
+        || ts::query(".app-list__sortbar button").and_then(|b| b.get_attribute("aria-pressed"));
+    assert_eq!(pressed().as_deref(), Some("false"));
+
     // Name: A→Z, then reversed, then back to the order Graph returned.
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Alpha").await;
+    assert_eq!(pressed().as_deref(), Some("true"));
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Zulu").await;
+    assert_eq!(pressed().as_deref(), Some("true"));
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Mike").await;
+    assert_eq!(pressed().as_deref(), Some("false"));
     assert_eq!(ts::query_all(".app-list__row").len(), 3);
 }
 
@@ -211,4 +221,287 @@ async fn refresh_invokes_invalidate_list_cache() {
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     // The per-page Refresh scopes invalidation to this list's kind only.
     assert_eq!(call.arg_str("kind").as_deref(), Some("apps"));
+}
+
+/// Refresh refetches only once the backend has dropped its cached list. The
+/// backend's cache-hit path is synchronous, so a refetch started before the
+/// invalidation lands re-serves the very list Refresh meant to drop. The mock
+/// plays that cache: it serves the old rows until the invalidation arrives.
+#[wasm_bindgen_test]
+async fn refresh_refetches_only_after_the_cache_is_dropped() {
+    ts::reset();
+    ipc_mock::mock_each("list_applications_with_pairing", |_| {
+        if ts::call_count("invalidate_list_cache") == 0 {
+            fixtures::apps(&["Before Refresh"])
+        } else {
+            fixtures::apps(&["After Refresh"])
+        }
+    });
+    ts::mock_ok("invalidate_list_cache", &());
+
+    let _mounted = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::body_contains("Before Refresh")).await;
+
+    ts::click("button[aria-label=\"Refresh App Registrations\"]");
+
+    ts::wait_for(|| ts::body_contains("After Refresh")).await;
+    let call = ts::last_call("invalidate_list_cache").expect("recorded call");
+    assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert_eq!(call.arg_str("kind").as_deref(), Some("apps"));
+}
+
+/// A reload (delete, remove-expired, "Fix", Refresh) remounts the loaded list
+/// body — its `<Suspense>` re-runs — and used to throw the operator back to the
+/// first row of a long list. The offset now lives on `tenant_ui` and is
+/// replayed into the fresh scroller; a search still snaps to the top.
+#[wasm_bindgen_test]
+async fn refetch_keeps_the_scroll_position() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    // GUI tests load no `styles.css`: give the scroller a real viewport and the
+    // rows their absolute positioning (ROW_HEIGHT is 52px).
+    let m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+
+    let scroller = || -> web_sys::HtmlElement {
+        ts::query(".app-list__scroller")
+            .expect("the list scroller")
+            .unchecked_into()
+    };
+    let el = scroller();
+    el.set_scroll_top(5200);
+    let _ = el.dispatch_event(&web_sys::Event::new("scroll").unwrap());
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() >= 5000.0).await;
+
+    m.session.bump_apps_reload();
+    ts::wait_for(|| ts::call_count("list_applications_with_pairing") >= 2).await;
+    // A new scroller element, landed back at the operator's row.
+    ts::wait_for(|| {
+        ts::query(".app-list__scroller")
+            .map(|el| el.unchecked_into::<web_sys::HtmlElement>().scroll_top() >= 5000)
+            .unwrap_or(false)
+            && ts::body_contains("App 100")
+    })
+    .await;
+
+    // A new row set within the instance still starts at the top.
+    ts::set_input_value(SEARCH, "App 1");
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() == 0.0).await;
+}
+
+/// A search that matches nothing unmounts the list (the empty state replaces
+/// it) before the list's own snap-to-top can run. The carried offset must still
+/// reset, or the next non-empty result would reopen at the old row set's
+/// position instead of the top.
+#[wasm_bindgen_test]
+async fn an_empty_search_does_not_carry_the_offset_into_the_next_result() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    let m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+
+    let el: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list scroller")
+        .unchecked_into();
+    el.set_scroll_top(5200);
+    let _ = el.dispatch_event(&web_sys::Event::new("scroll").unwrap());
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() >= 5000.0).await;
+
+    ts::set_input_value(SEARCH, "no such app");
+    ts::wait_for(|| ts::body_contains("No matching apps")).await;
+    ts::wait_for(|| m.session.tenant_ui.apps_scroll_top.get_untracked() == 0.0).await;
+
+    // 100 rows (5200px) under a 260px viewport: a stale 5200 would clamp to a
+    // non-zero offset here, so a zero really is "started at the top".
+    ts::set_input_value(SEARCH, "App 0");
+    ts::wait_for(|| ts::text(COUNT) == "100 of 200 app registrations").await;
+    ts::wait_for(|| ts::body_contains("App 000")).await;
+    // Give a (wrong) replay from the mount effect / ResizeObserver its chance.
+    for _ in 0..10 {
+        ts::tick().await;
+    }
+    let scroller: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list is back")
+        .unchecked_into();
+    assert_eq!(scroller.scroll_top(), 0, "the new result starts at the top");
+    assert_eq!(m.session.tenant_ui.apps_scroll_top.get_untracked(), 0.0);
+    assert!(ts::body_contains("App 000"));
+}
+
+/// Home's "With secrets" metric drills here (`open_apps_with_facet`): the list
+/// lands filtered to apps holding a client secret, with the collapsed filter
+/// drawer opened once by the destination-aware one-shot so the active chip is
+/// visible.
+#[wasm_bindgen_test]
+async fn a_home_drill_lands_on_the_with_secrets_chip() {
+    ts::reset();
+    let mut with_secret = fixtures::app_row("app-1", "Payroll API");
+    with_secret.password_credential_count = 1;
+    let mut cert_only = fixtures::app_row("app-2", "HR Sync");
+    cert_only.password_credential_count = 0;
+    cert_only.key_credential_count = 1;
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &vec![with_secret, cert_only],
+    );
+
+    let m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "2 app registrations").await;
+    assert!(
+        ts::query(".filter-chips").is_none(),
+        "drawer starts collapsed"
+    );
+
+    m.session.open_apps_with_facet("secrets");
+
+    ts::wait_for(|| ts::query(".filter-chips").is_some()).await;
+    ts::wait_for(|| ts::text(COUNT) == "1 of 2 app registrations").await;
+    assert!(ts::body_contains("Payroll API"));
+    assert!(!ts::body_contains("HR Sync"));
+    assert!(ts::body_contains("With secrets"));
+    assert_eq!(
+        m.session.tenant_ui.pending_open_filters.get_untracked(),
+        None
+    );
+    assert_eq!(m.session.tenant_ui.apps_facet.get_untracked(), "secrets");
+}
+
+/// The two date filters sat under a visible `<label>` that labelled nothing
+/// (no `for`, no wrapping), so a screen reader announced two bare "date"
+/// fields. Each carries its own name, in the order it renders; the saved-view
+/// name box is named too, not left to its placeholder.
+#[wasm_bindgen_test]
+async fn filter_drawer_fields_have_accessible_names() {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM"]),
+    );
+
+    let _mounted = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "1 app registrations").await;
+
+    if ts::query_all(".date-range-field__native").is_empty() {
+        ts::click(".filter-toggle");
+    }
+    ts::wait_for(|| ts::query_all(".date-range-field__native").len() == 2).await;
+    let names: Vec<String> = ts::query_all(".date-range-field__native")
+        .iter()
+        .map(|el| el.get_attribute("aria-label").unwrap_or_default())
+        .collect();
+    assert_eq!(names, ["Created before", "Created after"]);
+
+    ts::click_button_labelled("+ Save view");
+    ts::wait_for(|| ts::query(".saved-views__input").is_some()).await;
+    assert!(
+        ts::query("input.saved-views__input[aria-label=\"View name\"]").is_some(),
+        "the saved-view name box needs a name beyond its placeholder"
+    );
+}
+
+/// The filter chip whose visible label (not its count) reads `label`. Chip
+/// `textContent` includes the count, so match the label child.
+fn chip(label: &str) -> Option<web_sys::Element> {
+    ts::query_all(".filter-chip").into_iter().find(|c| {
+        c.query_selector(".filter-chip__label")
+            .ok()
+            .flatten()
+            .and_then(|l| l.text_content())
+            .is_some_and(|t| t.trim() == label)
+    })
+}
+
+fn attr(el: Option<web_sys::Element>, name: &str) -> Option<String> {
+    el.and_then(|e| e.get_attribute(name))
+}
+
+/// The Filters toggle says whether its drawer is open, and the facet chips say
+/// which one is applied, as real `"true"`/`"false"` strings — the active chip
+/// used to be marked by color alone, and a bare-bool binding renders
+/// `aria-expanded=""` / nothing, which no screen reader reads as a state.
+#[wasm_bindgen_test]
+async fn filter_toggle_and_chips_expose_their_state() {
+    use wasm_bindgen::JsCast;
+    ts::reset();
+    let mut with_secret = fixtures::app_row("app-1", "Payroll API");
+    with_secret.password_credential_count = 1;
+    let mut cert_only = fixtures::app_row("app-2", "HR Sync");
+    cert_only.password_credential_count = 0;
+    cert_only.key_credential_count = 1;
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &vec![with_secret, cert_only],
+    );
+
+    let _m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "2 app registrations").await;
+    assert!(
+        ts::query(".filter-chips").is_none(),
+        "drawer starts collapsed"
+    );
+    assert_eq!(
+        attr(ts::query(".filter-toggle"), "aria-expanded").as_deref(),
+        Some("false")
+    );
+
+    ts::click(".filter-toggle");
+    ts::wait_for(|| ts::query(".filter-chips").is_some()).await;
+    assert_eq!(
+        attr(ts::query(".filter-toggle"), "aria-expanded").as_deref(),
+        Some("true")
+    );
+
+    assert_eq!(attr(chip("All"), "aria-pressed").as_deref(), Some("true"));
+    assert_eq!(
+        attr(chip("With secrets"), "aria-pressed").as_deref(),
+        Some("false")
+    );
+    let chips = ts::query_all(".filter-chip");
+    assert!(!chips.is_empty());
+    for c in &chips {
+        let state = c.get_attribute("aria-pressed");
+        assert!(
+            matches!(state.as_deref(), Some("true" | "false")),
+            "every chip carries a string aria-pressed, got {state:?} on {:?}",
+            c.text_content()
+        );
+    }
+
+    chip("With secrets")
+        .expect("With secrets chip")
+        .unchecked_ref::<web_sys::HtmlElement>()
+        .click();
+    ts::wait_for(|| {
+        attr(chip("With secrets"), "aria-pressed").as_deref() == Some("true")
+            && attr(chip("All"), "aria-pressed").as_deref() == Some("false")
+    })
+    .await;
 }

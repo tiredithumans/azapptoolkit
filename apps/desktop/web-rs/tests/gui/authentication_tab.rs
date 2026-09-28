@@ -49,28 +49,6 @@ fn values(selector: &str) -> Vec<String> {
         .collect()
 }
 
-/// Click the first `<button>` whose visible text is exactly `label`. The three
-/// lists deliberately spell their Add buttons out in full, so this is
-/// unambiguous.
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-/// True when the focused element matches `selector`.
-fn focused_matches(selector: &str) -> bool {
-    web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.active_element())
-        .is_some_and(|el| el.matches(selector).unwrap_or(false))
-}
-
 #[wasm_bindgen_test]
 async fn renders_one_row_per_uri_and_counts_them() {
     ts::reset();
@@ -117,10 +95,12 @@ async fn add_focuses_the_new_row_and_remove_drops_only_that_row() {
     let _m = mount(&["https://a/cb", "https://b/cb", "https://c/cb"], &[]);
     ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 3).await;
 
-    click_button("Add web redirect URI");
+    // The three lists spell their Add buttons out in full, so a label is
+    // unambiguous.
+    ts::click_button_labelled("Add web redirect URI");
     ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 4).await;
     // The new row takes focus, so typing can start immediately.
-    ts::wait_for(|| focused_matches(".uri-list--web .uri-list__row:nth-child(4) input")).await;
+    ts::wait_for(|| ts::focused_matches(".uri-list--web .uri-list__row:nth-child(4) input")).await;
 
     // Remove the middle row. A positional key would have shifted the values.
     ts::click(
@@ -164,7 +144,7 @@ async fn a_rejected_uri_marks_its_own_row_without_blocking_save() {
     // Advisory only: Save still reaches the backend, which stays the authority.
     let save = ts::query(".actions-row button").unwrap();
     assert!(save.get_attribute("disabled").is_none());
-    click_button("Save");
+    ts::click_button_labelled("Save");
     ts::wait_for(|| ts::call_count("set_application_authentication") == 1).await;
 }
 
@@ -174,16 +154,16 @@ async fn save_sends_one_entry_per_row_trimmed_with_blanks_dropped() {
     let _m = mount(&["https://a/cb"], &["https://spa.contoso.com/"]);
     ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 1).await;
 
-    click_button("Add web redirect URI");
+    ts::click_button_labelled("Add web redirect URI");
     ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 2).await;
     ts::set_input_value(
         ".uri-list--web .uri-list__row:nth-child(2) input",
         "  https://b/cb?x=1,2;3  ",
     );
-    click_button("Add web redirect URI"); // left blank on purpose
+    ts::click_button_labelled("Add web redirect URI"); // left blank on purpose
     ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 3).await;
 
-    click_button("Save");
+    ts::click_button_labelled("Save");
     ts::wait_for(|| ts::call_count("set_application_authentication") == 1).await;
     let input = ts::last_call("set_application_authentication")
         .unwrap()

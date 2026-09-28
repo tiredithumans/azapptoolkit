@@ -159,6 +159,99 @@ fn a_sibling_key_invalidation_does_not_block_an_untouched_index() {
     );
 }
 
+/// The diagnostics "Clear cache" button (`diagnostics.rs` `clear_cache`,
+/// which calls `clear` / `clear_kind`) can land while a tenant-wide scan is
+/// in flight. `clear`'s `bump_watches` is the only thing stopping that scan
+/// from re-pinning its pre-clear snapshot for the full TTL right after the
+/// operator asked for a clean slate.
+#[test]
+fn a_full_clear_mid_scan_refuses_the_stale_index_store() {
+    let cache = Cache::new();
+    let key = "t1|sp_index".to_string();
+
+    let watch = cache.generation_for(CacheKind::Lists, &key);
+    cache.clear();
+
+    assert!(
+        !cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])),
+        "a scan that straddled a full clear must not re-pin its snapshot"
+    );
+    assert!(
+        cache.get_typed::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
+        "the cleared key must stay empty"
+    );
+    assert_eq!(
+        cache.watch_count(),
+        0,
+        "the refused store still releases its watch"
+    );
+}
+
+/// The per-kind "Clear" must refuse a scan of THAT kind too — deleting the
+/// `bump_watches` call from `clear_kind` would otherwise pass every other
+/// test here.
+#[test]
+fn clearing_the_watched_kind_mid_scan_refuses_the_store() {
+    let cache = Cache::new();
+    let key = "t1|sp_index".to_string();
+
+    let watch = cache.generation_for(CacheKind::Lists, &key);
+    cache.clear_kind(CacheKind::Lists);
+
+    assert!(
+        !cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])),
+        "clearing the Lists kind mid-scan must refuse the Lists index store"
+    );
+    assert!(cache.get_typed::<Vec<u8>>(CacheKind::Lists, &key).is_none());
+}
+
+/// …and must NOT refuse a scan of another kind: `clear_kind(Audit)` passing
+/// `None` instead of `Some(kind)` would make every in-flight index rescan.
+#[test]
+fn clearing_another_kind_does_not_block_an_index_store() {
+    let cache = Cache::new();
+    let key = "t1|sp_index".to_string();
+
+    let watch = cache.generation_for(CacheKind::Lists, &key);
+    cache.clear_kind(CacheKind::Audit);
+
+    assert!(
+        cache.put_typed_index_if_current(watch, Arc::new(vec![3u8])),
+        "clearing the Audit kind touched nothing this scan watches"
+    );
+    assert_eq!(
+        cache
+            .get_typed::<Vec<u8>>(CacheKind::Lists, &key)
+            .as_deref(),
+        Some(&vec![3u8])
+    );
+}
+
+/// Every kind indexes its own bucket, and every bucket is reachable. The
+/// compile-time checks next to `CacheKind::ALL` already prove this; the test
+/// is the runtime witness a reader can find by name.
+#[test]
+fn every_kind_indexes_its_own_bucket() {
+    for (i, kind) in CacheKind::ALL.iter().enumerate() {
+        assert_eq!(kind.idx(), i, "{kind:?} must index bucket {i}");
+    }
+    let cache = Cache::new();
+    for kind in CacheKind::ALL {
+        let key = format!("t1|every_kind_{kind:?}");
+        cache.put(kind, key.clone(), &Sample(format!("{kind:?}")));
+        assert_eq!(
+            cache.get::<Sample>(kind, &key),
+            Some(Sample(format!("{kind:?}"))),
+            "{kind:?}'s bucket must round-trip"
+        );
+        assert_eq!(
+            entry_count(&cache, kind),
+            1,
+            "{kind:?} wrote its own bucket"
+        );
+    }
+}
+
 #[test]
 fn a_store_consumes_its_watch_and_leaves_the_table_empty() {
     // The watch is moved into the store, so a replay is a *compile* error

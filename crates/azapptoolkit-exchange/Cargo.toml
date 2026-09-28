@@ -10,12 +10,10 @@ description = "Exchange Online Admin API client (RBAC for Applications) for azap
 [dependencies]
 azapptoolkit-core = { path = "../azapptoolkit-core" }
 
-tokio = { workspace = true }
-bytes = "1"
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-url = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

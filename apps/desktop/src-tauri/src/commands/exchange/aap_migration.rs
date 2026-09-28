@@ -38,8 +38,9 @@ pub async fn migrate_application_access_policies(
     // could not stop a whole-tenant migration once started, and a session that
     // died on the first app still burned through every remaining one, producing
     // an identical "failed" line per app that read as a tenant rejecting the
-    // writes. Shares `audit_cancel` with the security audit and bulk actions
-    // (AGENTS.md), claimed ONCE so a cancel can't be lost at a boundary.
+    // writes. The migration has its own flag, `migration_cancel`, stopped only
+    // by `cancel_aap_migration` — an audit or bulk Cancel can no longer stop it
+    // — and is claimed ONCE so a cancel can't be lost at a boundary.
     //
     // Claimed BEFORE the three tenant-wide reads below, not after them — the
     // same rule and the same reason as `run_audit`: `claim()` takes a fresh
@@ -49,7 +50,7 @@ pub async fn migrate_application_access_policies(
     // (`cancelled >= generation`) never sees it. `get_application_access_policies`
     // walks every policy in the tenant, so pressing Cancel while it ran was both
     // likely and, until this moved, silently discarded.
-    let cancel = state.audit_cancel.claim();
+    let cancel = state.migration_cancel.claim();
     let session = SessionDead::new();
     let mut cancelled = false;
 
@@ -91,6 +92,14 @@ pub async fn migrate_application_access_policies(
     // against the tenant to find out which apps are still on legacy policies —
     // the same "a partial run is never presented as a complete one" rule the
     // flag exists for, applied to the apps rather than to the run.
+    let ctx = MigrationContext {
+        graph: &graph,
+        exo: &exo,
+        resources: &resources,
+        scope_override: scope_override.as_deref(),
+        tenant_defaults: &tenant_defaults,
+        dry_run,
+    };
     let mut remaining = batches.into_iter();
     let mut unattempted: Vec<String> = Vec::new();
     while let Some((policy_app_id, batch)) = remaining.next() {
@@ -103,18 +112,7 @@ pub async fn migrate_application_access_policies(
             unattempted.extend(remaining.map(|(id, _)| id));
             break;
         }
-        match migrate_one(
-            &graph,
-            &exo,
-            &policy_app_id,
-            &batch,
-            &resources,
-            scope_override.as_deref(),
-            &tenant_defaults,
-            dry_run,
-        )
-        .await
-        {
+        match migrate_one(ctx, &policy_app_id, &batch).await {
             Ok(item) => items.push(item),
             Err(err) => {
                 // `note_code` keeps `UiError::is_reauth_fatal` the single
@@ -145,17 +143,44 @@ pub async fn migrate_application_access_policies(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Signals an in-progress [`migrate_application_access_policies`] run to stop
+/// before the next application. The run checks only at application boundaries:
+/// an application already mid-migration finishes, because [`migrate_one`]'s
+/// steps are ordered never to leave it half-scoped. So a single-app run stops
+/// only if the Cancel lands during the tenant-wide reads, before its one
+/// application starts; a stopped run reports `incomplete` and names the
+/// applications it never reached in `unattempted`.
+#[tauri::command]
+pub fn cancel_aap_migration(state: State<'_, AppState>) {
+    state.migration_cancel.cancel();
+}
+
+/// What stays the same for every application in one migration run, grouped so
+/// each per-app [`migrate_one`] call names only what varies (the app and its
+/// policies) — the same reasoning as `ApplyExchangeMailboxScopeParams`.
+#[derive(Clone, Copy)]
+pub(super) struct MigrationContext<'a> {
+    graph: &'a GraphClient,
+    exo: &'a ExchangeClient,
+    resources: &'a [ResourceRoles],
+    scope_override: Option<&'a str>,
+    tenant_defaults: &'a TenantDefaults,
+    dry_run: bool,
+}
+
 pub(super) async fn migrate_one(
-    graph: &GraphClient,
-    exo: &ExchangeClient,
+    ctx: MigrationContext<'_>,
     app_id: &str,
     policies: &[ExoApplicationAccessPolicy],
-    resources: &[ResourceRoles],
-    scope_override: Option<&str>,
-    tenant_defaults: &TenantDefaults,
-    dry_run: bool,
 ) -> Result<AapMigrationItem, UiError> {
+    let MigrationContext {
+        graph,
+        exo,
+        resources,
+        scope_override,
+        tenant_defaults,
+        dry_run,
+    } = ctx;
     let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
@@ -172,7 +197,7 @@ pub(super) async fn migrate_one(
         .await?
         .ok_or_else(|| {
             UiError::not_found(
-                "service_principal_not_found",
+                "service_principal",
                 "no Entra service principal for this app",
             )
         })?;
@@ -193,7 +218,7 @@ pub(super) async fn migrate_one(
             })?;
         let group = exo.get_group(&scope_group).await?.ok_or_else(|| {
             UiError::not_found(
-                "scope_group_not_found",
+                "scope_group",
                 format!("scope group '{scope_group}' not found"),
             )
         })?;
@@ -283,14 +308,13 @@ pub(super) async fn migrate_one(
         // would then refuse (or, before the refusal existed, silently not
         // deliver) — an operator approving the plan could not see the difference.
         if let Some(current) = existing_filter.as_deref() {
-            let current_groups = scope_groups_in_filter(current);
-            let wanted_dns = group_dns_in_filter(&scope_filter);
             // Case-FOLDED, like the post-write proof in `rbac.rs`: Exchange
             // returns DNs in its own casing, so a raw comparison warns about a
             // scope that in fact already confines exactly the wanted groups.
-            let wanted_folded: std::collections::HashSet<String> =
-                wanted_dns.iter().map(|d| d.to_ascii_lowercase()).collect();
-            if !current_groups.complete || current_groups.folded_dns() != wanted_folded {
+            // An unreadable current filter is never agreement.
+            if !scope_groups_in_filter(current)
+                .same_groups_as(&scope_groups_in_filter(&scope_filter))
+            {
                 warnings.push(format!(
                     "a management scope “{scope_name}” already exists and confines access to a \
                      different set of groups than this plan computed. Its filter is ({current}). \
@@ -350,13 +374,11 @@ pub(super) async fn migrate_one(
 
     // 4. remove the unscoped Entra grants so scoping is effective — but only for
     //    permissions whose scoped role actually landed (never strand the app).
-    let removed_entra_grants = remove_unscoped_grants(
-        graph,
-        &entra_sp.id,
-        &targets_safe_to_strip(scoped),
-        &mut warnings,
-    )
-    .await;
+    //    `still_orgwide` is deliberately not consulted: whether the policies go
+    //    stays `policies_safe_to_remove`'s decision, below.
+    let removed_entra_grants = remove_unscoped_grants(graph, &entra_sp.id, &scoped, &mut warnings)
+        .await
+        .removed;
 
     // 5. remove the legacy policies — ONLY once nothing they were constraining is
     //    still granted org-wide (see `policies_safe_to_remove`).
@@ -390,11 +412,11 @@ pub(super) async fn migrate_one(
             );
         } else {
             warnings.push(format!(
-                "KEPT the legacy policy: {} still granted organization-wide in Microsoft Entra \
-                 ID. The policy is the only thing confining {} today, so removing it would give \
-                 this app access to every mailbox. Re-run once the grant(s) are scoped.",
-                kept.join(", "),
-                if kept.len() == 1 { "it" } else { "them" }
+                "KEPT the legacy policy: {}. The policy is the only thing confining {} today, so \
+                 removing it would give this app access to every mailbox. Re-run once the \
+                 grant(s) are scoped.",
+                still_granted_orgwide(&kept),
+                it_or_them(kept.len())
             ));
         }
         status = "partial";

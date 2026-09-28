@@ -718,3 +718,37 @@ async fn publishing_app_roles_drops_the_cached_resource_definitions() {
         "an unrelated family was swept; the key segmenting is not working"
     );
 }
+
+/// The SP index is an advanced query (`$count=true` + eventual), and Graph does
+/// not carry `ConsistencyLevel` into the `nextLink` request — so every
+/// continuation restates it, and page 1 and pages 2+ come from the same store.
+#[tokio::test]
+async fn list_service_principals_index_continues_as_an_advanced_query() {
+    let server = MockServer::start().await;
+    let page2_link = format!("{}/servicePrincipals?page=2", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$count", "true"))
+        .and(query_param_is_missing("page"))
+        .and(header("consistencylevel", "eventual"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": page2_link,
+            "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "one" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("page", "2"))
+        .and(header("consistencylevel", "eventual"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-2", "appId": "app-2", "displayName": "two" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let sps = client.list_service_principals_index().await.unwrap();
+    assert_eq!(sps.len(), 2, "page 2 answered only as an advanced query");
+    assert_eq!(sps[1].id, "sp-2");
+}

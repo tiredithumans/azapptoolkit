@@ -60,7 +60,8 @@ pub struct SiteAppGrantRow {
 
 /// Result of a full site-permission sweep. `sites_failed` counts sites whose
 /// permission read errored (never silently folded into "no grants"), so the
-/// UI can say "covered 140 of 142 sites" instead of overstating coverage.
+/// UI can say "covered 140 of 142 sites" — or "stopped at the 5000-site cap" —
+/// instead of overstating coverage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteSweepResult {
@@ -70,6 +71,11 @@ pub struct SiteSweepResult {
     pub sites_failed: usize,
     pub rows: Vec<SiteAppGrantRow>,
     pub cancelled: bool,
+    /// The site enumeration stopped at the sweep's safety cap, so `total_sites`
+    /// is the cap and `rows` are a prefix of the tenant. Unlike `cancelled` and
+    /// `sites_failed` this is deterministic — re-running hits the same cap.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// One principal's slice of the sweep index: the sites it can reach under the
@@ -93,6 +99,10 @@ pub struct AppSiteAccessDto {
     pub sites_failed: usize,
     /// The sweep stopped early, so the list is a prefix of the tenant.
     pub cancelled: bool,
+    /// The sweep stopped at its site cap; the list is a prefix of the tenant,
+    /// like `cancelled` — but re-running will not extend it.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl AppSiteAccessDto {
@@ -122,13 +132,17 @@ impl AppSiteAccessDto {
             sites_scanned: sweep.sites_scanned,
             sites_failed: sweep.sites_failed,
             cancelled: sweep.cancelled,
+            truncated: sweep.truncated,
         }
     }
 
-    /// True when every enumerable site was read successfully, so an empty
-    /// `sites` list really does mean "no per-site grants".
+    /// True when every enumerable site was read successfully AND the
+    /// enumeration itself was not capped, so an empty `sites` list really does
+    /// mean "no per-site grants". Same three-way conjunction shape as
+    /// `AuditExportCoverage::is_complete`; a cached capped sweep rides on this
+    /// carrying its flag, so no consumer can read it as an all-clear.
     pub fn is_complete(&self) -> bool {
-        !self.cancelled && self.sites_failed == 0
+        !self.cancelled && !self.truncated && self.sites_failed == 0
     }
 }
 
@@ -168,7 +182,12 @@ mod tests {
         }
     }
 
-    fn sweep(rows: Vec<SiteAppGrantRow>, failed: usize, cancelled: bool) -> SiteSweepResult {
+    fn sweep(
+        rows: Vec<SiteAppGrantRow>,
+        failed: usize,
+        cancelled: bool,
+        truncated: bool,
+    ) -> SiteSweepResult {
         SiteSweepResult {
             tenant_id: "t".into(),
             total_sites: 10,
@@ -176,6 +195,7 @@ mod tests {
             sites_failed: failed,
             rows,
             cancelled,
+            truncated,
         }
     }
 
@@ -191,6 +211,7 @@ mod tests {
                 row("HR", None, &["read"]),
             ],
             0,
+            false,
             false,
         );
         let mine = AppSiteAccessDto::from_sweep(&s, "app-1");
@@ -209,7 +230,12 @@ mod tests {
         // No grants for this app — but two sites could not be read, so "no
         // access" is not a conclusion the UI may draw.
         let partial = AppSiteAccessDto::from_sweep(
-            &sweep(vec![row("Marketing", Some("other"), &["read"])], 2, false),
+            &sweep(
+                vec![row("Marketing", Some("other"), &["read"])],
+                2,
+                false,
+                false,
+            ),
             "app-1",
         );
         assert!(partial.sites.is_empty());
@@ -217,8 +243,26 @@ mod tests {
         assert_eq!(partial.sites_failed, 2);
 
         // A cancelled sweep is likewise a prefix, not an answer.
-        let cancelled = AppSiteAccessDto::from_sweep(&sweep(Vec::new(), 0, true), "app-1");
+        let cancelled = AppSiteAccessDto::from_sweep(&sweep(Vec::new(), 0, true, false), "app-1");
         assert!(!cancelled.is_complete());
+    }
+
+    /// A sweep that stopped at the site cap read every site it enumerated
+    /// without a failure and was never cancelled — exactly the shape that used
+    /// to read as complete. It is a prefix of the tenant, so an empty per-app
+    /// list is "not found in the first N sites", never "no grants"; and the
+    /// single projection must carry the flag, or the cached (backend-side) and
+    /// fresh (frontend-side) paths would disagree about it.
+    #[test]
+    fn a_capped_sweep_is_a_prefix_not_an_answer() {
+        let capped = AppSiteAccessDto::from_sweep(&sweep(Vec::new(), 0, false, true), "app-1");
+        assert!(capped.sites.is_empty());
+        assert!(capped.truncated, "from_sweep must carry the cap flag");
+        assert!(!capped.is_complete());
+
+        // And the positive, so the conjunction can't be over-tightened.
+        let full = AppSiteAccessDto::from_sweep(&sweep(Vec::new(), 0, false, false), "app-1");
+        assert!(full.is_complete());
     }
 }
 

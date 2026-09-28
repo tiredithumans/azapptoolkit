@@ -1,10 +1,12 @@
 //! Microsoft national/sovereign cloud endpoint selection.
 //!
 //! Every Microsoft service this toolkit talks to (Entra login, Graph, Exchange
-//! Online, Key Vault, ARM) lives at a different host in each sovereign cloud, so
-//! a tenant in US Gov / DoD / 21Vianet cannot use the commercial endpoints. The
-//! cloud is a *deployment-time* choice (not a per-session toggle), selected via
-//! the `AZAPPTOOLKIT_CLOUD` env var and defaulting to the commercial cloud.
+//! Online, Key Vault, ARM, Log Analytics) lives at a different host in each
+//! sovereign cloud, so a tenant in US Gov / DoD / 21Vianet cannot use the
+//! commercial endpoints. The cloud is a *deployment-time* choice (not a
+//! per-session toggle), selected via `AZAPPTOOLKIT_CLOUD` (the runtime env var,
+//! or baked at build time by the desktop crate) and defaulting to the
+//! commercial cloud — see [`CloudEnvironment::select`].
 //!
 //! Endpoint values are from Microsoft's national-cloud / Graph deployment docs:
 //! <https://learn.microsoft.com/en-us/graph/deployments> and
@@ -61,23 +63,43 @@ impl CloudEnvironment {
         }
     }
 
-    /// Reads `AZAPPTOOLKIT_CLOUD`, defaulting to [`Self::Commercial`]. An
-    /// unrecognized value logs a warning and falls back to commercial.
+    /// Resolves the cloud from its layers: the runtime `AZAPPTOOLKIT_CLOUD` env
+    /// var, else the build-time bake, else [`Self::Commercial`]. A blank value
+    /// counts as unset; an unrecognized one logs a warning and falls through to
+    /// the next layer. Pure, so the precedence is testable without touching the
+    /// process environment.
+    pub fn select(env: Option<&str>, baked: Option<&str>) -> Self {
+        for (layer, value) in [("env var", env), ("build-time bake", baked)] {
+            let Some(v) = value.filter(|v| !v.trim().is_empty()) else {
+                continue;
+            };
+            match Self::parse(v) {
+                Some(c) => return c,
+                None => tracing::warn!(
+                    value = %v,
+                    layer,
+                    "unrecognized AZAPPTOOLKIT_CLOUD; ignoring it"
+                ),
+            }
+        }
+        Self::Commercial
+    }
+
+    /// Reads `AZAPPTOOLKIT_CLOUD` from the process environment, falling back to
+    /// `baked` (the desktop crate's build-time value) and then to
+    /// [`Self::Commercial`] — [`Self::select`] over the live env var.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_env_or(baked: Option<&str>) -> Self {
+        let env = std::env::var("AZAPPTOOLKIT_CLOUD").ok();
+        Self::select(env.as_deref(), baked)
+    }
+
+    /// Reads `AZAPPTOOLKIT_CLOUD`, defaulting to [`Self::Commercial`] (no
+    /// build-time layer). An unrecognized value logs a warning and falls back
+    /// to commercial.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env() -> Self {
-        match std::env::var("AZAPPTOOLKIT_CLOUD") {
-            Ok(v) if !v.trim().is_empty() => match Self::parse(&v) {
-                Some(c) => c,
-                None => {
-                    tracing::warn!(
-                        value = %v,
-                        "unrecognized AZAPPTOOLKIT_CLOUD; using the commercial cloud"
-                    );
-                    Self::Commercial
-                }
-            },
-            _ => Self::Commercial,
-        }
+        Self::from_env_or(None)
     }
 
     /// Entra authority root (no trailing slash); authorities are
@@ -87,6 +109,34 @@ impl CloudEnvironment {
             Self::Commercial => "https://login.microsoftonline.com",
             Self::UsGov | Self::UsGovDod => "https://login.microsoftonline.us",
             Self::China => "https://login.partner.microsoftonline.cn",
+        }
+    }
+
+    /// Entra's generic non-gallery ("custom") application template id — the
+    /// template the SSO wizard instantiates. It differs per cloud; Learn lists
+    /// global `8adf8e6e-…`, US government `4602d0b4-…` and China (21Vianet)
+    /// `5a532e38-…`. DoD is not listed separately: it is served by the US
+    /// Government cloud here, as it is for the login authority (an inference).
+    /// <https://learn.microsoft.com/powershell/module/microsoft.entra.applications/new-entraapplicationfromapplicationtemplate>
+    pub fn custom_app_template_id(&self) -> &'static str {
+        match self {
+            Self::Commercial => "8adf8e6e-67b2-4cf2-a259-e3dc5476c621",
+            Self::UsGov | Self::UsGovDod => "4602d0b4-76bb-404b-bca9-2652e1a39c6d",
+            Self::China => "5a532e38-1581-4918-9658-008dc27c1d68",
+        }
+    }
+
+    /// SAML IdP entity id / issuer root (no trailing slash); the issuer is
+    /// `{root}/{tenant_id}/`. Global and US Government use `sts.windows.net`
+    /// (<https://learn.microsoft.com/entra/identity-platform/reference-saml-tokens>).
+    /// For China (21Vianet) no Entra page states the SAML issuer; the only Learn
+    /// evidence is the Dynamics 365 performance-SDK guidance, which names
+    /// `https://sts.chinacloudapi.cn/` as the identity provider for 21Vianet
+    /// deployments.
+    pub fn saml_issuer_root(&self) -> &'static str {
+        match self {
+            Self::Commercial | Self::UsGov | Self::UsGovDod => "https://sts.windows.net",
+            Self::China => "https://sts.chinacloudapi.cn",
         }
     }
 
@@ -171,6 +221,54 @@ impl CloudEnvironment {
             Self::China => "https://api.loganalytics.azure.cn",
         }
     }
+
+    /// Microsoft Entra admin center origin for this cloud — the three hosts in
+    /// Learn's Entra FAQ firewall allow-list (`entra.microsoft.com`,
+    /// `entra.microsoft.us`, `entra.microsoftonline.cn`). DoD shares the US
+    /// Government admin center, as it does the login authority.
+    /// <https://learn.microsoft.com/entra/fundamentals/faq>
+    pub fn entra_admin_center(&self) -> &'static str {
+        match self {
+            Self::Commercial => "https://entra.microsoft.com",
+            Self::UsGov | Self::UsGovDod => "https://entra.microsoft.us",
+            Self::China => "https://entra.microsoftonline.cn",
+        }
+    }
+
+    /// PIM "My roles → Microsoft Entra roles" in this cloud's admin center —
+    /// where an operator activates an eligible directory role. The readiness
+    /// checklist links it under a role that reads Missing.
+    pub fn pim_my_roles_url(&self) -> String {
+        format!(
+            "{}/#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadmigratedroles",
+            self.entra_admin_center()
+        )
+    }
+}
+
+/// Serialized as [`CloudEnvironment::as_str`] — the one wire vocabulary for a
+/// cloud (a backup manifest's `cloud`, a restore plan's mismatch). Hand-written
+/// rather than a serde `rename_all` so `as_str`/`parse` stay the only
+/// definition of the labels.
+impl serde::Serialize for CloudEnvironment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Read back through [`CloudEnvironment::parse`], except that a blank value is
+/// rejected: `parse("")` means "unset, use the default" for the env var, but a
+/// manifest with an empty cloud must not quietly pass as commercial and slip
+/// past restore's cross-cloud check.
+impl<'de> serde::Deserialize<'de> for CloudEnvironment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let s = String::deserialize(deserializer)?;
+        if s.trim().is_empty() {
+            return Err(D::Error::custom("cloud is empty"));
+        }
+        Self::parse(&s).ok_or_else(|| D::Error::custom(format!("unknown cloud '{s}'")))
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +294,66 @@ mod tests {
             c.log_analytics_resource(),
             "https://api.loganalytics.azure.com"
         );
+        assert_eq!(
+            c.custom_app_template_id(),
+            "8adf8e6e-67b2-4cf2-a259-e3dc5476c621"
+        );
+        assert_eq!(c.saml_issuer_root(), "https://sts.windows.net");
+    }
+
+    #[test]
+    fn custom_app_template_id_is_the_documented_non_gallery_template_per_cloud() {
+        assert_eq!(
+            CloudEnvironment::Commercial.custom_app_template_id(),
+            "8adf8e6e-67b2-4cf2-a259-e3dc5476c621"
+        );
+        assert_eq!(
+            CloudEnvironment::UsGov.custom_app_template_id(),
+            "4602d0b4-76bb-404b-bca9-2652e1a39c6d"
+        );
+        assert_eq!(
+            CloudEnvironment::UsGovDod.custom_app_template_id(),
+            CloudEnvironment::UsGov.custom_app_template_id()
+        );
+        assert_eq!(
+            CloudEnvironment::China.custom_app_template_id(),
+            "5a532e38-1581-4918-9658-008dc27c1d68"
+        );
+    }
+
+    #[test]
+    fn select_prefers_env_then_baked_then_commercial() {
+        use CloudEnvironment::*;
+        assert_eq!(
+            CloudEnvironment::select(Some("usgov"), Some("china")),
+            UsGov
+        );
+        assert_eq!(CloudEnvironment::select(None, Some("china")), China);
+        assert_eq!(CloudEnvironment::select(Some("  "), Some("china")), China);
+        assert_eq!(
+            CloudEnvironment::select(Some("bogus"), Some("usgovdod")),
+            UsGovDod
+        );
+        assert_eq!(CloudEnvironment::select(None, Some("bogus")), Commercial);
+        assert_eq!(CloudEnvironment::select(None, None), Commercial);
+        assert_eq!(CloudEnvironment::select(Some(""), Some("")), Commercial);
+    }
+
+    #[test]
+    fn pim_link_stays_in_each_clouds_admin_center() {
+        for (cloud, host) in [
+            (CloudEnvironment::Commercial, "https://entra.microsoft.com/"),
+            (CloudEnvironment::UsGov, "https://entra.microsoft.us/"),
+            (CloudEnvironment::UsGovDod, "https://entra.microsoft.us/"),
+            (CloudEnvironment::China, "https://entra.microsoftonline.cn/"),
+        ] {
+            let url = cloud.pim_my_roles_url();
+            assert!(url.starts_with(host), "{cloud:?}: {url}");
+            assert!(
+                url.contains("Microsoft_Azure_PIMCommon"),
+                "{cloud:?}: {url}"
+            );
+        }
     }
 
     #[test]
@@ -207,6 +365,7 @@ mod tests {
         assert_eq!(g.keyvault_resource(), "https://vault.usgovcloudapi.net");
         assert_eq!(g.arm_resource(), "https://management.usgovcloudapi.net");
         assert_eq!(g.log_analytics_resource(), "https://api.loganalytics.us");
+        assert_eq!(g.saml_issuer_root(), "https://sts.windows.net");
     }
 
     #[test]
@@ -236,6 +395,7 @@ mod tests {
             c.log_analytics_resource(),
             "https://api.loganalytics.azure.cn"
         );
+        assert_eq!(c.saml_issuer_root(), "https://sts.chinacloudapi.cn");
     }
 
     #[test]
@@ -265,5 +425,26 @@ mod tests {
         ] {
             assert_eq!(CloudEnvironment::parse(c.as_str()).unwrap(), c);
         }
+    }
+
+    #[test]
+    fn serde_uses_the_as_str_vocabulary() {
+        use serde_json::json;
+        for c in [
+            CloudEnvironment::Commercial,
+            CloudEnvironment::UsGov,
+            CloudEnvironment::UsGovDod,
+            CloudEnvironment::China,
+        ] {
+            assert_eq!(serde_json::to_value(c).unwrap(), json!(c.as_str()));
+            let back: CloudEnvironment = serde_json::from_value(json!(c.as_str())).unwrap();
+            assert_eq!(back, c);
+        }
+        // Lenient on read, like `parse`.
+        let commercial: CloudEnvironment = serde_json::from_value(json!("Commercial")).unwrap();
+        assert_eq!(commercial, CloudEnvironment::Commercial);
+        // A blank label must not default to commercial, and an unknown one fails.
+        assert!(serde_json::from_value::<CloudEnvironment>(json!("")).is_err());
+        assert!(serde_json::from_value::<CloudEnvironment>(json!("mars")).is_err());
     }
 }

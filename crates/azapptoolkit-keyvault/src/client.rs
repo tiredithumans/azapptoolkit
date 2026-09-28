@@ -1,9 +1,12 @@
 //! Thin HTTP client over Key Vault's REST surface.
 //!
-//! Every request runs through the same retry + jitter pattern as
-//! [`azapptoolkit_graph::client`]; parity with the PS `Retry-Utility` is the
-//! point. We don't share code across crates (the Graph retry is tied to
-//! `GraphError`), but the knobs match.
+//! Retry budget, backoff, jitter and `Retry-After` handling come from the
+//! shared [`azapptoolkit_core::http_retry::with_retries`] loop — the same one
+//! the Graph, ARM and Exchange transports run — and the per-attempt HTTP
+//! status → [`KeyVaultError`] mapping is the one the ARM transport uses too,
+//! [`azapptoolkit_core::http_error::failed_response`]. Only each verb's
+//! [`RetryClass`] (`retry_class_for`, with its `set_secret` PUT decision) is
+//! local to this crate.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +16,26 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use azapptoolkit_core::http_retry::{
-    Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
-};
-use azapptoolkit_core::net::{redacted_host, same_origin};
+use azapptoolkit_core::http_error::{describe_error_chain, failed_response, send_failure};
+use azapptoolkit_core::http_retry::{Attempt, RetryClass, parse_retry_after_seconds, with_retries};
+use azapptoolkit_core::net::{endpoint_family, redacted_host, same_origin};
 use azapptoolkit_core::token::{BearerProvider, TokenError};
 
 use crate::error::{KeyVaultError, Result};
 use crate::models::{Paged, SecretItem, SecretSetRequest, SecretValue};
 
+/// Key Vault **data-plane** api-version (`{vault}.vault.azure.net/secrets`).
+/// The announced Key Vault api-version retirement (every version before
+/// 2026-02-01 on 2027-02-27) covers the control plane only; stable data-plane
+/// versions are explicitly unaffected. Source:
+/// <https://learn.microsoft.com/rest/api/keyvault/secrets/get-secret/get-secret>,
+/// <https://learn.microsoft.com/azure/key-vault/general/migrate-api-version>
+/// (reviewed 2026-09).
 pub const DEFAULT_API_VERSION: &str = "7.4";
+
+/// Defensive bound on `nextLink` paging: a misbehaving server returning a
+/// self-referencing `nextLink` must not page forever (far above any real vault).
+const MAX_PAGES: usize = 1000;
 
 pub struct KeyVaultClient {
     http: reqwest::Client,
@@ -54,6 +67,7 @@ impl KeyVaultClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             .build()
             .expect("reqwest client builds");
         Self {
@@ -70,9 +84,6 @@ impl KeyVaultClient {
     }
 
     pub async fn list_secrets(&self) -> Result<Vec<SecretItem>> {
-        // Defensive bound: a misbehaving server returning a self-referencing
-        // `nextLink` must not page forever (far above any real vault).
-        const MAX_PAGES: usize = 1000;
         let path = "/secrets".to_string();
         let mut paged: Paged<SecretItem> = self.get_json(&path).await?;
         let mut out = paged.value;
@@ -93,7 +104,11 @@ impl KeyVaultClient {
     pub async fn get_secret(&self, name: &str, version: Option<&str>) -> Result<SecretValue> {
         crate::validate::validate_secret_name(name)?;
         let path = match version {
-            Some(v) => format!("/secrets/{name}/{v}"),
+            Some(v) => {
+                // The version is a path segment too: validated like the name.
+                crate::validate::validate_secret_version(v)?;
+                format!("/secrets/{name}/{v}")
+            }
             None => format!("/secrets/{name}"),
         };
         self.get_json(&path).await
@@ -117,7 +132,7 @@ impl KeyVaultClient {
 
     async fn send_json<B, T>(&self, method: Method, path: &str, body: &B) -> Result<T>
     where
-        B: Serialize + ?Sized,
+        B: Serialize + ?Sized + Sync,
         T: DeserializeOwned,
     {
         let value =
@@ -139,8 +154,8 @@ impl KeyVaultClient {
     }
 
     /// Unified transport for both path-relative and absolute (`nextLink`)
-    /// requests: one retry + jitter + `Retry-After` loop mapping HTTP status →
-    /// typed `KeyVaultError`. `check_origin` rejects an off-vault URL before the
+    /// requests: one retry + jitter + `Retry-After` loop whose attempts map HTTP
+    /// status → typed `KeyVaultError` through the shared `failed_response`. `check_origin` rejects an off-vault URL before the
     /// bearer is attached (a `nextLink` is attacker-influenced server output);
     /// `attach_api_version` appends the `api-version` query, which a `nextLink`
     /// already carries and so is skipped for it.
@@ -172,7 +187,9 @@ impl KeyVaultClient {
 
         // Retry budget, backoff and `Retry-After` handling live in
         // `http_retry::with_retries`; this closure only classifies one attempt.
-        with_retries("key vault", retry_class_for(&method), |_| {
+        // Names the verb and endpoint family (ids masked, no query) in the log.
+        let label = format!("key vault {method} {}", endpoint_family(url));
+        with_retries(&label, retry_class_for(&method), |_| {
             let http = self.http.clone();
             let headers = headers.clone();
             let method = method.clone();
@@ -187,64 +204,24 @@ impl KeyVaultClient {
                 }
                 let resp = match req.send().await {
                     Ok(r) => r,
-                    // No response means no `Retry-After` to honor — the shared
-                    // loop falls back to jittered exponential backoff.
-                    Err(err) => {
-                        return Attempt::Retry {
-                            reason: RetryReason::Transient,
-                            retry_after_secs: None,
-                            err: KeyVaultError::Network(err.to_string()),
-                        };
-                    }
+                    Err(err) => return send_failure(&err),
                 };
                 let status = resp.status();
                 if status.is_success() {
                     return Attempt::Done(
                         resp.bytes()
                             .await
-                            .map_err(|e| KeyVaultError::Network(e.to_string())),
+                            .map_err(|e| KeyVaultError::Network(describe_error_chain(&e))),
                     );
                 }
+                // `Retry-After` first: reading the body consumes the response.
                 let retry_after = parse_retry_after_seconds(
                     resp.headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok()),
                 );
-                let body_text = resp.text().await.unwrap_or_default();
-                let code = status.as_u16();
-
-                let terminal = match code {
-                    401 => Some(KeyVaultError::Unauthorized),
-                    403 => Some(KeyVaultError::Forbidden(body_text.clone())),
-                    404 => Some(KeyVaultError::NotFound(body_text.clone())),
-                    c if (400..500).contains(&c) && c != 429 => Some(KeyVaultError::Api {
-                        status: code,
-                        body: body_text.clone(),
-                    }),
-                    _ => None,
-                };
-                if let Some(err) = terminal {
-                    return Attempt::Done(Err(err));
-                }
-
-                Attempt::Retry {
-                    reason: if code == 429 {
-                        RetryReason::Throttled
-                    } else {
-                        RetryReason::Transient
-                    },
-                    retry_after_secs: retry_after,
-                    err: if code == 429 {
-                        KeyVaultError::Throttled {
-                            retry_after_secs: retry_after,
-                        }
-                    } else {
-                        KeyVaultError::Server {
-                            status: code,
-                            body: body_text,
-                        }
-                    },
-                }
+                let raw_body = resp.text().await.unwrap_or_default();
+                failed_response(status.as_u16(), retry_after, &raw_body)
             }
         })
         .await
@@ -260,10 +237,18 @@ impl KeyVaultClient {
 
 /// The retry class for an HTTP verb.
 ///
-/// `GET`/`HEAD`/`PUT`/`DELETE` are idempotent by definition, so replaying one
-/// whose outcome is unknown is safe. `POST`/`PATCH` may have already committed
-/// — a Key Vault `setSecret` replayed after a 502 writes a second version — so
-/// only an explicit throttle is replayed for them.
+/// `GET`/`HEAD`/`DELETE` are idempotent. `PUT` is replayed too, but here that
+/// is a decision, not a definition: `PUT /secrets/{name}`
+/// ([`KeyVaultClient::set_secret`]) appends a new version on every call, so a
+/// replay after a 5xx or connection reset that followed a committed write
+/// leaves a second version. The replay carries the identical value, so the
+/// current version is still the right secret; the cost is one duplicate
+/// same-value version. Refusing the replay would be worse:
+/// `rotate_app_credential` rolls back the freshly minted app secret when this
+/// write fails, so a post-commit transient would leave the vault holding a
+/// credential Entra no longer accepts. `POST`/`PATCH` replay only an explicit
+/// throttle (the `addPassword` hazard documented on
+/// `azapptoolkit_core::http_retry::RetryClass`).
 fn retry_class_for(method: &Method) -> RetryClass {
     match *method {
         Method::GET | Method::HEAD | Method::PUT | Method::DELETE => RetryClass::Idempotent,
@@ -274,8 +259,12 @@ fn retry_class_for(method: &Method) -> RetryClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SecretAttributesRequest;
     use azapptoolkit_core::token::StaticTokenProvider;
-    use wiremock::matchers::{header, method, path, query_param};
+    use chrono::{TimeZone, Utc};
+    use wiremock::matchers::{
+        body_json, header, method, path, query_param, query_param_is_missing,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_client(base: &str) -> KeyVaultClient {
@@ -389,5 +378,208 @@ mod tests {
         let c = make_client(&server.uri());
         let err = c.get_secret("foo", None).await.unwrap_err();
         assert!(matches!(err, KeyVaultError::Unauthorized));
+    }
+
+    /// Key Vault's `nextLink` already carries `api-version`; following it must
+    /// not append a second one (a duplicated query parameter is rejected).
+    #[tokio::test]
+    async fn list_secrets_follows_next_link_without_doubling_api_version() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .and(query_param("api-version", DEFAULT_API_VERSION))
+            .and(query_param_is_missing("$skiptoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {"id": "https://v.vault.azure.net/secrets/one"},
+                    {"id": "https://v.vault.azure.net/secrets/two"}
+                ],
+                "nextLink": format!("{uri}/secrets?$skiptoken=p2&api-version={DEFAULT_API_VERSION}")
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .and(query_param("$skiptoken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"id": "https://v.vault.azure.net/secrets/three"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let items = make_client(&uri).list_secrets().await.unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2].name(), Some("three"));
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 2);
+        let api_versions = reqs[1]
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "api-version")
+            .count();
+        assert_eq!(api_versions, 1, "follow URL: {}", reqs[1].url);
+    }
+
+    /// A `nextLink` is attacker-influenced server output: the vault bearer
+    /// must never follow it to another origin.
+    #[tokio::test]
+    async fn refuses_off_origin_next_link() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"id": "https://v.vault.azure.net/secrets/one"}],
+                "nextLink": "https://evil.example.com/secrets?token=steal"
+            })))
+            .mount(&server)
+            .await;
+
+        let err = make_client(&server.uri()).list_secrets().await.unwrap_err();
+        assert!(matches!(err, KeyVaultError::Protocol(_)), "got {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("evil.example.com"), "got {msg}");
+        assert!(!msg.contains("token=steal"), "leaked query: {msg}");
+        // Only the first page was requested; nothing was sent off-origin.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// The rotation write (`rotate_app_credential`) mirrors the app secret's
+    /// expiry into the vault: `exp` must be Unix seconds under `attributes`.
+    #[tokio::test]
+    async fn set_secret_sends_exp_as_unix_seconds_under_attributes() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/secrets/rotated"))
+            .and(query_param("api-version", DEFAULT_API_VERSION))
+            // 2026-01-01T00:00:00Z in seconds — not milliseconds, not RFC 3339.
+            .and(body_json(serde_json::json!({
+                "value": "v",
+                "attributes": {"enabled": true, "exp": 1767225600}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": "v",
+                "id": "https://v.vault.azure.net/secrets/rotated/1"
+            })))
+            .mount(&server)
+            .await;
+        let req = SecretSetRequest {
+            value: "v".into(),
+            content_type: None,
+            tags: None,
+            attributes: Some(SecretAttributesRequest {
+                enabled: Some(true),
+                expires: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+                not_before: None,
+            }),
+        };
+        let resp = make_client(&server.uri())
+            .set_secret("rotated", &req)
+            .await
+            .unwrap();
+        assert_eq!(resp.value, "v");
+    }
+
+    /// A self-referencing `nextLink` stops at `MAX_PAGES` instead of paging
+    /// forever.
+    #[tokio::test]
+    async fn list_secrets_stops_at_the_page_cap() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [],
+                "nextLink": format!("{uri}/secrets")
+            })))
+            .mount(&server)
+            .await;
+
+        let err = make_client(&uri).list_secrets().await.unwrap_err();
+        assert!(
+            matches!(&err, KeyVaultError::Protocol(m) if m.contains("exceeded")),
+            "got {err:?}"
+        );
+        // The first page plus MAX_PAGES - 1 follows: the cap is checked before
+        // the MAX_PAGES-th follow is sent.
+        assert_eq!(server.received_requests().await.unwrap().len(), MAX_PAGES);
+    }
+
+    #[test]
+    fn retry_class_for_replays_put_but_not_post_or_patch() {
+        for m in [Method::GET, Method::HEAD, Method::PUT, Method::DELETE] {
+            assert_eq!(retry_class_for(&m), RetryClass::Idempotent, "{m}");
+        }
+        for m in [Method::POST, Method::PATCH] {
+            assert_eq!(retry_class_for(&m), RetryClass::NonIdempotent, "{m}");
+        }
+    }
+
+    /// The deliberate `PUT` replay (see `retry_class_for`): a 502 after the
+    /// write is replayed with a byte-identical body, so any duplicate version
+    /// holds the same value.
+    #[tokio::test]
+    async fn set_secret_replays_the_identical_value_after_a_502() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/secrets/s"))
+            .respond_with(ResponseTemplate::new(502).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/secrets/s"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": "v",
+                "id": "https://v.vault.azure.net/secrets/s/1"
+            })))
+            .mount(&server)
+            .await;
+        let req = SecretSetRequest {
+            value: "v".into(),
+            content_type: None,
+            tags: None,
+            attributes: None,
+        };
+        make_client(&server.uri())
+            .set_secret("s", &req)
+            .await
+            .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(reqs.iter().all(|r| r.method == wiremock::http::Method::PUT));
+        assert_eq!(reqs[0].body, reqs[1].body);
+    }
+
+    #[tokio::test]
+    async fn get_secret_reads_a_specific_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secrets/my-secret/0123456789abcdef0123456789abcdef"))
+            .and(query_param("api-version", DEFAULT_API_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": "older",
+                "id": "https://v.vault.azure.net/secrets/my-secret/0123456789abcdef0123456789abcdef"
+            })))
+            .mount(&server)
+            .await;
+        let sv = make_client(&server.uri())
+            .get_secret("my-secret", Some("0123456789abcdef0123456789abcdef"))
+            .await
+            .unwrap();
+        assert_eq!(sv.value, "older");
+    }
+
+    /// `version` is spliced into the request path, so a traversal value is
+    /// refused before any request (and bearer) leaves the process.
+    #[tokio::test]
+    async fn get_secret_refuses_a_malformed_version_before_any_request() {
+        let server = MockServer::start().await;
+        let err = make_client(&server.uri())
+            .get_secret("my-secret", Some("../keys/x"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, KeyVaultError::InvalidName(_)), "got {err:?}");
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

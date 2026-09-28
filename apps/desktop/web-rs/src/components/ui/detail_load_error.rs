@@ -1,5 +1,7 @@
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
+
+use super::FormError;
 
 use azapptoolkit_dto::UiError;
 
@@ -13,6 +15,10 @@ use azapptoolkit_dto::UiError;
 /// detail panes, the tenant list views, and the Home dashboard cards all route
 /// through it (each passing its own `on_retry` and a context `class`), replacing
 /// the ad-hoc `.app-list__error` / `card_error` variants.
+///
+/// The message renders through `FormError` (`role="alert"`), so a load that
+/// fails after the pane is already on screen is announced; the muted `[code]`
+/// and the Retry button sit outside the live region on purpose.
 #[component]
 pub fn DetailLoadError(
     error: UiError,
@@ -32,7 +38,7 @@ pub fn DetailLoadError(
     }
     view! {
         <div class=classes>
-            <Body1 class="form-error">{message}</Body1>
+            <FormError>{message}</FormError>
             {(!code.is_empty())
                 .then(|| view! { <span class="ui-load-error__code">{format!("[{code}]")}</span> })}
             <Button

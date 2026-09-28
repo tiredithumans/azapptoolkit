@@ -43,6 +43,12 @@ pub struct CreateApplicationRequest {
     pub sign_in_audience: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Free-form `tags` written at creation. The DR restore stamps its restore
+    /// marker here — in the create POST itself, so an app can never exist
+    /// without it — which is what lets a re-run find the apps it already
+    /// created ([`GraphClient::find_applications_by_tag`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Partial update for `PATCH /applications/{id}`. Only fields set on the
@@ -198,7 +204,7 @@ fn default_application_select() -> &'static [&'static str] {
 /// (`identifierUris`/`api`) blocks the per-tab paths fetch separately, so one
 /// GET (or one `$batch` sub-request) captures an app's whole configuration.
 /// Shared by the single and batched backup reads so their projections can't drift.
-const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
+pub(super) const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
 
@@ -318,6 +324,31 @@ impl GraphClient {
         self.batch_get_json(&urls).await
     }
 
+    /// Batched `GET /applications/{id}` projected to what the bulk
+    /// expired-secret sweep reads (`id,appId,displayName,passwordCredentials`) —
+    /// the sweep's **selection** read, so a "Fix all N" fetches exactly the
+    /// selected apps in one `$batch` POST per 20 ids instead of walking every
+    /// page of the tenant and discarding all but the selection. The projection
+    /// mirrors the sweep's tenant-walk `$select` so both read paths see the same
+    /// fields. One `Result<Application>` per input id **in order**; a per-id
+    /// failure is one `Err` in the vec, a whole-batch failure is the outer `Err`
+    /// so the caller can fall back to per-id reads.
+    pub async fn batch_get_applications_credentials(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Result<Application>>> {
+        let urls: Vec<String> = object_ids
+            .iter()
+            .map(|id| {
+                batch_sub_url(
+                    &format!("/applications/{id}"),
+                    &[("$select", "id,appId,displayName,passwordCredentials")],
+                )
+            })
+            .collect();
+        self.batch_get_json(&urls).await
+    }
+
     /// Fetches every application in the tenant by following `@odata.nextLink`
     /// until exhausted. A safety `cap` argument prevents unbounded memory in
     /// pathological tenants; pass `None` to disable.
@@ -385,7 +416,7 @@ impl GraphClient {
         let path = format!("/applications/{object_id}/owners");
         let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
         let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
-        self.collect_all_pages(page).await
+        self.collect_all_pages(page, false).await
     }
 
     pub async fn create_application(&self, body: &CreateApplicationRequest) -> Result<Application> {
@@ -450,6 +481,25 @@ impl GraphClient {
         Ok(page.items.into_iter().next())
     }
 
+    /// Applications carrying the exact `tag` (`tags/any(t:t eq '…')`, a basic
+    /// query — no `ConsistencyLevel` needed). One page capped at 10: callers use
+    /// this to find an app they tagged themselves, so more than one hit is
+    /// already an anomaly they must refuse, not something to page through.
+    /// Selects `createdDateTime` so a caller can prove a hit is its own.
+    pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<Application>> {
+        let filter = format!("tags/any(t:t eq '{}')", escape_odata(tag));
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            (
+                "$select",
+                "id,appId,displayName,createdDateTime,passwordCredentials",
+            ),
+            ("$top", "10"),
+        ];
+        let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
+        Ok(page.items)
+    }
+
     /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw
     /// JSON. `identifierUris` / `web` / `spa` aren't on the typed [`Application`]
     /// (and aren't in the list `$select`), so the SSO detail tab reads them
@@ -458,16 +508,8 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        let path = format!("/applications/{object_id}");
-        let params: [(&str, &str); 1] = [("$select", "id,appId,identifierUris,web,spa")];
-        match self
-            .get_json::<serde_json::Value>(&path, &params, false)
+        self.get_application_fields_raw(object_id, "id,appId,identifierUris,web,spa")
             .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 
     /// GET `/applications/{id}` selecting only the Authentication-tab fields, as
@@ -481,19 +523,22 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        let path = format!("/applications/{object_id}");
-        let params: [(&str, &str); 1] = [(
-            "$select",
+        self.get_application_fields_raw(
+            object_id,
             "id,appId,isFallbackPublicClient,web,spa,publicClient",
-        )];
-        match self
-            .get_json::<serde_json::Value>(&path, &params, false)
-            .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        )
+        .await
+    }
+
+    /// GET `/applications/{id}` with the given `$select`, as raw JSON; `Ok(None)`
+    /// for 404. The one body behind the raw per-tab field readers above.
+    async fn get_application_fields_raw(
+        &self,
+        object_id: &str,
+        select: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let path = format!("/applications/{object_id}");
+        self.get_json_optional(&path, &[("$select", select)]).await
     }
 
     /// GET `/applications/{id}` selecting only the Expose-an-API fields
@@ -507,14 +552,7 @@ impl GraphClient {
     ) -> Result<Option<ApplicationExposeApi>> {
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "id,appId,identifierUris,api")];
-        match self
-            .get_json::<ApplicationExposeApi>(&path, &params, false)
-            .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.get_json_optional(&path, &params).await
     }
 
     /// PATCH `/applications/{id}` with Expose-an-API fields. Each array Graph
@@ -535,8 +573,9 @@ impl GraphClient {
 
     /// Instantiates a non-gallery application from an application template,
     /// creating a paired application + service principal in one call. The SSO
-    /// wizard always uses the generic custom template
-    /// (`8adf8e6e-67b2-4cf2-a259-e3dc5476c621`). Newly created objects replicate
+    /// wizard uses the configured cloud's generic custom template
+    /// (`CloudEnvironment::custom_app_template_id` in `azapptoolkit-core`; the
+    /// id differs per sovereign cloud). Newly created objects replicate
     /// asynchronously, so an immediate follow-up read/PATCH can 404 briefly —
     /// callers wrap subsequent steps in a `NotFound`-only retry.
     pub async fn instantiate_application_template(
@@ -572,7 +611,8 @@ impl GraphClient {
         let page: Paged<ApplicationTemplate> = self
             .get_json_prefer("/applicationTemplates", &params, "odata.maxpagesize=2800")
             .await?;
-        self.collect_all_pages(page).await
+        // `get_json_prefer` issues page 1 as a plain read; so do the rest.
+        self.collect_all_pages(page, false).await
     }
 
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
@@ -580,7 +620,7 @@ impl GraphClient {
     /// `spa.redirectUris`). Kept separate from the typed `AppPatch` so the
     /// widely-used struct stays untouched. Accepts any `Serialize` body (an
     /// `ApplicationSsoPatch` or a `serde_json::Value`).
-    pub async fn patch_application_web<B: serde::Serialize>(
+    pub async fn patch_application_web<B: serde::Serialize + Sync>(
         &self,
         object_id: &str,
         body: &B,

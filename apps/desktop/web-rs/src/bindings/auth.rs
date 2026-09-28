@@ -1,14 +1,15 @@
-//! Auth IPC bindings: `sign_in`, `sign_out`, `current_tenants`.
+//! Auth IPC bindings: sign-in, session restore/refresh, sign-out, re-auth and
+//! scope consent.
 //!
 //! Tauri's invoke layer expects camelCase keys for command args (the macro
 //! converts them to the snake_case Rust parameter names), so the `Args`
 //! structs use `#[serde(rename_all = "camelCase")]`.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
-use super::{SignInOutcome, TenantContext};
+use super::{SignInOutcome, TenantArg, TenantContext};
 
 pub async fn sign_in() -> Result<SignInOutcome, UiError> {
     invoke_result("sign_in", ()).await
@@ -21,6 +22,10 @@ pub async fn sign_in() -> Result<SignInOutcome, UiError> {
 /// here, the operator signed out, or the stored refresh token expired or was
 /// revoked); the backend deliberately reports every such case this way, so a
 /// caller shows the normal sign-in card rather than an error.
+///
+/// `Err` means exactly one thing: Entra ID was unreachable (code `network`).
+/// The stored session is intact, so the caller offers a Retry
+/// (`views::sign_in::attempt_restore`).
 pub async fn restore_session() -> Result<Option<TenantContext>, UiError> {
     invoke_result("restore_session", ()).await
 }
@@ -34,18 +39,12 @@ pub async fn sign_out(tenant: &TenantContext) -> Result<(), UiError> {
     invoke_result("sign_out", SignOutArgs { tenant }).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RefreshSessionArgs<'a> {
-    tenant_id: &'a str,
-}
-
 /// Re-mints the signed-in account's tokens in place — drops the cached access
 /// tokens and re-acquires them via the stored refresh token — so a role
 /// activated after sign-in (e.g. a PIM "Exchange Administrator" role) takes
 /// effect without a full sign-out/sign-in. The session (refresh token) is kept.
 pub async fn refresh_session(tenant_id: &str) -> Result<(), UiError> {
-    invoke_result("refresh_session", RefreshSessionArgs { tenant_id }).await
+    invoke_result("refresh_session", TenantArg { tenant_id }).await
 }
 
 /// Interactively re-authenticates the signed-in account in place — one browser
@@ -79,8 +78,11 @@ pub async fn request_scope_consent(tenant_id: &str, feature: &str) -> Result<(),
     invoke_result("request_scope_consent", ConsentArgs { tenant_id, feature }).await
 }
 
-/// Cheap probe used by the App shell to short-circuit when the WASM bundle is
-/// loaded outside the Tauri webview (e.g. during a `trunk serve` smoke run).
-pub fn is_tauri_runtime() -> bool {
-    tauri_sys::core::is_tauri()
+/// Completes a Conditional Access step-up (MFA, registration, an external
+/// challenge) for a feature's scopes — the recovery for a command that failed
+/// with the `interaction_required` code. One browser round trip with
+/// `prompt=login`, pinned to the signed-in account; the session is never
+/// dropped. Takes the same feature keys as [`request_scope_consent`].
+pub async fn request_scope_step_up(tenant_id: &str, feature: &str) -> Result<(), UiError> {
+    invoke_result("request_scope_step_up", ConsentArgs { tenant_id, feature }).await
 }

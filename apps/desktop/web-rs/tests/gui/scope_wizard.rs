@@ -18,7 +18,11 @@
 //!   mechanisms — or two *levels* of the Selected family — hides scoping
 //!   entirely and grants org-wide.
 //! - **Pre-seed:** opening with a permission pre-selected jumps to the
-//!   choose-access step.
+//!   choose-access step; a preseed the wizard cannot scope (e.g. `Sites.*` on
+//!   Office 365 SharePoint Online) is described and granted org-wide.
+//! - **Reversible:** every mechanism offers a scoped radio above its target
+//!   panel, so picking "Org-wide" on a SharePoint or item cart can be undone on
+//!   the same step.
 //! - **Review:** step 3 names the principal, the resolved targets and the
 //!   org-wide grants the apply will strip — before it runs.
 #![cfg(target_arch = "wasm32")]
@@ -125,52 +129,6 @@ fn graph_app_selection(value: &str) -> PickerSelection {
     }
 }
 
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-fn next_enabled() -> bool {
-    ts::query_all("button").iter().any(|el| {
-        el.text_content().unwrap_or_default().trim() == "Next"
-            && el
-                .dyn_ref::<web_sys::HtmlButtonElement>()
-                .map(|b| !b.disabled())
-                .unwrap_or(false)
-    })
-}
-
-/// Toggle the catalog row whose permission value matches `value` exactly (the
-/// `<strong>` head), clicking its cart checkbox.
-fn select_permission(value: &str) {
-    for row in ts::query_all(".permission-picker__row") {
-        let head = row
-            .query_selector(".permission-picker__row-head strong")
-            .ok()
-            .flatten();
-        let is_match = head
-            .map(|h| h.text_content().unwrap_or_default().trim() == value)
-            .unwrap_or(false);
-        if is_match {
-            let cb = row
-                .query_selector(".permission-picker__check")
-                .ok()
-                .flatten()
-                .expect("permission row has a checkbox");
-            let el: web_sys::HtmlElement = cb.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no permission row for `{value}`");
-}
-
 /// Mount the wizard (open) for an app-registration target, with `preseed`.
 fn mount_wizard(preseed: Option<PickerSelection>) -> ts::Mounted {
     ts::reset();
@@ -206,13 +164,13 @@ async fn step1_hint_explains_disabled_next_until_a_permission_is_picked() {
     ts::wait_for(|| ts::body_contains("Mail.Read")).await;
     // Empty cart: Next is disabled and a hint says why (the apply-time validation
     // message is unreachable from step 1, so without this the button is mute).
-    assert!(!next_enabled());
+    assert!(!ts::button_labelled_enabled("Next"));
     assert!(ts::body_contains(
         "Select at least one permission to continue."
     ));
     // Picking one clears the hint and enables Next.
-    select_permission("Mail.Read");
-    ts::wait_for(next_enabled).await;
+    ts::select_picker_permission("Mail.Read");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
     assert!(!ts::body_contains(
         "Select at least one permission to continue."
     ));
@@ -230,19 +188,19 @@ async fn exchange_scoped_path_declares_then_scopes_without_orgwide() {
 
     // Step 1 — pick the three mail permissions from the catalog.
     ts::wait_for(|| ts::body_contains("Mail.Send")).await;
-    select_permission("Mail.Read");
-    select_permission("Mail.ReadWrite");
-    select_permission("Mail.Send");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Mail.Read");
+    ts::select_picker_permission("Mail.ReadWrite");
+    ts::select_picker_permission("Mail.Send");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // Step 2 — managed mailboxes (default); wait for the group to resolve.
     ts::wait_for(|| ts::body_contains("alice@contoso.com")).await;
-    click_button("Next");
+    ts::click_button_labelled("Next");
 
     // Step 3 — review, then grant.
     ts::wait_for(|| ts::body_contains("not have org-wide mailbox access")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("grant_exchange_mailbox_access") == 1).await;
 
     assert_eq!(ts::call_count("declare_app_permission"), 3);
@@ -271,9 +229,9 @@ async fn managed_group_panel_flags_a_not_yet_created_group() {
     ts::mock_ok("list_exchange_scope_group", &missing_scope_group());
 
     ts::wait_for(|| ts::body_contains("Mail.Read")).await;
-    select_permission("Mail.Read");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Mail.Read");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // The panel resolves the (missing) group and announces it will be created.
     ts::wait_for(|| ts::body_contains("Will be created")).await;
@@ -288,9 +246,9 @@ async fn managed_group_panel_marks_an_existing_group_and_lists_members() {
     ts::mock_ok("list_exchange_scope_group", &populated_scope_group());
 
     ts::wait_for(|| ts::body_contains("Mail.Read")).await;
-    select_permission("Mail.Read");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Mail.Read");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("alice@contoso.com")).await;
     assert!(ts::body_contains("Exists"));
@@ -304,9 +262,9 @@ async fn orgwide_option_grants_without_scoping() {
     ts::mock_ok("list_exchange_scope_group", &populated_scope_group());
 
     ts::wait_for(|| ts::body_contains("Mail.Read")).await;
-    select_permission("Mail.Read");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Mail.Read");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // Step 2 — the org-wide radio is the last of the three Exchange mode options.
     ts::wait_for(|| ts::query_all(".radio-row input").len() == 3).await;
@@ -314,10 +272,10 @@ async fn orgwide_option_grants_without_scoping() {
     let orgwide: web_sys::HtmlElement = radios[radios.len() - 1].clone().unchecked_into();
     orgwide.click();
     ts::tick().await;
-    click_button("Next");
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("EVERY resource")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("grant_single_permission") == 1).await;
 
     assert_eq!(ts::call_count("grant_exchange_mailbox_access"), 0);
@@ -331,9 +289,9 @@ async fn sharepoint_path_converts_to_sites_selected() {
 
     // Step 1 — pick Sites.Read.All from the catalog.
     ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
-    select_permission("Sites.Read.All");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Sites.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // Step 2 — SharePoint site selection.
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
@@ -341,11 +299,11 @@ async fn sharepoint_path_converts_to_sites_selected() {
         ".modal textarea",
         "https://contoso.sharepoint.com/sites/Marketing",
     );
-    click_button("Next");
+    ts::click_button_labelled("Next");
 
     // Step 3 — review, then grant.
     ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("convert_site_access_to_selected") == 1).await;
 
     // SharePoint scoping only — never the Exchange RBAC path.
@@ -378,17 +336,17 @@ async fn mixed_selection_grants_org_wide_only() {
     ts::mock_ok("grant_single_permission", &fixtures::grant_result());
 
     ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
-    select_permission("Mail.Read");
-    select_permission("Sites.Read.All");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Mail.Read");
+    ts::select_picker_permission("Sites.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // Step 2 — no scoped targets; the note explains why, and org-wide is forced.
     ts::wait_for(|| ts::body_contains("can't be scoped together")).await;
-    click_button("Next");
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("EVERY resource")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("grant_single_permission") == 2).await;
 
     assert_eq!(ts::call_count("grant_exchange_mailbox_access"), 0);
@@ -420,9 +378,9 @@ async fn selected_item_path_grants_against_the_resolved_folder() {
     ts::mock_ok("grant_selected_item_access", &selected_item_scope_result());
 
     ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
-    select_permission("Files.SelectedOperations.Selected");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     // Step 2 offers the item panel, NOT the "can't be scoped" fallback.
     ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
@@ -443,9 +401,9 @@ async fn selected_item_path_grants_against_the_resolved_folder() {
         "a folder reads as a folder, not a file"
     );
 
-    click_button("Next");
+    ts::click_button_labelled("Next");
     ts::wait_for(|| ts::body_contains("permission inheritance is broken")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("grant_selected_item_access") == 1).await;
 
     // The item path only — never the site conversion or the org-wide grant.
@@ -487,9 +445,9 @@ async fn a_target_the_permission_cannot_reach_is_flagged_before_granting() {
     );
 
     ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
-    select_permission("Files.SelectedOperations.Selected");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
     ts::set_textarea_value(
@@ -519,10 +477,10 @@ async fn two_selected_levels_in_one_cart_fall_back_to_org_wide() {
     ts::mock_ok("grant_single_permission", &fixtures::grant_result());
 
     ts::wait_for(|| ts::body_contains("Lists.SelectedOperations.Selected")).await;
-    select_permission("Files.SelectedOperations.Selected");
-    select_permission("Lists.SelectedOperations.Selected");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Files.SelectedOperations.Selected");
+    ts::select_picker_permission("Lists.SelectedOperations.Selected");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("can't be scoped together")).await;
     assert!(
@@ -543,16 +501,16 @@ async fn the_review_step_names_the_principal_the_targets_and_what_gets_removed()
     ts::mock_ok("convert_site_access_to_selected", &site_scope_result());
 
     ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
-    select_permission("Sites.Read.All");
-    ts::wait_for(next_enabled).await;
-    click_button("Next");
+    ts::select_picker_permission("Sites.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(
         ".modal textarea",
         "https://contoso.sharepoint.com/sites/Marketing",
     );
-    click_button("Next");
+    ts::click_button_labelled("Next");
 
     ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
     // The principal, by appId — two apps can share a display name, and this is
@@ -566,4 +524,94 @@ async fn the_review_step_names_the_principal_the_targets_and_what_gets_removed()
     ));
     // The strip, stated before the grant rather than reported after it.
     assert!(ts::body_contains("REMOVES any org-wide"));
+}
+
+/// The step-2 access-mode radios only — the site and item panels carry their own
+/// read/write `.radio-row` radios, so counting rows would mix the two.
+fn scope_mode_radios() -> Vec<web_sys::HtmlElement> {
+    ts::query_all("input[name='scope-mode']")
+        .into_iter()
+        .map(|el| el.unchecked_into())
+        .collect()
+}
+
+#[wasm_bindgen_test]
+async fn orgwide_is_reversible_on_a_sharepoint_cart() {
+    // The org-wide radio used to be the only one on a SharePoint cart: once
+    // clicked, the site panel vanished and nothing on the step brought it back.
+    let _m = mount_wizard(None);
+
+    ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
+    ts::select_picker_permission("Sites.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+
+    ts::wait_for(|| ts::body_contains("Site URLs")).await;
+    assert_eq!(scope_mode_radios().len(), 2);
+    assert!(ts::body_contains("Specific sites"));
+
+    scope_mode_radios().last().unwrap().click();
+    ts::tick().await;
+    assert!(!ts::body_contains("Site URLs"));
+    assert!(ts::body_contains("reach every resource"));
+
+    scope_mode_radios()[0].click();
+    ts::wait_for(|| ts::body_contains("Site URLs")).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Marketing",
+    );
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+}
+
+#[wasm_bindgen_test]
+async fn orgwide_is_reversible_on_an_item_cart() {
+    let _m = mount_wizard(None);
+
+    ts::wait_for(|| ts::body_contains("Files.SelectedOperations.Selected")).await;
+    ts::select_picker_permission("Files.SelectedOperations.Selected");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+    assert_eq!(scope_mode_radios().len(), 2);
+    assert!(ts::body_contains("Specific libraries, folders & files"));
+
+    scope_mode_radios().last().unwrap().click();
+    ts::tick().await;
+    assert!(!ts::body_contains("Library, folder or file URLs"));
+    assert!(ts::body_contains("reach every resource"));
+
+    scope_mode_radios()[0].click();
+    ts::wait_for(|| ts::body_contains("Library, folder or file URLs")).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_preseed_the_wizard_cannot_scope_is_granted_org_wide() {
+    // A `Sites.Read.All` held on Office 365 SharePoint Online is not something
+    // the site conversion can confine. Seeded anyway, it used to keep the scoped
+    // default: the review described a scoped grant and "Grant access" silently
+    // did nothing. It must read — and grant — as org-wide.
+    let _m = mount_wizard(Some(PickerSelection {
+        resource_app_id: azapptoolkit_core::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID.to_string(),
+        kind: PermissionKind::Application,
+        permission_id: "spo-sites-read-all".to_string(),
+        permission_value: "Sites.Read.All".to_string(),
+    }));
+    ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+
+    ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
+    assert!(ts::body_contains("can't be scoped together"));
+    assert!(!ts::body_contains("Site URLs"));
+    ts::click_button_labelled("Next");
+
+    ts::wait_for(|| ts::body_contains("EVERY resource")).await;
+    assert!(
+        !ts::body_contains("REMOVES any org-wide"),
+        "an org-wide grant strips nothing, so the review must not say it does"
+    );
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("grant_single_permission") == 1).await;
+    assert_eq!(ts::call_count("convert_site_access_to_selected"), 0);
 }

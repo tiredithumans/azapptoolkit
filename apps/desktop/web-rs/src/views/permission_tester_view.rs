@@ -14,24 +14,28 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
-use wasm_bindgen::JsCast;
 
-use crate::bindings::permission_tester::{self, PermissionTestResult};
+use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, FormError, SectionHeader, TabBar, TabBarItem,
+};
+use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_deferred_blur::use_deferred_blur;
 use crate::state::use_session;
 
 use crate::util::no_tenant;
 
-/// Maps a verdict string from [`PermissionTestResult`] to (badge class, label).
-fn verdict_badge(verdict: &str) -> (&'static str, &'static str) {
+/// Maps a [`PermissionTestResult`] verdict to (badge tone, label).
+/// Exhaustive on purpose: a new verdict must be given its own badge.
+fn verdict_badge(verdict: AccessVerdict) -> (BadgeTone, &'static str) {
     match verdict {
-        "org_wide" => ("badge badge--warning", "Has access — organization-wide"),
-        "scoped" => ("badge badge--ok", "Has access — scoped"),
-        "no_access" => ("badge", "No access"),
-        _ => ("badge badge--warning", "Couldn't determine"),
+        AccessVerdict::OrgWide => (BadgeTone::Warning, "Has access — organization-wide"),
+        AccessVerdict::Scoped => (BadgeTone::Ok, "Has access — scoped"),
+        AccessVerdict::NoAccess => (BadgeTone::Neutral, "No access"),
+        AccessVerdict::Unknown => (BadgeTone::Warning, "Couldn't determine"),
     }
 }
 
@@ -68,6 +72,9 @@ pub fn PermissionTesterView() -> impl IntoView {
         app_id.set(String::new());
         app_query.set(String::new());
         app_focused.set(false);
+        // Tenant A's mailbox / site URL mean nothing in tenant B.
+        mailbox.set(String::new());
+        site_url.set(String::new());
         result.set(None);
         error.set(None);
         needs_consent.set(false);
@@ -108,7 +115,7 @@ pub fn PermissionTesterView() -> impl IntoView {
     // (all three are service principals testable by appId). Returns
     // `(app_id, display_name, kind)`, deduped by appId (an app registration and
     // its enterprise-app SP share one appId; the test verdict is the same).
-    let debounced_query = use_debounced(app_query.into(), 200);
+    let debounced_query = use_debounced(app_query.into(), TYPEAHEAD_DEBOUNCE_MS);
     let app_results = LocalResource::new(move || {
         let t = tenant.get();
         let q = debounced_query.get();
@@ -146,6 +153,19 @@ pub fn PermissionTesterView() -> impl IntoView {
     // the input's keydown handler can pick the selected row synchronously.
     Effect::new(move |_| {
         if let Some(rows) = app_results.get() {
+            // A seeded selection leaves the field reading the bare appId; the
+            // search for it resolves the name by exact lookup, so show that
+            // instead. Guarded on the seeded state (field text == selected
+            // appId) so a manual query is never overwritten.
+            let seeded = app_id.get_untracked();
+            if !seeded.is_empty()
+                && app_query.with_untracked(|q| q.trim().eq_ignore_ascii_case(&seeded))
+                && let Some((_, name, _)) = rows
+                    .iter()
+                    .find(|(id, _, _)| id.eq_ignore_ascii_case(&seeded))
+            {
+                app_query.set(name.clone());
+            }
             rows_now.set(rows.to_vec());
             sel.set(0);
         }
@@ -229,10 +249,14 @@ pub fn PermissionTesterView() -> impl IntoView {
                     result.set(Some(res));
                 }
                 Err(e) => {
-                    if e.code == "consent_required" {
+                    if e.is_consent_required() {
                         needs_consent.set(true);
                     }
-                    error.set(Some(e.message));
+                    // A dead session gets the Re-authenticate lever, not a
+                    // dead-end line; consent keeps this view's own button.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
             busy.set(false);
@@ -258,7 +282,9 @@ pub fn PermissionTesterView() -> impl IntoView {
                 }
                 Err(e) => {
                     busy.set(false);
-                    error.set(Some(e.message));
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
         });
@@ -303,74 +329,79 @@ pub fn PermissionTesterView() -> impl IntoView {
                         }
                         on:keydown=on_picker_keydown
                         on:focus=move |_| app_focused.set(true)
-                        on:blur=move |_| {
-                            // Delay closing so a click on a result registers first
-                            // (the click fires after blur). Mirrors GlobalSearch.
-                            if let Some(w) = web_sys::window() {
-                                let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
-                                    app_focused.set(false)
-                                });
-                                let _ = w
-                                    .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                        cb.unchecked_ref::<js_sys::Function>(),
-                                        150,
-                                    );
-                            }
-                        }
+                        // Delay closing so a click on a result registers first.
+                        on:blur=use_deferred_blur(app_focused)
                     />
                     {move || {
                         if !app_focused.get() || app_query.get().trim().is_empty() {
                             return ().into_any();
                         }
+                        // The listbox holds only options; the loading and empty
+                        // text sits in a sibling `role="status"` region so it is
+                        // never announced as if it were a result (same shape as
+                        // GlobalSearch).
                         view! {
-                            <div class="tester-picker__results" role="listbox" id="tester-listbox">
-                                <Suspense fallback=move || {
-                                    view! {
-                                        <div class="tester-picker__empty">"Searching…"</div>
-                                    }
-                                }>
-                                    {move || Suspend::new(async move {
-                                        let rows = app_results.await;
-                                        if rows.is_empty() {
-                                            return view! {
-                                                <div class="tester-picker__empty">
-                                                    "No matching identities."
-                                                </div>
+                            <div class="tester-picker__results">
+                                <div role="listbox" id="tester-listbox">
+                                    <Suspense fallback=|| ()>
+                                        {move || Suspend::new(async move {
+                                            let rows = app_results.await;
+                                            if rows.is_empty() {
+                                                return ().into_any();
                                             }
-                                                .into_any();
-                                        }
-                                        rows.into_iter()
-                                            .enumerate()
-                                            .map(|(i, (id, name, kind))| {
-                                                let row_class = move || {
-                                                    let mut c = String::from("tester-picker__item");
-                                                    if sel.get() == i {
-                                                        c.push_str(" tester-picker__item--active");
+                                            rows.into_iter()
+                                                .enumerate()
+                                                .map(|(i, (id, name, kind))| {
+                                                    let row_class = move || {
+                                                        let mut c = String::from("tester-picker__item");
+                                                        if sel.get() == i {
+                                                            c.push_str(" tester-picker__item--active");
+                                                        }
+                                                        c
+                                                    };
+                                                    view! {
+                                                        <button
+                                                            type="button"
+                                                            id=format!("tester-opt-{i}")
+                                                            role="option"
+                                                            aria-selected=move || (sel.get() == i).to_string()
+                                                            class=row_class
+                                                            on:mouseenter=move |_| sel.set(i)
+                                                            on:click=move |_| pick(i)
+                                                        >
+                                                            <span class="tester-picker__name">
+                                                                <TypeChip kind=kind />
+                                                                {name}
+                                                            </span>
+                                                            <span class="mono muted">{id}</span>
+                                                        </button>
                                                     }
-                                                    c
-                                                };
-                                                view! {
-                                                    <button
-                                                        type="button"
-                                                        id=format!("tester-opt-{i}")
-                                                        role="option"
-                                                        aria-selected=move || (sel.get() == i).to_string()
-                                                        class=row_class
-                                                        on:mouseenter=move |_| sel.set(i)
-                                                        on:click=move |_| pick(i)
-                                                    >
-                                                        <span class="tester-picker__name">
-                                                            <TypeChip kind=kind />
-                                                            {name}
-                                                        </span>
-                                                        <span class="mono muted">{id}</span>
-                                                    </button>
-                                                }
-                                            })
-                                            .collect_view()
-                                            .into_any()
-                                    })}
-                                </Suspense>
+                                                })
+                                                .collect_view()
+                                                .into_any()
+                                        })}
+                                    </Suspense>
+                                </div>
+                                <div role="status">
+                                    <Suspense fallback=move || {
+                                        view! {
+                                            <div class="tester-picker__empty">"Searching…"</div>
+                                        }
+                                    }>
+                                        {move || Suspend::new(async move {
+                                            app_results
+                                                .await
+                                                .is_empty()
+                                                .then(|| {
+                                                    view! {
+                                                        <div class="tester-picker__empty">
+                                                            "No matching identities."
+                                                        </div>
+                                                    }
+                                                })
+                                        })}
+                                    </Suspense>
+                                </div>
                             </div>
                         }
                             .into_any()
@@ -435,7 +466,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 }}
             </div>
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
             {move || {
                 needs_consent
@@ -462,7 +493,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 result
                     .get()
                     .map(|r| {
-                        let (badge_class, label) = verdict_badge(&r.verdict);
+                        let (badge_tone, label) = verdict_badge(r.verdict);
                         let roles = if r.roles.is_empty() {
                             None
                         } else {
@@ -471,7 +502,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                         view! {
                             <div class="permission-tester__result">
                                 <div class="row-between">
-                                    <span class=badge_class>{label}</span>
+                                    <Badge label=label tone=badge_tone />
                                     <span class="muted">{r.resource_label.clone()}</span>
                                 </div>
                                 {r.detail.clone().map(|d| view! { <Body1>{d}</Body1> })}

@@ -2,10 +2,11 @@
 //!
 //! One posture strip (read-only severity counts + Run / Cancel / Export /
 //! progress / consent — the single owner of the audit-run lifecycle via
-//! [`AuditController`]) above five co-equal sub-tabs: **Findings** (grouped,
+//! [`AuditController`]) above six co-equal sub-tabs: **Findings** (grouped,
 //! remediation-centric — the default), **All apps** (the ranked score table),
-//! and the three inventory lenses (Credential expiry, Delegated grants,
-//! Application permissions). The
+//! and the four inventory lenses (Credential expiry, SSO certificates,
+//! Delegated grants, Application permissions) — each lens an `AuditDashboard`
+//! over its own dataset, with its own facets + `SavedViews`. The
 //! controller is constructed once here and provided via context so both audit
 //! panes read the same scan; the strip's counts are display-only — filtering
 //! happens inside the panes (this view retired the old triple-control setup:
@@ -18,15 +19,15 @@
 
 use std::collections::HashSet;
 
+use azapptoolkit_core::audit::PostureCounts;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, FormError, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
-use crate::views::audit_view::posture::PostureCounts;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
 use crate::views::consent_grants_view::ConsentGrantsView;
 use crate::views::credentials_dashboard::CredentialsDashboard;
@@ -187,9 +188,17 @@ fn PostureStrip() -> impl IntoView {
                             0.0
                         };
                         let cap = p.in_flight_cap;
-                        view! {
-                            <div class="audit-progress">
-                                <ProgressBar value=Signal::derive(move || pct) />
+                        // `total == 0` is a PHASE, not a fraction: the app
+                        // count is not known until the tenant-wide prefetch
+                        // (the longest part of a large run) lands, and
+                        // "0 / 0 apps" read as a stalled scan.
+                        let status = if p.total == 0 {
+                            let label = p
+                                .current_app
+                                .unwrap_or_else(|| "Preparing the scan…".to_string());
+                            view! { <Body1>{label}</Body1> }.into_any()
+                        } else {
+                            view! {
                                 <Body1>
                                     {format!(
                                         "{} / {} apps  (cap: {}{})",
@@ -200,6 +209,13 @@ fn PostureStrip() -> impl IntoView {
                                     )}
                                 </Body1>
                                 {p.current_app.map(|n| view! { <Body1>{n}</Body1> })}
+                            }
+                                .into_any()
+                        };
+                        view! {
+                            <div class="audit-progress">
+                                <ProgressBar value=Signal::derive(move || pct) />
+                                {status}
                                 <Show when=move || cap < peak_cap.get()>
                                     <p class="audit-progress__notice" role="status">
                                         "Microsoft Graph is rate-limiting this scan, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
@@ -210,7 +226,7 @@ fn PostureStrip() -> impl IntoView {
                     })
             }}
             {move || {
-                ctrl.scan_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                ctrl.scan_error.get().map(|e| view! { <FormError>{e}</FormError> })
             }}
             // A cancelled scan leaves an arbitrary PREFIX of the tenant scored,
             // and every number on this workbench — the counts above, the findings
@@ -230,6 +246,54 @@ fn PostureStrip() -> impl IntoView {
                                 {format!(
                                     "This scan was cancelled early — {scored} of {total} principals were scored. Everything below covers only those; re-run for full coverage.",
                                 )}
+                            </Callout>
+                        }
+                    })
+            }}
+            // A truncated run is the same prefix problem from the other side:
+            // the tenant holds more app registrations than one run scores, so
+            // the counts, groups and every "Fix all N" cover only an arbitrary
+            // prefix. Unconditional (unlike the Findings pane's empty-state
+            // variant), independent of the cancelled notice (both can hold),
+            // and worded exactly as the export's `coverage_sentences`.
+            {move || {
+                ctrl.result
+                    .with(|r| r.as_ref().is_some_and(|r| r.truncated))
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                "The tenant holds more app registrations than one run scores, so this scan covered an arbitrary prefix of them. This is not an all-clear, and re-running will not extend it."
+                            </Callout>
+                        }
+                    })
+            }}
+            // A run whose tenant-wide reads partly failed under-reports risk,
+            // and every other signal on this workbench looks identical to a
+            // clean scan. Unconditional (not folded into the Findings pane's
+            // no-findings case): the dangerous outcome is a run that DOES show
+            // findings while silently omitting whole categories of them. On the
+            // strip so both audit panes carry it.
+            {move || {
+                let gaps = ctrl
+                    .result
+                    .with(|r| r.as_ref().map(|r| r.degraded.clone()).unwrap_or_default());
+                (!gaps.is_empty())
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                // Deliberately not "reached every application":
+                                // `PerPrincipalScoring` is exactly the gap where
+                                // it did not, so a lede claiming full coverage
+                                // would contradict the item below it.
+                                <p class="posture-strip__degraded-lede">
+                                    "Part of this scan could not run — treat the results as incomplete and re-run."
+                                </p>
+                                <ul class="posture-strip__degraded-list">
+                                    {gaps
+                                        .into_iter()
+                                        .map(|g| view! { <li>{g.description()}</li> })
+                                        .collect_view()}
+                                </ul>
                             </Callout>
                         }
                     })

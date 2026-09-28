@@ -217,9 +217,15 @@ impl ExchangeClient {
     /// with no `Identity`). Exchange offers no reverse "which scopes reference
     /// this group?" lookup, so answering that means reading them all and
     /// matching their `RecipientFilter` — the reason this exists.
+    ///
+    /// Through `invoke_command`, never `invoke_optional`: an identity-less list
+    /// has no object to be missing (an empty tenant answers 200 with
+    /// `value: []`), so any rejection is an error, never "no scopes". The
+    /// reverse-reference check behind the irreversible
+    /// `delete_exchange_scope_group` reads an empty list as "no references".
     pub async fn list_management_scopes(&self) -> Result<Vec<ExoManagementScope>> {
         let values = self
-            .invoke_optional("Get-ManagementScope", json!({}))
+            .invoke_command("Get-ManagementScope", json!({}))
             .await?;
         all_as(values)
     }
@@ -267,9 +273,16 @@ impl ExchangeClient {
 
     // ---------------- Legacy Application Access Policies (migration) ----------------
 
+    /// Every legacy Application Access Policy in the organization.
+    ///
+    /// Through `invoke_command`, never `invoke_optional`: an identity-less list
+    /// has no object to be missing (an empty tenant answers 200 with
+    /// `value: []`), so any rejection is an error, never "no policies". The
+    /// reverse-reference check behind the irreversible
+    /// `delete_exchange_scope_group` reads an empty list as "no references".
     pub async fn get_application_access_policies(&self) -> Result<Vec<ExoApplicationAccessPolicy>> {
         let values = self
-            .invoke_optional("Get-ApplicationAccessPolicy", json!({}))
+            .invoke_command("Get-ApplicationAccessPolicy", json!({}))
             .await?;
         all_as(values)
     }

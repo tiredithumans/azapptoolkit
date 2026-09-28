@@ -10,9 +10,10 @@ use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, Card, CopyableId, SectionHeader};
+use crate::components::ui::{Callout, Card, CopyableId, FormError, SectionHeader};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::{count_noun, plural};
 
 #[component]
 pub fn DisasterRecoveryView() -> impl IntoView {
@@ -72,8 +73,10 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     );
                     captured.set(Some(b));
                     session.toast_success(format!(
-                        "Backed up {apps} app registration(s), {ent} enterprise app(s), \
-                         {mis} managed identity(ies). Save it to a file to keep it."
+                        "Backed up {}, {}, {}. Save it to a file to keep it.",
+                        count_noun(apps, "app registration", "app registrations"),
+                        count_noun(ent, "enterprise app", "enterprise apps"),
+                        count_noun(mis, "managed identity", "managed identities"),
                     ));
                 }
                 // A user-initiated cancel comes back as the `cancelled` code —
@@ -95,7 +98,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     };
     let cancel_backup = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_dr().await;
+            let _ = backup::cancel_backup().await;
         });
     };
     let save_file = move |_| {
@@ -160,12 +163,16 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 Ok(r) => {
                     let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
                     session.toast_success(format!(
-                        "Restored {} app(s); {} secret(s) regenerated. Save the report — \
+                        "Restored {}; {} regenerated. Save the report — \
                          the secret values are shown only once.",
-                        r.apps.len(),
-                        secrets
+                        count_noun(r.apps.len(), "app", "apps"),
+                        count_noun(secrets, "secret", "secrets"),
                     ));
                     report.set(Some(r));
+                    // A second click would be a second restore, so running it
+                    // again requires deliberately re-loading the file.
+                    plan.set(None);
+                    loaded.set(None);
                 }
                 Err(e) => {
                     if !session.report_if_session_dead(&e) {
@@ -179,7 +186,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     };
     let cancel_restore = move |_| {
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_dr().await;
+            let _ = backup::cancel_restore().await;
         });
     };
     let save_report = Callback::new(move |()| {
@@ -201,8 +208,9 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         });
     });
 
-    // Restore is blocked on a cloud mismatch (a hard error from the backend too).
-    let cloud_blocked = move || plan.get().and_then(|p| p.cloud_mismatch).is_some();
+    // Restore is blocked on a cloud mismatch or a too-new manifest (both hard
+    // errors from the backend too).
+    let plan_blocked = move || plan.get().is_some_and(|p| p.is_blocked());
 
     view! {
         <div class="tool-page dr-view">
@@ -277,7 +285,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     }}
                 </Show>
                 <Show when=move || error.get().is_some()>
-                    <p class="dr-view__error" role="alert">{move || error.get().unwrap_or_default()}</p>
+                    <FormError>{move || error.get().unwrap_or_default()}</FormError>
                 </Show>
 
                 <Show when=move || captured.get().is_some()>
@@ -320,7 +328,8 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                                     <Callout tone="warn">
                                         <p>
                                             {format!(
-                                                "{n} object(s) could not be read and are NOT in this backup. Restoring it will not recreate them.",
+                                                "{} could not be fully read. This backup is missing what is listed below, and restoring it will not recreate it.",
+                                                count_noun(n, "object", "objects"),
                                             )}
                                         </p>
                                         <ul class="dr-view__skipped-list">{rows}</ul>
@@ -331,9 +340,11 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                             <div class="dr-view__result">
                                 <p class="dr-view__summary">
                                     {format!(
-                                        "Ready: {apps} app registration(s), {ent} enterprise app(s), \
-                                         {mis} managed identity(ies). {secrets} secret(s) will need \
-                                         regeneration on restore.",
+                                        "Ready: {}, {}, {}. {} will need regeneration on restore.",
+                                        count_noun(apps, "app registration", "app registrations"),
+                                        count_noun(ent, "enterprise app", "enterprise apps"),
+                                        count_noun(mis, "managed identity", "managed identities"),
+                                        count_noun(secrets, "secret", "secrets"),
                                     )}
                                 </p>
                                 {skipped_notice}
@@ -363,7 +374,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     >
                         <Icon name=IconName::Upload size=16 /> " Load backup file…"
                     </Button>
-                    <Show when=move || plan.get().is_some() && !cloud_blocked() && !restoring.get()>
+                    <Show when=move || plan.get().is_some() && !plan_blocked() && !restoring.get()>
                         <Button appearance=ButtonAppearance::Primary on_click=move |_| confirm_open.set(true)>
                             "Restore into this tenant…"
                         </Button>
@@ -376,7 +387,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 </div>
 
                 <Show when=move || restore_error.get().is_some()>
-                    <p class="dr-view__error" role="alert">{move || restore_error.get().unwrap_or_default()}</p>
+                    <FormError>{move || restore_error.get().unwrap_or_default()}</FormError>
                 </Show>
 
                 // Plan preview (before confirming).
@@ -412,7 +423,9 @@ pub fn DisasterRecoveryView() -> impl IntoView {
             >
                 <p>
                     "This creates new app registrations in the current tenant and regenerates their \
-                     secrets. It does not overwrite or delete anything that already exists. The new \
+                     secrets. It does not overwrite or delete anything that already exists. Running \
+                     it again with the same file recognises the apps an earlier run created (by \
+                     their restore tag) and completes them instead of duplicating them. The new \
                      secret values are shown only once — save the report afterwards."
                 </p>
                 <div class="dr-view__actions">
@@ -426,20 +439,43 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     }
 }
 
-/// The dry-run plan: counts + the cloud-mismatch blocker + the tenant-change note.
+/// The dry-run plan: the work of all five passes, both blockers (cloud
+/// mismatch, too-new manifest), the tenant-change note, and a duplicate
+/// warning when the backup is being restored into the tenant it came from.
 #[component]
 fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
     let cloud = plan.cloud_mismatch.clone();
+    let schema = plan.schema_too_new.clone();
+    let same_tenant = (!plan.tenant_changed).then(|| plan.source_tenant_id.clone());
     view! {
         <div class="dr-view__plan">
             {cloud.map(|m| view! {
-                <p class="dr-view__error" role="alert">
+                <Callout tone="danger" role="alert">
                     {format!(
                         "This backup is from the \"{}\" cloud, but this app targets \"{}\". \
                          Restore is blocked — use a build configured for the backup's cloud.",
-                        m.backup_cloud, m.destination_cloud,
+                        m.backup_cloud.as_str(), m.destination_cloud.as_str(),
                     )}
-                </p>
+                </Callout>
+            })}
+            {schema.map(|s| view! {
+                <Callout tone="danger" role="alert">
+                    {format!(
+                        "This backup was written by a newer version of azapptoolkit (manifest \
+                         schema {}; this version reads up to {}). Restore is blocked — update \
+                         azapptoolkit first.",
+                        s.manifest_version, s.supported_version,
+                    )}
+                </Callout>
+            })}
+            {same_tenant.map(|src| view! {
+                <Callout tone="warn">
+                    {format!(
+                        "This backup was taken from this tenant ({src}). Restoring it here does \
+                         not roll anything back — it creates a second copy of every app \
+                         registration in it, with new appIds and new secrets.",
+                    )}
+                </Callout>
             })}
             <Show when=move || plan.tenant_changed>
                 <p class="dr-view__note">
@@ -451,11 +487,37 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                 </p>
             </Show>
             <ul class="dr-view__plan-list">
-                <li>{format!("{} app registration(s) to create", plan.app_registrations_to_create)}</li>
-                <li>{format!("{} secret(s) to regenerate (new values issued)", plan.secrets_to_regenerate)}</li>
-                <li>{format!("{} certificate(s) need manual re-upload", plan.certificates_needing_manual_upload)}</li>
-                <li>{format!("{} federated credential(s) restored as-is", plan.federated_credentials_to_restore)}</li>
-                <li>{format!("{} owner(s) to remap by name", plan.owners_to_remap)}</li>
+                <li>{format!("{} to create", count_noun(plan.app_registrations_to_create, "app registration", "app registrations"))}</li>
+                <li>{format!("{} to regenerate (new values issued)", count_noun(plan.secrets_to_regenerate, "secret", "secrets"))}</li>
+                {(plan.expired_secrets_skipped > 0).then(|| view! {
+                    <li>{format!(
+                        "{} already expired when the backup was taken — not re-issued",
+                        count_noun(plan.expired_secrets_skipped, "secret had", "secrets had"),
+                    )}</li>
+                })}
+                <li>{format!("{} manual re-upload", count_noun(plan.certificates_needing_manual_upload, "certificate needs", "certificates need"))}</li>
+                <li>{format!("{} to restore (each validated and listed in the report)", count_noun(plan.federated_credentials_to_restore, "federated credential", "federated credentials"))}</li>
+                <li>{format!("{} to remap by name", count_noun(plan.owners_to_remap, "owner", "owners"))}</li>
+                <li>{format!(
+                    "{} to re-apply access to (settings, role assignments, group memberships)",
+                    count_noun(plan.enterprise_apps_to_reapply, "enterprise app", "enterprise apps"),
+                )}</li>
+                {(plan.enterprise_apps_manual > 0).then(|| view! {
+                    <li>{format!(
+                        "{} manual follow-up (gallery/foreign apps, or no paired app registration in this backup)",
+                        count_noun(plan.enterprise_apps_manual, "enterprise app needs", "enterprise apps need"),
+                    )}</li>
+                })}
+                <li>{format!(
+                    "{} to re-bind by name — each must already be recreated here; Azure RBAC is always a manual step",
+                    count_noun(plan.managed_identities_to_rebind, "managed identity", "managed identities"),
+                )}</li>
+                {(plan.skipped_in_backup > 0).then(|| view! {
+                    <li>{format!(
+                        "{} recorded in the backup (objects or parts it could not read) — restoring will not recreate what is missing",
+                        count_noun(plan.skipped_in_backup, "gap", "gaps"),
+                    )}</li>
+                })}
             </ul>
         </div>
     }
@@ -487,19 +549,19 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
         <div class="dr-view__result">
             <p class="dr-view__summary">
                 {format!(
-                    "Restored {} app(s){}. {} secret(s) regenerated.",
-                    report.apps.len(),
+                    "Restored {}{}. {} regenerated.",
+                    count_noun(report.apps.len(), "app", "apps"),
                     match (report.cancelled, session_expired) {
                         (_, true) => " (stopped early — the sign-in session expired)",
                         (true, false) => " (cancelled before completing — partial)",
                         (false, false) => "",
                     },
-                    total_secrets,
+                    count_noun(total_secrets, "secret", "secrets"),
                 )}
             </p>
             <Show when=move || session_expired>
                 <Callout tone="warn">
-                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again — it recreates only what is missing."
+                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
                 </Callout>
             </Show>
             <Show when=move || has_secrets>
@@ -524,6 +586,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                                 <strong>{a.display_name}</strong>
                                 <span class="dr-view__report-id">{format!("new appId {}", a.new_app_id)}</span>
                                 {a.consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
+                                {a.adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {
                                 <ul class="dr-view__secrets">
@@ -539,12 +602,12 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                             })}
                             {(!unresolved.is_empty()).then(|| view! {
                                 <p class="dr-view__report-note">
-                                    {format!("Unresolved owner(s): {}", unresolved.join(", "))}
+                                    {format!("Unresolved owner{}: {}", plural(unresolved.len()), unresolved.join(", "))}
                                 </p>
                             })}
                             {(!certs.is_empty()).then(|| view! {
                                 <p class="dr-view__report-note">
-                                    {format!("Re-upload certificate(s): {}", certs.join(", "))}
+                                    {format!("Re-upload certificate{}: {}", plural(certs.len()), certs.join(", "))}
                                 </p>
                             })}
                             {(!warnings.is_empty()).then(|| view! {
@@ -569,7 +632,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                                     <div class="dr-view__report-head">
                                         <strong>{e.display_name}</strong>
                                         <span class="dr-view__report-id">
-                                            {format!("{} assignment(s), {} group membership(s)", e.assignments_applied, e.group_memberships_applied)}
+                                            {format!("{}, {}", count_noun(e.assignments_applied, "assignment", "assignments"), count_noun(e.group_memberships_applied, "group membership", "group memberships"))}
                                         </span>
                                     </div>
                                     {(!unresolved.is_empty()).then(|| view! {
@@ -600,7 +663,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                                     <div class="dr-view__report-head">
                                         <strong>{m.display_name}</strong>
                                         <span class="dr-view__report-id">
-                                            {format!("{} Graph app-role(s) re-bound", m.app_roles_rebound)}
+                                            {format!("{} re-bound", count_noun(m.app_roles_rebound, "Graph app role", "Graph app roles"))}
                                         </span>
                                     </div>
                                     {(!warnings.is_empty()).then(|| view! {
@@ -631,7 +694,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
 
             {(!failures.is_empty()).then(|| view! {
                 <div class="dr-view__failures">
-                    <p class="dr-view__error">"Apps that could not be created:"</p>
+                    <FormError>"Apps that could not be created:"</FormError>
                     <ul>
                         {failures.into_iter().map(|f| view! {
                             <li>{format!("{}: {}", f.display_name, f.message)}</li>

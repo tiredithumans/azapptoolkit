@@ -14,11 +14,14 @@ use parking_lot::Mutex;
 use azapptoolkit_arm::{ArmClient, LogAnalyticsClient};
 use azapptoolkit_auth::{EntraAuthService, TenantContext};
 use azapptoolkit_core::cache::Cache;
+use azapptoolkit_core::cloud::CloudEnvironment;
+use azapptoolkit_core::identity::canonical_tenant_id;
 use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_keyvault::KeyVaultClient;
 
+use crate::dto::config::ConfigSource;
 use crate::token_adapter::ScopedTokenAdapter;
 
 /// Default client id for the public "azapptoolkit Desktop" app registration.
@@ -38,6 +41,11 @@ const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000000";
 /// workspace root. `None` when no `.env` was present at build time.
 const BUILD_CLIENT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_CLIENT_ID");
 const BUILD_TENANT_ID: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_TENANT_ID");
+/// Sovereign cloud baked in at build time from `AZAPPTOOLKIT_CLOUD` in `.env`
+/// (a cloud name, not a secret). The runtime `AZAPPTOOLKIT_CLOUD` env var still
+/// wins; unset in both, the app targets the commercial cloud
+/// ([`CloudEnvironment::from_env_or`]).
+const BUILD_CLOUD: Option<&str> = option_env!("AZAPPTOOLKIT_BUILD_CLOUD");
 
 /// Shared state behind a [`CancelFlag`] and every [`CancelToken`] it issues.
 ///
@@ -90,7 +98,10 @@ impl CancelFlag {
     /// Cancelling older generations too is deliberate: the alternative is a
     /// displaced run continuing to write after the operator pressed Cancel.
     /// Stopping a run that was going to be superseded anyway is harmless; the
-    /// reverse is not.
+    /// reverse is not. That holds only because every flag carries ONE run kind
+    /// (see the [`AppState`] cancel fields): on a flag shared between kinds, one
+    /// kind's Cancel would stop the other. The mapping is pinned by
+    /// `tests/repo_invariants/cancel.rs`.
     pub fn cancel(&self) {
         let current = self.0.current.load(Ordering::Acquire);
         self.0.cancelled.fetch_max(current, Ordering::AcqRel);
@@ -121,28 +132,41 @@ impl CancelToken {
     }
 }
 
-/// Resolution order for a client/tenant id: a non-empty runtime env var (for
-/// MDM/automation overrides), then the user's `settings.json` value (written by
-/// the first-run config screen), then the build-time bake from `.env`, then the
-/// placeholder default — which makes sign-in fail and the config screen show.
+/// Resolves a client/tenant id from the process environment; see
+/// [`resolve_from`] for the precedence.
 fn resolve(
     env_var: &str,
     settings: Option<&str>,
     baked: Option<&'static str>,
     default: &'static str,
-) -> String {
-    if let Ok(v) = std::env::var(env_var)
-        && !v.is_empty()
-    {
-        return v;
+) -> (String, ConfigSource) {
+    resolve_from(std::env::var(env_var).ok(), settings, baked, default)
+}
+
+/// Resolution order for a client/tenant id: a non-empty runtime env var (for
+/// MDM/automation overrides), then the user's `settings.json` value (written by
+/// the first-run config screen and Settings → Tenant connection), then the
+/// build-time bake from `.env`, then the placeholder default — which makes
+/// sign-in fail and the config screen show. An empty value at any tier falls
+/// through. Returns the value together with the [`ConfigSource`] that supplied
+/// it. Pure (the env value is passed in) so every tier is unit-testable without
+/// the `unsafe` `std::env::set_var`.
+fn resolve_from(
+    env: Option<String>,
+    settings: Option<&str>,
+    baked: Option<&'static str>,
+    default: &'static str,
+) -> (String, ConfigSource) {
+    if let Some(v) = env.filter(|v| !v.is_empty()) {
+        return (v, ConfigSource::Env);
     }
     if let Some(v) = settings.filter(|s| !s.is_empty()) {
-        return v.to_string();
+        return (v.to_string(), ConfigSource::Settings);
     }
-    baked
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| default.to_string())
+    match baked.filter(|s| !s.is_empty()) {
+        Some(v) => (v.to_owned(), ConfigSource::Baked),
+        None => (default.to_string(), ConfigSource::Unset),
+    }
 }
 
 /// Lock → check → build → insert: the shape every per-tenant client cache here
@@ -188,12 +212,79 @@ where
     }
 }
 
+/// One on-demand consent feature: an admin-consent / premium scope set that
+/// rides its own `ScopedTokenAdapter`, never the sign-in bundle. The wire key
+/// ([`Self::as_str`]) is what `request_scope_consent` receives from the UI and
+/// what a capability's `scope_feature` names; [`AppState::feature_scopes`] maps
+/// it to the scope set. Every variant has a capabilities-catalog row (pinned by
+/// `every_consent_feature_has_a_catalog_row`), so the readiness checklist and
+/// the 403 hints cover each feature the app can request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentFeature {
+    Write,
+    Sync,
+    AuditLog,
+    Policy,
+    PolicyWrite,
+    SharePoint,
+    GroupMembership,
+    Exchange,
+    KeyVault,
+    Arm,
+    LogAnalytics,
+}
+
+impl ConsentFeature {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::Write,
+        Self::Sync,
+        Self::AuditLog,
+        Self::Policy,
+        Self::PolicyWrite,
+        Self::SharePoint,
+        Self::GroupMembership,
+        Self::Exchange,
+        Self::KeyVault,
+        Self::Arm,
+        Self::LogAnalytics,
+    ];
+
+    /// The stable wire key (`request_scope_consent`'s `feature`, a capability's
+    /// `scope_feature`).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Sync => "sync",
+            Self::AuditLog => "audit_log",
+            Self::Policy => "policy",
+            Self::PolicyWrite => "policy_write",
+            Self::SharePoint => "sharepoint",
+            Self::GroupMembership => "group_membership",
+            Self::Exchange => "exchange",
+            Self::KeyVault => "keyvault",
+            Self::Arm => "arm",
+            Self::LogAnalytics => "log_analytics",
+        }
+    }
+
+    /// The feature for a wire key, or `None` for an unknown one — the inverse
+    /// of [`Self::as_str`], so the keys have one spelling.
+    pub(crate) fn parse(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == key)
+    }
+}
+
 pub struct AppState {
     pub auth: Arc<EntraAuthService>,
     /// The resolved client/tenant IDs the auth service signs in with, kept so
     /// `get_auth_config` can report configuration status to the first-run UI.
     pub client_id: String,
     pub tenant_id: String,
+    /// Which resolution tier supplied [`Self::client_id`], so the Tenant
+    /// connection tab can say when an env var or the build decides it.
+    pub client_id_source: ConfigSource,
+    /// Which resolution tier supplied [`Self::tenant_id`].
+    pub tenant_id_source: ConfigSource,
     pub cache: Arc<Cache>,
     /// Single-flight gates, keyed by cache key. See [`AppState::single_flight`].
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -212,19 +303,31 @@ pub struct AppState {
     /// its own host + token audience, distinct from ARM). Built on first use
     /// for the granted-vs-used Graph activity analysis.
     pub la_clients: Mutex<HashMap<String, Arc<LogAnalyticsClient>>>,
-    /// Flipped by the `cancel_audit` Tauri command; checked by the audit loop
-    /// between tasks. Reset to `false` at the top of every run.
+    // One flag per run kind. `CancelFlag::cancel` stops every generation on its
+    // flag, and the views that start these runs stay mounted (keep-alive views,
+    // display-toggled panels), so runs of different kinds overlap: a flag shared
+    // between kinds lets one kind's Cancel stop the other. Each flag is claimed
+    // (`CancelFlag::claim`, once, before the first await) by one run kind and
+    // cancelled by exactly one command — pinned by
+    // `tests/repo_invariants/cancel.rs`.
+    /// `run_audit`; cancelled by `cancel_audit`.
     pub audit_cancel: CancelFlag,
-    /// Cancel flag for the SharePoint site-permission sweep — deliberately its
-    /// own flag (not `audit_cancel`) so cancelling a sweep can't abort a
-    /// concurrent audit/bulk run, and vice versa. Reset at the top of every
-    /// sweep; flipped by `cancel_site_sweep`.
-    pub sweep_cancel: CancelFlag,
-    /// Cancel flag for the DR backup/restore fan-out — its own flag (not
-    /// `audit_cancel`) so cancelling a long backup or restore can't abort a
-    /// concurrent audit/bulk/sweep run, and vice versa. Reset at the top of
-    /// every backup/restore; flipped by `cancel_dr`.
-    pub dr_cancel: CancelFlag,
+    /// Every `bulk_*` command; cancelled by `cancel_bulk`. Two bulk runs started
+    /// from different bulk action bars share it, so one Cancel stops both.
+    pub bulk_cancel: CancelFlag,
+    /// `migrate_application_access_policies`; cancelled by `cancel_aap_migration`.
+    pub migration_cancel: CancelFlag,
+    /// `sweep_site_permissions` (Resource Access Sites tab and the per-app site
+    /// panel); cancelled by `cancel_site_sweep`.
+    pub site_sweep_cancel: CancelFlag,
+    /// `sweep_key_vault_access`; cancelled by `cancel_key_vault_sweep`.
+    pub key_vault_sweep_cancel: CancelFlag,
+    /// `find_mailbox_reachers`; cancelled by `cancel_mailbox_probe`.
+    pub mailbox_probe_cancel: CancelFlag,
+    /// `backup_tenant`; cancelled by `cancel_backup`.
+    pub backup_cancel: CancelFlag,
+    /// `restore_tenant`; cancelled by `cancel_restore`.
+    pub restore_cancel: CancelFlag,
 }
 
 impl AppState {
@@ -232,18 +335,22 @@ impl AppState {
         // The user's persisted IDs (first-run config screen) sit between env
         // vars and the build-time bake in the resolution order.
         let settings = UserSettings::stored(&crate::config_directory());
-        let client_id = resolve(
+        let (client_id, client_id_source) = resolve(
             "AZAPPTOOLKIT_CLIENT_ID",
             settings.client_id.as_deref(),
             BUILD_CLIENT_ID,
             DEFAULT_CLIENT_ID,
         );
-        let tenant_id = resolve(
+        // Canonical (lowercase) so an env/`.env`-baked or pre-fix settings value
+        // typed in uppercase still equals the id token's `tid`, the cache keys
+        // and the remembered account's tenant.
+        let (raw_tenant, tenant_id_source) = resolve(
             "AZAPPTOOLKIT_TENANT_ID",
             settings.tenant_id.as_deref(),
             BUILD_TENANT_ID,
             DEFAULT_TENANT_ID,
         );
+        let tenant_id = canonical_tenant_id(&raw_tenant);
         if tenant_id == DEFAULT_TENANT_ID {
             tracing::warn!(
                 "AZAPPTOOLKIT_TENANT_ID is not set; sign-in will fail until configured (first-run screen)."
@@ -254,10 +361,28 @@ impl AppState {
                 "AZAPPTOOLKIT_CLIENT_ID is not set; sign-in will fail until configured (first-run screen)."
             );
         }
+        let auth = EntraAuthService::new_in_cloud(
+            client_id.clone(),
+            tenant_id.clone(),
+            CloudEnvironment::from_env_or(BUILD_CLOUD),
+        );
+        // Both ids are public identifiers (docs/DEVELOPMENT.md) and the auth
+        // crate already logs the tenant; only the values and their sources are
+        // recorded here, never the rest of settings.json.
+        tracing::info!(
+            cloud = ?auth.cloud(),
+            tenant_id = %tenant_id,
+            tenant_id_source = tenant_id_source.as_str(),
+            client_id = %client_id,
+            client_id_source = client_id_source.as_str(),
+            "resolved auth config"
+        );
         Self {
-            auth: EntraAuthService::new(client_id.clone(), tenant_id.clone()),
+            auth,
             client_id,
             tenant_id,
+            client_id_source,
+            tenant_id_source,
             cache: Cache::new(),
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::new()),
@@ -266,8 +391,13 @@ impl AppState {
             arm_clients: Mutex::new(HashMap::new()),
             la_clients: Mutex::new(HashMap::new()),
             audit_cancel: CancelFlag::new(),
-            sweep_cancel: CancelFlag::new(),
-            dr_cancel: CancelFlag::new(),
+            bulk_cancel: CancelFlag::new(),
+            migration_cancel: CancelFlag::new(),
+            site_sweep_cancel: CancelFlag::new(),
+            key_vault_sweep_cancel: CancelFlag::new(),
+            mailbox_probe_cancel: CancelFlag::new(),
+            backup_cancel: CancelFlag::new(),
+            restore_cancel: CancelFlag::new(),
         }
     }
 
@@ -278,23 +408,44 @@ impl AppState {
     ///
     /// Pre-seeding `graph_clients` is what makes this work — `graph_for` is a
     /// get-or-build, so the seeded client wins and no `ScopedTokenAdapter` is
-    /// ever constructed. Nothing here touches `settings.json`.
+    /// ever constructed. Nothing here touches `settings.json`. The claims-mapping
+    /// policy token rides the same static bearer, so the claims `*_core` can be
+    /// driven too.
     #[cfg(test)]
     pub(crate) fn for_test(tenant_id: &str, base_url: &str) -> Self {
         use azapptoolkit_core::token::StaticTokenProvider;
 
+        Self::for_test_with_write_token(tenant_id, base_url, StaticTokenProvider::new("test-token"))
+    }
+
+    /// [`Self::for_test`] whose Graph client sends its writes (every non-GET)
+    /// with `write_token` — a provider that dies partway drives the
+    /// stop-on-a-dead-session paths of a multi-write command.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_write_token(
+        tenant_id: &str,
+        base_url: &str,
+        write_token: Arc<dyn azapptoolkit_core::token::BearerProvider>,
+    ) -> Self {
+        use azapptoolkit_core::token::StaticTokenProvider;
+
         let cache = Cache::new();
-        let client = Arc::new(GraphClient::with_base_url(
-            tenant_id.to_string(),
-            StaticTokenProvider::new("test-token"),
-            StaticTokenProvider::new("test-token"),
-            Arc::clone(&cache),
-            format!("{}/v1.0", base_url.trim_end_matches('/')),
-        ));
+        let client = Arc::new(
+            GraphClient::with_base_url(
+                tenant_id.to_string(),
+                StaticTokenProvider::new("test-token"),
+                write_token,
+                Arc::clone(&cache),
+                format!("{}/v1.0", base_url.trim_end_matches('/')),
+            )
+            .with_policy_write_token(StaticTokenProvider::new("test-token")),
+        );
         Self {
             auth: EntraAuthService::new("test-client", tenant_id),
             client_id: "test-client".to_string(),
             tenant_id: tenant_id.to_string(),
+            client_id_source: ConfigSource::Settings,
+            tenant_id_source: ConfigSource::Settings,
             cache,
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::from([(tenant_id.to_string(), client)])),
@@ -303,8 +454,13 @@ impl AppState {
             arm_clients: Mutex::new(HashMap::new()),
             la_clients: Mutex::new(HashMap::new()),
             audit_cancel: CancelFlag::new(),
-            sweep_cancel: CancelFlag::new(),
-            dr_cancel: CancelFlag::new(),
+            bulk_cancel: CancelFlag::new(),
+            migration_cancel: CancelFlag::new(),
+            site_sweep_cancel: CancelFlag::new(),
+            key_vault_sweep_cancel: CancelFlag::new(),
+            mailbox_probe_cancel: CancelFlag::new(),
+            backup_cancel: CancelFlag::new(),
+            restore_cancel: CancelFlag::new(),
         }
     }
 
@@ -340,8 +496,8 @@ impl AppState {
     ///
     /// Best-effort by design: an unwritable settings file costs the operator one
     /// extra sign-in next launch and must never fail the sign-in that just
-    /// succeeded. Goes through `mutate` like every other writer — three commands
-    /// read-modify-write this file from different threads.
+    /// succeeded. Every settings.json writer goes through `UserSettings::mutate`;
+    /// several read-modify-write this file from different threads.
     pub fn remember_account(&self, tenant: &TenantContext) {
         let tenant = tenant.clone();
         if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
@@ -365,6 +521,39 @@ impl AppState {
         }) {
             tracing::warn!(target: "auth", error = %e, "could not clear the remembered account");
         }
+    }
+
+    /// Everything this process holds for `tenant_id`, dropped on sign-out: every
+    /// per-tenant client map, the tenant's idle single-flight gates, and every
+    /// cache kind. Distinct from [`Self::forget_account`] (the settings.json
+    /// restore pointer).
+    ///
+    /// The clients hold no tokens — each carries a `ScopedTokenAdapter` that
+    /// re-asks the auth service, whose tokens `sign_out` has just purged — so
+    /// dropping them is hygiene, not a leak fix: it keeps the sweep exhaustive
+    /// and bounds `kv_clients`, which is keyed per `(tenant, vault)` and would
+    /// otherwise only grow. Only *idle* gates are dropped (the same rule the
+    /// [`Self::single_flight`] sweep uses): a gate some fetch still holds is
+    /// left alone, since dropping it would split that in-flight fetch.
+    ///
+    /// The cache sweep drops EVERY tenant-scoped entry — lists, the cached audit
+    /// run + site sweep (`CacheKind::Audit`), and the SP/permission lookups — so
+    /// the next sign-in (a different tenant, or a different operator on the SAME
+    /// tenant) never reads this session's data. `invalidate_tenant` sweeps all
+    /// kinds by the shared `{tenant_id}|` convention (and is unit-tested in
+    /// core). A new `Mutex<HashMap<…>>` field on `AppState` must be named here —
+    /// pinned by `repo_invariants/cache.rs`.
+    pub fn forget_tenant(&self, tenant_id: &str) {
+        self.graph_clients.lock().remove(tenant_id);
+        self.exchange_clients.lock().remove(tenant_id);
+        self.kv_clients.lock().retain(|(t, _), _| t != tenant_id);
+        self.arm_clients.lock().remove(tenant_id);
+        self.la_clients.lock().remove(tenant_id);
+        let prefix = format!("{tenant_id}|");
+        self.inflight
+            .lock()
+            .retain(|k, gate| !k.starts_with(&prefix) || Arc::strong_count(gate) > 1);
+        self.cache.invalidate_tenant(tenant_id);
     }
 
     /// The account a previous run remembered, if it belongs to the tenant *this*
@@ -443,8 +632,8 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_policy_scopes(),
             );
-            // Policy.ReadWrite.ApplicationConfiguration for claims-mapping policies
-            // (SAML claim customization). Same on-demand, incremental-consent
+            // Policy.ReadWrite.ApplicationConfiguration + Application.ReadWrite.All
+            // for claims-mapping policies (SAML claim customization). Same on-demand, incremental-consent
             // contract — never part of the sign-in bundle.
             let policy_write_token = ScopedTokenAdapter::new_cae(
                 self.auth.clone(),
@@ -459,8 +648,10 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_sharepoint_scopes(),
             );
-            // GroupMember.ReadWrite.All for adding/removing a service principal as
-            // a security-group member (group-gated APIs like Power BI / Fabric).
+            // GroupMember.ReadWrite.All + Application.ReadWrite.All (Graph needs
+            // both to add a service principal) for adding/removing a service
+            // principal as a security-group member (group-gated APIs like
+            // Power BI / Fabric).
             // Same on-demand, incremental-consent contract — never at sign-in.
             let group_member_token = ScopedTokenAdapter::new_cae(
                 self.auth.clone(),
@@ -526,53 +717,66 @@ impl AppState {
         })
     }
 
-    /// Scopes requested for interactive incremental consent for `feature`, or
-    /// `None` for an unknown feature key. Resolves the cloud-correct resource
-    /// audiences via the auth service (single source) rather than spreading host
-    /// constants across command handlers; the `request_scope_consent` command
-    /// maps a UI feature name to a scope set.
-    pub fn consent_scopes_for(&self, feature: &str) -> Option<Vec<String>> {
-        Some(match feature {
-            "write" => self.auth.default_graph_write_scopes(),
-            "sync" => self.auth.default_graph_sync_scopes(),
-            "audit_log" => self.auth.default_graph_audit_log_scopes(),
-            "policy" => self.auth.default_graph_policy_scopes(),
-            "policy_write" => self.auth.default_graph_policy_write_scopes(),
-            "sharepoint" => self.auth.default_graph_sharepoint_scopes(),
-            "group_membership" => self.auth.default_graph_group_member_scopes(),
-            "exchange" => self.auth.default_exchange_scopes(),
-            "keyvault" => {
+    /// Scopes for one on-demand consent feature — the single table behind
+    /// interactive consent ([`Self::consent_scopes_for`]), the `ensure_*`
+    /// pre-acquisitions and the readiness probe. Resolves the cloud-correct
+    /// resource audiences via the auth service (single source) rather than
+    /// spreading host constants across command handlers. Exhaustive, so a new
+    /// [`ConsentFeature`] can't be added without its scope set.
+    pub(crate) fn feature_scopes(&self, feature: ConsentFeature) -> Vec<String> {
+        match feature {
+            ConsentFeature::Write => self.auth.default_graph_write_scopes(),
+            ConsentFeature::Sync => self.auth.default_graph_sync_scopes(),
+            ConsentFeature::AuditLog => self.auth.default_graph_audit_log_scopes(),
+            ConsentFeature::Policy => self.auth.default_graph_policy_scopes(),
+            ConsentFeature::PolicyWrite => self.auth.default_graph_policy_write_scopes(),
+            ConsentFeature::SharePoint => self.auth.default_graph_sharepoint_scopes(),
+            ConsentFeature::GroupMembership => self.auth.default_graph_group_member_scopes(),
+            ConsentFeature::Exchange => self.auth.default_exchange_scopes(),
+            ConsentFeature::KeyVault => {
                 EntraAuthService::resource_default_scopes(&self.auth.cloud().keyvault_resource())
             }
-            "arm" => EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource()),
-            "log_analytics" => EntraAuthService::resource_default_scopes(
+            ConsentFeature::Arm => {
+                EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource())
+            }
+            ConsentFeature::LogAnalytics => EntraAuthService::resource_default_scopes(
                 self.auth.cloud().log_analytics_resource(),
             ),
-            _ => return None,
-        })
+        }
+    }
+
+    /// Scopes requested for interactive incremental consent for `feature`, or
+    /// `None` for an unknown feature key. The `request_scope_consent` command
+    /// maps a UI feature name to a scope set through this.
+    pub fn consent_scopes_for(&self, feature: &str) -> Option<Vec<String>> {
+        ConsentFeature::parse(feature).map(|f| self.feature_scopes(f))
     }
 
     /// Shared core for every `ensure_*_token` probe below: pre-acquires (and
     /// caches) the token for `scopes` so a not-yet-consented scope surfaces as
-    /// the typed [`AuthError::ConsentRequired`] (the UI offers a "Grant consent"
-    /// button) instead of being flattened to a generic `token_error` deep inside
-    /// a `ScopedTokenAdapter`/`BearerProvider` boundary. On success the token is
+    /// the typed [`AuthError::ConsentRequired`] BEFORE the command does any
+    /// side-effecting work, and binds the command's specific consent feature
+    /// (the UI's "Grant consent" button for that feature). `consent_required`
+    /// also crosses the `BearerProvider` boundary on its own now
+    /// (`core::reauth::passthrough_code`), but only at the point the scoped call
+    /// is made — possibly after earlier writes landed. On success the token is
     /// cached and the subsequent client call reuses it, so the happy path costs
     /// no extra round trip.
     ///
-    /// `cae` MUST match the CAE-ness of the adapter that later consumes the same
-    /// scope set: the token cache key omits CAE-ness, so a non-CAE pre-warm would
-    /// make a `new_cae` adapter reuse a non-CAE token (and vice versa). The Graph
-    /// scopes ride `new_cae` (cae = true); ARM / Exchange / Log Analytics stay
-    /// non-CAE (cae = false). This is the CAE/adapter pairing each wrapper's doc
-    /// comment cross-references — keeping the branch in one place.
+    /// CAE-ness must match the adapter that later consumes the same scope set:
+    /// the token cache keys on CAE-ness, so a mismatched pre-warm lands in the
+    /// other slot and the adapter pays one extra silent refresh instead of
+    /// reusing it. It is derived here from the scope set
+    /// (`EntraAuthService::is_graph_scope_set` — the same rule the consent and
+    /// step-up flows use), never passed by hand: every Graph set rides a
+    /// `new_cae` adapter in [`Self::graph_for`], while ARM / Exchange / Key
+    /// Vault / Log Analytics stay non-CAE.
     async fn ensure_scoped_token(
         &self,
         tenant_id: &str,
         scopes: Vec<String>,
-        cae: bool,
     ) -> azapptoolkit_auth::Result<()> {
-        if cae {
+        if self.auth.is_graph_scope_set(&scopes) {
             self.auth
                 .access_token_for_scopes_cae(tenant_id, &scopes, None)
                 .await?;
@@ -584,55 +788,78 @@ impl AppState {
         Ok(())
     }
 
-    /// Acquires (and caches) the ARM token up front, surfacing a *typed* auth
-    /// error — notably [`AuthError::ConsentRequired`] — before any ARM call.
-    /// The `BearerProvider` boundary flattens errors to `String`, so a command
-    /// that wants the UI to distinguish "needs consent" must probe here first;
-    /// on success the token is cached and the subsequent `ArmClient` call reuses
-    /// it, so the happy path costs no extra round trip. Non-CAE (like the ARM adapter).
-    pub async fn ensure_arm_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = EntraAuthService::resource_default_scopes(self.auth.cloud().arm_resource());
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+    /// Silently acquires (and caches) the token for one consent feature's scope
+    /// set — the core the `ensure_*` wrappers below and the readiness scope
+    /// probe share, so a readiness pre-warm and the feature's own adapter always
+    /// agree on the scope set and its CAE-ness.
+    pub(crate) async fn ensure_feature_token(
+        &self,
+        tenant_id: &str,
+        feature: ConsentFeature,
+    ) -> azapptoolkit_auth::Result<()> {
+        self.ensure_scoped_token(tenant_id, self.feature_scopes(feature))
+            .await
     }
 
-    /// Acquires (and caches) the `Policy.ReadWrite.ApplicationConfiguration`
-    /// token up front, surfacing a *typed* auth error — notably
-    /// [`AuthError::ConsentRequired`] — before any claims-mapping write. The
-    /// `ScopedTokenAdapter` boundary flattens errors to `String` (a
-    /// `consent_required` raised inside a scoped Graph call would reach the UI as
-    /// a generic `token_error`), so an SSO command that wants the UI to show a
-    /// "Grant consent" button must probe here first. On success the token is
+    /// Acquires (and caches) the ARM token up front, surfacing a *typed* auth
+    /// error — notably [`AuthError::ConsentRequired`] — before any ARM call, so
+    /// the command fails before any side effect and can bind the `arm` consent
+    /// feature for the UI's button; on success the token is cached and the
+    /// subsequent `ArmClient` call reuses it, so the happy path costs no extra
+    /// round trip. Non-CAE (like the ARM adapter).
+    pub async fn ensure_arm_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
+        self.ensure_feature_token(tenant_id, ConsentFeature::Arm)
+            .await
+    }
+
+    /// Acquires (and caches) the claims-mapping policy token
+    /// (`Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`)
+    /// up front, surfacing a *typed* auth error — notably
+    /// [`AuthError::ConsentRequired`] — before any claims-mapping write, so an
+    /// SSO command fails before its first side effect and the UI's "Grant
+    /// consent" button binds the `policy_write` feature. On success the token is
     /// cached and the subsequent claims Graph call reuses it. CAE (Graph adapter).
     pub async fn ensure_policy_write_token(
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_policy_write_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::PolicyWrite)
+            .await
     }
 
     /// Acquires (and caches) the `Sites.FullControl.All` token up front, so a
     /// missing-consent rejection surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the SharePoint site access section offers a "Grant
-    /// consent" button) instead of being flattened to a generic `token_error`
-    /// inside the scoped SharePoint Graph call. CAE (Graph adapter).
+    /// [`AuthError::ConsentRequired`] before any SharePoint work, bound to the
+    /// `sharepoint` feature the site access section's "Grant consent" button
+    /// requests. CAE (Graph adapter).
     pub async fn ensure_sharepoint_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_sharepoint_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::SharePoint)
+            .await
     }
 
-    /// Acquires (and caches) the `GroupMember.ReadWrite.All` token up front, so
+    /// Acquires (and caches) the `GroupMember.ReadWrite.All` +
+    /// `Application.ReadWrite.All` token up front, so
     /// a not-yet-consented scope surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the group-membership panel offers a
-    /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the scoped Graph call. CAE, matching the `new_cae`
-    /// adapter that consumes this scope set.
+    /// [`AuthError::ConsentRequired`] before any membership change, bound to the
+    /// `group_membership` feature the panel's "Grant consent" button requests.
+    /// CAE, matching the `new_cae` adapter that consumes this scope set.
     pub async fn ensure_group_member_token(
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_group_member_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::GroupMembership)
+            .await
+    }
+
+    /// Acquires (and caches) the `Synchronization.Read.All` token up front, so a
+    /// not-yet-consented scope surfaces as the typed
+    /// [`AuthError::ConsentRequired`] before the provisioning read, bound to the
+    /// `sync` feature the Provisioning tab's "Grant consent & retry" button
+    /// requests (otherwise the missing consent reads as a bare 403). CAE,
+    /// matching the `new_cae` `sync_token` adapter that consumes this scope set.
+    pub async fn ensure_sync_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
+        self.ensure_feature_token(tenant_id, ConsentFeature::Sync)
+            .await
     }
 
     /// Acquires (and caches) the `AuditLog.Read.All` token up front, so the audit
@@ -645,22 +872,22 @@ impl AppState {
     /// already advertises cp1); the cached token is reused by the subsequent
     /// sign-in activity fetch, so the happy path costs no extra round trip.
     pub async fn ensure_audit_log_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_graph_audit_log_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, true).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::AuditLog)
+            .await
     }
 
     /// Acquires (and caches) the `outlook.office365.com/Exchange.Manage` token
     /// up front, so a not-yet-consented Exchange scope surfaces as the typed
-    /// [`AuthError::ConsentRequired`] (the Exchange/Permissions views offer a
-    /// "Grant consent" button) instead of being flattened to a generic
-    /// `token_error` inside the `ScopedTokenAdapter`'s `bearer()` call. The
-    /// cached token is reused by the subsequent Exchange admin-API call, so the
-    /// happy path costs no extra round trip. Note a *consented-but-RBAC-blocked*
-    /// user still passes this (a token is issued) and instead gets a 403 from the
-    /// admin API. Non-CAE (like the Exchange adapter).
+    /// [`AuthError::ConsentRequired`] before any Exchange work (a grant must not
+    /// half-land), bound to the `exchange` feature the Exchange/Permissions
+    /// views' "Grant consent" button requests. The cached token is reused by the
+    /// subsequent Exchange admin-API call, so the happy path costs no extra
+    /// round trip. Note a *consented-but-RBAC-blocked* user still passes this (a
+    /// token is issued) and instead gets a 403 from the admin API. Non-CAE (like
+    /// the Exchange adapter).
     pub async fn ensure_exchange_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
-        let scopes = self.auth.default_exchange_scopes();
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::Exchange)
+            .await
     }
 
     /// Acquires (and caches) the Log Analytics query token up front
@@ -672,9 +899,8 @@ impl AppState {
         &self,
         tenant_id: &str,
     ) -> azapptoolkit_auth::Result<()> {
-        let scopes =
-            EntraAuthService::resource_default_scopes(self.auth.cloud().log_analytics_resource());
-        self.ensure_scoped_token(tenant_id, scopes, false).await
+        self.ensure_feature_token(tenant_id, ConsentFeature::LogAnalytics)
+            .await
     }
 
     /// Returns a cached Azure Monitor Logs query client for `tenant_id`,
@@ -708,7 +934,67 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::CancelFlag;
+    use super::{AppState, CancelFlag, ConfigSource, resolve, resolve_from};
+    use azapptoolkit_core::cache::CacheKind;
+
+    /// Never set by anything, so the env-var branch of the [`resolve`] wiring
+    /// falls through. Every tier, the env arm included, is covered through the
+    /// pure [`resolve_from`] (setting a real env var needs the `unsafe`
+    /// `std::env::set_var`, and the workspace denies `unsafe_code`).
+    const NEVER_SET: &str = "AZAPPTOOLKIT_TEST_NEVER_SET_F484";
+
+    #[test]
+    fn resolve_precedence_env_settings_baked_placeholder() {
+        use ConfigSource::*;
+        let env = |v: &str| Some(v.to_string());
+        type Case = (
+            Option<String>,
+            Option<&'static str>,
+            Option<&'static str>,
+            &'static str,
+            ConfigSource,
+        );
+        let cases: [Case; 9] = [
+            // The env var wins over settings and the bake.
+            (env("e"), Some("s"), Some("b"), "e", Env),
+            (env("e"), None, None, "e", Env),
+            // An empty env var falls through to settings.
+            (env(""), Some("s"), Some("b"), "s", Settings),
+            // A settings value beats the bake.
+            (None, Some("s"), Some("b"), "s", Settings),
+            // An empty settings value falls through to the bake.
+            (None, Some(""), Some("b"), "b", Baked),
+            (env(""), Some(""), Some("b"), "b", Baked),
+            // An empty bake falls to the placeholder.
+            (None, None, Some(""), "d", Unset),
+            (env(""), Some(""), Some(""), "d", Unset),
+            // Nothing anywhere is the placeholder.
+            (None, None, None, "d", Unset),
+        ];
+        for (i, (e, s, b, want, source)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                resolve_from(e, s, b, "d"),
+                (want.to_string(), source),
+                "case {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_reads_the_env_then_applies_the_same_precedence() {
+        assert_eq!(
+            resolve(NEVER_SET, Some("s"), Some("b"), "d"),
+            ("s".to_string(), ConfigSource::Settings)
+        );
+    }
+
+    #[test]
+    fn config_sources_keep_their_log_spellings() {
+        assert_eq!(ConfigSource::Env.as_str(), "env");
+        assert_eq!(ConfigSource::Settings.as_str(), "settings.json");
+        assert_eq!(ConfigSource::Baked.as_str(), "baked");
+        assert_eq!(ConfigSource::Unset.as_str(), "unset");
+    }
 
     #[test]
     fn a_claimed_run_starts_uncancelled_and_stops_on_cancel() {
@@ -732,8 +1018,8 @@ mod tests {
 
     #[test]
     fn distinct_cancel_flags_are_independent() {
-        // The flag separation (audit_cancel vs sweep_cancel vs dr_cancel):
-        // cancelling a sweep must not abort a concurrent audit, and vice versa.
+        // One flag per run kind (see the AppState field docs): cancelling a
+        // sweep must not abort a concurrent audit, and vice versa.
         let audit = CancelFlag::new();
         let sweep = CancelFlag::new();
         let audit_run = audit.claim();
@@ -783,5 +1069,120 @@ mod tests {
         f.cancel();
         let run = f.claim();
         assert!(!run.is_cancelled());
+    }
+
+    #[test]
+    fn forget_tenant_drops_only_that_tenants_clients_and_idle_gates() {
+        let state = AppState::for_test("t1", "http://127.0.0.1:9");
+        state.kv_for("t1", "vault1").expect("valid vault name");
+        state.kv_for("t2", "vault1").expect("valid vault name");
+        state.arm_for("t1");
+        state.arm_for("t2");
+        state.log_analytics_for("t1");
+        state.exchange_for("t1", "a@contoso.com");
+        state.graph_for("t2");
+        let held = state.single_flight("t1|held");
+        drop(state.single_flight("t1|idle"));
+        drop(state.single_flight("t2|idle"));
+        state.cache.put(CacheKind::Lists, "t1|x".to_string(), &1u32);
+        state.cache.put(CacheKind::Lists, "t2|x".to_string(), &2u32);
+
+        state.forget_tenant("t1");
+
+        assert!(!state.graph_clients.lock().contains_key("t1"));
+        assert!(!state.exchange_clients.lock().contains_key("t1"));
+        assert!(!state.arm_clients.lock().contains_key("t1"));
+        assert!(!state.la_clients.lock().contains_key("t1"));
+        assert!(state.kv_clients.lock().keys().all(|(t, _)| t != "t1"));
+
+        assert!(state.graph_clients.lock().contains_key("t2"));
+        assert!(state.arm_clients.lock().contains_key("t2"));
+        assert!(
+            state
+                .kv_clients
+                .lock()
+                .contains_key(&("t2".to_string(), "vault1".to_string()))
+        );
+
+        let gates = state.inflight.lock();
+        assert!(gates.contains_key("t1|held"), "a held gate must survive");
+        assert!(!gates.contains_key("t1|idle"), "an idle t1 gate is dropped");
+        assert!(
+            gates.contains_key("t2|idle"),
+            "another tenant's gate is kept"
+        );
+        drop(gates);
+
+        assert_eq!(state.cache.get::<u32>(CacheKind::Lists, "t1|x"), None);
+        assert_eq!(state.cache.get::<u32>(CacheKind::Lists, "t2|x"), Some(2));
+        drop(held);
+    }
+
+    mod consent_features {
+        use super::super::{AppState, ConsentFeature};
+        use azapptoolkit_core::capabilities::CAPABILITIES;
+
+        #[test]
+        fn consent_feature_keys_round_trip() {
+            for f in ConsentFeature::ALL {
+                assert_eq!(ConsentFeature::parse(f.as_str()), Some(f));
+            }
+            assert_eq!(ConsentFeature::parse("nope"), None);
+        }
+
+        #[test]
+        fn every_catalog_scope_feature_is_a_consent_feature() {
+            // A catalog row naming an unknown feature would probe as "?" forever
+            // and its "Grant consent" button would fail with an unknown feature.
+            for c in CAPABILITIES {
+                if let Some(key) = c.scope_feature {
+                    assert!(
+                        ConsentFeature::parse(key).is_some(),
+                        "{}: scope_feature {key:?} is not a consent feature",
+                        c.key
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn every_consent_feature_has_a_catalog_row() {
+            // The other direction: a feature the app can request but the
+            // catalog doesn't list gets no readiness row, no "Requires:" label
+            // and no 403 remediation (how `sync` and `policy_write` went unlisted).
+            for f in ConsentFeature::ALL {
+                assert!(
+                    CAPABILITIES
+                        .iter()
+                        .any(|c| c.scope_feature == Some(f.as_str())),
+                    "consent feature {:?} has no capabilities-catalog row",
+                    f.as_str()
+                );
+            }
+        }
+
+        #[test]
+        fn graph_features_are_the_cae_ones() {
+            // `ensure_scoped_token` derives CAE-ness from the scope set; this
+            // pins the classification per feature against the adapters
+            // `graph_for` builds (every Graph set `new_cae`) and the resource
+            // clients (ARM / Exchange / Key Vault / Log Analytics, non-CAE).
+            let state = AppState::for_test("t", "http://127.0.0.1:9");
+            for f in ConsentFeature::ALL {
+                let graph = !matches!(
+                    f,
+                    ConsentFeature::Exchange
+                        | ConsentFeature::KeyVault
+                        | ConsentFeature::Arm
+                        | ConsentFeature::LogAnalytics
+                );
+                assert_eq!(
+                    state.auth.is_graph_scope_set(&state.feature_scopes(f)),
+                    graph,
+                    "{}",
+                    f.as_str()
+                );
+            }
+        }
     }
 }

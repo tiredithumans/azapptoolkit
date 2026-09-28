@@ -27,11 +27,33 @@ use web_sys::{Element, HtmlElement, ResizeObserver};
 
 use crate::hooks::use_grid_keynav::{RowSource, use_row_keynav};
 
+/// The caller half of [`VirtualList`]'s `scroll_offset`: zero the carried
+/// offset whenever `items` changes, from a scope that outlives the list.
+///
+/// `VirtualList` snaps to the top itself on a row-set change — but only while it
+/// is mounted. The App Registrations / Enterprise lists wrap it in a
+/// `<Show when=non-empty>`, so a search that matches nothing unmounts it before
+/// its snap runs; without this, the next non-empty result would remount it at
+/// the offset of the old, unrelated row set. The first run is skipped: a fresh
+/// caller (a refetch remount) is exactly where the carried offset must survive.
+pub fn reset_scroll_offset_on_change<T>(items: Memo<Arc<Vec<T>>>, offset: RwSignal<f64>)
+where
+    T: Send + Sync + 'static,
+{
+    Effect::new(move |prev: Option<()>| {
+        items.track();
+        if prev.is_some() {
+            offset.set(0.0);
+        }
+    });
+}
+
 #[component]
 pub fn VirtualList<T, K, KF, R>(
     /// All rows, reactively. Only the visible window is rendered; when the
-    /// row set changes the scroller snaps back to the top (the old offset
-    /// pointed into a different list).
+    /// row set changes within this instance the scroller snaps back to the top
+    /// (the old offset pointed into a different list). A parent that remounts
+    /// the list instead (a refetch) carries the offset via `scroll_offset`.
     #[prop(into)]
     items: Signal<Arc<Vec<T>>>,
     /// Fixed row height in pixels (e.g. `52.0`).
@@ -57,6 +79,16 @@ pub fn VirtualList<T, K, KF, R>(
     key: KF,
     /// Builds one row. Must set the row's own `style:top` / `style:height`.
     render_row: R,
+    /// Caller-owned scroll offset. When given, the offset outlives this
+    /// instance, so a parent that remounts the list on a refetch (the
+    /// `<Suspense>` bodies of the App Registrations / Enterprise lists) lands
+    /// back where the operator was; a row-set change within one instance still
+    /// snaps to the top. A caller that can unmount this list while the row set
+    /// changes (an empty-state `<Show>`) must also call
+    /// [`reset_scroll_offset_on_change`], or the offset outlives the row set it
+    /// pointed into.
+    #[prop(optional)]
+    scroll_offset: Option<RwSignal<f64>>,
 ) -> impl IntoView
 where
     T: Clone + Send + Sync + 'static,
@@ -72,9 +104,37 @@ where
     let render_row: StoredValue<R, LocalStorage> = StoredValue::new_local(render_row);
     let key: StoredValue<KF, LocalStorage> = StoredValue::new_local(key);
 
-    let scroll_top = RwSignal::new(0.0_f64);
+    // Writing through to the caller's signal (when given) is what carries the
+    // offset across a remount — and `visible_range` renders the carried window
+    // straight away, before the DOM scroller has caught up.
+    let scroll_top = scroll_offset.unwrap_or_else(|| RwSignal::new(0.0_f64));
     let viewport_height = RwSignal::new(600.0_f64);
     let scroll_ref: NodeRef<Div> = NodeRef::new();
+
+    // A carried offset still has to be replayed into the DOM: a fresh scroller
+    // starts at `scrollTop` 0. And it can only land once the scroller has
+    // layout — a list remounted while its view is hidden (`keep_alive`'s
+    // `display:none`, e.g. a bulk delete run from the Bulk Actions page)
+    // ignores `scrollTop` — so this is retried from the ResizeObserver, which
+    // fires on the hidden → shown transition.
+    //
+    // The value replayed is the signal's CURRENT one, not a snapshot taken at
+    // construction: the caller's `reset_scroll_offset_on_change` may zero it
+    // after this instance was built for the new row set, and that reset wins.
+    let pending_restore = StoredValue::new(scroll_offset.is_some_and(|s| s.get_untracked() > 0.0));
+    let apply_pending = move |el: &HtmlElement| {
+        if el.client_height() > 0 && pending_restore.get_value() {
+            pending_restore.set_value(false);
+            let v = scroll_top.get_untracked();
+            if v > 0.0 {
+                el.set_scroll_top(v.round() as i32);
+                // Read back: the browser clamps to the (possibly shrunk) list,
+                // and a clamp to 0 fires no scroll event — without this the
+                // window would stay at a stale offset.
+                scroll_top.set(el.scroll_top() as f64);
+            }
+        }
+    };
 
     // Measure height and update the signal. Handles `scroll_ref` being None
     // (e.g. during SSR or before first frame) by returning early.
@@ -84,6 +144,7 @@ where
             if h > 0.0 {
                 viewport_height.set(h);
             }
+            apply_pending(&el);
         }
     };
 
@@ -101,6 +162,7 @@ where
                     if h > 0.0 {
                         viewport_height.set(h);
                     }
+                    apply_pending(&el_clone);
                 }
             })
                 as Box<dyn FnMut(Vec<web_sys::ResizeObserverEntry>)>);
@@ -116,9 +178,9 @@ where
 
                 // Keep the closure alive while observing (the observer holds a raw
                 // pointer to it), then on unmount disconnect the observer and drop
-                // the closure — instead of leaking both via `forget()`. The three
-                // lists are keep-alive panes so this fires ~once per session today,
-                // but it makes `VirtualList` leak-free for any remounting caller too.
+                // the closure — instead of leaking both via `forget()`. The lists
+                // remount on every refetch (their `<Suspense>` bodies re-run), so
+                // this fires once per reload, not once per session.
                 let closure_store = StoredValue::new_local(Some(observer_fn));
                 let observer_for_cleanup = observer.clone();
                 on_cleanup(move || {
@@ -129,13 +191,18 @@ where
         }
     });
 
-    // Snap back to the top whenever the row set changes (search keystroke,
-    // facet click, refetch) — skipping the first run, where the scroller is
-    // already at 0. Setting `scrollTop` re-fires `on_scroll`, which is
-    // idempotent here.
+    // Snap back to the top whenever the row set changes within this instance
+    // (search keystroke, facet click, sort) — skipping the first run, where
+    // the scroller is at 0 or at the carried offset. A refetch never reaches
+    // this: it remounts the instance (the callers' `<Suspense>` bodies), and
+    // the caller's `scroll_offset` carries the position across that. Setting
+    // `scrollTop` re-fires `on_scroll`, which is idempotent here.
     Effect::new(move |prev: Option<()>| {
         items.track();
         if prev.is_some() {
+            // A carried offset pointed into the old row set too; don't let a
+            // later visibility change jump back to it.
+            pending_restore.set_value(false);
             if let Some(el) = scroll_ref.get_untracked() {
                 el.set_scroll_top(0);
             }

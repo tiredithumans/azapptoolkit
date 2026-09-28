@@ -151,7 +151,6 @@ dependencies = [
  "serde_json",
  "tauri-sys",
  "thaw",
- "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -1909,8 +1908,8 @@ dependencies = [
 
 [[package]]
 name = "tauri-sys"
-version = "0.2.4"
-source = "git+https://github.com/JonasKruckenberg/tauri-sys?rev=289bd29fcbce1ee86c45089477898dbdf23f8fca#289bd29fcbce1ee86c45089477898dbdf23f8fca"
+version = "0.2.5"
+source = "git+https://github.com/JonasKruckenberg/tauri-sys?rev=571cef48b216ce5dcd0e487a1184a32d77a88452#571cef48b216ce5dcd0e487a1184a32d77a88452"
 dependencies = [
  "derive_more",
  "futures",
@@ -1919,8 +1918,10 @@ dependencies = [
  "send_wrapper",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "serde_repr",
  "thiserror 2.0.21",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]

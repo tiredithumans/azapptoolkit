@@ -8,11 +8,13 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::bindings::TenantContext;
 use azapptoolkit_web_rs::components::open_items_dock::OpenItemsDock;
 use azapptoolkit_web_rs::components::open_items_workspace::OpenItemsWorkspace;
 use azapptoolkit_web_rs::hooks::use_shortcuts::use_shortcuts;
-use azapptoolkit_web_rs::state::{OpenItemKind, use_session};
+use azapptoolkit_web_rs::state::{OpenItem, OpenItemKind, use_session};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
+use azapptoolkit_web_rs::util::ls_set;
 
 /// Count elements matching `selector` that are actually visible (hidden ones are
 /// `display:none`, so they have no offset parent).
@@ -30,16 +32,6 @@ fn visible_count(selector: &str) -> usize {
 
 fn visible_panes() -> usize {
     visible_count(".workspace__pane")
-}
-
-/// True when the focused element matches `selector`. Focus placement is the
-/// whole property here and no DOM query expresses it.
-fn focused_matches(selector: &str) -> bool {
-    web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.active_element())
-        .and_then(|el| el.matches(selector).ok())
-        .unwrap_or(false)
 }
 
 /// The App Reg / Enterprise detail commands, so opened windows load and report
@@ -262,12 +254,12 @@ async fn focus_moves_into_the_pane_and_returns_on_collapse() {
     );
     // Without this the overlay opens with focus still on <body>, ~13 Tab
     // presses (the whole nav rail) away from the pane it just opened.
-    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+    ts::wait_for(|| ts::focused_matches(".workspace__pane")).await;
 
     // Escape collapses the workspace; focus goes back to the row, so the
     // operator keeps their place in the list rather than restarting at <body>.
     ts::press_key("body", "Escape");
-    ts::wait_for(|| focused_matches(".probe-row")).await;
+    ts::wait_for(|| ts::focused_matches(".probe-row")).await;
 }
 
 #[wasm_bindgen_test]
@@ -303,7 +295,7 @@ async fn accelerators_step_the_dock_and_close_the_focused_item() {
     // would drop the operator back on `<body>` with every step.
     ts::press_key_with_accel("body", "]");
     ts::wait_for(|| m.session.shown_items.get_untracked() == vec![b]).await;
-    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+    ts::wait_for(|| ts::focused_matches(".workspace__pane")).await;
     ts::press_key_with_accel("body", "[");
     ts::wait_for(|| m.session.shown_items.get_untracked() == vec![a]).await;
 
@@ -315,5 +307,71 @@ async fn accelerators_step_the_dock_and_close_the_focused_item() {
     assert!(
         m.session.is_open(OpenItemKind::AppReg, "app-1").is_none(),
         "the focused item is the one that closed"
+    );
+}
+
+/// A dock restored at sign-in comes back as chips only: no pane is shown, so no
+/// pane may fetch. Mounting every parked window hidden used to fire a full
+/// detail read per item before Home had painted.
+#[wasm_bindgen_test]
+async fn restored_chips_fetch_nothing_until_opened() {
+    let m = mount();
+    let snapshot = serde_json::to_string(&vec![
+        OpenItem {
+            id: 1,
+            kind: OpenItemKind::AppReg,
+            entity_id: "app-1".into(),
+            title: "Contoso API".into(),
+            focused_at: 1,
+        },
+        OpenItem {
+            id: 2,
+            kind: OpenItemKind::Enterprise,
+            entity_id: "sp-1".into(),
+            title: "Fabrikam Web".into(),
+            focused_at: 2,
+        },
+    ])
+    .unwrap();
+    // Own tenant id: localStorage outlives a test within the shard, and the
+    // other tests park their items under the default test tenant.
+    ls_set("azapptoolkit:workspace:restore-gui-tenant", &snapshot);
+    m.session.set_active_tenant(Some(TenantContext {
+        tenant_id: "restore-gui-tenant".into(),
+        account_oid: "00000000-0000-0000-0000-000000000001".into(),
+        username: None,
+        display_name: None,
+    }));
+
+    ts::wait_for(|| ts::query_all(".open-dock__chip").len() == 2).await;
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("get_application_detail"),
+        0,
+        "no fetch for a parked chip"
+    );
+    assert_eq!(ts::call_count("get_enterprise_application_detail"), 0);
+    assert_eq!(visible_panes(), 0, "restore never re-opens a pane");
+
+    // Opening a chip mounts (and fetches) that pane only.
+    m.session.focus_item(1, false);
+    ts::wait_for(|| visible_panes() == 1).await;
+    ts::wait_for(|| ts::call_count("get_application_detail") == 1).await;
+    assert_eq!(ts::call_count("get_enterprise_application_detail"), 0);
+
+    // Once mounted it stays alive: hide and re-show refetches nothing.
+    m.session.shown_items.set(vec![]);
+    ts::wait_for(|| visible_panes() == 0).await;
+    m.session.focus_item(1, false);
+    ts::wait_for(|| visible_panes() == 1).await;
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("get_application_detail"),
+        1,
+        "kept alive, not refetched"
     );
 }

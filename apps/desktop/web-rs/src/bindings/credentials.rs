@@ -1,15 +1,17 @@
 //! Credential-expiry dashboard IPC bindings.
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::credentials::CredentialRowDto;
 
 /// Lists every app-registration credential in the tenant, soonest-to-expire
-/// first. Always fetched fresh (no cache) so a just-rotated credential isn't
-/// shown as still-expiring.
+/// first. The backend reads it through its `{tenant}|credential_expirations`
+/// cache (`CacheKind::Lists`), which `invalidate_app_credentials`
+/// (rotate/remove) and `invalidate_app_lists` (create/delete) clear on `Ok`, so
+/// a just-rotated credential is never shown as still-expiring.
 pub async fn list_credential_expirations(
     tenant_id: &str,
 ) -> Result<Vec<CredentialRowDto>, UiError> {

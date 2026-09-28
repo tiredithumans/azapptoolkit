@@ -2,11 +2,11 @@
 //! mailbox access and migrate legacy Application Access Policies. DTOs come
 //! from the shared `azapptoolkit-dto` crate (re-exported here for callers).
 
+use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
-use tauri_sys::core::invoke_result;
 
-use crate::bindings::AppIdArgs;
+use crate::bindings::{AppIdArgs, ObjectIdArgs};
 pub use azapptoolkit_dto::exchange::*;
 
 #[derive(Serialize)]
@@ -157,13 +157,6 @@ pub async fn remove_exchange_scope_group_members(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ObjectArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-}
-
 /// Per-permission effective mailbox scoping for an app's declared mail/calendar/
 /// contacts permissions. Degrades gracefully: when the signed-in user is not an
 /// Exchange admin, every entry's scope is `Unknown` rather than an error.
@@ -173,7 +166,7 @@ pub async fn get_mail_permission_scopes(
 ) -> Result<Vec<MailScopeEntry>, UiError> {
     invoke_result(
         "get_mail_permission_scopes",
-        ObjectArgs {
+        ObjectIdArgs {
             tenant_id,
             object_id,
         },
@@ -301,4 +294,12 @@ pub async fn migrate_application_access_policies(
         },
     )
     .await
+}
+
+/// Signals an in-progress AAP migration to stop before the next application. An
+/// application already mid-migration finishes (its steps are ordered never to
+/// leave it half-scoped), so a single-app run stops only if this lands before
+/// that application starts.
+pub async fn cancel_aap_migration() -> Result<(), UiError> {
+    invoke_result("cancel_aap_migration", ()).await
 }

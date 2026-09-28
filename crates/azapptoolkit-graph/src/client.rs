@@ -48,6 +48,13 @@ pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 /// the safe request everywhere.
 pub(crate) const MAX_PAGE_SIZE: &str = "999";
 
+/// Hard cap on the pages any paging helper follows. It is the cycle guard: a
+/// `{"value": [], "@odata.nextLink": "<same url>"}` loop never advances an item
+/// cap, so only a page count bounds it. Legitimate paging is far under it —
+/// with [`MAX_PAGE_SIZE`] it bounds a read at about 200k rows. One definition,
+/// shared by every helper in `transport` and the domain modules.
+pub(crate) const MAX_PAGES: usize = 200;
+
 /// Row cap on the shared per-tenant service-principal index
 /// ([`GraphClient::list_service_principals_index`]). Public because the
 /// surfaces that read the index — the Enterprise Applications and Managed
@@ -89,7 +96,7 @@ pub use applications::{
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
-pub(crate) use transport::{batch_sub_url, escape_odata, search_phrase};
+pub(crate) use transport::{batch_sub_url, escape_odata, not_found_as_none, search_phrase};
 
 pub struct GraphClient {
     http: reqwest::Client,
@@ -121,11 +128,12 @@ pub struct GraphClient {
     /// Optional `Policy.Read.All` token for reading Conditional Access policies,
     /// acquired on demand. Same graceful-degradation contract as `audit_log_token`.
     policy_token: Option<Arc<dyn BearerProvider>>,
-    /// Optional `Policy.ReadWrite.ApplicationConfiguration` token for creating
-    /// and assigning claims-mapping policies (SAML attribute & claim
-    /// customization). The default `write_token` (`Application.ReadWrite.All`)
-    /// does NOT cover `/policies/claimsMappingPolicies`, so those writes must
-    /// ride this scope; acquired on demand (incremental consent).
+    /// Optional `Policy.ReadWrite.ApplicationConfiguration` +
+    /// `Application.ReadWrite.All` token (one token) for claims-mapping
+    /// policies (SAML attribute & claim customization). The default
+    /// `write_token` does NOT cover `/policies/claimsMappingPolicies`, and the
+    /// service-principal `$ref` assign/list/remove are documented as needing
+    /// both scopes in the same token; acquired on demand (incremental consent).
     policy_write_token: Option<Arc<dyn BearerProvider>>,
     /// Optional `Sites.FullControl.All` token for the SharePoint `Sites.Selected`
     /// model (list/grant/revoke a site's per-app permissions). The verb-selected
@@ -134,11 +142,12 @@ pub struct GraphClient {
     /// calls ride this token instead of the default read/write pair; acquired on
     /// demand (incremental consent).
     sharepoint_token: Option<Arc<dyn BearerProvider>>,
-    /// Optional `GroupMember.ReadWrite.All` token for adding/removing a service
-    /// principal as a member of a security group (the `$ref` member endpoints).
-    /// Membership *reads* ride the verb-selected `read_token`
-    /// (`Directory.Read.All` covers `memberOf`); only the writes need this
-    /// admin-consent scope, so it's acquired on demand (incremental consent).
+    /// Optional `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token
+    /// (one token — Learn documents the pair for a `servicePrincipal` member) for
+    /// adding/removing a service principal as a member of a security group (the
+    /// `$ref` member endpoints). Membership *reads* ride the verb-selected
+    /// `read_token` (`Directory.Read.All` covers `memberOf`); only the writes need
+    /// this admin-consent pair, so it's acquired on demand (incremental consent).
     group_member_token: Option<Arc<dyn BearerProvider>>,
     throttle_observer: parking_lot::RwLock<Option<Arc<dyn ThrottleObserver>>>,
 }
@@ -162,14 +171,13 @@ impl GraphClient {
     ) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(60))
             // The 60s ceiling is sized for the *slowest legitimate response* —
             // a 999-app page carrying credential arrays, or a `$batch` POST of
-            // 20 sub-requests. Without a separate connect budget a host that
-            // accepts no connection burns that whole ceiling before the retry
-            // loop even sees a failure, and does it once per attempt. A TCP+TLS
-            // handshake to Graph is sub-second in practice, so 10s is generous.
-            .connect_timeout(Duration::from_secs(10))
+            // 20 sub-requests. The shared connect budget keeps a host that
+            // accepts no connection from burning it once per attempt (see
+            // `CONNECT_TIMEOUT` for the arithmetic).
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
             // Long fan-outs (audit, DR backup) go quiet between waves. Holding
             // idle sockets across those gaps keeps the next wave off a fresh
             // handshake; 90s comfortably spans the throttle back-off window.
@@ -211,8 +219,9 @@ impl GraphClient {
         self
     }
 
-    /// Attaches a `Policy.ReadWrite.ApplicationConfiguration` token enabling
-    /// claims-mapping-policy create/assign (SAML claim customization).
+    /// Attaches a `Policy.ReadWrite.ApplicationConfiguration` +
+    /// `Application.ReadWrite.All` token enabling claims-mapping-policy
+    /// create/update/delete and the service-principal assign/list/remove.
     pub fn with_policy_write_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.policy_write_token = Some(token);
         self
@@ -225,8 +234,8 @@ impl GraphClient {
         self
     }
 
-    /// Attaches a `GroupMember.ReadWrite.All` token enabling group-membership
-    /// add/remove for service principals.
+    /// Attaches a `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token
+    /// enabling group-membership add/remove for service principals.
     pub fn with_group_member_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.group_member_token = Some(token);
         self
@@ -259,12 +268,36 @@ impl GraphClient {
         format!("{}|{}|lean", self.tenant_id, app_id)
     }
 
+    /// Installs `observer` as the client's single throttle observer. The slot
+    /// holds one observer, so a second fan-out attaching on the same per-tenant
+    /// client displaces the first (logged): the earlier run then finishes at a
+    /// fixed cap, with the per-request `Retry-After` handling still in force.
     pub fn set_throttle_observer(&self, observer: Arc<dyn ThrottleObserver>) {
-        *self.throttle_observer.write() = Some(observer);
+        let prev = self.throttle_observer.write().replace(observer.clone());
+        if let Some(prev) = prev
+            && !Arc::ptr_eq(&prev, &observer)
+        {
+            tracing::warn!(
+                tenant = %self.tenant_id,
+                "throttle: replacing a live observer; concurrent fan-outs on one tenant share a single slot"
+            );
+        }
     }
 
-    pub fn clear_throttle_observer(&self) {
-        *self.throttle_observer.write() = None;
+    /// Detaches `observer` only if it is the one currently installed, returning
+    /// whether it did. A run whose observer was displaced by a concurrent
+    /// fan-out must not wipe that run's tracker on its way out — that would
+    /// leave the survivor running with a fixed cap and no back-off for the rest
+    /// of its life.
+    pub fn clear_throttle_observer(&self, observer: &Arc<dyn ThrottleObserver>) -> bool {
+        let mut slot = self.throttle_observer.write();
+        match slot.as_ref() {
+            Some(cur) if Arc::ptr_eq(cur, observer) => {
+                *slot = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     // --------- SharePoint Sites.Selected ---------
@@ -277,14 +310,15 @@ impl GraphClient {
         self.require_token(self.sharepoint_token.as_ref(), "Sites.FullControl.All")
     }
 
-    /// The `GroupMember.ReadWrite.All` token the group-membership writes ride
+    /// The `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` token the
+    /// group-membership writes ride
     /// (see [`Self::with_group_member_token`]). `None` means the optional scope
     /// wasn't wired — surfaced as `Forbidden` so the UI degrades rather than
     /// panics.
     fn group_member_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(
             self.group_member_token.as_ref(),
-            "GroupMember.ReadWrite.All",
+            "GroupMember.ReadWrite.All + Application.ReadWrite.All",
         )
     }
 
@@ -310,14 +344,15 @@ impl GraphClient {
         self.require_token(self.policy_token.as_ref(), "Policy.Read.All")
     }
 
-    /// The `Policy.ReadWrite.ApplicationConfiguration` token the claims-mapping
-    /// policy writes ride (see [`Self::with_policy_write_token`]). `None` means
+    /// The `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`
+    /// token the claims-mapping policy calls ride (see
+    /// [`Self::with_policy_write_token`]). `None` means
     /// the optional scope wasn't wired — surfaced as `Forbidden` so the UI
     /// degrades rather than panics.
     fn policy_write_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(
             self.policy_write_token.as_ref(),
-            "Policy.ReadWrite.ApplicationConfiguration",
+            "Policy.ReadWrite.ApplicationConfiguration + Application.ReadWrite.All",
         )
     }
 
