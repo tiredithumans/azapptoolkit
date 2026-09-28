@@ -152,12 +152,12 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
             <dd class="row-meta">
                 {move || {
                     let eff = enabled_override.get().or(initial_enabled);
-                    let (label, cls) = match eff {
-                        Some(true) => ("Enabled", "badge badge--ok"),
-                        Some(false) => ("Disabled", "badge badge--danger"),
-                        None => ("Unknown", "badge"),
+                    let (label, tone) = match eff {
+                        Some(true) => ("Enabled", BadgeTone::Ok),
+                        Some(false) => ("Disabled", BadgeTone::Danger),
+                        None => ("Unknown", BadgeTone::Neutral),
                     };
-                    view! { <span class=cls>{label}</span> }
+                    view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
@@ -177,12 +177,12 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
             <dd class="row-meta">
                 {move || {
                     let eff = assign_override.get().or(initial_assign);
-                    let (label, cls) = match eff {
-                        Some(true) => ("Required", "badge badge--ok"),
-                        Some(false) => ("Not required", "badge badge--warning"),
-                        None => ("Unknown", "badge"),
+                    let (label, tone) = match eff {
+                        Some(true) => ("Required", BadgeTone::Ok),
+                        Some(false) => ("Not required", BadgeTone::Warning),
+                        None => ("Unknown", BadgeTone::Neutral),
                     };
-                    view! { <span class=cls>{label}</span> }
+                    view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
@@ -206,12 +206,12 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
             <dd class="row-meta">
                 {move || {
                     let hidden = hidden_override.get().unwrap_or(initial_hidden);
-                    let (label, cls) = if hidden {
-                        ("Hidden", "badge badge--warning")
+                    let (label, tone) = if hidden {
+                        ("Hidden", BadgeTone::Warning)
                     } else {
-                        ("Visible", "badge badge--ok")
+                        ("Visible", BadgeTone::Ok)
                     };
-                    view! { <span class=cls>{label}</span> }
+                    view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Subtle)

@@ -19,7 +19,7 @@ use crate::bindings::enterprise_application::{
     self, AppRoleInput, AppRolesView, EnterpriseApplicationDetail,
 };
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::SkeletonList;
+use crate::components::ui::{Badge, BadgeTone, DataTable, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -262,110 +262,89 @@ pub(super) fn AppRolesContent(
                     match roles_res.await {
                         Err(e) => view! { <Body1 class="form-error">{e.message}</Body1> }.into_any(),
                         Ok(view_model) => {
-                            let roles = view_model.roles;
-                            if roles.is_empty() {
-                                return view! {
-                                    <Body1>"No app roles defined. Add one to publish a role."</Body1>
-                                }
-                                    .into_any();
-                            }
                             view! {
-                                <table class="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>"Display name"</th>
-                                            <th>"Value"</th>
-                                            <th>"Allowed members"</th>
-                                            <th>"State"</th>
-                                            <th>
-                                                <span class="visually-hidden">"Actions"</span>
-                                            </th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {roles
-                                            .into_iter()
-                                            .map(|r| {
-                                                let enabled = r.is_enabled.unwrap_or(true);
-                                                // A value-less role is the built-in SAML default
-                                                // (msiam_access) — surfaced read-only.
-                                                let builtin = r.value.trim().is_empty();
-                                                let (state_label, badge_class) = if enabled {
-                                                    ("Enabled", "badge--ok")
-                                                } else {
-                                                    ("Disabled", "badge--unknown")
-                                                };
-                                                let edit_role = r.clone();
-                                                let toggle_role = r.clone();
-                                                let delete_id = r.id.clone();
-                                                // Display name first (the row's own first
-                                                // column), with the value the tokens carry —
-                                                // the body talks about that value.
-                                                let delete_label = if r.display_name.trim().is_empty() {
-                                                    r.value.clone()
-                                                } else {
-                                                    format!("{} ({})", r.display_name, r.value)
-                                                };
-                                                let delete_aria = format!("Delete app role {delete_label}");
-                                                let actions = if builtin {
-                                                    view! { <span class="muted">"Built-in"</span> }
-                                                        .into_any()
-                                                } else {
-                                                    view! {
-                                                        <div class="actions-row">
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                disabled=busy_any
-                                                                on_click=Box::new(move |_| open_edit(
-                                                                    edit_role.clone(),
-                                                                ))
-                                                            >
-                                                                "Edit"
-                                                            </Button>
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                disabled=busy_any
-                                                                on_click=Box::new(move |_| toggle(
-                                                                    toggle_role.clone(),
-                                                                ))
-                                                            >
-                                                                {if enabled { "Disable" } else { "Enable" }}
-                                                            </Button>
-                                                            <Button
-                                                                class="button--danger"
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                disabled=busy_any
-                                                                attr:aria-label=delete_aria
-                                                                on_click=Box::new(move |_| {
-                                                                    pending_delete
-                                                                        .set(
-                                                                            Some((delete_id.clone(), delete_label.clone())),
-                                                                        )
-                                                                })
-                                                            >
-                                                                "Delete"
-                                                            </Button>
-                                                        </div>
-                                                    }
-                                                        .into_any()
-                                                };
-                                                view! {
-                                                    <tr>
-                                                        <td>{r.display_name.clone()}</td>
-                                                        <td class="mono">{r.value.clone()}</td>
-                                                        <td>{member_types_label(&r.allowed_member_types)}</td>
-                                                        <td>
-                                                            <span class=format!(
-                                                                "badge {badge_class}",
-                                                            )>{state_label}</span>
-                                                        </td>
-                                                        <td>{actions}</td>
-                                                    </tr>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </tbody>
-                                </table>
+                                <DataTable
+                                    headers=vec!["Display name", "Value", "Allowed members", "State", ""]
+                                    rows=view_model.roles
+                                    empty_message="No app roles defined. Add one to publish a role."
+                                    row=move |r: AppRole| {
+                                        let enabled = r.is_enabled.unwrap_or(true);
+                                        // A value-less role is the built-in SAML default
+                                        // (msiam_access) — surfaced read-only.
+                                        let builtin = r.value.trim().is_empty();
+                                        let (state_label, state_tone) = if enabled {
+                                            ("Enabled", BadgeTone::Ok)
+                                        } else {
+                                            ("Disabled", BadgeTone::Unknown)
+                                        };
+                                        let edit_role = r.clone();
+                                        let toggle_role = r.clone();
+                                        let delete_id = r.id.clone();
+                                        // Display name first (the row's own first
+                                        // column), with the value the tokens carry —
+                                        // the body talks about that value.
+                                        let delete_label = if r.display_name.trim().is_empty() {
+                                            r.value.clone()
+                                        } else {
+                                            format!("{} ({})", r.display_name, r.value)
+                                        };
+                                        let delete_aria = format!("Delete app role {delete_label}");
+                                        let actions = if builtin {
+                                            view! { <span class="muted">"Built-in"</span> }
+                                                .into_any()
+                                        } else {
+                                            view! {
+                                                <div class="actions-row">
+                                                    <Button
+                                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                        disabled=busy_any
+                                                        on_click=Box::new(move |_| open_edit(
+                                                            edit_role.clone(),
+                                                        ))
+                                                    >
+                                                        "Edit"
+                                                    </Button>
+                                                    <Button
+                                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                        disabled=busy_any
+                                                        on_click=Box::new(move |_| toggle(
+                                                            toggle_role.clone(),
+                                                        ))
+                                                    >
+                                                        {if enabled { "Disable" } else { "Enable" }}
+                                                    </Button>
+                                                    <Button
+                                                        class="button--danger"
+                                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                        disabled=busy_any
+                                                        attr:aria-label=delete_aria
+                                                        on_click=Box::new(move |_| {
+                                                            pending_delete
+                                                                .set(
+                                                                    Some((delete_id.clone(), delete_label.clone())),
+                                                                )
+                                                        })
+                                                    >
+                                                        "Delete"
+                                                    </Button>
+                                                </div>
+                                            }
+                                                .into_any()
+                                        };
+                                        view! {
+                                            <tr>
+                                                <td>{r.display_name.clone()}</td>
+                                                <td class="mono">{r.value.clone()}</td>
+                                                <td>{member_types_label(&r.allowed_member_types)}</td>
+                                                <td>
+                                                    <Badge label=state_label tone=state_tone />
+                                                </td>
+                                                <td>{actions}</td>
+                                            </tr>
+                                        }
+                                            .into_any()
+                                    }
+                                />
                             }
                                 .into_any()
                         }

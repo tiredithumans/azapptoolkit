@@ -4,13 +4,10 @@
 //! integration tests (a binary-only crate exposes nothing). The Trunk build
 //! still bundles the `main.rs` bin; this split adds no runtime cost.
 //!
-//! Exposing the view/component modules as `pub` (so integration tests can mount
-//! them) makes each `#[component]` fn `pub`, and many take props of crate-
-//! internal types — an intentional design (those types are not part of any
-//! shipped API; the components are only "public" to be test-mountable). Allow
-//! the resulting `private_interfaces` lint crate-wide rather than leaking those
-//! prop types into the public surface.
-#![allow(private_interfaces)]
+//! The view/component modules are `pub` only so integration tests can mount
+//! them. No crate-wide `private_interfaces` allow: every prop type a `pub`
+//! `#[component]` takes is itself reachable, so a crate-internal type leaking
+//! through a `pub` item still warns (and fails `just web-clippy`).
 
 use leptos::prelude::*;
 use thaw::{ConfigProvider, Theme};

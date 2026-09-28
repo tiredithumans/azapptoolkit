@@ -73,6 +73,123 @@ fn inline_notice_markup_lives_only_in_the_callout_primitive() {
     );
 }
 
+/// The `.badge` tone vocabulary lives in exactly ONE component.
+///
+/// `components::ui::Badge` declared itself the one home of the status pill, yet
+/// 45 lines across 16 files hand-wrote `"badge badge--…"` — more than twice the
+/// primitive's own call sites. That is how `badge--info` shipped for a staged
+/// SAML signing certificate with no stylesheet rule behind it: a class string
+/// is invisible to the compiler, so the certificate the whole rollover flow is
+/// about rendered in the bare neutral chrome. The tone is now a `BadgeTone`
+/// enum (an unknown tone is a compile error, and `badge.rs`'s own test proves
+/// each tone has a rule), which only helps if nobody routes around it.
+///
+/// Like the Callout rule, this matches the class strings themselves rather than
+/// the inline `class="badge` attribute: most bypasses bound the class to a
+/// variable first (`("Enabled", "badge--ok")` tuples, `format!("badge {cls}")`),
+/// and that is the same bypass with one more line. Comment lines are skipped so
+/// prose that describes the markup is not an offender.
+#[test]
+fn status_pill_markup_lives_only_in_the_badge_primitive() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::web_modules() {
+        // The primitive itself is where this markup belongs.
+        if name == "components/ui/badge.rs" {
+            continue;
+        }
+        for (n, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("\"badge") || line.contains("badge--") {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled status-pill markup outside the Badge primitive: {offenders:#?}\n\
+         Use `components::ui::Badge` with a `BadgeTone` (a helper returns the tone, not a \
+         class string) instead of writing the `.badge` classes directly."
+    );
+}
+
+/// Every row table is keyboard-navigable.
+///
+/// The shortcuts sheet promises "↑ ↓ / Home / End — Move between rows in a
+/// table", and `DataTable` exists so that promise holds for free. Eleven
+/// tables hand-rolled `<table class="data-table">` instead — the App
+/// Registration Permissions and Expose an API tabs, an enterprise app's App
+/// roles and SAML signing certificates, the observed Graph usage table — and
+/// none wired `use_grid_keynav`, so the arrow keys did nothing there.
+///
+/// A table goes through `DataTable`; one whose rows are a keyed `<For>` (which
+/// `DataTable`'s by-value `rows` can't express) wires `use_grid_keynav` on its
+/// `<tbody>` itself. The rule counts per file — every `<table` needs its own
+/// keynav call — rather than accepting any keynav call anywhere in the file,
+/// the coarse per-file match `repo_invariants.rs` warns about.
+#[test]
+fn every_table_wires_keyboard_row_navigation() {
+    /// Tables that are not a row list, with the reason.
+    const NOT_A_GRID: &[(&str, &str)] = &[(
+        "views/dialogs/cache_diagnostics_dialog.rs",
+        "headerless key/value stats, not a row list",
+    )];
+    let modules = super::sources::web_modules();
+    for (exempt, why) in NOT_A_GRID {
+        let src = modules
+            .iter()
+            .find(|(name, _)| name == exempt)
+            .map(|(_, src)| src)
+            .unwrap_or_else(|| panic!("stale NOT_A_GRID entry `{exempt}` ({why}): no such file"));
+        assert!(
+            super::sources::code_lines(src).any(|l| l.contains("<table")),
+            "stale NOT_A_GRID entry `{exempt}` ({why}): it no longer renders a <table>"
+        );
+    }
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in &modules {
+        if name == "components/ui/data_table.rs" || NOT_A_GRID.iter().any(|(f, _)| f == name) {
+            continue;
+        }
+        let (mut tables, mut keynavs) = (0usize, 0usize);
+        for line in super::sources::code_lines(src) {
+            tables += line.matches("<table").count();
+            keynavs += line.matches("use_grid_keynav(").count();
+        }
+        if tables > keynavs {
+            offenders.push(format!(
+                "{name}: {tables} <table> vs {keynavs} use_grid_keynav"
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "tables without keyboard row navigation: {offenders:#?}\n\
+         Render the table through `components::ui::DataTable`; a keyed `<For>` table wires \
+         `use_grid_keynav(tbody_ref, ..)` on its `<tbody>` (see `resource_access/sites.rs`)."
+    );
+}
+
+/// No source points at the retired TSX frontend.
+///
+/// `apps/desktop/` holds only `src-tauri` and `web-rs`, but eight module docs
+/// still said a view "mirrors `apps/desktop/web/src/…tsx`" — a pointer a new
+/// contributor follows to nothing. (`web-rs/` does not contain the needle.)
+#[test]
+fn no_source_points_at_the_retired_tsx_frontend() {
+    let offenders: Vec<String> = super::sources::web_modules()
+        .into_iter()
+        .filter(|(_, src)| src.contains("apps/desktop/web/"))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "sources pointing at the deleted `apps/desktop/web/` TSX frontend: {offenders:#?}\n\
+         State the module's purpose instead."
+    );
+}
+
 /// A missing consent is recognised by ONE predicate, `UiError::is_consent_required`.
 ///
 /// Twenty-odd surfaces compared `e.code == "consent_required"` by hand, so the

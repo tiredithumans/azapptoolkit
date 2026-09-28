@@ -28,7 +28,9 @@ use thaw::Body1;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::icon::IconName;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{CopyableId, EmptyState, SearchInput, ShowMore, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, CopyableId, EmptyState, SearchInput, ShowMore, TabBar, TabBarItem,
+};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -408,10 +410,10 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                     <CopyableId value=i.app_id.clone() label="app id" />
                                                 </td>
                                                 <td>
-                                                    <span class=format!(
-                                                        "badge {}",
-                                                        risk_class(&i.risk_level),
-                                                    )>{i.risk_level.as_str()}</span>
+                                                    <Badge
+                                                        label=i.risk_level.as_str()
+                                                        tone=risk_tone(&i.risk_level)
+                                                    />
                                                 </td>
                                                 <td>{i.risk_score}</td>
                                                 <td>
@@ -485,10 +487,10 @@ pub fn AuditAppsPane() -> impl IntoView {
     }
 }
 
-/// A risk badge's modifier class, derived from the one tone map
-/// ([`groups::tone`]) so badges and finding-group dots can't drift apart.
-fn risk_class(level: &RiskLevel) -> String {
-    format!("badge--{}", groups::tone(*level))
+/// A risk badge's tone, derived from the one tone map ([`groups::tone`]) so
+/// badges and finding-group dots can't drift apart.
+fn risk_tone(level: &RiskLevel) -> BadgeTone {
+    groups::tone(*level)
 }
 
 /// "Last sign-in" cell. Distinguishes never-signed-in from an unavailable report

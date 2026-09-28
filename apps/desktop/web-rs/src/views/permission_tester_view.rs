@@ -19,20 +19,20 @@ use wasm_bindgen::JsCast;
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Badge, BadgeTone, Callout, SectionHeader, TabBar, TabBarItem};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
 use crate::util::no_tenant;
 
-/// Maps a [`PermissionTestResult`] verdict to (badge class, label).
+/// Maps a [`PermissionTestResult`] verdict to (badge tone, label).
 /// Exhaustive on purpose: a new verdict must be given its own badge.
-fn verdict_badge(verdict: AccessVerdict) -> (&'static str, &'static str) {
+fn verdict_badge(verdict: AccessVerdict) -> (BadgeTone, &'static str) {
     match verdict {
-        AccessVerdict::OrgWide => ("badge badge--warning", "Has access — organization-wide"),
-        AccessVerdict::Scoped => ("badge badge--ok", "Has access — scoped"),
-        AccessVerdict::NoAccess => ("badge", "No access"),
-        AccessVerdict::Unknown => ("badge badge--warning", "Couldn't determine"),
+        AccessVerdict::OrgWide => (BadgeTone::Warning, "Has access — organization-wide"),
+        AccessVerdict::Scoped => (BadgeTone::Ok, "Has access — scoped"),
+        AccessVerdict::NoAccess => (BadgeTone::Neutral, "No access"),
+        AccessVerdict::Unknown => (BadgeTone::Warning, "Couldn't determine"),
     }
 }
 
@@ -463,7 +463,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 result
                     .get()
                     .map(|r| {
-                        let (badge_class, label) = verdict_badge(r.verdict);
+                        let (badge_tone, label) = verdict_badge(r.verdict);
                         let roles = if r.roles.is_empty() {
                             None
                         } else {
@@ -472,7 +472,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                         view! {
                             <div class="permission-tester__result">
                                 <div class="row-between">
-                                    <span class=badge_class>{label}</span>
+                                    <Badge label=label tone=badge_tone />
                                     <span class="muted">{r.resource_label.clone()}</span>
                                 </div>
                                 {r.detail.clone().map(|d| view! { <Body1>{d}</Body1> })}

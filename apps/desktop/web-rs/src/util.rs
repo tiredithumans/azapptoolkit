@@ -7,6 +7,8 @@ use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS;
 use leptos::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::components::ui::BadgeTone;
+
 /// Keep-alive wrapper for a tab/view: the body mounts on first visit (tracked in
 /// `visited`) and thereafter stays in the DOM, toggled via `display` so its
 /// state (scroll, inputs, loaded resources) survives switching away and back.
@@ -245,15 +247,14 @@ pub fn expiry_label(days: i64) -> String {
     }
 }
 
-/// Badge tone (the `Badge` primitive's `danger` / `warning` / `ok`) for a
-/// floored day count.
-pub fn expiry_tone(days: i64) -> &'static str {
+/// Badge tone (`Danger` / `Warning` / `Ok`) for a floored day count.
+pub fn expiry_tone(days: i64) -> BadgeTone {
     if days <= EXPIRY_CRITICAL_DAYS {
-        "danger"
+        BadgeTone::Danger
     } else if days <= EXPIRY_WARNING_DAYS {
-        "warning"
+        BadgeTone::Warning
     } else {
-        "ok"
+        BadgeTone::Ok
     }
 }
 
@@ -460,11 +461,11 @@ mod tests {
 
     #[test]
     fn expiry_tone_thresholds() {
-        assert_eq!(expiry_tone(-1), "danger");
-        assert_eq!(expiry_tone(7), "danger");
-        assert_eq!(expiry_tone(8), "warning");
-        assert_eq!(expiry_tone(30), "warning");
-        assert_eq!(expiry_tone(31), "ok");
+        assert_eq!(expiry_tone(-1), BadgeTone::Danger);
+        assert_eq!(expiry_tone(7), BadgeTone::Danger);
+        assert_eq!(expiry_tone(8), BadgeTone::Warning);
+        assert_eq!(expiry_tone(30), BadgeTone::Warning);
+        assert_eq!(expiry_tone(31), BadgeTone::Ok);
     }
 
     #[test]

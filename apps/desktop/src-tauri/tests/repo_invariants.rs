@@ -20,8 +20,9 @@
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch, the
 //!   sign-out sweep
 //! - [`cancel`] — one `CancelToken` claim per long-running command
-//! - [`commands`] — whole-layer scans (the Callout primitive, consent
-//!   detection, resource-gated scope fixes)
+//! - [`commands`] — whole-layer scans (the Callout and Badge primitives,
+//!   keyboard-navigable tables, retired TSX pointers, consent detection,
+//!   resource-gated scope fixes)
 //! - [`ipc`] — the IPC contract: handler registry ↔ commands ↔ bindings, arg
 //!   keys, return types, and the single tauri-sys door
 //! - [`logging`] — tracing macros set their target with `target:`, not a field

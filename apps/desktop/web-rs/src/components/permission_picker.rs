@@ -23,9 +23,10 @@ use crate::bindings::permissions::{
 };
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Badge, Card, DetailLoadError, TabBar, TabBarItem};
+use crate::components::ui::{Badge, BadgeTone, Card, DetailLoadError, TabBar, TabBarItem};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
+use crate::util::no_tenant;
 
 // Microsoft Graph's first-party app id — the natural default for both the App
 // Registration and Managed Identity grant flows. Re-exported from its one
@@ -132,11 +133,7 @@ pub fn PermissionPicker(
         let _ = reload.get();
         async move {
             let Some(t) = tenant else {
-                return Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                });
+                return Err(no_tenant());
             };
             permissions::list_resource_permissions(&t, &resource).await
         }
@@ -339,7 +336,7 @@ fn delegated_risk_badge(value: &str) -> AnyView {
         view! {
             <Badge
                 label="Broad scope"
-                tone="warning"
+                tone=BadgeTone::Warning
                 title="Broad delegated scope — prefer the narrowest scope and user consent where possible"
             />
         }

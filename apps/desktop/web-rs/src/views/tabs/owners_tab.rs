@@ -1,5 +1,4 @@
-//! Owners tab. Lists current owners + lets you search and add. Mirrors
-//! `apps/desktop/web/src/views/tabs/OwnersTab.tsx`.
+//! Owners tab. Lists current owners + lets you search and add.
 
 use std::sync::Arc;
 

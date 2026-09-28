@@ -1,6 +1,5 @@
-//! Create-app dialog. Minimal port that exposes display name + audience +
-//! description + create-SP toggle. Mirrors
-//! `apps/desktop/web/src/views/CreateAppDialog.tsx`.
+//! Create-app dialog: display name + sign-in audience + description +
+//! create-SP toggle.
 
 use leptos::html;
 use leptos::prelude::*;
@@ -10,6 +9,7 @@ use crate::bindings::applications::{self, CreateApplicationInput};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
+use crate::views::tabs::overview_tab::SIGN_IN_AUDIENCES;
 
 #[component]
 pub fn CreateAppDialog(
@@ -19,7 +19,7 @@ pub fn CreateAppDialog(
 ) -> impl IntoView {
     let cmd = use_command();
     let display_name = RwSignal::new(String::new());
-    let audience = RwSignal::new("AzureADMyOrg".to_string());
+    let audience = RwSignal::new(SIGN_IN_AUDIENCES[0].0.to_string());
     let description = RwSignal::new(String::new());
     let create_sp = RwSignal::new(true);
 
@@ -85,16 +85,12 @@ pub fn CreateAppDialog(
                     </Field>
                     <Field label="Sign-in audience">
                         <Select value=audience>
-                            <option value="AzureADMyOrg">"Single tenant (this directory only)"</option>
-                            <option value="AzureADMultipleOrgs">
-                                "Multitenant (any Microsoft Entra directory)"
-                            </option>
-                            <option value="AzureADandPersonalMicrosoftAccount">
-                                "Multitenant + personal Microsoft accounts"
-                            </option>
-                            <option value="PersonalMicrosoftAccount">
-                                "Personal Microsoft accounts only"
-                            </option>
+                            {SIGN_IN_AUDIENCES
+                                .iter()
+                                .map(|(value, label)| {
+                                    view! { <option value=*value>{*label}</option> }
+                                })
+                                .collect_view()}
                         </Select>
                     </Field>
                     <Field label="Description (optional)">

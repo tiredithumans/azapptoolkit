@@ -22,13 +22,13 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
 };
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::{fmt_date, keep_alive};
+use crate::util::{fmt_date, keep_alive, no_tenant};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
@@ -85,11 +85,7 @@ pub fn EnterpriseApplicationDetailPane(
             if let Some(t) = tenant {
                 enterprise_application::get_enterprise_application_detail(&t.tenant_id, &id).await
             } else {
-                Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                })
+                Err(no_tenant())
             }
         }
     });
@@ -233,7 +229,7 @@ fn EnterpriseAppPanel(
                 {move || {
                     ro_signal
                         .with(|d| d.service_principal.is_foreign_tenant)
-                        .then(|| view! { <Badge label="Foreign tenant" tone="warning" /> })
+                        .then(|| view! { <Badge label="Foreign tenant" tone=BadgeTone::Warning /> })
                 }}
                 {move || {
                     ro_signal

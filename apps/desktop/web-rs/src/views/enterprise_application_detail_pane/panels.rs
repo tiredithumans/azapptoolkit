@@ -112,13 +112,13 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                                 {list
                                     .into_iter()
                                     .map(|j| {
-                                        let (label, cls) = match j.status_code.as_deref() {
-                                            Some("Active") => ("Active".to_string(), "badge badge--ok"),
+                                        let (label, tone) = match j.status_code.as_deref() {
+                                            Some("Active") => ("Active".to_string(), BadgeTone::Ok),
                                             Some("Quarantine") => {
-                                                ("Quarantine".to_string(), "badge badge--danger")
+                                                ("Quarantine".to_string(), BadgeTone::Danger)
                                             }
-                                            Some(other) => (other.to_string(), "badge badge--warning"),
-                                            None => ("Unknown".to_string(), "badge"),
+                                            Some(other) => (other.to_string(), BadgeTone::Warning),
+                                            None => ("Unknown".to_string(), BadgeTone::Neutral),
                                         };
                                         let last = match (j.last_state.clone(), j.last_run.clone()) {
                                             (Some(s), Some(t)) => format!("{s} — {t}"),
@@ -133,7 +133,7 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                                             <div class="prov-job">
                                                 <div class="row-between">
                                                     <strong>{title}</strong>
-                                                    <span class=cls>{label}</span>
+                                                    <Badge label=label tone=tone />
                                                 </div>
                                                 <dl class="read-field">
                                                     <dt>"Last run"</dt>

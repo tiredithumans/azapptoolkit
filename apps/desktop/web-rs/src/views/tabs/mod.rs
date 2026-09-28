@@ -1,4 +1,4 @@
-//! Detail-pane tabs. Mirrors `apps/desktop/web/src/views/tabs/`.
+//! Detail-pane tabs.
 
 pub mod activity_tab;
 pub mod app_tab;

@@ -17,7 +17,7 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::{self, AppPermissionGrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::Callout;
+use crate::components::ui::{Badge, BadgeTone, Callout};
 use crate::state::use_session;
 use crate::util::contains_ignore_case;
 
@@ -75,10 +75,10 @@ pub fn AppPermissionGrantsView() -> impl IntoView {
 }
 
 fn grant_row(session: crate::state::Session, r: AppPermissionGrantDto) -> impl IntoView {
-    let risk_class = match r.risk.as_str() {
-        "high" => "badge badge--danger",
-        "medium" => "badge badge--warning",
-        _ => "badge",
+    let risk_tone = match r.risk.as_str() {
+        "high" => BadgeTone::Danger,
+        "medium" => BadgeTone::Warning,
+        _ => BadgeTone::Neutral,
     };
     let risk_label = match r.risk.as_str() {
         "high" => "High",
@@ -96,7 +96,7 @@ fn grant_row(session: crate::state::Session, r: AppPermissionGrantDto) -> impl I
             </td>
             <td>{r.resource_display_name.clone()}</td>
             <td>
-                <span class=risk_class>{risk_label}</span>
+                <Badge label=risk_label tone=risk_tone />
             </td>
             <td class="cell-mid">
                 <Button

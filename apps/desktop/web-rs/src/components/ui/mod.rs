@@ -2,8 +2,6 @@
 //! (a few lines of Leptos + a class on a styled root). The CSS lives in
 //! `styles.css` under the "UI primitives" section.
 
-#![allow(unused_imports, dead_code)]
-
 mod badge;
 mod callout;
 mod card;
@@ -20,7 +18,7 @@ mod show_more;
 mod skeleton;
 mod tab_bar;
 
-pub use badge::Badge;
+pub use badge::{Badge, BadgeTone};
 pub use callout::Callout;
 pub use card::Card;
 pub use copy_block::CopyBlock;

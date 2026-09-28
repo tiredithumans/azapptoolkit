@@ -9,7 +9,9 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, Spinn
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
 use crate::hooks::use_command::use_command;
 
-const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
+/// The sign-in audiences, as `(Graph value, label)` in display order — the one
+/// list: this tab's editor and `create_app_dialog` both render from it.
+pub(crate) const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
     ("AzureADMyOrg", "Single tenant (this directory only)"),
     (
         "AzureADMultipleOrgs",

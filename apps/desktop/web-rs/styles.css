@@ -452,6 +452,13 @@ h3 {
   border-color: var(--ok);
   color: var(--ok);
 }
+/* Informational, not a verdict — e.g. a staged SAML signing certificate
+   waiting to be activated. */
+.badge--info {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
 /* Indeterminate state ("couldn't determine", e.g. mailbox scoping when the
    Exchange admin API was unavailable). A dashed outline reads as "unresolved /
    needs attention" — distinct from both the bare "—" dash (not applicable) and
@@ -2655,27 +2662,6 @@ h3 {
   font-size: var(--text-caption);
   color: var(--text-muted);
 }
-.permissions-tab__filters {
-  display: flex;
-  gap: var(--space-2);
-  margin-bottom: var(--space-2);
-}
-.permissions-tab__filter-chip {
-  background: var(--bg-subtle);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  padding: 2px 10px;
-  font-size: var(--text-xs);
-  cursor: pointer;
-  font: inherit;
-  white-space: nowrap;
-}
-.permissions-tab__filter-chip--on {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* ---------- Permission picker ---------- */
 .permission-picker {
   margin: var(--space-3) 0;

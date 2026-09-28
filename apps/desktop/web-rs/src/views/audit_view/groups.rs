@@ -13,6 +13,7 @@ use std::cmp::Reverse;
 use azapptoolkit_core::audit::{AuditItem, RemediationKind, RiskLevel, matches_finding};
 
 use crate::components::bulk_action_bar::BulkAction;
+use crate::components::ui::BadgeTone;
 
 /// Which section of the Findings pane a group renders in.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -232,7 +233,7 @@ pub(super) fn group_findings(items: &[AuditItem]) -> Vec<FindingGroup> {
 /// workbench's finding-group tone dot.
 pub(crate) fn ranked_actionable_findings(
     tally: impl Fn(&str) -> Option<(usize, RiskLevel)>,
-) -> Vec<(&'static str, &'static str, &'static str, usize)> {
+) -> Vec<(&'static str, &'static str, BadgeTone, usize)> {
     let mut ranked: Vec<(&'static GroupSpec, usize, RiskLevel)> = GROUP_CATALOG
         .iter()
         .filter(|spec| matches!(spec.section, GroupSection::Actionable))
@@ -249,14 +250,15 @@ pub(crate) fn ranked_actionable_findings(
         .collect()
 }
 
-/// The one `RiskLevel` → tone mapping; `finding_group_view`, `risk_class` and
-/// (via [`ranked_actionable_findings`]) the Home card all derive from it.
-pub(super) fn tone(level: RiskLevel) -> &'static str {
+/// The one `RiskLevel` → tone mapping; `finding_group_view`, `risk_tone` and
+/// (via [`ranked_actionable_findings`]) the Home card all derive from it. Its
+/// `Display` is the `--{tone}` suffix the finding-group dots share.
+pub(super) fn tone(level: RiskLevel) -> BadgeTone {
     match level {
-        RiskLevel::Critical => "critical",
-        RiskLevel::High => "danger",
-        RiskLevel::Medium => "warning",
-        RiskLevel::Low => "ok",
+        RiskLevel::Critical => BadgeTone::Critical,
+        RiskLevel::High => BadgeTone::Danger,
+        RiskLevel::Medium => BadgeTone::Warning,
+        RiskLevel::Low => BadgeTone::Ok,
     }
 }
 
@@ -526,12 +528,12 @@ mod tests {
             ),
         ];
         let summary = CachedAuditSummary::from_items(&items, None);
-        let from_summary: Vec<(&str, &str, usize)> =
+        let from_summary: Vec<(&str, BadgeTone, usize)> =
             ranked_actionable_findings(|k| summary.finding_tally(k))
                 .into_iter()
                 .map(|(key, _, tone, n)| (key, tone, n))
                 .collect();
-        let from_items: Vec<(&str, &str, usize)> = group_findings(&items)
+        let from_items: Vec<(&str, BadgeTone, usize)> = group_findings(&items)
             .into_iter()
             .filter(|g| matches!(g.spec.section, GroupSection::Actionable))
             .filter(|g| !g.item_indices.is_empty())

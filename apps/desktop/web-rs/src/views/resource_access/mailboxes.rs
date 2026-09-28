@@ -13,7 +13,7 @@ use crate::bindings::permission_tester::{
     self, AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, ShowMore};
+use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
@@ -332,7 +332,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                         {rows
                                             .into_iter()
                                             .map(|row| {
-                                                let (badge_class, badge_label) = verdict_badge(row.verdict);
+                                                let (badge_tone, badge_label) = verdict_badge(row.verdict);
                                                 let badge_title = verdict_tooltip(row.verdict);
                                                 let app_primary = row
                                                     .display_name
@@ -366,7 +366,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                                         </td>
                                                         <td class="cell-mid">{row.held_permissions.join(", ")}</td>
                                                         <td class="cell-mid">
-                                                            <span class=badge_class title=badge_title>{badge_label}</span>
+                                                            <Badge label=badge_label tone=badge_tone title=badge_title />
                                                         </td>
                                                         <td>{format!("{}{roles}", row.detail.unwrap_or_default())}</td>
                                                     </tr>

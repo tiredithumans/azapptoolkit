@@ -13,8 +13,7 @@
 use super::*;
 
 impl Session {
-    /// Switching tenant resets selections and view, mirroring the
-    /// `setActiveTenant` reducer in `apps/desktop/web/src/store.ts`.
+    /// Switching tenant resets selections and view.
     pub fn set_active_tenant(&self, tenant: Option<TenantContext>) {
         self.active_tenant.set(tenant);
         // Clear the cross-entity working set — a previous tenant's open items are

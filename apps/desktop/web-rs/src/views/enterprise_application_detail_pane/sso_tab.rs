@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::components::ui::{Callout, CopyBlock};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyBlock, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::util::{expiry_label, expiry_tone};
 
@@ -249,125 +249,118 @@ fn SigningCertRolloverPanel(
                         let superseded = superseded.clone();
                         move |_| pending_retire.set(superseded.clone())
                     };
-                    let rows = roll
-                        .certs
-                        .iter()
-                        .map(|c| {
-                            let label = match c.status {
-                                sso::CertStatus::Active => "Active",
-                                sso::CertStatus::Staged => "Staged",
-                                sso::CertStatus::Superseded => "Previous",
-                                sso::CertStatus::Expired => "Expired",
-                            };
-                            // Status reads as a badge, matching the expiry board,
-                            // so Active is findable at a glance in a list where
-                            // every other row is inert.
-                            let status_class = match c.status {
-                                sso::CertStatus::Active => "badge badge--ok",
-                                sso::CertStatus::Staged => "badge badge--info",
-                                sso::CertStatus::Superseded => "badge badge--unknown",
-                                sso::CertStatus::Expired => "badge badge--danger",
-                            };
-                            // Only the DATE, not the full RFC3339 timestamp: a
-                            // wall of `2029-08-12T13:34:01Z` buries the one
-                            // number that matters.
-                            let expiry = c
-                                .end_date_time
-                                .as_deref()
-                                .and_then(|d| d.split('T').next())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            // The backend floors `days_to_expiry` (`div_euclid`),
-                            // which is exactly `expiry_label`'s input contract.
-                            let days = c.days_to_expiry.map(expiry_label).unwrap_or_default();
-                            // An imminent expiry must not read with the same
-                            // weight as one three years out — the live tenant
-                            // showed "4 days left" and "1095 days left" in
-                            // identical plain text. An already-expired one
-                            // (d < 0) takes the danger arm too.
-                            let days_class = match c.days_to_expiry.map(expiry_tone) {
-                                Some("danger") => "cert-rollover__days badge badge--danger",
-                                Some("warning") => "cert-rollover__days badge badge--warning",
-                                _ => "cert-rollover__days",
-                            };
-                            // An expired, non-nominated certificate is dead
-                            // weight the backend will happily remove (the retire
-                            // guards only protect the active and staged ones) —
-                            // this is the portal's "Delete certificate" on
-                            // inactive certs. The superseded cert deliberately
-                            // does NOT get this button: it is the rollback
-                            // target, and its removal stays on the explicit
-                            // "Retire previous certificate" action below.
-                            let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
-                                && !c.is_active)
-                                .then(|| {
-                                    let key_id = c.key_id.clone();
-                                    let remove_aria = format!(
-                                        "Remove expired certificate {}",
-                                        c.thumbprint,
-                                    );
-                                    view! {
-                                        <Button
-                                            class="cert-rollover__remove"
-                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                            attr:aria-label=remove_aria
-                                            on_click=Box::new(move |_| {
-                                                let key_id = key_id.clone();
-                                                cmd.run_toast_err(
-                                                    move |_: sso::SigningCertRolloverDto| {
-                                                        session.toast_success("Expired certificate removed.");
-                                                        bump();
-                                                    },
-                                                    move |tenant_id| {
-                                                        let id = sp_id.get_value();
-                                                        let key_id = key_id.clone();
-                                                        async move {
-                                                            sso::retire_saml_signing_certificate(
-                                                                    &tenant_id,
-                                                                    &id,
-                                                                    &key_id,
-                                                                )
-                                                                .await
-                                                        }
-                                                    },
-                                                );
-                                            })
-                                            disabled=Signal::derive(move || cmd.busy.get())
-                                        >
-                                            "Remove"
-                                        </Button>
-                                    }
-                                });
-                            view! {
-                                <tr class="cert-rollover__row">
-                                    <td class="cert-rollover__status">
-                                        <span class=status_class>{label}</span>
-                                    </td>
-                                    <td class="cert-rollover__thumbprint">
-                                        <code>{c.thumbprint.clone()}</code>
-                                    </td>
-                                    <td class="cert-rollover__expiry">
-                                        {expiry} " " <span class=days_class>{days}</span>
-                                    </td>
-                                    <td class="cert-rollover__actions">{remove_btn}</td>
-                                </tr>
-                            }
-                        })
-                        .collect_view();
                     view! {
-                        <table class="cert-rollover__table">
-                            <thead>
-                                <tr>
-                                    <th>"Status"</th>
-                                    <th>"Thumbprint"</th>
-                                    <th>"Expires"</th>
-                                    <th>
-                                        <span class="visually-hidden">"Actions"</span>
-                                    </th>
-                                </tr>
-                            </thead>
-                            <tbody>{rows}</tbody>
-                        </table>
+                        <DataTable
+                            headers=vec!["Status", "Thumbprint", "Expires", ""]
+                            rows=roll.certs.clone()
+                            empty_message="No signing certificates on this application."
+                            row=move |c: sso::SigningCertDto| {
+                                let label = match c.status {
+                                    sso::CertStatus::Active => "Active",
+                                    sso::CertStatus::Staged => "Staged",
+                                    sso::CertStatus::Superseded => "Previous",
+                                    sso::CertStatus::Expired => "Expired",
+                                };
+                                // Status reads as a badge, matching the expiry board,
+                                // so Active is findable at a glance in a list where
+                                // every other row is inert. Staged is informational,
+                                // not a verdict: it is the certificate the whole
+                                // rollover flow is about.
+                                let status_tone = match c.status {
+                                    sso::CertStatus::Active => BadgeTone::Ok,
+                                    sso::CertStatus::Staged => BadgeTone::Info,
+                                    sso::CertStatus::Superseded => BadgeTone::Unknown,
+                                    sso::CertStatus::Expired => BadgeTone::Danger,
+                                };
+                                // Only the DATE, not the full RFC3339 timestamp: a
+                                // wall of `2029-08-12T13:34:01Z` buries the one
+                                // number that matters.
+                                let expiry = c
+                                    .end_date_time
+                                    .as_deref()
+                                    .and_then(|d| d.split('T').next())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                // The backend floors `days_to_expiry` (`div_euclid`),
+                                // which is exactly `expiry_label`'s input contract.
+                                let days = c.days_to_expiry.map(expiry_label).unwrap_or_default();
+                                // An imminent expiry must not read with the same
+                                // weight as one three years out — the live tenant
+                                // showed "4 days left" and "1095 days left" in
+                                // identical plain text. An already-expired one
+                                // (d < 0) takes the danger arm too.
+                                let days_view = match c.days_to_expiry.map(expiry_tone) {
+                                    Some(tone @ (BadgeTone::Danger | BadgeTone::Warning)) => {
+                                        view! { <Badge label=days tone=tone class="cert-rollover__days" /> }
+                                            .into_any()
+                                    }
+                                    _ => view! { <span class="cert-rollover__days">{days}</span> }.into_any(),
+                                };
+                                // An expired, non-nominated certificate is dead
+                                // weight the backend will happily remove (the retire
+                                // guards only protect the active and staged ones) —
+                                // this is the portal's "Delete certificate" on
+                                // inactive certs. The superseded cert deliberately
+                                // does NOT get this button: it is the rollback
+                                // target, and its removal stays on the explicit
+                                // "Retire previous certificate" action below.
+                                let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
+                                    && !c.is_active)
+                                    .then(|| {
+                                        let key_id = c.key_id.clone();
+                                        let remove_aria = format!(
+                                            "Remove expired certificate {}",
+                                            c.thumbprint,
+                                        );
+                                        view! {
+                                            <Button
+                                                class="cert-rollover__remove"
+                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                attr:aria-label=remove_aria
+                                                on_click=Box::new(move |_| {
+                                                    let key_id = key_id.clone();
+                                                    cmd.run_toast_err(
+                                                        move |_: sso::SigningCertRolloverDto| {
+                                                            session.toast_success("Expired certificate removed.");
+                                                            bump();
+                                                        },
+                                                        move |tenant_id| {
+                                                            let id = sp_id.get_value();
+                                                            let key_id = key_id.clone();
+                                                            async move {
+                                                                sso::retire_saml_signing_certificate(
+                                                                        &tenant_id,
+                                                                        &id,
+                                                                        &key_id,
+                                                                    )
+                                                                    .await
+                                                            }
+                                                        },
+                                                    );
+                                                })
+                                                disabled=Signal::derive(move || cmd.busy.get())
+                                            >
+                                                "Remove"
+                                            </Button>
+                                        }
+                                    });
+                                view! {
+                                    <tr class="cert-rollover__row">
+                                        <td class="cert-rollover__status">
+                                            <Badge label=label tone=status_tone />
+                                        </td>
+                                        <td class="cert-rollover__thumbprint">
+                                            <code>{c.thumbprint.clone()}</code>
+                                        </td>
+                                        <td class="cert-rollover__expiry">
+                                            {expiry} " " {days_view}
+                                        </td>
+                                        <td class="cert-rollover__actions">{remove_btn}</td>
+                                    </tr>
+                                }
+                                    .into_any()
+                            }
+                        />
 
                         // Phase guidance — one Callout, never two competing ones.
                         {(phase == sso::RolloverPhase::Staged && active_expired)

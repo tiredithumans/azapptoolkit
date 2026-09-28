@@ -23,12 +23,12 @@ use crate::bindings::expose_api::{
 };
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{DetailLoadError, DetailSkeleton};
+use crate::components::ui::{Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
-use azapptoolkit_core::models::OAuth2PermissionScope;
+use azapptoolkit_core::models::{OAuth2PermissionScope, PreAuthorizedApplication};
 
 use crate::util::no_tenant;
 
@@ -386,58 +386,34 @@ fn ExposeApiLoaded(
                 <Body1 class="hint">
                     "The globally unique URI clients use to request tokens for this API (the audience). Usually api://{client-id}."
                 </Body1>
-                {
-                    let list = dto.identifier_uris.clone();
-                    if list.is_empty() {
+                <DataTable
+                    headers=vec!["URI", ""]
+                    rows=dto.identifier_uris.clone()
+                    empty_message="No Application ID URI is set — clients can't request tokens for this API's scopes until one is added."
+                    row=move |uri: String| {
+                        let uri_click = uri.clone();
+                        let remove_label = format!("Remove Application ID URI {uri}");
                         view! {
-                            <Body1>
-                                "No Application ID URI is set — clients can't request tokens for this API's scopes until one is added."
-                            </Body1>
-                        }
-                            .into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>"URI"</th>
-                                        <th>
-                                            <span class="visually-hidden">"Actions"</span>
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|uri| {
-                                            let uri_click = uri.clone();
-                                            let remove_label = format!("Remove Application ID URI {uri}");
-                                            view! {
-                                                <tr>
-                                                    <td class="mono">{uri.clone()}</td>
-                                                    <td class="cell-mid">
-                                                        <Button
-                                                            class="button--danger"
-                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                            attr:aria-label=remove_label
-                                                            on_click=Box::new(move |_| {
-                                                                uri_remove_cmd.error.set(None);
-                                                                pending_remove_uri.set(Some(uri_click.clone()))
-                                                            })
-                                                        >
-                                                            "Remove"
-                                                        </Button>
-                                                    </td>
-                                                </tr>
-                                            }
+                            <tr>
+                                <td class="mono">{uri}</td>
+                                <td class="cell-mid">
+                                    <Button
+                                        class="button--danger"
+                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                        attr:aria-label=remove_label
+                                        on_click=Box::new(move |_| {
+                                            uri_remove_cmd.error.set(None);
+                                            pending_remove_uri.set(Some(uri_click.clone()))
                                         })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
+                                    >
+                                        "Remove"
+                                    </Button>
+                                </td>
+                            </tr>
                         }
                             .into_any()
                     }
-                }
+                />
             </section>
             <section>
                 <header class="row-between">
@@ -454,88 +430,63 @@ fn ExposeApiLoaded(
                 <Body1 class="hint">
                     "Delegated permissions client applications can request when calling this API on a signed-in user's behalf."
                 </Body1>
-                {
-                    let list = dto.scopes.clone();
-                    if list.is_empty() {
-                        view! { <Body1>"No scopes defined."</Body1> }.into_any()
-                    } else {
+                <DataTable
+                    headers=vec![
+                        "Scope name",
+                        "Who can consent",
+                        "Admin consent display name",
+                        "State",
+                        "",
+                    ]
+                    rows=dto.scopes.clone()
+                    empty_message="No scopes defined."
+                    row=move |s: OAuth2PermissionScope| {
+                        let enabled = s.is_enabled.unwrap_or(true);
+                        let (state_label, state_tone) = if enabled {
+                            ("Enabled", BadgeTone::Ok)
+                        } else {
+                            ("Disabled", BadgeTone::Unknown)
+                        };
+                        let edit_scope = s.clone();
+                        let delete_id = s.id.clone();
+                        let delete_value = s.value.clone();
+                        let delete_label = format!("Delete scope {}", s.value);
                         view! {
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>"Scope name"</th>
-                                        <th>"Who can consent"</th>
-                                        <th>"Admin consent display name"</th>
-                                        <th>"State"</th>
-                                        <th>
-                                            <span class="visually-hidden">"Actions"</span>
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|s| {
-                                            let enabled = s.is_enabled.unwrap_or(true);
-                                            let (state_label, badge_class) = if enabled {
-                                                ("Enabled", "badge--ok")
-                                            } else {
-                                                ("Disabled", "badge--unknown")
-                                            };
-                                            let edit_scope = s.clone();
-                                            let delete_id = s.id.clone();
-                                            let delete_value = s.value.clone();
-                                            let delete_label = format!("Delete scope {}", s.value);
-                                            view! {
-                                                <tr>
-                                                    <td class="mono">{s.value.clone()}</td>
-                                                    <td>{consent_label(s.r#type.as_deref())}</td>
-                                                    <td>
-                                                        {s
-                                                            .admin_consent_display_name
-                                                            .clone()
-                                                            .unwrap_or_else(|| "—".into())}
-                                                    </td>
-                                                    <td>
-                                                        <span class=format!(
-                                                            "badge {badge_class}",
-                                                        )>{state_label}</span>
-                                                    </td>
-                                                    <td>
-                                                        <div class="actions-row">
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| open_edit_scope(
-                                                                    edit_scope.clone(),
-                                                                ))
-                                                            >
-                                                                "Edit"
-                                                            </Button>
-                                                            <Button
-                                                                class="button--danger"
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                attr:aria-label=delete_label
-                                                                on_click=Box::new(move |_| {
-                                                                    pending_delete_scope
-                                                                        .set(
-                                                                            Some((delete_id.clone(), delete_value.clone())),
-                                                                        )
-                                                                })
-                                                            >
-                                                                "Delete"
-                                                            </Button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
+                            <tr>
+                                <td class="mono">{s.value.clone()}</td>
+                                <td>{consent_label(s.r#type.as_deref())}</td>
+                                <td>
+                                    {s.admin_consent_display_name.clone().unwrap_or_else(|| "—".into())}
+                                </td>
+                                <td>
+                                    <Badge label=state_label tone=state_tone />
+                                </td>
+                                <td>
+                                    <div class="actions-row">
+                                        <Button
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            on_click=Box::new(move |_| open_edit_scope(edit_scope.clone()))
+                                        >
+                                            "Edit"
+                                        </Button>
+                                        <Button
+                                            class="button--danger"
+                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                            attr:aria-label=delete_label
+                                            on_click=Box::new(move |_| {
+                                                pending_delete_scope
+                                                    .set(Some((delete_id.clone(), delete_value.clone())))
+                                            })
+                                        >
+                                            "Delete"
+                                        </Button>
+                                    </div>
+                                </td>
+                            </tr>
                         }
                             .into_any()
                     }
-                }
+                />
             </section>
             <section>
                 <header class="row-between">
@@ -557,94 +508,75 @@ fn ExposeApiLoaded(
                     "Pre-authorized clients can request the selected scopes without the user being asked to consent. Only authorize clients you trust."
                 </Body1>
                 {
-                    let list = dto.pre_authorized_applications.clone();
                     let names = dto.client_display_names.clone();
                     let by_id: std::collections::HashMap<String, String> = dto
                         .scopes
                         .iter()
                         .map(|s| (s.id.clone(), s.value.clone()))
                         .collect();
-                    if list.is_empty() {
-                        view! { <Body1>"No authorized client applications."</Body1> }.into_any()
-                    } else {
-                        view! {
-                            <table class="data-table">
-                                <thead>
+                    view! {
+                        <DataTable
+                            headers=vec!["Client application", "Client ID", "Authorized scopes", ""]
+                            rows=dto.pre_authorized_applications.clone()
+                            empty_message="No authorized client applications."
+                            row=move |p: PreAuthorizedApplication| {
+                                let scope_names = p
+                                    .delegated_permission_ids
+                                    .iter()
+                                    .map(|id| {
+                                        by_id
+                                            .get(id)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!(
+                                                "{}…",
+                                                id.chars().take(8).collect::<String>(),
+                                            ))
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let edit_id = p.app_id.clone();
+                                let edit_scopes = p.delegated_permission_ids.clone();
+                                let name = names.get(&p.app_id.to_ascii_lowercase()).cloned();
+                                let remove_subject = match &name {
+                                    Some(n) => format!("{n} ({})", p.app_id),
+                                    None => p.app_id.clone(),
+                                };
+                                let remove_id = p.app_id.clone();
+                                let remove_aria = format!("Remove authorized client {remove_subject}");
+                                view! {
                                     <tr>
-                                        <th>"Client application"</th>
-                                        <th>"Client ID"</th>
-                                        <th>"Authorized scopes"</th>
-                                        <th>
-                                            <span class="visually-hidden">"Actions"</span>
-                                        </th>
+                                        <td>{name.unwrap_or_else(|| "—".into())}</td>
+                                        <td class="mono">{p.app_id.clone()}</td>
+                                        <td>{scope_names}</td>
+                                        <td>
+                                            <div class="actions-row">
+                                                <Button
+                                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                    on_click=Box::new(move |_| open_edit_pre(
+                                                        edit_id.clone(),
+                                                        edit_scopes.clone(),
+                                                    ))
+                                                >
+                                                    "Edit"
+                                                </Button>
+                                                <Button
+                                                    class="button--danger"
+                                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                    attr:aria-label=remove_aria
+                                                    on_click=Box::new(move |_| {
+                                                        pending_remove_pre
+                                                            .set(Some((remove_id.clone(), remove_subject.clone())))
+                                                    })
+                                                >
+                                                    "Remove"
+                                                </Button>
+                                            </div>
+                                        </td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    {list
-                                        .into_iter()
-                                        .map(|p| {
-                                            let scope_names = p
-                                                .delegated_permission_ids
-                                                .iter()
-                                                .map(|id| {
-                                                    by_id
-                                                        .get(id)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| format!(
-                                                            "{}…",
-                                                            id.chars().take(8).collect::<String>(),
-                                                        ))
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-                                            let edit_id = p.app_id.clone();
-                                            let edit_scopes = p.delegated_permission_ids.clone();
-                                            let name = names.get(&p.app_id.to_ascii_lowercase()).cloned();
-                                            let remove_subject = match &name {
-                                                Some(n) => format!("{n} ({})", p.app_id),
-                                                None => p.app_id.clone(),
-                                            };
-                                            let remove_id = p.app_id.clone();
-                                            let remove_aria = format!("Remove authorized client {remove_subject}");
-                                            view! {
-                                                <tr>
-                                                    <td>{name.unwrap_or_else(|| "—".into())}</td>
-                                                    <td class="mono">{p.app_id.clone()}</td>
-                                                    <td>{scope_names}</td>
-                                                    <td>
-                                                        <div class="actions-row">
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                on_click=Box::new(move |_| open_edit_pre(
-                                                                    edit_id.clone(),
-                                                                    edit_scopes.clone(),
-                                                                ))
-                                                            >
-                                                                "Edit"
-                                                            </Button>
-                                                            <Button
-                                                                class="button--danger"
-                                                                appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                                                attr:aria-label=remove_aria
-                                                                on_click=Box::new(move |_| {
-                                                                    pending_remove_pre
-                                                                        .set(
-                                                                            Some((remove_id.clone(), remove_subject.clone())),
-                                                                        )
-                                                                })
-                                                            >
-                                                                "Remove"
-                                                            </Button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </tbody>
-                            </table>
-                        }
-                            .into_any()
+                                }
+                                    .into_any()
+                            }
+                        />
                     }
                 }
             </section>

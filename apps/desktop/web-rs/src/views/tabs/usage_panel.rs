@@ -15,7 +15,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
 use crate::bindings::usage;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, DataTable};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
 
@@ -172,34 +172,22 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                             {(!r.rows.is_empty())
                                 .then(|| {
                                     view! {
-                                        <table class="data-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>"Method"</th>
-                                                    <th>"Path"</th>
-                                                    <th>"Calls"</th>
-                                                    <th>"Last seen"</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {r
-                                                    .rows
-                                                    .into_iter()
-                                                    .map(|row| {
-                                                        view! {
-                                                            <tr>
-                                                                <td class="cell-mid">{row.method}</td>
-                                                                <td class="mono">{row.path}</td>
-                                                                <td class="cell-mid">{row.count}</td>
-                                                                <td class="cell-mid">
-                                                                    {row.last_seen.unwrap_or_default()}
-                                                                </td>
-                                                            </tr>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </tbody>
-                                        </table>
+                                        <DataTable
+                                            headers=vec!["Method", "Path", "Calls", "Last seen"]
+                                            rows=r.rows
+                                            empty_message="No Graph calls observed."
+                                            row=|row: usage::GraphUsageRow| {
+                                                view! {
+                                                    <tr>
+                                                        <td class="cell-mid">{row.method}</td>
+                                                        <td class="mono">{row.path}</td>
+                                                        <td class="cell-mid">{row.count}</td>
+                                                        <td class="cell-mid">{row.last_seen.unwrap_or_default()}</td>
+                                                    </tr>
+                                                }
+                                                    .into_any()
+                                            }
+                                        />
                                     }
                                 })}
                         }

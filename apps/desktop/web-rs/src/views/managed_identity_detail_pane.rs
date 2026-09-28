@@ -27,7 +27,8 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    Badge, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar,
+    TabBarItem,
 };
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
@@ -465,7 +466,7 @@ pub fn ManagedIdentityDetailPane(
                                             .high_privilege
                                             .then(|| {
                                                 view! {
-                                                    <Badge label="High" tone="danger" />
+                                                    <Badge label="High" tone=BadgeTone::Danger />
                                                 }
                                             });
                                         view! {

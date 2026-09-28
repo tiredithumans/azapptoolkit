@@ -12,7 +12,9 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
-use crate::components::ui::{Callout, DataTable, DetailLoadError, Skeleton, SkeletonList};
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, DataTable, DetailLoadError, Skeleton, SkeletonList,
+};
 use crate::state::use_session;
 
 use crate::util::{fmt_datetime, no_tenant};
@@ -204,10 +206,10 @@ fn activity_row(item: ActivityLogItem) -> impl IntoView {
         .map(fmt_datetime)
         .unwrap_or_else(|| "—".into());
     let result = item.result.unwrap_or_else(|| "—".into());
-    let result_class = match result.as_str() {
-        "success" => "badge badge--ok",
-        "failure" => "badge badge--danger",
-        _ => "badge",
+    let result_tone = match result.as_str() {
+        "success" => BadgeTone::Ok,
+        "failure" => BadgeTone::Danger,
+        _ => BadgeTone::Neutral,
     };
     let changed: Vec<String> = item
         .modified_properties
@@ -231,7 +233,7 @@ fn activity_row(item: ActivityLogItem) -> impl IntoView {
             <td>{item.initiated_by}</td>
             <td>{item.target_summary}</td>
             <td>
-                <span class=result_class>{result}</span>
+                <Badge label=result tone=result_tone />
             </td>
         </tr>
     }

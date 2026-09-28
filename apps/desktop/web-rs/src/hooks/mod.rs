@@ -1,4 +1,4 @@
-//! Shared reactive hooks. Mirrors `apps/desktop/web/src/hooks/`.
+//! Shared reactive hooks.
 
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, HtmlInputElement};

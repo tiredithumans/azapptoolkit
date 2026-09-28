@@ -8,7 +8,7 @@ use leptos::prelude::*;
 
 use crate::bindings::managed_identity::{ManagedIdentityDto, MiSubtype};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::Badge;
+use crate::components::ui::{Badge, BadgeTone};
 use crate::constants::*;
 use crate::state::{OpenItemKind, use_session};
 
@@ -84,7 +84,7 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
                             view! {
                                 <Badge
                                     label="Disabled"
-                                    tone="unknown"
+                                    tone=BadgeTone::Unknown
                                     title="Sign-in disabled — this identity's accountEnabled is false."
                                 />
                             }

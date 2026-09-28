@@ -1,6 +1,5 @@
-//! Searchable, virtualized list of app registrations. Mirrors
-//! `apps/desktop/web/src/views/ApplicationList.tsx`. Hand-rolled fixed-row
-//! windowing replaces `@tanstack/react-virtual` (no Rust port exists).
+//! Searchable, virtualized list of app registrations, with hand-rolled
+//! fixed-row windowing.
 //!
 //! All filtering (search, creation-date range, credential facet) runs **in
 //! memory** over the loaded rows through the shared [`use_filtered_list`] memos
@@ -28,7 +27,7 @@ use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
 use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
@@ -125,12 +124,12 @@ fn sort_rows(rows: &mut [ApplicationListRowDto], col: AppSortCol, desc: bool) {
 /// it.
 ///
 /// Tones are the Credential-expiry dashboard's `status_badge` vocabulary
-/// (`danger` / `warning` / `ok` / `unknown`), because a row and that dashboard
+/// (`BadgeTone::Danger` / `Warning` / `Ok` / `Unknown`), because a row and that dashboard
 /// describe the same credential — two colour languages for one fact is how an
 /// operator learns to trust neither.
 struct CredentialMeta {
     label: &'static str,
-    tone: &'static str,
+    tone: BadgeTone,
     /// `"12d left"` / `"3 days ago"`. `None` when nothing on the app carries an
     /// end date, where the badge already says all there is to say.
     expiry: Option<String>,
@@ -145,10 +144,10 @@ fn credential_meta(
     now: DateTime<Utc>,
 ) -> CredentialMeta {
     let (label, tone) = match status {
-        ListCredentialStatus::Active => ("Active", "ok"),
-        ListCredentialStatus::Expiring => ("Expiring", "warning"),
-        ListCredentialStatus::Expired => ("Expired", "danger"),
-        ListCredentialStatus::None => ("No creds", "unknown"),
+        ListCredentialStatus::Active => ("Active", BadgeTone::Ok),
+        ListCredentialStatus::Expiring => ("Expiring", BadgeTone::Warning),
+        ListCredentialStatus::Expired => ("Expired", BadgeTone::Danger),
+        ListCredentialStatus::None => ("No creds", BadgeTone::Unknown),
     };
     CredentialMeta {
         label,
@@ -887,10 +886,10 @@ mod tests {
     #[test]
     fn credential_meta_reuses_the_dashboard_badge_vocabulary() {
         let tone = |s| credential_meta(s, None, at(0)).tone;
-        assert_eq!(tone(ListCredentialStatus::Active), "ok");
-        assert_eq!(tone(ListCredentialStatus::Expiring), "warning");
-        assert_eq!(tone(ListCredentialStatus::Expired), "danger");
-        assert_eq!(tone(ListCredentialStatus::None), "unknown");
+        assert_eq!(tone(ListCredentialStatus::Active), BadgeTone::Ok);
+        assert_eq!(tone(ListCredentialStatus::Expiring), BadgeTone::Warning);
+        assert_eq!(tone(ListCredentialStatus::Expired), BadgeTone::Danger);
+        assert_eq!(tone(ListCredentialStatus::None), BadgeTone::Unknown);
     }
 
     #[test]

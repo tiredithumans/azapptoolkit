@@ -79,6 +79,58 @@ pub(crate) fn command_modules() -> Vec<(String, String)> {
     out
 }
 
+/// Every `.rs` file under the frontend's `web-rs/src`, as (path relative to
+/// `src`, `/`-separated, source), sorted. Unlike [`command_modules`] nothing is
+/// stripped: the frontend rules scan markup, and a `#[cfg(test)]` module
+/// spelling that markup is as much a bypass as any other.
+pub(crate) fn web_modules() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("apps/desktop")
+        .join("web-rs/src");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let name = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            out.push((name.replace('\\', "/"), src));
+        }
+    }
+    assert!(
+        out.len() > 50,
+        "walked {} frontend modules from {} — the source-tree walk is broken, and a rule that \
+         scans nothing passes vacuously",
+        out.len(),
+        root.display()
+    );
+    out.sort();
+    out
+}
+
+/// The lines of `src` that are not `//` comments (doc or plain), so a rule
+/// keyed on markup never fires on prose that merely describes it.
+pub(crate) fn code_lines(src: &str) -> impl Iterator<Item = &str> {
+    src.lines().filter(|l| !l.trim_start().starts_with("//"))
+}
+
 /// One `#[tauri::command]` handler: its name and its **own** body.
 pub(crate) struct Command {
     pub(crate) module: String,

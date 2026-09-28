@@ -25,15 +25,15 @@ use thaw::Body1;
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
 use crate::bindings::readiness;
-use crate::components::ui::{Callout, SectionHeader, SkeletonList};
+use crate::components::ui::{Badge, BadgeTone, Callout, SectionHeader, SkeletonList};
 use crate::state::use_session;
 
-/// (badge class, label) for a verdict pill.
-fn verdict_meta(v: Verdict) -> (&'static str, &'static str) {
+/// (badge tone, label) for a verdict pill.
+fn verdict_meta(v: Verdict) -> (BadgeTone, &'static str) {
     match v {
-        Verdict::Have => ("badge badge--ok", "✓ Have"),
-        Verdict::Missing => ("badge badge--danger", "✗ Missing"),
-        Verdict::Unknown => ("badge badge--warning", "? Unknown"),
+        Verdict::Have => (BadgeTone::Ok, "✓ Have"),
+        Verdict::Missing => (BadgeTone::Danger, "✗ Missing"),
+        Verdict::Unknown => (BadgeTone::Warning, "? Unknown"),
     }
 }
 
@@ -85,11 +85,11 @@ fn gaps_first(mut groups: Vec<(String, Vec<ReadinessItem>)>) -> Vec<(String, Vec
 }
 
 fn verdict_row(axis: &'static str, verdict: Verdict, detail: String) -> impl IntoView {
-    let (class, label) = verdict_meta(verdict);
+    let (tone, label) = verdict_meta(verdict);
     view! {
         <div class="readiness__axis">
             <span class="readiness__axis-name">{axis}</span>
-            <span class=class>{label}</span>
+            <Badge label=label tone=tone />
             <span class="readiness__axis-detail">{detail}</span>
         </div>
     }

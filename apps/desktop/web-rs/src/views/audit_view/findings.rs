@@ -19,7 +19,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::audit::MAILBOX_SCOPING_UNRESOLVED;
 use crate::components::bulk_action_bar::BulkActionBar;
 use crate::components::select_all_bar::SelectAllBar;
-use crate::components::ui::{Callout, ShowMore};
+use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
@@ -28,7 +28,7 @@ use super::controller::AuditController;
 use super::filter::issue_lines_for;
 use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings, tone};
 use super::row::AuditRowActions;
-use super::{last_sign_in_cell, risk_class};
+use super::{last_sign_in_cell, risk_tone};
 
 #[component]
 pub(crate) fn FindingsPane() -> impl IntoView {
@@ -475,10 +475,10 @@ fn finding_group_view(
                                                 }}
                                             </td>
                                             <td>
-                                                <span class=format!(
-                                                    "badge {}",
-                                                    risk_class(&i.risk_level),
-                                                )>{i.risk_level.as_str()}</span>
+                                                <Badge
+                                                    label=i.risk_level.as_str()
+                                                    tone=risk_tone(&i.risk_level)
+                                                />
                                             </td>
                                             <td>{i.risk_score}</td>
                                             {shows_last_sign_in

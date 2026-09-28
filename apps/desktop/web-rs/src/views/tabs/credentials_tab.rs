@@ -16,7 +16,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, CopyableId, DataTable};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -36,30 +36,27 @@ fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
     Some((end - now).num_days())
 }
 
-fn status_label(days: Option<i64>) -> (&'static str, &'static str) {
+fn status_label(days: Option<i64>) -> (&'static str, BadgeTone) {
     match days {
-        None => ("Unknown", "badge--unknown"),
-        Some(d) if d < 0 => ("Expired", "badge--danger"),
-        Some(d) if d <= CRITICAL_DAYS => ("Critical", "badge--danger"),
-        Some(d) if d <= WARN_DAYS => ("Warning", "badge--warning"),
-        Some(_) => ("OK", "badge--ok"),
+        None => ("Unknown", BadgeTone::Unknown),
+        Some(d) if d < 0 => ("Expired", BadgeTone::Danger),
+        Some(d) if d <= CRITICAL_DAYS => ("Critical", BadgeTone::Danger),
+        Some(d) if d <= WARN_DAYS => ("Warning", BadgeTone::Warning),
+        Some(_) => ("OK", BadgeTone::Ok),
     }
 }
 
 /// The days-until-expiry status badge, shared by the secrets and certificates
-/// tables (the days-remaining text and the urgency class come from the same
+/// tables (the days-remaining text and the urgency tone come from the same
 /// `status_label` thresholds).
 fn status_badge(days: Option<i64>) -> impl IntoView {
-    let (status, badge_class) = status_label(days);
-    view! {
-        <span class=format!("badge {badge_class}")>
-            {match days {
-                None => status.to_string(),
-                Some(d) if d < 0 => "Expired".into(),
-                Some(d) => format!("{d}d left"),
-            }}
-        </span>
-    }
+    let (status, tone) = status_label(days);
+    let label = match days {
+        None => status.to_string(),
+        Some(d) if d < 0 => "Expired".into(),
+        Some(d) => format!("{d}d left"),
+    };
+    view! { <Badge label=label tone=tone /> }
 }
 
 /// A credential Remove button shared by the secrets and certificates tables:

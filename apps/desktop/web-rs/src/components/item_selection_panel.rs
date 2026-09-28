@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Field, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::sharepoint::{self, SharePointResourceRef};
-use crate::components::ui::Callout;
+use crate::components::ui::{Badge, BadgeTone, Callout};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -168,7 +168,7 @@ pub fn ItemSelectionPanel(
                             Probe::Failed(msg) => {
                                 view! {
                                     <li class="resource-probe resource-probe--bad">
-                                        <span class="badge badge--danger">"Not found"</span>
+                                        <Badge label="Not found" tone=BadgeTone::Danger />
                                         <span>{url}</span>
                                         <span class="muted">{msg}</span>
                                     </li>
@@ -194,11 +194,10 @@ pub fn ItemSelectionPanel(
                                     } else {
                                         "resource-probe resource-probe--bad"
                                     }>
-                                        <span class=if accepted {
-                                            "badge badge--ok"
-                                        } else {
-                                            "badge badge--danger"
-                                        }>{kind}</span>
+                                        <Badge
+                                            label=kind
+                                            tone=if accepted { BadgeTone::Ok } else { BadgeTone::Danger }
+                                        />
                                         <span>{path}</span>
                                         {(!accepted).then(|| view! { <span class="muted">{why}</span> })}
                                     </li>

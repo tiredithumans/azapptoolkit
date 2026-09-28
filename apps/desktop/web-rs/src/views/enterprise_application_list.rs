@@ -22,7 +22,7 @@ use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
 };
 use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
@@ -429,7 +429,7 @@ fn view_row(
                             view! {
                                 <Badge
                                     label="Disabled"
-                                    tone="unknown"
+                                    tone=BadgeTone::Unknown
                                     title="Sign-in disabled — this service principal's accountEnabled is false."
                                 />
                             }
@@ -439,7 +439,7 @@ fn view_row(
                             view! {
                                 <Badge
                                     label="Foreign"
-                                    tone="warning"
+                                    tone=BadgeTone::Warning
                                     title="Foreign tenant — app registered in a different tenant; consented locally."
                                 />
                             }

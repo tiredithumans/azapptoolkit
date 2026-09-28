@@ -48,6 +48,15 @@
 
 ### Fixed
 
+- **Arrow keys now move between rows in every table.** The keyboard shortcuts sheet promises ↑ ↓ /
+  Home / End in tables, but the Permissions and Expose an API tabs, an enterprise app's App roles
+  and SAML signing-certificate tables, and the observed Graph usage table ignored them. They now
+  work like the other tables. A staged SAML signing certificate also gets its own blue badge, so
+  the certificate waiting to be activated stands out from the others.
+- **The Permissions tab's kind filter can no longer hide every row.** You could switch off both the
+  Application and Delegated toggles and be left with an empty table and no explanation. It is now
+  one All / Application / Delegated choice, and a choice with nothing in it says so. An app with no
+  permissions now points you to Grant access instead of the Entra portal.
 - **The Activity and Conditional Access tabs now name every role that can grant their admin
   consent.** When Microsoft Graph refused the read for lack of consent, the message said to ask a
   Global Administrator. A Privileged Role Administrator, Application Administrator or Cloud

@@ -29,9 +29,11 @@ use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::Callout;
-use crate::components::ui::IconButton;
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, EmptyState, IconButton, TabBar, TabBarItem,
+};
 use crate::hooks::use_command::use_command;
+use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::{Session, use_session};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::usage_panel::UsagePanel;
@@ -231,9 +233,17 @@ pub fn PermissionsTab(
     // surface, formerly `row_error`).
     let cmd = use_command();
 
-    // Application/Delegated filter toggles. Both default on.
-    let show_application = RwSignal::new(true);
-    let show_delegated = RwSignal::new(true);
+    // Application/Delegated kind filter: one choice (`all` | `application` |
+    // `delegated`), so it can never reach a both-off state that hides every row.
+    let kind_filter = RwSignal::new("all".to_string());
+    // Roving-tabindex row navigation for the keyed table (it can't be a
+    // `DataTable`: the rows are a `<For>`). Reseeds when the filter or the
+    // row set changes.
+    let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
+    let on_grid_key = use_grid_keynav(tbody_ref, move || {
+        let _ = kind_filter.get();
+        let _ = detail.with(|d| d.resolved_permissions.len());
+    });
 
     // Effective Exchange mailbox scoping per Graph permission value, lazily
     // resolved when the app declares any scopable mail permission. Empty until
@@ -535,22 +545,23 @@ pub fn PermissionsTab(
                 on_changed=on_changed
             />
             {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
-            <div class="permissions-tab__filters">
-                <button
-                    class=move || filter_chip_class(show_application.get())
-                    type="button"
-                    on:click=move |_| show_application.update(|v| *v = !*v)
-                >
-                    "Application"
-                </button>
-                <button
-                    class=move || filter_chip_class(show_delegated.get())
-                    type="button"
-                    on:click=move |_| show_delegated.update(|v| *v = !*v)
-                >
-                    "Delegated"
-                </button>
-            </div>
+            <TabBar
+                items=vec![
+                    TabBarItem {
+                        value: "all",
+                        label: "All",
+                    },
+                    TabBarItem {
+                        value: "application",
+                        label: "Application",
+                    },
+                    TabBarItem {
+                        value: "delegated",
+                        label: "Delegated",
+                    },
+                ]
+                selected=kind_filter
+            />
             // A resource SP the backend couldn't read leaves that resource's
             // granted rows reading "Not granted" (no SP id to join grants to).
             // The backend doesn't cache such a detail; this says why the rows
@@ -597,13 +608,11 @@ pub fn PermissionsTab(
             {move || {
                 // The empty check reads only the (stable) resolved set, so this
                 // outer block renders the table shell once. The rows are a keyed
-                // `<For>` whose `each` tracks just the filters — so toggling
+                // `<For>` whose `each` tracks just the filter — so switching
                 // Application/Delegated diffs rows instead of rebuilding the table.
                 if detail.with(|d| d.resolved_permissions.is_empty()) {
                     return view! {
-                        <Body1>
-                            "No permissions declared. Use the Entra portal or restore from a saved manifest."
-                        </Body1>
+                        <EmptyState title="No permissions declared" body="Use Grant access to add one." />
                     }
                         .into_any();
                 }
@@ -621,20 +630,14 @@ pub fn PermissionsTab(
                                 </th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody node_ref=tbody_ref on:keydown=on_grid_key.clone()>
                             <For
                                 each=move || {
-                                    let show_app = show_application.get();
-                                    let show_del = show_delegated.get();
+                                    let filter = kind_filter.get();
                                     detail.with(|d| {
                                         d.resolved_permissions
                                             .iter()
-                                            .filter(|p| match p.permission_kind {
-                                                PermissionKind::Application => show_app,
-                                                PermissionKind::Delegated => show_del,
-                                                // Unknown shows whenever either filter is on.
-                                                PermissionKind::Unknown => show_app || show_del,
-                                            })
+                                            .filter(|p| kind_visible(&filter, p.permission_kind))
                                             .cloned()
                                             .collect::<Vec<_>>()
                                     })
@@ -669,6 +672,26 @@ pub fn PermissionsTab(
                             />
                         </tbody>
                     </table>
+                    // A kind with nothing in it says so, rather than leaving a
+                    // bare header row.
+                    {move || {
+                        let filter = kind_filter.get();
+                        let any_visible = detail
+                            .with(|d| {
+                                d.resolved_permissions
+                                    .iter()
+                                    .any(|p| kind_visible(&filter, p.permission_kind))
+                            });
+                        (!any_visible)
+                            .then(|| {
+                                let kind = if filter == "delegated" { "delegated" } else { "application" };
+                                view! {
+                                    <Body1 class="data-table__empty">
+                                        {format!("No {kind} permissions declared.")}
+                                    </Body1>
+                                }
+                            })
+                    }}
                 }
                     .into_any()
             }}
@@ -845,12 +868,16 @@ pub fn PermissionsTab(
     }
 }
 
-fn filter_chip_class(on: bool) -> String {
-    let mut c = String::from("permissions-tab__filter-chip");
-    if on {
-        c.push_str(" permissions-tab__filter-chip--on");
+/// Whether a row of `kind` shows under the kind filter (`all` |
+/// `application` | `delegated`). An unclassified (`Unknown`) row shows under
+/// every choice: hiding it would drop a permission the operator can't see
+/// anywhere else.
+fn kind_visible(filter: &str, kind: PermissionKind) -> bool {
+    match filter {
+        "application" => matches!(kind, PermissionKind::Application | PermissionKind::Unknown),
+        "delegated" => matches!(kind, PermissionKind::Delegated | PermissionKind::Unknown),
+        _ => true,
     }
-    c
 }
 
 fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
@@ -928,7 +955,11 @@ where
     let remove_permission_id = p.permission_id.clone();
     let granted = runtime_assignment_id.is_some() || runtime_grant_id.is_some();
     let status_label = if granted { "Granted" } else { "Not granted" };
-    let status_class = if granted { "badge badge--ok" } else { "badge" };
+    let status_tone = if granted {
+        BadgeTone::Ok
+    } else {
+        BadgeTone::Neutral
+    };
 
     let trash_button = match (permission_kind, runtime_assignment_id, runtime_grant_id) {
         (PermissionKind::Application, Some(assignment_id), _) => {
@@ -1098,7 +1129,7 @@ where
                 }
             </td>
             <td class="cell-mid">
-                <span class=status_class>{status_label}</span>
+                <Badge label=status_label tone=status_tone />
             </td>
             <td class="cell-mid">
                 <div class="cell-actions">
@@ -1115,6 +1146,27 @@ where
 mod tests {
     use super::*;
     use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID};
+
+    /// The kind filter narrows, but never hides an unclassified row, and
+    /// `all` hides nothing.
+    #[test]
+    fn kind_filter_never_hides_an_unclassified_row() {
+        use PermissionKind::{Application, Delegated, Unknown};
+        let cases = [
+            ("all", Application, true),
+            ("all", Delegated, true),
+            ("all", Unknown, true),
+            ("application", Application, true),
+            ("application", Delegated, false),
+            ("application", Unknown, true),
+            ("delegated", Application, false),
+            ("delegated", Delegated, true),
+            ("delegated", Unknown, true),
+        ];
+        for (filter, kind, shown) in cases {
+            assert_eq!(kind_visible(filter, kind), shown, "{filter} / {kind:?}");
+        }
+    }
 
     fn grant_result(failures: Vec<permissions::GrantFailure>) -> GrantResult {
         GrantResult {

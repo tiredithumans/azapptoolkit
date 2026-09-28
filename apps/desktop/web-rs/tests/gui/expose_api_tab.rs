@@ -132,6 +132,30 @@ async fn removing_a_uri_sends_only_that_uri() {
     assert!(call.args.get("uris").is_none());
 }
 
+/// The authorized-clients table (the tab's third section; the only one the
+/// fixture gives two rows).
+const PRE_AUTH_ROWS: &str = ".expose-api > section:nth-of-type(3) tbody tr";
+
+/// The tab's tables take the grid keyboard contract the shortcuts sheet
+/// promises: one row is the tab stop, and ArrowDown moves it to the next row.
+#[wasm_bindgen_test]
+async fn arrow_keys_move_between_authorized_client_rows() {
+    ts::reset();
+    ts::mock_ok("get_expose_api", &dto());
+    let _m = mount();
+    ts::wait_for(|| ts::body_contains("Contoso Portal")).await;
+
+    let roving = format!("{PRE_AUTH_ROWS}[tabindex='0']");
+    ts::wait_for(|| ts::query_all(&roving).len() == 1).await;
+    assert_eq!(ts::query_all(PRE_AUTH_ROWS).len(), 2);
+    assert!(ts::text(&roving).contains("Contoso Portal"));
+
+    ts::focus(&roving);
+    ts::press_key(&roving, "ArrowDown");
+    ts::wait_for(|| ts::text(&roving).contains(UNRESOLVED_CLIENT)).await;
+    assert_eq!(ts::query_all(&roving).len(), 1);
+}
+
 #[wasm_bindgen_test]
 async fn pre_authorized_rows_show_the_client_name() {
     ts::reset();

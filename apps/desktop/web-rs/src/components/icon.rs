@@ -3,8 +3,6 @@
 //! Stroke geometry follows Lucide (24×24 viewBox, stroke-width 1.5,
 //! round joins/caps). Color via `currentColor`.
 
-#![allow(dead_code)]
-
 use leptos::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +27,6 @@ pub enum IconName {
     Upload,
     Search,
     Close,
-    More,
     Filter,
     // Status
     AlertTriangle,
@@ -41,7 +38,6 @@ pub enum IconName {
     // Affordances
     ChevronRight,
     ChevronDown,
-    ExternalLink,
     LogOut,
     Maximize,
 }
@@ -173,12 +169,6 @@ fn paths(name: IconName) -> AnyView {
             <path d="M18 6 6 18M6 6l12 12"></path>
         }
         .into_any(),
-        IconName::More => view! {
-            <circle cx="12" cy="12" r="1"></circle>
-            <circle cx="19" cy="12" r="1"></circle>
-            <circle cx="5" cy="12" r="1"></circle>
-        }
-        .into_any(),
         IconName::Filter => view! {
             <path d="M3 6h18M6 12h12M10 18h4"></path>
         }
@@ -220,12 +210,6 @@ fn paths(name: IconName) -> AnyView {
         .into_any(),
         IconName::ChevronDown => view! {
             <path d="m6 9 6 6 6-6"></path>
-        }
-        .into_any(),
-        IconName::ExternalLink => view! {
-            <path d="M15 3h6v6"></path>
-            <path d="M10 14 21 3"></path>
-            <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path>
         }
         .into_any(),
         IconName::LogOut => view! {

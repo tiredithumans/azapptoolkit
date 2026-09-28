@@ -28,6 +28,15 @@ surfaces reuse it rather than re-implementing the markup.
 - **Notices/alerts** — `components::ui::Callout` (`info`/`ok`/`warn`/`danger`, reusing the `.alert`
   classes). New alert markup goes through it; migrate any raw `<div class="alert alert--…">` you
   touch.
+- **Status pills** — `components::ui::Badge` with a typed `BadgeTone` (`Neutral`/`Ok`/`Info`/
+  `Warning`/`Danger`/`Critical`/`Unknown`); a status helper returns a `BadgeTone`, never a class
+  string. The `.badge` classes are spelled only in `badge.rs`, whose test proves every tone has a
+  stylesheet rule (`badge--info` once shipped without one); pinned by `repo_invariants/commands.rs`.
+- **Tables** — `DataTable`, which brings keyboard row navigation (roving tabindex, ↑ ↓ / Home /
+  End, Enter on the row's first button) plus the empty state; pass `""` for an action column. A
+  keyed `<For>` table that can't use it wires `use_grid_keynav` on its `<tbody>` (the Permissions
+  tab, `resource_access/sites.rs`). Every `<table` in `web-rs/src` needs its own keynav call —
+  pinned by `repo_invariants/commands.rs`, with a reasoned exemption list for non-grid tables.
 - **Empty states** — a table's empty is `DataTable`'s `empty_message`; a whole section/pane with
   nothing to show is `EmptyState`; never a bare `<Body1>`. `.muted` (colour only) and `.hint`
   (smaller field-hint size) are different jobs — don't merge them.

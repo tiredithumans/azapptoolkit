@@ -17,7 +17,7 @@ use crate::bindings::keyvault_rbac::{
 };
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::SearchInput;
-use crate::components::ui::{Badge, Callout, ShowMore};
+use crate::components::ui::{Badge, BadgeTone, Callout, ShowMore};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -432,7 +432,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                 {high
                                                     .then(|| {
                                                         view! {
-                                                            <Badge label="High-privilege" tone="warning" />
+                                                            <Badge label="High-privilege" tone=BadgeTone::Warning />
                                                         }
                                                     })}
                                                 {inherited

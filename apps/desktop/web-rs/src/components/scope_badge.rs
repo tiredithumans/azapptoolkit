@@ -15,7 +15,7 @@ use azapptoolkit_core::audit::{
 };
 use leptos::prelude::*;
 
-use crate::components::ui::Badge;
+use crate::components::ui::{Badge, BadgeTone};
 
 // Scope predicates are re-exported from `azapptoolkit_core::scoping` so the badge
 // rendering here and the backend grant/scope logic share one authoritative
@@ -49,13 +49,13 @@ pub fn app_permission_risk_badge(value: &str) -> AnyView {
         Some(RiskLevel::High) => view! {
             <Badge
                 label="High risk"
-                tone="danger"
+                tone=BadgeTone::Danger
                 title="High-risk application permission — runs app-only, without a user"
             />
         }
         .into_any(),
         Some(RiskLevel::Medium) => view! {
-            <Badge label="Medium" tone="warning" title="Medium-risk application permission" />
+            <Badge label="Medium" tone=BadgeTone::Warning title="Medium-risk application permission" />
         }
         .into_any(),
         _ => ().into_any(),
@@ -152,7 +152,7 @@ pub fn permission_scope_cell(
         ScopeCell::Resolving => view! {
             <Badge
                 label="Resolving…"
-                tone="unknown"
+                tone=BadgeTone::Unknown
                 title="Querying Exchange for the effective mailbox scope — this takes a few seconds"
             />
         }
@@ -160,7 +160,7 @@ pub fn permission_scope_cell(
         ScopeCell::SitesSelected => view! {
             <Badge
                 label="Scoped (selected sites)"
-                tone="ok"
+                tone=BadgeTone::Ok
                 title="Confined to individually-granted sites (Sites.Selected)"
             />
         }
@@ -168,7 +168,7 @@ pub fn permission_scope_cell(
         ScopeCell::SitesOrgWide => view! {
             <Badge
                 label="Org-wide"
-                tone="danger"
+                tone=BadgeTone::Danger
                 title="Grants access to every site in the tenant"
             />
         }
@@ -176,7 +176,7 @@ pub fn permission_scope_cell(
         ScopeCell::ItemsSelected => view! {
             <Badge
                 label="Scoped (selected items)"
-                tone="ok"
+                tone=BadgeTone::Ok
                 title="Confined to individually-granted lists, folders or files. Reach is not enumerable — check a specific resource to see its grants."
             />
         }
@@ -238,7 +238,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
         MailPermissionScope::OrgWide => view! {
             <Badge
                 label="Org-wide"
-                tone="danger"
+                tone=BadgeTone::Danger
                 title="Reaches every mailbox in the tenant"
             />
         }
@@ -246,7 +246,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
         MailPermissionScope::Unknown => view! {
             <Badge
                 label="Unknown"
-                tone="unknown"
+                tone=BadgeTone::Unknown
                 title="Mailbox scoping couldn't be determined — the Exchange admin API was unavailable (it may still be loading, or you may need Exchange admin rights / to grant consent). See the Exchange scoping section below."
             />
         }
@@ -266,7 +266,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                 let title = recipient_filter
                     .or(scope_name)
                     .unwrap_or_else(|| "Scoped via RBAC for Applications".to_string());
-                view! { <Badge label=label tone="ok" title=title /> }.into_any()
+                view! { <Badge label=label tone=BadgeTone::Ok title=title /> }.into_any()
             }
             // Legacy Application Access Policy: genuinely scoped, but deprecated —
             // an amber badge nudges migration to RBAC for Applications.
@@ -277,7 +277,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                 } else {
                     format!("Legacy Application Access Policy: {detail}. Consider migrating to RBAC for Applications (Exchange scoping section on the Permissions tab).")
                 };
-                view! { <Badge label="Scoped (legacy)" tone="warning" title=title /> }.into_any()
+                view! { <Badge label="Scoped (legacy)" tone=BadgeTone::Warning title=title /> }.into_any()
             }
         },
     }

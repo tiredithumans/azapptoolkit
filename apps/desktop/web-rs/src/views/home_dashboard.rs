@@ -10,7 +10,7 @@ use thaw::{Body1, Button, ButtonAppearance};
 use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
 use crate::components::icon::{Icon, IconName};
-use crate::components::ui::{DetailLoadError, SectionHeader, Skeleton};
+use crate::components::ui::{BadgeTone, DetailLoadError, SectionHeader, Skeleton};
 use crate::state::{ActiveView, Session, use_session};
 use crate::util::{TimeAgo, time_ago};
 use crate::views::audit_view::ranked_actionable_findings;
@@ -590,7 +590,7 @@ fn card_lists(key: &str) -> bool {
 fn finding_row(
     n: usize,
     title: &'static str,
-    tone: &'static str,
+    tone: BadgeTone,
     key: &'static str,
     session: Session,
 ) -> impl IntoView {

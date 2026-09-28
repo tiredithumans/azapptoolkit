@@ -28,7 +28,7 @@ use crate::components::scope_wizard::ScopeTarget;
 use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{no_tenant, parse_lines};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 // The principal this section addresses is a `ScopeTarget` — the SAME model the
@@ -169,11 +169,7 @@ pub fn ExchangeScopingSection(
                 return Ok(Vec::new());
             }
             let Some(t) = tenant else {
-                return Err(azapptoolkit_dto::UiError {
-                    code: "no_tenant".into(),
-                    message: "tenant missing".into(),
-                    retryable: false,
-                });
+                return Err(no_tenant());
             };
             exchange::list_exchange_role_assignments(&t.tenant_id, &app_id).await
         }

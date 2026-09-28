@@ -23,7 +23,7 @@ use leptos::prelude::*;
 use thaw::Body1;
 
 use crate::bindings::permission_tester::AccessVerdict;
-use crate::components::ui::{SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{BadgeTone, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 
 mod keyvault;
@@ -79,15 +79,15 @@ pub fn ResourceAccessView() -> impl IntoView {
     }
 }
 
-/// Verdict badge class — org-wide reach reads as a warning, confined access as
+/// Verdict badge tone — org-wide reach reads as a warning, confined access as
 /// ok, everything else neutral. Exhaustive on purpose (as is
 /// [`verdict_tooltip`]): a new verdict must be given its own badge.
-pub(super) fn verdict_badge(verdict: AccessVerdict) -> (&'static str, &'static str) {
+pub(super) fn verdict_badge(verdict: AccessVerdict) -> (BadgeTone, &'static str) {
     match verdict {
-        AccessVerdict::OrgWide => ("badge badge--warning", "Org-wide"),
-        AccessVerdict::Scoped => ("badge badge--ok", "Scoped"),
-        AccessVerdict::NoAccess => ("badge", "No access"),
-        AccessVerdict::Unknown => ("badge", "Unknown"),
+        AccessVerdict::OrgWide => (BadgeTone::Warning, "Org-wide"),
+        AccessVerdict::Scoped => (BadgeTone::Ok, "Scoped"),
+        AccessVerdict::NoAccess => (BadgeTone::Neutral, "No access"),
+        AccessVerdict::Unknown => (BadgeTone::Neutral, "Unknown"),
     }
 }
 

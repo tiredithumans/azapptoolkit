@@ -1,7 +1,3 @@
-// The toast push API is intentionally complete (success/info/error); not every
-// kind/helper has a call site yet, mirroring the icon catalog in `icon.rs`.
-#![allow(dead_code)]
-
 //! In-app toast notifications. A single `ToastHost` is mounted near the
 //! shell root and renders the live stack from `Session::toasts`; toasts are
 //! pushed from anywhere via the `Session` helpers (`toast_success`,
