@@ -48,6 +48,13 @@
 
 ### Fixed
 
+- **Screen readers now hear which filters, findings groups and filter chips are open or selected.**
+  The Filters button on each list and every group header on the Security tab's Findings pane
+  announced no expanded or collapsed state, and a Findings header read its arrow glyph aloud as part
+  of its name. The list filter chips showed the active one by color alone; each chip now says
+  whether it is pressed. Global search and the Permission Tester's app picker no longer announce
+  "Searching…", "No matching records" or the result-limit warning as if they were results, and
+  global search names the group (Go to, App Registrations, …) a result belongs to.
 - **Arrow keys now move between rows in every table.** The keyboard shortcuts sheet promises ↑ ↓ /
   Home / End in tables, but the Permissions and Expose an API tabs, an enterprise app's App roles
   and SAML signing-certificate tables, and the observed Graph usage table ignored them. They now

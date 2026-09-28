@@ -323,55 +323,72 @@ pub fn PermissionTesterView() -> impl IntoView {
                         if !app_focused.get() || app_query.get().trim().is_empty() {
                             return ().into_any();
                         }
+                        // The listbox holds only options; the loading and empty
+                        // text sits in a sibling `role="status"` region so it is
+                        // never announced as if it were a result (same shape as
+                        // GlobalSearch).
                         view! {
-                            <div class="tester-picker__results" role="listbox" id="tester-listbox">
-                                <Suspense fallback=move || {
-                                    view! {
-                                        <div class="tester-picker__empty">"Searching…"</div>
-                                    }
-                                }>
-                                    {move || Suspend::new(async move {
-                                        let rows = app_results.await;
-                                        if rows.is_empty() {
-                                            return view! {
-                                                <div class="tester-picker__empty">
-                                                    "No matching identities."
-                                                </div>
+                            <div class="tester-picker__results">
+                                <div role="listbox" id="tester-listbox">
+                                    <Suspense fallback=|| ()>
+                                        {move || Suspend::new(async move {
+                                            let rows = app_results.await;
+                                            if rows.is_empty() {
+                                                return ().into_any();
                                             }
-                                                .into_any();
-                                        }
-                                        rows.into_iter()
-                                            .enumerate()
-                                            .map(|(i, (id, name, kind))| {
-                                                let row_class = move || {
-                                                    let mut c = String::from("tester-picker__item");
-                                                    if sel.get() == i {
-                                                        c.push_str(" tester-picker__item--active");
+                                            rows.into_iter()
+                                                .enumerate()
+                                                .map(|(i, (id, name, kind))| {
+                                                    let row_class = move || {
+                                                        let mut c = String::from("tester-picker__item");
+                                                        if sel.get() == i {
+                                                            c.push_str(" tester-picker__item--active");
+                                                        }
+                                                        c
+                                                    };
+                                                    view! {
+                                                        <button
+                                                            type="button"
+                                                            id=format!("tester-opt-{i}")
+                                                            role="option"
+                                                            aria-selected=move || (sel.get() == i).to_string()
+                                                            class=row_class
+                                                            on:mouseenter=move |_| sel.set(i)
+                                                            on:click=move |_| pick(i)
+                                                        >
+                                                            <span class="tester-picker__name">
+                                                                <TypeChip kind=kind />
+                                                                {name}
+                                                            </span>
+                                                            <span class="mono muted">{id}</span>
+                                                        </button>
                                                     }
-                                                    c
-                                                };
-                                                view! {
-                                                    <button
-                                                        type="button"
-                                                        id=format!("tester-opt-{i}")
-                                                        role="option"
-                                                        aria-selected=move || (sel.get() == i).to_string()
-                                                        class=row_class
-                                                        on:mouseenter=move |_| sel.set(i)
-                                                        on:click=move |_| pick(i)
-                                                    >
-                                                        <span class="tester-picker__name">
-                                                            <TypeChip kind=kind />
-                                                            {name}
-                                                        </span>
-                                                        <span class="mono muted">{id}</span>
-                                                    </button>
-                                                }
-                                            })
-                                            .collect_view()
-                                            .into_any()
-                                    })}
-                                </Suspense>
+                                                })
+                                                .collect_view()
+                                                .into_any()
+                                        })}
+                                    </Suspense>
+                                </div>
+                                <div role="status">
+                                    <Suspense fallback=move || {
+                                        view! {
+                                            <div class="tester-picker__empty">"Searching…"</div>
+                                        }
+                                    }>
+                                        {move || Suspend::new(async move {
+                                            app_results
+                                                .await
+                                                .is_empty()
+                                                .then(|| {
+                                                    view! {
+                                                        <div class="tester-picker__empty">
+                                                            "No matching identities."
+                                                        </div>
+                                                    }
+                                                })
+                                        })}
+                                    </Suspense>
+                                </div>
                             </div>
                         }
                             .into_any()

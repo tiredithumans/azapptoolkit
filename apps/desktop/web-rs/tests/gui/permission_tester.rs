@@ -70,3 +70,33 @@ async fn a_seed_set_before_first_mount_survives_the_tenant_reset() {
     assert_eq!(picker_value(), GUID);
     assert_eq!(m.session.tenant_ui.tester_app_id.get_untracked(), None);
 }
+
+/// The picker's listbox holds only options: the empty-result text is in a
+/// sibling `role="status"` region, so a screen reader never announces it as if
+/// it were an identity to pick.
+#[wasm_bindgen_test]
+async fn the_picker_says_no_match_outside_its_listbox() {
+    ts::reset();
+    ts::mock_ok("global_search", &fixtures::global_search_apps(&[]));
+
+    let _m = ts::mount_view(|| view! { <PermissionTesterView /> });
+    // Let the mount-time tenant reset run first, or it clears the query.
+    ts::tick().await;
+    ts::focus(PICKER);
+    ts::set_input_value(PICKER, "zqx");
+
+    let status = || {
+        ts::query(".tester-picker__results [role=status]")
+            .and_then(|e| e.text_content())
+            .unwrap_or_default()
+    };
+    ts::wait_for(|| status().contains("No matching identities.")).await;
+    let listbox = ts::query("#tester-listbox").expect("the listbox renders while open");
+    assert!(
+        !listbox
+            .text_content()
+            .unwrap_or_default()
+            .contains("No matching identities.")
+    );
+    assert_eq!(listbox.children().length(), 0);
+}

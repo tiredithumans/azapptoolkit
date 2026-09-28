@@ -86,9 +86,14 @@ surfaces reuse it rather than re-implementing the markup.
   natively where `.thaw-tab-list` needed an app-side `overflow-x` patch. Don't hand-roll a pair of
   buttons whose selected state is a Primary `appearance` either. `TabBar` only writes its bound
   signal, so a side effect on change (clearing a search box) belongs in an `Effect` that skips its
-  first run. **`aria-selected` must be a *string*** (`(sel == v).to_string()`): bound to a bare
+  first run. **Every true/false ARIA state is bound to a *string*** — `aria-selected`,
+  `aria-expanded`, `aria-pressed`, `aria-checked`, … (`(sel == v).to_string()`): bound to a bare
   `bool`, Leptos renders a boolean attribute — `aria-selected=""` when true, absent when false —
-  and neither is a valid ARIA value.
+  and neither is a valid ARIA value. Pinned by `web-rs/tests/aria_state_bindings.rs`, a source scan
+  under `just web-test`. A **combobox**'s listbox holds only `role="option"`s or `role="group"`s of
+  them (one group per heading, named by `aria-labelledby`); its loading / empty / error / cap text
+  lives in a sibling `role="status"` region, never among the options (`GlobalSearch`, the
+  Permission Tester's picker).
   Two things legitimately stay different, and "consolidate" must not eat them: `FilterChip` keeps
   its count badge and zero-count disabled state (thaw's `Tab` takes only `class`/`value`/`children`
   and could not express either), and `.ui-select` stays where the option list is long or open-ended.

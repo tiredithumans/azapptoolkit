@@ -133,9 +133,12 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                             <button
                                 type="button"
                                 class="finding-group__header finding-group__header--section"
+                                // A string, never a bare bool (see
+                                // `finding_group_view`).
+                                aria-expanded=move || healthy_open.get().to_string()
                                 on:click=move |_| healthy_open.update(|o| *o = !*o)
                             >
-                                <span class="finding-group__chevron">
+                                <span class="finding-group__chevron" aria-hidden="true">
                                     {move || if healthy_open.get() { "▾" } else { "▸" }}
                                 </span>
                                 "Healthy configuration"
@@ -252,11 +255,17 @@ fn finding_group_view(
     // The dot is the collapsed header's only severity signal, so the tier has to
     // survive being unable to see colour: `role="img"` + `aria-label` folds it
     // into the header button's accessible name (which was otherwise just
-    // "{title} {count} principals ▾"), and `title` gives the same word to a
+    // "{title} {count} principals"; the ▾/▸ chevron is `aria-hidden`, the
+    // open state is `aria-expanded`), and `title` gives the same word to a
     // sighted operator who can't separate two reds. It deliberately does NOT go
     // in `.finding-group__title` — a GUI test reads that element's text as the
     // group's name.
     let worst_label = format!("Worst: {}", g.worst.as_str());
+    // Group keys are unique static snake_case strings and the pane mounts once,
+    // so this id cannot collide. `aria-controls` points at it only while the
+    // body is rendered (it sits inside `<Show>`), so it never dangles.
+    let body_id = format!("finding-group-body-{key}");
+    let controls_id = body_id.clone();
     let head_class = if actionable {
         "finding-group"
     } else {
@@ -284,7 +293,16 @@ fn finding_group_view(
     view! {
         <section class=head_class>
             <div class="finding-group__head">
-                <button type="button" class="finding-group__header" on:click=toggle>
+                <button
+                    type="button"
+                    class="finding-group__header"
+                    // A *string*, never a bare `bool`: Leptos renders a bool as
+                    // a boolean attribute, and neither `aria-expanded=""` nor an
+                    // absent one is a valid ARIA value.
+                    aria-expanded=move || is_open().to_string()
+                    aria-controls=move || is_open().then(|| controls_id.clone())
+                    on:click=toggle
+                >
                     <span
                         class=format!("finding-group__tone finding-group__tone--{tone}")
                         role="img"
@@ -298,7 +316,7 @@ fn finding_group_view(
                             if count == 1 { "principal" } else { "principals" },
                         )}
                     </span>
-                    <span class="finding-group__chevron">
+                    <span class="finding-group__chevron" aria-hidden="true">
                         {move || if is_open() { "▾" } else { "▸" }}
                     </span>
                 </button>
@@ -320,7 +338,7 @@ fn finding_group_view(
                     })}
             </div>
             <Show when=is_open>
-                <div class="finding-group__body">
+                <div class="finding-group__body" id=body_id.clone()>
                     <p class="muted finding-group__blurb">{blurb}</p>
                     {(key == "unused" && !ctrl.report_available.get())
                         .then(|| {

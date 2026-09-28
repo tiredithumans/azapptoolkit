@@ -38,10 +38,20 @@ async fn tabs_organize_defaults_into_groups() {
 
     // The App Registration pane is active on load: its seeded owner shows.
     assert!(ts::body_contains("Alex Admin"));
+    // The TabBar's selection is a real `"true"`/`"false"` string, never a
+    // boolean attribute (`aria-selected=""` / absent).
+    let selected = |n: usize| {
+        ts::query(&format!(".ui-tabs button:nth-of-type({n})"))
+            .and_then(|b| b.get_attribute("aria-selected"))
+    };
+    assert_eq!(selected(1).as_deref(), Some("true"));
+    assert_eq!(selected(2).as_deref(), Some("false"));
 
     // Enterprise pane: seeded owner + the SSO notification-email field.
     ts::click(".ui-tabs button:nth-of-type(2)");
     ts::wait_for(|| ts::body_contains("Sam Owner")).await;
+    assert_eq!(selected(2).as_deref(), Some("true"));
+    assert_eq!(selected(1).as_deref(), Some("false"));
     assert!(ts::body_contains(
         "Default SSO notification emails (one per line, max 5)"
     ));

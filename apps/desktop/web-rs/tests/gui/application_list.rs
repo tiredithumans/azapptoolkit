@@ -110,13 +110,22 @@ async fn sorting_by_name_reorders_the_rows() {
     ts::wait_for(|| ts::text(COUNT) == "3 app registrations").await;
     assert_eq!(ts::text(".app-list__row-title"), "Mike");
 
+    // The toggle's state is a real `"true"`/`"false"` string, never a boolean
+    // attribute (`aria-pressed=""` / absent).
+    let pressed =
+        || ts::query(".app-list__sortbar button").and_then(|b| b.get_attribute("aria-pressed"));
+    assert_eq!(pressed().as_deref(), Some("false"));
+
     // Name: A→Z, then reversed, then back to the order Graph returned.
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Alpha").await;
+    assert_eq!(pressed().as_deref(), Some("true"));
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Zulu").await;
+    assert_eq!(pressed().as_deref(), Some("true"));
     ts::click(".app-list__sortbar button");
     ts::wait_for(|| ts::text(".app-list__row-title") == "Mike").await;
+    assert_eq!(pressed().as_deref(), Some("false"));
     assert_eq!(ts::query_all(".app-list__row").len(), 3);
 }
 
@@ -416,4 +425,83 @@ async fn filter_drawer_fields_have_accessible_names() {
         ts::query("input.saved-views__input[aria-label=\"View name\"]").is_some(),
         "the saved-view name box needs a name beyond its placeholder"
     );
+}
+
+/// The filter chip whose visible label (not its count) reads `label`. Chip
+/// `textContent` includes the count, so match the label child.
+fn chip(label: &str) -> Option<web_sys::Element> {
+    ts::query_all(".filter-chip").into_iter().find(|c| {
+        c.query_selector(".filter-chip__label")
+            .ok()
+            .flatten()
+            .and_then(|l| l.text_content())
+            .is_some_and(|t| t.trim() == label)
+    })
+}
+
+fn attr(el: Option<web_sys::Element>, name: &str) -> Option<String> {
+    el.and_then(|e| e.get_attribute(name))
+}
+
+/// The Filters toggle says whether its drawer is open, and the facet chips say
+/// which one is applied, as real `"true"`/`"false"` strings — the active chip
+/// used to be marked by color alone, and a bare-bool binding renders
+/// `aria-expanded=""` / nothing, which no screen reader reads as a state.
+#[wasm_bindgen_test]
+async fn filter_toggle_and_chips_expose_their_state() {
+    use wasm_bindgen::JsCast;
+    ts::reset();
+    let mut with_secret = fixtures::app_row("app-1", "Payroll API");
+    with_secret.password_credential_count = 1;
+    let mut cert_only = fixtures::app_row("app-2", "HR Sync");
+    cert_only.password_credential_count = 0;
+    cert_only.key_credential_count = 1;
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &vec![with_secret, cert_only],
+    );
+
+    let _m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "2 app registrations").await;
+    assert!(
+        ts::query(".filter-chips").is_none(),
+        "drawer starts collapsed"
+    );
+    assert_eq!(
+        attr(ts::query(".filter-toggle"), "aria-expanded").as_deref(),
+        Some("false")
+    );
+
+    ts::click(".filter-toggle");
+    ts::wait_for(|| ts::query(".filter-chips").is_some()).await;
+    assert_eq!(
+        attr(ts::query(".filter-toggle"), "aria-expanded").as_deref(),
+        Some("true")
+    );
+
+    assert_eq!(attr(chip("All"), "aria-pressed").as_deref(), Some("true"));
+    assert_eq!(
+        attr(chip("With secrets"), "aria-pressed").as_deref(),
+        Some("false")
+    );
+    let chips = ts::query_all(".filter-chip");
+    assert!(!chips.is_empty());
+    for c in &chips {
+        let state = c.get_attribute("aria-pressed");
+        assert!(
+            matches!(state.as_deref(), Some("true" | "false")),
+            "every chip carries a string aria-pressed, got {state:?} on {:?}",
+            c.text_content()
+        );
+    }
+
+    chip("With secrets")
+        .expect("With secrets chip")
+        .unchecked_ref::<web_sys::HtmlElement>()
+        .click();
+    ts::wait_for(|| {
+        attr(chip("With secrets"), "aria-pressed").as_deref() == Some("true")
+            && attr(chip("All"), "aria-pressed").as_deref() == Some("false")
+    })
+    .await;
 }

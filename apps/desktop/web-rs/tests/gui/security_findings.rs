@@ -190,11 +190,73 @@ async fn groups_rank_by_worst_severity_then_count() {
         ts::query("[aria-label='Worst: Critical']").is_some(),
         "the worst-severity dot carries its tier as an accessible name"
     );
+    // Every header is a disclosure with a real `"true"`/`"false"` state, and
+    // its ▾/▸ glyph is hidden from the accessible name.
+    let headers = ts::query_all(".finding-group__header");
+    assert!(!headers.is_empty());
+    for h in &headers {
+        assert_eq!(
+            h.get_attribute("aria-expanded").as_deref(),
+            Some("false"),
+            "collapsed header {:?}",
+            h.text_content()
+        );
+    }
+    for c in ts::query_all(".finding-group__chevron") {
+        assert_eq!(c.get_attribute("aria-hidden").as_deref(), Some("true"));
+    }
     // The healthy section trails as a collapsed disclosure; expanding it
     // reveals the positive groups even at zero count.
     assert!(!ts::body_contains("Mailbox access scoped"));
     ts::click(".finding-group__header--section");
     ts::wait_for(|| ts::body_contains("Mailbox access scoped")).await;
+    assert_eq!(
+        ts::query(".finding-group__header--section")
+            .and_then(|h| h.get_attribute("aria-expanded"))
+            .as_deref(),
+        Some("true")
+    );
+}
+
+/// An open group's header says so and points `aria-controls` at the body it
+/// revealed; a collapsed one carries no `aria-controls` (its body is not in
+/// the DOM, so the reference would dangle).
+#[wasm_bindgen_test]
+async fn an_open_group_header_is_expanded_and_controls_its_body() {
+    let m = mount_security().await;
+    let unused_header = || {
+        ts::query_all(".finding-group__header")
+            .into_iter()
+            .find(|h| {
+                h.query_selector(".finding-group__title")
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.text_content())
+                    .is_some_and(|t| t == "Unused applications")
+            })
+            .expect("Unused applications header")
+    };
+    assert_eq!(unused_header().get_attribute("aria-controls"), None);
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unused".to_string()));
+    ts::wait_for(|| ts::query(".finding-group__body").is_some()).await;
+
+    let header = unused_header();
+    assert_eq!(
+        header.get_attribute("aria-expanded").as_deref(),
+        Some("true")
+    );
+    let body_id = ts::query(".finding-group__body")
+        .and_then(|b| b.get_attribute("id"))
+        .expect("the open body carries an id");
+    assert_eq!(body_id, "finding-group-body-unused");
+    assert_eq!(
+        header.get_attribute("aria-controls").as_deref(),
+        Some(body_id.as_str())
+    );
 }
 
 /// Trimmed text of the posture strip — the coverage caveats' one home, above
