@@ -101,11 +101,9 @@ pub struct AzureRoleDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AzureRolesResult {
     pub roles: Vec<AzureRoleDto>,
-    /// Subscriptions actually scanned (capped for safety).
-    pub scanned: usize,
-    /// Subscriptions the signed-in user can reach (before the cap).
+    /// Subscriptions the signed-in user can reach — every one is scanned.
     pub total: usize,
-    /// Scanned subscriptions whose role-assignment lookup failed and was skipped.
+    /// Subscriptions whose role-assignment lookup failed and was skipped.
     pub skipped: usize,
 }
 

@@ -431,27 +431,12 @@ pub fn ManagedIdentityDetailPane(
                             // shown with no high-privilege roles could be Owner
                             // on an unscanned/unreadable subscription, so a
                             // partial view must never read as authoritative.
-                            let coverage = (res.scanned < res.total
-                                || res.skipped > 0)
+                            let coverage = (res.skipped > 0)
                                 .then(|| {
-                                    let mut parts = Vec::new();
-                                    if res.scanned < res.total {
-                                        parts
-                                            .push(format!(
-                                                "scanned {} of {} subscriptions (capped)",
-                                                res.scanned, res.total,
-                                            ));
-                                    }
-                                    if res.skipped > 0 {
-                                        parts
-                                            .push(format!(
-                                                "{} unreadable and skipped",
-                                                res.skipped,
-                                            ));
-                                    }
                                     let msg = format!(
-                                        "Partial view — {}. Roles on subscriptions not scanned aren't shown.",
-                                        parts.join("; "),
+                                        "Partial view — {} of {} subscriptions unreadable and skipped. Roles on subscriptions not scanned aren't shown.",
+                                        res.skipped,
+                                        res.total,
                                     );
                                     view! { <Callout tone="warn">{msg}</Callout> }
                                 });

@@ -186,15 +186,13 @@ word-boundary → substring → publisher-only; *whether* a row matches is per-t
 name/publisher, so "office 365" doesn't drag in every "365" app while "teams microsoft" still finds
 Microsoft Teams) and caps display at `GALLERY_TOP`. Because the corpus is the whole catalog,
 `total_matches`/`truncated` are **exact** — "showing the closest 50 of N" is honest without a
-`$count` round trip, and `partial_catalog` is always false (a short fetch is an `Err`, not a partial
+`$count` round trip, and there is no partial-catalog state (a short fetch is an `Err`, not a partial
 `Ok`).
 
 One asymmetry worth keeping: **a failed corpus fetch propagates as an error**, unlike `search_corpus`,
 which degrades to an empty corpus. An empty result set here is a *claim that no such app exists* — a
 lie the operator can't distinguish from a broken fetch, which is the bug class this whole path exists
-to avoid. (The demo's mock keeps its args-aware `gallery_search_for` match over the sample catalog
-and sets `partial_catalog: true`, so a curated-sample miss isn't presented as a confident
-full-gallery zero.)
+to avoid. (The demo's mock keeps its args-aware `gallery_search_for` match over the sample catalog.)
 
 ## Invalidation — only on `Ok`
 

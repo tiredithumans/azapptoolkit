@@ -1771,7 +1771,6 @@ pub fn gallery_search_results() -> GallerySearchResultsDto {
         total_matches: results.len(),
         results,
         truncated: false,
-        partial_catalog: false,
     }
 }
 
@@ -1843,11 +1842,6 @@ pub fn gallery_search_for(query: &str) -> GallerySearchResultsDto {
         total_matches: results.len(),
         results,
         truncated: false,
-        // The demo's catalog IS partial — a dozen curated samples of a ~39k
-        // gallery. Admitting that turns a demo no-match into "the gallery was
-        // only partly loaded" instead of the confident "no gallery apps match
-        // X", which reads as a broken search to anyone who knows X exists.
-        partial_catalog: true,
     }
 }
 
@@ -2012,7 +2006,6 @@ pub fn azure_role(
 pub fn azure_roles(roles: Vec<AzureRoleDto>) -> AzureRolesResult {
     AzureRolesResult {
         roles,
-        scanned: 2,
         total: 2,
         skipped: 0,
     }

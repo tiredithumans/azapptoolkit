@@ -248,19 +248,10 @@ pub fn GalleryDialog(
                                                         .into_any();
                                                 };
                                                 if found.results.is_empty() {
-                                                    // A real search that matched nothing says so,
-                                                    // and owns up when the catalog was partial
-                                                    // rather than implying the app doesn't exist.
-                                                    let msg = if found.partial_catalog {
-                                                        "No gallery apps match that search, but the \
-                                                         gallery was only partly loaded — try a \
-                                                         narrower name."
-                                                            .to_string()
-                                                    } else {
-                                                        format!(
-                                                            "No gallery apps match \u{201c}{asked}\u{201d}.",
-                                                        )
-                                                    };
+                                                    // A real search that matched nothing says so.
+                                                    let msg = format!(
+                                                        "No gallery apps match \u{201c}{asked}\u{201d}.",
+                                                    );
                                                     return view! { <Body1 class="hint">{msg}</Body1> }
                                                         .into_any();
                                                 }

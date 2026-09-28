@@ -208,11 +208,10 @@ pub async fn list_managed_identity_azure_roles(
     let subscriptions = arm.list_subscriptions().await?;
     // Scan every subscription the signed-in user can reach so the Azure RBAC
     // picture is complete (no cap). Coverage is still tracked: `total` is what
-    // the user can reach, `scanned` now equals it, and `skipped` counts scanned
-    // subs whose role-assignment lookup failed — the only remaining source of a
-    // partial view. Fan-out stays bounded by `ARM_CONCURRENCY`.
+    // the user can reach and `skipped` counts subs whose role-assignment lookup
+    // failed — the only source of a partial view. Fan-out stays bounded by
+    // `ARM_CONCURRENCY`.
     let total = subscriptions.len();
-    let scanned = total;
     let subs = subscriptions;
 
     // Fetch each subscription's assignments concurrently (bounded). A failed
@@ -282,7 +281,6 @@ pub async fn list_managed_identity_azure_roles(
     rows.sort_by_key(|r| (std::cmp::Reverse(r.high_privilege), r.role_name.clone()));
     Ok(AzureRolesResult {
         roles: rows,
-        scanned,
         total,
         skipped,
     })

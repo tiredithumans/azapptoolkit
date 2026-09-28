@@ -157,9 +157,6 @@ pub struct GallerySearchResultsDto {
     /// `true` when `total_matches` exceeded the display cap, so the picker can
     /// say results were narrowed rather than silently showing a subset.
     pub truncated: bool,
-    /// `true` when the gallery itself exceeded the fetch cap, so matching ran
-    /// over a partial catalog and a missing app might exist beyond it.
-    pub partial_catalog: bool,
 }
 
 /// Result of creating an enterprise application from a gallery template
