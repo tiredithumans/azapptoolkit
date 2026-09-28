@@ -268,7 +268,7 @@ pub fn mailbox_scope_badge(scope: MailPermissionScope) -> AnyView {
                     .unwrap_or_else(|| "Scoped via RBAC for Applications".to_string());
                 view! { <Badge label=label tone=BadgeTone::Ok title=title /> }.into_any()
             }
-            // Legacy Application Access Policy: genuinely scoped, but deprecated —
+            // Legacy Application Access Policy: genuinely scoped, but legacy —
             // an amber badge nudges migration to RBAC for Applications.
             ScopeMechanism::LegacyApplicationAccessPolicy => {
                 let detail = recipient_filter.or(scope_name).unwrap_or_default();

@@ -1,6 +1,6 @@
 //! Exchange Online RBAC-for-Applications commands.
 //!
-//! These replace the deprecated Application Access Policy flow: instead of a
+//! These replace the legacy Application Access Policy flow: instead of a
 //! single mail-enabled security group scoped via `New-ApplicationAccessPolicy`,
 //! an app's mailbox access is scoped with an Exchange management scope
 //! (`MemberOfGroup` recipient filter) plus per-role management role

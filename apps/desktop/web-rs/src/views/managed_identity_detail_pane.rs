@@ -390,7 +390,7 @@ pub fn ManagedIdentityDetailPane(
                                         on_click=Box::new(on_consent)
                                         disabled=Signal::derive(move || consenting.get())
                                     >
-                                        "Grant access"
+                                        "Grant consent to Azure"
                                     </Button>
                                     {move || {
                                         consent_error
@@ -522,6 +522,11 @@ const COMMON_AZURE_ROLES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The `<Select>` value of the "Custom role definition id…" option, which
+/// reveals a GUID input for any other built-in or custom role. Not a GUID, so it
+/// can never collide with a [`COMMON_AZURE_ROLES`] entry.
+const CUSTOM_ROLE_OPTION: &str = "custom";
+
 /// Inline form to create an Azure RBAC role assignment for the selected managed
 /// identity (`Microsoft.Authorization/roleAssignments` PUT). Collapsed by
 /// default; on success it calls `on_assigned` so the parent re-reads the roles.
@@ -534,6 +539,7 @@ fn AssignAzureRolePanel(
     let session = use_session();
     let open = RwSignal::new(false);
     let role = RwSignal::new(COMMON_AZURE_ROLES[0].1.to_string());
+    let custom_role = RwSignal::new(String::new());
     let scope = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -552,7 +558,18 @@ fn AssignAzureRolePanel(
             ));
             return;
         }
-        let role_v = role.get();
+        let role_v = if role.get() == CUSTOM_ROLE_OPTION {
+            let custom = custom_role.get().trim().to_string();
+            if !azapptoolkit_core::guid::is_guid(&custom) {
+                error.set(Some(
+                    "Enter the role definition id as a GUID, e.g. 974c5e8b-45b9-4653-ba55-5f855dd0fb88.".into(),
+                ));
+                return;
+            }
+            custom
+        } else {
+            role.get()
+        };
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
@@ -609,8 +626,17 @@ fn AssignAzureRolePanel(
                                             view! { <option value=*guid>{*name}</option> }
                                         })
                                         .collect_view()}
+                                    <option value=CUSTOM_ROLE_OPTION>
+                                        "Custom role definition id…"
+                                    </option>
                                 </Select>
                             </div>
+                            <Show when=move || role.get() == CUSTOM_ROLE_OPTION>
+                                <div class="read-field">
+                                    <strong>"Role definition id (GUID)"</strong>
+                                    <Input value=custom_role />
+                                </div>
+                            </Show>
                             <div class="read-field">
                                 <strong>"Scope (/subscriptions/<id>[/resourceGroups/<rg>])"</strong>
                                 <Input value=scope />

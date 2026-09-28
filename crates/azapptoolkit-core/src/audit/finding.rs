@@ -37,7 +37,7 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // so this must stay `.contains` — a "normalize to starts_with" sweep would
         // silently empty the Scoped-mailbox finding (pinned by the tests below).
         "scoped_mailbox" => |x| x.contains(issue::SCOPED_VIA_RBAC),
-        // Confined, but by the deprecated per-app Application Access Policy
+        // Confined, but by the legacy per-app Application Access Policy
         // rather than RBAC for Applications. Its own finding, not a variant of
         // `orgwide_mailbox` (the access IS confined) and not of `scoped_mailbox`
         // (that group is the healthy end state this one migrates toward) — the
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn legacy_policy_scoping_is_neither_org_wide_nor_healthy_scoped() {
         // The three mailbox findings are mutually exclusive by construction:
-        // legacy-policy scoping is confined (so not org-wide) but deprecated (so
+        // legacy-policy scoping is confined (so not org-wide) but legacy (so
         // not the healthy RBAC group). The separation rests on the scorer
         // keeping SCOPED_VIA_RBAC out of this advisory — if that leaks back in,
         // `scoped_mailbox`'s `.contains` would swallow the row and the

@@ -817,11 +817,16 @@ mod tests {
 
         assert!(
             checked >= 20,
-            "only {checked} broader-side values walked — the subsumption table or this walk is              broken, and the rule would pass vacuously"
+            "only {checked} broader-side values walked — the subsumption table or this walk is \
+             broken, and the rule would pass vacuously"
         );
         assert!(
             unscored.is_empty(),
-            "these permissions are named as the BROADER side of a subsumption pair — this file              tells operators to downgrade away from them — yet they carry no risk weight and so              score zero: {unscored:?}\nAdd them to HIGH_RISK_APP_PERMISSIONS or              MEDIUM_RISK_APP_PERMISSIONS (tenant-wide write is high, tenant-wide read is medium),              or list them in INTENTIONALLY_UNSCORED with a reason."
+            "these permissions are named as the BROADER side of a subsumption pair — this file \
+             tells operators to downgrade away from them — yet they carry no risk weight and so \
+             score zero: {unscored:?}\nAdd them to HIGH_RISK_APP_PERMISSIONS or \
+             MEDIUM_RISK_APP_PERMISSIONS (tenant-wide write is high, tenant-wide read is medium), \
+             or list them in INTENTIONALLY_UNSCORED with a reason."
         );
     }
 

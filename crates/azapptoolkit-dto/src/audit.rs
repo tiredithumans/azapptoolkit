@@ -289,7 +289,10 @@ impl AuditCoverageGap {
     pub fn description(self) -> &'static str {
         match self {
             AuditCoverageGap::GraphAppRoleAssignments => {
-                "Tenant-wide Microsoft Graph app-role assignments could not be read, so                  enterprise applications, managed identities and orphaned service principals                  were not scored, and mailbox permissions could not be checked for an                  un-stripped org-wide grant."
+                "Tenant-wide Microsoft Graph app-role assignments could not be read, so \
+                 enterprise applications, managed identities and orphaned service principals \
+                 were not scored, and mailbox permissions could not be checked for an \
+                 un-stripped org-wide grant."
             }
             AuditCoverageGap::ServicePrincipalIndex => {
                 "The tenant's service-principal list could not be read, so enterprise \
@@ -297,13 +300,17 @@ impl AuditCoverageGap {
                  scored. App registrations were still covered."
             }
             AuditCoverageGap::EwsFullAccessGrants => {
-                "Org-wide EWS full-mailbox-access grants could not be read, so an application                  shown as scoped to specific mailboxes may still reach every mailbox."
+                "Org-wide EWS full-mailbox-access grants could not be read, so an application \
+                 shown as scoped to specific mailboxes may still reach every mailbox."
             }
             AuditCoverageGap::PerPrincipalScoring => {
-                "Some applications could not be scored and are missing from these results,                  so a risk this run does not show may simply not have been looked at."
+                "Some applications could not be scored and are missing from these results, \
+                 so a risk this run does not show may simply not have been looked at."
             }
             AuditCoverageGap::PermissionResolution => {
-                "The permissions an application programming interface defines could not be                  read, so applications holding those permissions were scored as though they                  held none — they may look clean here while holding high-risk access."
+                "The permissions an application programming interface defines could not be \
+                 read, so applications holding those permissions were scored as though they \
+                 held none — they may look clean here while holding high-risk access."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
@@ -373,8 +380,11 @@ mod tests {
         // and losing the result.
         for gap in [
             AuditCoverageGap::GraphAppRoleAssignments,
+            AuditCoverageGap::ServicePrincipalIndex,
             AuditCoverageGap::EwsFullAccessGrants,
             AuditCoverageGap::PerPrincipalScoring,
+            AuditCoverageGap::PermissionResolution,
+            AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");
             assert_eq!(
@@ -384,6 +394,14 @@ mod tests {
             assert!(
                 !gap.description().trim().is_empty(),
                 "{gap:?} needs an operator-facing description"
+            );
+            // A multi-line literal missing its `\` continuation keeps the
+            // newline's indentation — a run of spaces the UI (`pre-wrap`) and
+            // the CSV export both show verbatim.
+            assert!(
+                !gap.description().contains("  ") && !gap.description().contains('\n'),
+                "{gap:?}'s description carries a whitespace run: {:?}",
+                gap.description()
             );
         }
         assert_eq!(

@@ -181,7 +181,7 @@ pub enum ScopeMechanism {
     #[default]
     Rbac,
     /// A legacy Application Access Policy (`New-ApplicationAccessPolicy`). Still
-    /// effective, but deprecated — surfaced so it can be migrated to RBAC.
+    /// effective, but legacy (deprecation to be announced) — surfaced so it can be migrated to RBAC.
     LegacyApplicationAccessPolicy,
 }
 
@@ -405,7 +405,7 @@ impl AppPermissions {
     /// Rule 11 splits its scoped bucket on this: RBAC for Applications is the
     /// healthy end state, while a legacy Application Access Policy genuinely
     /// confines the access *today* (so it keeps the reduced scoped weight) but
-    /// is a deprecated mechanism the audit surfaces for migration.
+    /// is a legacy mechanism the audit surfaces for migration.
     pub(super) fn scope_mechanism(&self, grant: &ResourcePermission) -> Option<ScopeMechanism> {
         if !crate::scoping::is_scopable_exchange_resource_permission(
             grant.resource_app_id.as_deref(),
@@ -625,7 +625,7 @@ pub mod issue {
     pub const UNCONFINABLE_MAILBOX: &str = "Org-wide mailbox access that RBAC cannot confine";
     /// Substring shared by every "…scoped via RBAC for Applications…" advisory.
     pub const SCOPED_VIA_RBAC: &str = "scoped via RBAC for Applications";
-    /// Mailbox access that IS confined today, but by a deprecated legacy
+    /// Mailbox access that IS confined today, but by a legacy
     /// Application Access Policy rather than RBAC for Applications. A prefix
     /// marker like its siblings, and deliberately worded so it does **not**
     /// contain [`SCOPED_VIA_RBAC`] — that substring would also pull the row

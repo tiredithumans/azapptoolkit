@@ -62,7 +62,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "legacy_mailbox_scope",
         title: "Legacy Application Access Policy scoping",
-        blurb: "Mailbox access confined by an Application Access Policy — deprecated, per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
+        blurb: "Mailbox access confined by an Application Access Policy — legacy (replaced by RBAC for Applications; Microsoft has said its deprecation will be announced), per-app, and blind to anything granted through Exchange RBAC. Migrate each app to a management scope with scoped role assignments; the fix plans the change before applying it.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },

@@ -2,6 +2,11 @@
 
 ### Added
 
+- **A managed identity's Azure role form accepts any role, and its consent button says what it does.**
+  A "Custom role definition id…" option takes the GUID of any other built-in or custom Azure role
+  (checked as a GUID before the request), where the form offered only eight common roles; and the
+  Azure Resource Manager consent button now reads "Grant consent to Azure", no longer the same
+  "Grant access" as the permission wizard in the same pane.
 - **Home's "With secrets" and "With certs" counts now open the matching App Registrations.** They
   were the only numbers on Home you couldn't click, and the list had no way to show every app that
   holds a client secret or a certificate — the question to answer before moving apps from secrets
@@ -48,6 +53,16 @@
 
 ### Fixed
 
+- **CSV exports open correctly in Excel when names are not plain ASCII.** Every CSV now starts with
+  a UTF-8 byte-order mark, which Excel needs to read `Zürich Finanz` or a Japanese app name
+  without garbling it (pandas strips the mark on its own; base R's `read.csv` wants
+  `fileEncoding = "UTF-8-BOM"`).
+- **Audit coverage caveats no longer carry runs of spaces.** Four "what this run could not
+  determine" sentences, shown on the Security tab and written into the audit export, had lost
+  their line continuations and showed long gaps mid-sentence.
+- **Application Access Policies are called "legacy", not "deprecated".** The Security tab group
+  and the audit recommendation now match Microsoft's wording: the policies are replaced by RBAC
+  for Applications, and a deprecation is yet to be announced.
 - **Resource Access no longer shows the previous mailbox's verdicts while checking a different one.**
   The old table stayed under the progress bar (and under any error) for a mailbox you were no longer
   asking about; it now clears when you check a new address. The Permission tester also shows a

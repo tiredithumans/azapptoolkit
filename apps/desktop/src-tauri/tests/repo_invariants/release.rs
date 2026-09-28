@@ -242,7 +242,8 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
 
     assert!(
         documented.len() >= 5,
-        "parsed only {documented:?} from AGENTS.md — the line format changed and this test is          checking nothing"
+        "parsed only {documented:?} from AGENTS.md — the line format changed and this test is \
+         checking nothing"
     );
     assert_eq!(
         documented, enforced,

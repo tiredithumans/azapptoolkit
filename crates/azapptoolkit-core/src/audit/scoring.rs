@@ -256,7 +256,7 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 /// - **confirmed scoped by a legacy Application Access Policy** → its own
 ///   finding plus the `MigrateApplicationAccessPolicy` fix. The access really is
 ///   confined (so it keeps the reduced scoped weight the risk rules give it —
-///   this is not an org-wide finding), but the mechanism is deprecated: AAPs are
+///   this is not an org-wide finding), but the mechanism is legacy: AAPs are
 ///   an all-or-nothing per-app gate that only constrains Entra grants, and
 ///   Microsoft's replacement is RBAC for Applications;
 /// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation. Decided
@@ -372,7 +372,7 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     }
     // Confined access, split by the mechanism doing the confining: RBAC for
     // Applications is the end state, a legacy Application Access Policy is a
-    // deprecated one to migrate off. Both keep the reduced scoped weight the
+    // legacy one to migrate off. Both keep the reduced scoped weight the
     // risk rules already applied — the policy really does confine the grant.
     let (scoped_legacy, scoped_rbac): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         mailbox_scoped.into_iter().partition(|g| {
@@ -389,7 +389,8 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
         ));
         c.recommendations.push(
             "Migrate this app to RBAC for Applications. An Application Access Policy is a \
-             deprecated per-app gate that constrains only Microsoft Entra grants — it cannot \
+             legacy per-app gate (replaced by RBAC for Applications; Microsoft has said its \
+             deprecation will be announced) that constrains only Microsoft Entra grants — it cannot \
              confine access granted through Exchange RBAC, applies to every mailbox permission \
              the app holds at once, and Microsoft's replacement is a management scope plus \
              scoped role assignments."
