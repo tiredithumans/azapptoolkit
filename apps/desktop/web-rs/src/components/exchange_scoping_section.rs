@@ -14,7 +14,7 @@
 //! those.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use azapptoolkit_core::defaults::TenantDefaults;
 
@@ -22,6 +22,7 @@ use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::bindings::{auth, defaults};
 use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::scope_wizard::ScopeTarget;
@@ -444,12 +445,10 @@ pub fn ExchangeScopingSection(
 
                             <hr />
                             <strong>"Advanced: scope to existing groups"</strong>
-                            <Field label="Existing group identifiers (one per line)">
-                                <Textarea
-                                    value=groups_text
-                                    placeholder="hr-team@contoso.com\nFinanceMailboxes"
-                                />
-                            </Field>
+                            <MailboxGroupsField
+                                value=groups_text
+                                label="Existing group identifiers (one per line)"
+                            />
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)

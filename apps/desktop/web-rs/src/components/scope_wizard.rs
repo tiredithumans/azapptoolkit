@@ -36,11 +36,11 @@
 //! has no mechanism: a scoped mode can never outlive the mechanism it belongs to.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
+use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
-use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
@@ -829,14 +829,9 @@ pub fn ScopeWizard(
                 view! { <ManagedScopeGroupPanel app_id=app_id group_state=group_state /> }
                     .into_any()
             }
-            ScopeMode::Existing => view! {
-                <GroupAutocomplete target=existing_groups />
-                <Textarea
-                    value=existing_groups
-                    placeholder="hr-team@contoso.com\nFinanceMailboxes"
-                />
+            ScopeMode::Existing => {
+                view! { <MailboxGroupsField value=existing_groups /> }.into_any()
             }
-            .into_any(),
             ScopeMode::Sites => {
                 view! { <SiteSelectionPanel site_urls=site_urls write=site_write /> }.into_any()
             }

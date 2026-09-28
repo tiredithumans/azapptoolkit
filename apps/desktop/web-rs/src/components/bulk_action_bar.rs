@@ -29,6 +29,7 @@ use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar, Textarea};
 use crate::bindings::applications;
 use crate::bindings::bulk;
 use crate::bindings::events;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::ui::{Callout, FormError};
 use crate::constants::RENDER_PAGE;
 use crate::hooks::use_debounced::use_debounced;
@@ -296,7 +297,10 @@ enum Confirm {
 /// placeholder. Adding an action meant editing all four and hoping; and the two
 /// keyword tables had no relationship to each other, so a disagreement between
 /// them would show the operator one word and require another, leaving the
-/// confirm button disabled with nothing on screen explaining why.
+/// confirm button disabled with nothing on screen explaining why. The armed
+/// panel's confirm-button text and description moved here too, so the panel
+/// has no per-action `match` left; the only per-action dispatch that remains is
+/// the runner in `run`, which is necessarily per-command.
 struct Spec {
     label: &'static str,
     /// Destroys or revokes something, so it must render red wherever it is
@@ -310,37 +314,156 @@ struct Spec {
     /// typed keyword on its own high-privilege grounds — which is exactly why
     /// "is it red" and "how is it confirmed" are separate fields rather than one
     /// flag doing double duty.
+    ///
+    /// `RemoveRedundant` is the one destructive action confirmed by a click:
+    /// the backend re-resolves each app live and removes only permissions
+    /// strictly covered by a broader grant the app keeps, so load-bearing
+    /// grants survive and effective access is unchanged.
     destructive: bool,
     confirm: Confirm,
+    /// The armed panel's point-of-no-return button text.
+    confirm_label: &'static str,
+    /// The armed panel's sentence, given the selected count.
+    description: fn(usize) -> String,
 }
 
 impl BulkAction {
+    /// Every action, in declaration order. Adding a variant: list it here and
+    /// give it a slot in `tests::slot` (an exhaustive match that won't compile
+    /// until you do).
+    #[cfg(test)]
+    pub(crate) const ALL: [BulkAction; 9] = [
+        BulkAction::Grant,
+        BulkAction::RemoveExpired,
+        BulkAction::RemoveRedundant,
+        BulkAction::ScopeMailbox,
+        BulkAction::ScopeSharePoint,
+        BulkAction::AddOwner,
+        BulkAction::DisableSignIn,
+        BulkAction::StageSsoCertificate,
+        BulkAction::Delete,
+    ];
+
     fn spec(self) -> Spec {
-        let (label, destructive, confirm) = match self {
-            BulkAction::Grant => ("Grant consent", false, Confirm::Keyword("GRANT")),
-            BulkAction::RemoveExpired => (
-                "Remove expired credentials",
-                true,
-                Confirm::Keyword("REMOVE"),
-            ),
-            BulkAction::RemoveRedundant => ("Remove redundant permissions", true, Confirm::Click),
-            BulkAction::ScopeMailbox => ("Scope mailbox access", false, Confirm::Groups),
-            BulkAction::ScopeSharePoint => ("Scope SharePoint access", false, Confirm::Sites),
-            BulkAction::AddOwner => ("Add owner", false, Confirm::Owner),
-            BulkAction::DisableSignIn => ("Disable sign-in", false, Confirm::Click),
+        match self {
+            BulkAction::Grant => Spec {
+                label: "Grant consent",
+                destructive: false,
+                confirm: Confirm::Keyword("GRANT"),
+                confirm_label: "Grant consent",
+                description: |n| {
+                    format!(
+                        "Grant admin consent to the {} — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            BulkAction::RemoveExpired => Spec {
+                label: "Remove expired credentials",
+                destructive: true,
+                confirm: Confirm::Keyword("REMOVE"),
+                confirm_label: "Remove expired",
+                description: |n| {
+                    format!(
+                        "Remove every expired password credential from the {}. This is irreversible.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            // Red because it deletes grants, but a click suffices: the backend
+            // re-resolves each app live and removes only permissions strictly
+            // covered by a broader grant the app keeps, so effective access is
+            // unchanged. Pinned by `tests::CLICK_CONFIRMED_DESTRUCTIVE`.
+            BulkAction::RemoveRedundant => Spec {
+                label: "Remove redundant permissions",
+                destructive: true,
+                confirm: Confirm::Click,
+                confirm_label: "Remove redundant",
+                description: |n| {
+                    format!(
+                        "Remove redundant application permissions (narrower ones already covered by a broader grant) from the {}. Re-resolved live per app; load-bearing grants are kept.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            BulkAction::ScopeMailbox => Spec {
+                label: "Scope mailbox access",
+                destructive: false,
+                confirm: Confirm::Groups,
+                confirm_label: "Scope mailbox",
+                description: |n| {
+                    format!(
+                        "Confine the mailbox permissions of the {} to the groups below via Exchange RBAC (every mail permission each app holds is scoped). Needs Exchange admin rights.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            BulkAction::ScopeSharePoint => Spec {
+                label: "Scope SharePoint access",
+                destructive: false,
+                confirm: Confirm::Sites,
+                confirm_label: "Scope SharePoint",
+                description: |n| {
+                    format!(
+                        "Convert the org-wide SharePoint access of the {} to Sites.Selected on the sites below.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            BulkAction::AddOwner => Spec {
+                label: "Add owner",
+                destructive: false,
+                confirm: Confirm::Owner,
+                confirm_label: "Add owner",
+                description: |n| {
+                    format!(
+                        "Add one user as an owner of the {}. Purely additive — apps that already have this owner are skipped.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            BulkAction::DisableSignIn => Spec {
+                label: "Disable sign-in",
+                destructive: false,
+                confirm: Confirm::Click,
+                confirm_label: "Disable sign-in",
+                description: |n| {
+                    format!(
+                        "Disable sign-in for the {} by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
             // Additive and inactive: the new certificate signs nothing until it
             // is activated per app, so this is neither destructive nor worth a
             // typed keyword. The risk it carries is the opposite of the usual
             // one — doing nothing is what breaks sign-in.
-            BulkAction::StageSsoCertificate => {
-                ("Stage signing certificates", false, Confirm::Click)
-            }
-            BulkAction::Delete => ("Delete", true, Confirm::Keyword("DELETE")),
-        };
-        Spec {
-            label,
-            destructive,
-            confirm,
+            BulkAction::StageSsoCertificate => Spec {
+                label: "Stage signing certificates",
+                destructive: false,
+                confirm: Confirm::Click,
+                confirm_label: "Stage certificates",
+                description: |n| {
+                    format!(
+                        "Generate a new SAML signing certificate on the {} and leave it INACTIVE. Nothing changes for users: each app keeps signing with its current certificate until you activate the new one from its SSO tab. Apps that already have a replacement staged are skipped.",
+                        count_noun(n, "selected app", "selected apps")
+                    )
+                },
+            },
+            // Entra soft-deletes app registrations for 30 days, so the copy
+            // must not call this permanent (the single-app dialog says the same).
+            BulkAction::Delete => Spec {
+                label: "Delete",
+                destructive: true,
+                confirm: Confirm::Keyword("DELETE"),
+                confirm_label: "Delete",
+                description: |n| {
+                    format!(
+                        "Delete the {}. Their service principals' permission grants are revoked and any credentials stop working immediately. Deletion can be undone from the Entra admin center within 30 days.",
+                        count_noun(n, "selected app registration", "selected app registrations")
+                    )
+                },
+            },
         }
     }
 
@@ -805,59 +928,22 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         })
     };
 
-    let description: AnyView = match action {
-        BulkAction::RemoveExpired => view! {
-            <Body1 class="bulk-action__danger">
-                {move || format!("Remove every expired password credential from the {}. This is irreversible.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::Delete => view! {
-            <Body1 class="bulk-action__danger">
-                {move || format!("Permanently delete the {}. This cannot be undone.", count_noun(n(), "selected app registration", "selected app registrations"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::RemoveRedundant => view! {
-            <Body1>
-                {move || format!("Remove redundant application permissions (narrower ones already covered by a broader grant) from the {}. Re-resolved live per app; load-bearing grants are kept.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::ScopeMailbox => view! {
-            <Body1>
-                {move || format!("Confine the mailbox permissions of the {} to the groups below via Exchange RBAC (every mail permission each app holds is scoped). Needs Exchange admin rights.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::ScopeSharePoint => view! {
-            <Body1>
-                {move || format!("Convert the org-wide SharePoint access of the {} to Sites.Selected on the sites below.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::StageSsoCertificate => view! {
-            <Body1>
-                {move || format!("Generate a new SAML signing certificate on the {} and leave it INACTIVE. Nothing changes for users: each app keeps signing with its current certificate until you activate the new one from its SSO tab. Apps that already have a replacement staged are skipped.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::AddOwner => view! {
-            <Body1>
-                {move || format!("Add one user as an owner of the {}. Purely additive — apps that already have this owner are skipped.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::DisableSignIn => view! {
-            <Body1>
-                {move || format!("Disable sign-in for the {} by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
-        BulkAction::Grant => view! {
-            <Body1 class="bulk-action__danger">
-                {move || format!("Grant admin consent to the {} — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.", count_noun(n(), "selected app", "selected apps"))}
-            </Body1>
-        }.into_any(),
+    let spec = action.spec();
+    let describe = spec.description;
+    // The description reads as a warning exactly where the operator must type
+    // a keyword.
+    let desc_cls = if matches!(spec.confirm, Confirm::Keyword(_)) {
+        "bulk-action__danger"
+    } else {
+        ""
     };
+    let description = view! { <Body1 class=desc_cls>{move || describe(n())}</Body1> };
 
     // Driven by the action's `Confirm` requirement, not by naming the actions
     // that happen to have one today: an action added with `Confirm::Keyword`
     // gets the typed gate automatically, and cannot end up gated by `confirm_ok`
     // while rendering no input to satisfy it.
-    let input: AnyView = match action.spec().confirm {
+    let input: AnyView = match spec.confirm {
         Confirm::Keyword(keyword) => view! {
             <div class="confirm-gate">
                 <Body1 class="confirm-gate__label">
@@ -868,8 +954,11 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         }
         .into_any(),
         Confirm::Groups => view! {
-            <Textarea value=groups_text placeholder="Mailbox groups (name, address, or object id) — one per line" />
-        }.into_any(),
+            <div class="bulk-action-bar__scope-form">
+                <MailboxGroupsField value=groups_text />
+            </div>
+        }
+        .into_any(),
         Confirm::Sites => view! {
             <div class="bulk-action-bar__scope-form">
                 <Textarea value=sites_text placeholder="https://contoso.sharepoint.com/sites/Marketing — one per line" />
@@ -958,17 +1047,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         Confirm::Click => ().into_any(),
     };
 
-    let confirm_label = match action {
-        BulkAction::RemoveExpired => "Remove expired",
-        BulkAction::RemoveRedundant => "Remove redundant",
-        BulkAction::ScopeMailbox => "Scope mailbox",
-        BulkAction::ScopeSharePoint => "Scope SharePoint",
-        BulkAction::AddOwner => "Add owner",
-        BulkAction::DisableSignIn => "Disable sign-in",
-        BulkAction::StageSsoCertificate => "Stage certificates",
-        BulkAction::Delete => "Delete",
-        BulkAction::Grant => "Grant consent",
-    };
+    let confirm_label = spec.confirm_label;
     let confirm_cls = if danger { "button--danger" } else { "" };
 
     view! {
@@ -1209,16 +1288,63 @@ fn parse_delete(r: bulk::BulkDeleteResult, label_for: impl Fn(&str) -> String) -
 mod tests {
     use super::*;
 
-    const ALL_ACTIONS: [BulkAction; 8] = [
-        BulkAction::Grant,
-        BulkAction::RemoveExpired,
-        BulkAction::RemoveRedundant,
-        BulkAction::ScopeMailbox,
-        BulkAction::ScopeSharePoint,
-        BulkAction::AddOwner,
-        BulkAction::DisableSignIn,
-        BulkAction::Delete,
-    ];
+    /// The one destructive action confirmed by a plain click. Why: the backend
+    /// re-resolves each app live and removes only permissions strictly covered
+    /// by a broader grant the app keeps, so effective access is unchanged.
+    const CLICK_CONFIRMED_DESTRUCTIVE: [BulkAction; 1] = [BulkAction::RemoveRedundant];
+
+    /// A slot per variant. Exhaustive with no wildcard, so a new variant won't
+    /// compile until it gets one — the groups.rs "won't compile until listed"
+    /// pattern, tightened with a slot match (full compile-time exhaustiveness of
+    /// `ALL` would need a derive crate, and dependencies are a cost).
+    fn slot(a: BulkAction) -> usize {
+        match a {
+            BulkAction::Grant => 0,
+            BulkAction::RemoveExpired => 1,
+            BulkAction::RemoveRedundant => 2,
+            BulkAction::ScopeMailbox => 3,
+            BulkAction::ScopeSharePoint => 4,
+            BulkAction::AddOwner => 5,
+            BulkAction::DisableSignIn => 6,
+            BulkAction::StageSsoCertificate => 7,
+            BulkAction::Delete => 8,
+        }
+    }
+
+    /// `BulkAction::ALL` lists every variant exactly once, in declaration
+    /// order, so the spec tests below iterate every action by construction.
+    #[test]
+    fn all_lists_every_action_once() {
+        assert_eq!(
+            BulkAction::ALL.len(),
+            9,
+            "a variant was added: list it in `BulkAction::ALL` and give it a `slot`"
+        );
+        let mut hits = [0u8; BulkAction::ALL.len()];
+        for a in BulkAction::ALL {
+            hits[slot(a)] += 1;
+        }
+        assert!(
+            hits.iter().all(|&h| h == 1),
+            "`ALL` has a gap or duplicate: {hits:?}"
+        );
+        assert!(
+            BulkAction::ALL
+                .iter()
+                .enumerate()
+                .all(|(i, a)| *a as usize == i),
+            "`ALL` is out of declaration order"
+        );
+    }
+
+    /// Bulk delete must not tell the operator the apps are gone for good:
+    /// Entra soft-deletes app registrations for 30 days.
+    #[test]
+    fn a_bulk_delete_says_it_can_be_restored() {
+        let d = (BulkAction::Delete.spec().description)(3);
+        assert!(d.contains("30 days"), "{d}");
+        assert!(!d.contains("cannot be undone"), "{d}");
+    }
 
     /// Every action's spec is coherent, and the confirm keywords are distinct.
     ///
@@ -1231,9 +1357,18 @@ mod tests {
     #[test]
     fn every_action_has_a_coherent_spec() {
         let mut keywords: Vec<&str> = Vec::new();
-        for action in ALL_ACTIONS {
+        for action in BulkAction::ALL {
             let spec = action.spec();
             assert!(!spec.label.is_empty(), "{action:?} has no label");
+            assert!(
+                !spec.confirm_label.is_empty(),
+                "{action:?} has no confirm label"
+            );
+            let d = (spec.description)(7);
+            assert!(
+                d.contains('7'),
+                "{action:?}'s description must state the selected count"
+            );
             if let Confirm::Keyword(word) = spec.confirm {
                 assert!(
                     word.chars().all(|c| c.is_ascii_uppercase()),
@@ -1256,15 +1391,18 @@ mod tests {
     /// `confirm` are separate fields rather than one flag doing both jobs.
     #[test]
     fn destructive_actions_are_keyword_gated() {
-        for action in ALL_ACTIONS {
-            let spec = action.spec();
-            if spec.destructive && action != BulkAction::RemoveRedundant {
-                assert!(
-                    matches!(spec.confirm, Confirm::Keyword(_)),
-                    "{action:?} is destructive but confirms on a plain click"
-                );
-            }
-        }
+        let click_confirmed: Vec<BulkAction> = BulkAction::ALL
+            .into_iter()
+            .filter(|a| {
+                let spec = a.spec();
+                spec.destructive && !matches!(spec.confirm, Confirm::Keyword(_))
+            })
+            .collect();
+        assert_eq!(
+            click_confirmed, CLICK_CONFIRMED_DESTRUCTIVE,
+            "a destructive action confirms on a plain click; gate it on a keyword \
+             or justify it in CLICK_CONFIRMED_DESTRUCTIVE"
+        );
         // Reversible actions must NOT be red — red reserved for the
         // irreversible is what keeps it worth reading.
         assert!(!BulkAction::DisableSignIn.spec().destructive);

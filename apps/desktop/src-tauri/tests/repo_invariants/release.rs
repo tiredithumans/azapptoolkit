@@ -621,6 +621,64 @@ fn updater_commands_consult_the_update_gate_before_the_network() {
     }
 }
 
+/// Auto-update is interactive (AGENTS.md): only the UpdateSplash's click
+/// handler may install. A launch-time `perform_update` — or a second installer
+/// path in the backend — would reintroduce the silent install.
+#[test]
+fn only_the_update_splash_installs_an_update() {
+    let callers: Vec<String> = super::sources::web_modules()
+        .into_iter()
+        .filter(|(path, src)| path != "bindings/updater.rs" && src.contains("perform_update("))
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(
+        callers,
+        vec!["components/update_splash.rs".to_string()],
+        "only the UpdateSplash may call `perform_update`: any other caller can install \
+         without the operator's click"
+    );
+    let splash = super::sources::web_modules()
+        .into_iter()
+        .find(|(path, _)| path == "components/update_splash.rs")
+        .map(|(_, src)| src)
+        .expect("update_splash.rs");
+    let handler = splash.find("let do_update").expect(
+        "UpdateSplash no longer defines `do_update` — renamed? Update this rule rather than \
+         letting it pass vacuously",
+    );
+    let call = splash.find("updater::perform_update(").expect(
+        "UpdateSplash no longer calls `updater::perform_update(` — renamed? Update this rule \
+         rather than letting it pass vacuously",
+    );
+    assert!(
+        handler < call,
+        "`perform_update` must be called from inside the `do_update` click handler"
+    );
+    assert!(
+        splash.contains("on_click=Box::new(do_update)"),
+        "`do_update` must be the Update button's click handler, not run on mount"
+    );
+
+    let installers: Vec<String> = super::sources::commands()
+        .into_iter()
+        .filter(|c| c.body.contains("download_and_install"))
+        .map(|c| c.name.to_string())
+        .collect();
+    assert_eq!(
+        installers,
+        vec!["perform_update".to_string()],
+        "only the `perform_update` command may download and install an update"
+    );
+    let total: usize = super::sources::command_modules()
+        .iter()
+        .map(|(_, src)| src.matches(".download_and_install(").count())
+        .sum();
+    assert_eq!(
+        total, 1,
+        "exactly one `.download_and_install(` may exist under src/commands (in `perform_update`)"
+    );
+}
+
 /// glibc symbol versions bind to the BUILD host's libc, so the Linux release
 /// runner IS the oldest distro the AppImage/.deb can start on. A floating
 /// `ubuntu-latest` silently raised the floor to glibc 2.38; the pin, the

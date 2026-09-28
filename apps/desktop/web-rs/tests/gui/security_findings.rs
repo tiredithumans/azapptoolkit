@@ -3,7 +3,8 @@
 //! the group↔bulk-action pairing (the retired over-privileged→remove-redundant
 //! mismatch), the per-row fix↔section pairing (a section offers its own rule's
 //! Fix only, deep-links "Open" to its own tab, and applying one fix leaves the
-//! others standing), the add-owner / disable-sign-in bulk flows, and the
+//! others standing), the add-owner / disable-sign-in bulk flows, the
+//! keyword-gated bulk delete, and the
 //! Home-drill routing (severity → All apps pane, finding → expanded group).
 #![cfg(target_arch = "wasm32")]
 
@@ -17,7 +18,8 @@ use azapptoolkit_core::audit::{
 use azapptoolkit_core::models::DirectoryObject;
 use azapptoolkit_dto::audit::{AuditCoverageGap, AuditRunResult};
 use azapptoolkit_dto::bulk::{
-    BulkAddOwnerResult, BulkDisableOutcome, BulkDisableSignInResult, BulkOwnerOutcome,
+    BulkAddOwnerResult, BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome,
+    BulkDisableSignInResult, BulkOwnerOutcome,
 };
 use azapptoolkit_dto::exchange::{AapMigrationItem, AapMigrationReport};
 use azapptoolkit_dto::remediation::RemediationOutcome;
@@ -706,6 +708,76 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
             .and_then(|v| v.as_str()),
         Some("obj-Idle App")
     );
+}
+
+/// The typed DELETE gate is wired to the button, not just the spec: the unit
+/// tests pin that Delete is `Confirm::Keyword("DELETE")`; this proves the
+/// command cannot fire until the exact word is typed, and that a failed row is
+/// reported.
+#[wasm_bindgen_test]
+async fn bulk_delete_fires_only_after_the_exact_keyword() {
+    let m = mount_security().await;
+    ts::mock_ok(
+        "bulk_delete_applications",
+        &BulkDeleteResult {
+            deleted: vec![],
+            failed: vec![BulkDeleteFailure {
+                object_id: "obj-Idle App".to_string(),
+                message: "Insufficient privileges to complete the operation.".to_string(),
+            }],
+            cancelled: false,
+        },
+    );
+
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unused".to_string()));
+    ts::wait_for(|| ts::body_contains("Fix all 1")).await;
+    ts::click_button_labelled("Fix all 1");
+    // Scoped: the armed panel's confirm button shares the label.
+    ts::wait_for(|| ts::button_labelled_in(".bulk-action-bar__actions", "Delete").is_some()).await;
+    ts::click_button_labelled_in(".bulk-action-bar__actions", "Delete");
+    let gate = ".bulk-action-bar__confirm .confirm-gate input";
+    ts::wait_for(|| ts::query(gate).is_some()).await;
+    let confirm = || {
+        ts::button_labelled_in(".bulk-action-bar__confirm", "Delete").expect("armed panel's Delete")
+    };
+    assert!(
+        confirm().has_attribute("disabled"),
+        "empty keyword must not arm Delete"
+    );
+
+    ts::set_input_value(gate, "delete");
+    ts::tick().await;
+    assert!(
+        confirm().has_attribute("disabled"),
+        "a wrong-case keyword must not arm Delete"
+    );
+    confirm().click();
+    ts::tick().await;
+    assert_eq!(
+        ts::call_count("bulk_delete_applications"),
+        0,
+        "a wrong-case keyword must not run a bulk delete"
+    );
+
+    ts::set_input_value(gate, "DELETE");
+    ts::wait_for(|| !confirm().has_attribute("disabled")).await;
+    confirm().click();
+    ts::wait_for(|| ts::call_count("bulk_delete_applications") == 1).await;
+    let call = ts::last_call("bulk_delete_applications").unwrap();
+    assert_eq!(
+        call.args
+            .get("objectIds")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+        Some(vec!["obj-Idle App"])
+    );
+
+    ts::wait_for(|| ts::body_contains("1 item failed:")).await;
+    assert!(ts::body_contains("Insufficient privileges"));
+    assert!(ts::body_contains("Deleted 0 apps; 1 failed."));
 }
 
 /// The legacy-policy migration Fix is plan-first: opening it must run a **dry

@@ -11,7 +11,7 @@ use azapptoolkit_core::audit::RemediationAction;
 
 use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
-use crate::components::group_autocomplete::GroupAutocomplete;
+use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
@@ -212,11 +212,7 @@ pub fn ScopeMailboxButton(
                             "Confine these permissions to members of specific mail-enabled groups via Exchange RBAC for Applications. The app keeps access only to those mailboxes; its org-wide grant is removed once the scoped roles are in place. You must be an Exchange administrator."
                         </Body1>
                         <p class="muted">{action.detail.clone()}</p>
-                        <GroupAutocomplete target=groups_text />
-                        <Textarea
-                            value=groups_text
-                            placeholder="Mail-enabled groups — one per line (name, address, or object id)"
-                        />
+                        <MailboxGroupsField value=groups_text />
                         {move || {
                             warned
                                 .get()

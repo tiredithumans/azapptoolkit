@@ -814,6 +814,11 @@
   and Created after date filters, the saved-view name box and each permission checkbox in the grant
   picker now have a name too. A table's unlabelled action column, including on the tenant-wide
   dashboards, is announced as Actions.
+- **The bulk Delete confirmation no longer says deleted apps are gone for good.** It said "This
+  cannot be undone", but Entra keeps a deleted app registration for 30 days, and the Delete dialog on
+  an app's own page already says so. Seeing that warning after deleting the wrong apps, you could
+  recreate them, which gives each a new application ID and breaks everything that signs in with the
+  old one. The bulk panel now says deletion can be undone from the Entra admin center within 30 days.
 
 ### Changed
 
@@ -891,6 +896,10 @@
   written; Trunk now minifies it (and `index.html`) in release and Pages builds, taking it to 69 KB
   (28 KB → 11 KB compressed). The script that loads the app is unchanged: Trunk's minifier cannot
   parse it and ships it as written.
+- **Bulk "Scope mailbox access" can now search for groups, and so can a permission's advanced "scope
+  to existing groups" form.** The per-app Scope… dialog and the Grant access wizard already had the
+  typeahead; these two were bare text boxes, and the bulk one applies the same groups to every
+  selected app. All four places now use the same search and placeholder.
 
 ### Security
 
