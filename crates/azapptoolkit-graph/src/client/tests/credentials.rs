@@ -191,6 +191,36 @@ async fn remove_key_credential_preserves_the_surviving_certificate_blob() {
     client.remove_key_credential("obj-1", "drop").await.unwrap();
 }
 
+/// A key id that is already gone (another admin, a stale finding) is
+/// `NotFound`, and the unchanged array is NOT written back: a PATCH would
+/// report a removal that never happened.
+#[tokio::test]
+async fn remove_key_credential_refuses_an_absent_key_without_patching() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "keyCredentials": [
+                {"keyId": "keep", "type": "AsymmetricX509Cert", "usage": "Verify",
+                 "key": "cert-blob-keep"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let err = client
+        .remove_key_credential("obj-1", "gone")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::NotFound(_)), "got {err:?}");
+}
+
 #[tokio::test]
 async fn add_token_signing_certificate_returns_thumbprint() {
     let server = MockServer::start().await;
@@ -289,4 +319,36 @@ async fn removing_a_sp_signing_cert_drops_both_key_halves_and_its_pfx_password()
         .remove_service_principal_key_credential("sp-1", "k-sign")
         .await
         .expect("the PATCH carries exactly the surviving entries");
+}
+
+/// The SP-side twin: an absent key is `NotFound` with no PATCH — which also
+/// retires the old no-op PATCH an unresolvable key used to send.
+#[tokio::test]
+async fn removing_an_absent_sp_key_sends_no_patch() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1"))
+        .and(query_param("$select", "keyCredentials,passwordCredentials"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "keyCredentials": [
+                { "keyId": "k-other", "customKeyIdentifier": "BBB", "usage": "Verify", "type": "AsymmetricX509Cert" }
+            ],
+            "passwordCredentials": [
+                { "keyId": "p-bbb", "customKeyIdentifier": "BBB" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/servicePrincipals/sp-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let err = client
+        .remove_service_principal_key_credential("sp-1", "k-gone")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::NotFound(_)), "got {err:?}");
 }

@@ -15,6 +15,7 @@ use azapptoolkit_core::models::{Application, RequiredResourceAccess};
 use azapptoolkit_core::scoping::{
     exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
 };
+use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
 use crate::commands::exchange::{
@@ -55,10 +56,25 @@ pub async fn remediate_remove_expired_credentials(
     tenant_id: String,
     object_id: String,
 ) -> Result<RemediationOutcome, UiError> {
-    let client = state.graph_for(&tenant_id);
+    remediate_remove_expired_credentials_core(&state, &tenant_id, &object_id).await
+}
+
+/// The body of [`remediate_remove_expired_credentials`], over `&AppState` so the
+/// handler tests drive the same code.
+///
+/// A credential that is already gone by the time its removal runs (another
+/// admin, a concurrent run) answers `NotFound`. That is the end state this Fix
+/// wants, so it is skipped — neither counted as removed nor allowed to stop the
+/// loop. Any other failure still stops it.
+pub(crate) async fn remediate_remove_expired_credentials_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<RemediationOutcome, UiError> {
+    let client = state.graph_for(tenant_id);
     // Fail before any mutation if we can't read the live app — nothing changed,
     // so no cache bust is needed on this path.
-    let app = client.get_application(&object_id).await?;
+    let app = client.get_application(object_id).await?;
     let now = Utc::now();
 
     let expired_secrets = expired_password_key_ids(&app, now);
@@ -68,19 +84,30 @@ pub async fn remediate_remove_expired_credentials(
     let mut error: Option<UiError> = None;
 
     for key_id in &expired_secrets {
-        if let Err(e) = client.remove_password(&object_id, key_id).await {
-            error = Some(e.into());
-            break;
-        }
-        outcome.removed_secrets += 1;
-    }
-    if error.is_none() {
-        for key_id in &expired_certs {
-            if let Err(e) = client.remove_key_credential(&object_id, key_id).await {
+        match client.remove_password(object_id, key_id).await {
+            Ok(()) => outcome.removed_secrets += 1,
+            // Removed since the live read (another admin, a concurrent run):
+            // already the end state this Fix wants, so skip it without counting
+            // it or stopping the loop.
+            Err(GraphError::NotFound(_)) => {}
+            Err(e) => {
                 error = Some(e.into());
                 break;
             }
-            outcome.removed_certificates += 1;
+        }
+    }
+    if error.is_none() {
+        for key_id in &expired_certs {
+            match client.remove_key_credential(object_id, key_id).await {
+                Ok(()) => outcome.removed_certificates += 1,
+                // As above: already gone, and `remove_key_credential` sent no
+                // PATCH for it.
+                Err(GraphError::NotFound(_)) => {}
+                Err(e) => {
+                    error = Some(e.into());
+                    break;
+                }
+            }
         }
     }
 
@@ -92,7 +119,7 @@ pub async fn remediate_remove_expired_credentials(
     // so we bust caches even when a later removal failed (but never when nothing
     // was removed).
     if outcome.total() > 0 {
-        invalidate_app_credentials(&state.cache, &tenant_id, &object_id);
+        invalidate_app_credentials(&state.cache, tenant_id, object_id);
     }
     if let Some(e) = error {
         return Err(e);
@@ -834,5 +861,130 @@ mod tests {
                 .all(|r| r.method.as_str() != "DELETE" && r.method.as_str() != "PATCH"),
             "a vetoed plan must mutate nothing"
         );
+    }
+
+    // ---------------- expired-credentials handler ----------------
+    //
+    // An expired `endDateTime` must be past "now" by more than a whole day
+    // (`audit::is_expired`), so the fixtures use dates years from the wall clock.
+
+    use crate::commands::test_support::{
+        detail_cached, indexes_intact, mock_state, sample_app_json, seed_indexes_and_detail,
+    };
+    use wiremock::matchers::body_partial_json;
+
+    const EXPIRED: &str = "2020-01-01T00:00:00Z";
+
+    /// `sample_app_json()` carrying the given expired secrets and certificates.
+    fn app_with_expired(secrets: &[&str], certs: &[&str]) -> serde_json::Value {
+        let mut app = sample_app_json();
+        app["passwordCredentials"] = secrets
+            .iter()
+            .map(|k| serde_json::json!({"keyId": k, "endDateTime": EXPIRED}))
+            .collect();
+        app["keyCredentials"] = certs
+            .iter()
+            .map(|k| serde_json::json!({"keyId": k, "endDateTime": EXPIRED}))
+            .collect();
+        app
+    }
+
+    async fn mount_app(server: &MockServer, app: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_remove_password(server: &MockServer, key_id: &str, status: u16) {
+        Mock::given(method("POST"))
+            .and(path(format!("/v1.0/applications/{OBJECT}/removePassword")))
+            .and(body_partial_json(serde_json::json!({ "keyId": key_id })))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_already_removed_certificate_is_skipped_and_not_counted() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&[], &["c1"])).await;
+        // `remove_key_credential`'s live re-read (`$select=keyCredentials`,
+        // which `get_application`'s longer `$select` does not match): another
+        // admin removed the certificate since the Fix read the app.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .and(query_param("$select", "keyCredentials"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"keyCredentials": []})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let out = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect("an already-gone certificate is the end state, not a failure");
+        assert_eq!(out.removed_certificates, 0, "nothing was removed");
+        assert_eq!(out.total(), 0);
+        assert!(
+            detail_cached(&state, TENANT, OBJECT),
+            "nothing was written, so nothing is busted"
+        );
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    #[tokio::test]
+    async fn a_vanished_secret_is_skipped_and_the_rest_are_removed() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&["s1", "s2"], &[])).await;
+        mount_remove_password(&server, "s1", 404).await;
+        mount_remove_password(&server, "s2", 204).await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let out = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect("a vanished secret must not stop the Fix");
+        assert_eq!(out.removed_secrets, 1, "only s2 was actually removed");
+        assert!(
+            !detail_cached(&state, TENANT, OBJECT),
+            "s2 WAS removed, so the credential list changed"
+        );
+        assert!(
+            indexes_intact(&state, TENANT),
+            "a credential-only removal must keep both tenant-wide indexes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_404_failure_still_stops_the_fix() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_app(&server, app_with_expired(&["s1"], &["c1"])).await;
+        mount_remove_password(&server, "s1", 403).await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+
+        let err = remediate_remove_expired_credentials_core(&state, TENANT, OBJECT)
+            .await
+            .expect_err("a 403 is a real failure");
+        assert_eq!(err.code, "forbidden");
+        assert!(
+            detail_cached(&state, TENANT, OBJECT),
+            "nothing was removed, so nothing is busted"
+        );
+        assert!(indexes_intact(&state, TENANT));
     }
 }

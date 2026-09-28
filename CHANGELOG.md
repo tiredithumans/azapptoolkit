@@ -48,6 +48,12 @@
 
 ### Fixed
 
+- **Removing expired credentials no longer counts a credential that was already gone.** The
+  audit's one-click Fix rewrote an app's certificate list even when the expired certificate had
+  already been removed (by another admin, or since the audit ran), and counted it as removed. It
+  now skips a secret or certificate that no longer exists and keeps removing the rest. Removing a
+  certificate, or retiring a SAML signing certificate, that is already gone now reports that it
+  wasn't found instead of succeeding without changing anything.
 - **The Exchange scoping section no longer lists an administrative-unit-scoped role assignment as
   org-wide.** "Current Exchange role assignments" showed "(org-wide)" for any assignment without a
   management scope, so an assignment created with `-RecipientAdministrativeUnitScope` looked as if it

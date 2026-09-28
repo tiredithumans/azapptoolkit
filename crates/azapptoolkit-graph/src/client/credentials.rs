@@ -195,13 +195,23 @@ impl GraphClient {
     /// "remove expired credentials" Fix reaches this on apps that also hold a
     /// live certificate, so stripping `key` from the survivors here is the
     /// worst case of the bug it guards against.
+    ///
+    /// A `key_id` that is not on the application is `Err(GraphError::NotFound)`
+    /// and sends no PATCH: another admin (or a stale finding) removed it first,
+    /// and writing the unchanged array back would report a removal that never
+    /// happened. Callers that want "already gone" to count as done match on it.
     pub async fn remove_key_credential(&self, object_id: &str, key_id: &str) -> Result<()> {
-        let entries: Vec<serde_json::Value> = self
-            .live_key_credentials(object_id)
-            .await?
+        let live = self.live_key_credentials(object_id).await?;
+        let before = live.len();
+        let entries: Vec<serde_json::Value> = live
             .into_iter()
             .filter(|c| c.get("keyId").and_then(|v| v.as_str()) != Some(key_id))
             .collect();
+        if entries.len() == before {
+            return Err(GraphError::NotFound(format!(
+                "certificate credential {key_id} is not on the application"
+            )));
+        }
         let body = serde_json::json!({ "keyCredentials": entries });
         let path = format!("/applications/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(&body))
@@ -248,6 +258,11 @@ impl GraphClient {
     /// halves stranded that password credential on the service principal
     /// forever, so this sweeps `passwordCredentials` by the same identifier —
     /// otherwise every retired certificate left a permanent orphan behind.
+    ///
+    /// A `key_id` that is not on the service principal is
+    /// `Err(GraphError::NotFound)` and sends no PATCH (nothing was written, so
+    /// there is no cache to invalidate), exactly as for
+    /// [`Self::remove_key_credential`].
     pub async fn remove_service_principal_key_credential(
         &self,
         object_id: &str,
@@ -267,11 +282,20 @@ impl GraphClient {
             .cloned()
             .unwrap_or_default();
 
-        // Resolve the target's thumbprint so the paired half goes with it.
-        let thumbprint = entries
+        // Resolve the target first: an absent key is already gone, and a PATCH
+        // would rewrite the unchanged arrays and report a removal that never
+        // happened.
+        let Some(target) = entries
             .iter()
             .find(|c| c.get("keyId").and_then(|v| v.as_str()) == Some(key_id))
-            .and_then(|c| c.get("customKeyIdentifier"))
+        else {
+            return Err(GraphError::NotFound(format!(
+                "signing key {key_id} is not on the service principal"
+            )));
+        };
+        // Resolve the target's thumbprint so the paired half goes with it.
+        let thumbprint = target
+            .get("customKeyIdentifier")
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
