@@ -97,9 +97,11 @@ surfaces reuse it rather than re-implementing the markup.
   `bool`, Leptos renders a boolean attribute — `aria-selected=""` when true, absent when false —
   and neither is a valid ARIA value. Pinned by `web-rs/tests/aria_state_bindings.rs`, a source scan
   under `just web-test`. A **combobox**'s listbox holds only `role="option"`s or `role="group"`s of
-  them (one group per heading, named by `aria-labelledby`); its loading / empty / error / cap text
+  them (one group per heading, named by `aria-labelledby`); its loading / empty / error text
   lives in a sibling `role="status"` region, never among the options (`GlobalSearch`, the
-  Permission Tester's picker).
+  Permission Tester's picker). A notice that qualifies the results (`GlobalSearch`'s index-cap and
+  failed-lookup `Callout`s) goes in its own `role="status"` region *before* the listbox, so it
+  leads the scrolling panel instead of sitting below the fold.
   Two things legitimately stay different, and "consolidate" must not eat them: `FilterChip` keeps
   its count badge and zero-count disabled state (thaw's `Tab` takes only `class`/`value`/`children`
   and could not express either), and `.ui-select` stays where the option list is long or open-ended.

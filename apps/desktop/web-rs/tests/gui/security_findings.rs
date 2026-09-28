@@ -208,13 +208,24 @@ async fn groups_rank_by_worst_severity_then_count() {
     // The healthy section trails as a collapsed disclosure; expanding it
     // reveals the positive groups even at zero count.
     assert!(!ts::body_contains("Mailbox access scoped"));
+    let section = || ts::query(".finding-group__header--section").expect("the healthy header");
+    assert_eq!(section().get_attribute("aria-controls"), None);
     ts::click(".finding-group__header--section");
     ts::wait_for(|| ts::body_contains("Mailbox access scoped")).await;
     assert_eq!(
-        ts::query(".finding-group__header--section")
-            .and_then(|h| h.get_attribute("aria-expanded"))
-            .as_deref(),
+        section().get_attribute("aria-expanded").as_deref(),
         Some("true")
+    );
+    // Open, it names the container it revealed — and that container holds the
+    // positive groups.
+    let controls = section()
+        .get_attribute("aria-controls")
+        .expect("an open healthy section points at its body");
+    let body = ts::query(&format!("#{controls}")).expect("aria-controls resolves");
+    assert!(
+        body.text_content()
+            .unwrap_or_default()
+            .contains("Mailbox access scoped")
     );
 }
 

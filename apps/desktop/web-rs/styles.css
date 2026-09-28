@@ -3987,6 +3987,13 @@ h3 {
   display: grid;
   gap: var(--space-2);
 }
+
+/* The revealed healthy groups, wrapped so the section header's
+   `aria-controls` has one element to name; spaced like their parent. */
+.finding-groups__healthy-body {
+  display: grid;
+  gap: var(--space-2);
+}
 .finding-fix-all {
   flex: none;
 }

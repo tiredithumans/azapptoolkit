@@ -9,8 +9,10 @@
 //! warning comments, so this scan holds the line instead of the comments. See
 //! `docs/architecture/frontend-workspace.md`.
 //!
-//! A binding passes when its expression contains `.to_string()` or a string
-//! literal (`"true"` / `"false"`, `then_some("true")`, `then_some("page")`).
+//! A binding passes when its expression yields a string: `.to_string()`,
+//! `format!`, or a string literal in a value position (`"true"` / `"false"`,
+//! `then_some("page")`, `Some("…")`, a block or match arm ending in one) —
+//! never a literal that is only compared against (`x.get() == "a"`).
 //! A bare identifier (`aria-selected=aria_selected`) is resolved to the nearest
 //! preceding `let <ident> = …;` in the same file. Token-valued attributes such
 //! as `aria-sort` are out of scope.
@@ -106,8 +108,23 @@ fn resolve_let<'a>(src: &'a str, ident: &str, before: usize) -> Option<&'a str> 
     Some(expression_at(src, at + needle.len(), true))
 }
 
+/// Whether `expr` *yields* a string. A string literal counts only in a value
+/// position — `"true"` / `"false"`, `then_some("…")`, `Some("…")`, a block or
+/// match arm that evaluates to one — never as a comparison operand:
+/// `aria-pressed=move || facet.get() == "all"` is still a bare `bool`.
 fn is_string_valued(expr: &str) -> bool {
-    expr.contains(".to_string()") || expr.contains('"')
+    const YIELDS_STRING: &[&str] = &[
+        ".to_string()",
+        "format!(",
+        "\"true\"",
+        "\"false\"",
+        "then_some(\"",
+        "Some(\"",
+        "{ \"",
+        "=> \"",
+    ];
+    let squashed: String = expr.split_whitespace().collect::<Vec<_>>().join(" ");
+    YIELDS_STRING.iter().any(|form| squashed.contains(form))
 }
 
 /// Every non-literal boolean-ARIA-state binding in `src` (already
@@ -222,6 +239,15 @@ fn the_aria_scanner_reads_the_shapes_the_tree_uses() {
     );
     assert_eq!(
         verdicts("let a = move || sel.get() == v;\nview! {\n    <button aria-selected=a\n    >\n}"),
+        [false]
+    );
+    // A string literal as a comparison operand is still a bare bool.
+    assert_eq!(
+        verdicts("<button\n    aria-pressed=move || x.get() == \"a\"\n>"),
+        [false]
+    );
+    assert_eq!(
+        verdicts("<button\n    aria-selected=move || facet.with(|f| f == \"all\")\n>"),
         [false]
     );
 

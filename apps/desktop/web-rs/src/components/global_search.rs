@@ -24,11 +24,13 @@
 //! and the failed-lookup `Callout` this is the fastest input in the app *and*
 //! the one that can quietly lie: ten rows reads as "there are ten", and a bare
 //! "No matches." reads as "not in this tenant". None of these annotations is
-//! focusable or part of the roving selection — see `render_group`. The two
-//! notices, like "Searching…" and "No matching records.", render in a
-//! `role="status"` region *below* the listbox rather than inside it: a
-//! listbox's children are only `role="group"`s (one per heading, named via
-//! `aria-labelledby`) of `role="option"`s.
+//! focusable or part of the roving selection — see `render_group`. None of the
+//! non-result text renders inside the listbox, whose children are only
+//! `role="group"`s (one per heading, named via `aria-labelledby`) of
+//! `role="option"`s: the two notices sit in a `role="status"` region *above*
+//! it — first in the scrolling panel, so a capped tenant's warning is never
+//! below the fold — and "Searching…" / "No matching records." / "Search
+//! failed" in a second `role="status"` region below it.
 //!
 //! **The roving index spans both kinds.** Destinations are selectable, so
 //! unlike the group footers they *do* enter `flatten_hits`, and the record
@@ -270,14 +272,27 @@ pub fn GlobalSearch() -> impl IntoView {
                 if !dropdown_visible.get() {
                     return ().into_any();
                 }
-                // The positioned dropdown holds two siblings: the listbox, whose
+                // The positioned dropdown holds three siblings: a `role="status"`
+                // region for the cap / lookup notices, the listbox, whose
                 // children are only `role="group"`s of `role="option"`s, and a
-                // `role="status"` region for everything that is not a result
-                // (loading, empty, failure, and the cap / lookup notices). ARIA
-                // allows nothing else inside a listbox, and a screen reader
-                // would otherwise announce "Searching…" as if it were a hit.
+                // second `role="status"` region for the rest of what is not a
+                // result (loading, empty, failure). ARIA allows nothing else
+                // inside a listbox, and a screen reader would otherwise announce
+                // "Searching…" as if it were a hit. The notices come FIRST: the
+                // panel scrolls (up to ~40 rows), and a truncation warning below
+                // the fold is one nobody reads.
                 view! {
                     <div class="global-search__results">
+                        <div class="global-search__notices" role="status">
+                            <Suspense fallback=|| ()>
+                                {move || Suspend::new(async move {
+                                    match results.await {
+                                        Some(Ok(r)) => view_result_notices(&r),
+                                        None | Some(Err(_)) => ().into_any(),
+                                    }
+                                })}
+                            </Suspense>
+                        </div>
                         <div role="listbox" id="global-search-listbox">
                             // Destinations first, and outside the `Suspense`:
                             // they are a local table match, so making them wait
@@ -326,7 +341,7 @@ pub fn GlobalSearch() -> impl IntoView {
                                             </div>
                                         }
                                             .into_any(),
-                                        Some(Ok(r)) => view_result_notices(&r),
+                                        Some(Ok(r)) => view_no_records(&r),
                                     }
                                 })}
                             </Suspense>
@@ -339,10 +354,9 @@ pub fn GlobalSearch() -> impl IntoView {
     }
 }
 
-/// The non-result half of a resolved search, rendered in the dropdown's
-/// `role="status"` region (below the listbox, never inside it): the index-cap
-/// and failed-lookup notices, and "No matching records." when every record
-/// group is empty.
+/// The honesty notices of a resolved search, rendered in the dropdown's first
+/// `role="status"` region (above the listbox, never inside it): the index-cap
+/// and failed-lookup `Callout`s.
 fn view_result_notices(results: &GlobalSearchResults) -> leptos::prelude::AnyView {
     // The corpus this query filtered is itself a truncated view of the tenant,
     // so every answer below — "No matching records." emphatically included — is
@@ -369,25 +383,32 @@ fn view_result_notices(results: &GlobalSearchResults) -> leptos::prelude::AnyVie
         }
     });
 
+    view! {
+        {cap_notice}
+        {lookup_notice}
+    }
+    .into_any()
+}
+
+/// "No matching records." when every record group of a resolved search is
+/// empty, rendered in the dropdown's second `role="status"` region (below the
+/// listbox).
+fn view_no_records(results: &GlobalSearchResults) -> leptos::prelude::AnyView {
     let empty = results.app_registrations.is_empty()
         && results.enterprise_apps.is_empty()
         && results.managed_identities.is_empty();
     // "records", not a bare "No matches": the "Go to" group above may well have
     // matched, and a flat denial over a list of visible hits is the one thing
     // worse than an over-broad claim.
-    let no_records =
-        empty.then(|| view! { <div class="global-search__empty">"No matching records."</div> });
-    view! {
-        {cap_notice}
-        {lookup_notice}
-        {no_records}
-    }
-    .into_any()
+    empty
+        .then(|| view! { <div class="global-search__empty">"No matching records."</div> })
+        .into_any()
 }
 
 /// The record groups of a resolved search, rendered inside the listbox. Their
-/// notices (cap, failed lookup, "No matching records.") are
-/// [`view_result_notices`]'s — they are not options, so they live outside it.
+/// notices (cap and failed lookup: [`view_result_notices`], above it; "No
+/// matching records.": [`view_no_records`], below it) are not options, so they
+/// live outside it.
 fn view_result_groups(
     results: GlobalSearchResults,
     session: crate::state::Session,

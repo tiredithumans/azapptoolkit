@@ -30,6 +30,10 @@ use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findin
 use super::row::AuditRowActions;
 use super::{last_sign_in_cell, risk_tone};
 
+/// The revealed "Healthy configuration" groups' container — the target of the
+/// section header's `aria-controls`. The pane mounts once, so it is unique.
+const HEALTHY_SECTION_ID: &str = "finding-section-healthy";
+
 #[component]
 pub(crate) fn FindingsPane() -> impl IntoView {
     let session = use_session();
@@ -136,6 +140,12 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                 // A string, never a bare bool (see
                                 // `finding_group_view`).
                                 aria-expanded=move || healthy_open.get().to_string()
+                                // Only while the body is rendered — a collapsed
+                                // section's body is not in the DOM, so the
+                                // reference would dangle (as for the groups).
+                                aria-controls=move || {
+                                    healthy_open.get().then_some(HEALTHY_SECTION_ID)
+                                }
                                 on:click=move |_| healthy_open.update(|o| *o = !*o)
                             >
                                 <span class="finding-group__chevron" aria-hidden="true">
@@ -144,19 +154,21 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                 "Healthy configuration"
                             </button>
                             <Show when=move || healthy_open.get()>
-                                {healthy
-                                    .iter()
-                                    .map(|g| {
-                                        finding_group_view(
-                                            g.clone(),
-                                            ctrl,
-                                            expanded,
-                                            selection,
-                                            render_limit,
-                                            false,
-                                        )
-                                    })
-                                    .collect_view()}
+                                <div class="finding-groups__healthy-body" id=HEALTHY_SECTION_ID>
+                                    {healthy
+                                        .iter()
+                                        .map(|g| {
+                                            finding_group_view(
+                                                g.clone(),
+                                                ctrl,
+                                                expanded,
+                                                selection,
+                                                render_limit,
+                                                false,
+                                            )
+                                        })
+                                        .collect_view()}
+                                </div>
                             </Show>
                         </div>
                     </div>

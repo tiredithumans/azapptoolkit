@@ -14,18 +14,36 @@ use azapptoolkit_web_rs::components::index_cap_notice::corpus_cap_message;
 use azapptoolkit_web_rs::state::ActiveView;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
-/// The listbox's text, and the sibling status region's: the non-option text
-/// (loading, empty, failure, cap and lookup notices) belongs to the second.
+/// The listbox's text, and its two sibling status regions': the non-option
+/// text belongs to those — the cap and lookup notices to the one above the
+/// listbox, loading / empty / failure to the one below it.
 fn listbox_text() -> String {
     ts::query("#global-search-listbox")
         .and_then(|e| e.text_content())
         .unwrap_or_default()
 }
 
-fn status_text() -> String {
-    ts::query(".global-search__results [role=status]")
+fn notices_text() -> String {
+    ts::query(".global-search__results > .global-search__notices[role=status]")
         .and_then(|e| e.text_content())
         .unwrap_or_default()
+}
+
+fn status_text() -> String {
+    ts::query(".global-search__results > .global-search__status[role=status]")
+        .and_then(|e| e.text_content())
+        .unwrap_or_default()
+}
+
+/// The truncation / failed-lookup notices are the first thing in the (scrolling)
+/// panel, ahead of every result row — below the listbox they would sit under
+/// the fold on exactly the tenants big enough to trip the cap.
+fn assert_notices_lead_the_panel() {
+    let first = ts::query(".global-search__results")
+        .and_then(|r| r.first_element_child())
+        .expect("the results panel has children");
+    assert_eq!(first.get_attribute("role").as_deref(), Some("status"));
+    assert!(first.class_name().contains("global-search__notices"));
 }
 
 fn is_active(selector: &str) -> bool {
@@ -176,7 +194,8 @@ async fn a_capped_result_renders_the_group_footer_and_the_cap_notice() {
     }
     assert_eq!(labels, ["App Registrations"]);
     assert!(!listbox_text().contains(&corpus_cap_message(10_000)));
-    assert!(status_text().contains(&corpus_cap_message(10_000)));
+    assert!(notices_text().contains(&corpus_cap_message(10_000)));
+    assert_notices_lead_the_panel();
 }
 
 /// A GUID search whose lookups did not all answer must not read as "not in
@@ -193,9 +212,12 @@ async fn a_failed_guid_lookup_warns_instead_of_reading_as_no_match() {
 
     ts::wait_for(|| ts::body_contains("No matching records.")).await;
     assert!(ts::body_contains(LOOKUP_DEGRADED_NOTICE));
-    // Neither is a result: both are in the status region, outside the listbox.
+    // Neither is a result: both are in a status region, outside the listbox —
+    // the warning in the one that leads the panel.
     assert!(status_text().contains("No matching records."));
-    assert!(status_text().contains(LOOKUP_DEGRADED_NOTICE));
+    assert!(notices_text().contains(LOOKUP_DEGRADED_NOTICE));
+    assert!(!status_text().contains(LOOKUP_DEGRADED_NOTICE));
+    assert_notices_lead_the_panel();
     assert!(!listbox_text().contains("No matching records."));
     assert!(!listbox_text().contains(LOOKUP_DEGRADED_NOTICE));
 }
