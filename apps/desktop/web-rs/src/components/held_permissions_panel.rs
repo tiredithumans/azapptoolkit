@@ -29,6 +29,7 @@ use crate::components::legacy_exchange_grants_callout::{
 use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::{app_permission_risk_badge, permission_scope_cell};
 use crate::components::ui::{Callout, DataTable, IconButton};
+use crate::util::count_noun;
 
 /// Whether an already-held permission can be restricted in place *per row* (and so
 /// should offer a "Scope…" action): an org-wide `Sites.*` **on Microsoft Graph**
@@ -105,8 +106,12 @@ pub fn HeldPermissionsPanel(
             (
                 "warn",
                 format!(
-                    "Holds {} high-risk application permission(s): {}",
-                    high.len(),
+                    "Holds {}: {}",
+                    count_noun(
+                        high.len(),
+                        "high-risk application permission",
+                        "high-risk application permissions",
+                    ),
                     label(&high),
                 ),
             )
@@ -114,8 +119,12 @@ pub fn HeldPermissionsPanel(
             (
                 "info",
                 format!(
-                    "Holds {} medium-risk application permission(s): {}",
-                    medium.len(),
+                    "Holds {}: {}",
+                    count_noun(
+                        medium.len(),
+                        "medium-risk application permission",
+                        "medium-risk application permissions",
+                    ),
                     label(&medium),
                 ),
             )

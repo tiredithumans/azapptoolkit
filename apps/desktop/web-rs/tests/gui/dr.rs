@@ -136,7 +136,7 @@ async fn a_backup_with_skipped_objects_warns_before_save() {
     .await;
 
     assert!(
-        ts::body_contains("1 object(s) could not be fully read"),
+        ts::body_contains("1 object could not be fully read"),
         "{}",
         ts::body_text()
     );
@@ -224,16 +224,10 @@ async fn the_plan_lists_enterprise_and_managed_identity_work() {
         ..plan()
     })
     .await;
-    assert!(ts::body_contains(
-        "3 enterprise app(s) to re-apply access to"
-    ));
-    assert!(ts::body_contains(
-        "2 enterprise app(s) need manual follow-up"
-    ));
-    assert!(ts::body_contains(
-        "4 managed identity(ies) to re-bind by name"
-    ));
-    assert!(ts::body_contains("1 gap(s) recorded in the backup"));
+    assert!(ts::body_contains("3 enterprise apps to re-apply access to"));
+    assert!(ts::body_contains("2 enterprise apps need manual follow-up"));
+    assert!(ts::body_contains("4 managed identities to re-bind by name"));
+    assert!(ts::body_contains("1 gap recorded in the backup"));
     assert!(
         !ts::body_contains("second copy"),
         "a cross-tenant plan has no duplicate warning"

@@ -35,6 +35,7 @@ use crate::components::ui::{
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::{Session, use_session};
+use crate::util::count_noun;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
@@ -87,8 +88,12 @@ fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKin
 /// `Ok(GrantResult)` rather than erroring, so a partial consent must not read as
 /// an unqualified success.
 fn consent_report(r: &GrantResult) -> Result<String, String> {
-    let created = r.role_assignments_created.len();
-    let upserted = r.scope_grants_upserted.len();
+    let created = count_noun(
+        r.role_assignments_created.len(),
+        "role assignment",
+        "role assignments",
+    );
+    let upserted = count_noun(r.scope_grants_upserted.len(), "scope grant", "scope grants");
     if let Some(first) = r.failures.first() {
         let failed = r.failures.len();
         let more = if failed > 1 {
@@ -97,8 +102,7 @@ fn consent_report(r: &GrantResult) -> Result<String, String> {
             String::new()
         };
         return Err(format!(
-            "Admin consent partly applied: {created} role assignment(s), {upserted} scope \
-             grant(s); {failed} failed — {}{more}",
+            "Admin consent partly applied: {created}, {upserted}; {failed} failed — {}{more}",
             first.message
         ));
     }
@@ -109,7 +113,7 @@ fn consent_report(r: &GrantResult) -> Result<String, String> {
         String::new()
     };
     Ok(format!(
-        "Admin consent granted: {created} role assignment(s), {upserted} scope grant(s){skipped}."
+        "Admin consent granted: {created}, {upserted}{skipped}."
     ))
 }
 
@@ -1184,10 +1188,7 @@ mod tests {
     #[test]
     fn a_partial_consent_is_reported_as_an_error() {
         let ok = consent_report(&grant_result(vec![])).expect("a clean grant");
-        assert!(
-            ok.contains("2 role assignment(s), 0 scope grant(s)"),
-            "{ok}"
-        );
+        assert!(ok.contains("2 role assignments, 0 scope grants"), "{ok}");
 
         let failure = permissions::GrantFailure {
             resource_app_id: MICROSOFT_GRAPH_APP_ID.into(),

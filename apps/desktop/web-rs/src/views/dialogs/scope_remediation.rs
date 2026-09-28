@@ -16,7 +16,7 @@ use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 
 /// Which principal a scope Fix targets. App-registration rows route to the
 /// audit remediation wrappers (which re-resolve the application + its SP);
@@ -123,8 +123,12 @@ pub fn ScopeMailboxButton(
                     open.set(false);
                     needs_consent.set(false);
                     session.toast_success(format!(
-                        "Scoped mailbox access — removed {} org-wide grant(s). Re-run the audit to refresh scores.",
-                        res.removed_entra_grants.len()
+                        "Scoped mailbox access — removed {}. Re-run the audit to refresh scores.",
+                        count_noun(
+                            res.removed_entra_grants.len(),
+                            "org-wide grant",
+                            "org-wide grants"
+                        )
                     ));
                     on_done.run(target.row_id());
                 }
@@ -218,9 +222,9 @@ pub fn ScopeMailboxButton(
                                 .get()
                                 .map(|r| {
                                     let summary = format!(
-                                        "Scope “{}”: removed {} org-wide grant(s), but some of what you asked for may not have been applied — read the notes below.",
+                                        "Scope “{}”: removed {}, but some of what you asked for may not have been applied — read the notes below.",
                                         r.scope_name,
-                                        r.removed_entra_grants.len(),
+                                        count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
                                     );
                                     view! {
                                         <Callout tone="warn" role="status">
@@ -362,7 +366,9 @@ pub fn ScopeSharePointButton(
                         open.set(false);
                         needs_consent.set(false);
                         session.toast_success(format!(
-                            "Restricted SharePoint access to {sites} site(s) — removed {removed} org-wide grant(s). Re-run the audit to refresh scores."
+                            "Restricted SharePoint access to {} — removed {}. Re-run the audit to refresh scores.",
+                            count_noun(sites, "site", "sites"),
+                            count_noun(removed, "org-wide grant", "org-wide grants"),
                         ));
                         on_done.run(target.row_id());
                     }

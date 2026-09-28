@@ -192,8 +192,23 @@ pub fn relative_time(
     format!("{days} day{} ago", plural(days))
 }
 
-fn plural(n: i64) -> &'static str {
-    if n == 1 { "" } else { "s" }
+/// `""` for exactly one, `"s"` otherwise — the regular English plural suffix,
+/// so a count line reads "1 app" / "3 apps" and never the ticket-unfriendly
+/// "app(s)". Generic over the integer types the DTOs carry.
+pub fn plural<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    if n == N::from(1) { "" } else { "s" }
+}
+
+/// `"{n} {one}"` or `"{n} {many}"`: a count with its agreeing noun, for
+/// irregular plurals (mailbox/mailboxes, identity/identities) and for a phrase
+/// whose verb must agree too (`count_noun(n, "app was", "apps were")`).
+pub fn count_noun<N: std::fmt::Display + PartialEq + From<u8>>(
+    n: N,
+    one: &str,
+    many: &str,
+) -> String {
+    let noun = if n == N::from(1) { one } else { many };
+    format!("{n} {noun}")
 }
 
 /// Parses an RFC3339 timestamp into its display pair — for the RFC3339
@@ -295,6 +310,27 @@ pub fn created_in_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plural_drops_the_suffix_only_for_exactly_one() {
+        assert_eq!(plural(0usize), "s");
+        assert_eq!(plural(1usize), "");
+        assert_eq!(plural(2usize), "s");
+        assert_eq!(plural(0i64), "s");
+        assert_eq!(plural(1i64), "");
+        assert_eq!(plural(2i64), "s");
+        assert_eq!(plural(0u32), "s");
+        assert_eq!(plural(1u32), "");
+        assert_eq!(plural(2u32), "s");
+    }
+
+    #[test]
+    fn count_noun_pairs_the_count_with_its_agreeing_noun() {
+        assert_eq!(count_noun(1usize, "identity", "identities"), "1 identity");
+        assert_eq!(count_noun(4u32, "identity", "identities"), "4 identities");
+        assert_eq!(count_noun(0i64, "app", "apps"), "0 apps");
+        assert_eq!(count_noun(1usize, "app was", "apps were"), "1 app was");
+    }
 
     #[test]
     fn parse_lines_splits_on_newline_comma_semicolon_and_trims() {

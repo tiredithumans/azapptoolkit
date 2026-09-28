@@ -18,6 +18,7 @@ use crate::bindings::usage;
 use crate::components::ui::{Callout, DataTable};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
+use crate::util::plural;
 
 #[component]
 pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
@@ -157,7 +158,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                         let summary = format!(
                             "{} call pattern{} over {} days (workspace: {}){}{}",
                             r.rows.len(),
-                            if r.rows.len() == 1 { "" } else { "s" },
+                            plural(r.rows.len()),
                             r.days,
                             r.workspace_name,
                             if r.truncated { " — long tail truncated" } else { "" },

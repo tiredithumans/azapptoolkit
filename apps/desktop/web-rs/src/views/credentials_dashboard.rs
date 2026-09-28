@@ -19,7 +19,7 @@ use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, fmt_date};
+use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date};
 
 #[component]
 pub fn CredentialsDashboard() -> impl IntoView {
@@ -40,7 +40,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh credential expiry"
             view_key="credentials"
-            noun="credential(s)"
+            noun="credentials"
             empty_message="No credentials match this filter."
             facets=vec![
                 ("all", "All"),
@@ -70,7 +70,8 @@ pub fn CredentialsDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{expired} credential(s) already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    "{} already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    count_noun(expired, "credential", "credentials"),
                                 )}
                             </Callout>
                         }

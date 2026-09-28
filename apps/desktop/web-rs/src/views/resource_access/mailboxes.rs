@@ -19,6 +19,7 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::{Session, use_session};
+use crate::util::plural;
 
 use super::{verdict_badge, verdict_tooltip};
 
@@ -42,7 +43,7 @@ fn summary_line(r: &MailboxReachersResult) -> String {
         "{} of {} candidate app{} can reach “{}”",
         reachers,
         r.total_candidates,
-        if r.total_candidates == 1 { "" } else { "s" },
+        plural(r.total_candidates),
         r.mailbox,
     );
     if unknowns > 0 {
@@ -319,7 +320,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                         "No application can reach “{}” — all {} candidate{} were checked and have no access.",
                                         r.mailbox,
                                         no_access,
-                                        if no_access == 1 { "" } else { "s" },
+                                        plural(no_access),
                                     )}
                                 </Body1>
                             }

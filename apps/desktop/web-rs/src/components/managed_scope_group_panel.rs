@@ -19,7 +19,7 @@ use crate::components::ui::Callout;
 use crate::components::ui::{Badge, BadgeTone, FormError, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 #[allow(clippy::type_complexity)]
@@ -102,8 +102,8 @@ pub fn ManagedScopeGroupPanel(
             move |r: exchange::ExchangeMemberMutationResult| {
                 add_text.set(String::new());
                 let mut msg = format!(
-                    "Added {} mailbox(es) to {}.",
-                    r.succeeded.len(),
+                    "Added {} to {}.",
+                    count_noun(r.succeeded.len(), "mailbox", "mailboxes"),
                     r.group_name
                 );
                 if r.group_created {
@@ -112,8 +112,8 @@ pub fn ManagedScopeGroupPanel(
                 session.toast_success(msg);
                 if !r.failed.is_empty() {
                     group_cmd.error.set(Some(format!(
-                        "{} mailbox(es) could not be added: {}",
-                        r.failed.len(),
+                        "{} could not be added: {}",
+                        count_noun(r.failed.len(), "mailbox", "mailboxes"),
                         r.failed
                             .iter()
                             .map(|f| format!("{} ({})", f.mailbox, f.reason))
@@ -207,8 +207,7 @@ pub fn ManagedScopeGroupPanel(
                     }
                     Some(Ok(g)) => {
                         let name = g.group_name.clone();
-                        let n = g.members.len();
-                        let noun = if n == 1 { "mailbox" } else { "mailboxes" };
+                        let in_scope = count_noun(g.members.len(), "mailbox", "mailboxes");
                         view! {
                             <div class="managed-scope-group__status">
                                 <div>
@@ -218,7 +217,7 @@ pub fn ManagedScopeGroupPanel(
                                 </div>
                                 <Body1 class="hint">
                                     {format!(
-                                        "{n} {noun} in scope — the app can reach exactly these through the scoped grant.",
+                                        "{in_scope} in scope — the app can reach exactly these through the scoped grant.",
                                     )}
                                 </Body1>
                             </div>

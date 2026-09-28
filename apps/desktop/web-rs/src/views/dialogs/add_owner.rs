@@ -18,6 +18,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
+use crate::util::count_noun;
 
 /// "Add owner" remediation — one-click applies the tenant's default owners
 /// (Settings → `app_registration.default_owners`) or searches users and adds the
@@ -141,8 +142,8 @@ pub fn AddOwnerButton(
                 // Leave the modal open with the error so the operator can retry;
                 // don't clear the Fix button.
                 error.set(Some(format!(
-                    "{} default owner(s) failed — {}",
-                    failures.len(),
+                    "{} failed — {}",
+                    count_noun(failures.len(), "default owner", "default owners"),
                     failures.join("; ")
                 )));
                 return;
@@ -151,7 +152,8 @@ pub fn AddOwnerButton(
             raw_query.set(String::new());
             if added > 0 {
                 session.toast_success(format!(
-                    "Added {added} default owner(s) — re-run the audit to refresh the ownership finding."
+                    "Added {} — re-run the audit to refresh the ownership finding.",
+                    count_noun(added, "default owner", "default owners")
                 ));
             } else {
                 session.toast_success(

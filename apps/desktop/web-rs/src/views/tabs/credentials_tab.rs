@@ -21,7 +21,7 @@ use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{
-    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, fmt_date, ls_get, ls_set, write_clipboard,
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date, ls_get, ls_set, write_clipboard,
 };
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
@@ -519,13 +519,14 @@ pub fn CredentialsTab(
                         false,
                     ));
                 }
-                let removed = r.removed_key_ids.len();
+                let removed =
+                    count_noun(r.removed_key_ids.len(), "expired secret", "expired secrets");
                 if r.failures.is_empty() {
-                    session.toast_success(format!("Removed {removed} expired secret(s)."));
+                    session.toast_success(format!("Removed {removed}."));
                 } else {
                     session.toast_error(
                         format!(
-                            "Removed {removed} expired secret(s); {} could not be removed.",
+                            "Removed {removed}; {} could not be removed.",
                             r.failures.len(),
                         ),
                         None,
@@ -601,8 +602,8 @@ pub fn CredentialsTab(
                         // {reason}"), not just a count: there is no log viewer in
                         // the UI, so "see the log" pointed nowhere.
                         format!(
-                            "{msg} {} warning(s): {}",
-                            r.warnings.len(),
+                            "{msg} {}: {}",
+                            count_noun(r.warnings.len(), "warning", "warnings"),
                             r.warnings.join("; "),
                         ),
                         None,
@@ -1265,9 +1266,9 @@ pub fn CredentialsTab(
                 body="The new secret is created and stored in Key Vault first. Then every existing client secret on this application is removed, including ones that have not expired. Any caller still using one of them will start getting 401s immediately. This cannot be undone."
                 subject=Signal::derive(move || {
                     format!(
-                        "{} \u{2014} {} existing secret(s)",
+                        "{} \u{2014} {}",
                         app_name.get(),
-                        existing_count.get(),
+                        count_noun(existing_count.get(), "existing secret", "existing secrets"),
                     )
                 })
                 confirm_label="Rotate & remove"

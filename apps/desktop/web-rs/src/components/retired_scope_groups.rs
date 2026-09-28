@@ -49,7 +49,7 @@ pub fn RetiredScopeGroups(
     view! {
         <Callout tone="info" role="status">
             <Body1>
-                "This app's mailboxes now come from the toolkit-managed group. The group(s) below were the previous scope source, left in place for you to retire — with whatever still references them, as far as Exchange can be asked."
+                "This app's mailboxes now come from the toolkit-managed group. Each group below was a previous scope source, left in place for you to retire — with whatever still references it, as far as Exchange can be asked."
             </Body1>
             <ul class="warnings">
                 {groups

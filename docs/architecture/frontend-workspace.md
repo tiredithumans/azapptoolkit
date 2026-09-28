@@ -10,7 +10,11 @@ views, the open-items workspace, or the Security workbench's panes.
 Leptos reactivity is closure-based: `{move || sig.get()}` inside `view!` for tracking,
 `.get()`/`.with()` to read. Shared state is `RwSignal<T>` fields on a context-provided `Session`
 (`web-rs/src/state/mod.rs`). CSS is one plain global `styles.css` with BEM-ish class names — no
-CSS-in-Rust, no per-component stylesheets.
+CSS-in-Rust, no per-component stylesheets. Every class selector in it must be rendered somewhere in
+`src/` (or be a `thaw-*` override, or a modifier built by `format!("{base}--{…}")`), and every
+`var(--token)` it uses must be declared in it — a fallback does not excuse an undefined token, which
+renders transparent. Both are pinned by `web-rs/tests/stylesheet_coverage.rs`, so a rule whose
+component is gone is deleted with it.
 
 ## One primitive per UI pattern
 

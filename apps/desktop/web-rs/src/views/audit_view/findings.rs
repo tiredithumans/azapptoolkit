@@ -23,6 +23,7 @@ use crate::components::ui::{Badge, Callout, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::use_session;
+use crate::util::count_noun;
 
 use super::controller::AuditController;
 use super::filter::issue_lines_for;
@@ -323,10 +324,7 @@ fn finding_group_view(
                     ></span>
                     <span class="finding-group__title">{title}</span>
                     <span class="finding-group__count">
-                        {format!(
-                            "{count} {}",
-                            if count == 1 { "principal" } else { "principals" },
-                        )}
+                        {count_noun(count, "principal", "principals")}
                     </span>
                     <span class="finding-group__chevron" aria-hidden="true">
                         {move || if is_open() { "▾" } else { "▸" }}

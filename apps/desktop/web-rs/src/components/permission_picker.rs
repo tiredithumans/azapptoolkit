@@ -28,7 +28,7 @@ use crate::components::ui::{
 };
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
-use crate::util::no_tenant;
+use crate::util::{count_noun, no_tenant};
 
 // Microsoft Graph's first-party app id — the natural default for both the App
 // Registration and Managed Identity grant flows. Re-exported from its one
@@ -194,15 +194,11 @@ pub fn PermissionPicker(
                                             {apps
                                                 .into_iter()
                                                 .map(|r: CatalogResourceSummary| {
-                                                    let label = if r.role_count == 1 {
-                                                        format!("{} (1 app role)", r.display_name)
-                                                    } else {
-                                                        format!(
-                                                            "{} ({} app roles)",
-                                                            r.display_name,
-                                                            r.role_count,
-                                                        )
-                                                    };
+                                                    let label = format!(
+                                                        "{} ({})",
+                                                        r.display_name,
+                                                        count_noun(r.role_count, "app role", "app roles"),
+                                                    );
                                                     view! {
                                                         <option value=r.app_id.clone()>{label}</option>
                                                     }

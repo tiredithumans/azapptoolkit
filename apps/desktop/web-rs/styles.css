@@ -337,7 +337,7 @@ h3 {
 
 .member-list li {
   padding: var(--space-1) 0;
-  border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.2));
+  border-bottom: 1px solid var(--border);
 }
 
 /* Icon-button group inside a table cell. The cell itself stays a normal
@@ -1491,18 +1491,6 @@ h3 {
 .mi-properties dd {
   margin: 0;
 }
-.mi-grant {
-  display: grid;
-  gap: var(--space-2);
-}
-.mi-scope-panel {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-}
 /* Collapsible scoping sections under the permissions table (Exchange /
    SharePoint) — bordered so they read as tools, not more table rows. */
 .detail-section {
@@ -1552,19 +1540,6 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
-}
-/* Enterprise-app owners list: name over UPN. */
-.owner-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.owner-list li {
-  display: flex;
-  flex-direction: column;
 }
 /* List filter chips — the shared facet bar on the App Reg / Enterprise / MI
    lists (replaces the old hidden Select dropdowns). Each chip is a plain button
@@ -1625,7 +1600,7 @@ h3 {
   cursor: pointer;
 }
 .filter-toggle:hover {
-  background: var(--surface-hover, var(--surface));
+  background: var(--bg-subtle);
 }
 .filter-toggle__badge {
   display: inline-flex;
@@ -1852,28 +1827,6 @@ h3 {
   outline: none;
   box-shadow: var(--focus-ring);
 }
-.dash-links {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-.dash-link {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: none;
-  background: transparent;
-  color: var(--text);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: var(--text-base);
-  text-align: left;
-}
-.dash-link:hover {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
 /* Home Security Posture card: a severity row (large drill boxes) above a ranked
    "Top findings" list that rhymes with the Security workbench's Findings pane
    (tone dot · title · count · chevron). Same drill targets, scannable order. */
@@ -2089,12 +2042,6 @@ h3 {
   gap: 6px;
   align-items: center;
 }
-.checkbox-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin: var(--space-2) 0;
-}
 .radio-row {
   display: flex;
   gap: var(--space-2);
@@ -2154,54 +2101,6 @@ h3 {
   width: min(880px, 92vw);
 }
 
-/* Command palette (Cmd/Ctrl-K). Reuses .modal-backdrop for the scrim but
-   anchors the box near the top like VS Code / Linear. */
-.cmd-palette__backdrop {
-  align-items: flex-start;
-}
-.cmd-palette {
-  margin-top: 12vh;
-  width: min(560px, 92vw);
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-16);
-  overflow: hidden;
-  animation: ui-pop-in var(--motion-base) var(--ease-decel);
-}
-.cmd-palette__input {
-  width: 100%;
-  box-sizing: border-box;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--text);
-  font-size: var(--text-md);
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-.cmd-palette__list {
-  list-style: none;
-  margin: 0;
-  padding: var(--space-1);
-  max-height: 46vh;
-  overflow: auto;
-}
-.cmd-palette__item {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: var(--text-base);
-}
-.cmd-palette__item--active {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.cmd-palette__empty {
-  padding: var(--space-3);
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
 @keyframes ui-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2389,13 +2288,6 @@ h3 {
 }
 .muted {
   color: var(--text-muted);
-}
-
-.centered-pad {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-6);
 }
 
 /* ---------- Type chip (identity / permission kind) ---------- */
@@ -3144,6 +3036,7 @@ h3 {
   padding: 1px 5px;
   color: var(--text-muted);
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 
@@ -3460,7 +3353,6 @@ h3 {
     max-height: 92vh;
   }
   /* Multi-column editor rows collapse to a single stacked column. */
-  .sso-claims__row,
   .claims-editor__basic-ref-grid {
     grid-template-columns: 1fr;
   }
@@ -3634,12 +3526,6 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-2);
-}
-.sso-claims__row {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  align-items: center;
-  gap: var(--space-2);
 }
 
 /* Full attributes & claims editor (ClaimsEditor component). */
@@ -4234,11 +4120,6 @@ h3 {
 .dr-view__secret-name {
   color: var(--text-muted);
 }
-.dr-view__secret-value {
-  font-family: var(--font-mono, monospace);
-  user-select: all;
-  word-break: break-all;
-}
 .dr-view__report-note {
   margin: var(--space-2) 0 0;
   color: var(--text-muted);
@@ -4302,17 +4183,6 @@ h3 {
 }
 .shortcuts__keys {
   margin: 0;
-}
-.shortcuts__keys kbd {
-  display: inline-block;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-alt);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
-  white-space: nowrap;
 }
 .shortcuts__what {
   margin: 0;

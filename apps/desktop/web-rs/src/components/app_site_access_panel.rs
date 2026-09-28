@@ -24,6 +24,7 @@ use crate::bindings::sharepoint::{self, AppSiteAccessDto, SiteSweepProgress};
 use crate::components::ui::{Callout, DataTable};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::plural;
 
 #[component]
 pub fn AppSiteAccessPanel(
@@ -308,10 +309,10 @@ fn coverage_summary(access: &AppSiteAccessDto) -> String {
     let n = access.sites.len();
     let mut out = format!(
         "{n} site{} — from {} of {} scanned site{}",
-        if n == 1 { "" } else { "s" },
+        plural(n),
         access.sites_scanned,
         access.total_sites,
-        if access.total_sites == 1 { "" } else { "s" },
+        plural(access.total_sites),
     );
     if access.sites_failed > 0 {
         out.push_str(&format!(

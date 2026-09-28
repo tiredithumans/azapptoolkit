@@ -13,7 +13,7 @@ use crate::bindings::consent::{self, OAuth2GrantDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::contains_ignore_case;
+use crate::util::{contains_ignore_case, count_noun};
 
 #[component]
 pub fn ConsentGrantsView() -> impl IntoView {
@@ -33,7 +33,7 @@ pub fn ConsentGrantsView() -> impl IntoView {
             search_placeholder="Filter by client name…"
             refresh_label="Refresh consent grants"
             view_key="consent"
-            noun="grant(s)"
+            noun="grants"
             empty_message="No grants match this filter."
             facets=vec![("all", "All"), ("risky", "High-risk"), ("admin", "Admin consent")]
             headers=vec!["Client", "Resource", "Consent", "Scopes", ""]
@@ -50,7 +50,8 @@ pub fn ConsentGrantsView() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{risky} grant(s) include high-risk scopes ({admin_risky} admin-consented for all users).",
+                                    "{} high-risk scopes ({admin_risky} admin-consented for all users).",
+                                    count_noun(risky, "grant includes", "grants include"),
                                 )}
                             </Callout>
                         }

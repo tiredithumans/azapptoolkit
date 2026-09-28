@@ -11,6 +11,7 @@ use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::{DataTable, FormError};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
+use crate::util::count_noun;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 fn owner_kind(o: &DirectoryObject) -> &'static str {
@@ -138,12 +139,15 @@ pub fn OwnersTab(
             }
             if !failures.is_empty() {
                 error.set(Some(format!(
-                    "{} default owner(s) failed — {}",
-                    failures.len(),
+                    "{} failed — {}",
+                    count_noun(failures.len(), "default owner", "default owners"),
                     failures.join("; ")
                 )));
             } else if added > 0 {
-                session.toast_success(format!("Added {added} default owner(s)."));
+                session.toast_success(format!(
+                    "Added {}.",
+                    count_noun(added, "default owner", "default owners")
+                ));
             } else {
                 session.toast_success("Default owners are already present.");
             }
@@ -265,8 +269,8 @@ pub fn OwnersTab(
                             .collect::<Vec<_>>()
                             .join("; ");
                         error.set(Some(format!(
-                            "{} owner change(s) failed — {details}",
-                            res.failures.len()
+                            "{} failed — {details}",
+                            count_noun(res.failures.len(), "owner change", "owner changes")
                         )));
                     } else {
                         session.toast_success("Owners updated.");

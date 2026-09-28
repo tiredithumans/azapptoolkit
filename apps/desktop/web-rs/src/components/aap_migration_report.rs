@@ -13,6 +13,7 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::ui::{Callout, CopyableId};
+use crate::util::count_noun;
 
 /// Stops an in-flight migration: it stops before the next application; an
 /// application already mid-migration finishes, because its steps are ordered
@@ -59,13 +60,16 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
     let needs_attention = !report.dry_run && report.items.iter().any(|i| i.status != "migrated");
     let header = match (report.dry_run, needs_attention) {
         (true, _) => format!(
-            "Plan: {} app(s) would be migrated. Nothing has changed yet.",
-            report.items.len()
+            "Plan: {} would be migrated. Nothing has changed yet.",
+            count_noun(report.items.len(), "app", "apps")
         ),
-        (false, false) => format!("Migrated {} app(s).", report.items.len()),
+        (false, false) => format!(
+            "Migrated {}.",
+            count_noun(report.items.len(), "app", "apps")
+        ),
         (false, true) => format!(
-            "Migrated {} app(s), but some need attention — see the notes below.",
-            report.items.len(),
+            "Migrated {}, but some need attention — see the notes below.",
+            count_noun(report.items.len(), "app", "apps"),
         ),
     };
     // A run stopped by Cancel or a dead session has left the remaining apps on
@@ -96,7 +100,10 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
         <Show when=move || { unattempted_count > 0 }>
             <details class="aap-unattempted">
                 <summary>
-                    {format!("{unattempted_count} app(s) not reached — still on legacy policies")}
+                    {format!(
+                        "{} not reached — still on legacy policies",
+                        count_noun(unattempted_count, "app", "apps"),
+                    )}
                 </summary>
                 <ul class="warnings">
                     {unattempted

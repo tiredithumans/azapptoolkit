@@ -24,7 +24,7 @@ pub fn ShortcutsHelp(open: RwSignal<bool>) -> impl IntoView {
                         view! {
                             <div class="shortcuts__row">
                                 <dt class="shortcuts__keys">
-                                    <kbd>{*keys}</kbd>
+                                    <kbd class="ui-kbd">{*keys}</kbd>
                                 </dt>
                                 <dd class="shortcuts__what">{*what}</dd>
                             </div>

@@ -48,6 +48,9 @@
 
 ### Fixed
 
+- **The keyboard shortcuts sheet draws each key as a filled key cap.** The key style pointed at a
+  colour that was never defined, so in both themes every key showed as an empty outline. The
+  Filters button on the lists also gets a hover highlight, which it was missing for the same reason.
 - **Actions that fail on a throttled or briefly unavailable service now offer Retry.** Saving an
   enterprise app's settings, SSO configuration or signing certificates showed a red notification
   that vanished after ten seconds, so the only way back was to find the control and click it again.
@@ -811,6 +814,10 @@
 
 ### Changed
 
+- **Counts in toasts, confirmations, bulk-action summaries and the disaster-recovery plan read "1
+  app" and "3 apps" instead of "app(s)".** These are the lines you paste into a change ticket.
+  Where a verb follows the count it now agrees too, e.g. "1 app was never attempted", "2 enterprise
+  apps need manual follow-up".
 - **Settings, the permission picker, the Cache dialog and the managed scope group panel show
   placeholder rows while they load,** like the other pages, instead of a spinner or a bare
   "Loading…".

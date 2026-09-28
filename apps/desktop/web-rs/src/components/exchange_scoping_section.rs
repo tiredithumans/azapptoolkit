@@ -28,7 +28,7 @@ use crate::components::scope_wizard::ScopeTarget;
 use crate::components::ui::{Callout, DataTable, FormError};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
-use crate::util::{no_tenant, parse_lines};
+use crate::util::{count_noun, no_tenant, parse_lines};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 // The principal this section addresses is a `ScopeTarget` — the SAME model the
@@ -208,11 +208,15 @@ pub fn ExchangeScopingSection(
             move |r: exchange::ExchangeAccessResult| {
                 if r.warnings.is_empty() {
                     session.toast_success(format!(
-                        "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s).",
+                        "Scope “{}”: assigned {}, skipped {}, removed {}.",
                         r.scope_name,
-                        r.roles_assigned.len(),
+                        count_noun(r.roles_assigned.len(), "role", "roles"),
                         r.roles_skipped.len(),
-                        r.removed_entra_grants.len(),
+                        count_noun(
+                            r.removed_entra_grants.len(),
+                            "org-wide grant",
+                            "org-wide grants"
+                        ),
                     ));
                     on_changed.run(());
                 } else {
@@ -328,8 +332,9 @@ pub fn ExchangeScopingSection(
                     // One item per app; an app can fold several policies.
                     let policies: usize = r.items.iter().map(|i| i.removed_policies.len()).sum();
                     session.toast_success(format!(
-                        "Migrated {} app(s); removed {policies} legacy policy(ies).",
-                        r.items.len()
+                        "Migrated {}; removed {}.",
+                        count_noun(r.items.len(), "app", "apps"),
+                        count_noun(policies, "legacy policy", "legacy policies"),
                     ));
                     on_changed.run(());
                 }
@@ -401,11 +406,11 @@ pub fn ExchangeScopingSection(
                     .get()
                     .map(|r| {
                         let summary = format!(
-                            "Scope “{}”: assigned {} role(s), skipped {}, removed {} org-wide grant(s). Some of what you asked for may not have been applied — read the notes below.",
+                            "Scope “{}”: assigned {}, skipped {}, removed {}. Some of what you asked for may not have been applied — read the notes below.",
                             r.scope_name,
-                            r.roles_assigned.len(),
+                            count_noun(r.roles_assigned.len(), "role", "roles"),
                             r.roles_skipped.len(),
-                            r.removed_entra_grants.len(),
+                            count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
                         );
                         let filter = r.scope_filter.clone();
                         let warnings = r.warnings.clone();
@@ -509,18 +514,18 @@ pub fn ExchangeScopingSection(
                                         let headline = match (r.dry_run, r.repointed) {
                                             (true, _) => {
                                                 format!(
-                                                    "Plan: copy {} mailbox(es) into “{}”, then point scope “{}” at it. Nothing has changed yet.",
-                                                    r.members_copied.len(),
+                                                    "Plan: copy {} into “{}”, then point scope “{}” at it. Nothing has changed yet.",
+                                                    count_noun(r.members_copied.len(), "mailbox", "mailboxes"),
                                                     r.group_name,
                                                     r.scope_name,
                                                 )
                                             }
                                             (false, true) => {
                                                 format!(
-                                                    "Scope “{}” now points at “{}” ({} mailbox(es)).",
+                                                    "Scope “{}” now points at “{}” ({}).",
                                                     r.scope_name,
                                                     r.group_name,
-                                                    r.members_copied.len(),
+                                                    count_noun(r.members_copied.len(), "mailbox", "mailboxes"),
                                                 )
                                             }
                                             (false, false) => {
@@ -630,11 +635,12 @@ pub fn ExchangeScopingSection(
                                         .run(
                                             move |res: exchange::ExchangeAccessRemovalResult| {
                                                 confirm_remove.set(false);
-                                                let n = res.removed_assignments.len();
-                                                session
-                                                    .toast_success(
-                                                        format!("Removed {n} Exchange role assignment(s)"),
-                                                    );
+                                                let removed = count_noun(
+                                                    res.removed_assignments.len(),
+                                                    "Exchange role assignment",
+                                                    "Exchange role assignments",
+                                                );
+                                                session.toast_success(format!("Removed {removed}"));
                                                 reload.update(|v| *v += 1);
                                                 on_changed.run(());
                                             },

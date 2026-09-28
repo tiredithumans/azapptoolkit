@@ -1,6 +1,7 @@
 use super::*;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::Callout;
+use crate::util::count_noun;
 
 /// Owners tab — lists current owners and lets you add/remove them. Only **users**
 /// can own a service principal (Graph rejects groups), so the search targets
@@ -132,14 +133,17 @@ pub(super) fn OwnersContent(
             }
             if !failures.is_empty() {
                 error.set(Some(format!(
-                    "{} default owner(s) failed — {}",
-                    failures.len(),
+                    "{} failed — {}",
+                    count_noun(failures.len(), "default owner", "default owners"),
                     failures.join("; ")
                 )));
                 adding_defaults.set(false);
             } else {
                 session.toast_success(if added > 0 {
-                    format!("Added {added} default owner(s).")
+                    format!(
+                        "Added {}.",
+                        count_noun(added, "default owner", "default owners")
+                    )
                 } else {
                     "Default owners are already present.".to_string()
                 });

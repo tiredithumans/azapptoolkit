@@ -26,6 +26,7 @@ use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
 use crate::util::EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS;
+use crate::util::count_noun;
 
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {
@@ -115,7 +116,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh SSO certificate expiry"
             view_key="sso-certificates"
-            noun="SAML app(s)"
+            noun="SAML apps"
             empty_message="No SAML applications match this filter."
             reload=reload
             facets=vec![
@@ -157,7 +158,8 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{expired} signing certificate(s) already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                    "{} already expired; {unprepared} expire within {WARNING_DAYS} days with no replacement staged.",
+                                    count_noun(expired, "signing certificate", "signing certificates"),
                                 )}
                             </Callout>
                         }

@@ -10,6 +10,7 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::remediation;
 use crate::bindings::remediation::RedundantPermissionsOutcome;
 use crate::state::use_session;
+use crate::util::plural;
 use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::migrate_legacy_scope::MigrateLegacyScopeButton;
@@ -357,10 +358,7 @@ fn DisableSignInAction(
 /// re-run that found nothing left to do.
 fn redundant_outcome_report(o: &RedundantPermissionsOutcome) -> (String, bool) {
     let n = o.removed.len();
-    let mut msg = format!(
-        "Removed {n} redundant permission{}",
-        if n == 1 { "" } else { "s" }
-    );
+    let mut msg = format!("Removed {n} redundant permission{}", plural(n));
     if !o.skipped.is_empty() {
         msg.push_str(&format!(
             "; kept {} — its covering permission isn't confirmed org-wide (revoked, scoped \
@@ -493,7 +491,7 @@ fn ExpiredCredsAction(
                     session.toast_success(
                         format!(
                             "Removed {n} expired credential{} — re-run the audit to refresh scores.",
-                            if n == 1 { "" } else { "s" }
+                            plural(n)
                         )
                         .as_str(),
                     );

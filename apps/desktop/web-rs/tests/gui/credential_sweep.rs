@@ -90,7 +90,7 @@ async fn a_completed_sweep_confirms_itself_outside_the_reloaded_subtree() {
     // the tab, which the reload replaces.
     ts::wait_for(|| ts::query(".toast").is_some()).await;
     assert!(
-        ts::text(".toast").contains("Removed 2 expired secret(s)"),
+        ts::text(".toast").contains("Removed 2 expired secrets"),
         "the sweep must report what it removed, got {:?}",
         ts::text(".toast"),
     );
@@ -126,7 +126,7 @@ async fn a_partial_sweep_says_that_some_secrets_survived() {
     ts::wait_for(|| ts::query(".toast").is_some()).await;
     let toast = ts::text(".toast");
     assert!(
-        toast.contains("Removed 1 expired secret(s)") && toast.contains("1 could not be removed"),
+        toast.contains("Removed 1 expired secret;") && toast.contains("1 could not be removed"),
         "a partial sweep must name the part that failed, got {toast:?}"
     );
     // Error-toned, so it lingers longer than a routine success.

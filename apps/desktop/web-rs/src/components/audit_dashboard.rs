@@ -39,7 +39,7 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     refresh_label: String,
     /// Namespaces saved views in `localStorage` (e.g. `"credentials"`).
     view_key: &'static str,
-    /// Plural-aware noun for the count line, e.g. `"credential(s)"`.
+    /// Plural noun for the empty state and the count line, e.g. `"credentials"`.
     #[prop(into)]
     noun: String,
     /// Shown when the filter matches nothing.

@@ -34,7 +34,7 @@ use crate::constants::RENDER_PAGE;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 
 /// One failed item from a bulk run, surfaced below the aggregate summary so the
 /// user can see *which* app failed and *why*. Public so the Bulk Actions page's
@@ -169,9 +169,8 @@ impl Parsed {
 fn unattempted_note(attempted: usize, reached: Option<usize>) -> String {
     match reached.map_or(0, |r| attempted.saturating_sub(r)) {
         0 => String::new(),
-        n => {
-            format!(" — {n} app(s) were never attempted and are still selected; re-run to finish.")
-        }
+        1 => " — 1 app was never attempted and is still selected; re-run to finish.".to_string(),
+        n => format!(" — {n} apps were never attempted and are still selected; re-run to finish."),
     }
 }
 
@@ -674,7 +673,7 @@ pub fn BulkActionBar(
                             view! {
                                 <div class="bulk-failures">
                                     <Body1 class="bulk-failures__title">
-                                        {format!("{} item(s) failed:", fs.len())}
+                                        {format!("{} failed:", count_noun(fs.len(), "item", "items"))}
                                     </Body1>
                                     <ul class="bulk-failures__list">
                                         {fs
@@ -793,7 +792,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
             labels.truncate(RENDER_PAGE);
             view! {
                 <details class="bulk-selection" open=danger>
-                    <summary>{format!("{total} app(s) selected")}</summary>
+                    <summary>{format!("{} selected", count_noun(total, "app", "apps"))}</summary>
                     <ul class="bulk-selection__list">
                         {labels.into_iter().map(|l| view! { <li>{l}</li> }).collect_view()}
                         {(overflow > 0)
@@ -809,47 +808,47 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
     let description: AnyView = match action {
         BulkAction::RemoveExpired => view! {
             <Body1 class="bulk-action__danger">
-                {move || format!("Remove every expired password credential from the {} selected app(s). This is irreversible.", n())}
+                {move || format!("Remove every expired password credential from the {}. This is irreversible.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::Delete => view! {
             <Body1 class="bulk-action__danger">
-                {move || format!("Permanently delete the {} selected app registration(s). This cannot be undone.", n())}
+                {move || format!("Permanently delete the {}. This cannot be undone.", count_noun(n(), "selected app registration", "selected app registrations"))}
             </Body1>
         }.into_any(),
         BulkAction::RemoveRedundant => view! {
             <Body1>
-                {move || format!("Remove redundant application permissions (narrower ones already covered by a broader grant) from the {} selected app(s). Re-resolved live per app; load-bearing grants are kept.", n())}
+                {move || format!("Remove redundant application permissions (narrower ones already covered by a broader grant) from the {}. Re-resolved live per app; load-bearing grants are kept.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::ScopeMailbox => view! {
             <Body1>
-                {move || format!("Confine the {} selected app(s)' mailbox permissions to the groups below via Exchange RBAC (every mail permission each app holds is scoped). Needs Exchange admin rights.", n())}
+                {move || format!("Confine the mailbox permissions of the {} to the groups below via Exchange RBAC (every mail permission each app holds is scoped). Needs Exchange admin rights.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::ScopeSharePoint => view! {
             <Body1>
-                {move || format!("Convert the {} selected app(s)' org-wide SharePoint access to Sites.Selected on the sites below.", n())}
+                {move || format!("Convert the org-wide SharePoint access of the {} to Sites.Selected on the sites below.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::StageSsoCertificate => view! {
             <Body1>
-                {move || format!("Generate a new SAML signing certificate on the {} selected app(s) and leave it INACTIVE. Nothing changes for users: each app keeps signing with its current certificate until you activate the new one from its SSO tab. Apps that already have a replacement staged are skipped.", n())}
+                {move || format!("Generate a new SAML signing certificate on the {} and leave it INACTIVE. Nothing changes for users: each app keeps signing with its current certificate until you activate the new one from its SSO tab. Apps that already have a replacement staged are skipped.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::AddOwner => view! {
             <Body1>
-                {move || format!("Add one user as an owner of the {} selected app(s). Purely additive — apps that already have this owner are skipped.", n())}
+                {move || format!("Add one user as an owner of the {}. Purely additive — apps that already have this owner are skipped.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::DisableSignIn => view! {
             <Body1>
-                {move || format!("Disable sign-in for the {} selected app(s) by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.", n())}
+                {move || format!("Disable sign-in for the {} by disabling their service principals. Reversible — re-enable anytime from the enterprise app's Overview.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
         BulkAction::Grant => view! {
             <Body1 class="bulk-action__danger">
-                {move || format!("Grant admin consent to the {} selected app(s) — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.", n())}
+                {move || format!("Grant admin consent to the {} — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.", count_noun(n(), "selected app", "selected apps"))}
             </Body1>
         }.into_any(),
     };
@@ -1008,7 +1007,8 @@ fn parse_grant(r: bulk::BulkGrantResult, label_for: impl Fn(&str) -> String) -> 
     let reached = r.outcomes.len();
     Parsed::new(
         format!(
-            "Granted consent to {reached} app(s); {} with errors{}.",
+            "Granted consent to {}; {} with errors{}.",
+            count_noun(reached, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1034,8 +1034,8 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
                 // Synthesized from counts, so there is no wire code to carry.
                 (None, false) => (
                     Some(format!(
-                        "{} credential(s) could not be removed",
-                        s.failed_key_ids.len()
+                        "{} could not be removed",
+                        count_noun(s.failed_key_ids.len(), "credential", "credentials")
                     )),
                     None,
                 ),
@@ -1056,8 +1056,8 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
         .count();
     Parsed {
         summary: format!(
-            "Scanned {} app(s); {} had expired creds removed{}.",
-            r.apps_scanned,
+            "Scanned {}; {} had expired creds removed{}.",
+            count_noun(r.apps_scanned, "app", "apps"),
             removed,
             cancelled_suffix(r.cancelled)
         ),
@@ -1077,7 +1077,13 @@ fn parse_redundant(
     let reached = r.outcomes.len();
     Parsed::new(
         format!(
-            "Removed {removed_total} redundant permission(s) across {apps_changed} app(s); {} failed{}.",
+            "Removed {} across {}; {} failed{}.",
+            count_noun(
+                removed_total,
+                "redundant permission",
+                "redundant permissions"
+            ),
+            count_noun(apps_changed, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1092,7 +1098,8 @@ fn parse_scope(noun: &str, r: bulk::BulkScopeResult, label_for: impl Fn(&str) ->
     let scoped = reached - fails.len();
     Parsed::new(
         format!(
-            "Scoped {noun} access on {scoped} app(s); {} failed{}.",
+            "Scoped {noun} access on {}; {} failed{}.",
+            count_noun(scoped, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1108,7 +1115,8 @@ fn parse_add_owner(r: bulk::BulkAddOwnerResult, label_for: impl Fn(&str) -> Stri
     let reached = r.outcomes.len();
     Parsed::new(
         format!(
-            "Added the owner to {added} app(s); {skipped} already had them; {} failed{}.",
+            "Added the owner to {}; {skipped} already had them; {} failed{}.",
+            count_noun(added, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1123,7 +1131,8 @@ fn parse_disable(r: bulk::BulkDisableSignInResult, label_for: impl Fn(&str) -> S
     let disabled = reached - fails.len();
     Parsed::new(
         format!(
-            "Disabled sign-in for {disabled} app(s); {} failed{}. Re-enable anytime from the enterprise app's Overview.",
+            "Disabled sign-in for {}; {} failed{}. Re-enable anytime from the enterprise app's Overview.",
+            count_noun(disabled, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1149,9 +1158,10 @@ fn parse_stage_certs(r: bulk::BulkStageCertResult, label_for: impl Fn(&str) -> S
     let reached = r.outcomes.len();
     Parsed::new(
         format!(
-            "Staged a new signing certificate on {staged} app(s){skipped_note}; {} failed{}. \
+            "Staged a new signing certificate on {}{skipped_note}; {} failed{}. \
              Nothing has changed for users yet — activate each app from its SSO tab once the \
              application has picked the new certificate up.",
+            count_noun(staged, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1184,8 +1194,8 @@ fn parse_delete(r: bulk::BulkDeleteResult, label_for: impl Fn(&str) -> String) -
     let reached = r.deleted.len() + fails.len();
     Parsed {
         summary: format!(
-            "Deleted {} app(s); {} failed{}.",
-            r.deleted.len(),
+            "Deleted {}; {} failed{}.",
+            count_noun(r.deleted.len(), "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
@@ -1367,7 +1377,7 @@ mod tests {
         // stay re-selectable. The two fields answer different questions.
         let fails = vec![BulkFailure {
             label: "app".into(),
-            reason: "3 credential(s) could not be removed".into(),
+            reason: "3 credentials could not be removed".into(),
             object_id: Some("obj-app".into()),
             code: None,
         }];
@@ -1404,7 +1414,7 @@ mod tests {
         let summary = &p.summary;
         assert_eq!(p.failures.len(), 1);
         assert!(
-            summary.contains("2 app(s)"),
+            summary.contains("on 2 apps;"),
             "scoped count must exclude failures: {summary}"
         );
         assert!(summary.contains("1 failed"), "{summary}");
@@ -1452,7 +1462,7 @@ mod tests {
         );
         let summary = &p.summary;
         assert_eq!(p.failures.len(), 1);
-        assert!(summary.contains("to 1 app(s)"), "{summary}");
+        assert!(summary.contains("to 1 app;"), "{summary}");
         assert!(summary.contains("1 already had them"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
     }
@@ -1477,11 +1487,20 @@ mod tests {
             upper,
         );
         let note = unattempted_note(40, p.reached);
-        assert!(note.contains("28 app(s) were never attempted"), "{note}");
+        assert!(note.contains("28 apps were never attempted"), "{note}");
         assert!(
             note.contains("still selected"),
             "the tail survives the run, so say so — it is what makes 're-run to \
              finish' actionable: {note}"
+        );
+    }
+
+    #[test]
+    fn a_single_unattempted_app_reads_in_the_singular() {
+        let note = unattempted_note(2, Some(1));
+        assert!(
+            note.contains("1 app was never attempted and is still selected"),
+            "{note}"
         );
     }
 
@@ -1536,7 +1555,7 @@ mod tests {
             "deleted + failed is exactly what the fan-out dispatched"
         );
         let note = unattempted_note(10, p.reached);
-        assert!(note.contains("7 app(s) were never attempted"), "{note}");
+        assert!(note.contains("7 apps were never attempted"), "{note}");
         assert_eq!(
             p.failures[0].object_id.as_deref(),
             Some("c"),

@@ -25,6 +25,7 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::plural;
 
 /// Lowercased haystack of a row's vault + principal + role facets, newline-joined
 /// so one search box serves both lookup directions. Built once per sweep result.
@@ -131,12 +132,12 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     format!(
                         "{} role assignment{} across {} vault{} — scanned {} of {} vault{}{}{}",
                         rows.len(),
-                        if rows.len() == 1 { "" } else { "s" },
+                        plural(rows.len()),
                         distinct_vaults,
-                        if distinct_vaults == 1 { "" } else { "s" },
+                        plural(distinct_vaults),
                         r.vaults_scanned,
                         r.total_vaults,
-                        if r.total_vaults == 1 { "" } else { "s" },
+                        plural(r.total_vaults),
                         if r.vaults_failed > 0 {
                             format!(" ({} failed — coverage is partial)", r.vaults_failed)
                         } else {

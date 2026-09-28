@@ -50,7 +50,7 @@ use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
-use crate::util::parse_lines;
+use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::scoping::{
     ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
 };
@@ -94,7 +94,7 @@ fn mode_options(kind: ScopeKind) -> &'static [(ScopeMode, &'static str)] {
     match kind {
         ScopeKind::Exchange => &[
             (ScopeMode::Managed, "Specific mailboxes"),
-            (ScopeMode::Existing, "Existing group(s)"),
+            (ScopeMode::Existing, "Existing groups"),
         ],
         ScopeKind::SharePoint => &[(ScopeMode::Sites, "Specific sites")],
         ScopeKind::SharePointItem => &[(ScopeMode::Items, "Specific libraries, folders & files")],
@@ -144,34 +144,51 @@ fn consent_scope(mode: ScopeMode) -> &'static str {
 
 fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
     let mut s = format!(
-        "Scoped “{}”: assigned {} role(s), removed {} org-wide grant(s).",
+        "Scoped “{}”: assigned {}, removed {}.",
         r.scope_name,
-        r.roles_assigned.len(),
-        r.removed_entra_grants.len(),
+        count_noun(r.roles_assigned.len(), "role", "roles"),
+        count_noun(
+            r.removed_entra_grants.len(),
+            "org-wide grant",
+            "org-wide grants"
+        ),
     );
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
 
 fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
     let mut s = format!(
-        "Scoped to {} site(s), removed {} org-wide grant(s).",
-        r.sites_granted.len(),
-        r.removed_orgwide_grants.len(),
+        "Scoped to {}, removed {}.",
+        count_noun(r.sites_granted.len(), "site", "sites"),
+        count_noun(
+            r.removed_orgwide_grants.len(),
+            "org-wide grant",
+            "org-wide grants"
+        ),
     );
     if r.declared_permission {
         s.push_str(" Added Sites.Selected to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
 
 fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
-    let mut s = format!("Scoped to {} resource(s).", r.granted.len());
+    let mut s = format!(
+        "Scoped to {}.",
+        count_noun(r.granted.len(), "resource", "resources")
+    );
     if r.granted_role_added {
         s.push_str(" Granted the Selected permission.");
     }
@@ -179,7 +196,10 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
         s.push_str(" Added it to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(" {} warning(s).", r.warnings.len()));
+        s.push_str(&format!(
+            " {}.",
+            count_noun(r.warnings.len(), "warning", "warnings")
+        ));
     }
     s
 }
@@ -322,11 +342,14 @@ async fn apply_orgwide(
                 Err(e) => return Err(e),
             }
         }
-        let mut s = format!("Granted {} permission(s) org-wide.", items.len());
+        let mut s = format!(
+            "Granted {} org-wide.",
+            count_noun(items.len(), "permission", "permissions")
+        );
         if !failures.is_empty() {
             s.push_str(&format!(
-                " {} issue(s): {}",
-                failures.len(),
+                " {}: {}",
+                count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
             ));
         }
@@ -355,15 +378,18 @@ async fn apply_orgwide(
             skipped += r.skipped.len();
             failures.extend(r.failures);
         }
-        let mut s = format!("Granted {granted} permission(s) org-wide");
+        let mut s = format!(
+            "Granted {} org-wide",
+            count_noun(granted, "permission", "permissions")
+        );
         if skipped > 0 {
             s.push_str(&format!(", {skipped} already present"));
         }
         s.push('.');
         if !failures.is_empty() {
             s.push_str(&format!(
-                " {} issue(s): {}",
-                failures.len(),
+                " {}: {}",
+                count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
             ));
         }
@@ -731,7 +757,7 @@ pub fn ScopeWizard(
 
     // What the resolved targets ARE, for the definition-list label.
     let targets_label = move || match active_mode.get() {
-        ScopeMode::Managed | ScopeMode::Existing => "Mailbox group(s)",
+        ScopeMode::Managed | ScopeMode::Existing => "Mailbox groups",
         ScopeMode::Sites => "Sites",
         ScopeMode::Items => "Libraries, folders & files",
         ScopeMode::OrgWide => "Reach",
@@ -784,13 +810,13 @@ pub fn ScopeWizard(
                 "Grant {perms} org-wide. The app will reach EVERY resource in the tenant — use only when the permission genuinely needs tenant-wide reach.",
             ),
             ScopeMode::Managed | ScopeMode::Existing => format!(
-                "Grant {perms}, scoped to the chosen mailbox group(s). The app will not have org-wide mailbox access.",
+                "Grant {perms}, scoped to the chosen mailbox groups. The app will not have org-wide mailbox access.",
             ),
             ScopeMode::Sites => format!(
-                "Grant {perms}, scoped to the chosen site(s) via Sites.Selected. The app will not have org-wide site access.",
+                "Grant {perms}, scoped to the chosen sites via Sites.Selected. The app will not have org-wide site access.",
             ),
             ScopeMode::Items => format!(
-                "Grant {perms}, scoped to the chosen library/folder/file(s). The app reaches nothing else, and permission inheritance is broken on each target.",
+                "Grant {perms}, scoped to the chosen libraries, folders or files. The app reaches nothing else, and permission inheritance is broken on each target.",
             ),
         }
     };

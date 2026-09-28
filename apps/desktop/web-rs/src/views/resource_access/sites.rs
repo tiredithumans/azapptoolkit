@@ -18,6 +18,7 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
+use crate::util::plural;
 
 /// Lowercased haystack of a row's site + app facets, newline-joined so one
 /// search box serves both lookup directions without cross-field false matches.
@@ -115,9 +116,9 @@ pub(super) fn SitesPanel() -> impl IntoView {
                     format!(
                         "{} app grant{} across {} site{} — scanned {} of {} sites{}{}{}",
                         rows.len(),
-                        if rows.len() == 1 { "" } else { "s" },
+                        plural(rows.len()),
                         distinct_sites,
-                        if distinct_sites == 1 { "" } else { "s" },
+                        plural(distinct_sites),
                         r.sites_scanned,
                         r.total_sites,
                         if r.sites_failed > 0 {

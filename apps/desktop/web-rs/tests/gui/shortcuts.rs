@@ -49,6 +49,13 @@ async fn question_mark_toggles_the_shortcut_sheet() {
         !ts::query_all(".shortcuts__row").is_empty(),
         "the sheet documents at least one binding"
     );
+    // Each key renders as the shared `.ui-kbd` chip, not a bare `<kbd>` with
+    // an ad-hoc rule (which once pointed at an undefined colour token).
+    assert_eq!(
+        ts::query_all(".shortcuts__keys kbd.ui-kbd").len(),
+        ts::query_all(".shortcuts__row").len(),
+        "every binding's key renders as a .ui-kbd chip"
+    );
 }
 
 #[wasm_bindgen_test]
