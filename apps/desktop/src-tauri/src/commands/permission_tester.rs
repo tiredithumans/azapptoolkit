@@ -34,9 +34,10 @@ use azapptoolkit_core::models::{
     AppRoleAssignment, ResolvedSharePointResource, SelectedPermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED,
-    SP_SITES_SELECTED, SelectedScopeLevel, is_scopable_exchange_resource_permission,
-    is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
+    OFFICE365_SHAREPOINT_ONLINE_APP_ID, SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED,
+    SP_LISTS_SELECTED, SP_SITES_SELECTED, SelectedScopeLevel,
+    is_scopable_exchange_resource_permission, is_sharepoint_orgwide_permission,
+    selected_scope_accepts, selected_scope_level_for,
 };
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::models::{
@@ -50,9 +51,10 @@ use azapptoolkit_exchange::verdict::{aap_verdict_for, is_org_wide_auth_row};
 use crate::commands::exchange::exchange_client;
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_roles::{
-    ResourceRoles, graph_role_index, mailbox_resource_roles, resolve_grant,
+    ResourceRoles, mailbox_resource_roles, resolve_grant, sharepoint_resource_roles,
 };
 use crate::commands::progress::emit_progress;
+use crate::commands::sharepoint::{sharepoint_client_checked, sharepoint_item_err};
 use crate::dto::UiError;
 use crate::dto::permission_tester::{
     AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
@@ -78,25 +80,14 @@ async fn orgwide_mailbox_grant(client: &GraphClient, app_id: &str) -> Result<Vec
     let Some(sp) = client.get_service_principal_by_app_id(app_id).await? else {
         return Ok(Vec::new());
     };
-    // Across BOTH mailbox-bearing resources: reading Microsoft Graph alone missed
-    // an org-wide EWS `full_access_as_app` grant, which reaches every mailbox.
-    let resources = mailbox_resource_roles(client).await?;
-    let assignments = client.list_app_role_assignments(&sp.id).await?;
-    let mut perms: Vec<String> = assignments
-        .iter()
-        // Resource-aware: `resolve_grant` knows which of the two mailbox
-        // resources the grant sits on, and only Microsoft Graph's mail family
-        // (plus the EWS scope) can be confined by RBAC for Applications.
-        // Testing the bare value admitted Office 365 Exchange Online's retired
-        // Outlook REST `Mail.*` appRoles, which cannot be scoped at all.
-        .filter_map(|a| resolve_grant(&resources, &a.resource_id, &a.app_role_id))
-        .filter(|(resource, _, value)| {
-            is_scopable_exchange_resource_permission(Some(resource), value)
-        })
-        .map(|(_, _, value)| value.to_string())
-        .collect();
+    // Across BOTH mailbox-bearing resources, resource-aware — the shared
+    // pipeline the Exchange scoping reconciliation reads, so the two can't drift.
+    let mut perms: Vec<String> =
+        crate::commands::exchange::try_held_orgwide_mail_grants(client, &sp.id)
+            .await?
+            .into_iter()
+            .collect();
     perms.sort();
-    perms.dedup();
     Ok(perms)
 }
 
@@ -987,11 +978,16 @@ impl HeldSharePointGrants {
     }
 }
 
-/// Reads `app_id`'s granted Microsoft Graph app-roles and classifies the
-/// SharePoint ones. An app with no service principal in the tenant holds
-/// nothing (`Ok` of the empty default). `Err` when the SP lookup, the Graph role
-/// index or the assignment list can't be read — the caller must then report
-/// `unknown` rather than "no access".
+/// Reads `app_id`'s granted app-roles on BOTH SharePoint-bearing resources
+/// (Microsoft Graph and Office 365 SharePoint Online) and classifies the
+/// SharePoint ones. An org-wide `Sites.*` on SharePoint Online (REST/CSOM)
+/// reaches every site just as the Graph one does, so reading Graph alone let
+/// such an app read as `no_access`; it is labelled with its resource so the
+/// verdict names which API carries the reach. Selected scopes stay Graph-only
+/// ([`selected_scope_level_for`]). An app with no service principal in the
+/// tenant holds nothing (`Ok` of the empty default). `Err` when the SP lookup,
+/// the Graph role index or the assignment list can't be read — the caller must
+/// then report `unknown` rather than "no access".
 async fn sharepoint_grants_held(
     client: &GraphClient,
     app_id: &str,
@@ -999,19 +995,24 @@ async fn sharepoint_grants_held(
     let Some(sp) = client.get_service_principal_by_app_id(app_id).await? else {
         return Ok(HeldSharePointGrants::default());
     };
-    let (_, role_value_by_id) = graph_role_index(client).await?;
+    let resources = sharepoint_resource_roles(client).await?;
     let assignments = client.list_app_role_assignments(&sp.id).await?;
 
     let mut orgwide = Vec::new();
     let mut selected = Vec::new();
     for a in &assignments {
-        let Some(value) = role_value_by_id.get(&a.app_role_id) else {
+        let Some((resource, _, value)) = resolve_grant(&resources, &a.resource_id, &a.app_role_id)
+        else {
             continue;
         };
-        if is_sharepoint_orgwide(value) {
-            orgwide.push(value.clone());
-        } else if let Some(level) = selected_scope_level_for(Some(MICROSOFT_GRAPH_APP_ID), value) {
-            selected.push((value.clone(), level));
+        if is_sharepoint_orgwide_permission(Some(resource), value) {
+            orgwide.push(if resource == OFFICE365_SHAREPOINT_ONLINE_APP_ID {
+                format!("{value} (SharePoint Online)")
+            } else {
+                value.to_string()
+            });
+        } else if let Some(level) = selected_scope_level_for(Some(resource), value) {
+            selected.push((value.to_string(), level));
         }
     }
     orgwide.sort();
@@ -1069,7 +1070,7 @@ async fn find_entry_in_chain(
         let perms = client
             .list_list_item_permissions(&resolved.site_id, list_id, item_id)
             .await
-            .map_err(sharepoint_test_err)?;
+            .map_err(sharepoint_item_err)?;
         if let Some(roles) = roles_for_app(&perms, app_id) {
             return Ok(Some(EntryHit {
                 level: resolved.level,
@@ -1084,7 +1085,7 @@ async fn find_entry_in_chain(
         let perms = client
             .list_list_permissions(&resolved.site_id, list_id)
             .await
-            .map_err(sharepoint_test_err)?;
+            .map_err(sharepoint_item_err)?;
         if let Some(roles) = roles_for_app(&perms, app_id) {
             return Ok(Some(EntryHit {
                 level: SelectedScopeLevel::List,
@@ -1101,7 +1102,7 @@ async fn find_entry_in_chain(
     let perms = client
         .list_site_permissions(&resolved.site_id)
         .await
-        .map_err(sharepoint_test_err)?;
+        .map_err(sharepoint_item_err)?;
     let mut roles: Vec<String> = perms
         .into_iter()
         .filter(|p| {
@@ -1125,20 +1126,6 @@ async fn find_entry_in_chain(
         where_label: site_label,
         roles,
     }))
-}
-
-/// A 403 from the tester's reads means the *operator* lacks rights on the site,
-/// not that the tested app does — so it carries the sub-site capability's
-/// guidance rather than a bare Graph body. Mirrors `commands::sharepoint`.
-fn sharepoint_test_err(err: azapptoolkit_graph::GraphError) -> UiError {
-    let mut ui = UiError::from(err);
-    if let Some(remediation) =
-        crate::commands::graph_err::forbidden_remediation(&ui, "sharepoint_selected_items")
-    {
-        tracing::warn!(detail = %ui.message, "permission tester: SharePoint read forbidden");
-        ui.message = remediation.to_string();
-    }
-    ui
 }
 
 /// Tests whether `app_id` can access the SharePoint resource at `site_url` — a
@@ -1166,11 +1153,7 @@ pub async fn test_site_access(
     app_id: String,
     site_url: String,
 ) -> Result<PermissionTestResult, UiError> {
-    state
-        .ensure_sharepoint_token(&tenant_id)
-        .await
-        .map_err(UiError::from)?;
-    let client = state.graph_for(&tenant_id);
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     // Read the principal's grants once — both paths below need them, and a
     // failure here must not be read as "holds nothing".
@@ -1188,7 +1171,7 @@ pub async fn test_site_access(
     let resolved = client
         .resolve_sharepoint_resource(&site_url)
         .await
-        .map_err(sharepoint_test_err)?;
+        .map_err(sharepoint_item_err)?;
     let label = resolved.display_path.clone();
 
     // Path 1 (org-wide) needs no entry at all, so the chain walk is skipped.
@@ -1389,6 +1372,7 @@ mod tests {
     use crate::commands::export::csv_columns;
     use azapptoolkit_core::cache::Cache;
     use azapptoolkit_core::models::{SiteIdentity, SiteIdentitySet};
+    use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
     use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
     use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
 
@@ -1878,6 +1862,65 @@ mod tests {
         );
         let held = sharepoint_grants_held(&client, "app-1").await.unwrap();
         assert!(held.orgwide.is_empty() && held.selected.is_empty());
+    }
+
+    // An org-wide `Sites.*` on Office 365 SharePoint Online (REST/CSOM) reaches
+    // every site as surely as the Graph one; reading Graph alone let such an app
+    // read as `no_access`. The same value on each resource is kept apart.
+    #[tokio::test]
+    async fn an_orgwide_sites_grant_on_sharepoint_online_is_held() {
+        use wiremock::matchers::{method, path, query_param};
+        let server = wiremock::MockServer::start().await;
+        let sp_by_app_id = |app_id: &str, body: serde_json::Value| {
+            wiremock::Mock::given(method("GET"))
+                .and(path("/servicePrincipals"))
+                .and(query_param("$filter", format!("appId eq '{app_id}'")))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "value": [body] })),
+                )
+        };
+        sp_by_app_id(
+            "app-1",
+            serde_json::json!({"id": "sp-app", "appId": "app-1"}),
+        )
+        .mount(&server)
+        .await;
+        sp_by_app_id(
+            MICROSOFT_GRAPH_APP_ID,
+            serde_json::json!({"id": "sp-graph", "appId": MICROSOFT_GRAPH_APP_ID,
+                "appRoles": [{"id": "r-graph-sel", "value": "Sites.Selected"}]}),
+        )
+        .mount(&server)
+        .await;
+        sp_by_app_id(
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+            serde_json::json!({"id": "sp-spo", "appId": OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+                "appRoles": [{"id": "r-spo-full", "value": "Sites.FullControl.All"}]}),
+        )
+        .mount(&server)
+        .await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/servicePrincipals/sp-app/appRoleAssignments"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"value": [
+                    {"id": "a1", "principalId": "sp-app", "resourceId": "sp-spo", "appRoleId": "r-spo-full"},
+                    {"id": "a2", "principalId": "sp-app", "resourceId": "sp-graph", "appRoleId": "r-graph-sel"}
+                ]}),
+            ))
+            .mount(&server)
+            .await;
+        let held = sharepoint_grants_held(&graph_over(&server), "app-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            held.orgwide,
+            vec!["Sites.FullControl.All (SharePoint Online)"]
+        );
+        assert_eq!(
+            held.selected,
+            vec![("Sites.Selected".to_string(), SelectedScopeLevel::Site)]
+        );
     }
 
     // ── The SharePoint verdict table ──────────────────────────────────────

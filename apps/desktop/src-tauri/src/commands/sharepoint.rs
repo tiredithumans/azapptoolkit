@@ -202,7 +202,7 @@ fn dedupe_targets(urls: &[String]) -> Vec<String> {
 /// tenant's Graph client. Mirrors `exchange_client_checked`; every SharePoint
 /// command routes its pre-acquire through here so the "consent is checked
 /// before side effects" contract lives in one place.
-async fn sharepoint_client_checked(
+pub(crate) async fn sharepoint_client_checked(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<Arc<azapptoolkit_graph::GraphClient>, UiError> {
@@ -233,7 +233,9 @@ fn sharepoint_err(err: azapptoolkit_graph::GraphError) -> UiError {
 /// the site's content — which the tenant SharePoint Administrator role doesn't
 /// reach. Sending both through one message told an operator whose site-level
 /// grants worked that they lacked a role they demonstrably held.
-fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
+/// A 403 from the permission tester's reads means the *operator* lacks rights
+/// on the resource, so it routes through here too.
+pub(crate) fn sharepoint_item_err(err: azapptoolkit_graph::GraphError) -> UiError {
     map_sharepoint_err(err, "sharepoint_selected_items")
 }
 

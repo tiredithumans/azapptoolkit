@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use tauri::State;
 
 use azapptoolkit_core::models::AppRoleAssignment;
-use azapptoolkit_core::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID;
+use azapptoolkit_core::scoping::{
+    OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+};
 use azapptoolkit_graph::GraphClient;
 
 use crate::dto::UiError;
@@ -146,18 +148,36 @@ pub(crate) use azapptoolkit_exchange::targets::{ResourceRoles, resolve_grant, re
 pub(crate) async fn mailbox_resource_roles(
     client: &GraphClient,
 ) -> Result<Vec<ResourceRoles>, UiError> {
+    graph_and_resource_roles(client, OFFICE365_EXCHANGE_ONLINE_APP_ID).await
+}
+
+/// The SharePoint-bearing resources' appRole indexes: Microsoft Graph and
+/// Office 365 SharePoint Online (SharePoint REST/CSOM). An org-wide `Sites.*`
+/// grant on either reaches every site, so a reader classifying SharePoint reach
+/// must see both. Same contract as [`mailbox_resource_roles`]: Graph is
+/// required, SharePoint Online is best-effort (a tenant with no app consenting
+/// to it has no service principal for it, which reads as nothing held there).
+pub(crate) async fn sharepoint_resource_roles(
+    client: &GraphClient,
+) -> Result<Vec<ResourceRoles>, UiError> {
+    graph_and_resource_roles(client, OFFICE365_SHAREPOINT_ONLINE_APP_ID).await
+}
+
+/// Microsoft Graph's appRole index (required) plus `extra_app_id`'s
+/// (best-effort) — the shared body of the two per-workload resource readers.
+async fn graph_and_resource_roles(
+    client: &GraphClient,
+    extra_app_id: &'static str,
+) -> Result<Vec<ResourceRoles>, UiError> {
     let (graph_sp_id, graph_roles) = graph_role_index(client).await?;
     let mut out = vec![ResourceRoles {
         app_id: MICROSOFT_GRAPH_APP_ID,
         sp_object_id: graph_sp_id,
         role_value_by_id: graph_roles,
     }];
-    if let Ok(Some(sp)) = client
-        .resolve_resource_sp(OFFICE365_EXCHANGE_ONLINE_APP_ID)
-        .await
-    {
+    if let Ok(Some(sp)) = client.resolve_resource_sp(extra_app_id).await {
         out.push(ResourceRoles {
-            app_id: OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            app_id: extra_app_id,
             sp_object_id: sp.id,
             role_value_by_id: sp
                 .app_roles

@@ -37,18 +37,28 @@ pub(super) async fn legacy_aap_scope(
 /// reaches every mailbox, but the verdict still read `Scoped`.
 ///
 /// Best-effort: any read failure yields an empty set (no reconciliation) rather
-/// than fabricating an org-wide verdict from a transient error.
+/// than fabricating an org-wide verdict from a transient error. A caller that
+/// must tell "holds none" from "unreadable" uses [`try_held_orgwide_mail_grants`].
 pub(crate) async fn held_orgwide_mail_grants(
     graph: &GraphClient,
     sp_object_id: &str,
 ) -> HashSet<String> {
-    let Ok(resources) = mailbox_resource_roles(graph).await else {
-        return HashSet::new();
-    };
-    let Ok(assignments) = graph.list_app_role_assignments(sp_object_id).await else {
-        return HashSet::new();
-    };
-    assignments
+    try_held_orgwide_mail_grants(graph, sp_object_id)
+        .await
+        .unwrap_or_default()
+}
+
+/// The fallible core of [`held_orgwide_mail_grants`]: `Err` when the mailbox
+/// role index or the SP's assignment list couldn't be read, so the permission
+/// tester can report an unreadable Entra layer as `unknown` rather than "holds
+/// none". The one home of the mailbox-grant resolution pipeline.
+pub(crate) async fn try_held_orgwide_mail_grants(
+    graph: &GraphClient,
+    sp_object_id: &str,
+) -> Result<HashSet<String>, UiError> {
+    let resources = mailbox_resource_roles(graph).await?;
+    let assignments = graph.list_app_role_assignments(sp_object_id).await?;
+    Ok(assignments
         .iter()
         // Resolve each grant against the resource it was made on, so an appRole
         // id collision across APIs can't match the wrong permission.
@@ -62,7 +72,7 @@ pub(crate) async fn held_orgwide_mail_grants(
             is_scopable_exchange_resource_permission(Some(resource), value)
         })
         .map(|(_, _, value)| value.to_string())
-        .collect()
+        .collect())
 }
 
 /// Resolves the effective Exchange mailbox scoping for each `(value, exchange_role)`

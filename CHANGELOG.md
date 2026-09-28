@@ -53,6 +53,10 @@
 
 ### Fixed
 
+- **The Permission tester sees org-wide `Sites.*` grants on Office 365 SharePoint Online.** An app
+  holding `Sites.FullControl.All` on the SharePoint REST/CSOM resource reaches every site, but the
+  site test read only Microsoft Graph's grants, so such an app could read as "No access". Both
+  resources are now read, and a SharePoint Online grant is labelled as such in the verdict.
 - **CSV exports open correctly in Excel when names are not plain ASCII.** Every CSV now starts with
   a UTF-8 byte-order mark, which Excel needs to read `Zürich Finanz` or a Japanese app name
   without garbling it (pandas strips the mark on its own; base R's `read.csv` wants
