@@ -235,7 +235,11 @@ pub fn PermissionTesterView() -> impl IntoView {
                     if e.is_consent_required() {
                         needs_consent.set(true);
                     }
-                    error.set(Some(e.message));
+                    // A dead session gets the Re-authenticate lever, not a
+                    // dead-end line; consent keeps this view's own button.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
             busy.set(false);
@@ -261,7 +265,9 @@ pub fn PermissionTesterView() -> impl IntoView {
                 }
                 Err(e) => {
                     busy.set(false);
-                    error.set(Some(e.message));
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
         });

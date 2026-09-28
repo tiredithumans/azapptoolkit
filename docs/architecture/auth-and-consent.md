@@ -244,7 +244,18 @@ which a sign-out/sign-in cycle would.
   → Conditional Access step-up (**Verify identity**) —
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
   is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
-  text as well).
+  text as well). Surfaces with their own consent / step-up button (the Permission Tester, the
+  Resource Access Sites and Key Vault sweeps) call only `report_if_session_dead` first and show
+  their inline text when it returns false; ones without (the mailbox probe, the Key Vault browser)
+  take the whole `report_recovery_action` ladder; global search points its status row at the toast.
+  A recovery toast dedupes by lever + feature (`Session::push_recovery_toast`: `reauth`,
+  `refresh-token:{text}`, `consent:{feature}`, `step-up:{feature}`), so a burst of failures raises
+  one lever, and the stack cap (`MAX_TOASTS`) drops transient toasts before any sticky one
+  (`Toast::is_sticky`: an error with an action). Only `CommandState::run_toast_err` adds **Retry**
+  (`report_command_error_with_retry`), for a failure the backend marks `retryable` (throttled,
+  5xx, network) and no recovery lever outranks; the Retry is pinned to the tenant the call ran for,
+  because toasts survive a tenant switch. Direct `report_command_error` callers hold no op to
+  re-run and keep a plain toast.
 - `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
   couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one
   401 doesn't prove the session dead, so a fan-out keeps going. The Exchange/Key Vault/ARM 401

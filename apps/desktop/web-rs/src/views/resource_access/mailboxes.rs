@@ -191,7 +191,14 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             };
             match permission_tester::find_mailbox_reachers(&t.tenant_id, &mb).await {
                 Ok(r) => result.set(Some(r)),
-                Err(e) => error.set(Some(e.message)),
+                // This panel has no consent / step-up button of its own, so it
+                // takes the shared sink's whole ladder (dead session, rejected
+                // token, Exchange consent, step-up) before the inline line.
+                Err(e) => {
+                    if !session.report_recovery_action(&e, "exchange") {
+                        error.set(Some(e.message));
+                    }
+                }
             }
             probing.set(false);
             progress.set(None);

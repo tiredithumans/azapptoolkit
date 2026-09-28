@@ -218,7 +218,11 @@ pub(super) fn SitesPanel() -> impl IntoView {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
-                    error.set(Some(e.message));
+                    // A dead session gets the Re-authenticate lever instead of a
+                    // dead-end line; consent keeps this panel's own button.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
                 }
             }
             scanning.set(false);
@@ -236,7 +240,11 @@ pub(super) fn SitesPanel() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
                 Ok(()) => do_run(),
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
+                }
             }
         });
     };

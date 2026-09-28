@@ -222,11 +222,16 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
                     step_up_required.set(e.is_interaction_required());
-                    error.set(Some(if e.is_interaction_required() {
-                        VERIFY_IDENTITY_MESSAGE.to_string()
-                    } else {
-                        e.message
-                    }));
+                    // A dead session gets the Re-authenticate lever instead of a
+                    // dead-end line; consent and step-up keep this panel's own
+                    // buttons.
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(if e.is_interaction_required() {
+                            VERIFY_IDENTITY_MESSAGE.to_string()
+                        } else {
+                            e.message
+                        }));
+                    }
                 }
             }
             scanning.set(false);
@@ -244,7 +249,11 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match auth::request_scope_consent(&t.tenant_id, "arm").await {
                 Ok(()) => do_run(),
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(e.message));
+                    }
+                }
             }
         });
     };

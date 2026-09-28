@@ -76,11 +76,11 @@ impl Session {
             return false;
         }
         let session = *self;
-        self.push_toast(
-            ToastKind::Error,
+        self.push_recovery_toast(
+            "reauth".to_string(),
             "Your session has expired — re-authenticate to continue.",
-            Some("Re-authenticate".to_string()),
-            Some(std::rc::Rc::new(move || session.spawn_reauth())),
+            "Re-authenticate",
+            std::rc::Rc::new(move || session.spawn_reauth()),
         );
         true
     }
@@ -88,10 +88,12 @@ impl Session {
     /// Run interactive incremental consent for `feature`'s scopes — the one
     /// round trip a silent grant cannot make — then tell the user the action is
     /// theirs to repeat. The sibling of [`Self::spawn_reauth`], down to the
-    /// "retry" wording: this sink only ever receives the `UiError`, never the
-    /// closure that produced it, so it cannot replay the failed operation.
-    /// Call sites that *do* hold a re-runnable operation (the per-feature
-    /// banners, the scope wizard) keep replaying it themselves.
+    /// "retry" wording: the recovery lever receives only the `UiError`, never
+    /// the closure that produced it, so it cannot replay the failed operation.
+    /// Replay is the caller's: the per-feature banners and the scope wizard
+    /// re-run their own operation, and `CommandState::run_toast_err` hands its
+    /// op to [`Self::report_command_error_with_retry`] as a Retry action (for a
+    /// transient failure only — a consent failure is not one).
     ///
     /// `feature` is a key the backend's `AppState::consent_scopes_for` accepts
     /// (`"write"`, `"exchange"`, `"sharepoint"`, `"arm"`, …).
@@ -116,7 +118,7 @@ impl Session {
     /// browser round trip (`prompt=login`) that satisfies the MFA or other
     /// interactive step the resource demands — then tell the user the action
     /// is theirs to repeat. The twin of [`Self::spawn_scope_consent`], with the
-    /// same feature keys and the same "retry" wording (this sink never holds
+    /// same feature keys and the same "retry" wording (the lever never holds
     /// the failed operation, so it cannot replay it).
     pub fn spawn_scope_step_up(&self, feature: &'static str) {
         let session = *self;
@@ -230,11 +232,13 @@ impl Session {
             str::to_string,
         );
         let session = *self;
-        self.push_toast(
-            ToastKind::Error,
+        // The text is part of the key: a Key Vault 401's curated guidance must
+        // not be swallowed by an Exchange one already showing.
+        self.push_recovery_toast(
+            format!("refresh-token:{message}"),
             message,
-            Some("Refresh token".to_string()),
-            Some(std::rc::Rc::new(move || session.spawn_refresh_token())),
+            "Refresh token",
+            std::rc::Rc::new(move || session.spawn_refresh_token()),
         );
         true
     }
@@ -265,13 +269,11 @@ impl Session {
             return false;
         }
         let session = *self;
-        self.push_toast(
-            ToastKind::Error,
+        self.push_recovery_toast(
+            format!("consent:{feature}"),
             "This tenant hasn't consented to the permissions this action needs.",
-            Some("Grant consent".to_string()),
-            Some(std::rc::Rc::new(move || {
-                session.spawn_scope_consent(feature)
-            })),
+            "Grant consent",
+            std::rc::Rc::new(move || session.spawn_scope_consent(feature)),
         );
         true
     }
@@ -305,13 +307,11 @@ impl Session {
             return false;
         }
         let session = *self;
-        self.push_toast(
-            ToastKind::Error,
+        self.push_recovery_toast(
+            format!("step-up:{feature}"),
             crate::components::verify_identity_button::VERIFY_IDENTITY_MESSAGE,
-            Some("Verify identity".to_string()),
-            Some(std::rc::Rc::new(move || {
-                session.spawn_scope_step_up(feature)
-            })),
+            "Verify identity",
+            std::rc::Rc::new(move || session.spawn_scope_step_up(feature)),
         );
         true
     }
@@ -351,8 +351,9 @@ impl Session {
     }
 
     /// Surface a failed command: the recovery toast when one applies (see
-    /// [`Self::report_recovery_action`]), else a plain `toast_error`. This is
-    /// the central error sink `use_command` routes through.
+    /// [`Self::report_recovery_action`]), else a plain `toast_error` — never a
+    /// Retry, because this sink holds no operation to re-run (see
+    /// [`Self::report_command_error_with_retry`] for the caller that does).
     ///
     /// `consent_feature` is declared by the caller because **nothing in a
     /// `consent_required` error says which scope set was missing** — a component
@@ -364,10 +365,29 @@ impl Session {
         e: &azapptoolkit_dto::UiError,
         consent_feature: &'static str,
     ) {
+        self.report_command_error_with_retry(e, consent_feature, None);
+    }
+
+    /// [`Self::report_command_error_for`] for a caller that holds the failed
+    /// operation and can re-run it (`CommandState::run_toast_err`, the central
+    /// sink `use_command` routes toast failures through): the error toast
+    /// gains `retry` as a sticky **Retry** action — but only when the backend
+    /// marks the failure transient (`UiError::retryable`, computed by
+    /// `core::http_retry::is_retryable_code`: throttled, server_error,
+    /// network_error). Re-running a permanent failure (a 403, a validation
+    /// error) would fail the same way, so it stays a plain toast. A recovery
+    /// action outranks Retry: re-running on a dead session, a rejected token or
+    /// a missing consent cannot succeed until that lever is used.
+    pub fn report_command_error_with_retry(
+        &self,
+        e: &azapptoolkit_dto::UiError,
+        consent_feature: &'static str,
+        retry: Option<ToastAction>,
+    ) {
         if self.report_recovery_action(e, consent_feature) {
             return;
         }
-        self.toast_error(e.message.clone(), None);
+        self.toast_error(e.message.clone(), retry.filter(|_| e.retryable));
     }
 }
 
@@ -502,6 +522,77 @@ mod tests {
                     !t.message.contains("AADSTS"),
                     "AAD's text names a code the operator can't act on"
                 );
+            });
+        });
+    }
+
+    fn retry_counter() -> (std::rc::Rc<std::cell::Cell<u32>>, ToastAction) {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = runs.clone();
+        (runs, std::rc::Rc::new(move || count.set(count.get() + 1)))
+    }
+
+    #[test]
+    fn a_transient_failure_with_a_rerun_offers_retry() {
+        // `retryable` is the backend's word that the same call may succeed:
+        // a caller holding the op gets a sticky Retry instead of a toast that
+        // vanishes after ten seconds.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let (runs, retry) = retry_counter();
+            session.report_command_error_with_retry(
+                &UiError::new("throttled", "Too many requests", true),
+                "write",
+                Some(retry),
+            );
+            let action = session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                assert_eq!(list[0].action_label.as_deref(), Some("Retry"));
+                assert!(list[0].is_sticky(), "a Retry toast waits for the operator");
+                list[0].action.clone().expect("a retry action")
+            });
+            action();
+            assert_eq!(runs.get(), 1);
+        });
+    }
+
+    #[test]
+    fn a_permanent_failure_never_offers_retry() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let (_, retry) = retry_counter();
+            session.report_command_error_with_retry(
+                &UiError::new("forbidden", "Insufficient privileges", false),
+                "write",
+                Some(retry),
+            );
+            session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                assert!(
+                    list[0].action_label.is_none(),
+                    "a 403 fails the same way twice"
+                );
+                assert!(list[0].action.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn a_recovery_action_outranks_retry() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let (_, retry) = retry_counter();
+            session.report_command_error_with_retry(
+                &UiError::new("refresh_missing", "gone", true),
+                "write",
+                Some(retry),
+            );
+            session.toasts.with_untracked(|list| {
+                assert_eq!(list.len(), 1);
+                assert_eq!(list[0].action_label.as_deref(), Some("Re-authenticate"));
             });
         });
     }

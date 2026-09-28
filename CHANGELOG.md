@@ -48,6 +48,17 @@
 
 ### Fixed
 
+- **Actions that fail on a throttled or briefly unavailable service now offer Retry.** Saving an
+  enterprise app's settings, SSO configuration or signing certificates showed a red notification
+  that vanished after ten seconds, so the only way back was to find the control and click it again.
+  When the service says the failure is temporary, the notification now has a Retry button and stays
+  until you use or dismiss it. It won't retry after you switch tenants.
+- **An expired session now offers Re-authenticate everywhere, once.** The Permission Tester, the
+  Resource Access sites, Key Vault and mailbox scans, the Key Vault browser and global search showed
+  the raw error with no way forward, and global search repeated it on every keystroke. Each now
+  raises the Re-authenticate notification. Repeated failures raise it once instead of stacking
+  copies, and a burst of other notifications can no longer push it, or any notification waiting for
+  you to act, off the screen.
 - **An enterprise app's Access, Permissions and App roles tabs, and a SharePoint site's permission
   list, offer Retry when they fail to load.** A throttled or dropped request left a red line — on
   the Access tab one that began with the raw code, such as `error [throttled]` — and you had to

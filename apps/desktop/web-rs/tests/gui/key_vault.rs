@@ -69,6 +69,36 @@ async fn list_error_renders_message() {
     ts::wait_for(|| ts::body_contains("Caller lacks Key Vault Secrets User")).await;
 }
 
+/// A dead session used to render its raw message inline with no way forward;
+/// it now raises the Re-authenticate notification instead (the DR view's shape:
+/// the recovery lever replaces the dead-end line).
+#[wasm_bindgen_test]
+async fn a_dead_session_list_error_offers_reauthenticate() {
+    ts::reset();
+    ts::mock_err(
+        "kv_list_secrets",
+        &fixtures::ui_error("refresh_missing", "session expired"),
+    );
+
+    let m = ts::mount_view(|| view! { <KeyVaultView /> });
+    ts::tick().await;
+
+    ts::set_input_value(VAULT_INPUT, "myvault");
+    ts::click(LIST_BTN);
+
+    ts::wait_for(|| {
+        m.session.toasts.with_untracked(|list| {
+            list.iter()
+                .any(|t| t.action_label.as_deref() == Some("Re-authenticate"))
+        })
+    })
+    .await;
+    assert!(
+        !ts::body_contains("session expired"),
+        "the lever replaces the dead-end inline text"
+    );
+}
+
 #[wasm_bindgen_test]
 async fn tenant_switch_clears_listed_secrets_and_vault_name() {
     // The view stays mounted across a tenant switch (keep-alive), so tenant A's

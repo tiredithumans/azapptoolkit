@@ -14,9 +14,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use azapptoolkit_web_rs::bindings::SignInOutcome;
+use azapptoolkit_web_rs::bindings::enterprise_application;
 use azapptoolkit_web_rs::bindings::usage::GraphUsageResult;
 use azapptoolkit_web_rs::components::toast::ToastHost;
+use azapptoolkit_web_rs::hooks::use_command;
 use azapptoolkit_web_rs::ipc_mock;
+use azapptoolkit_web_rs::state::use_session;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::tabs::usage_panel::UsagePanel;
 
@@ -311,10 +314,18 @@ async fn concurrent_refresh_token_actions_start_one_refresh() {
     ts::mock_ok("refresh_session", &());
     let m = ts::mount_view(|| view! { <ToastHost /> });
 
-    for _ in 0..2 {
-        m.session
-            .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
-    }
+    // Two DIFFERENT 401s — a bare one and a client's curated guidance — so two
+    // toasts stay: identical 401s now collapse to one toast (the recovery
+    // toast dedupes on its key, pinned by the `state::toasts` unit tests),
+    // which would leave nothing concurrent to guard.
+    m.session
+        .report_command_error(&fixtures::ui_error("unauthorized", "unauthorized (401)"));
+    m.session.report_command_error(&fixtures::ui_error(
+        "unauthorized",
+        "unauthorized (401)\n\nYour Key Vault token was rejected. Use \
+         \"Refresh token\" (next to Sign out), then retry; if it persists, \
+         confirm the app has consented the vault.azure.net scope.",
+    ));
     ts::wait_for(|| ts::query_all(".toast__action").len() == 2).await;
     // Fire both toasts' actions, then the top bar's entry, in one synchronous
     // turn — before the first refresh's task runs. (Read from the session, not
@@ -339,4 +350,58 @@ async fn concurrent_refresh_token_actions_start_one_refresh() {
     ts::wait_for(|| !m.session.token_refreshing.get_untracked()).await;
     m.session.spawn_refresh_token();
     ts::wait_for(|| ts::call_count("refresh_session") == 2).await;
+}
+
+/// Fires one `run_toast_err` mutation — the enterprise-app notes save, as the
+/// Overview tab does — so the test drives the real runner, sink and toast.
+#[component]
+fn RetryHarness() -> impl IntoView {
+    let session = use_session();
+    let cmd = use_command();
+    let run = move |_| {
+        cmd.run_toast_err(
+            move |()| {
+                session.toast_success("Saved.");
+            },
+            |tid: String| async move {
+                enterprise_application::set_enterprise_app_notes(&tid, "sp-1", "n").await
+            },
+        );
+    };
+    view! {
+        <button class="harness-run" type="button" on:click=run>
+            "Save"
+        </button>
+    }
+}
+
+/// A throttled save used to end in a red toast that vanished after ten
+/// seconds, so the only way back was to find the control and click it again.
+/// A transient failure now carries a sticky Retry that re-runs the same call.
+#[wasm_bindgen_test]
+async fn a_throttled_toast_failure_offers_retry_that_reruns_the_op() {
+    ts::reset();
+    ts::mock_err("set_enterprise_app_notes", &fixtures::throttled_error());
+    let _m = ts::mount_view(|| {
+        view! {
+            <ToastHost />
+            <RetryHarness />
+        }
+    });
+
+    ts::click(".harness-run");
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    assert_eq!(ts::text(".toast__action"), "Retry");
+    assert!(ts::body_contains(fixtures::THROTTLED_MESSAGE));
+
+    ts::mock_ok("set_enterprise_app_notes", &());
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::call_count("set_enterprise_app_notes") == 2).await;
+    ts::wait_for(|| ts::body_contains("Saved.")).await;
+    let call = ts::last_call("set_enterprise_app_notes").expect("the retried call");
+    assert_eq!(
+        call.arg_str("tenantId").as_deref(),
+        Some("test-tenant"),
+        "the retry runs for the tenant the call first ran for",
+    );
 }

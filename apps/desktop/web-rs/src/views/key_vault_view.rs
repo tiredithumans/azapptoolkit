@@ -95,7 +95,14 @@ pub fn KeyVaultView() -> impl IntoView {
                         listed.set(items);
                         loaded.set(true);
                     }
-                    Err(e) => error.set(Some(e.message)),
+                    // This view has no consent / step-up button of its own, so
+                    // it takes the shared sink's whole ladder (dead session,
+                    // rejected token, Key Vault consent, step-up) first.
+                    Err(e) => {
+                        if !session.report_recovery_action(&e, "keyvault") {
+                            error.set(Some(e.message));
+                        }
+                    }
                 }
             }
             busy.set(false);
@@ -121,7 +128,11 @@ pub fn KeyVaultView() -> impl IntoView {
             if still_active(&t.tenant_id) {
                 match result {
                     Ok(value) => revealed.set(Some(value)),
-                    Err(e) => error.set(Some(e.message)),
+                    Err(e) => {
+                        if !session.report_recovery_action(&e, "keyvault") {
+                            error.set(Some(e.message));
+                        }
+                    }
                 }
             }
             revealing.set(None);

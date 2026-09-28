@@ -9,7 +9,9 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
-use azapptoolkit_web_rs::components::global_search::{GlobalSearch, LOOKUP_DEGRADED_NOTICE};
+use azapptoolkit_web_rs::components::global_search::{
+    GlobalSearch, LOOKUP_DEGRADED_NOTICE, SEARCH_SESSION_EXPIRED,
+};
 use azapptoolkit_web_rs::components::index_cap_notice::corpus_cap_message;
 use azapptoolkit_web_rs::state::ActiveView;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
@@ -220,4 +222,37 @@ async fn a_failed_guid_lookup_warns_instead_of_reading_as_no_match() {
     assert_notices_lead_the_panel();
     assert!(!listbox_text().contains("No matching records."));
     assert!(!listbox_text().contains(LOOKUP_DEGRADED_NOTICE));
+}
+
+/// A dead session used to re-render "Search failed: …" on every settled
+/// keystroke with no way forward. It now points at the Re-authenticate
+/// notification — raised once, however many keystrokes fail.
+#[wasm_bindgen_test]
+async fn a_dead_session_search_offers_reauthenticate_once() {
+    ts::reset();
+    ts::mock_ok("prefetch_search_corpus", &());
+    ts::mock_err(
+        "global_search",
+        &fixtures::ui_error("refresh_missing", "session expired"),
+    );
+
+    let m = ts::mount_view(|| view! { <GlobalSearch /> });
+    ts::focus(".global-search__field");
+    ts::set_input_value(".global-search__field", "zqx");
+    ts::wait_for(|| status_text().contains(SEARCH_SESSION_EXPIRED)).await;
+    assert!(
+        !status_text().contains("Search failed"),
+        "{}",
+        status_text()
+    );
+
+    // Another settled keystroke fails the same way (past the 250 ms debounce).
+    ts::set_input_value(".global-search__field", "zqxy");
+    ts::wait_for(|| ts::call_count("global_search") == 2).await;
+    ts::tick().await;
+
+    m.session.toasts.with_untracked(|list| {
+        assert_eq!(list.len(), 1, "one lever, not one per keystroke");
+        assert_eq!(list[0].action_label.as_deref(), Some("Re-authenticate"));
+    });
 }

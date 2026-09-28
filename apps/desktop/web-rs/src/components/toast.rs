@@ -2,8 +2,8 @@
 //! shell root and renders the live stack from `Session::toasts`; toasts are
 //! pushed from anywhere via the `Session` helpers (`toast_success`,
 //! `toast_error`, …) and auto-dismiss after a timeout — errors linger longer
-//! than successes/info so they aren't missed; error toasts that carry a retry
-//! action stay until acted on or dismissed. Errors announce assertively
+//! than successes/info so they aren't missed; error toasts that carry an
+//! action stay until acted on or dismissed ([`Toast::is_sticky`]). Errors announce assertively
 //! (`role="alert"`), the rest politely (`role="status"`).
 
 use std::collections::HashMap;
@@ -44,6 +44,22 @@ pub struct Toast {
     /// Label + handler for an action button (only rendered when present).
     pub action_label: Option<String>,
     pub action: Option<ToastAction>,
+    /// Identity of a recovery toast (the lever plus what it recovers, e.g.
+    /// `"reauth"`, `"consent:exchange"`): a second push with the same key while
+    /// one is showing is a no-op, so a burst of failures raises one lever, not
+    /// a stack of copies. `None` (every other toast) never merges — two Retry
+    /// toasts with the same text re-run different operations.
+    pub dedupe_key: Option<String>,
+}
+
+impl Toast {
+    /// The one definition of "sticky": an error that carries an action (Retry,
+    /// Re-authenticate, Grant consent, …) stays until acted on or dismissed.
+    /// `ToastHost` never auto-dismisses one, and the stack cap evicts one only
+    /// once no transient toast is left to drop.
+    pub fn is_sticky(&self) -> bool {
+        matches!(self.kind, ToastKind::Error) && self.action.is_some()
+    }
 }
 
 impl ToastKind {
@@ -99,12 +115,9 @@ pub fn ToastHost() -> impl IntoView {
             Some(w) => w,
             None => return,
         };
-        // Snapshot the (id, kind, has-action) of the currently-present toasts.
-        let present: Vec<(u64, ToastKind, bool)> = toasts.with(|list| {
-            list.iter()
-                .map(|t| (t.id, t.kind, t.action.is_some()))
-                .collect()
-        });
+        // Snapshot the (id, kind, sticky) of the currently-present toasts.
+        let present: Vec<(u64, ToastKind, bool)> =
+            toasts.with(|list| list.iter().map(|t| (t.id, t.kind, t.is_sticky())).collect());
 
         handles.update_value(|map| {
             // Cancel + drop timers for toasts that are gone.
@@ -120,9 +133,8 @@ pub fn ToastHost() -> impl IntoView {
                 }
             }
             // Schedule timers for new auto-dismissable toasts.
-            for (id, kind, has_action) in present {
-                // Errors with a retry action are sticky; everything else expires.
-                let sticky = matches!(kind, ToastKind::Error) && has_action;
+            for (id, kind, sticky) in present {
+                // Sticky toasts (`Toast::is_sticky`) stay; everything else expires.
                 if sticky || map.contains_key(&id) {
                     continue;
                 }

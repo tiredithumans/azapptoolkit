@@ -68,6 +68,13 @@ const GOTO_LIMIT: usize = 8;
 pub const LOOKUP_DEGRADED_NOTICE: &str = "A directory lookup failed, so these results may be \
      incomplete — try the search again in a moment.";
 
+/// What the status row shows when a search failed because the session is dead
+/// (`UiError::is_reauth_fatal`): the lever is the Re-authenticate notification
+/// the failure raised, so the row points at it instead of echoing the raw
+/// error. The one home for the wording, which the GUI test reads too.
+pub const SEARCH_SESSION_EXPIRED: &str =
+    "Your session has expired — use Re-authenticate in the notification, then search again.";
+
 #[component]
 pub fn GlobalSearch() -> impl IntoView {
     let session = use_session();
@@ -107,10 +114,19 @@ pub fn GlobalSearch() -> impl IntoView {
                     return None;
                 }
                 let t = tenant?;
+                // A dead session raises the Re-authenticate lever — once, however
+                // many keystrokes fail: the recovery toast dedupes on its key.
+                // Written after the await, so it tracks nothing.
                 Some(
                     search::global_search(&t.tenant_id, trimmed)
                         .await
-                        .map_err(|e| e.message),
+                        .map_err(|e| {
+                            if session.report_if_session_dead(&e) {
+                                SEARCH_SESSION_EXPIRED.to_string()
+                            } else {
+                                e.message
+                            }
+                        }),
                 )
             }
         });
@@ -335,12 +351,17 @@ pub fn GlobalSearch() -> impl IntoView {
                                             </div>
                                         }
                                             .into_any(),
-                                        Some(Err(msg)) => view! {
-                                            <div class="global-search__empty">
-                                                {format!("Search failed: {msg}")}
-                                            </div>
+                                        Some(Err(msg)) => {
+                                            let text = if msg == SEARCH_SESSION_EXPIRED {
+                                                msg
+                                            } else {
+                                                format!("Search failed: {msg}")
+                                            };
+                                            view! {
+                                                <div class="global-search__empty">{text}</div>
+                                            }
+                                                .into_any()
                                         }
-                                            .into_any(),
                                         Some(Ok(r)) => view_no_records(&r),
                                     }
                                 })}
