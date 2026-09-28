@@ -9,6 +9,10 @@ on:
     branches: [main]
     paths:
       - "apps/desktop/web-rs/**"
+      # web-rs path-depends on core and dto, which inherit from the root manifest.
+      - "crates/azapptoolkit-core/**"
+      - "crates/azapptoolkit-dto/**"
+      - "Cargo.toml"
       - "justfile"
       - ".github/workflows/pages.yml"
   workflow_dispatch:

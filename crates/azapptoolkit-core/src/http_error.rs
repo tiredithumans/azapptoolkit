@@ -52,6 +52,10 @@
 ///     }
 /// }
 /// ```
+///
+/// A consumer crate must depend on `thiserror` directly: the generated
+/// `#[derive(::thiserror::Error)]` expands to hard-coded `::thiserror` paths, so
+/// a re-export from this crate cannot satisfy it.
 #[macro_export]
 macro_rules! http_error_enum {
     (

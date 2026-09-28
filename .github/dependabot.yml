@@ -32,13 +32,11 @@ updates:
       prefix: deps
     open-pull-requests-limit: 10
     ignore:
-      # sha2 0.10 is what `oauth2` 5 (via azapptoolkit-auth), `p12-keystore` and
-      # `tauri-codegen` already resolve to, and it is TRANSITIVE-ONLY — nothing
-      # in this repo declares sha2 directly, because certificate thumbprints
-      # digest on aws-lc-rs, the backend rcgen already signs with. Bumping the
-      # lock entry to 0.11 would not remove the 0.10 line those three pin; it
-      # would add a second crypto major to the graph of a credential tool.
-      # Drop this ignore once oauth2/Tauri move first. NOTE: `rsa`
+      # sha2 is TRANSITIVE-ONLY — nothing in this repo declares it (certificate
+      # thumbprints digest on aws-lc-rs). The 0.10 line is pinned by `oauth2` 5,
+      # `p12-keystore` and `tauri-codegen`; 0.11 is already present, Linux-only,
+      # via `secret-service`. The ignore stops Dependabot churning a dependency
+      # we do not own; drop it once oauth2 and Tauri move to 0.11. NOTE: `rsa`
       # (RUSTSEC-2023-0071) is not in this graph at all — cert generation uses
       # rcgen on the aws_lc_rs backend specifically to keep it out, and
       # `deny.toml`'s `[[bans.deny]] name = "rsa"` is what enforces that.

@@ -522,6 +522,11 @@ build-windows-updater:
 # leg can be added later). `--bundles app,dmg` keeps deb/rpm/etc. off the macOS
 # leg. Same updater-key contract as `build-windows-updater`.
 
+# macOS .app + .dmg for local use (Apple Silicon), no updater signing key needed.
+[working-directory('apps/desktop/src-tauri')]
+build-macos:
+    cargo tauri build --target aarch64-apple-darwin --bundles app,dmg -- --locked
+
 # macOS .dmg + .app.tar.gz with signed updater artifacts (Apple Silicon).
 [working-directory('apps/desktop/src-tauri')]
 build-macos-updater:
@@ -531,6 +536,11 @@ build-macos-updater:
 # with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
 # patchelf on the build host (CI installs them). `--bundles appimage,deb` — rpm
 # is omitted for now. Same updater-key contract as `build-windows-updater`.
+
+# Linux AppImage + .deb for local use, no updater signing key needed.
+[working-directory('apps/desktop/src-tauri')]
+build-linux:
+    cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb -- --locked
 
 # Linux AppImage + .deb with signed updater artifacts.
 [working-directory('apps/desktop/src-tauri')]

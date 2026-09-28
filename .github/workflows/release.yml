@@ -73,7 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
-          tool: just,cargo-audit
+          tool: just,cargo-audit,cargo-deny@0.20.2
       # main-branch CI runs `just audit` per-merge, but an advisory filed after
       # the last merge (or against this tag's exact lockfile) would otherwise
       # ship unscanned — gate it here so a new advisory fails the release.
@@ -83,6 +83,11 @@ jobs:
       # tree ships inside the webview with IPC access — scan it at release too.
       - name: audit (web-rs lockfile)
         run: just web-audit
+      # deny.toml's `yanked = "deny"`, bans and sources on the shipping lockfiles.
+      - name: deny (workspace)
+        run: just deny
+      - name: deny (web-rs)
+        run: just web-deny
 
   # Per-platform bundles + signed updater artifacts. Each leg uploads its whole
   # bundle/ tree as an artifact; the `release` job assembles one cross-platform

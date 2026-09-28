@@ -144,7 +144,8 @@ deliberately:
 The release workflow builds packages for all three platforms — Windows
 (MSI + NSIS), macOS (`.dmg` + `.app` updater payload), and Linux
 (`.AppImage` + `.deb`) — each on its native GitHub-hosted runner. Locally
-you can build for your own host with the per-platform recipes below.
+you can build for your own host with the keyless recipes (`just build-windows`,
+`just build-macos`, `just build-linux`); the `-updater` variants need the signing key.
 
 ### Windows
 

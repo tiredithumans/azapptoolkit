@@ -27,11 +27,8 @@ Cargo.lock.bak
 # on $PATH and needs no such file.
 apps/desktop/web-rs/webdriver.json
 
-# Node / Tauri
-node_modules/
+# Trunk output
 dist/
-.vite/
-*.tsbuildinfo
 
 # Tauri build artifacts
 apps/desktop/src-tauri/gen/
