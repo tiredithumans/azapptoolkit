@@ -357,7 +357,10 @@ the consistency flag page 1 was issued with — there is no default. Graph does 
 `ConsistencyLevel` into the `nextLink` request, so an advanced query (the SP index, the `memberOf`
 casts) restates it on every continuation, and a plain read never adds it: page 2 of an `$expand`
 scan would lose the expansion, and page 2 of any other plain read would come from the
-eventually-consistent index while page 1 came from the directory.
+eventually-consistent index while page 1 came from the directory. The scoped helpers
+(`collect_pages_from`, `collect_pages_from_capped`) take a fetch closure instead of a consistency flag,
+origin-check each nextLink before the scoped bearer is attached, and share the one `client::MAX_PAGES`
+page cap with the rest.
 
 ## Page size is a wall-clock divisor, not a tuning knob
 

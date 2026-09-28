@@ -84,37 +84,11 @@ impl GraphClient {
             "{}/sites?search=*&$select=id,displayName,webUrl&$top=200",
             self.base_url
         );
-        let mut page: Paged<Site> = self.scoped_get_retried(token, &url).await?;
-        let mut out = Vec::new();
-        out.append(&mut page.items);
-
-        const MAX_PAGES: usize = 200;
-        let mut pages = 1usize;
-
-        while out.len() < max {
-            let Some(next) = page.next_link.take() else {
-                // Exhausted within the cap — full coverage.
-                return Ok((out, false));
-            };
-            if !same_origin(&self.base_url, &next) {
-                return Err(GraphError::Protocol(
-                    "refusing to follow nextLink to a different origin".into(),
-                ));
-            }
-            if pages >= MAX_PAGES {
-                return Err(GraphError::Protocol(
-                    "site paging exceeded the page limit".into(),
-                ));
-            }
-            page = self.scoped_get_retried(token, &next).await?;
-            out.append(&mut page.items);
-            pages += 1;
-        }
-        // Reached the cap. More sites remain iff the last page overshot it or a
-        // further nextLink is still pending — an exact fit is NOT truncation.
-        let truncated = out.len() > max || page.next_link.is_some();
-        out.truncate(max);
-        Ok((out, truncated))
+        let first: Paged<Site> = self.scoped_get_retried(token, &url).await?;
+        self.collect_pages_from_capped(first, max, |u| async move {
+            self.scoped_get_retried(token, &u).await
+        })
+        .await
     }
 
     /// Grants an application the given `roles` (e.g. `["read"]` / `["write"]`)

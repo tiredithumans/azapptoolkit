@@ -368,9 +368,9 @@ impl GraphClient {
             let grant_id = existing
                 .id
                 .as_ref()
-                .ok_or_else(|| GraphError::Api {
-                    status: 500,
-                    body: "existing grant missing id".to_string(),
+                // A client-side contract violation, not a Graph server error.
+                .ok_or_else(|| {
+                    GraphError::Protocol("existing oauth2PermissionGrant has no id".into())
                 })?
                 .clone();
             self.update_oauth2_grant_scope(&grant_id, &scope_str)

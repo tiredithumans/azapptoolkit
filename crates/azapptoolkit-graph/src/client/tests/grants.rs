@@ -188,6 +188,28 @@ async fn upsert_admin_oauth2_grant_in_reads_no_grants_of_its_own() {
     assert!(grant.scope.split_whitespace().any(|s| s == "email"));
 }
 
+/// A matching pre-read grant without an `id` is a client-side contract
+/// violation, reported as `Protocol` — never a fabricated Graph 500. No mocks:
+/// any request would fall through to wiremock's 404 and come back `NotFound`.
+#[tokio::test]
+async fn upsert_in_refuses_a_matching_grant_without_an_id() {
+    let server = MockServer::start().await;
+    let existing = vec![azapptoolkit_core::models::OAuth2PermissionGrant {
+        id: None,
+        client_id: "sp-client".into(),
+        resource_id: "sp-graph".into(),
+        consent_type: "AllPrincipals".into(),
+        principal_id: None,
+        scope: "User.Read".into(),
+    }];
+    let client = make_client(&server.uri());
+    let err = client
+        .upsert_admin_oauth2_grant_in("sp-client", "sp-graph", &["email"], &existing)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::GraphError::Protocol(_)), "got {err:?}");
+}
+
 /// With no matching grant in the pre-read list, the variant creates one — and
 /// still makes no read.
 #[tokio::test]

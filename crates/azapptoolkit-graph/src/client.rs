@@ -48,6 +48,13 @@ pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 /// the safe request everywhere.
 pub(crate) const MAX_PAGE_SIZE: &str = "999";
 
+/// Hard cap on the pages any paging helper follows. It is the cycle guard: a
+/// `{"value": [], "@odata.nextLink": "<same url>"}` loop never advances an item
+/// cap, so only a page count bounds it. Legitimate paging is far under it —
+/// with [`MAX_PAGE_SIZE`] it bounds a read at about 200k rows. One definition,
+/// shared by every helper in `transport` and the domain modules.
+pub(crate) const MAX_PAGES: usize = 200;
+
 /// Row cap on the shared per-tenant service-principal index
 /// ([`GraphClient::list_service_principals_index`]). Public because the
 /// surfaces that read the index — the Enterprise Applications and Managed
@@ -89,7 +96,7 @@ pub use applications::{
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
-pub(crate) use transport::{batch_sub_url, escape_odata, search_phrase};
+pub(crate) use transport::{batch_sub_url, escape_odata, not_found_as_none, search_phrase};
 
 pub struct GraphClient {
     http: reqwest::Client,

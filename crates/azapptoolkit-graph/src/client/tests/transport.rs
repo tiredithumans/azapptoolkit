@@ -266,6 +266,65 @@ async fn get_json_absolute_rejects_foreign_origin() {
     assert!(matches!(err, GraphError::Protocol(_)));
 }
 
+#[tokio::test]
+async fn collect_pages_from_capped_refuses_a_foreign_next_link() {
+    // The scoped follower checks the origin BEFORE handing the link to the
+    // closure, which is what attaches the scoped bearer — so the closure must
+    // never run for a foreign link.
+    let client = make_client("https://graph.microsoft.com/v1.0");
+    let first = Paged {
+        items: vec![1],
+        next_link: Some("https://evil.example.com/x".into()),
+        total_count: None,
+    };
+    let err = client
+        .collect_pages_from_capped(first, 10, |_url: String| async move {
+            panic!("a foreign nextLink must never reach the fetch closure")
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Protocol(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn get_json_optional_maps_only_404_to_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/things/gone"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/things/here"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "x"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/things/denied"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let gone = client
+        .get_json_optional::<serde_json::Value>("/things/gone", &[])
+        .await
+        .expect("a 404 is the object having vanished, not an error");
+    assert!(gone.is_none());
+
+    let here = client
+        .get_json_optional::<serde_json::Value>("/things/here", &[])
+        .await
+        .unwrap();
+    assert_eq!(here.unwrap()["id"], "x");
+
+    let denied = client
+        .get_json_optional::<serde_json::Value>("/things/denied", &[])
+        .await
+        .expect_err("a 403 must stay an error, never read as a vanished object");
+    assert!(matches!(denied, GraphError::Forbidden(_)), "got {denied:?}");
+}
+
 /// A throttle observer that only counts how often it was notified.
 struct Counter(std::sync::atomic::AtomicUsize);
 impl Counter {

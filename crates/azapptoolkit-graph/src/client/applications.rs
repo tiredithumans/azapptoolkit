@@ -508,16 +508,8 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        let path = format!("/applications/{object_id}");
-        let params: [(&str, &str); 1] = [("$select", "id,appId,identifierUris,web,spa")];
-        match self
-            .get_json::<serde_json::Value>(&path, &params, false)
+        self.get_application_fields_raw(object_id, "id,appId,identifierUris,web,spa")
             .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 
     /// GET `/applications/{id}` selecting only the Authentication-tab fields, as
@@ -531,19 +523,22 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        let path = format!("/applications/{object_id}");
-        let params: [(&str, &str); 1] = [(
-            "$select",
+        self.get_application_fields_raw(
+            object_id,
             "id,appId,isFallbackPublicClient,web,spa,publicClient",
-        )];
-        match self
-            .get_json::<serde_json::Value>(&path, &params, false)
-            .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        )
+        .await
+    }
+
+    /// GET `/applications/{id}` with the given `$select`, as raw JSON; `Ok(None)`
+    /// for 404. The one body behind the raw per-tab field readers above.
+    async fn get_application_fields_raw(
+        &self,
+        object_id: &str,
+        select: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let path = format!("/applications/{object_id}");
+        self.get_json_optional(&path, &[("$select", select)]).await
     }
 
     /// GET `/applications/{id}` selecting only the Expose-an-API fields
@@ -557,14 +552,7 @@ impl GraphClient {
     ) -> Result<Option<ApplicationExposeApi>> {
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "id,appId,identifierUris,api")];
-        match self
-            .get_json::<ApplicationExposeApi>(&path, &params, false)
-            .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.get_json_optional(&path, &params).await
     }
 
     /// PATCH `/applications/{id}` with Expose-an-API fields. Each array Graph

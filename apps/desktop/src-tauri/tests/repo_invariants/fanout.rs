@@ -355,11 +355,13 @@ fn call_sites_extracts_balanced_calls_and_ignores_lookalikes() {
 /// large tenant, and nothing fails. The size rides the `nextLink`, so it only
 /// has to be on the first request — which the CALLER builds, and which is
 /// therefore where the rule looks. (`collect_all_pages(` does not match
-/// `collect_all_pages_capped(`.)
+/// `collect_all_pages_capped(`, nor `collect_pages_from(` the scoped
+/// `collect_pages_from_capped(`, so each capped form is listed on its own.)
 const PAGING_HELPERS: &[&str] = &[
     "collect_all_pages(",
     "collect_all_pages_capped(",
     "collect_pages_from(",
+    "collect_pages_from_capped(",
 ];
 
 /// What counts as asking for a page size: `$top` as a query pair or inline in

@@ -527,14 +527,7 @@ impl GraphClient {
         // view's non-default fields are returned reliably.
         let select = default_service_principal_select().join(",");
         let params: [(&str, &str); 1] = [("$select", select.as_str())];
-        match self
-            .get_json::<ServicePrincipal>(&path, &params, false)
-            .await
-        {
-            Ok(sp) => Ok(Some(sp)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.get_json_optional(&path, &params).await
     }
 
     /// Batched [`Self::get_service_principal_by_object_id`]: one `$batch` POST
@@ -553,14 +546,7 @@ impl GraphClient {
             .map(|id| batch_sub_url(&format!("/servicePrincipals/{id}"), &[("$select", &select)]))
             .collect();
         let raw: Vec<Result<ServicePrincipal>> = self.batch_get_json(&urls).await?;
-        Ok(raw
-            .into_iter()
-            .map(|r| match r {
-                Ok(sp) => Ok(Some(sp)),
-                Err(GraphError::NotFound(_)) => Ok(None),
-                Err(e) => Err(e),
-            })
-            .collect())
+        Ok(raw.into_iter().map(not_found_as_none).collect())
     }
 
     /// GET `/servicePrincipals/{id}` selecting only the SSO-relevant fields, as
@@ -576,14 +562,7 @@ impl GraphClient {
             "$select",
             "id,appId,preferredSingleSignOnMode,preferredTokenSigningKeyThumbprint,keyCredentials,notificationEmailAddresses",
         )];
-        match self
-            .get_json::<serde_json::Value>(&path, &params, false)
-            .await
-        {
-            Ok(v) => Ok(Some(v)),
-            Err(GraphError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.get_json_optional(&path, &params).await
     }
 
     /// Replaces a service principal's `tags` array (full-set PATCH). Used to

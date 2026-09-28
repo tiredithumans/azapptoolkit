@@ -178,8 +178,7 @@ impl GraphClient {
     ) -> Result<Vec<T>> {
         // Bound a pathological/cyclic nextLink; legitimate paging is far under
         // this. (Origin safety is enforced by `get_json_absolute_with`'s
-        // same-origin check.) Mirrors `list_conditional_access_policies`.
-        const MAX_PAGES: usize = 200;
+        // same-origin check.)
         let mut out = Vec::new();
         out.append(&mut page.items);
         let mut pages = 1;
@@ -226,7 +225,6 @@ impl GraphClient {
         max_items: usize,
         consistency_eventual: bool,
     ) -> Result<(Vec<T>, bool)> {
-        const MAX_PAGES: usize = 200;
         let mut out = Vec::new();
         out.append(&mut page.items);
         let mut pages = 1usize;
@@ -256,23 +254,54 @@ impl GraphClient {
     /// Collects all pages from a scoped FETCH closure, following `@odata.nextLink`
     /// until exhausted or the page cap is hit. Each nextLink is origin-checked
     /// before being passed to `fetch_page`, so the bearer token never leaves the
-    /// trusted Graph origin.
+    /// trusted Graph origin. The uncapped form of
+    /// [`Self::collect_pages_from_capped`] — one loop serves both.
     pub(crate) async fn collect_pages_from<F, T, Fut>(
         &self,
-        mut first_page: Paged<T>,
-        mut fetch_page: F,
+        first_page: Paged<T>,
+        fetch_page: F,
     ) -> Result<Vec<T>>
     where
         F: FnMut(String) -> Fut + Send,
         Fut: std::future::Future<Output = Result<Paged<T>>> + Send,
         T: DeserializeOwned + Send,
     {
-        const MAX_PAGES: usize = 200;
+        // `usize::MAX` is never reached, and truncating to it is a no-op.
+        self.collect_pages_from_capped(first_page, usize::MAX, fetch_page)
+            .await
+            .map(|(items, _)| items)
+    }
+
+    /// The scoped paging follower: like [`Self::collect_pages_from`] but stops
+    /// once `max_items` rows are collected and returns `(items, truncated)`,
+    /// where `truncated` is true when rows existed beyond the cap (an exact fit
+    /// is not truncation). Each nextLink is origin-checked before `fetch_page`
+    /// attaches the scoped bearer.
+    ///
+    /// Unlike [`Self::collect_all_pages_capped`], hitting [`MAX_PAGES`] is a hard
+    /// `Protocol` error here, not a degrade-to-truncated: this is the scoped
+    /// family's existing contract (a cyclic link on a scoped read fails), and
+    /// the callers were written against it.
+    pub(crate) async fn collect_pages_from_capped<F, T, Fut>(
+        &self,
+        mut first_page: Paged<T>,
+        max_items: usize,
+        mut fetch_page: F,
+    ) -> Result<(Vec<T>, bool)>
+    where
+        F: FnMut(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Paged<T>>> + Send,
+        T: DeserializeOwned + Send,
+    {
         let mut out = Vec::new();
         out.append(&mut first_page.items);
         let mut page: Paged<T> = first_page;
         let mut pages = 1usize;
-        while let Some(next) = page.next_link.take() {
+        while out.len() < max_items {
+            let Some(next) = page.next_link.take() else {
+                // Exhausted within the cap — full coverage.
+                return Ok((out, false));
+            };
             if !same_origin(&self.base_url, &next) {
                 return Err(GraphError::Protocol(
                     "refusing to follow nextLink to a different origin".into(),
@@ -287,7 +316,11 @@ impl GraphClient {
             out.append(&mut page.items);
             pages += 1;
         }
-        Ok(out)
+        // Reached the cap. More rows remain iff the last page overshot it or a
+        // further nextLink is still pending — an exact fit is NOT truncation.
+        let truncated = out.len() > max_items || page.next_link.is_some();
+        out.truncate(max_items);
+        Ok((out, truncated))
     }
 
     /// Issues a GET against an absolute URL (e.g. an `@odata.nextLink`) and
@@ -345,6 +378,18 @@ impl GraphClient {
             .send_core(Method::GET, path, query, consistency_eventual, None)
             .await?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
+    }
+
+    /// [`Self::get_json`] for a single object that may have been deleted: a 404
+    /// is `Ok(None)` (see [`not_found_as_none`]). A basic query — no
+    /// `ConsistencyLevel`, so an `$expand` or a just-written object reads from
+    /// the directory.
+    pub(crate) async fn get_json_optional<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Option<T>> {
+        not_found_as_none(self.get_json(path, query, false).await)
     }
 
     /// GET the read-token collection with a `Prefer` request header — used by the
@@ -670,6 +715,18 @@ impl GraphClient {
                 }
             }
         }
+    }
+}
+
+/// The crate's "object vanished between the index read and the detail read"
+/// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
+/// stays an error. One definition, so the single-object readers and the
+/// batched ones cannot drift.
+pub(crate) fn not_found_as_none<T>(r: Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(GraphError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
