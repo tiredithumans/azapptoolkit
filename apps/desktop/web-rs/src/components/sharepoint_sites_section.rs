@@ -21,7 +21,7 @@ use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
-use crate::components::ui::{Callout, DataTable};
+use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -233,7 +233,7 @@ pub fn SharePointSitesSection(
                             </div>
 
                             {move || {
-                                cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 needs_consent
@@ -323,7 +323,14 @@ pub fn SharePointSitesSection(
                                         // echo the raw 403 body here.
                                         Err(e) if e.is_consent_required() => ().into_any(),
                                         Err(e) => {
-                                            view! { <Body1 class="form-error">{e.message}</Body1> }
+                                            view! {
+                                                <DetailLoadError
+                                                    error=e
+                                                    on_retry=Callback::new(move |_| {
+                                                        reload.update(|n| *n += 1)
+                                                    })
+                                                />
+                                            }
                                                 .into_any()
                                         }
                                     }

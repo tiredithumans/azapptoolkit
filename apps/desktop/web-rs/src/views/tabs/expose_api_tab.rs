@@ -23,7 +23,9 @@ use crate::bindings::expose_api::{
 };
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton};
+use crate::components::ui::{
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError,
+};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -595,7 +597,7 @@ fn ExposeApiLoaded(
                     <Input value=uri_value />
                 </Field>
                 {move || {
-                    uri_add_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    uri_add_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button
@@ -674,7 +676,7 @@ fn ExposeApiLoaded(
                     " Enabled — clients can request this scope"
                 </label>
                 {move || {
-                    scope_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    scope_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button
@@ -802,7 +804,7 @@ fn ExposeApiLoaded(
                     })
                     .collect_view()}
                 {move || {
-                    pre_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    pre_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button

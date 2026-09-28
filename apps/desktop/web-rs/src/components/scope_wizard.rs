@@ -46,7 +46,7 @@ use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -1024,7 +1024,7 @@ pub fn ScopeWizard(
                         }}
                     </Show>
 
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
                     // Tell the user why "Next" is disabled on step 1 — the cart is
                     // empty. The apply-time validation message is unreachable from

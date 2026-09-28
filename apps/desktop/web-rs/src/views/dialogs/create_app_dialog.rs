@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::applications::{self, CreateApplicationInput};
+use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
@@ -108,7 +109,7 @@ pub fn CreateAppDialog(
                         " Provision an enterprise application (service principal) in this tenant"
                     </label>
                     {move || {
-                        cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                        cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                     }}
                     <div class="actions-row">
                         <Button

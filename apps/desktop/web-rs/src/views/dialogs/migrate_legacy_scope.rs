@@ -27,6 +27,7 @@ use azapptoolkit_core::audit::RemediationAction;
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::FormError;
 use crate::state::use_session;
 
 #[component]
@@ -140,7 +141,7 @@ pub fn MigrateLegacyScopeButton(
                             }
                         })
                 }}
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                 {move || {
                     report.get().map(|r| view! { <AapMigrationReportView report=r /> })
                 }}

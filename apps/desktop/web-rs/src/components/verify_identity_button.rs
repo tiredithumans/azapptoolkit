@@ -11,9 +11,10 @@
 //! failed surface's feature(s), then re-runs the surface.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::auth;
+use crate::components::ui::FormError;
 use crate::state::use_session;
 
 /// What an `interaction_required` surface says instead of `e.message`, which
@@ -76,6 +77,6 @@ pub fn VerifyIdentityButton(
                 "Verify identity & retry"
             </Button>
         </div>
-        {move || error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })}
+        {move || error.get().map(|m| view! { <FormError>{m}</FormError> })}
     }
 }

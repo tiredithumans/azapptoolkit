@@ -24,7 +24,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, FormError, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
@@ -226,7 +226,7 @@ fn PostureStrip() -> impl IntoView {
                     })
             }}
             {move || {
-                ctrl.scan_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                ctrl.scan_error.get().map(|e| view! { <FormError>{e}</FormError> })
             }}
             // A cancelled scan leaves an arbitrary PREFIX of the tenant scored,
             // and every number on this workbench — the counts above, the findings

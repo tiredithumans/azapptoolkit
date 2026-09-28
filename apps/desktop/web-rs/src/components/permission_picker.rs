@@ -16,14 +16,16 @@ use azapptoolkit_core::scoping::{
     is_sharepoint_orgwide,
 };
 use leptos::prelude::*;
-use thaw::{Body1, Input};
+use thaw::Input;
 
 use crate::bindings::permissions::{
     self, CatalogResourceSummary, PermissionKind, ResourcePermissions,
 };
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Badge, BadgeTone, Card, DetailLoadError, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, Card, DetailLoadError, SkeletonList, TabBar, TabBarItem,
+};
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::util::no_tenant;
@@ -219,7 +221,7 @@ pub fn PermissionPicker(
             </div>
             {(matches!(mode, PickerMode::AppAndDelegated))
                 .then(|| view! { <TabBar items=tabs.clone() selected=active_kind /> })}
-            <Suspense fallback=|| view! { <Body1>"Loading permissions…"</Body1> }>
+            <Suspense fallback=|| view! { <SkeletonList rows=6 /> }>
                 {move || {
                     let needle = filter_debounced.get().to_lowercase();
                     let kind = active_kind.get();

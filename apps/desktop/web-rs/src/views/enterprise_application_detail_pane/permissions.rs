@@ -220,7 +220,13 @@ pub(super) fn PermissionsContent(
                 {move || Suspend::new(async move {
                     match granted.await {
                         Err(e) => {
-                            view! { <Body1 class="form-error">{e.message}</Body1> }.into_any()
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
                         }
                         Ok(list) => {
                             // Same held-permission table as the managed-identity view

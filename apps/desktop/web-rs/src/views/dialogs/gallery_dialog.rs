@@ -19,6 +19,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 use crate::bindings::enterprise_application::{
     self, ApplicationTemplateDto, GalleryAppSummary, GallerySearchResultsDto,
 };
+use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_escape::use_escape;
@@ -167,7 +168,7 @@ pub fn GalleryDialog(
                                     {move || {
                                         cmd.error
                                             .get()
-                                            .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                            .map(|e| view! { <FormError>{e}</FormError> })
                                     }}
                                     <div class="actions-row">
                                         <Button
@@ -229,9 +230,9 @@ pub fn GalleryDialog(
                                                     Ok(f) => f,
                                                     Err(msg) => {
                                                         return view! {
-                                                            <Body1 class="form-error">
+                                                            <FormError>
                                                                 {format!("Search failed: {msg}")}
-                                                            </Body1>
+                                                            </FormError>
                                                         }
                                                             .into_any();
                                                     }

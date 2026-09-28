@@ -8,7 +8,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications::{self, ApplicationDetail};
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
-use crate::components::ui::DataTable;
+use crate::components::ui::{DataTable, FormError};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -375,9 +375,9 @@ pub fn OwnersTab(
                         let items = staged.get();
                         if items.is_empty() {
                             view! {
-                                <Body1 class="form-error">
+                                <FormError>
                                     "No owners staged — applying would leave the app with no explicit owners."
-                                </Body1>
+                                </FormError>
                             }
                                 .into_any()
                         } else {
@@ -481,9 +481,9 @@ pub fn OwnersTab(
                             Ok(users) => users,
                             Err(msg) => {
                                 return view! {
-                                    <Body1 class="form-error">
+                                    <FormError>
                                         {format!("Search failed: {msg}")}
-                                    </Body1>
+                                    </FormError>
                                 }
                                     .into_any();
                             }
@@ -556,7 +556,7 @@ pub fn OwnersTab(
                     })}
                 </Suspense>
             </section>
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <Show when=move || no_owner_defaults.get() fallback=|| ()>
                 <OwnerDefaultsHint class="form-error" tab="app-reg" />
             </Show>

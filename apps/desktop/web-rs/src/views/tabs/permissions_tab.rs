@@ -30,7 +30,7 @@ use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, EmptyState, IconButton, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, EmptyState, FormError, IconButton, TabBar, TabBarItem,
 };
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -544,7 +544,7 @@ pub fn PermissionsTab(
                 })
                 on_changed=on_changed
             />
-            {move || cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <TabBar
                 items=vec![
                     TabBarItem {
@@ -812,7 +812,7 @@ pub fn PermissionsTab(
                 })
                 on_close=Callback::new(move |()| close_revoke())
             />
-            {move || consent_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || consent_error.get().map(|e| view! { <FormError>{e}</FormError> })}
             {move || {
                 let has_mail = detail.with(|d| {
                     d.resolved_permissions.iter().any(|p| {

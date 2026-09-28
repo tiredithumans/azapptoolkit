@@ -16,7 +16,7 @@ use crate::bindings::applications::{
 };
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable};
+use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable, FormError};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -880,7 +880,7 @@ pub fn CredentialsTab(
             // delete/remove). A modal keeps its own copy: this one renders behind
             // the backdrop, where it is invisible to someone who just watched an
             // action do nothing.
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <ModalShell
                 open=Signal::derive(move || add_open.get())
                 title="New client secret"
@@ -891,7 +891,7 @@ pub fn CredentialsTab(
                 // tab body behind the backdrop. Without it a failed generate left
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                 <Body1 class="hint">
                     "Consider a certificate or federated identity credential instead — \
                      they're more secure than client secrets, which shouldn't be used in production."
@@ -972,7 +972,7 @@ pub fn CredentialsTab(
                 // tab body behind the backdrop. Without it a failed generate left
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                 <Body1>
                     "Creates an RSA-2048 certificate, adds the public part to this app as a verify-only credential, and shows the private key once — as PEM text, and as a password-protected .pfx you can save. Use either to authenticate the app (client assertion)."
                 </Body1>
@@ -1095,7 +1095,7 @@ pub fn CredentialsTab(
                             {move || {
                                 pfx_error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 (pk_copy.get() == Some(false))
@@ -1154,7 +1154,7 @@ pub fn CredentialsTab(
                 // tab body behind the backdrop. Without it a failed generate left
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                 <Body1>
                     "Mints a new client secret, stores it as a new version of the vault secret below, and, with Rotate & remove, deletes every existing client secret on the app. The value is written only to Key Vault — it is never shown here."
                 </Body1>

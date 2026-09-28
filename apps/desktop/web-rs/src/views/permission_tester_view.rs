@@ -19,7 +19,9 @@ use wasm_bindgen::JsCast;
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{Badge, BadgeTone, Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, FormError, SectionHeader, TabBar, TabBarItem,
+};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -453,7 +455,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 }}
             </div>
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
             {move || {
                 needs_consent

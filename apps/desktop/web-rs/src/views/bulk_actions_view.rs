@@ -20,7 +20,7 @@ use crate::bindings::bulk;
 use crate::bindings::events;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure, BulkProgressRow};
 use crate::components::icon::IconName;
-use crate::components::ui::{Callout, EmptyState, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 
 #[component]
@@ -210,7 +210,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                             }
                                         })
                                 }}
-                                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                             </div>
                         }
                             .into_any()

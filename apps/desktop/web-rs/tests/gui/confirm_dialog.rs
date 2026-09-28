@@ -53,3 +53,34 @@ async fn require_keyword_gates_confirm_until_typed_exactly() {
     ts::set_input_value(".confirm-dialog__keyword input", "DELETE");
     ts::wait_for(|| !confirm_button().disabled()).await;
 }
+
+/// A failed confirm renders its error through `FormError`, which carries
+/// `role="alert"` so the failure is announced — the operator is otherwise left
+/// on a re-enabled button with no audible cue. This also proves the attribute
+/// passed to the thaw `Body1` reaches the DOM.
+#[wasm_bindgen_test]
+async fn an_error_is_announced_as_an_alert() {
+    ts::reset();
+    let _m = ts::mount_view(|| {
+        view! {
+            <ConfirmDialog
+                open=Signal::derive(|| true)
+                title="Remove this owner?"
+                body="Dangerous."
+                confirm_label="Remove"
+                error=Signal::derive(|| Some("Save failed".to_string()))
+                on_confirm=Callback::new(|()| {})
+                on_close=Callback::new(|()| {})
+            />
+        }
+    });
+
+    ts::wait_for(|| {
+        ts::query(".form-error[role=alert]").is_some_and(|el| {
+            el.text_content()
+                .unwrap_or_default()
+                .contains("Save failed")
+        })
+    })
+    .await;
+}

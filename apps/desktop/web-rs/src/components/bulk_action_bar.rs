@@ -29,7 +29,7 @@ use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar, Textarea};
 use crate::bindings::applications;
 use crate::bindings::bulk;
 use crate::bindings::events;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::constants::RENDER_PAGE;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -711,7 +711,7 @@ pub fn BulkActionBar(
                             }
                         })
                 }}
-                {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             </div>
         </Show>
     }
@@ -943,7 +943,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                                         }
                                             .into_any(),
                                         Err(e) => {
-                                            view! { <Body1 class="form-error">{e}</Body1> }.into_any()
+                                            view! { <FormError>{e}</FormError> }.into_any()
                                         }
                                     })
                             }}

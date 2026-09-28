@@ -233,7 +233,6 @@ mod tests {
             ".alert",
             ".signin-error",
             ".toast__message",
-            ".dr-view__error",
             ".app-detail__error",
         ] {
             let body = rule_body(selector)

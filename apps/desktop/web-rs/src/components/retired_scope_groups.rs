@@ -20,7 +20,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize};
 
 use crate::bindings::exchange::{self, RetiredScopeGroupDto};
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::state::use_session;
 
 /// The label an operator recognises the group by, falling back to the DN — which
@@ -218,7 +218,7 @@ fn RetiredGroupRow(
                         </div>
                     </Show>
                 </Show>
-                {move || error.get().map(|e| view! { <div class="form-error">{e}</div> })}
+                {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             </Show>
         </li>
     }

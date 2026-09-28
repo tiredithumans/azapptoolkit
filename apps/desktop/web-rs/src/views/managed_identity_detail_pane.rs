@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::SP_SITES_SELECTED;
@@ -27,8 +27,8 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, SkeletonList, TabBar,
-    TabBarItem,
+    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, FormError, SkeletonList,
+    TabBar, TabBarItem,
 };
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
@@ -395,7 +395,7 @@ pub fn ManagedIdentityDetailPane(
                                     {move || {
                                         consent_error
                                             .get()
-                                            .map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                                            .map(|m| view! { <FormError>{m}</FormError> })
                                     }}
                                 </Callout>
                             }
@@ -616,7 +616,7 @@ fn AssignAzureRolePanel(
                                 <Input value=scope />
                             </div>
                             {move || {
-                                error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                                error.get().map(|m| view! { <FormError>{m}</FormError> })
                             }}
                             <div class="actions-row">
                                 <Button

@@ -26,6 +26,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::applications;
 use crate::bindings::search::GlobalSearchResults;
+use crate::components::ui::FormError;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -215,7 +216,7 @@ pub fn DirectorySearch(
                         Ok(v) => v,
                         Err(msg) => {
                             return view! {
-                                <Body1 class="form-error">{format!("Search failed: {msg}")}</Body1>
+                                <FormError>{format!("Search failed: {msg}")}</FormError>
                             }
                                 .into_any();
                         }

@@ -16,7 +16,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textare
 use crate::bindings::auth;
 use crate::bindings::exchange;
 use crate::components::ui::Callout;
-use crate::components::ui::{Badge, BadgeTone};
+use crate::components::ui::{Badge, BadgeTone, FormError, SkeletonList};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -247,11 +247,11 @@ pub fn ManagedScopeGroupPanel(
                 </Button>
             </div>
             {move || {
-                group_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                group_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
             }}
             {move || {
                 match group_state.get() {
-                    None => view! { <Body1 class="hint">"Loading…"</Body1> }.into_any(),
+                    None => view! { <SkeletonList rows=2 /> }.into_any(),
                     Some(Err(e)) => {
                         let needs_consent = e.is_consent_required();
                         view! {

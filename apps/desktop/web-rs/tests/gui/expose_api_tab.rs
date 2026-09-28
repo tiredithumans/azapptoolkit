@@ -80,6 +80,10 @@ async fn a_failed_load_offers_retry() {
 
     ts::wait_for(|| ts::query(".ui-load-error").is_some()).await;
     assert!(ts::body_contains(fixtures::THROTTLED_MESSAGE));
+    assert!(
+        ts::query(".ui-load-error [role=alert]").is_some(),
+        "the load failure is announced"
+    );
 
     ts::mock_ok("get_expose_api", &dto());
     ts::click_button_labelled_in(".ui-load-error", "Retry");

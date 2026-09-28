@@ -19,7 +19,9 @@ use crate::bindings::enterprise_application::{
     self, AppRoleInput, AppRolesView, EnterpriseApplicationDetail,
 };
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Badge, BadgeTone, DataTable, SkeletonList};
+use crate::components::ui::{
+    Badge, BadgeTone, DataTable, DetailLoadError, FormError, SkeletonList,
+};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -260,7 +262,15 @@ pub(super) fn AppRolesContent(
             }>
                 {move || Suspend::new(async move {
                     match roles_res.await {
-                        Err(e) => view! { <Body1 class="form-error">{e.message}</Body1> }.into_any(),
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
                         Ok(view_model) => {
                             view! {
                                 <DataTable
@@ -405,7 +415,7 @@ pub(super) fn AppRolesContent(
                     " Enabled — the role can be assigned and appears in tokens"
                 </label>
                 {move || {
-                    upsert_cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    upsert_cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
                 <div class="actions-row">
                     <Button

@@ -13,6 +13,7 @@ use azapptoolkit_core::models::DirectoryObject;
 
 use crate::bindings::applications;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
+use crate::components::ui::FormError;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
@@ -255,12 +256,12 @@ pub fn AddOwnerButton(
                                             .into_any()
                                     }
                                     Err(e) => {
-                                        view! { <Body1 class="form-error">{e}</Body1> }.into_any()
+                                        view! { <FormError>{e}</FormError> }.into_any()
                                     }
                                 })
                         }}
                         {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <Show when=move || no_owner_defaults.get() fallback=|| ()>
                             <OwnerDefaultsHint class="form-error" tab="app-reg" />

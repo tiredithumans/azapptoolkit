@@ -3,10 +3,11 @@
 //! cap at runtime (ports `Set-azapptoolkitCacheConfiguration`).
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::diagnostics::{self, CacheKindDto, CacheStatsDto, SetCacheConfigInput};
 use crate::components::modal_shell::ModalShell;
+use crate::components::ui::{FormError, SkeletonList};
 
 #[component]
 pub fn CacheDiagnosticsDialog(
@@ -106,7 +107,7 @@ pub fn CacheDiagnosticsDialog(
         <ModalShell open=open title="Cache" wide=true on_close=on_close>
             {move || {
                 match stats.get() {
-                    None => view! { <Body1>"Loading…"</Body1> }.into_any(),
+                    None => view! { <SkeletonList rows=4 /> }.into_any(),
                     Some(s) => {
                         view! {
                             <table class="data-table">
@@ -230,7 +231,7 @@ pub fn CacheDiagnosticsDialog(
                     <Input value=max_size />
                 </Field>
                 {move || {
-                    config_error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                    config_error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}
             </section>
             <div class="actions-row">

@@ -48,6 +48,16 @@
 
 ### Fixed
 
+- **An enterprise app's Access, Permissions and App roles tabs, and a SharePoint site's permission
+  list, offer Retry when they fail to load.** A throttled or dropped request left a red line — on
+  the Access tab one that began with the raw code, such as `error [throttled]` — and you had to
+  switch tabs or refresh the app to try again. They now show the same message and Retry button as
+  the other tabs, with the code in small print after the message. Sign-in and Access Readiness
+  errors now lead with the message too.
+- **Screen readers announce errors and the "Copied" confirmation.** A failed save in a dialog, a
+  tab that failed to load, or a failed backup or restore appeared on screen without a sound, so a
+  screen reader user was left on a re-enabled button with no idea why. Each error is now read out as
+  it appears, and copying an ID says "Copied".
 - **Screen readers now hear which filters, findings groups and filter chips are open or selected.**
   The Filters button on each list and every group header on the Security tab's Findings pane
   announced no expanded or collapsed state, and a Findings header read its arrow glyph aloud as part
@@ -790,6 +800,9 @@
 
 ### Changed
 
+- **Settings, the permission picker, the Cache dialog and the managed scope group panel show
+  placeholder rows while they load,** like the other pages, instead of a spinner or a bare
+  "Loading…".
 - **The sample Azure custom role no longer grants deleting Key Vault secrets.**
   `docs/operator-rbac/azure-custom-role.json` included
   `Microsoft.KeyVault/vaults/secrets/deleteSecret/action`, but the app never deletes a secret: it

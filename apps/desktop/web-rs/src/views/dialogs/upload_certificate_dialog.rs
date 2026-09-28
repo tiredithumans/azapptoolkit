@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::applications::{self, AddCertificateInput, UploadedCertificate};
+use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
@@ -132,7 +133,7 @@ pub fn UploadCertificateDialog(
                         <Textarea value=pem />
                     </Field>
                     {move || {
-                        cmd.error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                        cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
                     }}
                     <div class="actions-row">
                         <Button

@@ -30,7 +30,7 @@ use crate::bindings::defaults::{
 };
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::owner_picker::OwnerPicker;
-use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, DetailSkeleton, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::parse_lines;
 use crate::views::config_screen::AuthConfigForm;
@@ -129,14 +129,7 @@ pub fn SettingsView() -> impl IntoView {
                  them each time. They apply only when you choose to (e.g. the \"Add Default Owners\" \
                  button); nothing here changes an app on its own."
             </Body1>
-            <Suspense fallback=move || {
-                view! {
-                    <Spinner
-                        size=Signal::derive(|| SpinnerSize::Medium)
-                        label="Loading settings…"
-                    />
-                }
-            }>
+            <Suspense fallback=move || view! { <DetailSkeleton /> }>
                 {move || Suspend::new(async move {
                     match loaded.await {
                         Some((tenant_id, initial)) => {
@@ -449,7 +442,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                             {move || {
                                 error
                                     .get()
-                                    .map(|e| view! { <Callout tone="danger">{e}</Callout> })
+                                    .map(|e| view! { <Callout tone="danger" role="alert">{e}</Callout> })
                             }}
                             <div class="actions-row">
                                 <Button

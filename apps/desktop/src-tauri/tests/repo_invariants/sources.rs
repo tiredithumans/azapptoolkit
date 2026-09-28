@@ -163,7 +163,7 @@ pub(crate) fn command_attribute_at_line_start(src: &str, at: usize) -> bool {
 /// `from`. Skips string literals and `//` comments so a brace inside either
 /// cannot unbalance the scan (same reasoning as `fanout::call_sites`; char
 /// literals are deliberately not tracked because `'` also opens a lifetime).
-fn balanced_block(src: &str, from: usize) -> Option<String> {
+pub(crate) fn balanced_block(src: &str, from: usize) -> Option<String> {
     let bytes = src.as_bytes();
     let open = src[from..].find('{')? + from;
     let (mut depth, mut i) = (0usize, open);

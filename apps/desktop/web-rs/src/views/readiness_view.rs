@@ -236,11 +236,15 @@ pub fn ReadinessView() -> impl IntoView {
                             // to press.
                             view! {
                                 <Callout tone="warn">
-                                    {format!(
-                                        "Couldn't check readiness [{}]: {}",
-                                        e.code,
-                                        e.message,
-                                    )}
+                                    {format!("Couldn't check readiness: {}", e.message)}
+                                    {(!e.code.is_empty())
+                                        .then(|| {
+                                            view! {
+                                                <span class="ui-load-error__code">
+                                                    {format!(" [{}]", e.code)}
+                                                </span>
+                                            }
+                                        })}
                                     <button
                                         class="link-btn readiness__retry"
                                         on:click=move |_| session.bump_readiness_reload()

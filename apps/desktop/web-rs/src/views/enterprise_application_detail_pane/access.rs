@@ -1,12 +1,12 @@
 use super::*;
-use crate::components::ui::{Callout, SearchInput};
+use crate::components::ui::{Callout, FormError, SearchInput};
 use crate::constants::LIST_FILTER_DEBOUNCE_MS;
 use crate::util::contains_ignore_case;
 use azapptoolkit_core::models::AppRole;
 use enterprise_application::AppAssignmentDto;
 
 #[component]
-pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
+pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
     let sp_id = Signal::derive(move || signal.with(|d| d.service_principal.id.clone()));
@@ -253,9 +253,10 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                             }
                             Err(e) => {
                                 view! {
-                                    <Body1 class="form-error">
-                                        {format!("error [{}]: {}", e.code, e.message)}
-                                    </Body1>
+                                    <DetailLoadError
+                                        error=e
+                                        on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                    />
                                 }
                                     .into_any()
                             }
@@ -339,7 +340,7 @@ pub(super) fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) ->
                 })
             />
 
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <GroupMembershipSection sp_id=sp_id />
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
@@ -584,9 +585,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     }
                     Err(e) => {
                         view! {
-                            <Body1 class="form-error">
-                                {format!("error [{}]: {}", e.code, e.message)}
-                            </Body1>
+                            <DetailLoadError
+                                error=e
+                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                            />
                         }
                             .into_any()
                     }
@@ -631,12 +633,7 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                         }
                             .into_any()
                     } else {
-                        view! {
-                            <Body1 class="form-error">
-                                {format!("error [{}]: {}", e.code, e.message)}
-                            </Body1>
-                        }
-                            .into_any()
+                        view! { <FormError>{e.message}</FormError> }.into_any()
                     }
                 })
         }}

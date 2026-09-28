@@ -61,9 +61,9 @@ pub fn SignInScreen(
             retrying.set(false);
         });
     };
-    // (message, hint): the hint translates the machine error code into a
-    // recovery step, since "error [keyring]" means nothing to most users.
-    let error: RwSignal<Option<(String, &'static str)>> = RwSignal::new(None);
+    // (message, code, hint): the hint translates the machine error code into a
+    // recovery step, since a bare `[keyring]` means nothing to most users.
+    let error: RwSignal<Option<(String, String, &'static str)>> = RwSignal::new(None);
 
     let on_sign_in = move |_| {
         if busy.get() {
@@ -79,13 +79,13 @@ pub fn SignInScreen(
                     restore_unreachable.set(false);
                     session.set_active_tenant(Some(outcome.tenant));
                 }
-                // Surface the error code alongside the message (matches the
-                // detail-pane `error [code]: message` convention) so failures
-                // are diagnosable.
-                Err(err) => error.set(Some((
-                    format!("error [{}]: {}", err.code, err.message),
-                    recovery_hint(&err.code, &err.message),
-                ))),
+                // Message first, with the machine code muted after it — the
+                // same shape as `DetailLoadError` — so a failure stays
+                // diagnosable without leading with the wire code.
+                Err(err) => {
+                    let hint = recovery_hint(&err.code, &err.message);
+                    error.set(Some((err.message, err.code, hint)));
+                }
             }
             busy.set(false);
         });
@@ -164,11 +164,19 @@ pub fn SignInScreen(
                 {move || {
                     error
                         .get()
-                        .map(|(msg, hint)| {
+                        .map(|(msg, code, hint)| {
                             view! {
                                 <Body1 class="signin-error">
                                     {format!("Sign-in failed: {msg}")}
                                 </Body1>
+                                {(!code.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <span class="ui-load-error__code">
+                                                {format!("[{code}]")}
+                                            </span>
+                                        }
+                                    })}
                                 <Body1 class="signin-hint">{hint}</Body1>
                             }
                         })

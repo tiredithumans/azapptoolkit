@@ -187,6 +187,10 @@ async fn a_too_new_manifest_blocks_restore_before_confirm() {
     .await;
     assert!(ts::body_contains("newer version of azapptoolkit"));
     assert!(
+        ts::query(".dr-view__plan [role=alert]").is_some(),
+        "the blocker is announced"
+    );
+    assert!(
         !ts::has_button_labelled("Restore into this tenant…"),
         "a blocked plan must not offer the restore"
     );

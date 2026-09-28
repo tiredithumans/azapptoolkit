@@ -12,7 +12,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::auth;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_command::use_command;
 
@@ -80,7 +80,7 @@ pub fn ScopeUnavailableBanner(
                     view! { <VerifyIdentityButton features=&["exchange"] on_verified=on_retry /> }
                 })}
             {move || {
-                cmd.error.get().map(|m| view! { <Body1 class="form-error">{m}</Body1> })
+                cmd.error.get().map(|m| view! { <FormError>{m}</FormError> })
             }}
         </Callout>
     }

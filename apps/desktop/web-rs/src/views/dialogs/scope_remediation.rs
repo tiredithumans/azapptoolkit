@@ -12,7 +12,7 @@ use azapptoolkit_core::audit::RemediationAction;
 use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::GroupAutocomplete;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -237,7 +237,7 @@ pub fn ScopeMailboxButton(
                                 })
                         }}
                         {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <div class="actions-row">
                             <Button
@@ -438,7 +438,7 @@ pub fn ScopeSharePointButton(
                             placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
                         />
                         {move || {
-                            error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                            error.get().map(|e| view! { <FormError>{e}</FormError> })
                         }}
                         <div class="actions-row">
                             <Button

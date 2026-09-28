@@ -4142,13 +4142,6 @@ h3 {
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.dr-view__error {
-  margin: var(--space-3) 0 0;
-  color: var(--danger);
-  font-size: var(--text-sm);
-  /* Keep a backend UiError's \n\n guidance on its own lines. */
-  white-space: pre-wrap;
-}
 .dr-view__notice,
 .audit-progress__notice {
   margin: var(--space-2) 0 0;

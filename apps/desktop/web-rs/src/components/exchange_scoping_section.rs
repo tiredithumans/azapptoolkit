@@ -25,7 +25,7 @@ use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::scope_wizard::ScopeTarget;
-use crate::components::ui::{Callout, DataTable};
+use crate::components::ui::{Callout, DataTable, FormError};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{no_tenant, parse_lines};
@@ -465,7 +465,7 @@ pub fn ExchangeScopingSection(
                                 grant_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
 
                             <hr />
@@ -499,7 +499,7 @@ pub fn ExchangeScopingSection(
                                 move_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 move_result
@@ -550,12 +550,12 @@ pub fn ExchangeScopingSection(
                                                 {(!unverified.is_empty())
                                                     .then(|| {
                                                         view! {
-                                                            <Body1 class="form-error">
+                                                            <FormError>
                                                                 {format!(
                                                                     "Not verified in the managed group: {}",
                                                                     unverified.join(", "),
                                                                 )}
-                                                            </Body1>
+                                                            </FormError>
                                                         }
                                                     })}
                                                 {(!warnings.is_empty())
@@ -612,7 +612,7 @@ pub fn ExchangeScopingSection(
                                 remove_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             <ConfirmDialog
                                 open=Signal::derive(move || confirm_remove.get())
@@ -757,7 +757,7 @@ pub fn ExchangeScopingSection(
                                 mig_cmd
                                     .error
                                     .get()
-                                    .map(|e| view! { <Body1 class="form-error">{e}</Body1> })
+                                    .map(|e| view! { <FormError>{e}</FormError> })
                             }}
                             {move || {
                                 mig_result

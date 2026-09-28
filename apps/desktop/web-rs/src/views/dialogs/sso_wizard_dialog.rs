@@ -16,7 +16,7 @@ use crate::bindings::sso::{
 };
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, FormError};
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
@@ -388,7 +388,7 @@ pub fn SsoWizardDialog(
                         {move || oidc_result.get().map(|s| view! { <OidcSummaryView summary=s /> })}
                     </Show>
 
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
 
                     // ---- Footer actions ----
                     <div class="actions-row">

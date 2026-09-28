@@ -23,8 +23,14 @@ surfaces reuse it rather than re-implementing the markup.
   box.
 - **Loading** — skeletons for content regions (`SkeletonList` / `DetailSkeleton`); spinners are
   reserved for in-button / inline busy states only.
-- **Load failure** — `DetailLoadError`, the universal "message + Retry" block (detail panes, all
-  three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a context `class`.
+- **Load failure** — `DetailLoadError`, the universal "message + Retry" block (detail panes and
+  their tabs/sections, all three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a
+  context `class`. A `Suspend` `Err` arm never renders `form-error` / `FormError` directly — pinned
+  by `repo_invariants/commands.rs`, with a reasoned exemption list for the typed searches whose
+  `String` error it cannot take.
+- **Inline error** — `components::ui::FormError` (`.form-error` + `role="alert"`, so an error that
+  appears after an action is announced); `DetailLoadError` uses it for its message. Never write
+  `<Body1 class="form-error">` by hand — pinned by `repo_invariants/commands.rs`.
 - **Notices/alerts** — `components::ui::Callout` (`info`/`ok`/`warn`/`danger`, reusing the `.alert`
   classes). New alert markup goes through it; migrate any raw `<div class="alert alert--…">` you
   touch.

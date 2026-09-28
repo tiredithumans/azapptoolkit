@@ -35,7 +35,9 @@ use crate::views::tabs::EnterpriseTab;
 use crate::views::tabs::activity_tab::ActivityPanel;
 use crate::views::tabs::conditional_access_tab::ConditionalAccessPanel;
 
-mod access;
+// `pub` for the same reason as `panels`: the GUI tests mount the Access tab
+// directly to drive its failed-load Retry.
+pub mod access;
 mod app_roles;
 mod credentials;
 mod overview;

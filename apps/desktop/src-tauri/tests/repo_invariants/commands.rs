@@ -114,6 +114,181 @@ fn status_pill_markup_lives_only_in_the_badge_primitive() {
     );
 }
 
+/// The inline "this failed" line has ONE home: `components::ui::FormError`.
+///
+/// Sixty-six sites wrote `<Body1 class="form-error">` by hand, and only one of
+/// them carried a live-region role — so a failed save inside a dialog, a failed
+/// tab load, or a failed backup appeared on screen without a sound, and a
+/// screen-reader user was left on a re-enabled button with no idea why.
+/// `FormError` pairs the class with `role="alert"`; writing the markup directly
+/// is how the role goes missing again.
+#[test]
+fn inline_error_markup_lives_only_in_the_form_error_primitive() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (name, src) in super::sources::web_modules() {
+        // The primitive itself is where this markup belongs.
+        if name == "components/ui/form_error.rs" {
+            continue;
+        }
+        for (n, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("<Body1 class=\"form-error\"") {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled inline-error markup outside the FormError primitive: {offenders:#?}\n\
+         Use `components::ui::FormError`, which adds `role=\"alert\"` so the error is \
+         announced when it appears."
+    );
+}
+
+/// Typed searches whose `Err` carries a `String`, not a `UiError`, so
+/// `DetailLoadError` cannot take it — and the next keystroke re-runs the search,
+/// which is its retry. `(file, marker in the arm, reason)`.
+const SEARCH_ERR_ARMS: &[(&str, &str, &str)] = &[
+    (
+        "components/directory_search.rs",
+        "Search failed:",
+        "typed directory search; String error, the next keystroke retries",
+    ),
+    (
+        "views/tabs/owners_tab.rs",
+        "Search failed:",
+        "typed owner search; String error, the next keystroke retries",
+    ),
+    (
+        "views/dialogs/gallery_dialog.rs",
+        "Search failed:",
+        "typed gallery search; String error, the next keystroke retries",
+    ),
+];
+
+/// The `Err` arms inside each `Suspend::new(..)` block of `src` that render an
+/// inline error (`form-error` / `<FormError`) instead of `DetailLoadError`,
+/// plus the number of `Suspend::new(` blocks walked.
+///
+/// An arm's window is its own line plus up to three following lines, stopping
+/// before the next `=>` — without that stop, a consent arm that renders nothing
+/// (`Err(e) if e.is_consent_required() => ().into_any(),`) bleeds into the
+/// `DetailLoadError` arm after it, and a clean arm is read as the offender's.
+fn suspend_err_offenders(src: &str) -> (Vec<String>, usize) {
+    let src = src.replace("\r\n", "\n");
+    let (mut offenders, mut blocks) = (Vec::new(), 0usize);
+    let mut from = 0usize;
+    while let Some(hit) = src[from..].find("Suspend::new(") {
+        let end = from + hit + "Suspend::new(".len();
+        from = end;
+        let Some(body) = super::sources::balanced_block(&src, end) else {
+            continue;
+        };
+        blocks += 1;
+        let lines: Vec<&str> = super::sources::code_lines(&body).collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.contains("Err(") && line.contains("=>")) {
+                continue;
+            }
+            let mut window = vec![*line];
+            for next in lines.iter().skip(i + 1).take(3) {
+                if next.contains("=>") {
+                    break;
+                }
+                window.push(next);
+            }
+            let window = window.join("\n");
+            if window.contains("form-error") || window.contains("<FormError") {
+                offenders.push(window);
+            }
+        }
+    }
+    (offenders, blocks)
+}
+
+/// A failed load inside a `Suspense` renders `DetailLoadError`, never a bare
+/// inline error.
+///
+/// `DetailLoadError` is the documented "message + Retry" block, yet the
+/// enterprise app's Access, Permissions and App roles tabs and the SharePoint
+/// site-permission list each printed `Err(e)` as a red line — the Access tab as
+/// `error [graph_http_429]: …` — with no Retry: a throttled read was a dead end
+/// until the operator switched tabs. Every such tab already owns the `reload`
+/// signal `on_retry` needs, so there is no reason to route around it.
+#[test]
+fn suspense_load_failures_render_detail_load_error() {
+    let modules = super::sources::web_modules();
+    for (file, marker, why) in SEARCH_ERR_ARMS {
+        let src = modules
+            .iter()
+            .find(|(name, _)| name == file)
+            .map(|(_, src)| src)
+            .unwrap_or_else(|| {
+                panic!("stale SEARCH_ERR_ARMS entry `{file}` ({why}): no such file")
+            });
+        assert!(
+            src.contains(marker),
+            "stale SEARCH_ERR_ARMS entry `{file}` ({why}): `{marker}` no longer occurs"
+        );
+    }
+    let (mut offenders, mut blocks) = (Vec::new(), 0usize);
+    for (name, src) in &modules {
+        let (found, walked) = suspend_err_offenders(src);
+        blocks += walked;
+        for window in found {
+            let exempt = SEARCH_ERR_ARMS
+                .iter()
+                .any(|(file, marker, _)| file == name && window.contains(marker));
+            if !exempt {
+                offenders.push(format!("{name}: {}", window.trim()));
+            }
+        }
+    }
+    assert!(
+        blocks >= 30,
+        "walked only {blocks} `Suspend::new(` blocks — the scan is broken, and a rule that \
+         scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "Suspense load failures rendered as a bare inline error: {offenders:#?}\n\
+         Render `<DetailLoadError error=e on_retry=Callback::new(move |_| reload.update(|n| \
+         *n += 1)) />` so the failure offers Retry (a typed search with a String error goes \
+         in SEARCH_ERR_ARMS with its reason)."
+    );
+}
+
+/// The Suspense scanner flags an inline-error arm and does not let a consent
+/// arm that renders nothing bleed into the `DetailLoadError` arm after it.
+#[test]
+fn the_suspense_err_scanner_reads_the_shapes_the_tree_uses() {
+    let bad = "{move || Suspend::new(async move {\n\
+               match res.await {\n\
+               Ok(v) => v.into_any(),\n\
+               Err(e) => view! { <Body1 class=\"form-error\">{e.message}</Body1> }.into_any(),\n\
+               }\n\
+               })}";
+    let (offenders, blocks) = suspend_err_offenders(bad);
+    assert_eq!(blocks, 1);
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+
+    let clean = "{move || Suspend::new(async move {\r\n\
+                 match res.await {\r\n\
+                 Ok(v) => v.into_any(),\r\n\
+                 Err(e) if e.is_consent_required() => ().into_any(),\r\n\
+                 Err(e) => {\r\n\
+                 view! { <DetailLoadError error=e on_retry=retry /> }.into_any()\r\n\
+                 }\r\n\
+                 }\r\n\
+                 })}\r\n\
+                 view! { <FormError>{msg}</FormError> }";
+    let (offenders, blocks) = suspend_err_offenders(clean);
+    assert_eq!(blocks, 1);
+    assert!(offenders.is_empty(), "{offenders:?}");
+}
+
 /// Every row table is keyboard-navigable.
 ///
 /// The shortcuts sheet promises "↑ ↓ / Home / End — Move between rows in a

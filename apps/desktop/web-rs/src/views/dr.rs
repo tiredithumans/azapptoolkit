@@ -10,7 +10,7 @@ use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, Card, CopyableId, SectionHeader};
+use crate::components::ui::{Callout, Card, CopyableId, FormError, SectionHeader};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 
@@ -282,7 +282,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     }}
                 </Show>
                 <Show when=move || error.get().is_some()>
-                    <p class="dr-view__error" role="alert">{move || error.get().unwrap_or_default()}</p>
+                    <FormError>{move || error.get().unwrap_or_default()}</FormError>
                 </Show>
 
                 <Show when=move || captured.get().is_some()>
@@ -381,7 +381,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 </div>
 
                 <Show when=move || restore_error.get().is_some()>
-                    <p class="dr-view__error" role="alert">{move || restore_error.get().unwrap_or_default()}</p>
+                    <FormError>{move || restore_error.get().unwrap_or_default()}</FormError>
                 </Show>
 
                 // Plan preview (before confirming).
@@ -444,23 +444,23 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
     view! {
         <div class="dr-view__plan">
             {cloud.map(|m| view! {
-                <p class="dr-view__error" role="alert">
+                <Callout tone="danger" role="alert">
                     {format!(
                         "This backup is from the \"{}\" cloud, but this app targets \"{}\". \
                          Restore is blocked — use a build configured for the backup's cloud.",
                         m.backup_cloud.as_str(), m.destination_cloud.as_str(),
                     )}
-                </p>
+                </Callout>
             })}
             {schema.map(|s| view! {
-                <p class="dr-view__error" role="alert">
+                <Callout tone="danger" role="alert">
                     {format!(
                         "This backup was written by a newer version of azapptoolkit (manifest \
                          schema {}; this version reads up to {}). Restore is blocked — update \
                          azapptoolkit first.",
                         s.manifest_version, s.supported_version,
                     )}
-                </p>
+                </Callout>
             })}
             {same_tenant.map(|src| view! {
                 <Callout tone="warn">
@@ -688,7 +688,7 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
 
             {(!failures.is_empty()).then(|| view! {
                 <div class="dr-view__failures">
-                    <p class="dr-view__error">"Apps that could not be created:"</p>
+                    <FormError>"Apps that could not be created:"</FormError>
                     <ul>
                         {failures.into_iter().map(|f| view! {
                             <li>{format!("{}: {}", f.display_name, f.message)}</li>

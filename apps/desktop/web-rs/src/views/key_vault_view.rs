@@ -14,11 +14,11 @@
 //! the next tenant's screen.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Spinner, SpinnerSize};
 
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{Callout, CopyableId, DataTable, SectionHeader};
+use crate::components::ui::{Callout, CopyableId, DataTable, FormError, SectionHeader};
 use crate::components::vault_picker::VaultPicker;
 use crate::state::{ActiveView, use_session};
 
@@ -227,7 +227,7 @@ pub fn KeyVaultView() -> impl IntoView {
                         }
                     })
             }}
-            {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
         </main>
     }
 }

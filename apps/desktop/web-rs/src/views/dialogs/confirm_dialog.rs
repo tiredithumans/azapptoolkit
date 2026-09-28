@@ -8,6 +8,7 @@ use leptos::html;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
+use crate::components::ui::FormError;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
 
@@ -90,7 +91,7 @@ pub fn ConfirmDialog(
                                 </label>
                             }
                         })}
-                    {move || error.get().map(|e| view! { <Body1 class="form-error">{e}</Body1> })}
+                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                     <div class="actions-row">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Secondary)

@@ -21,6 +21,10 @@ async fn copy_click_shows_transient_copied_badge() {
     );
     ts::click(".copyable-id .ui-icon-btn");
     ts::wait_for(|| ts::query(".copyable-id__copied").is_some()).await;
+    assert!(
+        ts::query(".copyable-id__copied[role=status]").is_some(),
+        "the badge is a status live region, so the copy is announced"
+    );
 
     // The badge is transient: it clears itself after the reset timeout.
     ts::wait_for(|| ts::query(".copyable-id__copied").is_none()).await;
