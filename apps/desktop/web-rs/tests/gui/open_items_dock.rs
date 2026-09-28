@@ -34,16 +34,6 @@ fn visible_panes() -> usize {
     visible_count(".workspace__pane")
 }
 
-/// True when the focused element matches `selector`. Focus placement is the
-/// whole property here and no DOM query expresses it.
-fn focused_matches(selector: &str) -> bool {
-    web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.active_element())
-        .and_then(|el| el.matches(selector).ok())
-        .unwrap_or(false)
-}
-
 /// The App Reg / Enterprise detail commands, so opened windows load and report
 /// their names back to the dock.
 fn mock_details() {
@@ -264,12 +254,12 @@ async fn focus_moves_into_the_pane_and_returns_on_collapse() {
     );
     // Without this the overlay opens with focus still on <body>, ~13 Tab
     // presses (the whole nav rail) away from the pane it just opened.
-    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+    ts::wait_for(|| ts::focused_matches(".workspace__pane")).await;
 
     // Escape collapses the workspace; focus goes back to the row, so the
     // operator keeps their place in the list rather than restarting at <body>.
     ts::press_key("body", "Escape");
-    ts::wait_for(|| focused_matches(".probe-row")).await;
+    ts::wait_for(|| ts::focused_matches(".probe-row")).await;
 }
 
 #[wasm_bindgen_test]
@@ -305,7 +295,7 @@ async fn accelerators_step_the_dock_and_close_the_focused_item() {
     // would drop the operator back on `<body>` with every step.
     ts::press_key_with_accel("body", "]");
     ts::wait_for(|| m.session.shown_items.get_untracked() == vec![b]).await;
-    ts::wait_for(|| focused_matches(".workspace__pane")).await;
+    ts::wait_for(|| ts::focused_matches(".workspace__pane")).await;
     ts::press_key_with_accel("body", "[");
     ts::wait_for(|| m.session.shown_items.get_untracked() == vec![a]).await;
 

@@ -39,7 +39,9 @@ and that regex.
 
 **Two parsers now depend on that header**, and they must agree: `release.yml` (above) and
 `web-rs/build.rs`, which slices the *running* version's section the same way and bakes it into
-the wasm bundle for the in-app "What's new" (below). `web-rs`'s
+the wasm bundle for the in-app "What's new" (below). Their agreement is pinned by
+`both_changelog_extractors_produce_the_same_notes` (`repo_invariants/release.rs`), which mounts
+the real `build_support.rs` parser. `web-rs`'s
 `the_running_versions_changelog_section_is_baked_in` test fails the build when the manifest
 version has no finalized section — the same mistake that would otherwise ship blank in-app notes.
 

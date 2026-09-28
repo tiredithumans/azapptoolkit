@@ -10,7 +10,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SiteAppGrantRow};
@@ -18,17 +17,6 @@ use azapptoolkit_web_rs::components::sharepoint_sites_section::SharePointSitesSe
 use azapptoolkit_web_rs::test_support as ts;
 
 const APP_ID: &str = "11111111-2222-3333-4444-555555555555";
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
 
 fn row(site: &str, roles: &[&str]) -> SiteAppGrantRow {
     SiteAppGrantRow {
@@ -67,7 +55,7 @@ async fn mount_with(access: Option<AppSiteAccessDto>) -> ts::Mounted {
         0,
         "a collapsed section must cost no IPC"
     );
-    click_button("Show");
+    ts::click_button_labelled("Show");
     m
 }
 
@@ -177,7 +165,7 @@ async fn no_cached_sweep_offers_a_scan_instead_of_an_empty_table() {
             truncated: false,
         },
     );
-    click_button("Scan sites");
+    ts::click_button_labelled("Scan sites");
     ts::wait_for(|| ts::body_contains("Marketing")).await;
     assert!(
         !ts::body_contains("Finance"),
@@ -200,7 +188,7 @@ async fn picking_a_site_loads_it_into_the_per_site_flow() {
 
     // "Manage" hands the URL to the existing grant/list/revoke section instead
     // of duplicating those mutations — so the site's permissions get listed.
-    click_button("Manage");
+    ts::click_button_labelled("Manage");
     ts::wait_for(|| ts::call_count("list_site_permissions") >= 1).await;
     let call = ts::last_call("list_site_permissions").expect("listed the picked site");
     assert_eq!(

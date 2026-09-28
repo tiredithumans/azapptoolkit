@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::applications::GeneratedCertificateResult;
@@ -29,22 +28,6 @@ fn generated() -> GeneratedCertificateResult {
         pfx_password: "PFXPASSWORD".to_string(),
         expires: "2027-01-01T00:00:00Z".to_string(),
     }
-}
-
-/// Clicks the first button whose trimmed text matches exactly.
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    let seen: Vec<String> = ts::query_all("button")
-        .iter()
-        .map(|e| e.text_content().unwrap_or_default().trim().to_string())
-        .collect();
-    panic!("no button labelled `{label}`; saw {seen:?}");
 }
 
 /// Mounts the tab, returning a counter of `on_changed` calls alongside it.
@@ -85,11 +68,11 @@ async fn a_generated_certificate_reveals_its_private_key_once() {
     let _m = mount_tab();
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
 
     // The dialog states the promise this test exists to hold it to.
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::call_count("generate_self_signed_certificate") == 1).await;
 
     // The reveal itself.
@@ -157,12 +140,12 @@ async fn saving_the_pfx_leaves_the_reveal_standing() {
     let (_m, changes) = mount_tab_counting();
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
 
-    click_button("Save .pfx…");
+    ts::click_button_labelled("Save .pfx…");
     ts::wait_for(|| ts::call_count("save_generated_certificate_pfx") == 1).await;
     ts::wait_for(|| ts::body_contains("/tmp/contoso.pfx")).await;
 
@@ -177,7 +160,7 @@ async fn saving_the_pfx_leaves_the_reveal_standing() {
     );
     assert!(ts::body_contains("PFXPASSWORD"), "and so must the password");
 
-    click_button("Done");
+    ts::click_button_labelled("Done");
     ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
     assert_eq!(changes.get_untracked(), 1);
 }
@@ -197,12 +180,12 @@ async fn a_failed_pfx_save_explains_itself_inside_the_reveal() {
     );
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
 
-    click_button("Save .pfx…");
+    ts::click_button_labelled("Save .pfx…");
     ts::wait_for(|| ts::body_contains("disk full")).await;
 
     let in_modal = ts::query_all(".modal .form-error")
@@ -246,9 +229,9 @@ async fn a_failed_generate_explains_itself_inside_the_dialog() {
     });
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::call_count("generate_self_signed_certificate") == 1).await;
 
     ts::wait_for(|| ts::body_contains("unsupported character")).await;
@@ -280,9 +263,9 @@ async fn the_reveal_defers_the_detail_reload_until_it_is_dismissed() {
     let (_m, changes) = mount_tab_counting();
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::call_count("generate_self_signed_certificate") == 1).await;
     ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
 
@@ -294,7 +277,7 @@ async fn the_reveal_defers_the_detail_reload_until_it_is_dismissed() {
 
     // Dismissing it is what releases the reload — the app now holds a new
     // public certificate, so the list behind the modal is stale until then.
-    click_button("Done");
+    ts::click_button_labelled("Done");
     ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
     assert_eq!(
         changes.get_untracked(),
@@ -313,9 +296,9 @@ async fn escape_does_not_dismiss_the_private_key_reveal() {
     let (_m, changes) = mount_tab_counting();
 
     ts::wait_for(|| ts::body_contains("Generate certificate…")).await;
-    click_button("Generate certificate…");
+    ts::click_button_labelled("Generate certificate…");
     ts::wait_for(|| ts::body_contains("shows the private key once")).await;
-    click_button("Generate");
+    ts::click_button_labelled("Generate");
     ts::wait_for(|| ts::body_contains("PRIVATEPART")).await;
 
     ts::press_key("body", "Escape");
@@ -326,7 +309,7 @@ async fn escape_does_not_dismiss_the_private_key_reveal() {
     );
     assert_eq!(changes.get_untracked(), 0);
 
-    click_button("Done");
+    ts::click_button_labelled("Done");
     ts::wait_for(|| !ts::body_contains("PRIVATEPART")).await;
     assert_eq!(changes.get_untracked(), 1);
 }
@@ -345,9 +328,9 @@ async fn escape_does_not_dismiss_the_new_secret_reveal() {
     );
 
     ts::wait_for(|| ts::body_contains("+ New secret")).await;
-    click_button("+ New secret");
+    ts::click_button_labelled("+ New secret");
     ts::wait_for(|| ts::body_contains("New client secret")).await;
-    click_button("Create");
+    ts::click_button_labelled("Create");
     ts::wait_for(|| ts::body_contains("SECRETVALUE")).await;
 
     ts::press_key("body", "Escape");
@@ -358,7 +341,7 @@ async fn escape_does_not_dismiss_the_new_secret_reveal() {
     );
     assert_eq!(changes.get_untracked(), 0);
 
-    click_button("Done");
+    ts::click_button_labelled("Done");
     ts::wait_for(|| !ts::body_contains("SECRETVALUE")).await;
     assert_eq!(changes.get_untracked(), 1);
 }

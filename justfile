@@ -17,13 +17,15 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 # test: the runner polls the page until it prints `test result:`, so every test
 # in a shard shares one 60s deadline.
 #
-# That is the reason the GUI tests stay sharded (tests/gui_N.rs, 8-21 MB each,
-# 16-21 tests apiece) rather than merging into one binary — four independent 60s
-# budgets, not one shared by all 72 tests. Merging was measured and is not a win
-# anyway: a single binary is 29 MB vs 53 MB across four, but builds *slower*
-# (49-50s vs 46-47s) because cargo links the four in parallel and the merged one
-# is a single serial link. `just`'s `export` puts it in every recipe's
-# environment cross-platform; only wasm-pack's runner reads it.
+# That is the reason the GUI tests stay sharded (tests/gui_N.rs) rather than
+# merging into one binary — four independent 60s budgets, not one shared by
+# every test. As of 2026-09-28: ~213 tests, 37-69 apiece, 12-28 MB per shard
+# (`just web-itest-size` prints today's sizes). Merging was measured, when the
+# suite was 72 tests, and was not a win anyway: a single binary was 29 MB vs
+# 53 MB across four, but built *slower* (49-50s vs 46-47s) because cargo links
+# the four in parallel and the merged one is a single serial link. `just`'s
+# `export` puts it in every recipe's environment cross-platform; only wasm-pack's
+# runner reads it.
 export WASM_BINDGEN_TEST_TIMEOUT := "60"
 
 # Show the recipe list when run with no arguments.
@@ -130,13 +132,16 @@ web-itest-auto:
 
 # Enforce the per-shard wasm size ceiling the whole GUI-test strategy rests on.
 #
-# A single merged test binary (~78 MB) exceeds what headless Chrome will
-# instantiate, so `tests/gui_N.rs` shards exist to stay under ~52 MB each. That
-# number lived ONLY in comments here and in Cargo.toml — nothing measured it. A
-# shard drifting past the ceiling does not fail with "too big"; it fails as an
-# opaque 60s `Failed to detect test as having been run` timeout, which reads like
-# a flaky browser and sends you looking in the wrong place. Measured, it is one
-# line of output naming the shard.
+# At opt-level 0 a merged test binary (~78 MB stripped) exceeded what headless
+# Chrome will instantiate; `[profile.test] opt-level = 1` (web-rs/Cargo.toml)
+# brought the merge to ~29 MB when the suite had 24 modules. The
+# `tests/gui_N.rs` shards also exist for the per-binary 60s runner budget
+# (`WASM_BINDGEN_TEST_TIMEOUT`, top of this file), and each must still stay
+# under ~52 MB. That number lived ONLY in comments here and in Cargo.toml —
+# nothing measured it. A shard drifting past the ceiling does not fail with "too
+# big"; it fails as an opaque 60s `Failed to detect test as having been run`
+# timeout, which reads like a flaky browser and sends you looking in the wrong
+# place. Measured, it is one line of output naming the shard.
 #
 # Unix/CI only (bash shebang): this is a size gate on the Linux CI runner, not
 # something a Windows dev box needs to reproduce. The `[windows]` twin below

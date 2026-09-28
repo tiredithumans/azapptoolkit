@@ -224,6 +224,123 @@ pub fn focus(selector: &str) {
     }
 }
 
+/// True when the focused element (`document.activeElement`) matches `selector`
+/// — for asserting focus placement, which no DOM query expresses.
+pub fn focused_matches(selector: &str) -> bool {
+    document()
+        .active_element()
+        .is_some_and(|el| el.matches(selector).unwrap_or(false))
+}
+
+// ------------------------- label-based button helpers -------------------------
+//
+// The flow tests' most common gesture: act on a `<button>` by its visible text.
+// A label matches when the button's trimmed `textContent` equals it exactly (not
+// a prefix), so "Save" never hits "Save all".
+
+/// The `<button>`s under `scope` (a CSS selector; empty = the whole document).
+fn buttons_in(scope: &str) -> Vec<web_sys::Element> {
+    if scope.is_empty() {
+        query_all("button")
+    } else {
+        query_all(&format!("{scope} button"))
+    }
+}
+
+fn is_labelled(el: &web_sys::Element, label: &str) -> bool {
+    el.text_content().unwrap_or_default().trim() == label
+}
+
+/// Every button label under `scope`, for a failure message that shows what the
+/// page actually rendered.
+fn labels_in(scope: &str) -> Vec<String> {
+    buttons_in(scope)
+        .iter()
+        .map(|el| el.text_content().unwrap_or_default().trim().to_string())
+        .collect()
+}
+
+/// The first `<button>` under `scope` whose trimmed text is exactly `label`.
+/// `scope` is a CSS selector; pass `""` for the whole document.
+pub fn button_labelled_in(scope: &str, label: &str) -> Option<web_sys::HtmlElement> {
+    buttons_in(scope)
+        .into_iter()
+        .find(|el| is_labelled(el, label))
+        .map(|el| el.unchecked_into())
+}
+
+/// The first `<button>` in the document whose trimmed text is exactly `label`.
+pub fn button_labelled(label: &str) -> Option<web_sys::HtmlElement> {
+    button_labelled_in("", label)
+}
+
+/// True once a button with exactly this label is rendered anywhere.
+pub fn has_button_labelled(label: &str) -> bool {
+    button_labelled(label).is_some()
+}
+
+/// True when any button with exactly this label is rendered AND enabled (no
+/// `disabled` attribute) — e.g. a wizard's "Next" once the step is valid.
+pub fn button_labelled_enabled(label: &str) -> bool {
+    buttons_in("")
+        .iter()
+        .any(|el| is_labelled(el, label) && !el.has_attribute("disabled"))
+}
+
+/// Click the first button with exactly this label. Panics, listing every
+/// button label on the page, when there is none.
+pub fn click_button_labelled(label: &str) {
+    match button_labelled(label) {
+        Some(el) => el.click(),
+        None => {
+            let seen = labels_in("");
+            panic!("no button labelled `{label}`; saw {seen:?}");
+        }
+    }
+}
+
+/// [`click_button_labelled`] restricted to the buttons under `scope` — for a
+/// modal or panel whose button shares its label with one behind it. Panics,
+/// listing the labels under `scope`, when there is none.
+pub fn click_button_labelled_in(scope: &str, label: &str) {
+    match button_labelled_in(scope, label) {
+        Some(el) => el.click(),
+        None => {
+            let seen = labels_in(scope);
+            panic!("no button labelled `{label}` under `{scope}`; saw {seen:?}");
+        }
+    }
+}
+
+/// Toggle the permission-picker catalog row whose permission value is exactly
+/// `value`: finds the `.permission-picker__row` whose
+/// `.permission-picker__row-head strong` reads `value` and clicks its
+/// `.permission-picker__check` cart checkbox. The one place those selectors are
+/// named for the tests, so a picker markup rename has one fix. Panics when no
+/// row matches.
+pub fn select_picker_permission(value: &str) {
+    for row in query_all(".permission-picker__row") {
+        let head = row
+            .query_selector(".permission-picker__row-head strong")
+            .ok()
+            .flatten();
+        let is_match = head
+            .map(|h| h.text_content().unwrap_or_default().trim() == value)
+            .unwrap_or(false);
+        if is_match {
+            let cb = row
+                .query_selector(".permission-picker__check")
+                .ok()
+                .flatten()
+                .expect("permission row has a checkbox");
+            let el: web_sys::HtmlElement = cb.unchecked_into();
+            el.click();
+            return;
+        }
+    }
+    panic!("no permission row for `{value}`");
+}
+
 /// Dispatch a bubbling `keydown` for `key` (e.g. "ArrowDown", "Enter", "Escape")
 /// on the element matching `selector`, as a keyboard user would.
 pub fn press_key(selector: &str, key: &str) {

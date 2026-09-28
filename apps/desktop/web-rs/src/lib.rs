@@ -323,8 +323,9 @@ fn initial_theme() -> Theme {
 
 /// `build.rs`'s CHANGELOG parser, mounted so its tests run in `cargo test`.
 /// A build script belongs to no test target, and this extraction has a second,
-/// independent implementation in `release.yml` — the edge cases are worth
-/// pinning on at least this side.
+/// independent implementation in `release.yml`; agreement between the two is
+/// pinned by `both_changelog_extractors_produce_the_same_notes`
+/// (`src-tauri/tests/repo_invariants/release.rs`); the edge cases are pinned here.
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;

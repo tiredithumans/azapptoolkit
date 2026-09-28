@@ -62,17 +62,6 @@ async fn mount_security() -> ts::Mounted {
     m
 }
 
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
 #[wasm_bindgen_test]
 async fn sp_rows_are_excluded_from_selection_on_the_apps_pane() {
     let m = mount_security().await;
@@ -145,10 +134,10 @@ async fn sp_mailbox_fix_routes_to_the_sp_only_command() {
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
 
-    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(".modal textarea", "Sales Team");
-    click_button("Scope access");
+    ts::click_button_labelled("Scope access");
     ts::wait_for(|| ts::call_count("grant_managed_identity_scoped_exchange_access") == 1).await;
 
     // Never the app-registration wrapper — it would 404 resolving the
@@ -198,13 +187,13 @@ async fn sp_mailbox_fix_offers_exchange_consent_on_consent_required() {
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
 
-    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(".modal textarea", "Sales Team");
-    click_button("Scope access");
+    ts::click_button_labelled("Scope access");
     ts::wait_for(|| ts::body_contains("Exchange.Manage")).await;
 
-    click_button("Grant consent");
+    ts::click_button_labelled("Grant consent");
     ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;
     let call = ts::last_call("request_scope_consent").unwrap();
     assert_eq!(call.arg_str("feature").as_deref(), Some("exchange"));
@@ -237,10 +226,10 @@ async fn sp_mailbox_fix_keeps_a_warned_grant_open() {
         .set(Some("orgwide_mailbox".to_string()));
     ts::wait_for(|| ts::body_contains("Scope 1 mailbox permission")).await;
 
-    click_button("Scope 1 mailbox permission to specific mailboxes");
+    ts::click_button_labelled("Scope 1 mailbox permission to specific mailboxes");
     ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
     ts::set_textarea_value(".modal textarea", "Sales Team");
-    click_button("Scope access");
+    ts::click_button_labelled("Scope access");
     ts::wait_for(|| ts::body_contains("with a different group set")).await;
 
     assert!(
@@ -317,9 +306,9 @@ async fn a_degraded_run_exports_its_own_items() {
     let _m = ts::mount_view(|| view! { <SecurityView /> });
     ts::wait_for(|| ts::body_contains("Org-wide mailbox access")).await;
 
-    click_button("Export");
+    ts::click_button_labelled("Export");
     ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
-    click_button("Export as CSV…");
+    ts::click_button_labelled("Export as CSV…");
     ts::wait_for(|| ts::call_count("save_audit_to_file") == 1).await;
 
     let call = ts::last_call("save_audit_to_file").unwrap();

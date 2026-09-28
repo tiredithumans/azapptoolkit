@@ -284,7 +284,9 @@ Tests are `tests/gui/<view>.rs` **modules**, grouped into shard binaries
 (`tests/gui_N.rs`) via `#[path] mod`; the harness lives in
 `web-rs/src/test_support/`.
 
-**Why shards.** One merged binary exceeds what headless Chrome will instantiate.
+**Why shards.** Each served test wasm must stay under the ceiling headless Chrome
+will instantiate (at opt-level 0 one merged binary exceeded it), and each binary
+gets its own 60 s runner budget (`WASM_BINDGEN_TEST_TIMEOUT`, justfile).
 `just web-itest-size` enforces the per-shard wasm ceiling and prints how to
 split when a shard grows past it. It runs in CI and in `just verify-full`
 (Unix; the Windows variant loud-skips).

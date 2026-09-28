@@ -22,22 +22,6 @@ use azapptoolkit_web_rs::components::toast::ToastHost;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::tabs::credentials_tab::CredentialsTab;
 
-/// Clicks the first button whose trimmed text matches exactly.
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    let seen: Vec<String> = ts::query_all("button")
-        .iter()
-        .map(|e| e.text_content().unwrap_or_default().trim().to_string())
-        .collect();
-    panic!("no button labelled `{label}`; saw {seen:?}");
-}
-
 fn expired_secret(key_id: &str) -> PasswordCredential {
     PasswordCredential {
         key_id: key_id.to_string(),
@@ -88,7 +72,7 @@ async fn a_completed_sweep_confirms_itself_outside_the_reloaded_subtree() {
     let _m = mount_with_toasts(vec![expired_secret("key-1"), expired_secret("key-2")]);
 
     ts::wait_for(|| ts::body_contains("Remove 2 expired")).await;
-    click_button("Remove 2 expired");
+    ts::click_button_labelled("Remove 2 expired");
     ts::wait_for(|| ts::body_contains("Remove all expired secrets?")).await;
     // The modal covers the tab it was opened from, and the workspace can have
     // several app windows open behind it — so "this application" has to be a
@@ -99,7 +83,7 @@ async fn a_completed_sweep_confirms_itself_outside_the_reloaded_subtree() {
             .as_deref(),
         Some("Contoso CRM"),
     );
-    click_button("Remove expired");
+    ts::click_button_labelled("Remove expired");
     ts::wait_for(|| ts::call_count("remove_expired_passwords") == 1).await;
 
     // In the toast stack, which the shell mounts above the detail pane — not in
@@ -134,9 +118,9 @@ async fn a_partial_sweep_says_that_some_secrets_survived() {
     let _m = mount_with_toasts(vec![expired_secret("key-1"), expired_secret("key-2")]);
 
     ts::wait_for(|| ts::body_contains("Remove 2 expired")).await;
-    click_button("Remove 2 expired");
+    ts::click_button_labelled("Remove 2 expired");
     ts::wait_for(|| ts::body_contains("Remove all expired secrets?")).await;
-    click_button("Remove expired");
+    ts::click_button_labelled("Remove expired");
     ts::wait_for(|| ts::call_count("remove_expired_passwords") == 1).await;
 
     ts::wait_for(|| ts::query(".toast").is_some()).await;
@@ -172,9 +156,9 @@ async fn a_sweep_stopped_by_a_dead_session_offers_reauthentication() {
     let _m = mount_with_toasts(vec![expired_secret("key-1"), expired_secret("key-2")]);
 
     ts::wait_for(|| ts::body_contains("Remove 2 expired")).await;
-    click_button("Remove 2 expired");
+    ts::click_button_labelled("Remove 2 expired");
     ts::wait_for(|| ts::body_contains("Remove all expired secrets?")).await;
-    click_button("Remove expired");
+    ts::click_button_labelled("Remove expired");
     ts::wait_for(|| ts::call_count("remove_expired_passwords") == 1).await;
 
     ts::wait_for(|| {
@@ -216,7 +200,7 @@ fn mock_rotation() {
 /// danger button — which must open a confirm, not dispatch.
 async fn open_rotate_remove_confirm() {
     ts::wait_for(|| ts::body_contains("Rotate into Key Vault…")).await;
-    click_button("Rotate into Key Vault…");
+    ts::click_button_labelled("Rotate into Key Vault…");
     ts::wait_for(|| {
         ts::query_all(".modal input").iter().any(|el| {
             el.clone()
@@ -227,7 +211,7 @@ async fn open_rotate_remove_confirm() {
     })
     .await;
     ts::wait_for(|| ts::body_contains("Rotate & remove 2 existing")).await;
-    click_button("Rotate & remove 2 existing");
+    ts::click_button_labelled("Rotate & remove 2 existing");
     ts::wait_for(|| ts::body_contains("Remove every existing client secret?")).await;
 }
 
@@ -253,7 +237,7 @@ async fn rotate_and_remove_names_the_count_and_waits_for_confirmation() {
         "the confirm must name the app and the count, got {subject:?}"
     );
 
-    click_button("Rotate & remove");
+    ts::click_button_labelled("Rotate & remove");
     ts::wait_for(|| ts::call_count("rotate_app_credential") == 1).await;
     let call = ts::last_call("rotate_app_credential").unwrap();
     assert_eq!(

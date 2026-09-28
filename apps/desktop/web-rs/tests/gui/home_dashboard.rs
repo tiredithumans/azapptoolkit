@@ -8,7 +8,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::audit::CachedAuditSummary;
@@ -33,17 +32,6 @@ fn mock_inventory() {
         "list_credential_expirations",
         &fixtures::credential_expirations(),
     );
-}
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
 }
 
 #[wasm_bindgen_test]
@@ -84,7 +72,7 @@ async fn no_cached_run_trips_pending_audit_run_in_one_click() {
     let m = ts::mount_view(|| view! { <HomeDashboard /> });
     ts::wait_for(|| ts::body_contains("No audit run in this session.")).await;
 
-    click_button("Run a security audit");
+    ts::click_button_labelled("Run a security audit");
     ts::tick().await;
 
     assert!(

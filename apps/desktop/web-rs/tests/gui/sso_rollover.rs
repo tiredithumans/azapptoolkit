@@ -22,22 +22,6 @@ use wasm_bindgen_test::*;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_detail_pane::sso_tab::SsoContent;
 
-/// Clicks the first button whose trimmed text matches exactly.
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    let seen: Vec<String> = ts::query_all("button")
-        .iter()
-        .map(|e| e.text_content().unwrap_or_default().trim().to_string())
-        .collect();
-    panic!("no button labelled `{label}`; saw {seen:?}");
-}
-
 /// Whether some `pre.secret-reveal` block holds `needle`.
 fn revealed(needle: &str) -> bool {
     ts::query_all("pre.secret-reveal")
@@ -228,7 +212,7 @@ async fn the_sso_tab_fills_from_one_config_read() {
 
 /// Opens the immediate-rotation confirmation, types the keyword and confirms.
 async fn confirm_rotation() {
-    click_button("Rotate and activate immediately");
+    ts::click_button_labelled("Rotate and activate immediately");
     assert_eq!(
         ts::call_count("rotate_saml_signing_certificate"),
         0,
@@ -245,7 +229,7 @@ async fn confirm_rotation() {
         })
     })
     .await;
-    click_button("Rotate now");
+    ts::click_button_labelled("Rotate now");
 }
 
 /// The rotated certificate is show-once (`SsoCertResult::base64`), and the
@@ -306,9 +290,9 @@ async fn rotating_immediately_asks_first_and_cancel_does_nothing() {
     ));
     ts::wait_for(|| ts::body_contains("Rotate and activate immediately")).await;
 
-    click_button("Rotate and activate immediately");
+    ts::click_button_labelled("Rotate and activate immediately");
     ts::wait_for(|| ts::body_contains("Rotate the signing certificate now?")).await;
-    click_button("Cancel");
+    ts::click_button_labelled("Cancel");
     ts::wait_for(|| !ts::body_contains("Rotate the signing certificate now?")).await;
 
     assert_eq!(
@@ -347,7 +331,7 @@ async fn retiring_the_previous_certificate_asks_first() {
     let _m = mount(&roll);
     ts::wait_for(|| ts::body_contains("Retire previous certificate")).await;
 
-    click_button("Retire previous certificate");
+    ts::click_button_labelled("Retire previous certificate");
     ts::wait_for(|| ts::body_contains("Retire the previous signing certificate?")).await;
     assert_eq!(
         ts::call_count("retire_saml_signing_certificate"),
@@ -355,7 +339,7 @@ async fn retiring_the_previous_certificate_asks_first() {
         "retire removes the only rollback — it must not run on one click",
     );
 
-    click_button("Retire");
+    ts::click_button_labelled("Retire");
     ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
     assert_eq!(
         ts::last_call("retire_saml_signing_certificate")

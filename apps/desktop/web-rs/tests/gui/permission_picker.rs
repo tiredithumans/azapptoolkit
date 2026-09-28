@@ -97,51 +97,6 @@ fn select_resource(app_id: &str) {
     select.dispatch_event(&ev).unwrap();
 }
 
-/// Toggle the catalog row whose permission value matches `value` exactly.
-fn select_permission(value: &str) {
-    for row in ts::query_all(".permission-picker__row") {
-        let head = row
-            .query_selector(".permission-picker__row-head strong")
-            .ok()
-            .flatten();
-        let is_match = head
-            .map(|h| h.text_content().unwrap_or_default().trim() == value)
-            .unwrap_or(false);
-        if is_match {
-            let cb = row
-                .query_selector(".permission-picker__check")
-                .ok()
-                .flatten()
-                .expect("permission row has a checkbox");
-            let el: web_sys::HtmlElement = cb.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no permission row for `{value}`");
-}
-
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-fn next_enabled() -> bool {
-    ts::query_all("button").iter().any(|el| {
-        el.text_content().unwrap_or_default().trim() == "Next"
-            && el
-                .dyn_ref::<web_sys::HtmlButtonElement>()
-                .map(|b| !b.disabled())
-                .unwrap_or(false)
-    })
-}
-
 #[wasm_bindgen_test]
 async fn picker_lists_tenant_app_registrations_group() {
     let _m = mount_mi_wizard();
@@ -163,16 +118,16 @@ async fn granting_tenant_app_role_to_managed_identity_passes_tenant_resource() {
     // Select the tenant app as the resource; its Application roles load.
     select_resource(TENANT_APP_ID);
     ts::wait_for(|| ts::body_contains("Orders.Read.All")).await;
-    select_permission("Orders.Read.All");
-    ts::wait_for(next_enabled).await;
+    ts::select_picker_permission("Orders.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
 
     // A managed identity + a custom-API role isn't Exchange/SharePoint-scopable,
     // so the wizard grants org-wide. Step through choose-access → review → grant.
-    click_button("Next");
+    ts::click_button_labelled("Next");
     ts::wait_for(|| ts::body_contains("granted org-wide")).await;
-    click_button("Next");
+    ts::click_button_labelled("Next");
     ts::wait_for(|| ts::body_contains("EVERY resource")).await;
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::call_count("grant_managed_identity_permission") == 1).await;
 
     let call = ts::last_call("grant_managed_identity_permission").unwrap();

@@ -1,5 +1,6 @@
-//! Tests for the GUI test harness itself — specifically, that one broken test
-//! cannot break the ones after it.
+//! Tests for the GUI test harness itself — chiefly, that one broken test
+//! cannot break the ones after it; also that the shared label-based button
+//! helpers every flow test leans on match what they claim to.
 //!
 //! wasm tests compile with `panic = abort`, so a failed assertion or a
 //! `wait_for` timeout kills the module **without unwinding**: `Mounted`'s `Drop`
@@ -74,4 +75,55 @@ async fn mounting_twice_leaves_exactly_one_view_in_the_document() {
         "mounting must sweep an orphaned host, or a remount doubles every count \
          the test then makes",
     );
+}
+
+#[wasm_bindgen_test]
+async fn label_helpers_match_trimmed_text_and_respect_scope() {
+    ts::reset();
+    let outer = RwSignal::new(0u32);
+    let modal = RwSignal::new(0u32);
+    let _m = ts::mount_view(move || {
+        view! {
+            <div class="harness-labels">
+                <button on:click=move |_| outer.update(|n| *n += 1)>" Save "</button>
+                <button disabled=true>"Next"</button>
+                <div class="modal">
+                    <button on:click=move |_| modal.update(|n| *n += 1)>"Save"</button>
+                </div>
+                <input class="probe" />
+            </div>
+        }
+    });
+    ts::wait_for(|| ts::query(".harness-labels").is_some()).await;
+
+    // Trimmed, exact — never a prefix.
+    assert!(
+        ts::has_button_labelled("Save"),
+        "surrounding whitespace is trimmed"
+    );
+    assert!(
+        !ts::has_button_labelled("Sav"),
+        "a label is an exact match, not a prefix"
+    );
+    assert!(ts::button_labelled("Next").is_some());
+    assert!(
+        !ts::button_labelled_enabled("Next"),
+        "a disabled button is not enabled"
+    );
+    assert!(ts::button_labelled_enabled("Save"));
+
+    // Scoped: only the modal's button is reachable under `.modal`.
+    ts::click_button_labelled_in(".modal", "Save");
+    ts::tick().await;
+    assert_eq!((outer.get_untracked(), modal.get_untracked()), (0, 1));
+    assert!(ts::button_labelled_in(".modal", "Next").is_none());
+
+    // Unscoped: the first match in document order.
+    ts::click_button_labelled("Save");
+    ts::tick().await;
+    assert_eq!((outer.get_untracked(), modal.get_untracked()), (1, 1));
+
+    ts::focus(".probe");
+    assert!(ts::focused_matches(".probe"));
+    assert!(!ts::focused_matches(".modal button"));
 }

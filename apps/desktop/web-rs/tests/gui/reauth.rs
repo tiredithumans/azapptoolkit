@@ -13,8 +13,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use wasm_bindgen::JsCast;
-
 use azapptoolkit_web_rs::bindings::SignInOutcome;
 use azapptoolkit_web_rs::bindings::usage::GraphUsageResult;
 use azapptoolkit_web_rs::components::toast::ToastHost;
@@ -183,17 +181,6 @@ async fn interaction_required_toast_runs_the_scope_step_up() {
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
 }
 
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
 /// Surfaces that render their own error never reach the toast sink, so an
 /// Azure / Log Analytics MFA policy used to print the raw AADSTS text with no
 /// way forward. Observed Graph activity now offers "Verify identity & retry",
@@ -221,7 +208,7 @@ async fn an_inline_surface_offers_the_resource_step_up_and_retries() {
         view! { <UsagePanel detail=Signal::derive(move || detail.clone()) /> }
     });
 
-    click_button("Check observed usage (90d)");
+    ts::click_button_labelled("Check observed usage (90d)");
     ts::wait_for(|| ts::body_contains("Verify identity & retry")).await;
     assert!(ts::body_contains("verify your identity"));
     assert!(!ts::body_contains("AADSTS"), "our wording, not AAD's code");
@@ -237,7 +224,7 @@ async fn an_inline_surface_offers_the_resource_step_up_and_retries() {
             truncated: false,
         },
     );
-    click_button("Verify identity & retry");
+    ts::click_button_labelled("Verify identity & retry");
     ts::wait_for(|| ts::body_contains("law-prod")).await;
 
     assert_eq!(*features.borrow(), ["log_analytics", "arm"]);
@@ -267,9 +254,9 @@ async fn a_failed_inline_step_up_says_so_and_does_not_retry() {
         view! { <UsagePanel detail=Signal::derive(move || detail.clone()) /> }
     });
 
-    click_button("Check observed usage (90d)");
+    ts::click_button_labelled("Check observed usage (90d)");
     ts::wait_for(|| ts::body_contains("Verify identity & retry")).await;
-    click_button("Verify identity & retry");
+    ts::click_button_labelled("Verify identity & retry");
     ts::wait_for(|| ts::body_contains("Couldn't complete verification")).await;
 
     assert_eq!(

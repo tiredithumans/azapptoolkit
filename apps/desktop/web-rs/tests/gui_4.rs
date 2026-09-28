@@ -1,11 +1,13 @@
 //! GUI test shard 4 of 4.
 //!
-//! Shards exist because a single merged test binary's served wasm exceeds what
-//! headless Chrome will instantiate. Modules are grouped by the **view subtree
-//! they mount**, not by count: the linker keeps only referenced views, so two
-//! modules that mount the same pane cost barely more than one, while splitting
-//! them duplicates that pane across both shards. Re-measure after moving a
-//! module (see the sharding note in AGENTS.md).
+//! Shards keep each served test wasm under the ceiling headless Chrome will
+//! instantiate (`just web-itest-size`) and give each binary its own 60 s runner
+//! budget (`WASM_BINDGEN_TEST_TIMEOUT`, justfile). Modules are grouped by the
+//! **view subtree they mount**, not by count: the linker keeps only referenced
+//! views, so two modules that mount the same pane cost barely more than one,
+//! while splitting them duplicates that pane across both shards. Re-measure
+//! after moving a module (see "Browser GUI tests: sharding" in
+//! `docs/architecture/frontend-workspace.md`).
 //!
 //! This shard holds the small, mostly self-contained surfaces plus shell-level (non-view)
 //! behaviour — none pulls a large view subtree.

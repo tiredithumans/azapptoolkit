@@ -14,17 +14,6 @@ use azapptoolkit_web_rs::bindings::config::ConfigSource;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::settings_view::SettingsView;
 
-/// The button labelled `label` inside `scope`. Scoped because the connection
-/// form and the confirmation over it deliberately carry the same label — the
-/// dialog's is the one that acts.
-fn button_in(scope: &str, label: &str) -> web_sys::HtmlElement {
-    ts::query_all(&format!("{scope} button"))
-        .into_iter()
-        .find(|el| el.text_content().unwrap_or_default().trim() == label)
-        .map(|el| el.unchecked_into())
-        .unwrap_or_else(|| panic!("no {label:?} button under {scope:?}"))
-}
-
 /// Every text input's current value in the active tab pane.
 fn input_values() -> Vec<String> {
     ts::query_all(".settings-tab input")
@@ -104,12 +93,14 @@ async fn tenant_connection_tab_prefills_then_confirms_the_restart() {
 
     // Saving asks first (a restart drops the signed-in session) and names the
     // tenant it is about to sign in to.
-    button_in(".settings-tab", "Save & restart").click();
+    ts::click_button_labelled_in(".settings-tab", "Save & restart");
     ts::wait_for(|| ts::body_contains("Restart and sign in?")).await;
     assert!(ts::body_contains(&configured.tenant_id));
 
-    // Confirming writes both IDs through, then relaunches.
-    button_in(".modal", "Save & restart").click();
+    // Confirming writes both IDs through, then relaunches. Scoped because the
+    // form and the confirmation over it deliberately carry the same label — the
+    // dialog's is the one that acts.
+    ts::click_button_labelled_in(".modal", "Save & restart");
     ts::wait_for(|| ts::last_call("set_auth_config").is_some()).await;
     let call = ts::last_call("set_auth_config").unwrap();
     assert_eq!(

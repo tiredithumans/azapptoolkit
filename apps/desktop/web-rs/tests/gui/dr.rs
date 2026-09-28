@@ -85,7 +85,7 @@ async fn load_plan(p: RestorePlan) -> ts::Mounted {
     let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
     ts::tick().await;
 
-    click_button("Load backup file…");
+    ts::click_button_labelled("Load backup file…");
     ts::wait_for(|| ts::query(".dr-view__plan").is_some()).await;
     m
 }
@@ -98,31 +98,13 @@ async fn run_restore(report: RestoreReport) -> ts::Mounted {
     let m = load_plan(plan()).await;
 
     // The plan lands before the restore button is offered.
-    ts::wait_for(|| has_button("Restore into this tenant…")).await;
-    click_button("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
+    ts::click_button_labelled("Restore into this tenant…");
     // The confirm dialog's own "Restore" is the one that fires the command.
-    ts::wait_for(|| has_button("Restore")).await;
-    click_button("Restore");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
     m
-}
-
-fn has_button(label: &str) -> bool {
-    ts::query_all("button")
-        .iter()
-        .any(|el| el.text_content().unwrap_or_default().trim() == label)
-}
-
-fn click_button(label: &str) {
-    use wasm_bindgen::JsCast;
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
 }
 
 /// Runs a backup whose `backup_tenant` answers `b`, and waits for the result
@@ -131,7 +113,7 @@ async fn run_backup(b: TenantBackup) -> ts::Mounted {
     ts::mock_ok("backup_tenant", &b);
     let m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
     ts::tick().await;
-    click_button("Back up this tenant");
+    ts::click_button_labelled("Back up this tenant");
     ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
     m
 }
@@ -205,7 +187,7 @@ async fn a_too_new_manifest_blocks_restore_before_confirm() {
     .await;
     assert!(ts::body_contains("newer version of azapptoolkit"));
     assert!(
-        !has_button("Restore into this tenant…"),
+        !ts::has_button_labelled("Restore into this tenant…"),
         "a blocked plan must not offer the restore"
     );
 }
@@ -222,7 +204,7 @@ async fn restoring_into_the_source_tenant_warns_of_duplicates() {
     .await;
     assert!(ts::body_contains("second copy of every app registration"));
     // Not a blocker: an operator may mean it.
-    assert!(has_button("Restore into this tenant…"));
+    assert!(ts::has_button_labelled("Restore into this tenant…"));
 }
 
 /// The plan describes the enterprise-app, managed-identity and backup-gap
@@ -271,10 +253,13 @@ async fn a_completed_restore_carries_no_partial_wording() {
 async fn the_restore_button_is_withdrawn_once_a_report_renders() {
     let _m = run_restore(RestoreReport::default()).await;
     assert!(
-        !has_button("Restore into this tenant…"),
+        !ts::has_button_labelled("Restore into this tenant…"),
         "the restore must not be re-runnable with one click"
     );
-    assert!(has_button("Load backup file…"), "re-loading stays possible");
+    assert!(
+        ts::has_button_labelled("Load backup file…"),
+        "re-loading stays possible"
+    );
 }
 
 /// An app a re-run recognised from an earlier run (by its restore tag) is

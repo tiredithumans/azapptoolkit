@@ -124,26 +124,6 @@ async fn mount_security() -> ts::Mounted {
     m
 }
 
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-/// True once a button with exactly this label exists — body-text waits are not
-/// enough here because group blurbs can mention an action's name before the
-/// bulk bar's button renders.
-fn has_button(label: &str) -> bool {
-    ts::query_all("button")
-        .iter()
-        .any(|el| el.text_content().unwrap_or_default().trim() == label)
-}
-
 /// Clicks the "Open" deep-link inside the row for `app_name`. Every row carries
 /// one, so the label alone is ambiguous — scope the search to the row.
 fn click_row_open(app_name: &str) {
@@ -161,19 +141,6 @@ fn click_row_open(app_name: &str) {
         }
     }
     panic!("no Open button in a row for `{app_name}`");
-}
-
-/// Clicks a button inside the bulk bar's armed panel — the panel's confirm can
-/// share its label with the bar's action button, so scope to the panel.
-fn click_panel_button(label: &str) {
-    for el in ts::query_all(".bulk-action-bar__confirm button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no armed-panel button labelled `{label}`");
 }
 
 /// Groups rank by their OWN worst severity, then by how many principals they
@@ -496,7 +463,7 @@ async fn fix_all_selects_only_application_rows() {
     assert!(!ts::body_contains("Mailbox scoping could not be resolved"));
     // The group holds 2 principals (app + SP) but only the app registration is
     // bulk-eligible — Fix all must seed exactly it.
-    click_button("Fix all 1");
+    ts::click_button_labelled("Fix all 1");
     ts::wait_for(|| {
         !m.session
             .tenant_ui
@@ -523,7 +490,7 @@ async fn group_bar_pairs_each_fix_with_its_own_rule() {
         .audit_expanded_group
         .set(Some("redundant_perms".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
-    click_button("Fix all 1");
+    ts::click_button_labelled("Fix all 1");
     ts::wait_for(|| ts::body_contains("Remove redundant permissions")).await;
 
     // …but the over-privileged (advisory) group must NOT — the old
@@ -601,15 +568,19 @@ async fn bulk_add_owner_flow_sends_the_picked_principal() {
         .audit_expanded_group
         .set(Some("ownership".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 2")).await;
-    click_button("Fix all 2");
-    ts::wait_for(|| has_button("Add owner")).await;
-    click_button("Add owner");
+    ts::click_button_labelled("Fix all 2");
+    // A button wait, not a body-text one: group blurbs can mention an action's
+    // name before the bulk bar's button renders.
+    ts::wait_for(|| ts::has_button_labelled("Add owner")).await;
+    ts::click_button_labelled("Add owner");
     ts::wait_for(|| ts::query(".bulk-action-bar__confirm input").is_some()).await;
     ts::set_input_value(".bulk-action-bar__confirm input", "dana");
     ts::wait_for(|| ts::query(".add-owner-candidates button").is_some()).await;
     ts::click(".add-owner-candidates button");
     ts::wait_for(|| ts::body_contains("Adding:")).await;
-    click_panel_button("Add owner");
+    // Scoped to the armed panel: its confirm shares its label with the bar's
+    // action button.
+    ts::click_button_labelled_in(".bulk-action-bar__confirm", "Add owner");
     ts::wait_for(|| ts::call_count("bulk_add_owner") == 1).await;
 
     let call = ts::last_call("bulk_add_owner").unwrap();
@@ -645,12 +616,12 @@ async fn bulk_disable_sign_in_flow_runs_on_the_unused_group() {
         .audit_expanded_group
         .set(Some("unused".to_string()));
     ts::wait_for(|| ts::body_contains("Fix all 1")).await;
-    click_button("Fix all 1");
-    ts::wait_for(|| has_button("Disable sign-in")).await;
-    click_button("Disable sign-in");
+    ts::click_button_labelled("Fix all 1");
+    ts::wait_for(|| ts::has_button_labelled("Disable sign-in")).await;
+    ts::click_button_labelled("Disable sign-in");
     // Reversible ⇒ plain confirm panel (no typed keyword).
     ts::wait_for(|| ts::query(".bulk-action-bar__confirm").is_some()).await;
-    click_panel_button("Disable sign-in");
+    ts::click_button_labelled_in(".bulk-action-bar__confirm", "Disable sign-in");
     ts::wait_for(|| ts::call_count("bulk_disable_sign_in") == 1).await;
 
     let call = ts::last_call("bulk_disable_sign_in").unwrap();
@@ -700,8 +671,8 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
-    click_button("Migrate to RBAC for Applications");
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
+    ts::click_button_labelled("Migrate to RBAC for Applications");
 
     // Opening the modal plans; nothing is committed yet.
     ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 1).await;
@@ -718,7 +689,7 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
     ts::wait_for(|| ts::body_contains("Nothing has changed yet")).await;
 
     // Committing sends the same call with dry_run cleared.
-    click_button("Migrate");
+    ts::click_button_labelled("Migrate");
     ts::wait_for(|| ts::call_count("migrate_application_access_policies") == 2).await;
     let commit = ts::last_call("migrate_application_access_policies").unwrap();
     assert_eq!(
@@ -743,17 +714,17 @@ async fn section_rows_offer_only_their_own_rules_fix() {
     };
 
     expand("legacy_mailbox_scope");
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
     assert!(
-        !has_button("Remove 1 expired credential"),
+        !ts::has_button_labelled("Remove 1 expired credential"),
         "the legacy-policy section must not offer the credential fix"
     );
 
     // …and symmetrically: the expired section owns the credential fix only.
     expand("expired");
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
     assert!(
-        !has_button("Migrate to RBAC for Applications"),
+        !ts::has_button_labelled("Migrate to RBAC for Applications"),
         "the expired-credentials section must not offer the migration fix"
     );
 }
@@ -771,7 +742,7 @@ async fn open_deep_links_to_the_section_it_was_clicked_in() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("expired".to_string()));
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
     click_row_open("Legacy Policy App");
     assert_eq!(tab().as_deref(), Some("credentials"));
     // What the mounted detail pane does: consume the tab once. (The harness
@@ -782,7 +753,7 @@ async fn open_deep_links_to_the_section_it_was_clicked_in() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
     // The app is still open: it keeps its live tab, and no pane mounts to
     // consume a queued one — queuing it would land the NEXT app on it.
     click_row_open("Legacy Policy App");
@@ -817,8 +788,8 @@ async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
         .tenant_ui
         .audit_expanded_group
         .set(Some("expired".to_string()));
-    ts::wait_for(|| has_button("Remove 1 expired credential")).await;
-    click_button("Remove 1 expired credential");
+    ts::wait_for(|| ts::has_button_labelled("Remove 1 expired credential")).await;
+    ts::click_button_labelled("Remove 1 expired credential");
     ts::wait_for(|| ts::body_contains("Remove expired credentials?")).await;
     // The modal covers the row it was opened from, so it has to name what it
     // will remove — a static body describing the *kind* of change left the
@@ -830,17 +801,17 @@ async fn applying_one_fix_leaves_the_other_sections_fix_standing() {
             .as_deref(),
         Some("old-secret (expired 2024-01-01)")
     );
-    click_button("Remove");
+    ts::click_button_labelled("Remove");
     ts::wait_for(|| ts::call_count("remediate_remove_expired_credentials") == 1).await;
     // The applied fix is gone for good.
-    ts::wait_for(|| !has_button("Remove 1 expired credential")).await;
+    ts::wait_for(|| !ts::has_button_labelled("Remove 1 expired credential")).await;
 
     // The legacy-policy section still offers the migration nobody has run.
     m.session
         .tenant_ui
         .audit_expanded_group
         .set(Some("legacy_mailbox_scope".to_string()));
-    ts::wait_for(|| has_button("Migrate to RBAC for Applications")).await;
+    ts::wait_for(|| ts::has_button_labelled("Migrate to RBAC for Applications")).await;
 }
 
 #[wasm_bindgen_test]

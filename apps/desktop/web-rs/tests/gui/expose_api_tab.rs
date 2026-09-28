@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_core::models::{OAuth2PermissionScope, PreAuthorizedApplication};
@@ -73,19 +72,6 @@ fn mount() -> ts::Mounted {
     })
 }
 
-/// Click the first `<button>` under `scope` whose visible text is exactly
-/// `label`.
-fn click_button_in(scope: &str, label: &str) {
-    for el in ts::query_all(&format!("{scope} button")) {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}` under `{scope}`");
-}
-
 #[wasm_bindgen_test]
 async fn a_failed_load_offers_retry() {
     ts::reset();
@@ -96,7 +82,7 @@ async fn a_failed_load_offers_retry() {
     assert!(ts::body_contains(fixtures::THROTTLED_MESSAGE));
 
     ts::mock_ok("get_expose_api", &dto());
-    click_button_in(".ui-load-error", "Retry");
+    ts::click_button_labelled_in(".ui-load-error", "Retry");
     ts::wait_for(|| ts::call_count("get_expose_api") == 2).await;
     ts::wait_for(|| ts::body_contains("api://app-1")).await;
     assert!(ts::query(".ui-load-error").is_none());
@@ -110,10 +96,10 @@ async fn adding_a_uri_sends_only_that_uri() {
     let _m = mount();
     ts::wait_for(|| ts::body_contains("api://app-1")).await;
 
-    click_button_in(".expose-api", "+ Add URI");
+    ts::click_button_labelled_in(".expose-api", "+ Add URI");
     ts::wait_for(|| ts::query(".modal input").is_some()).await;
     ts::set_input_value(".modal input", "https://contoso.com/api");
-    click_button_in(".modal", "Save");
+    ts::click_button_labelled_in(".modal", "Save");
 
     ts::wait_for(|| ts::call_count("add_identifier_uri") == 1).await;
     let call = ts::last_call("add_identifier_uri").unwrap();
@@ -135,10 +121,10 @@ async fn removing_a_uri_sends_only_that_uri() {
     ts::wait_for(|| ts::body_contains("api://app-1")).await;
 
     // The first row "Remove" is the URI table's (it renders first).
-    click_button_in(".expose-api table", "Remove");
+    ts::click_button_labelled_in(".expose-api table", "Remove");
     ts::wait_for(|| ts::query(".confirm-dialog__subject").is_some()).await;
     assert_eq!(ts::text(".confirm-dialog__subject"), "api://app-1");
-    click_button_in(".modal", "Remove");
+    ts::click_button_labelled_in(".modal", "Remove");
 
     ts::wait_for(|| ts::call_count("remove_identifier_uri") == 1).await;
     let call = ts::last_call("remove_identifier_uri").unwrap();
@@ -179,20 +165,20 @@ async fn picking_a_client_from_search_fills_the_client_id() {
     let _m = mount();
     ts::wait_for(|| ts::body_contains("Contoso Portal")).await;
 
-    click_button_in(".expose-api", "+ Add a client application");
+    ts::click_button_labelled_in(".expose-api", "+ Add a client application");
     ts::wait_for(|| ts::query(".modal input").is_some()).await;
     // The first input in the dialog is the directory search box.
     ts::set_input_value(".modal input", "fab");
     ts::wait_for(|| ts::query(".candidates li").is_some()).await;
     assert!(ts::text(".candidates li").contains("Fabrikam Mobile"));
-    click_button_in(".candidates li", "Select");
+    ts::click_button_labelled_in(".candidates li", "Select");
 
     ts::wait_for(|| ts::body_contains("Selected: Fabrikam Mobile")).await;
     let call = ts::last_call("global_search").unwrap();
     assert_eq!(call.arg_str("query").as_deref(), Some("fab"));
 
     ts::click(".modal .checkbox-row input");
-    click_button_in(".modal", "Save");
+    ts::click_button_labelled_in(".modal", "Save");
 
     ts::wait_for(|| ts::call_count("set_pre_authorized_app") == 1).await;
     let call = ts::last_call("set_pre_authorized_app").unwrap();

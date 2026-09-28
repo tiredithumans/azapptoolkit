@@ -7,7 +7,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::exchange::MailScopeEntry;
@@ -24,65 +23,6 @@ fn mi_grant_result() -> GrantManagedIdentityResult {
         skipped: Vec::new(),
         failures: Vec::new(),
     }
-}
-
-/// Click the first top-level (non-modal) button with this label.
-fn click_button(label: &str) {
-    for el in ts::query_all("button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no button labelled `{label}`");
-}
-
-fn next_enabled() -> bool {
-    ts::query_all("button").iter().any(|el| {
-        el.text_content().unwrap_or_default().trim() == "Next"
-            && el
-                .dyn_ref::<web_sys::HtmlButtonElement>()
-                .map(|b| !b.disabled())
-                .unwrap_or(false)
-    })
-}
-
-/// Click a button inside the open wizard modal (disambiguated from the pane's
-/// own "Grant access" entry button).
-fn click_modal_button(label: &str) {
-    for el in ts::query_all(".modal button") {
-        if el.text_content().unwrap_or_default().trim() == label {
-            let el: web_sys::HtmlElement = el.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no modal button labelled `{label}`");
-}
-
-/// Toggle the catalog row whose permission value matches `value` exactly.
-fn select_permission(value: &str) {
-    for row in ts::query_all(".permission-picker__row") {
-        let head = row
-            .query_selector(".permission-picker__row-head strong")
-            .ok()
-            .flatten();
-        let is_match = head
-            .map(|h| h.text_content().unwrap_or_default().trim() == value)
-            .unwrap_or(false);
-        if is_match {
-            let cb = row
-                .query_selector(".permission-picker__check")
-                .ok()
-                .flatten()
-                .expect("permission row has a checkbox");
-            let el: web_sys::HtmlElement = cb.unchecked_into();
-            el.click();
-            return;
-        }
-    }
-    panic!("no permission row for `{value}`");
 }
 
 /// Mock the MI resolution + detail resources + catalog, mount the self-contained
@@ -132,22 +72,24 @@ async fn granting_a_permission_orgwide_through_the_wizard() {
     ts::mock_ok("grant_managed_identity_permission", &mi_grant_result());
 
     // Open the unified wizard from the pane's "Grant access" button.
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| !ts::query_all(".permission-picker__row").is_empty()).await;
 
     // Step 1 — pick a non-scopable permission, so the wizard offers org-wide only
     // (the bare-SP grant goes through `grant_managed_identity_permission`).
-    select_permission("User.Read.All");
-    ts::wait_for(next_enabled).await;
-    click_modal_button("Next");
+    ts::select_picker_permission("User.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    // Wizard buttons are scoped to the modal, disambiguated from the pane's own
+    // "Grant access" entry button.
+    ts::click_button_labelled_in(".modal", "Next");
 
     // Step 2 — not scopable: the note explains why, and org-wide is forced.
     ts::wait_for(|| ts::body_contains("can't be scoped together")).await;
-    click_modal_button("Next");
+    ts::click_button_labelled_in(".modal", "Next");
 
     // Step 3 — review, then grant.
     ts::wait_for(|| ts::body_contains("EVERY resource")).await;
-    click_modal_button("Grant access");
+    ts::click_button_labelled_in(".modal", "Grant access");
     ts::wait_for(|| ts::call_count("grant_managed_identity_permission") == 1).await;
 
     let call = ts::last_call("grant_managed_identity_permission").unwrap();
@@ -165,6 +107,6 @@ async fn granting_a_permission_orgwide_through_the_wizard() {
 async fn detail_pane_offers_the_grant_wizard() {
     let _m = mount_mi_permissions().await;
     // The single unified entry point opens the wizard (full catalog).
-    click_button("Grant access");
+    ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::body_contains("Step 1 of 3 — Select permissions")).await;
 }

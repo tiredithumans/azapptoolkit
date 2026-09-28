@@ -250,14 +250,20 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
     );
 }
 
+/// `web-rs/build_support.rs` — the parser `web-rs/build.rs` bakes "What's new"
+/// with — mounted so the differential below runs the real `section_for`, not a
+/// copy of it.
+#[path = "../../../web-rs/build_support.rs"]
+mod build_support;
+
 /// The two CHANGELOG section extractors agree.
 ///
-/// There are two, in different languages, and the Rust one's own header comment
-/// says they "are expected to produce identical text for a release; nothing
-/// checks that". This is that check.
+/// There are two, in different languages, and they are expected to produce
+/// identical text for a release. This is the check that they do.
 ///
 /// * Rust — `web-rs/build_support.rs::section_for`, bakes the in-app
-///   "What's new" panel at compile time.
+///   "What's new" panel at compile time. The real function is mounted above
+///   via `#[path]`, so an edit to the parser changes this differential.
 /// * PowerShell — `release.yml`, fills the updater manifest's `notes` field,
 ///   which is what the update splash shows.
 ///
@@ -275,20 +281,6 @@ fn commit_scope_allowlist_agrees_between_agents_md_and_the_hook() {
 /// CHANGELOG will tell you whether the two still match.
 #[test]
 fn both_changelog_extractors_produce_the_same_notes() {
-    /// The Rust parser, mirroring `web-rs/build_support.rs::section_for`.
-    fn rust_semantics(changelog: &str, version: &str) -> Option<String> {
-        let header = format!("## [{version}]");
-        let mut lines = changelog.lines().skip_while(|l| !l.starts_with(&header));
-        lines.next()?;
-        let body = lines
-            .take_while(|l| !l.starts_with("## ["))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        (!body.is_empty()).then_some(body)
-    }
-
     /// A port of `release.yml`'s loop: skip until the target header, collect
     /// until the next `## [` header, trim. Empty ⇒ the workflow substitutes its
     /// own fallback sentence, which is `None` here.
@@ -340,7 +332,7 @@ fn both_changelog_extractors_produce_the_same_notes() {
 
     for v in &versions {
         assert_eq!(
-            rust_semantics(changelog, v),
+            build_support::section_for(changelog, v),
             powershell_semantics(changelog, v),
             "the in-app 'What's new' panel and the updater's release notes would show DIFFERENT \
              text for {v}. One is baked by web-rs/build_support.rs, the other by release.yml — \
@@ -353,7 +345,7 @@ fn both_changelog_extractors_produce_the_same_notes() {
     // workflow and invisible to the bake. `changelog_headers_match_what_both_
     // parsers_require` is what keeps it out of the real file.
     let sloppy = "##  [1.2.3] - 2026-01-01\n\n- note\n";
-    assert_eq!(rust_semantics(sloppy, "1.2.3"), None);
+    assert_eq!(build_support::section_for(sloppy, "1.2.3"), None);
     assert_eq!(
         powershell_semantics(sloppy, "1.2.3"),
         Some("- note".to_string()),
