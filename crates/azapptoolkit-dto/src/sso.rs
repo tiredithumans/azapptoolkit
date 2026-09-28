@@ -235,6 +235,9 @@ pub struct SamlSsoSummary {
     pub reply_url: String,
     pub signing_cert_base64: Option<String>,
     pub signing_cert_thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): minted
+    /// with `to_rfc3339()` at creation; `get_sso_config`'s summary copies
+    /// [`SsoConfigDto::signing_cert_expiry`], Graph's text verbatim.
     pub signing_cert_expiry: Option<String>,
     /// Set when a custom claims-mapping policy was created and assigned.
     pub claims_policy_id: Option<String>,
@@ -264,6 +267,9 @@ pub struct OidcSsoSummary {
     #[serde(default)]
     pub spa_redirect_uris: Vec<String>,
     pub client_secret: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// new secret's typed `endDateTime` via `to_rfc3339()`; `None` whenever
+    /// `client_secret` is.
     pub client_secret_expiry: Option<String>,
 }
 // Hand-written rather than derived: the workspace treats a derived `Debug` on
@@ -314,6 +320,9 @@ pub struct SsoConfigDto {
     #[serde(default)]
     pub spa_redirect_uris: Vec<String>,
     pub signing_cert_thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// preferred signing cert's `keyCredentials` `endDateTime`, Graph's text
+    /// verbatim and unparsed.
     pub signing_cert_expiry: Option<String>,
     /// SAML signing-cert expiry notification recipients
     /// (`notificationEmailAddresses` on the service principal).
@@ -463,6 +472,10 @@ pub struct SigningCertDto {
     /// differ in case, so every comparison against it is case-insensitive.
     pub thumbprint: String,
     pub display_name: Option<String>,
+    /// RFC3339 UTC `String` stamps (see the crate doc's *Timestamps*): the
+    /// `keyCredentials` entry's `startDateTime` / `endDateTime`, read from
+    /// untyped JSON and passed through verbatim, so one odd value degrades
+    /// only its own field.
     pub start_date_time: Option<String>,
     pub end_date_time: Option<String>,
     /// Matches `preferredTokenSigningKeyThumbprint`. Independent of
@@ -495,7 +508,9 @@ pub struct SigningCertRolloverDto {
     /// staged. Entra silently promotes a valid inactive certificate once the
     /// active one expires, so with a certificate staged this is a hard deadline
     /// for an intentional activation — not a soft warning. A value in the past
-    /// means Entra has already promoted for you.
+    /// means Entra has already promoted for you. An RFC3339 UTC `String`
+    /// stamp (see the crate doc's *Timestamps*), copied from the active
+    /// [`SigningCertDto::end_date_time`].
     pub auto_promote_deadline: Option<String>,
 }
 
@@ -514,6 +529,8 @@ pub struct SigningCertRolloverDto {
 /// reports, never as a security primitive.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataProbeDto {
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*), minted
+    /// by the backend when the fetch ran.
     pub fetched_at: String,
     /// Distinct signing certificates published, deduped by body. Two or more
     /// means an app that polls metadata can see the staged certificate.
@@ -539,6 +556,8 @@ pub struct MetadataProbeDto {
 pub struct SsoCertResult {
     pub thumbprint: String,
     pub base64: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*): the
+    /// minted certificate's typed `endDateTime` via `to_rfc3339()`.
     pub expiry: Option<String>,
 }
 
@@ -561,6 +580,8 @@ pub struct SsoCertificateRowDto {
     pub display_name: String,
     /// The active certificate's thumbprint (`preferredTokenSigningKeyThumbprint`).
     pub thumbprint: Option<String>,
+    /// RFC3339 UTC `String` stamp (see the crate doc's *Timestamps*), copied
+    /// from the active [`SigningCertDto::end_date_time`].
     pub end_date_time: Option<String>,
     pub days_to_expiry: Option<i64>,
     pub status: azapptoolkit_core::audit::CredentialStatus,

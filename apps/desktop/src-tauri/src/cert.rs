@@ -85,6 +85,34 @@ impl std::fmt::Debug for GeneratedCert {
 /// silently issued a 3-year cert.
 pub const MAX_VALIDITY_DAYS: i64 = 1095;
 
+/// Why [`generate_self_signed`] refused or failed. Every variant crosses IPC as
+/// the one `cert_generation_failed` code (no consumer branches on the cause);
+/// the variant is what tests match, and `Display` is the operator sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertGenError {
+    /// `validity_days` outside `1..=`[`MAX_VALIDITY_DAYS`]; `got` is the
+    /// requested value.
+    ValidityOutOfRange { got: i64 },
+    /// The common name is empty once trimmed.
+    EmptyCommonName,
+    /// Key generation, signing or PKCS#12 encoding failed. Carries the crypto
+    /// library's error text (never key material).
+    Crypto(String),
+}
+
+impl std::fmt::Display for CertGenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ValidityOutOfRange { got } => write!(
+                f,
+                "validity must be between 1 and {MAX_VALIDITY_DAYS} days (got {got})"
+            ),
+            Self::EmptyCommonName => f.write_str("certificate subject (common name) is required"),
+            Self::Crypto(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// Generates a self-signed RSA certificate with subject `CN=<common_name>` and
 /// the given validity in days. Returns an error for any validity outside
 /// `1..=MAX_VALIDITY_DAYS` so a user-supplied value is never silently
@@ -92,15 +120,13 @@ pub const MAX_VALIDITY_DAYS: i64 = 1095;
 pub fn generate_self_signed(
     common_name: &str,
     validity_days: i64,
-) -> Result<GeneratedCert, String> {
+) -> Result<GeneratedCert, CertGenError> {
     if !(1..=MAX_VALIDITY_DAYS).contains(&validity_days) {
-        return Err(format!(
-            "validity must be between 1 and {MAX_VALIDITY_DAYS} days (got {validity_days})"
-        ));
+        return Err(CertGenError::ValidityOutOfRange { got: validity_days });
     }
     let cn = common_name.trim();
     if cn.is_empty() {
-        return Err("certificate subject (common name) is required".into());
+        return Err(CertGenError::EmptyCommonName);
     }
 
     // rcgen keeps the private key's PKCS#8 DER inside the `KeyPair`; held in
@@ -108,11 +134,11 @@ pub fn generate_self_signed(
     // drops — on every `?` below as well as on success.
     let key_pair = Zeroizing::new(
         rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
-            .map_err(|e| format!("RSA key generation failed: {e}"))?,
+            .map_err(|e| CertGenError::Crypto(format!("RSA key generation failed: {e}")))?,
     );
 
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
-        .map_err(|e| format!("certificate params failed: {e}"))?;
+        .map_err(|e| CertGenError::Crypto(format!("certificate params failed: {e}")))?;
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, cn);
     params.distinguished_name = dn;
@@ -124,7 +150,7 @@ pub fn generate_self_signed(
 
     let cert = params
         .self_signed(&*key_pair)
-        .map_err(|e| format!("self-signing failed: {e}"))?;
+        .map_err(|e| CertGenError::Crypto(format!("self-signing failed: {e}")))?;
     let der = cert.der();
     let der_bytes: &[u8] = der.as_ref();
 
@@ -150,7 +176,8 @@ pub fn generate_self_signed(
         sha1.as_ref(),
         cn,
         &pfx_password,
-    )?;
+    )
+    .map_err(CertGenError::Crypto)?;
 
     // PKCS#8 PEM of the private key — surfaced once to the user, never persisted.
     // Serialized last so no error path above holds an unwiped copy; on success
@@ -433,21 +460,52 @@ mod tests {
 
     #[test]
     fn rejects_empty_common_name() {
-        assert!(generate_self_signed("   ", 365).is_err());
+        assert!(matches!(
+            generate_self_signed("   ", 365),
+            Err(CertGenError::EmptyCommonName)
+        ));
     }
 
     #[test]
     fn rejects_validity_below_one_day() {
-        assert!(generate_self_signed("App", 0).is_err());
-        assert!(generate_self_signed("App", -5).is_err());
+        assert_eq!(
+            generate_self_signed("App", 0).err(),
+            Some(CertGenError::ValidityOutOfRange { got: 0 })
+        );
+        assert_eq!(
+            generate_self_signed("App", -5).err(),
+            Some(CertGenError::ValidityOutOfRange { got: -5 })
+        );
     }
 
     #[test]
     fn rejects_validity_above_max() {
-        let r = generate_self_signed("App", MAX_VALIDITY_DAYS + 1);
-        assert!(r.is_err());
-        // Error mentions the limit so a UI can present an actionable message.
-        assert!(r.unwrap_err().contains(&MAX_VALIDITY_DAYS.to_string()));
+        let err = generate_self_signed("App", MAX_VALIDITY_DAYS + 1).unwrap_err();
+        assert_eq!(
+            err,
+            CertGenError::ValidityOutOfRange {
+                got: MAX_VALIDITY_DAYS + 1
+            }
+        );
+        // The one exact prose pin: the sentence names the limit so the UI can
+        // present an actionable message.
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "validity must be between 1 and {MAX_VALIDITY_DAYS} days (got {})",
+                MAX_VALIDITY_DAYS + 1
+            )
+        );
+    }
+
+    /// Validity is checked before the common name, so a request wrong on both
+    /// counts reports the validity.
+    #[test]
+    fn validity_is_checked_before_the_common_name() {
+        assert_eq!(
+            generate_self_signed("   ", 0).err(),
+            Some(CertGenError::ValidityOutOfRange { got: 0 })
+        );
     }
 
     #[test]

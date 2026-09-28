@@ -10,7 +10,7 @@ use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar};
 
 use crate::bindings::events;
 use crate::bindings::permission_tester::{
-    self, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
+    self, AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, ShowMore};
@@ -32,12 +32,12 @@ use super::{verdict_badge, verdict_tooltip};
 /// stated on screen, and a file that dropped one would read as an audited
 /// all-clear.
 fn summary_line(r: &MailboxReachersResult) -> String {
-    let reachers = r
+    let reachers = r.rows.iter().filter(|x| x.verdict.reaches()).count();
+    let unknowns = r
         .rows
         .iter()
-        .filter(|x| x.verdict == "org_wide" || x.verdict == "scoped")
+        .filter(|x| x.verdict == AccessVerdict::Unknown)
         .count();
-    let unknowns = r.rows.iter().filter(|x| x.verdict == "unknown").count();
     let mut summary = format!(
         "{} of {} candidate app{} can reach “{}”",
         reachers,
@@ -131,7 +131,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                 .map(|r| {
                     r.rows
                         .iter()
-                        .filter(|x| show_na || x.verdict != "no_access")
+                        .filter(|x| show_na || x.verdict != AccessVerdict::NoAccess)
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -278,7 +278,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             let Some(r) = result.get() else {
                 return ().into_any();
             };
-            let no_access = r.rows.iter().filter(|x| x.verdict == "no_access").count();
+            let no_access = r.rows.iter().filter(|x| x.verdict == AccessVerdict::NoAccess).count();
             // From the same memo the export reads, so the sentence on screen and
             // the one in the file are one string, not two that can drift apart.
             let summary = summary.get().unwrap_or_default();
@@ -332,8 +332,8 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                         {rows
                                             .into_iter()
                                             .map(|row| {
-                                                let (badge_class, badge_label) = verdict_badge(&row.verdict);
-                                                let badge_title = verdict_tooltip(&row.verdict);
+                                                let (badge_class, badge_label) = verdict_badge(row.verdict);
+                                                let badge_title = verdict_tooltip(row.verdict);
                                                 let app_primary = row
                                                     .display_name
                                                     .clone()

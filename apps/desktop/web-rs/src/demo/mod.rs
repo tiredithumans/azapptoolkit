@@ -50,7 +50,7 @@ use azapptoolkit_dto::exchange::{
     ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
 };
 use azapptoolkit_dto::managed_identity::{AppRoleGrantDto, MiSubtype};
-use azapptoolkit_dto::permission_tester::MailboxReachersResult;
+use azapptoolkit_dto::permission_tester::{AccessVerdict, MailboxReachersResult};
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 use azapptoolkit_dto::search::GlobalSearchResults;
 use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SitePermissionDto, SiteSweepResult};
@@ -796,11 +796,11 @@ fn mailbox_reachers(apps: &[DemoApp], mailbox: &str) -> MailboxReachersResult {
                 })
                 .collect();
             let verdict = if scopes.is_empty() {
-                "org_wide"
+                AccessVerdict::OrgWide
             } else if scopes.iter().any(|s| scope_covers(s, mailbox)) {
-                "scoped"
+                AccessVerdict::Scoped
             } else {
-                "no_access"
+                AccessVerdict::NoAccess
             };
             // Exchange names a role only for an RBAC assignment; a legacy
             // policy confines without one.
@@ -819,15 +819,11 @@ fn mailbox_reachers(apps: &[DemoApp], mailbox: &str) -> MailboxReachersResult {
             ))
         })
         .collect();
-    let rank = |v: &str| match v {
-        "org_wide" => 0,
-        "scoped" => 1,
-        "unknown" => 2,
-        _ => 3,
-    };
+    // The backend's order: highest reach first, names breaking ties.
     rows.sort_by(|a, b| {
-        rank(&a.verdict)
-            .cmp(&rank(&b.verdict))
+        a.verdict
+            .reach_rank()
+            .cmp(&b.verdict.reach_rank())
             .then_with(|| a.display_name.cmp(&b.display_name))
     });
     MailboxReachersResult {
@@ -1771,40 +1767,47 @@ mod tests {
         let finance = "finance@contoso.com";
         assert_eq!(verdict(finance, "Lamna Mail Reader"), None);
         assert_eq!(
-            verdict(finance, "Fabrikam Mail Sync").as_deref(),
-            Some("org_wide")
+            verdict(finance, "Fabrikam Mail Sync"),
+            Some(AccessVerdict::OrgWide)
         );
-        assert_eq!(verdict(finance, "Contoso CRM").as_deref(), Some("scoped"));
+        assert_eq!(verdict(finance, "Contoso CRM"), Some(AccessVerdict::Scoped));
         // Scoped elsewhere: confined away from finance@, onto their own group.
         assert_eq!(
-            verdict(finance, "Margie's Travel Portal").as_deref(),
-            Some("no_access")
+            verdict(finance, "Margie's Travel Portal"),
+            Some(AccessVerdict::NoAccess)
         );
         assert_eq!(
-            verdict(finance, "Coho Winery Mailer").as_deref(),
-            Some("no_access")
+            verdict(finance, "Coho Winery Mailer"),
+            Some(AccessVerdict::NoAccess)
         );
         let travel = "Travel@Contoso.com";
         assert_eq!(
-            verdict(travel, "Margie's Travel Portal").as_deref(),
-            Some("scoped")
+            verdict(travel, "Margie's Travel Portal"),
+            Some(AccessVerdict::Scoped)
         );
-        assert_eq!(verdict(travel, "Contoso CRM").as_deref(), Some("no_access"));
         assert_eq!(
-            verdict("coho.orders@contoso.com", "Coho Winery Mailer").as_deref(),
-            Some("scoped")
+            verdict(travel, "Contoso CRM"),
+            Some(AccessVerdict::NoAccess)
+        );
+        assert_eq!(
+            verdict("coho.orders@contoso.com", "Coho Winery Mailer"),
+            Some(AccessVerdict::Scoped)
         );
 
         // Highest reach first, as the backend orders them.
-        let order: Vec<String> = mailbox_reachers(&apps, finance)
+        let order: Vec<AccessVerdict> = mailbox_reachers(&apps, finance)
             .rows
             .into_iter()
             .map(|r| r.verdict)
             .collect();
-        let rank = |v: &str| {
-            ["org_wide", "scoped", "no_access"]
-                .iter()
-                .position(|x| *x == v)
+        let rank = |v: &AccessVerdict| {
+            [
+                AccessVerdict::OrgWide,
+                AccessVerdict::Scoped,
+                AccessVerdict::NoAccess,
+            ]
+            .iter()
+            .position(|x| x == v)
         };
         assert!(
             order.windows(2).all(|w| rank(&w[0]) <= rank(&w[1])),

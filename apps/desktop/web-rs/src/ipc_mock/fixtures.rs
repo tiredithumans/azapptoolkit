@@ -33,7 +33,7 @@ use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecre
 use azapptoolkit_dto::managed_identity::{
     AppRoleGrantDto, AzureRoleDto, AzureRolesResult, ManagedIdentityDto, MiSubtype,
 };
-use azapptoolkit_dto::permission_tester::MailboxProbeProgress;
+use azapptoolkit_dto::permission_tester::{AccessVerdict, MailboxProbeProgress};
 use azapptoolkit_dto::permissions::{
     CatalogResourceSummary, PermissionKind, ResolvedPermission, ResourcePermissions, RoleEntry,
 };
@@ -1316,13 +1316,13 @@ pub fn key_vault_access(
 }
 
 /// One principal's verdict against a probed mailbox (the mailbox reverse
-/// lookup). `verdict` is the machine-stable `org_wide` / `scoped` / … string.
+/// lookup).
 pub fn mailbox_reacher_row(
     app_id: &str,
     object_id: &str,
     display_name: &str,
     held_permissions: &[&str],
-    verdict: &str,
+    verdict: AccessVerdict,
     roles: &[&str],
 ) -> azapptoolkit_dto::permission_tester::MailboxReacherRow {
     azapptoolkit_dto::permission_tester::MailboxReacherRow {
@@ -1330,7 +1330,7 @@ pub fn mailbox_reacher_row(
         principal_id: guid(&format!("{display_name}:sp")),
         display_name: Some(display_name.to_string()),
         held_permissions: held_permissions.iter().map(|p| p.to_string()).collect(),
-        verdict: verdict.to_string(),
+        verdict,
         roles: roles.iter().map(|r| r.to_string()).collect(),
         detail: None,
         principal_kind: AuditPrincipalKind::Application,

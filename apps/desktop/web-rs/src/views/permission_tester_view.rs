@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 use wasm_bindgen::JsCast;
 
-use crate::bindings::permission_tester::{self, PermissionTestResult};
+use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{Callout, SectionHeader, TabBar, TabBarItem};
@@ -25,13 +25,14 @@ use crate::state::use_session;
 
 use crate::util::no_tenant;
 
-/// Maps a verdict string from [`PermissionTestResult`] to (badge class, label).
-fn verdict_badge(verdict: &str) -> (&'static str, &'static str) {
+/// Maps a [`PermissionTestResult`] verdict to (badge class, label).
+/// Exhaustive on purpose: a new verdict must be given its own badge.
+fn verdict_badge(verdict: AccessVerdict) -> (&'static str, &'static str) {
     match verdict {
-        "org_wide" => ("badge badge--warning", "Has access — organization-wide"),
-        "scoped" => ("badge badge--ok", "Has access — scoped"),
-        "no_access" => ("badge", "No access"),
-        _ => ("badge badge--warning", "Couldn't determine"),
+        AccessVerdict::OrgWide => ("badge badge--warning", "Has access — organization-wide"),
+        AccessVerdict::Scoped => ("badge badge--ok", "Has access — scoped"),
+        AccessVerdict::NoAccess => ("badge", "No access"),
+        AccessVerdict::Unknown => ("badge badge--warning", "Couldn't determine"),
     }
 }
 
@@ -462,7 +463,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 result
                     .get()
                     .map(|r| {
-                        let (badge_class, label) = verdict_badge(&r.verdict);
+                        let (badge_class, label) = verdict_badge(r.verdict);
                         let roles = if r.roles.is_empty() {
                             None
                         } else {

@@ -40,7 +40,7 @@ pub(crate) async fn add_password_core(
     input: AddPasswordInput,
 ) -> Result<PasswordCredential, UiError> {
     let (start, end) = resolve_password_window(&input, chrono::Utc::now())
-        .map_err(|msg| UiError::validation("invalid_secret_window", msg))?;
+        .map_err(|e| UiError::validation("invalid_secret_window", e.to_string()))?;
     let client = state.graph_for(tenant_id);
     let cred = client
         .add_password_window(object_id, &input.display_name, start, end)
@@ -54,6 +54,27 @@ pub(crate) async fn add_password_core(
 /// concept has one bound.
 pub(crate) const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
 
+/// Why [`resolve_password_window`] refused a custom secret window. Both causes
+/// cross IPC as the one `invalid_secret_window` code (no consumer branches on
+/// the cause — the credentials tab validates client-side in its own words);
+/// the variant is what tests match, and `Display` is the operator sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretWindowError {
+    /// The expiry is not strictly after the (explicit or implied) start.
+    EndNotAfterStart,
+    /// The window is longer than [`MAX_SECRET_LIFETIME_DAYS`].
+    LifetimeOverCap,
+}
+
+impl std::fmt::Display for SecretWindowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EndNotAfterStart => "expiry must be after the start date",
+            Self::LifetimeOverCap => "secret lifetime cannot exceed 24 months",
+        })
+    }
+}
+
 /// Resolves an [`AddPasswordInput`] to the `(start, end)` window sent to
 /// Graph. An explicit `end_date_time` (portal "Custom" expiry) wins over
 /// `lifetime_days`; without either, defaults to 180 days, matching the
@@ -66,16 +87,16 @@ fn resolve_password_window(
         Option<chrono::DateTime<chrono::Utc>>,
         chrono::DateTime<chrono::Utc>,
     ),
-    String,
+    SecretWindowError,
 > {
     match input.end_date_time {
         Some(end) => {
             let effective_start = input.start_date_time.unwrap_or(now);
             if end <= effective_start {
-                return Err("expiry must be after the start date".to_string());
+                return Err(SecretWindowError::EndNotAfterStart);
             }
             if end - effective_start > chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS) {
-                return Err("secret lifetime cannot exceed 24 months".to_string());
+                return Err(SecretWindowError::LifetimeOverCap);
             }
             Ok((input.start_date_time, end))
         }
@@ -168,7 +189,7 @@ pub async fn generate_self_signed_certificate(
 ) -> Result<GeneratedCertificateResult, UiError> {
     let validity = input.validity_days.unwrap_or(365);
     let mut generated = crate::cert::generate_self_signed(&input.subject, i64::from(validity))
-        .map_err(|msg| UiError::validation("cert_generation_failed", msg))?;
+        .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
 
     let expires_dt =
         chrono::DateTime::<chrono::Utc>::from_timestamp(generated.not_after.unix_timestamp(), 0);
@@ -461,7 +482,10 @@ pub(crate) async fn remove_expired_passwords_core(
 
 #[cfg(test)]
 mod password_window_tests {
-    use super::{AddPasswordInput, preset_secret_end, resolve_password_window};
+    use super::{
+        AddPasswordInput, MAX_SECRET_LIFETIME_DAYS, SecretWindowError, preset_secret_end,
+        resolve_password_window,
+    };
     use crate::commands::test_support::{at, fixed_now};
 
     fn input(
@@ -542,14 +566,14 @@ mod password_window_tests {
             fixed_now(),
         )
         .unwrap_err();
-        assert!(err.contains("after the start"));
+        assert_eq!(err, SecretWindowError::EndNotAfterStart);
         // Without an explicit start, "now" anchors the window.
-        assert!(
+        assert_eq!(
             resolve_password_window(
                 &input(None, None, Some("2025-12-31T00:00:00Z")),
                 fixed_now()
-            )
-            .is_err()
+            ),
+            Err(SecretWindowError::EndNotAfterStart)
         );
     }
 
@@ -564,7 +588,43 @@ mod password_window_tests {
             fixed_now(),
         )
         .unwrap_err();
-        assert!(err.contains("24 months"));
+        assert_eq!(err, SecretWindowError::LifetimeOverCap);
+    }
+
+    /// The cap is inclusive: exactly 730 days is accepted, one second more is
+    /// the over-cap cause — not the end-before-start one.
+    #[test]
+    fn lifetime_cap_is_inclusive_at_730_days() {
+        let start = at("2026-01-01T00:00:00Z");
+        let window = |end| AddPasswordInput {
+            display_name: "s".into(),
+            lifetime_days: None,
+            start_date_time: Some(start),
+            end_date_time: Some(end),
+        };
+        let cap = start + chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS);
+        assert_eq!(
+            resolve_password_window(&window(cap), fixed_now()),
+            Ok((Some(start), cap))
+        );
+        assert_eq!(
+            resolve_password_window(&window(cap + chrono::Duration::seconds(1)), fixed_now()),
+            Err(SecretWindowError::LifetimeOverCap)
+        );
+    }
+
+    /// The one exact prose pin: `Display` is the sentence the operator reads
+    /// in the `invalid_secret_window` error.
+    #[test]
+    fn secret_window_errors_read_as_the_operator_sentence() {
+        assert_eq!(
+            SecretWindowError::EndNotAfterStart.to_string(),
+            "expiry must be after the start date"
+        );
+        assert_eq!(
+            SecretWindowError::LifetimeOverCap.to_string(),
+            "secret lifetime cannot exceed 24 months"
+        );
     }
 }
 

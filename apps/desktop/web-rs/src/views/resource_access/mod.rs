@@ -22,6 +22,7 @@
 use leptos::prelude::*;
 use thaw::Body1;
 
+use crate::bindings::permission_tester::AccessVerdict;
 use crate::components::ui::{SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
 
@@ -79,13 +80,14 @@ pub fn ResourceAccessView() -> impl IntoView {
 }
 
 /// Verdict badge class — org-wide reach reads as a warning, confined access as
-/// ok, everything else neutral.
-pub(super) fn verdict_badge(verdict: &str) -> (&'static str, &'static str) {
+/// ok, everything else neutral. Exhaustive on purpose (as is
+/// [`verdict_tooltip`]): a new verdict must be given its own badge.
+pub(super) fn verdict_badge(verdict: AccessVerdict) -> (&'static str, &'static str) {
     match verdict {
-        "org_wide" => ("badge badge--warning", "Org-wide"),
-        "scoped" => ("badge badge--ok", "Scoped"),
-        "no_access" => ("badge", "No access"),
-        _ => ("badge", "Unknown"),
+        AccessVerdict::OrgWide => ("badge badge--warning", "Org-wide"),
+        AccessVerdict::Scoped => ("badge badge--ok", "Scoped"),
+        AccessVerdict::NoAccess => ("badge", "No access"),
+        AccessVerdict::Unknown => ("badge", "Unknown"),
     }
 }
 
@@ -93,12 +95,14 @@ pub(super) fn verdict_badge(verdict: &str) -> (&'static str, &'static str) {
 /// a path (typically the Exchange RBAC check) couldn't be evaluated, so the badge
 /// must read as "possible access, not yet verified" rather than contradicting a
 /// "blocked" line in the detail column.
-pub(super) fn verdict_tooltip(verdict: &str) -> &'static str {
+pub(super) fn verdict_tooltip(verdict: AccessVerdict) -> &'static str {
     match verdict {
-        "org_wide" => "Reaches this mailbox — and every mailbox — via an org-wide grant.",
-        "scoped" => "Reaches this mailbox through a scoped grant.",
-        "no_access" => "Confirmed: this principal cannot reach this mailbox.",
-        _ => {
+        AccessVerdict::OrgWide => {
+            "Reaches this mailbox — and every mailbox — via an org-wide grant."
+        }
+        AccessVerdict::Scoped => "Reaches this mailbox through a scoped grant.",
+        AccessVerdict::NoAccess => "Confirmed: this principal cannot reach this mailbox.",
+        AccessVerdict::Unknown => {
             "Access couldn’t be confirmed — an Exchange RBAC check needs Exchange administrator rights. Treat as possible access until verified."
         }
     }

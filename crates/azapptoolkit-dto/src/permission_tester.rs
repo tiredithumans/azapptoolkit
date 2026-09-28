@@ -9,14 +9,65 @@
 use azapptoolkit_core::audit::AuditPrincipalKind;
 use serde::{Deserialize, Serialize};
 
+/// Machine-stable verdict of one access test — how far the principal reaches
+/// the resource. The UI maps each to a badge + label.
+///
+/// The wire spellings are unchanged from when this was a bare `String`:
+/// `org_wide` / `scoped` / `no_access` / `unknown`. Any spelling a newer
+/// backend adds deserializes as [`AccessVerdict::Unknown`] (the
+/// [`crate::audit::AuditCoverageGap`] precedent), which reads as "possible
+/// access", never as "no access".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessVerdict {
+    /// Reaches every resource of its kind (an unscoped grant).
+    OrgWide,
+    /// Reaches this resource through a scoped grant only.
+    Scoped,
+    /// Proven not to reach this resource.
+    NoAccess,
+    /// The check couldn't run or couldn't decide — possible access.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AccessVerdict {
+    /// The wire spelling, byte-identical to what serde writes — for text
+    /// exports (the mailbox-reachers CSV).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OrgWide => "org_wide",
+            Self::Scoped => "scoped",
+            Self::NoAccess => "no_access",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// `true` when the verdict proves access (org-wide or scoped).
+    pub fn reaches(self) -> bool {
+        matches!(self, Self::OrgWide | Self::Scoped)
+    }
+
+    /// Sort rank, highest reach first: org-wide, scoped, unknown (possible
+    /// access), then no access. The one ordering the backend and the demo
+    /// both sort reverse-lookup rows by.
+    pub fn reach_rank(self) -> u8 {
+        match self {
+            Self::OrgWide => 0,
+            Self::Scoped => 1,
+            Self::Unknown => 2,
+            Self::NoAccess => 3,
+        }
+    }
+}
+
 /// Outcome of a single permission test against one resource.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionTestResult {
     /// `true` when the app can reach the resource (via any path).
     pub has_access: bool,
-    /// Short machine-stable verdict: one of `org_wide`, `scoped`, `no_access`,
-    /// `unknown`. The UI maps these to a badge + label.
-    pub verdict: String,
+    /// Machine-stable verdict; see [`AccessVerdict`] for the spellings.
+    pub verdict: AccessVerdict,
     /// Role/permission names that grant the access (e.g. EXO role names, or
     /// SharePoint site roles like `read`/`write`/`owner`). Empty on no access.
     pub roles: Vec<String>,
@@ -34,7 +85,7 @@ impl PermissionTestResult {
     pub fn unknown(resource_label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             has_access: false,
-            verdict: "unknown".into(),
+            verdict: AccessVerdict::Unknown,
             roles: Vec::new(),
             detail: Some(detail.into()),
             resource_label: resource_label.into(),
@@ -70,9 +121,8 @@ pub struct MailboxReacherRow {
     /// Online (the Entra side). Empty for a candidate discovered only via Exchange's SP
     /// store — its access, if any, comes solely from Exchange RBAC.
     pub held_permissions: Vec<String>,
-    /// Same machine-stable verdicts as [`PermissionTestResult::verdict`]:
-    /// `org_wide` / `scoped` / `no_access` / `unknown`.
-    pub verdict: String,
+    /// Same machine-stable verdict as [`PermissionTestResult::verdict`].
+    pub verdict: AccessVerdict,
     /// Exchange role names backing the verdict, when Exchange answered.
     pub roles: Vec<String>,
     pub detail: Option<String>,
@@ -111,4 +161,80 @@ pub struct MailboxReachersResult {
     #[serde(default)]
     pub exchange_sp_store_read: bool,
     pub cancelled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [AccessVerdict; 4] = [
+        AccessVerdict::OrgWide,
+        AccessVerdict::Scoped,
+        AccessVerdict::NoAccess,
+        AccessVerdict::Unknown,
+    ];
+
+    /// The spellings are a wire contract (the bindings, the CSV export and the
+    /// export round trip read them), so pin each one and `as_str`'s agreement.
+    #[test]
+    fn access_verdict_wire_spellings_are_stable() {
+        let expected = [
+            (AccessVerdict::OrgWide, "org_wide"),
+            (AccessVerdict::Scoped, "scoped"),
+            (AccessVerdict::NoAccess, "no_access"),
+            (AccessVerdict::Unknown, "unknown"),
+        ];
+        for (v, spelling) in expected {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{spelling}\"")
+            );
+            assert_eq!(v.as_str(), spelling);
+            let back: AccessVerdict = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
+            assert_eq!(back, v);
+        }
+        for v in ALL {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+    }
+
+    /// A spelling from a newer backend reads as "possible access", never as
+    /// "no access", and a whole result still round-trips.
+    #[test]
+    fn unknown_verdict_spellings_degrade_to_unknown() {
+        let v: AccessVerdict = serde_json::from_str("\"some_future_verdict\"").unwrap();
+        assert_eq!(v, AccessVerdict::Unknown);
+
+        let json = r#"{"has_access":true,"verdict":"org_wide","roles":["r"],"detail":null,"resource_label":"mbx"}"#;
+        let r: PermissionTestResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.verdict, AccessVerdict::OrgWide);
+        assert_eq!(serde_json::to_string(&r).unwrap(), json);
+    }
+
+    #[test]
+    fn reach_rank_orders_highest_reach_first() {
+        let mut sorted = ALL;
+        sorted.sort_by_key(|v| v.reach_rank());
+        assert_eq!(
+            sorted,
+            [
+                AccessVerdict::OrgWide,
+                AccessVerdict::Scoped,
+                AccessVerdict::Unknown,
+                AccessVerdict::NoAccess,
+            ]
+        );
+        for v in ALL {
+            assert_eq!(
+                v.reaches(),
+                matches!(v, AccessVerdict::OrgWide | AccessVerdict::Scoped),
+                "{v:?}"
+            );
+        }
+        assert!(!AccessVerdict::Unknown.reaches());
+        assert!(!AccessVerdict::NoAccess.reaches());
+    }
 }

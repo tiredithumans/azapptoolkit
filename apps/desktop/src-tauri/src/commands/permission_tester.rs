@@ -55,7 +55,8 @@ use crate::commands::graph_roles::{
 use crate::commands::progress::emit_progress;
 use crate::dto::UiError;
 use crate::dto::permission_tester::{
-    MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,
+    AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
+    PermissionTestResult,
 };
 use crate::state::AppState;
 
@@ -353,14 +354,14 @@ fn synthesize(mailbox: &str, entra: &EntraReach, rbac: &RbacReach) -> Permission
     }
 
     let verdict = match level {
-        3 => "org_wide",
-        2 => "scoped",
-        1 => "unknown",
-        _ => "no_access",
+        3 => AccessVerdict::OrgWide,
+        2 => AccessVerdict::Scoped,
+        1 => AccessVerdict::Unknown,
+        _ => AccessVerdict::NoAccess,
     };
     PermissionTestResult {
-        has_access: level >= 2,
-        verdict: verdict.into(),
+        has_access: verdict.reaches(),
+        verdict,
         roles,
         detail: Some(parts.join(" ")),
         resource_label: mailbox.to_string(),
@@ -697,17 +698,12 @@ pub async fn find_mailbox_reachers(
     }
     cancelled = cancelled || cancel.is_cancelled();
 
-    // Highest-reach first: org-wide, then scoped, then unknown, then no-access;
-    // names break ties so the order is stable across runs.
-    let rank = |v: &str| match v {
-        "org_wide" => 0,
-        "scoped" => 1,
-        "unknown" => 2,
-        _ => 3,
-    };
+    // Highest-reach first (`AccessVerdict::reach_rank`); names break ties so
+    // the order is stable across runs.
     rows.sort_by(|a, b| {
-        rank(&a.verdict)
-            .cmp(&rank(&b.verdict))
+        a.verdict
+            .reach_rank()
+            .cmp(&b.verdict.reach_rank())
             .then_with(|| a.display_name.cmp(&b.display_name))
     });
 
@@ -870,7 +866,7 @@ async fn probe_candidate(ctx: &ProbeContext<'_>, candidate: ProbeCandidate) -> P
                         app_id: String::new(),
                         display_name,
                         held_permissions,
-                        verdict: "unknown".into(),
+                        verdict: AccessVerdict::Unknown,
                         roles: Vec::new(),
                         detail: Some("Couldn't resolve the service principal.".into()),
                         // Can't confirm a local registration; route Open to the
@@ -1228,7 +1224,7 @@ fn site_verdict(
     {
         return PermissionTestResult {
             has_access: true,
-            verdict: "org_wide".into(),
+            verdict: AccessVerdict::OrgWide,
             roles: h.orgwide.clone(),
             detail: Some(format!(
                 "The app holds an organization-wide SharePoint permission and can access “{label}” (and every other site, library and file in the tenant)."
@@ -1242,7 +1238,7 @@ fn site_verdict(
         return match held {
             None => PermissionTestResult {
                 has_access: false,
-                verdict: "unknown".into(),
+                verdict: AccessVerdict::Unknown,
                 roles: Vec::new(),
                 detail: Some(format!(
                     "No permission entry names this app on “{label}” or anything above it, but its app-role assignments couldn't be read, so whether it holds an organization-wide SharePoint grant is unknown."
@@ -1251,7 +1247,7 @@ fn site_verdict(
             },
             Some(_) => PermissionTestResult {
                 has_access: false,
-                verdict: "no_access".into(),
+                verdict: AccessVerdict::NoAccess,
                 roles: Vec::new(),
                 detail: Some(format!(
                     "No permission entry names this app on “{label}” or anything above it, and it holds no organization-wide SharePoint grant."
@@ -1272,7 +1268,7 @@ fn site_verdict(
     let Some(held) = held else {
         return PermissionTestResult {
             has_access: false,
-            verdict: "unknown".into(),
+            verdict: AccessVerdict::Unknown,
             roles: hit.roles,
             detail: Some(format!(
                 "“{label}” grants this app access{via}, but its app-role assignments couldn't be read, so whether it holds the matching Selected scope is unknown."
@@ -1284,7 +1280,7 @@ fn site_verdict(
     match held.scope_for_level(hit.level) {
         Some(scope) => PermissionTestResult {
             has_access: true,
-            verdict: "scoped".into(),
+            verdict: AccessVerdict::Scoped,
             roles: hit.roles,
             detail: Some(format!(
                 "The app is granted access to “{label}” specifically{via}, and holds {scope} — the Selected model's grant and scope halves are both in place."
@@ -1293,7 +1289,7 @@ fn site_verdict(
         },
         None => PermissionTestResult {
             has_access: false,
-            verdict: "no_access".into(),
+            verdict: AccessVerdict::NoAccess,
             roles: hit.roles,
             detail: Some(format!(
                 "“{label}” grants this app access{via}, but the app doesn't hold a Selected permission reaching {}. A permission entry alone grants nothing until the matching scope is in the app's token — grant {} as well.",
@@ -1372,7 +1368,7 @@ fn mailbox_reachers_to_csv(rows: &[MailboxReacherRow], summary: &str) -> String 
         let row = [
             csv_field(r.display_name.as_deref().unwrap_or("")),
             csv_field(&r.app_id),
-            csv_field(&r.verdict),
+            csv_field(r.verdict.as_str()),
             // Semicolon-joined into one cell each: a comma would split the row.
             csv_field(&r.held_permissions.join("; ")),
             csv_field(&r.roles.join("; ")),
@@ -1396,13 +1392,13 @@ mod tests {
     use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
     use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
 
-    fn reacher(name: &str, verdict: &str) -> MailboxReacherRow {
+    fn reacher(name: &str, verdict: AccessVerdict) -> MailboxReacherRow {
         MailboxReacherRow {
             app_id: "11111111-1111-1111-1111-111111111111".into(),
             principal_id: "22222222-2222-2222-2222-222222222222".into(),
             display_name: Some(name.into()),
             held_permissions: vec!["Mail.Read".into(), "Mail.Send".into()],
-            verdict: verdict.into(),
+            verdict,
             roles: vec!["Application Mail.Read".into()],
             detail: Some("Org-wide Graph grant, unconstrained by any policy".into()),
             principal_kind: AuditPrincipalKind::Application,
@@ -1414,8 +1410,8 @@ mod tests {
     fn reacher_csv_leads_with_the_coverage_line_then_a_header_and_one_row_each() {
         let csv = mailbox_reachers_to_csv(
             &[
-                reacher("Contoso API", "org_wide"),
-                reacher("Fabrikam Web", "unknown"),
+                reacher("Contoso API", AccessVerdict::OrgWide),
+                reacher("Fabrikam Web", AccessVerdict::Unknown),
             ],
             "1 of 12 candidate apps can reach “shared@contoso.com” · 1 couldn’t be confirmed (need Exchange admin rights)",
         );
@@ -1436,7 +1432,10 @@ mod tests {
         // Comma-joining them would silently shift every column right of them —
         // as would the Exchange-supplied `detail` prose, which routinely
         // contains commas of its own, so the count is quote-aware.
-        let csv = mailbox_reachers_to_csv(&[reacher("Contoso API", "org_wide")], "complete");
+        let csv = mailbox_reachers_to_csv(
+            &[reacher("Contoso API", AccessVerdict::OrgWide)],
+            "complete",
+        );
         assert!(csv.contains("Mail.Read; Mail.Send"));
         let header = csv
             .lines()
@@ -1451,7 +1450,10 @@ mod tests {
         // CWE-1236: app display names are attacker-controllable directory data.
         // The comma in the payload is the point: neutralization has to compose
         // with quoting.
-        let csv = mailbox_reachers_to_csv(&[reacher("=cmd|'/c calc',A1", "org_wide")], "complete");
+        let csv = mailbox_reachers_to_csv(
+            &[reacher("=cmd|'/c calc',A1", AccessVerdict::OrgWide)],
+            "complete",
+        );
         assert!(csv.contains("\"'=cmd|'/c calc',A1\""));
     }
 
@@ -1530,7 +1532,7 @@ mod tests {
         ));
         let result = synthesize("a@x.com", &EntraReach::NotHeld, &reach);
         assert!(!result.has_access);
-        assert_eq!(result.verdict, "no_access");
+        assert_eq!(result.verdict, AccessVerdict::NoAccess);
         assert!(result.detail.unwrap().contains("InScope = false"));
     }
 
@@ -1540,7 +1542,7 @@ mod tests {
         assert!(matches!(reach, RbacReach::Scoped(_)));
         let result = synthesize("a@x.com", &EntraReach::NotHeld, &reach);
         assert!(result.has_access);
-        assert_eq!(result.verdict, "scoped");
+        assert_eq!(result.verdict, AccessVerdict::Scoped);
         assert_eq!(result.roles, vec!["Application Mail.Read".to_string()]);
     }
 
@@ -1555,7 +1557,7 @@ mod tests {
         assert!(matches!(reach, RbacReach::OrgWide(_)));
         assert_eq!(
             synthesize("a@x.com", &EntraReach::NotHeld, &reach).verdict,
-            "org_wide"
+            AccessVerdict::OrgWide
         );
     }
 
@@ -1567,7 +1569,7 @@ mod tests {
         assert!(matches!(reach, RbacReach::Indeterminate));
         let result = synthesize("a@x.com", &EntraReach::NotHeld, &reach);
         assert!(!result.has_access);
-        assert_eq!(result.verdict, "unknown");
+        assert_eq!(result.verdict, AccessVerdict::Unknown);
     }
 
     #[test]
@@ -1593,7 +1595,7 @@ mod tests {
             },
         );
         assert!(result.has_access);
-        assert_eq!(result.verdict, "org_wide");
+        assert_eq!(result.verdict, AccessVerdict::OrgWide);
         let detail = result.detail.unwrap();
         assert!(detail.contains("ineffective"));
         assert!(detail.contains("remove the Entra application permission"));
@@ -1609,7 +1611,7 @@ mod tests {
             },
         );
         assert!(!result.has_access);
-        assert_eq!(result.verdict, "no_access");
+        assert_eq!(result.verdict, AccessVerdict::NoAccess);
         assert!(
             result
                 .detail
@@ -1631,7 +1633,7 @@ mod tests {
             },
         );
         assert!(result.has_access);
-        assert_eq!(result.verdict, "scoped");
+        assert_eq!(result.verdict, AccessVerdict::Scoped);
         assert!(result.detail.unwrap().contains("Sales"));
     }
 
@@ -1645,7 +1647,7 @@ mod tests {
             &RbacReach::Indeterminate,
         );
         assert!(result.has_access);
-        assert_eq!(result.verdict, "org_wide");
+        assert_eq!(result.verdict, AccessVerdict::OrgWide);
         assert!(result.detail.unwrap().contains("couldn't be verified"));
     }
 
@@ -1658,7 +1660,7 @@ mod tests {
             &RbacReach::Scoped(vec!["Application Mail.Read".into()]),
         );
         assert!(result.has_access);
-        assert_eq!(result.verdict, "scoped");
+        assert_eq!(result.verdict, AccessVerdict::Scoped);
     }
 
     fn exo_sp(object_id: Option<&str>, name: &str) -> ExoServicePrincipal {
@@ -1799,7 +1801,7 @@ mod tests {
                 had_assignments: false,
             },
         );
-        assert_eq!(result.verdict, "unknown");
+        assert_eq!(result.verdict, AccessVerdict::Unknown);
         assert!(!result.has_access);
         let detail = result.detail.unwrap();
         assert!(detail.contains("couldn't be read"));
@@ -1813,14 +1815,14 @@ mod tests {
             &EntraReach::Unreadable,
             &RbacReach::Scoped(vec!["Application Mail.Read".into()]),
         );
-        assert_eq!(scoped.verdict, "scoped");
+        assert_eq!(scoped.verdict, AccessVerdict::Scoped);
         assert!(scoped.has_access);
         let org = synthesize(
             "a@x.com",
             &EntraReach::Unreadable,
             &RbacReach::OrgWide(vec!["Application Mail.Read".into()]),
         );
-        assert_eq!(org.verdict, "org_wide");
+        assert_eq!(org.verdict, AccessVerdict::OrgWide);
     }
 
     fn graph_over(server: &wiremock::MockServer) -> GraphClient {
@@ -1905,7 +1907,7 @@ mod tests {
             Some(hit(SelectedScopeLevel::Site, "Contoso")),
             LABEL.into(),
         );
-        assert_eq!(r.verdict, "org_wide");
+        assert_eq!(r.verdict, AccessVerdict::OrgWide);
         assert!(r.has_access);
         assert_eq!(r.roles, vec!["Sites.Read.All".to_string()]);
     }
@@ -1914,7 +1916,7 @@ mod tests {
     #[test]
     fn site_verdict_no_entry_and_unreadable_grants_is_unknown() {
         let r = site_verdict(None, None, LABEL.into());
-        assert_eq!(r.verdict, "unknown");
+        assert_eq!(r.verdict, AccessVerdict::Unknown);
         assert!(!r.has_access);
         let detail = r.detail.unwrap();
         assert!(detail.contains("couldn't be read"));
@@ -1925,7 +1927,7 @@ mod tests {
     #[test]
     fn site_verdict_no_entry_and_no_grants_is_no_access() {
         let r = site_verdict(Some(&HeldSharePointGrants::default()), None, LABEL.into());
-        assert_eq!(r.verdict, "no_access");
+        assert_eq!(r.verdict, AccessVerdict::NoAccess);
         assert!(!r.has_access);
         assert!(
             r.detail
@@ -1941,7 +1943,7 @@ mod tests {
             Some(hit(SelectedScopeLevel::File, LABEL)),
             LABEL.into(),
         );
-        assert_eq!(r.verdict, "unknown");
+        assert_eq!(r.verdict, AccessVerdict::Unknown);
         assert!(!r.has_access);
         assert_eq!(r.roles, vec!["read".to_string()]);
         assert!(
@@ -1959,7 +1961,7 @@ mod tests {
             Some(hit(SelectedScopeLevel::Site, "Contoso")),
             LABEL.into(),
         );
-        assert_eq!(r.verdict, "scoped");
+        assert_eq!(r.verdict, AccessVerdict::Scoped);
         assert!(r.has_access);
         let detail = r.detail.unwrap();
         assert!(detail.contains("inherited from “Contoso”"));
@@ -1974,7 +1976,7 @@ mod tests {
             Some(hit(SelectedScopeLevel::File, LABEL)),
             LABEL.into(),
         );
-        assert_eq!(r.verdict, "no_access");
+        assert_eq!(r.verdict, AccessVerdict::NoAccess);
         assert!(!r.has_access);
         let detail = r.detail.unwrap();
         assert!(detail.contains("Files.SelectedOperations.Selected"));

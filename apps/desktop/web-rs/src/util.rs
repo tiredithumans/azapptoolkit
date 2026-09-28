@@ -194,10 +194,12 @@ fn plural(n: i64) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// Parses an RFC3339 timestamp (as every backend DTO carries one) into its
-/// display pair. `None` when the string isn't a timestamp — the caller renders
-/// nothing at all, because a stamp we can't read is a bug on our side, not a
-/// state an operator can act on.
+/// Parses an RFC3339 timestamp into its display pair — for the RFC3339
+/// `String` stamps the DTO crate carries where a bad value must degrade only
+/// its own field (see the `azapptoolkit-dto` crate doc; `DateTime<Utc>`
+/// fields arrive already parsed). `None` when the string isn't a timestamp —
+/// the caller renders nothing at all, because a stamp we can't read is a bug
+/// on our side, not a state an operator can act on.
 pub fn time_ago(rfc3339: &str) -> Option<TimeAgo> {
     let then = chrono::DateTime::parse_from_rfc3339(rfc3339)
         .ok()?

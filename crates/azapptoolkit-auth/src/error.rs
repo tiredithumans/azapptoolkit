@@ -2,8 +2,15 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, AuthError>;
 
+/// Every way the Entra sign-in / token path can fail.
+///
+/// Exhaustive on purpose (no `#[non_exhaustive]`): the crate is
+/// workspace-internal (`publish = false`), and `From<AuthError> for UiError`
+/// in `azapptoolkit-dto` matches every variant, so a new variant fails to
+/// compile until it is given a wire code there. With the attribute it would
+/// instead fall into a catch-all arm — silently non-retryable and never
+/// re-auth-fatal.
 #[derive(Debug, Error)]
-#[non_exhaustive]
 pub enum AuthError {
     #[error("not signed in")]
     NotSignedIn,
@@ -52,8 +59,7 @@ pub enum AuthError {
 
     /// The loopback listener no longer produces this: a redirect with a
     /// foreign or missing `state` is answered 400 and ignored rather than
-    /// ending the sign-in. Kept for the public, `non_exhaustive` API and its
-    /// DTO mapping.
+    /// ending the sign-in. Kept for its DTO mapping (`state_mismatch`).
     #[error("state mismatch on redirect — possible CSRF")]
     StateMismatch,
 

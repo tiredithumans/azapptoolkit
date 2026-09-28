@@ -242,21 +242,26 @@ mod tests {
 
     #[test]
     fn ca_err_is_body_safe_and_classified() {
-        let license = map_ca_err(GraphError::Forbidden(
-            "{\"error\":{\"code\":\"Authentication_RequestFromNonPremiumTenantOrB2CTenant\"}}"
-                .into(),
-        ));
+        const LICENSE_BODY: &str =
+            "{\"error\":{\"code\":\"Authentication_RequestFromNonPremiumTenantOrB2CTenant\"}}";
+        const CONSENT_BODY: &str = "{\"error\":{\"code\":\"Authorization_RequestDenied\",\"message\":\"Insufficient privileges\"}}";
+        // The typed discriminator: the body classifies as license vs consent
+        // before any prose is involved. Both still share the one
+        // `ca_unavailable` code (the documented `premium_feature_err` design).
+        assert!(graph_err::looks_like_missing_license(LICENSE_BODY));
+        // A consent-style denial (no license keywords) must classify as consent,
+        // not license — guards the dropped " p1"/" p2" substring false-match.
+        assert!(!graph_err::looks_like_missing_license(CONSENT_BODY));
+
+        let license = map_ca_err(GraphError::Forbidden(LICENSE_BODY.into()));
         assert_eq!(license.code, "ca_unavailable");
         assert!(license.message.contains("license"));
 
-        // A consent-style denial (no license keywords) must classify as consent,
-        // not license — guards the dropped " p1"/" p2" substring false-match.
-        let consent = map_ca_err(GraphError::Forbidden(
-            "{\"error\":{\"code\":\"Authorization_RequestDenied\",\"message\":\"Insufficient privileges\"}}"
-                .into(),
-        ));
+        let consent = map_ca_err(GraphError::Forbidden(CONSENT_BODY.into()));
         assert_eq!(consent.code, "ca_unavailable");
         assert!(consent.message.contains("consent"));
+        // Neither a missing license nor missing consent fixes itself on retry.
+        assert!(!license.retryable && !consent.retryable);
 
         let server = map_ca_err(GraphError::Server {
             status: 503,

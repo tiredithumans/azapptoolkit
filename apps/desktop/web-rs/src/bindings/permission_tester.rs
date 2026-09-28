@@ -6,7 +6,8 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
 pub use azapptoolkit_dto::permission_tester::{
-    MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult, PermissionTestResult,
+    AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
+    PermissionTestResult,
 };
 
 #[derive(Serialize)]

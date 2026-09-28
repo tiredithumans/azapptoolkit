@@ -5,9 +5,29 @@
 //! a few `azapptoolkit-core` domain types (`Application`, `Organization`,
 //! `AuditItem` + its remediation/scope subtree) also cross IPC by direct
 //! re-use, embedded in or alongside the DTOs here, because both sides share
-//! the same Rust definitions. Kept dependency-light (just `serde`) so it
+//! the same Rust definitions. Kept dependency-light (`serde` + `chrono`) so it
 //! compiles cleanly to `wasm32-unknown-unknown`. Backend-only
 //! `From<…Error>` conversions are gated behind the `backend` feature.
+//!
+//! # Timestamps
+//!
+//! A timestamp crosses IPC in one of two Rust types, which put identical
+//! RFC3339 UTC text on the wire (chrono's `DateTime<Utc>` serializes to
+//! exactly that):
+//!
+//! - **`DateTime<Utc>`** — the default for a **new** field whenever the
+//!   backend holds a parsed value: a typed Graph model (`credentials.rs`) or a
+//!   stamp the backend mints itself (`backup.rs` `created_at`).
+//! - **`String`, documented as RFC3339 UTC** — kept where one bad value must
+//!   degrade just that field instead of failing deserialization of the whole
+//!   payload: values lifted verbatim from untyped upstream JSON (the SAML
+//!   `keyCredentials` read as `serde_json::Value`, Key Vault attributes), and
+//!   payloads that outlive a build (the cached audit `completed_at`). The
+//!   frontend parses these only through `util::time_ago` (a stamp it can't
+//!   read renders nothing), or takes the date part for display.
+//!
+//! Existing `String` stamps are grandfathered. Converting one is a per-module
+//! change that must keep the wire text and every frontend consumer in step.
 
 pub mod activity;
 pub mod applications;
@@ -208,6 +228,8 @@ mod backend_conv {
 
     impl From<AuthError> for UiError {
         fn from(err: AuthError) -> Self {
+            // Exhaustive on purpose (no wildcard): a new `AuthError` variant
+            // must be given a code here before the workspace compiles.
             let (code, retryable) = match &err {
                 AuthError::NotSignedIn => ("not_signed_in", false),
                 AuthError::RefreshTokenMissing(_) => ("refresh_missing", false),
@@ -225,7 +247,6 @@ mod backend_conv {
                 AuthError::Url(_) => ("url", false),
                 AuthError::Serde(_) => ("serde", false),
                 AuthError::Io(_) => ("io", true),
-                _ => ("unknown_auth", false),
             };
             UiError {
                 code: code.to_string(),
@@ -247,7 +268,9 @@ mod backend_conv {
         /// split is load-bearing (AGENTS.md): `InvalidGrant` must purge the
         /// refresh token while `ConsentRequired` and `InteractionRequired` (a
         /// per-resource Conditional Access step-up) must not. A silent change here breaks a UI branch
-        /// with no compile error, so lock it down.
+        /// with no compile error, so lock it down. Completeness is enforced by
+        /// the compiler (the `From` match is exhaustive, `AuthError` is not
+        /// `#[non_exhaustive]`); this test pins the values.
         #[test]
         fn auth_error_maps_to_stable_code_and_retryable() {
             let cases: Vec<(AuthError, &str, bool)> = vec![
