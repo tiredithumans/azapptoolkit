@@ -765,7 +765,7 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 10] = [
+const CACHED_ACCESSORS: [&str; 11] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
@@ -776,6 +776,9 @@ const CACHED_ACCESSORS: [&str; 10] = [
     "search_corpus(",
     "load_gallery_corpus(",
     "resolve_mail_scopes_audit_cached(",
+    // Lives in `commands/arm_roles.rs`, not `applications/cache.rs`: the ARM
+    // role-name lookup the MI Azure-roles view and the Key Vault sweep share.
+    "resolve_role_names_cached(",
 ];
 
 /// First cache read in flattened text: a direct `…cache.get(`,

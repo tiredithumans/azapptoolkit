@@ -7,14 +7,16 @@
 //! principal. Mirrors the legacy `Get-AzManagedIdentity` /
 //! `Grant-AzManagedIdentityPermission` cmdlets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use futures::stream::{self, StreamExt};
 use tauri::{AppHandle, State};
 
 use azapptoolkit_arm::RoleAssignment;
+use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
@@ -23,13 +25,6 @@ use crate::dto::managed_identity::{
 };
 use crate::state::AppState;
 
-/// Broadly-privileged built-in Azure roles flagged in the MI RBAC view.
-const HIGH_PRIVILEGE_ROLES: &[&str] = &[
-    "Owner",
-    "Contributor",
-    "User Access Administrator",
-    "Role Based Access Control Administrator",
-];
 /// Max concurrent ARM calls (per-subscription fetches + role-def resolution).
 /// Bounds fan-out so scanning every subscription stays within ARM's rate limits
 /// (429s are retried with backoff in the client); a large estate just takes
@@ -254,74 +249,34 @@ pub async fn list_managed_identity_azure_roles(
     // collapsing the above-subscription copies every subscription returns.
     let flat = flatten_assignments(per_sub);
 
-    // Resolve the unique role-definition ids to names concurrently.
-    let unique_ids: HashSet<String> = flat
-        .iter()
-        .filter_map(|(_, a)| a.properties.role_definition_id.clone())
-        .filter(|id| !id.is_empty())
-        .collect();
-    let cache = state.cache.clone();
-    let role_names: HashMap<String, String> = stream::iter(unique_ids)
-        .map(|id| {
-            let arm = arm.clone();
-            let cache = cache.clone();
-            let tenant_id = tenant_id.clone();
-            async move {
-                // Role definitions (Owner, Contributor, custom roles) are
-                // tenant-stable, so cache the resolved name — otherwise every
-                // managed-identity Azure-RBAC view re-fetches the same handful
-                // (and ARM throttles aggressively). Only a real name is cached;
-                // a fetch failure falls back to the GUID tail without poisoning.
-                // Read-only until TTL / sign-out by design: a role-definition
-                // rename is rare, so no mutation busts this — it's cleared by the
-                // 60-min Permissions TTL and the sign-out tenant sweep.
-                let key = format!("{tenant_id}|arm_roledef|{id}");
-                if let Some(name) = cache.get::<String>(CacheKind::Permissions, &key) {
-                    return (id, name);
-                }
-                match arm
-                    .get_role_definition(&id)
-                    .await
-                    .ok()
-                    .and_then(|d| d.properties.role_name)
-                {
-                    Some(name) => {
-                        cache.put(CacheKind::Permissions, key, &name);
-                        (id, name)
-                    }
-                    None => {
-                        let fallback = id.rsplit('/').next().unwrap_or("role").to_string();
-                        (id, fallback)
-                    }
-                }
+    // Resolve the role-definition ids to names (one fetch per role GUID,
+    // cached per tenant — see `arm_roles`).
+    let role_names = resolve_role_names_cached(
+        &arm,
+        &state.cache,
+        &tenant_id,
+        flat.iter()
+            .filter_map(|(_, a)| a.properties.role_definition_id.as_deref()),
+        ARM_CONCURRENCY,
+    )
+    .await;
+
+    let mut rows: Vec<AzureRoleDto> = flat
+        .into_iter()
+        .map(|(sub_display, a)| {
+            let scope = a.properties.scope.unwrap_or_default();
+            let role_def_id = a.properties.role_definition_id.unwrap_or_default();
+            let role_name = role_display_name(&role_names, &role_def_id);
+            let high_privilege = is_high_privilege_role(&role_name, RoleContext::AzureResources);
+            AzureRoleDto {
+                scope_level: scope_level(&scope),
+                role_name,
+                scope,
+                subscription: sub_display,
+                high_privilege,
             }
         })
-        .buffer_unordered(ARM_CONCURRENCY)
-        .collect()
-        .await;
-
-    let mut rows: Vec<AzureRoleDto> =
-        flat.into_iter()
-            .map(|(sub_display, a)| {
-                let scope = a.properties.scope.unwrap_or_default();
-                let role_def_id = a.properties.role_definition_id.unwrap_or_default();
-                let role_name = if role_def_id.is_empty() {
-                    "(unknown role)".to_string()
-                } else {
-                    role_names.get(&role_def_id).cloned().unwrap_or_else(|| {
-                        role_def_id.rsplit('/').next().unwrap_or("role").to_string()
-                    })
-                };
-                let high_privilege = HIGH_PRIVILEGE_ROLES.contains(&role_name.as_str());
-                AzureRoleDto {
-                    scope_level: scope_level(&scope),
-                    role_name,
-                    scope,
-                    subscription: sub_display,
-                    high_privilege,
-                }
-            })
-            .collect();
+        .collect();
 
     // High-privilege roles first, then by name.
     rows.sort_by_key(|r| (std::cmp::Reverse(r.high_privilege), r.role_name.clone()));

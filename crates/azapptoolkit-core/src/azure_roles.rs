@@ -1,6 +1,8 @@
 //! Well-known Azure built-in role definition GUIDs + a conservative
 //! "does a held role satisfy a required role" check, used by the Access
-//! Readiness Azure-RBAC enumeration.
+//! Readiness Azure-RBAC enumeration; and the one table of high-privilege
+//! built-in role **names** ([`is_high_privilege_role`]) that the managed-identity
+//! Azure-roles view and the Key Vault access sweep flag rows with.
 //!
 //! Role assignments returned by ARM carry only the role-definition **id** (a
 //! path ending in a GUID), never the human name — so we match by GUID. The
@@ -75,9 +77,64 @@ pub fn azure_role_satisfied(required_role_name: &str, held_role_ids: &HashSet<St
         .any(|g| held_role_ids.contains(*g))
 }
 
+/// Which surface is asking [`is_high_privilege_role`]: the set of roles worth
+/// flagging depends on what the row is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleContext {
+    /// A principal's Azure RBAC roles across resources (the managed-identity
+    /// Azure-roles view): only the broad management roles are flagged.
+    AzureResources,
+    /// Roles that apply to a Key Vault (the vault access sweep): the broad
+    /// roles plus the Key Vault roles with broad management or data-plane reach.
+    KeyVault,
+}
+
+/// Built-in roles with broad management reach, flagged in every context.
+const BROAD_HIGH_PRIVILEGE_ROLES: &[&str] = &[
+    "Owner",
+    "Contributor",
+    "User Access Administrator",
+    "Role Based Access Control Administrator",
+];
+
+/// Key Vault built-ins with broad management or data-plane reach over a vault,
+/// flagged only in [`RoleContext::KeyVault`].
+const KEY_VAULT_HIGH_PRIVILEGE_ROLES: &[&str] = &[
+    "Key Vault Administrator",
+    "Key Vault Data Access Administrator",
+    "Key Vault Secrets Officer",
+    "Key Vault Certificates Officer",
+    "Key Vault Crypto Officer",
+];
+
+/// Whether a resolved role **name** is flagged as high privilege in `context`
+/// (exact, case-sensitive match against the built-in display names).
+pub fn is_high_privilege_role(role_name: &str, context: RoleContext) -> bool {
+    BROAD_HIGH_PRIVILEGE_ROLES.contains(&role_name)
+        || (context == RoleContext::KeyVault && KEY_VAULT_HIGH_PRIVILEGE_ROLES.contains(&role_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_privilege_depends_on_context() {
+        use RoleContext::{AzureResources, KeyVault};
+        assert!(is_high_privilege_role("Key Vault Administrator", KeyVault));
+        assert!(!is_high_privilege_role(
+            "Key Vault Administrator",
+            AzureResources
+        ));
+        for ctx in [AzureResources, KeyVault] {
+            assert!(is_high_privilege_role("Owner", ctx), "{ctx:?}");
+            assert!(!is_high_privilege_role("Reader", ctx), "{ctx:?}");
+            assert!(
+                !is_high_privilege_role("Key Vault Secrets User", ctx),
+                "{ctx:?}"
+            );
+        }
+    }
 
     fn held(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_ascii_lowercase()).collect()

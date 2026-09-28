@@ -1,9 +1,10 @@
 //! Validation for Key Vault identifiers that flow into request URLs.
 //!
-//! `vault_name` is interpolated into the request host and `secret_name` into
-//! the request path, both from untrusted IPC input. Rejecting anything outside
-//! Azure's documented naming rules closes the SSRF / path-traversal vector
-//! (e.g. a `vault_name` of `evil.example.com/x?` or a `secret_name` of `../`).
+//! `vault_name` is interpolated into the request host, and `secret_name` and a
+//! secret `version` into the request path, all from untrusted IPC input.
+//! Rejecting anything outside Azure's documented shapes closes the SSRF /
+//! path-traversal vector (e.g. a `vault_name` of `evil.example.com/x?`, or a
+//! `secret_name` or `version` of `../`).
 
 use crate::error::{KeyVaultError, Result};
 
@@ -40,6 +41,19 @@ pub fn validate_secret_name(name: &str) -> Result<()> {
     } else {
         Err(KeyVaultError::InvalidName(format!(
             "{name:?} is not a valid Key Vault secret name"
+        )))
+    }
+}
+
+/// A Key Vault secret version id: 32 hex characters (the trailing segment of
+/// a secret `id`, `https://{vault}/secrets/{name}/{version}`).
+pub fn validate_secret_version(version: &str) -> Result<()> {
+    let ok = version.len() == 32 && version.bytes().all(|b| b.is_ascii_hexdigit());
+    if ok {
+        Ok(())
+    } else {
+        Err(KeyVaultError::InvalidName(format!(
+            "{version:?} is not a valid Key Vault secret version"
         )))
     }
 }
@@ -85,5 +99,27 @@ mod tests {
             );
         }
         assert!(validate_secret_name("my-secret-01").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_secret_versions() {
+        let short = "a".repeat(31);
+        let long = "a".repeat(33);
+        let non_hex = "g".repeat(32);
+        for v in [
+            "",
+            "..",
+            "../keys/x",
+            "a/b",
+            short.as_str(),
+            long.as_str(),
+            non_hex.as_str(),
+        ] {
+            assert!(
+                validate_secret_version(v).is_err(),
+                "{v:?} should be rejected"
+            );
+        }
+        assert!(validate_secret_version("0123456789abcdef0123456789abcdef").is_ok());
     }
 }

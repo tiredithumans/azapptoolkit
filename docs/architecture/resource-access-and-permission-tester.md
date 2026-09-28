@@ -73,9 +73,12 @@ the subscriptions (a failure there is fatal), then `list_key_vaults` per subscri
 `ARM_CONCURRENCY` (8), and reads each vault's `atScope()` role assignments through
 `dispatch_capped` — direct **and** inherited (resource group / subscription / management group).
 Rows carry `inherited` (the "Inherited" badge; `is_inherited` compares the assignment scope to the
-vault id case-insensitively); role-definition ids resolve to names (cached under
-`CacheKind::Permissions`) and principal ids to display names, and rows whose role is in
-`KV_HIGH_PRIVILEGE_ROLES` are flagged `high_privilege`. Progress streams as
+vault id case-insensitively); role-definition ids resolve to names through
+`arm_roles::resolve_role_names_cached` — one fetch per role GUID (via the first absolute id ARM
+returned for it, never the tenant-level path, which 404s for custom roles), cached under
+`CacheKind::Permissions` as `{tenant}|arm_roledef|{guid}` and shared with the managed-identity
+Azure-roles view — and principal ids to display names. Rows are flagged `high_privilege` by
+`azure_roles::is_high_privilege_role(_, RoleContext::KeyVault)`. Progress streams as
 `keyvault-sweep-progress`.
 
 - **Coverage, the same rule as the site sweep.** A per-vault read failure increments

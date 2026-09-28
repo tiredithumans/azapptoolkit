@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod app_roles;
 pub mod applications;
+pub(crate) mod arm_roles;
 pub mod audit;
 pub mod auth;
 pub mod backup;

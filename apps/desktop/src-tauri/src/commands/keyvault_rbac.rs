@@ -19,8 +19,10 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use azapptoolkit_arm::{KeyVaultResource, RoleAssignment};
+use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 
+use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
@@ -36,20 +38,6 @@ const ARM_CONCURRENCY: usize = 8;
 /// Safety cap on vaults per sweep — bounds a pathological estate. Raise if a
 /// user legitimately hits it.
 const MAX_VAULTS_PER_SWEEP: usize = 2_000;
-
-/// Built-in Azure roles that grant broad management or data-plane reach over a
-/// Key Vault — flagged so the reverse lookup surfaces the risky grants first.
-const KV_HIGH_PRIVILEGE_ROLES: &[&str] = &[
-    "Owner",
-    "Contributor",
-    "User Access Administrator",
-    "Role Based Access Control Administrator",
-    "Key Vault Administrator",
-    "Key Vault Data Access Administrator",
-    "Key Vault Secrets Officer",
-    "Key Vault Certificates Officer",
-    "Key Vault Crypto Officer",
-];
 
 /// Tenant-prefixed cache key (cross-tenant leakage guard, same convention as
 /// the site sweep and the list caches).
@@ -228,44 +216,18 @@ pub async fn sweep_key_vault_access(
         .flat_map(|(v, list)| list.into_iter().map(move |a| (v.clone(), a)))
         .collect();
 
-    // Resolve the unique role-definition ids to names (cached, tenant-stable —
-    // Owner/Contributor/Key Vault Administrator/…), mirroring the MI Azure-roles
-    // command so both surfaces read the same names.
-    let unique_roledefs: HashSet<String> = flat
-        .iter()
-        .filter_map(|(_, a)| a.properties.role_definition_id.clone())
-        .filter(|id| !id.is_empty())
-        .collect();
-    let role_names: HashMap<String, String> = stream::iter(unique_roledefs)
-        .map(|id| {
-            let arm = arm.clone();
-            let cache = cache.clone();
-            let tenant_id = tenant_id.clone();
-            async move {
-                let key = format!("{tenant_id}|arm_roledef|{id}");
-                if let Some(name) = cache.get::<String>(CacheKind::Permissions, &key) {
-                    return (id, name);
-                }
-                match arm
-                    .get_role_definition(&id)
-                    .await
-                    .ok()
-                    .and_then(|d| d.properties.role_name)
-                {
-                    Some(name) => {
-                        cache.put(CacheKind::Permissions, key, &name);
-                        (id, name)
-                    }
-                    None => {
-                        let fallback = id.rsplit('/').next().unwrap_or("role").to_string();
-                        (id, fallback)
-                    }
-                }
-            }
-        })
-        .buffer_unordered(ARM_CONCURRENCY)
-        .collect()
-        .await;
+    // Resolve the role-definition ids to names (one fetch per role GUID, cached
+    // per tenant), shared with the MI Azure-roles command so both surfaces read
+    // the same names.
+    let role_names = resolve_role_names_cached(
+        &arm,
+        &cache,
+        &tenant_id,
+        flat.iter()
+            .filter_map(|(_, a)| a.properties.role_definition_id.as_deref()),
+        ARM_CONCURRENCY,
+    )
+    .await;
 
     // Resolve principal display names via the Graph SP batch. Apps and managed
     // identities are both service principals, so they resolve; users/groups
@@ -279,37 +241,31 @@ pub async fn sweep_key_vault_access(
         .collect();
     let principal_names = resolve_principal_names(&graph, &unique_principals).await;
 
-    let mut rows: Vec<KeyVaultAccessRow> =
-        flat.into_iter()
-            .map(|(vault, a)| {
-                let props = a.properties;
-                let vault_id = vault.id.unwrap_or_default();
-                let inherited = is_inherited(props.scope.as_deref(), &vault_id);
-                let scope = props.scope.unwrap_or_else(|| vault_id.clone());
-                let role_def_id = props.role_definition_id.unwrap_or_default();
-                let role_name = if role_def_id.is_empty() {
-                    "(unknown role)".to_string()
-                } else {
-                    role_names.get(&role_def_id).cloned().unwrap_or_else(|| {
-                        role_def_id.rsplit('/').next().unwrap_or("role").to_string()
-                    })
-                };
-                let high_privilege = KV_HIGH_PRIVILEGE_ROLES.contains(&role_name.as_str());
-                let principal_id = props.principal_id.unwrap_or_default();
-                let principal_display_name = principal_names.get(&principal_id).cloned();
-                KeyVaultAccessRow {
-                    vault_id,
-                    vault_name: vault.name,
-                    scope,
-                    role_name,
-                    principal_id,
-                    principal_type: props.principal_type,
-                    principal_display_name,
-                    high_privilege,
-                    inherited,
-                }
-            })
-            .collect();
+    let mut rows: Vec<KeyVaultAccessRow> = flat
+        .into_iter()
+        .map(|(vault, a)| {
+            let props = a.properties;
+            let vault_id = vault.id.unwrap_or_default();
+            let inherited = is_inherited(props.scope.as_deref(), &vault_id);
+            let scope = props.scope.unwrap_or_else(|| vault_id.clone());
+            let role_def_id = props.role_definition_id.unwrap_or_default();
+            let role_name = role_display_name(&role_names, &role_def_id);
+            let high_privilege = is_high_privilege_role(&role_name, RoleContext::KeyVault);
+            let principal_id = props.principal_id.unwrap_or_default();
+            let principal_display_name = principal_names.get(&principal_id).cloned();
+            KeyVaultAccessRow {
+                vault_id,
+                vault_name: vault.name,
+                scope,
+                role_name,
+                principal_id,
+                principal_type: props.principal_type,
+                principal_display_name,
+                high_privilege,
+                inherited,
+            }
+        })
+        .collect();
     // High-privilege first, then by vault (its direct grants before its
     // inherited ones), then by role — the risky grants lead.
     rows.sort_by(|a, b| {
@@ -592,10 +548,11 @@ mod tests {
 
     #[test]
     fn high_privilege_roles_flagged_exactly() {
-        assert!(KV_HIGH_PRIVILEGE_ROLES.contains(&"Key Vault Administrator"));
-        assert!(KV_HIGH_PRIVILEGE_ROLES.contains(&"Owner"));
+        let flagged = |name: &str| is_high_privilege_role(name, RoleContext::KeyVault);
+        assert!(flagged("Key Vault Administrator"));
+        assert!(flagged("Owner"));
         // A read-only data role is NOT high-privilege.
-        assert!(!KV_HIGH_PRIVILEGE_ROLES.contains(&"Key Vault Secrets User"));
-        assert!(!KV_HIGH_PRIVILEGE_ROLES.contains(&"Reader"));
+        assert!(!flagged("Key Vault Secrets User"));
+        assert!(!flagged("Reader"));
     }
 }

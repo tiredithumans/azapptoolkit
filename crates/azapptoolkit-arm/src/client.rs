@@ -16,10 +16,32 @@ use crate::models::{
 };
 
 pub const ARM_BASE: &str = "https://management.azure.com";
+/// `Microsoft.Resources/subscriptions` (Subscriptions - List): latest stable.
+/// Source: <https://learn.microsoft.com/rest/api/resources/subscriptions/list>
+/// (reviewed 2026-09).
 const SUBSCRIPTIONS_API: &str = "2022-12-01";
+/// `Microsoft.Authorization` (role assignments / definitions): latest stable.
+/// Source: <https://learn.microsoft.com/rest/api/authorization/versions>
+/// (reviewed 2026-09).
 const AUTHORIZATION_API: &str = "2022-04-01";
+/// `Microsoft.OperationalInsights/workspaces`: behind the latest stable
+/// (2025-07-01) but not retiring; only `properties.customerId` is read. Source:
+/// <https://learn.microsoft.com/azure/templates/microsoft.operationalinsights/workspaces>
+/// (reviewed 2026-09).
 const LOG_ANALYTICS_WORKSPACES_API: &str = "2022-10-01";
-const KEYVAULT_API: &str = "2023-07-01";
+/// `Microsoft.KeyVault/vaults` (control plane): every version before
+/// 2026-02-01 retires on 2027-02-27 with no exception or extension. Only the
+/// vault listing uses it (`id`/`name`), and the 2026-02-01 RBAC-by-default
+/// change affects only vault creation. Pinned by
+/// `keyvault_control_plane_api_survives_the_2027_retirement`. Source:
+/// <https://learn.microsoft.com/azure/key-vault/general/migrate-api-version>
+/// (reviewed 2026-09).
+const KEYVAULT_API: &str = "2026-02-01";
+
+/// Defensive bound on `nextLink` paging: a misbehaving server returning a
+/// self-referencing `nextLink` must not page forever (far above any real
+/// collection).
+const MAX_PAGES: usize = 1000;
 
 pub struct ArmClient {
     http: reqwest::Client,
@@ -166,9 +188,6 @@ impl ArmClient {
         url: &str,
         query: &[(&str, &str)],
     ) -> Result<Vec<T>> {
-        // Defensive bound: a misbehaving server returning a self-referencing
-        // `nextLink` must not page forever (far above any real collection).
-        const MAX_PAGES: usize = 1000;
         let mut out = Vec::new();
         let mut page: Paged<T> = self.get_json(url, query).await?;
         out.append(&mut page.value);
@@ -679,5 +698,69 @@ mod tests {
         let client = client(&server.uri());
         let def = client.get_role_definition(id).await.unwrap();
         assert_eq!(def.properties.role_name.as_deref(), Some("Reader"));
+    }
+
+    /// Microsoft retires every Key Vault control-plane api-version before
+    /// 2026-02-01 on 2027-02-27; after that the vault sweep's per-subscription
+    /// listing would fail (logged and skipped) and report no vaults. Guards
+    /// against a downgrade. YYYY-MM-DD compares correctly as a string.
+    #[test]
+    fn keyvault_control_plane_api_survives_the_2027_retirement() {
+        assert!(KEYVAULT_API >= "2026-02-01", "{KEYVAULT_API}");
+    }
+
+    #[tokio::test]
+    async fn lists_log_analytics_workspaces_and_reads_customer_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/subscriptions/sub-1/providers/Microsoft.OperationalInsights/workspaces",
+            ))
+            .and(query_param("api-version", LOG_ANALYTICS_WORKSPACES_API))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.OperationalInsights/workspaces/law-1",
+                    "name": "law-1",
+                    "properties": {"customerId": "6f1c2a4e-0000-4000-8000-00000000abcd"}
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let ws = client(&server.uri())
+            .list_log_analytics_workspaces("sub-1")
+            .await
+            .unwrap();
+        assert_eq!(ws.len(), 1);
+        // The query API addresses a workspace by `customerId`, not its ARM id.
+        assert_eq!(
+            ws[0].properties.customer_id.as_deref(),
+            Some("6f1c2a4e-0000-4000-8000-00000000abcd")
+        );
+    }
+
+    /// A self-referencing `nextLink` stops at `MAX_PAGES` instead of paging
+    /// forever.
+    #[tokio::test]
+    async fn collect_paged_stops_at_the_page_cap() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        // No query matcher: the follows are sent verbatim, without `api-version`.
+        Mock::given(method("GET"))
+            .and(path("/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [],
+                "nextLink": format!("{uri}/subscriptions")
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client(&uri).list_subscriptions().await.unwrap_err();
+        assert!(
+            matches!(&err, ArmError::Protocol(m) if m.contains("exceeded")),
+            "got {err:?}"
+        );
+        // The first page plus MAX_PAGES - 1 follows.
+        assert_eq!(server.received_requests().await.unwrap().len(), MAX_PAGES);
     }
 }

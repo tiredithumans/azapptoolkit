@@ -169,7 +169,7 @@ mod optional_unix_timestamp_ser {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Paged<T> {
     pub value: Vec<T>,
     #[serde(rename = "nextLink", default)]
@@ -233,5 +233,29 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"value":"v"}"#);
+    }
+
+    /// The rotation write sends `exp` (and may send `nbf`) under `attributes`
+    /// as Unix **seconds** — a rename slip or a millisecond/RFC 3339 encoding
+    /// would leave every rotated secret without an expiry Key Vault honours.
+    #[test]
+    fn set_request_serialises_exp_and_nbf_as_unix_seconds() {
+        use chrono::TimeZone;
+        // Explicit fields: the Drop (zeroize) impl forbids `..Default::default()`.
+        let req = SecretSetRequest {
+            value: "v".into(),
+            content_type: None,
+            tags: None,
+            attributes: Some(SecretAttributesRequest {
+                enabled: Some(true),
+                expires: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+                not_before: Some(Utc.with_ymd_and_hms(2025, 12, 31, 0, 0, 0).unwrap()),
+            }),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            s,
+            r#"{"value":"v","attributes":{"enabled":true,"exp":1767225600,"nbf":1767139200}}"#
+        );
     }
 }

@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- **The Vault access tab will keep finding your key vaults after Microsoft retires older Key Vault
+  management APIs.** Microsoft stops accepting Key Vault control-plane API versions older than
+  2026-02-01 on February 27, 2027, and the sweep listed vaults with 2023-07-01. From that date it
+  would have reported no vaults instead of showing an error. It now uses 2026-02-01. Reading and
+  writing secrets uses a different API and is not affected.
 - **Removing expired credentials no longer counts a credential that was already gone.** The
   audit's one-click Fix rewrote an app's certificate list even when the expired certificate had
   already been removed (by another admin, or since the audit ran), and counted it as removed. It

@@ -2,7 +2,8 @@
 //!
 //! Scope: just the secrets surface on `{vault}.vault.azure.net` against the
 //! `2016-10-01`-compatible `secrets` REST API (we use `7.4` — the general-
-//! availability API version). Pulls bearer tokens through the shared
+//! availability API version; data plane, so the Key Vault control-plane
+//! api-version retirement does not apply). Pulls bearer tokens through the shared
 //! [`azapptoolkit_core::BearerProvider`] so the desktop layer wires one token
 //! adapter across audiences.
 //!
