@@ -254,7 +254,9 @@ which a sign-out/sign-in cycle would.
   (`Toast::is_sticky`: an error with an action). Only `CommandState::run_toast_err` adds **Retry**
   (`report_command_error_with_retry`), for a failure the backend marks `retryable` (throttled,
   5xx, network) and no recovery lever outranks; the Retry is pinned to the tenant the call ran for,
-  because toasts survive a tenant switch. Direct `report_command_error` callers hold no op to
+  because toasts survive a tenant switch, and bounded by the owning component: a sticky toast
+  outlives its detail pane, so a Retry whose `CommandState.busy` is disposed (or still busy) says
+  why instead of re-running an op that would read disposed signals and panic. Direct `report_command_error` callers hold no op to
   re-run and keep a plain toast.
 - `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
   couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one

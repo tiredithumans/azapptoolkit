@@ -54,7 +54,9 @@ impl CommandState {
         Fut: std::future::Future<Output = Result<T, azapptoolkit_dto::UiError>> + 'static,
         T: 'static,
     {
-        if self.busy.get_untracked() {
+        // `try_`: a handle whose owning component is gone (a sticky Retry
+        // toast outlives the pane that made it) reads as busy, never panics.
+        if self.busy.try_get_untracked().unwrap_or(true) {
             return;
         }
         let busy = self.busy;
@@ -124,9 +126,10 @@ impl CommandState {
     /// why `on_ok` and `op` are `Clone`: every run, the first and each retry,
     /// consumes a fresh clone. See [`fail_toast`](Self::fail_toast).
     ///
-    /// A retry goes through this runner again, so its guard applies: it is a
-    /// no-op while the same handle is busy, and it resolves the tenant anew
-    /// (pinned to the one the call first ran for — see `fail_toast`). An op
+    /// A retry goes through this runner again, so it resolves the tenant anew
+    /// (pinned to the one the call first ran for), and it is refused — with an
+    /// info toast saying why — while the same handle is busy or once the
+    /// component that owns it is gone (see `fail_toast`). An op
     /// that reads a signal when called (the enterprise-app notes text) retries
     /// with the value current at the click, not the one that failed.
     pub fn run_toast_err<T, Fut>(
@@ -164,25 +167,37 @@ impl CommandState {
     /// for. Toasts survive a tenant switch, and a re-run resolves the tenant
     /// active at the click — so without the pin a Retry clicked after a switch
     /// would send tenant A's captured object ids to tenant B. After a switch it
-    /// says so instead. Synchronous so it is testable without spawning.
+    /// says so instead.
+    ///
+    /// It is also **bounded by the owning component's lifetime**. The toast
+    /// lives on the shell's `Session` and, being sticky, outlives the detail
+    /// pane that raised it (closing the dock chip, "Close all", a tenant
+    /// A → B → A switch all dispose the pane), while `rerun` reads that pane's
+    /// signals and stored values — reading a disposed one panics the app. So a
+    /// Retry whose handle is disposed says the view was closed instead, and one
+    /// clicked while the same handle is still busy (another action on that pane
+    /// is in flight) says so rather than vanishing silently. Synchronous so it
+    /// is testable without spawning.
     pub(crate) fn fail_toast(
         self,
         e: azapptoolkit_dto::UiError,
         started_for: Option<String>,
         rerun: impl Fn() + 'static,
     ) {
-        let session = self.session;
+        let (session, busy) = (self.session, self.busy);
         let retry: ToastAction = Rc::new(move || {
-            if session.active_tenant.get_untracked().map(|t| t.tenant_id) == started_for {
-                rerun();
+            let not_retried = if busy.is_disposed() {
+                "That view was closed, so the action wasn't retried."
+            } else if session.active_tenant.get_untracked().map(|t| t.tenant_id) != started_for {
+                "You switched tenants, so that action wasn't retried."
+            } else if busy.try_get_untracked().unwrap_or(true) {
+                "Another action is still running there, so that one wasn't retried. \
+                 Try again when it finishes."
             } else {
-                session.push_toast(
-                    ToastKind::Info,
-                    "You switched tenants, so that action wasn't retried.",
-                    None,
-                    None,
-                );
-            }
+                rerun();
+                return;
+            };
+            session.push_toast(ToastKind::Info, not_retried, None, None);
         });
         session.report_command_error_with_retry(&e, self.consent_feature, Some(retry));
     }
@@ -351,6 +366,70 @@ mod tests {
             messages.iter().any(|m| m.contains("switched tenants")),
             "{messages:?}"
         );
+    }
+
+    #[test]
+    fn a_retry_after_its_view_closed_never_runs() {
+        // The sticky toast outlives the pane that owns the handle; the re-run
+        // reads that pane's (now disposed) signals, which would panic.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let pane = Owner::new();
+            let cmd = pane.with(use_command);
+            cmd.fail_toast(
+                azapptoolkit_dto::UiError::new("throttled", "slow down", true),
+                Some("tenant-a".to_string()),
+                || panic!("a retry ran for a closed view"),
+            );
+            let action = session
+                .toasts
+                .with_untracked(|list| list[0].action.clone().expect("a retry action"));
+            pane.cleanup();
+            assert!(cmd.busy.is_disposed());
+            action();
+            let messages: Vec<String> = session
+                .toasts
+                .with_untracked(|list| list.iter().map(|t| t.message.clone()).collect());
+            assert!(
+                messages.iter().any(|m| m.contains("view was closed")),
+                "{messages:?}"
+            );
+            // The runner's own guard is disposal-safe too: no panic, no spawn.
+            cmd.run_with(
+                |()| panic!("ran"),
+                |_| panic!("ran"),
+                |_| async { Err(azapptoolkit_dto::UiError::new("x", "ran", false)) },
+            );
+        });
+    }
+
+    #[test]
+    fn a_retry_while_the_handle_is_busy_says_so() {
+        // The runner's guard drops a click on a busy handle (sso_tab shares
+        // one handle across five actions); the operator must hear why.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let cmd = use_command();
+            cmd.fail_toast(
+                azapptoolkit_dto::UiError::new("server_error", "try later", true),
+                None,
+                || panic!("a busy handle re-ran"),
+            );
+            let action = session
+                .toasts
+                .with_untracked(|list| list[0].action.clone().expect("a retry action"));
+            cmd.busy.set(true);
+            action();
+            session.toasts.with_untracked(|list| {
+                assert!(
+                    list.iter().any(|t| t.message.contains("still running")),
+                    "the lever vanished silently"
+                );
+            });
+        });
     }
 
     #[test]
