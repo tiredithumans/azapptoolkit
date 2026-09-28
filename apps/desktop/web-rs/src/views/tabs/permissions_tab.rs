@@ -1,7 +1,8 @@
 //! Permissions tab. Lists declared `requiredResourceAccess` entries with
-//! human-friendly resource + permission names resolved server-side via the
-//! bundled catalog (`PermissionsCatalog::lookup_permission`). Application vs.
-//! Delegated permissions get distinct chips. Lets you grant admin consent.
+//! human-friendly resource + permission names resolved server-side from each
+//! resource's live service principal (`resolve_resource_sp`; the bundled
+//! resource directory only supplies well-known resource names). Application
+//! vs. Delegated permissions get distinct chips. Lets you grant admin consent.
 
 use std::collections::HashMap;
 use std::rc::Rc;

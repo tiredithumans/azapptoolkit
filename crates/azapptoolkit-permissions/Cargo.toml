@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Bundled Microsoft Graph permissions catalog (resource directory; live permission data resolves via the Graph client)"
+description = "Bundled directory of well-known Microsoft API resources (appId + name); permission definitions resolve live via the Graph client"
 
 [dependencies]
 serde = { workspace = true }

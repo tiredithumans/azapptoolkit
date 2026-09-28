@@ -73,8 +73,8 @@ pub struct GrantResult {
 }
 
 /// Application permission ("Role") vs delegated ("Scope"). `Unknown` is used
-/// when the catalog and live SP lookup both miss — the GUIDs are still shown
-/// in the UI so power users can copy them.
+/// when the live SP lookup misses and the declared type is neither Role nor
+/// Scope — the GUIDs are still shown in the UI so power users can copy them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionKind {
@@ -84,7 +84,9 @@ pub enum PermissionKind {
 }
 
 impl PermissionKind {
-    pub fn from_catalog_kind(kind: &str) -> Self {
+    /// Maps a `requiredResourceAccess[].type` (`"Role"` / `"Scope"`) to its
+    /// kind; anything else is `Unknown`.
+    pub fn from_access_type(kind: &str) -> Self {
         match kind {
             "Role" => PermissionKind::Application,
             "Scope" => PermissionKind::Delegated,
@@ -94,7 +96,7 @@ impl PermissionKind {
 }
 
 /// One declared `requiredResourceAccess` entry, resolved to human-readable
-/// fields where the catalog or a live SP lookup could match the GUIDs.
+/// fields where a live SP lookup could match the GUIDs.
 /// The raw GUIDs are preserved so the UI can show them as a secondary line
 /// / tooltip.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -45,7 +45,7 @@ crates/                              # shared Rust libraries
 ├── azapptoolkit-exchange/           # Exchange Admin API; `verdict.rs` = pure mailbox-scope decisions
 ├── azapptoolkit-keyvault/           # Azure Key Vault secrets client
 ├── azapptoolkit-arm/                # ARM + Azure Monitor Logs query (managed-identity)
-└── azapptoolkit-permissions/        # bundled permissions catalog (data/) + Graph fallback
+└── azapptoolkit-permissions/        # resource directory (data/); permissions resolve live
 
 apps/desktop/
 ├── src-tauri/                       # backend (main process)
@@ -109,7 +109,7 @@ bake them via `.env`).
 - **The `BearerProvider` boundary carries the auth classification** as `core::token::TokenError { code, message }` — never a bare `String` — with `token_adapter::token_error` as the sole mapping.
 - **Per-tenant operator defaults live in `settings.json`** (`UserSettings.tenant_defaults`); writers use only `UserSettings::mutate` (fails closed); `apply_tenant_defaults` destructures exhaustively and preserves the rotation-owned vault fields.
 - **Build-time config baking:** `build.rs` reads `.env` → `AZAPPTOOLKIT_BUILD_*`; env vars override. **CSP governs the webview only** — backend reqwest egress needs no `connect-src` change.
-- **Permissions catalog** is bundled at compile time from `azapptoolkit-permissions/data/`; unknown resources fall back to `resolve_resource_sp()`.
+- **Permission definitions resolve live** via `resolve_resource_sp()`; `azapptoolkit-permissions/data/` bundles only the picker's resource directory.
 
 ### Auth
 

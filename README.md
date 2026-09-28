@@ -73,9 +73,10 @@ toolkit-owned service principal storing tokens you cannot audit.
 ### Permissions, consent & scoping
 
 - **API permissions and admin consent** — pick delegated and
-  application permissions from a bundled catalog (with Graph fallback
-  for unknown resources) and grant admin consent in one click, with a
-  diff view before writing.
+  application permissions, listed live from each API's service
+  principal in your tenant (Microsoft APIs and your own app
+  registrations), and grant admin consent in one click, with a diff
+  view before writing.
 - **SharePoint site access (`Sites.Selected`)** — list, grant, and revoke a
   site's per-app permissions, and convert an org-wide `Sites.*` grant to
   site-scoped access.

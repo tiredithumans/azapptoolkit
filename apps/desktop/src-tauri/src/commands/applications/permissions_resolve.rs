@@ -1,63 +1,25 @@
 use std::collections::{HashMap, HashSet};
 
 use azapptoolkit_core::models::ServicePrincipal;
-use azapptoolkit_permissions::PermissionsCatalog;
 
 use crate::dto::permissions::{PermissionKind, ResolvedPermission};
 
 /// Resolves one declared permission to a [`ResolvedPermission`] through the
-/// fixed fallback ladder — bundled catalog → live resource SP (`appRoles` then
+/// fixed fallback ladder — live resource SP (`appRoles` then
 /// `oauth2PermissionScopes`) → raw GUID with the declared Role/Scope kind —
 /// joining the matching runtime grant via the caller's per-resource closures.
-/// Extracted so the ladder reads once instead of three near-identical struct
-/// builds inside the loop.
-#[allow(clippy::too_many_arguments)]
+/// There is no bundled rung: the resource directory carries names only.
+/// Extracted so the ladder reads once instead of near-identical struct builds
+/// inside the loop.
 fn resolve_one_permission(
-    catalog: &PermissionsCatalog,
     resource_app_id: &str,
     resource_display_name: &Option<String>,
-    cataloged: Option<&azapptoolkit_permissions::ResourceEntry>,
     live_sp: Option<&ServicePrincipal>,
     access: &azapptoolkit_core::models::ResourceAccess,
     runtime_assignment_for: &impl Fn(&str) -> Option<String>,
     runtime_grant_for: &impl Fn(&str) -> Option<String>,
 ) -> ResolvedPermission {
-    // 1. Catalog.
-    if let Some((display, kind)) = catalog.lookup_permission(resource_app_id, &access.id) {
-        let permission_value = cataloged.and_then(|r| {
-            r.app_roles
-                .iter()
-                .find(|x| x.id == access.id)
-                .map(|x| x.value.clone())
-                .or_else(|| {
-                    r.oauth2_permission_scopes
-                        .iter()
-                        .find(|x| x.id == access.id)
-                        .map(|x| x.value.clone())
-                })
-        });
-        let permission_kind = PermissionKind::from_catalog_kind(kind);
-        let (runtime_assignment_id, runtime_grant_id) = match permission_kind {
-            PermissionKind::Application => (runtime_assignment_for(&access.id), None),
-            PermissionKind::Delegated => (
-                None,
-                permission_value.as_deref().and_then(runtime_grant_for),
-            ),
-            PermissionKind::Unknown => (None, None),
-        };
-        return ResolvedPermission {
-            resource_app_id: resource_app_id.to_string(),
-            resource_display_name: resource_display_name.clone(),
-            permission_id: access.id.clone(),
-            permission_value,
-            permission_display_name: Some(display),
-            permission_kind,
-            runtime_assignment_id,
-            runtime_grant_id,
-        };
-    }
-
-    // 2. Live SP fallback (appRoles, then oauth2PermissionScopes).
+    // 1. Live SP (appRoles, then oauth2PermissionScopes).
     if let Some(sp) = live_sp {
         if let Some(role) = sp.app_roles.iter().find(|r| r.id == access.id) {
             return ResolvedPermission {
@@ -93,12 +55,8 @@ fn resolve_one_permission(
         }
     }
 
-    // 3. Total miss: surface raw GUIDs with the declared Role/Scope kind.
-    let permission_kind = match access.r#type.as_str() {
-        "Role" => PermissionKind::Application,
-        "Scope" => PermissionKind::Delegated,
-        _ => PermissionKind::Unknown,
-    };
+    // 2. Total miss: surface raw GUIDs with the declared Role/Scope kind.
+    let permission_kind = PermissionKind::from_access_type(&access.r#type);
     let runtime_assignment_id = matches!(permission_kind, PermissionKind::Application)
         .then(|| runtime_assignment_for(&access.id))
         .flatten();
@@ -117,7 +75,7 @@ fn resolve_one_permission(
 /// Resolves every declared permission (see [`resolve_one_permission`]) and
 /// reports whether the resolution is **degraded**: `true` when a declared
 /// resource's service principal couldn't be read. That resource's rows still
-/// come back (the ladder falls through to the catalog / raw GUID), but without
+/// come back (the ladder falls through to the raw GUID), but without
 /// the resource SP id they can't be joined to their runtime grants, so they read
 /// as "Not granted" whether or not they are — the caller must not cache or
 /// present such a result as authoritative.
@@ -127,7 +85,7 @@ pub(super) async fn resolve_required_resource_access(
     app_role_assignments: &[azapptoolkit_core::models::AppRoleAssignment],
     oauth2_permission_grants: &[azapptoolkit_core::models::OAuth2PermissionGrant],
 ) -> (Vec<ResolvedPermission>, bool) {
-    let catalog = PermissionsCatalog::bundled();
+    let directory = azapptoolkit_permissions::ResourceDirectory::bundled();
 
     // Resolve every distinct declared resource's SP up front and concurrently
     // (each is an independent, Permissions-cached Graph lookup) so the per-row
@@ -173,8 +131,9 @@ pub(super) async fn resolve_required_resource_access(
     let mut out = Vec::new();
 
     for resource in declared {
-        let cataloged = catalog.resource(&resource.resource_app_id);
-        let resource_display_from_catalog = cataloged.map(|r| r.display_name.clone());
+        let resource_display_from_directory = directory
+            .resource(&resource.resource_app_id)
+            .map(|r| r.display_name.clone());
 
         let live_sp = live_sps
             .get(&resource.resource_app_id)
@@ -182,7 +141,7 @@ pub(super) async fn resolve_required_resource_access(
         let resource_sp_id = live_sp.map(|sp| sp.id.as_str());
 
         let resource_display_name =
-            resource_display_from_catalog.or_else(|| live_sp.map(|sp| sp.display_name.clone()));
+            resource_display_from_directory.or_else(|| live_sp.map(|sp| sp.display_name.clone()));
 
         // Runtime-grant joins. Application: assignment.resource_id ==
         // resource_sp.id && assignment.app_role_id == permission_id.
@@ -208,10 +167,8 @@ pub(super) async fn resolve_required_resource_access(
 
         for access in &resource.resource_access {
             out.push(resolve_one_permission(
-                catalog,
                 &resource.resource_app_id,
                 &resource_display_name,
-                cataloged,
                 live_sp,
                 access,
                 &runtime_assignment_for,
@@ -226,7 +183,9 @@ pub(super) async fn resolve_required_resource_access(
 #[cfg(test)]
 mod tests {
     use azapptoolkit_core::cache::Cache;
-    use azapptoolkit_core::models::{AppRoleAssignment, RequiredResourceAccess, ResourceAccess};
+    use azapptoolkit_core::models::{
+        AppRole, AppRoleAssignment, OAuth2PermissionScope, RequiredResourceAccess, ResourceAccess,
+    };
     use azapptoolkit_core::token::StaticTokenProvider;
     use azapptoolkit_graph::GraphClient;
     use wiremock::matchers::{method, path, query_param};
@@ -234,8 +193,8 @@ mod tests {
 
     use super::*;
 
-    // Resource appIds outside the bundled catalog, so the ladder reads the
-    // live SP (and the join depends on it).
+    // Resource appIds outside the bundled directory, so the resource name
+    // comes from the live SP (and the join depends on it).
     const RES_A: &str = "11111111-aaaa-4aaa-8aaa-000000000001";
     const RES_B: &str = "22222222-bbbb-4bbb-8bbb-000000000002";
 
@@ -347,5 +306,77 @@ mod tests {
             "a resource with no SP in the tenant is an answer"
         );
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_directory_resource_resolves_from_the_live_sp() {
+        const GRAPH: &str = "00000003-0000-0000-c000-000000000000";
+        let name = Some("Microsoft Graph".to_string());
+        let sp = ServicePrincipal {
+            id: "sp-graph".into(),
+            app_id: GRAPH.into(),
+            app_roles: vec![AppRole {
+                id: "r1".into(),
+                value: "User.Read.All".into(),
+                display_name: "Read all users' full profiles".into(),
+                ..Default::default()
+            }],
+            oauth2_permission_scopes: vec![OAuth2PermissionScope {
+                id: "s1".into(),
+                value: "User.Read".into(),
+                admin_consent_display_name: Some("Sign in and read user profile".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let assignment_for = |id: &str| Some(format!("assign-{id}"));
+        let grant_for = |value: &str| Some(format!("grant-{value}"));
+        let resolve = |id: &str, kind: &str| {
+            let access = ResourceAccess {
+                id: id.into(),
+                r#type: kind.into(),
+            };
+            resolve_one_permission(
+                GRAPH,
+                &name,
+                Some(&sp),
+                &access,
+                &assignment_for,
+                &grant_for,
+            )
+        };
+
+        let role = resolve("r1", "Role");
+        assert_eq!(role.permission_kind, PermissionKind::Application);
+        assert_eq!(role.permission_value.as_deref(), Some("User.Read.All"));
+        assert_eq!(
+            role.resource_display_name.as_deref(),
+            Some("Microsoft Graph")
+        );
+        assert_eq!(role.runtime_assignment_id.as_deref(), Some("assign-r1"));
+        assert!(role.runtime_grant_id.is_none());
+
+        let scope = resolve("s1", "Scope");
+        assert_eq!(scope.permission_kind, PermissionKind::Delegated);
+        assert_eq!(
+            scope.permission_display_name.as_deref(),
+            Some("Sign in and read user profile")
+        );
+        // The delegated join keys off the scope value, not its id.
+        assert_eq!(scope.runtime_grant_id.as_deref(), Some("grant-User.Read"));
+        assert!(scope.runtime_assignment_id.is_none());
+
+        let role_miss = resolve("zz", "Role");
+        assert_eq!(role_miss.permission_kind, PermissionKind::Application);
+        assert!(role_miss.permission_value.is_none());
+        assert!(role_miss.permission_display_name.is_none());
+        assert_eq!(
+            resolve("zz", "Scope").permission_kind,
+            PermissionKind::Delegated
+        );
+        assert_eq!(
+            resolve("zz", "Other").permission_kind,
+            PermissionKind::Unknown
+        );
     }
 }

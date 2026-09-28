@@ -904,7 +904,7 @@ pub fn disable_sign_in_remediation() -> RemediationAction {
 
 /// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
 /// caller is responsible for turning Graph IDs into permission name strings
-/// (via the bundled catalog or a live lookup).
+/// (via a live resource-SP lookup).
 ///
 /// `now` is a parameter so tests can use deterministic timestamps.
 pub fn score_application(

@@ -13,6 +13,10 @@ use crate::state::AppState;
 
 // ---------------- Catalog browse ----------------
 
+/// The bundled resource directory for the permission picker's dropdown. The
+/// directory carries names only, so both counts are 0 here; the picker fills
+/// its per-resource counts from [`list_resource_permission_counts`], which
+/// resolves each resource's live service principal.
 #[tauri::command]
 pub fn list_catalog_resources() -> Vec<CatalogResourceSummary> {
     azapptoolkit_permissions::bundled_resources_slice()
@@ -20,8 +24,8 @@ pub fn list_catalog_resources() -> Vec<CatalogResourceSummary> {
         .map(|r| CatalogResourceSummary {
             app_id: r.app_id.clone(),
             display_name: r.display_name.clone(),
-            role_count: r.app_roles.len(),
-            scope_count: r.oauth2_permission_scopes.len(),
+            role_count: 0,
+            scope_count: 0,
         })
         .collect()
 }
@@ -1141,6 +1145,27 @@ pub async fn revoke_oauth2_scope(
 mod tests {
     use super::*;
     use azapptoolkit_core::models::{AppRole, OAuth2PermissionScope};
+
+    #[test]
+    fn catalog_resources_list_the_directory_without_counts() {
+        let resources = list_catalog_resources();
+        assert_eq!(
+            resources.len(),
+            azapptoolkit_permissions::bundled_resources_slice().len()
+        );
+        assert!(
+            resources
+                .iter()
+                .any(|r| r.app_id == "00000003-0000-0000-c000-000000000000")
+        );
+        // Counts come live from `list_resource_permission_counts`; the
+        // directory itself carries none.
+        assert!(
+            resources
+                .iter()
+                .all(|r| r.role_count == 0 && r.scope_count == 0)
+        );
+    }
 
     fn role(value: &str, enabled: Option<bool>) -> AppRole {
         AppRole {

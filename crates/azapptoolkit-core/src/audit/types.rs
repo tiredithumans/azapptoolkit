@@ -281,7 +281,7 @@ impl ResourcePermission {
 pub struct AppPermissions {
     /// Role-type entries on the app's `requiredResourceAccess` (or, for an
     /// SP-only row, the roles it has been *granted*), each paired with the
-    /// resource that exposes it. Resolved from the bundled catalog / Graph.
+    /// resource that exposes it. Resolved live from the resource's service principal.
     pub app_role_grants: Vec<ResourcePermission>,
     /// Values of Scope-type entries.
     pub scope_values: Vec<String>,
