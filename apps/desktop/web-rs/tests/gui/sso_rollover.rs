@@ -146,18 +146,15 @@ async fn a_steady_app_offers_no_activate_button() {
     );
 }
 
-/// An expired certificate that is no longer nominated is dead weight: the
-/// backend has always been willing to remove it, but no UI offered the action —
-/// the retire button only appeared for a superseded (rollback) certificate, so
-/// expired leftovers accumulated forever. The portal's equivalent is "Delete
-/// certificate" on an inactive cert.
-#[wasm_bindgen_test]
-async fn an_expired_inactive_certificate_offers_remove() {
-    ts::reset();
+const EXPIRED_THUMBPRINT: &str = "00B2C3D4E5F60718293A4B5C6D7E8F9012345678";
+
+/// Mounts a steady app that also carries one expired, non-nominated
+/// certificate (the last row), with `retire_saml_signing_certificate` mocked.
+fn mount_with_expired_cert() -> ts::Mounted {
     let mut roll = fixtures::signing_cert_rollover_steady("sp-demo", "app-demo");
     roll.certs.push(azapptoolkit_dto::sso::SigningCertDto {
         key_id: "key-expired".to_string(),
-        thumbprint: "00B2C3D4E5F60718293A4B5C6D7E8F9012345678".to_string(),
+        thumbprint: EXPIRED_THUMBPRINT.to_string(),
         display_name: Some("CN=Contoso SSO 2023".to_string()),
         start_date_time: Some("2020-05-01T00:00:00Z".to_string()),
         end_date_time: Some("2023-05-01T00:00:00Z".to_string()),
@@ -169,17 +166,72 @@ async fn an_expired_inactive_certificate_offers_remove() {
         "retire_saml_signing_certificate",
         &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
     );
+    mount(&roll)
+}
 
-    let _m = mount(&roll);
+/// An expired certificate that is no longer nominated is dead weight: the
+/// backend has always been willing to remove it, but no UI offered the action —
+/// the retire button only appeared for a superseded (rollback) certificate, so
+/// expired leftovers accumulated forever. The portal's equivalent is "Delete
+/// certificate" on an inactive cert. Removal is irreversible, so it runs only
+/// once the operator confirms it.
+#[wasm_bindgen_test]
+async fn an_expired_inactive_certificate_offers_remove() {
+    ts::reset();
+    let _m = mount_with_expired_cert();
     ts::wait_for(|| ts::query(".cert-rollover__remove").is_some()).await;
 
     ts::click(".cert-rollover__remove");
-    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+    ts::wait_for(|| ts::body_contains("Remove the expired signing certificate?")).await;
+    assert_eq!(ts::text(".confirm-dialog__subject"), EXPIRED_THUMBPRINT);
+    assert_eq!(
+        ts::call_count("retire_saml_signing_certificate"),
+        0,
+        "removing a certificate is irreversible — it must not run on one click",
+    );
 
+    ts::click_button_labelled_in(".modal", "Remove");
+    ts::wait_for(|| ts::call_count("retire_saml_signing_certificate") == 1).await;
+    assert_eq!(
+        ts::last_call("retire_saml_signing_certificate")
+            .unwrap()
+            .arg_str("keyId")
+            .as_deref(),
+        Some("key-expired"),
+        "remove must target the expired certificate",
+    );
     assert_eq!(
         ts::call_count("activate_saml_signing_certificate"),
         0,
         "removing an expired leftover must not touch the nomination",
+    );
+}
+
+/// The certificate table is a keyboard grid, whose Enter on a focused row
+/// activates the row's first button — on an expired row, that is Remove.
+/// Enter must therefore open the confirm, never delete the certificate.
+#[wasm_bindgen_test]
+async fn enter_on_an_expired_row_asks_before_removing() {
+    ts::reset();
+    let _m = mount_with_expired_cert();
+    ts::wait_for(|| ts::query(".cert-rollover__remove").is_some()).await;
+
+    let roving = ".cert-rollover__row[tabindex='0']";
+    ts::wait_for(|| ts::query_all(roving).len() == 1).await;
+    ts::focus(roving);
+    ts::press_key(roving, "End");
+    ts::wait_for(|| ts::text(roving).contains(EXPIRED_THUMBPRINT)).await;
+    ts::wait_for(|| ts::focused_matches(roving)).await;
+
+    ts::press_key(roving, "Enter");
+    ts::wait_for(|| ts::body_contains("Remove the expired signing certificate?")).await;
+    for _ in 0..3 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("retire_saml_signing_certificate"),
+        0,
+        "Enter on a row must not delete a certificate without confirmation",
     );
 }
 

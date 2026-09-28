@@ -98,6 +98,11 @@ fn SigningCertRolloverPanel(
     // retire. Component-level, like the dialog below: both sit outside the
     // Suspense so a `bump()` never rebuilds them mid-confirmation.
     let pending_retire: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    // (thumbprint, key_id) of the expired certificate awaiting a confirmed
+    // removal. Removal is irreversible, and the table's grid keynav makes the
+    // row's Remove button the target of Enter on a focused row — so it only
+    // ever opens this confirm, never deletes on the spot.
+    let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
     // Consumed by the first load, so every later one (a bump after stage,
     // activate, revert or retire) re-reads live.
@@ -143,6 +148,22 @@ fn SigningCertRolloverPanel(
         cmd.run_toast_err(
             move |_: sso::SigningCertRolloverDto| {
                 session.toast_success("Previous certificate retired.");
+                bump();
+            },
+            move |tenant_id| {
+                let id = sp_id.get_value();
+                let key_id = key_id.clone();
+                async move { sso::retire_saml_signing_certificate(&tenant_id, &id, &key_id).await }
+            },
+        );
+    };
+
+    // Removing an expired leftover also deletes a keyCredential for good, so it
+    // too runs only from its confirm dialog.
+    let do_remove = move |key_id: String| {
+        cmd.run_toast_err(
+            move |_: sso::SigningCertRolloverDto| {
+                session.toast_success("Expired certificate removed.");
                 bump();
             },
             move |tenant_id| {
@@ -307,7 +328,7 @@ fn SigningCertRolloverPanel(
                                 let remove_btn = (matches!(c.status, sso::CertStatus::Expired)
                                     && !c.is_active)
                                     .then(|| {
-                                        let key_id = c.key_id.clone();
+                                        let target = (c.thumbprint.clone(), c.key_id.clone());
                                         let remove_aria = format!(
                                             "Remove expired certificate {}",
                                             c.thumbprint,
@@ -318,25 +339,7 @@ fn SigningCertRolloverPanel(
                                                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                                 attr:aria-label=remove_aria
                                                 on_click=Box::new(move |_| {
-                                                    let key_id = key_id.clone();
-                                                    cmd.run_toast_err(
-                                                        move |_: sso::SigningCertRolloverDto| {
-                                                            session.toast_success("Expired certificate removed.");
-                                                            bump();
-                                                        },
-                                                        move |tenant_id| {
-                                                            let id = sp_id.get_value();
-                                                            let key_id = key_id.clone();
-                                                            async move {
-                                                                sso::retire_saml_signing_certificate(
-                                                                        &tenant_id,
-                                                                        &id,
-                                                                        &key_id,
-                                                                    )
-                                                                    .await
-                                                            }
-                                                        },
-                                                    );
+                                                    pending_remove.set(Some(target.clone()));
                                                 })
                                                 disabled=Signal::derive(move || cmd.busy.get())
                                             >
@@ -531,6 +534,23 @@ fn SigningCertRolloverPanel(
                     }
                 })
                 on_close=Callback::new(move |()| pending_retire.set(None))
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
+                title="Remove the expired signing certificate?"
+                body="The certificate is permanently deleted from this application. It is expired and no longer nominated, so sign-ins do not use it, but it cannot be restored."
+                subject=Signal::derive(move || {
+                    pending_remove.with(|p| p.as_ref().map(|(t, _)| t.clone())).unwrap_or_default()
+                })
+                confirm_label="Remove"
+                busy=Signal::derive(move || cmd.busy.get())
+                on_confirm=Callback::new(move |()| {
+                    if let Some((_, key_id)) = pending_remove.get() {
+                        pending_remove.set(None);
+                        do_remove(key_id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_remove.set(None))
             />
         </div>
     }

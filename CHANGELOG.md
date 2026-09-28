@@ -60,6 +60,10 @@
   and SAML signing-certificate tables, and the observed Graph usage table ignored them. They now
   work like the other tables. A staged SAML signing certificate also gets its own blue badge, so
   the certificate waiting to be activated stands out from the others.
+- **Removing an expired SAML signing certificate now asks first.** The SSO tab's Remove button
+  deleted the certificate on a single click, and once the table gained keyboard navigation, Enter
+  on that row did the same. Removal can't be undone, so both now open a confirmation naming the
+  certificate's thumbprint, like Retire previous certificate already did.
 - **The Permissions tab's kind filter can no longer hide every row.** You could switch off both the
   Application and Delegated toggles and be left with an empty table and no explanation. It is now
   one All / Application / Delegated choice, and a choice with nothing in it says so. An app with no
