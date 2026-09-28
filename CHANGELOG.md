@@ -53,6 +53,11 @@
 
 ### Fixed
 
+- **Screen readers now name every field and remove button in the SAML claims editor.** Its inputs
+  were named only by placeholders, which vanish once a value is typed, and each input claim,
+  parameter and output claim had an unnamed "✕" remove button; they now carry labels (the remove
+  buttons name the claim they drop). The retired scope group's typed delete confirmation is labelled
+  the same way.
 - **The Permission tester sees org-wide `Sites.*` grants on Office 365 SharePoint Online.** An app
   holding `Sites.FullControl.All` on the SharePoint REST/CSOM resource reaches every site, but the
   site test read only Microsoft Graph's grants, so such an app could read as "No access". Both

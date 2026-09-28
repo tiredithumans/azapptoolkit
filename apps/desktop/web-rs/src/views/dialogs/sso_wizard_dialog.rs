@@ -6,6 +6,9 @@
 //! + create, 3 = output summary. Step state is a plain `RwSignal<u8>` matched in
 //!   the view (the codebase has no Thaw stepper). Mirrors `create_app_dialog.rs`
 //!   for the modal shell and `secret_reveal_dialog.rs` for show-once output.
+//!
+//! Mounted in the shell only while its open flag is set, so each open is a
+//! fresh component — no manual state reset needed.
 
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
@@ -72,16 +75,10 @@ pub fn SsoWizardDialog(
     let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     use_focus_trap(modal_ref, open);
 
-    // Seed the SAML notification emails from the tenant default when the wizard
-    // opens — but only if the field is still empty, so a user's edit is never
-    // clobbered (and a manually-cleared field isn't re-filled mid-session).
-    Effect::new(move |_| {
-        if !open.get() || !notification_emails.get_untracked().trim().is_empty() {
-            return;
-        }
-        let Some(t) = session.active_tenant.get_untracked() else {
-            return;
-        };
+    // Seed the SAML notification emails from the tenant default. One-shot at
+    // construction: the shell mounts this dialog only while it is open, so each
+    // open is a fresh component with an empty field.
+    if let Some(t) = session.active_tenant.get_untracked() {
         leptos::task::spawn_local(async move {
             let d = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
             let emails = d.enterprise_application.default_notification_emails;
@@ -89,34 +86,9 @@ pub fn SsoWizardDialog(
                 notification_emails.set(emails.join("\n"));
             }
         });
-    });
+    }
 
-    // Reset everything to a clean slate (called on close / done).
-    let reset = move || {
-        step.set(0);
-        protocol.set("saml".to_string());
-        display_name.set(String::new());
-        entity_id.set(String::new());
-        reply_url.set(String::new());
-        logout_url.set(String::new());
-        cert_subject.set(String::new());
-        cert_days.set("365".to_string());
-        notification_emails.set(String::new());
-        claims_state.reset();
-        redirect_uris.set(String::new());
-        spa_uris.set(String::new());
-        secret_name.set(String::new());
-        secret_days.set("180".to_string());
-        error.set(None);
-        needs_consent.set(false);
-        saml_result.set(None);
-        oidc_result.set(None);
-    };
-
-    let close = move || {
-        reset();
-        on_close.run(());
-    };
+    let close = move || on_close.run(());
 
     // Runs the create command for the chosen protocol. Reused by the Create
     // button and by the retry-after-consent button.
@@ -239,7 +211,6 @@ pub fn SsoWizardDialog(
     // setup continues. SAML lands on SSO (where a warned-about claims or email
     // step is retried); OIDC on Overview, since `configure_oidc` never sets
     // `preferredSingleSignOnMode` and the SSO tab would read "not configured".
-    // Reads the result before `close()`, whose `reset()` clears it.
     let open_created = move |_| {
         let target = saml_result
             .get_untracked()

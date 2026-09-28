@@ -192,7 +192,12 @@ fn RetiredGroupRow(
                         }
                     >
                         <div class="actions-row">
-                            <Input value=typed placeholder=Signal::derive(move || type_prompt.get()) />
+                            // Named by a wrapping <label>, like `ConfirmDialog`'s typed
+                            // confirm: a placeholder alone is not an accessible name.
+                            <label>
+                                <span class="visually-hidden">{move || type_prompt.get()}</span>
+                                <Input value=typed placeholder=Signal::derive(move || type_prompt.get()) />
+                            </label>
                             <Button
                                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                 on_click=Box::new(move |_| armed.set(false))
