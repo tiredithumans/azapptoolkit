@@ -61,7 +61,8 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     /// → a fresh local counter, unchanged behaviour for every other caller.
     #[prop(optional)]
     reload: Option<RwSignal<u32>>,
-    /// Column header labels (use `""` for an action column with no heading).
+    /// Column header labels (use `""` for an action column with no heading;
+    /// a trailing `""` renders a visually-hidden "Actions" name).
     headers: Vec<&'static str>,
     /// Fetches the rows for a tenant id.
     fetch: Fetch,
@@ -301,8 +302,28 @@ where
             // tore down and rebuilt the whole table — defeating the keyed <For>
             // that exists precisely to patch rows in place.
             {
-                let header_cells = headers
-                    .with_value(|h| h.iter().map(|c| view! { <th>{*c}</th> }).collect_view());
+                // A trailing `""` header is the row-action column: give it a
+                // visually-hidden "Actions" name, as `DataTable` does. Only the
+                // LAST column — a leading `""` (the SSO dashboard's row-select
+                // checkbox column) is not an action column.
+                let header_cells = headers.with_value(|h| {
+                    let last = h.len().saturating_sub(1);
+                    h.iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            if c.is_empty() && i == last {
+                                view! {
+                                    <th>
+                                        <span class="visually-hidden">"Actions"</span>
+                                    </th>
+                                }
+                                .into_any()
+                            } else {
+                                view! { <th>{*c}</th> }.into_any()
+                            }
+                        })
+                        .collect_view()
+                });
                 view! {
                     <div style:display=move || {
                         let hidden = error.with(Option::is_some)

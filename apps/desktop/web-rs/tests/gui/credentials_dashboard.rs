@@ -26,6 +26,12 @@ async fn loads_and_renders_rows() {
             .as_deref(),
         Some("test-tenant")
     );
+    // The trailing action column has no visible heading, but it is named for
+    // assistive tech (the shared `AuditDashboard` header rule).
+    assert_eq!(
+        ts::text(".data-table thead th:last-child .visually-hidden"),
+        "Actions"
+    );
 }
 
 #[wasm_bindgen_test]
