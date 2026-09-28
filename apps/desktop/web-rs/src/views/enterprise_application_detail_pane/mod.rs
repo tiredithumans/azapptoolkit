@@ -11,7 +11,6 @@ use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, SpinnerSize, Textarea};
 
-use crate::bindings::applications;
 use crate::bindings::auth;
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDetail};
 use crate::bindings::sso::{self, SsoConfigDto, SsoMode, SsoSummary};

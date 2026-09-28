@@ -20,8 +20,6 @@ pub(super) fn OwnersContent(
     // The principal id currently being added/removed (drives per-row disabling).
     let busy: RwSignal<Option<String>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
-    let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 300);
     // (owner id, name): one dialog covers a list of owners, so the row's name is
     // staged with the id purely to be the dialog's subject, then discarded there.
     let pending_remove: RwSignal<Option<(String, String)>> = RwSignal::new(None);
@@ -30,21 +28,14 @@ pub(super) fn OwnersContent(
     // the route in it rather than as dead red text (`OwnerDefaultsHint`).
     let no_owner_defaults = RwSignal::new(false);
 
-    let candidates = LocalResource::new(move || {
-        let q = query.get();
-        let tenant = tenant.get();
-        async move {
-            let q = q.trim().to_string();
-            if q.len() < 2 {
-                return Ok::<Vec<DirectoryObject>, String>(Vec::new());
-            }
-            let Some(t) = tenant else {
-                return Ok(Vec::new());
-            };
-            applications::search_users(&t.tenant_id, &q)
-                .await
-                .map_err(|e| e.message)
-        }
+    // Already-owners are hidden from the search so they can't be added twice.
+    let existing_owner_ids = Signal::derive(move || {
+        signal.with(|d| {
+            d.owners
+                .iter()
+                .map(|o| o.id.clone())
+                .collect::<HashSet<String>>()
+        })
     });
 
     let mutate = move |add: bool, principal_id: String| {
@@ -229,87 +220,19 @@ pub(super) fn OwnersContent(
                     }}
                 </Button>
             </div>
-            <Field label="Search users by name or UPN (2+ chars)">
-                <Input value=raw_query placeholder="alice@contoso.com" />
-            </Field>
-            {move || {
-                if raw_query.get().trim().len() < 2 {
-                    return ().into_any();
-                }
-                view! {
-                    <Suspense fallback=move || {
-                        view! {
-                            <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" />
-                        }
-                    }>
-                        {move || Suspend::new(async move {
-                            match candidates.await {
-                                Err(msg) => {
-                                    view! {
-                                        <Body1 class="app-detail__error">
-                                            {format!("Search failed: {msg}")}
-                                        </Body1>
-                                    }
-                                        .into_any()
-                                }
-                                Ok(users) => {
-                                    let existing: std::collections::HashSet<String> = signal
-                                        .with_untracked(|d| {
-                                            d.owners.iter().map(|o| o.id.clone()).collect()
-                                        });
-                                    let filtered: Vec<DirectoryObject> = users
-                                        .into_iter()
-                                        .filter(|u| !existing.contains(&u.id))
-                                        .collect();
-                                    if filtered.is_empty() {
-                                        return view! { <Body1>"No matches."</Body1> }.into_any();
-                                    }
-                                    view! {
-                                        <ul class="candidates">
-                                            {filtered
-                                                .into_iter()
-                                                .map(|u| {
-                                                    let id_click = u.id.clone();
-                                                    let id_busy = u.id.clone();
-                                                    let display = u
-                                                        .display_name
-                                                        .clone()
-                                                        .unwrap_or_else(|| u.id.clone());
-                                                    let upn = u
-                                                        .user_principal_name
-                                                        .clone()
-                                                        .unwrap_or_else(|| u.id.clone());
-                                                    view! {
-                                                        <li>
-                                                            <div>
-                                                                <div>{display}</div>
-                                                                <div class="mono small">{upn}</div>
-                                                            </div>
-                                                            <Button
-                                                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                                                disabled=Signal::derive(move || {
-                                                                    busy.with(|b| b.as_deref() == Some(id_busy.as_str()))
-                                                                })
-                                                                on_click=Box::new(move |_| {
-                                                                    mutate(true, id_click.clone())
-                                                                })
-                                                            >
-                                                                "Add"
-                                                            </Button>
-                                                        </li>
-                                                    }
-                                                })
-                                                .collect_view()}
-                                        </ul>
-                                    }
-                                        .into_any()
-                                }
-                            }
-                        })}
-                    </Suspense>
-                }
-                    .into_any()
-            }}
+            // The same debounced directory search the Access tab and the
+            // Settings owner editors use; a successful add reloads the detail
+            // (tearing this down), so the box needs no clear-on-success.
+            <DirectorySearch
+                on_pick=Callback::new(move |u: DirectoryObject| mutate(true, u.id))
+                exclude=existing_owner_ids
+                label="Search users by name or UPN (2+ chars)"
+                placeholder="alice@contoso.com"
+                clear_on_pick=false
+                row_disabled=Callback::new(move |id: String| {
+                    busy.with(|b| b.as_deref() == Some(id.as_str()))
+                })
+            />
             {move || error.get().map(|e| view! { <Body1 class="app-detail__error">{e}</Body1> })}
             <Show when=move || no_owner_defaults.get() fallback=|| ()>
                 <OwnerDefaultsHint class="app-detail__error" tab="enterprise" />

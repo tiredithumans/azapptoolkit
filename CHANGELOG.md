@@ -48,6 +48,10 @@
 
 ### Fixed
 
+- **The app-registration Owners tab no longer says "No matches." under an empty search box.** Both
+  Owners tabs and the audit's add-owner dialog now use the same directory search as the Access tab,
+  so the search behaves identically everywhere and only reports "No matches." after an actual search.
+
 - **The keyboard shortcuts sheet draws each key as a filled key cap.** The key style pointed at a
   colour that was never defined, so in both themes every key showed as an empty outline. The
   Filters button on the lists also gets a hover highlight, which it was missing for the same reason.

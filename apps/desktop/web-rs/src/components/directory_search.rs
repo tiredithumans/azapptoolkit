@@ -4,8 +4,9 @@
 //! one" surface in the app is this component with different props: the Settings
 //! default-owner editors, the Settings SSO-notification distribution-list
 //! picker, the Exchange scope forms' group typeahead, both search blocks on
-//! the enterprise Access tab, and the Expose an API tab's client picker. Before this there were four hand-rolled copies of
-//! the same 60 lines — same 300 ms debounce, same 2-char gate, same
+//! the enterprise Access tab, the Expose an API tab's client picker, both
+//! Owners tabs (app registration and enterprise app) and the audit's add-owner
+//! dialog. Before this there were hand-rolled copies of the same 60 lines — same debounce, same 2-char gate, same
 //! `Suspense` + "Searching…" spinner, same `.candidates` markup — which had
 //! already drifted apart in three ways (see below).
 //!
@@ -27,6 +28,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 use crate::bindings::applications;
 use crate::bindings::search::GlobalSearchResults;
 use crate::components::ui::FormError;
+use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 
@@ -35,7 +37,6 @@ use crate::state::use_session;
 /// `chars()` instead, to match a backend char gate; that search is a different
 /// shape and is not folded in here.)
 const MIN_QUERY_LEN: usize = 2;
-const DEBOUNCE_MS: i32 = 300;
 
 /// Which directory the search hits, and how a result row is subtitled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -138,7 +139,7 @@ pub fn DirectorySearch(
 ) -> impl IntoView {
     let session = use_session();
     let raw_query = query.unwrap_or_else(|| RwSignal::new(String::new()));
-    let debounced = use_debounced(raw_query.into(), DEBOUNCE_MS);
+    let debounced = use_debounced(raw_query.into(), TYPEAHEAD_DEBOUNCE_MS);
     // Captured by the row closure, which must be `Fn`.
     let action_label = StoredValue::new(action_label);
 
@@ -200,7 +201,7 @@ pub fn DirectorySearch(
     let results = move || {
         // Gated on the RAW query, not the debounced one, for two reasons: the
         // result region disappears the instant the box is cleared instead of
-        // leaving a stale list up for 300 ms, and an *empty* box renders
+        // leaving a stale list up for the debounce, and an *empty* box renders
         // nothing at all. Two of the copies this replaced showed a bare "No
         // matches." under an untouched search field, because their empty-check
         // could not tell "searched and found none" from "hasn't searched yet".

@@ -7,44 +7,34 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
 
     // My Apps portal visibility (the `HideApp` tag). Toggled optimistically so
     // the row reflects the change without re-fetching the whole detail.
-    let sp_id = sp.id.clone();
     let initial_hidden = sp.tags.iter().any(|t| t == "HideApp");
     let hidden_override: RwSignal<Option<bool>> = RwSignal::new(None);
-    let toggling = RwSignal::new(false);
+    // Same runner as the two toggles below: double-submit guard, busy flag and
+    // the shared error sink (with Retry).
+    let visibility_cmd = use_command();
+    let toggling = visibility_cmd.busy;
+    let sp_id_visibility = StoredValue::new(sp.id.clone());
     let toggle_visibility = move |_| {
-        if toggling.get() {
-            return;
-        }
         let new_hidden = !hidden_override.get_untracked().unwrap_or(initial_hidden);
-        toggling.set(true);
-        let tenant = session.active_tenant.get();
-        let sp_id = sp_id.clone();
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
-                toggling.set(false);
-                return;
-            };
-            match enterprise_application::set_enterprise_app_visibility(
-                &t.tenant_id,
-                &sp_id,
-                new_hidden,
-            )
-            .await
-            {
-                Ok(()) => {
-                    hidden_override.set(Some(new_hidden));
-                    session.toast_success(if new_hidden {
-                        "Hidden from the My Apps portal."
-                    } else {
-                        "Visible on the My Apps portal."
-                    });
+        visibility_cmd.run_toast_err(
+            move |()| {
+                hidden_override.set(Some(new_hidden));
+                session.toast_success(if new_hidden {
+                    "Hidden from the My Apps portal."
+                } else {
+                    "Visible on the My Apps portal."
+                });
+            },
+            move |tenant_id| {
+                let id = sp_id_visibility.get_value();
+                async move {
+                    enterprise_application::set_enterprise_app_visibility(
+                        &tenant_id, &id, new_hidden,
+                    )
+                    .await
                 }
-                Err(e) => {
-                    session.report_command_error(&e);
-                }
-            }
-            toggling.set(false);
-        });
+            },
+        );
     };
 
     // ---- "Enabled for users to sign in?" toggle (accountEnabled). Optimistic

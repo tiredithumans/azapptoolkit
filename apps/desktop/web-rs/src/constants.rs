@@ -20,3 +20,9 @@ pub const ISSUES_INLINE: usize = 2;
 /// List filter debounce in milliseconds. Filters run in-memory over cached
 /// rows, so the delay only smooths re-render — not network traffic.
 pub const LIST_FILTER_DEBOUNCE_MS: i32 = 300;
+
+/// Debounce for a directory typeahead (global search, the permission tester's
+/// identity picker, `DirectorySearch`). Unlike [`LIST_FILTER_DEBOUNCE_MS`], each
+/// settled keystroke here is a backend search, so every typeahead shares one
+/// value rather than three different ones.
+pub const TYPEAHEAD_DEBOUNCE_MS: i32 = 250;

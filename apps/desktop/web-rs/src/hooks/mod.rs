@@ -5,6 +5,7 @@ use web_sys::{HtmlElement, HtmlInputElement};
 
 pub mod use_command;
 pub mod use_debounced;
+pub mod use_deferred_blur;
 pub mod use_escape;
 pub mod use_filtered_list;
 pub mod use_focus_return;

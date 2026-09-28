@@ -49,7 +49,9 @@ use crate::components::icon::{Icon, IconName};
 use crate::components::index_cap_notice::corpus_cap_message;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::Callout;
+use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
+use crate::hooks::use_deferred_blur::use_deferred_blur;
 use crate::state::{ActiveView, OpenItemKind, use_session};
 
 /// How many "Go to" rows the group renders before the footer takes over.
@@ -81,8 +83,10 @@ pub fn GlobalSearch() -> impl IntoView {
     let tenant = session.active_tenant;
 
     let raw_query = RwSignal::new(String::new());
-    let query = use_debounced(raw_query.into(), 250);
+    let query = use_debounced(raw_query.into(), TYPEAHEAD_DEBOUNCE_MS);
     let focused = RwSignal::new(false);
+    // Delay closing so a click on a result registers first.
+    let on_blur = use_deferred_blur(focused);
     // Keyboard roving selection over the destination + record hits (Arrow/Enter).
     let selected = RwSignal::new(0usize);
     let input_ref = NodeRef::<leptos::html::Input>::new();
@@ -245,19 +249,7 @@ pub fn GlobalSearch() -> impl IntoView {
                         focused.set(true);
                         warm_corpus();
                     }
-                    on:blur=move |_| {
-                        let win = web_sys::window();
-                        if let Some(w) = win {
-                            let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
-                                focused.set(false);
-                            });
-                            let _ = w
-                                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    cb.unchecked_ref::<js_sys::Function>(),
-                                    150,
-                                );
-                        }
-                    }
+                    on:blur=on_blur
                     on:keydown=on_keydown
                 />
                 // Clear (×) — shown only when the field has text. `mousedown` +
