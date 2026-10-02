@@ -1,21 +1,21 @@
 //! Validation for Key Vault identifiers that flow into request URLs.
 //!
-//! `vault_name` is interpolated into the request host, and `secret_name` and a
-//! secret `version` into the request path, all from untrusted IPC input.
-//! Rejecting anything outside Azure's documented shapes closes the SSRF /
-//! path-traversal vector (e.g. a `vault_name` of `evil.example.com/x?`, or a
-//! `secret_name` or `version` of `../`).
+//! `vault_name` is interpolated into the request host, `secret_name` and a
+//! secret `version` into the path, all from untrusted IPC input. Rejecting
+//! anything outside Azure's documented shapes closes the SSRF /
+//! path-traversal vector (e.g. `vault_name` of `evil.example.com/x?`, or a
+//! `secret_name`/`version` of `../`).
 
 use crate::error::{KeyVaultError, Result};
 
 /// Azure Key Vault name rules: 3–24 chars, ASCII alphanumeric and hyphens
-/// only, must start with a letter, end with a letter or digit, no consecutive
+/// only, starts with a letter, ends with a letter or digit, no consecutive
 /// hyphens.
 ///
-/// This validation is intentionally stricter than Azure's actual rules for
-/// SSRF protection — the name becomes part of the request host, so rejecting
-/// even theoretically-valid-but-edge cases (e.g. IDs that could be confused
-/// with IP addresses) is the safer choice.
+/// Deliberately stricter than Azure's actual rules for SSRF protection: the
+/// name becomes part of the request host, so rejecting even
+/// theoretically-valid edge cases (e.g. IDs confusable with IP addresses) is
+/// the safer choice.
 pub fn validate_vault_name(name: &str) -> Result<()> {
     let ok = (3..=24).contains(&name.len())
         && name.starts_with(|c: char| c.is_ascii_alphabetic())

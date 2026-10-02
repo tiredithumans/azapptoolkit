@@ -39,8 +39,8 @@ pub struct SecretAttributes {
 
 /// `GET /secrets/{name}` — full value included.
 ///
-/// Deserialize-only on purpose. Nothing serializes a fetched secret: the IPC
-/// boundary maps it field by field into `KvSecretValueDto`. A derived
+/// Deserialize-only on purpose: the IPC boundary maps a fetched secret into
+/// `KvSecretValueDto` field by field, and nothing serializes one. A derived
 /// `Serialize` would be a plaintext path (`serde_json::to_string`, a JSON
 /// tracing layer) around the redacted `Debug` below; if one is ever needed,
 /// hand-write it with the value redacted. Pinned by
@@ -58,9 +58,9 @@ pub struct SecretValue {
 }
 
 /// Manual impl so a stray `{:?}` can't log the secret value — the read-side
-/// twin of [`SecretSetRequest`]'s redacted Debug. (No zeroize-on-drop here:
-/// the value is moved into the IPC DTO the user asked to view, so a Drop impl
-/// would only forbid that field move without closing any real exposure.)
+/// twin of [`SecretSetRequest`]'s redacted Debug. No zeroize-on-drop: the
+/// value is moved into the IPC DTO the user asked to view, so a Drop impl
+/// would only forbid that field move without closing any real exposure.
 impl std::fmt::Debug for SecretValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretValue")
@@ -86,10 +86,9 @@ pub struct SecretSetRequest {
     pub attributes: Option<SecretAttributesRequest>,
 }
 
-/// The payload carries live secret material; wipe it on drop so freed heap
-/// pages don't retain the plaintext (matches `AccessToken` / `GeneratedCert`).
-/// The serialized request body and the transport buffers are the same accepted
-/// limits as token handling.
+/// Live secret material; wipe on drop so freed heap pages don't retain the
+/// plaintext (matches `AccessToken` / `GeneratedCert`). Serialized body and
+/// transport buffers are the same accepted limits as token handling.
 impl Drop for SecretSetRequest {
     fn drop(&mut self) {
         use zeroize::Zeroize;
@@ -223,8 +222,8 @@ mod tests {
 
     #[test]
     fn set_request_omits_none_fields() {
-        // Explicit fields: functional record update would move out of the
-        // base value, which the Drop (zeroize) impl forbids (E0509).
+        // Explicit fields: a `..` update moves out of the base value, which
+        // the Drop (zeroize) impl forbids (E0509).
         let req = SecretSetRequest {
             value: "v".into(),
             content_type: None,
@@ -236,7 +235,7 @@ mod tests {
     }
 
     /// The rotation write sends `exp` (and may send `nbf`) under `attributes`
-    /// as Unix **seconds** — a rename slip or a millisecond/RFC 3339 encoding
+    /// as Unix **seconds** — a rename slip or millisecond/RFC 3339 encoding
     /// would leave every rotated secret without an expiry Key Vault honours.
     #[test]
     fn set_request_serialises_exp_and_nbf_as_unix_seconds() {

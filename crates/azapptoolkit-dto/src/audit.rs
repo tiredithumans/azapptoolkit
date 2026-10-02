@@ -36,59 +36,57 @@ pub struct AuditRunResult {
     /// `true` when the tenant holds more app registrations than one run scores
     /// (`MAX_APPS_PER_RUN`), so this scan covered an arbitrary prefix of them.
     ///
-    /// Semantically a sibling of [`Self::cancelled`]: both mean "an incomplete
+    /// A semantic sibling of [`Self::cancelled`] — both mean "an incomplete
     /// view", so neither is cached and neither may be presented as an
-    /// all-clear. Kept separate because the remedy differs — a cancelled run is
+    /// all-clear — kept separate because the remedy differs: a cancelled run is
     /// re-runnable as-is, a truncated one needs the tenant narrowed or the cap
-    /// raised. `#[serde(default)]` so runs cached before this field deserialize
-    /// as untruncated.
+    /// raised. `#[serde(default)]` so runs cached before this field
+    /// deserialize as untruncated.
     #[serde(default)]
     pub truncated: bool,
     /// Reads that FAILED this run, each disabling a piece of the analysis.
     /// Empty on a fully-covered run.
     ///
     /// Third sibling of [`Self::cancelled`] and [`Self::truncated`], and the
-    /// one that was missing. Those two mean "we did not look at every app";
+    /// one that was missing: those two mean "we did not look at every app",
     /// this mostly means "we looked, but with part of the analysis switched
     /// off" — with [`AuditCoverageGap::PerPrincipalScoring`] the exception that
-    /// also covers individual apps dropped mid-run. Each
-    /// prefetch here was best-effort by design — a failure logged at `info!` and
-    /// returned an empty map — which is correct for availability and wrong for
-    /// reporting: an empty map is indistinguishable from "the tenant has none
-    /// of these", so the run scored LOWER risk than the truth and presented the
-    /// result as a clean, complete scan. An operator reading it had no way to
-    /// know a read had failed.
+    /// also covers individual apps dropped mid-run. Each prefetch was
+    /// best-effort by design (a failure logged at `info!`, an empty map
+    /// returned) — correct for availability, wrong for reporting: an empty map
+    /// is indistinguishable from "the tenant has none of these", so the run
+    /// scored LOWER risk than the truth and presented a clean, complete scan.
     ///
     /// Like its siblings, a run with gaps is not cached: a cached partial
     /// analysis is indistinguishable from a full one on the next read.
     #[serde(default)]
     pub degraded: Vec<AuditCoverageGap>,
-    /// When the run finished, RFC3339 UTC. `None` only for a run recorded
+    /// When the run finished, RFC3339 UTC; `None` only for a run recorded
     /// before this field existed.
     ///
     /// **Stamped by the runner and stored WITH the items** in the
     /// `CacheKind::Audit` entry, so a cache hit reports the original run time
     /// rather than the moment it was read back. Without it nothing on the
     /// Security workbench or the Home posture card said how old the numbers
-    /// were: the cache is in-process with a 60-minute TTL, so the counts an
-    /// operator acts on could be an hour stale, and the "no audit" copy claimed
-    /// none had ever been run when the truth was that this session had not.
+    /// were — with the 60-minute in-process TTL the counts could be an hour
+    /// stale, and the "no audit" copy claimed none had ever been run when the
+    /// truth was that this session had not.
     #[serde(default)]
     pub completed_at: Option<String>,
     /// `false` when some mail permission could not be checked against
     /// Exchange mailbox scoping this run — no Exchange client, the legacy
     /// Application Access Policy list unreadable, or an app left unprobed
-    /// (the Exchange breaker tripped or its probe failed). Those permissions
-    /// were scored at org-wide weight, so some "Org-wide mailbox access"
-    /// findings may already be confined to specific mailboxes by Exchange RBAC
-    /// or an AAP.
+    /// (the breaker tripped or its probe failed). Those permissions were
+    /// scored at org-wide weight, so some "Org-wide mailbox access" findings
+    /// may already be confined to specific mailboxes by Exchange RBAC or an
+    /// AAP.
     ///
     /// Deliberately NOT a [`Self::degraded`] gap: the degrade over-reports and
     /// never under-reports, so the run stays cacheable — the same call as the
-    /// sign-in report precedent ([`Self::sign_in_report_available`]). It still
-    /// has to be *said*, on the org-wide mailbox group and in every export
-    /// ([`MAILBOX_SCOPING_UNRESOLVED`]). Defaults to `true` so a run cached
-    /// before the field existed reads as it was presented then.
+    /// sign-in report precedent. It still has to be *said*, on the org-wide
+    /// mailbox group and in every export ([`MAILBOX_SCOPING_UNRESOLVED`]).
+    /// Defaults to `true` so a run cached before the field existed reads as
+    /// it was presented then.
     #[serde(default = "default_true")]
     pub mailbox_scoping_resolved: bool,
 }
@@ -105,18 +103,16 @@ pub const MAILBOX_SCOPING_UNRESOLVED: &str = "Mailbox scoping could not be resol
 /// One run's coverage caveats, minus its items — what an export needs in order
 /// to say what the scan did *not* cover.
 ///
-/// The workbench is meticulous about never presenting a partial scan as an
-/// all-clear (the posture strip, the Findings pane and the empty state each
-/// qualify a cancelled, truncated or degraded run), but the exported file is
-/// the artifact that leaves the app and reaches an auditor, and it carried none
-/// of it: `save_audit_to_file` received a bare `Vec<AuditItem>` while every
-/// caveat stayed behind on [`AuditRunResult`]. A **cancelled** run is
-/// specifically the one that ships its items to the exporter (it is never
-/// cached), so the case with the most to disclose disclosed nothing.
+/// The workbench qualifies a cancelled, truncated or degraded run everywhere,
+/// but the exported file is the artifact that leaves the app and reaches an
+/// auditor, and it carried none of it: `save_audit_to_file` received a bare
+/// `Vec<AuditItem>` while every caveat stayed behind on [`AuditRunResult`]. A
+/// **cancelled** run is specifically the one that ships its items to the
+/// exporter (it is never cached) — the case with the most to disclose
+/// disclosed nothing.
 ///
 /// A separate struct rather than the whole [`AuditRunResult`] so the
-/// by-reference export path keeps its property that the multi-MB item vector
-/// never round-trips the IPC bridge.
+/// by-reference export path keeps the multi-MB item vector off the IPC bridge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditExportCoverage {
     /// Principals the run SET OUT to score — the denominator a partial run
@@ -153,12 +149,12 @@ impl Default for AuditExportCoverage {
 /// What the Home dashboard's Security Posture card needs from the cached run:
 /// counts, never items.
 ///
-/// The cached run is up to 10 000 [`AuditItem`]s with five `Vec`s each —
-/// several to tens of MB of JSON. Home used to receive all of it over IPC on
-/// every audit reload (while the Security tab held a second copy) only to
-/// reduce it to a dozen numbers; the backend now reduces it with the same
-/// core [`posture_counts`] the Security strip runs over its own copy, so the
-/// two surfaces still share one count source.
+/// The cached run is up to 10 000 [`AuditItem`]s — several to tens of MB of
+/// JSON. Home used to receive all of it over IPC on every audit reload (while
+/// the Security tab held a second copy) only to reduce it to a dozen numbers;
+/// the backend now reduces it with the same [`posture_counts`] core the
+/// Security strip runs over its own copy, so the two surfaces share one count
+/// source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CachedAuditSummary {
     /// The stamp the RUN wrote (RFC3339 UTC), never the read time — see
@@ -231,40 +227,40 @@ impl AuditExportCoverage {
 pub enum AuditCoverageGap {
     /// The tenant-wide `appRoleAssignedTo` read on the Microsoft Graph SP.
     ///
-    /// The most consequential of the three. Its result drives BOTH the org-wide
-    /// vs scoped mailbox reconciliation — without it `orgwide_granted` is empty,
-    /// so a `Scoped` verdict is never defeated and an app that still holds an
-    /// un-stripped org-wide grant scores at the reduced scoped weight — AND the
-    /// SP-only scoring phase, which then finds no enterprise apps, managed
-    /// identities or orphaned service principals at all.
+    /// The most consequential of the three: its result drives BOTH the
+    /// org-wide vs scoped mailbox reconciliation — without it `orgwide_granted`
+    /// is empty, so a `Scoped` verdict is never defeated and an un-stripped
+    /// org-wide grant scores at the reduced scoped weight — AND the SP-only
+    /// scoring phase, which then finds no enterprise apps, managed identities
+    /// or orphaned service principals at all.
     GraphAppRoleAssignments,
     /// The tenant-wide `appRoleAssignedTo` read on the legacy Office 365
     /// Exchange Online SP, which finds org-wide EWS `full_access_as_app`
     /// grants. Such a grant reaches every mailbox and defeats any RBAC mailbox
-    /// scope on the same principal, so without this read a scoped verdict can
-    /// be reported for a principal that in fact has full mailbox access.
+    /// scope on the same principal, so without it a scoped verdict can be
+    /// reported for a principal that in fact has full mailbox access.
     EwsFullAccessGrants,
     /// One or more individual principals could not be scored, and were dropped
     /// from the result.
     ///
-    /// Unlike its two siblings this is not a tenant-wide read but a per-app
-    /// one: a transient scoring failure (or a task that panicked) was logged at
-    /// `warn!` and the app silently omitted from `items`, while `total_apps`
-    /// still counted it. The run then reported cancelled=false, truncated=false
-    /// and degraded=[] — a *complete* scan missing exactly the apps whose
-    /// scoring hit trouble — and cached itself as authoritative. Those apps are
-    /// disproportionately the interesting ones: a scoring failure usually means
-    /// a Graph or Exchange probe failed on that specific principal.
+    /// Unlike its siblings this is a per-app read: a transient scoring failure
+    /// (or a task that panicked) was logged at `warn!` and the app silently
+    /// omitted from `items`, while `total_apps` still counted it — the run
+    /// reported cancelled=false, truncated=false, degraded=[], a *complete*
+    /// scan missing exactly the apps that hit trouble, and cached itself as
+    /// authoritative. Those apps are disproportionately the interesting ones: a
+    /// scoring failure usually means a Graph or Exchange probe failed on that
+    /// specific principal.
     PerPrincipalScoring,
     /// A resource's permission index could not be resolved, so the permissions
     /// declared against it were skipped.
     ///
     /// Quieter than [`AuditCoverageGap::PerPrincipalScoring`] and worse to
-    /// miss: the affected apps are still present in `items`, scored, and shown
-    /// — just with an empty permission set, so they read as holding nothing
-    /// rather than as unexamined. A failed resolve is memoized for the run, so
-    /// one transient failure on the Microsoft Graph resource silently emptied
-    /// the permissions of every app in the tenant while the run reported itself
+    /// miss: the affected apps are still in `items`, scored and shown — with
+    /// an empty permission set, so they read as holding nothing rather than
+    /// as unexamined. A failed resolve is memoized for the run, so one
+    /// transient failure on the Microsoft Graph resource silently emptied the
+    /// permissions of every app in the tenant while the run reported itself
     /// complete and cached itself as authoritative.
     PermissionResolution,
     /// The tenant-wide service-principal index read that supplies the candidate
@@ -274,9 +270,10 @@ pub enum AuditCoverageGap {
     /// [`AuditCoverageGap::GraphAppRoleAssignments`] documents — no enterprise
     /// apps, managed identities or orphaned service principals are scored at
     /// all — but it is a different read, and for a long time it had no gap of
-    /// its own: the error was logged at `info!`, an empty vec was returned, and
-    /// the run reported itself complete and cached itself as authoritative. An
-    /// operator could not tell "no SP-only findings" from "never looked".
+    /// its own: the error was logged at `info!`, an empty vec was returned,
+    /// and the run reported itself complete and cached itself as
+    /// authoritative. An operator could not tell "no SP-only findings" from
+    /// "never looked".
     ServicePrincipalIndex,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
@@ -373,11 +370,11 @@ mod tests {
 
     #[test]
     fn coverage_gaps_round_trip_and_unknown_variants_degrade_to_other() {
-        // The enum is serialized as a plain camelCase string precisely so a new
-        // variant is not a wire-format change: an older build reading a newer
-        // build's cached run must land on `Other` (which still reads as "part of
-        // this run could not be completed") rather than failing the whole read
-        // and losing the result.
+        // The enum is serialized as a plain camelCase string so a new variant
+        // is not a wire-format change: an older build reading a newer build's
+        // cached run must land on `Other` (which still reads as "part of this
+        // run could not be completed") rather than failing the whole read and
+        // losing the result.
         for gap in [
             AuditCoverageGap::GraphAppRoleAssignments,
             AuditCoverageGap::ServicePrincipalIndex,

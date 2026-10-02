@@ -1,15 +1,14 @@
 //! Shape checks for ARM-supplied identifiers before they are spliced into a
 //! request URL.
 //!
-//! Subscription ids, Log Analytics workspace ids and resource ids reach this
-//! crate straight out of earlier ARM responses (or, for a role-assignment
-//! scope, from the operator) — the same attacker-influenced server-output
-//! class `collect_paged` guards `nextLink` for. The composed URL keeps the ARM
-//! host either way, but a `?` or `#` rewrites or truncates the query the call
-//! depends on, and a `..` segment (or its `%2e%2e` form) is normalised away by
-//! the URL parser, walking the call to a different path with the operator's
-//! token. Mirrors `azapptoolkit-keyvault`'s `validate` module. The refusals
-//! never echo the value.
+//! Subscription ids, workspace ids and resource ids reach this crate straight
+//! out of earlier ARM responses (or, for a role-assignment scope, the operator)
+//! — the same attacker-influenced server-output class `collect_paged` guards
+//! `nextLink` for. The composed URL keeps the ARM host, but a `?`/`#` rewrites
+//! or truncates the query the call depends on, and a `..` segment (or `%2e%2e`)
+//! is normalised away, walking the call to a different path with the operator's
+//! token. Mirrors `azapptoolkit-keyvault`'s `validate` module; refusals never
+//! echo the value.
 
 use azapptoolkit_core::guid::is_guid;
 

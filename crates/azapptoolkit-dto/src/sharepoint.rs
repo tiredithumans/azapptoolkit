@@ -80,9 +80,9 @@ pub struct SiteSweepResult {
 
 /// One principal's slice of the sweep index: the sites it can reach under the
 /// `Sites.Selected` model, with the roles it holds on each — the answer to
-/// "which sites is this app scoped to?" *without* the operator having to know a
-/// site URL, which Graph itself cannot answer (there is no reverse
-/// `appId → sites` lookup, only per-site permission reads).
+/// "which sites is this app scoped to?" without the operator knowing a site
+/// URL, which Graph itself cannot answer (no reverse `appId → sites` lookup,
+/// only per-site permission reads).
 ///
 /// The coverage fields ride along because they qualify the answer: an empty
 /// `sites` list means "no grant found in the sites we could read", and the UI
@@ -108,11 +108,11 @@ pub struct AppSiteAccessDto {
 impl AppSiteAccessDto {
     /// Projects one app's rows out of a full sweep.
     ///
-    /// Shared on purpose: the backend serves this from the *cached* tenant sweep
-    /// (so a per-app panel never ships thousands of rows across IPC), while the
-    /// frontend applies it to a sweep it just ran — which is never cached when
-    /// partial or cancelled, and so could not be re-read. One definition means
-    /// the two paths can't disagree about what "this app's sites" means.
+    /// Shared on purpose: the backend serves this from the *cached* tenant
+    /// sweep (so a per-app panel never ships thousands of rows across IPC),
+    /// while the frontend applies it to a sweep it just ran — never cached when
+    /// partial or cancelled, and so not re-readable. One definition means the
+    /// two paths can't disagree about what "this app's sites" means.
     ///
     /// Matches `app_id` case-insensitively: these are GUIDs, and Graph is not
     /// consistent about their casing across endpoints.

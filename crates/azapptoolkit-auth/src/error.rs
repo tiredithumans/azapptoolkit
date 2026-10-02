@@ -8,8 +8,7 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 /// workspace-internal (`publish = false`), and `From<AuthError> for UiError`
 /// in `azapptoolkit-dto` matches every variant, so a new variant fails to
 /// compile until it is given a wire code there. With the attribute it would
-/// instead fall into a catch-all arm — silently non-retryable and never
-/// re-auth-fatal.
+/// fall into a catch-all arm — silently non-retryable and never re-auth-fatal.
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("not signed in")]
@@ -19,12 +18,11 @@ pub enum AuthError {
     RefreshTokenMissing(String),
 
     /// AAD returned `invalid_grant` for a dead refresh token (e.g. AADSTS70008
-    /// expired, 70000 revoked, 50173 invalidated by a password change) — it is
-    /// no longer usable and must be discarded. A consent gap
-    /// ([`AuthError::ConsentRequired`]) or a Conditional Access step-up
-    /// ([`AuthError::InteractionRequired`]) is classified first and never lands
-    /// here. The string carries the redacted AAD code for tracing only; do not
-    /// show it to users.
+    /// expired, 70000 revoked, 50173 invalidated by a password change); it must
+    /// be discarded. A consent gap ([`AuthError::ConsentRequired`]) or a
+    /// Conditional Access step-up ([`AuthError::InteractionRequired`]) is
+    /// classified first and never lands here. The string is the redacted AAD
+    /// code for tracing only — do not show it to users.
     #[error("refresh token rejected by AAD ({0}); re-authentication required")]
     InvalidGrant(String),
 
@@ -74,10 +72,10 @@ pub enum AuthError {
 
     /// The OS credential store could not be registered at all — on Linux, no
     /// Secret Service provider (GNOME Keyring / KWallet) on the D-Bus session
-    /// bus. Distinct from [`AuthError::Keyring`], a store that exists but
-    /// refused (e.g. locked): there is nothing to unlock here. The failure is
-    /// memoised for the process (`token_cache::ensure_keyring_store`), so
-    /// recovering needs a restart once a provider is running.
+    /// bus. Distinct from [`AuthError::Keyring`] (a store that exists but
+    /// refused, e.g. locked). The failure is memoised for the process
+    /// (`token_cache::ensure_keyring_store`), so recovering needs a restart
+    /// once a provider is running.
     #[error("no OS credential store is available: {0}")]
     KeyringUnavailable(String),
 
