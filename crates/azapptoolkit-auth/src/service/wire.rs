@@ -1,8 +1,8 @@
 //! AAD wire protocol: `/token` response/error shapes, error classification +
 //! redaction, scope parsing, ID-token claims decoding, and CAE claims
 //! building. Free functions and private types with zero coupling to
-//! [`super::EntraAuthService`] — the flows in `service` call these; nothing
-//! here touches the network or the keyring.
+//! [`super::EntraAuthService`] — the `service` flows call these; nothing here
+//! touches the network or the keyring.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -135,8 +135,8 @@ pub(super) fn extract_aadsts_code(description: &str) -> Option<String> {
     }
 }
 
-/// Parse space-delimited scope strings from a token response. When the response
-/// omits `scope` entirely (`None`), fall back to `fallback` — the scopes we
+/// Parses the space-delimited `scope` from a token response. When the response
+/// omits it entirely (`None`), falls back to `fallback` — the scopes
 /// requested — so a refresh that doesn't echo the grant still records what the
 /// token covers. A present-but-empty `scope` stays empty (the server said so).
 pub(super) fn parse_scopes(raw: Option<&str>, fallback: &[String]) -> Vec<String> {
@@ -198,8 +198,8 @@ pub(super) struct IdClaims {
 /// Safe **only** because every call site feeds a token that arrived over TLS
 /// directly from Entra's `/token` endpoint, and the security-relevant claims
 /// (`nonce`, `tid`, `oid`) are re-bound to the request afterwards. Do NOT reuse
-/// this on a token from an untrusted source: it performs no signature, issuer,
-/// audience, or expiry validation.
+/// this on a token from an untrusted source: no signature, issuer, audience,
+/// or expiry validation.
 pub(super) fn parse_id_token(id_token: Option<&str>) -> Result<IdClaims> {
     let id_token =
         id_token.ok_or_else(|| AuthError::TokenExchange("no id_token in response".into()))?;

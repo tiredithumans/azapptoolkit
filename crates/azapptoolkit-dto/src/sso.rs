@@ -272,9 +272,9 @@ pub struct OidcSsoSummary {
     /// `client_secret` is.
     pub client_secret_expiry: Option<String>,
 }
-// Hand-written rather than derived: the workspace treats a derived `Debug` on
-// a secret as a defect, because any `?dto` in a `tracing` macro puts the
-// plaintext straight into the daily rolling log file. Mirrors
+// Hand-written rather than derived: a derived `Debug` on a secret is a defect
+// in this workspace — any `?dto` in a `tracing` macro puts the plaintext
+// straight into the daily rolling log file. Mirrors
 // `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
 // `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
 impl std::fmt::Debug for OidcSsoSummary {
@@ -564,13 +564,13 @@ pub struct SsoCertResult {
 /// One SAML app's token-signing certificate, as a row in the tenant-wide
 /// SSO-certificate expiry board.
 ///
-/// Deliberately **not** folded into the audit's risk score. An expiring signing
-/// certificate is an *availability* risk — sign-in stops on a known date — not
-/// an over-privilege one, and `risk_score` ranks exposure. Adding points here
-/// would move apps up a ranking operators read as "most over-permissioned"
-/// because they're due for routine maintenance. It reuses
-/// [`azapptoolkit_core::audit::CredentialStatus`] so the board's filters behave
-/// exactly like the credential-expiry board's.
+/// Deliberately **not** folded into the audit's risk score. An expiring
+/// signing certificate is an *availability* risk — sign-in stops on a known
+/// date — not an over-privilege one, and `risk_score` ranks exposure: points
+/// here would move apps up a ranking operators read as "most
+/// over-permissioned" for being due routine maintenance. Reuses
+/// [`azapptoolkit_core::audit::CredentialStatus`] so the board's filters
+/// behave exactly like the credential-expiry board's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SsoCertificateRowDto {
     /// SP object id — deep-links into the enterprise app's SSO tab, where the

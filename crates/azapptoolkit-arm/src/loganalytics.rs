@@ -1,12 +1,12 @@
 //! Azure Monitor Logs query client (data plane).
 //!
-//! Distinct from [`crate::ArmClient`] — the query API lives at its own host
+//! Distinct from [`crate::ArmClient`] — the query API has its own host
 //! (`https://api.loganalytics.azure.com`, sovereign variants via
 //! `CloudEnvironment::log_analytics_resource`) and its own token audience, so
-//! it takes its own [`BearerProvider`]. Used to read `MicrosoftGraphActivityLogs`
-//! for the granted-vs-used permission analysis; kept in this crate because it
-//! shares the ARM crate's error/retry stack and the workspaces it queries are
-//! discovered through [`crate::ArmClient::list_log_analytics_workspaces`].
+//! it takes its own [`BearerProvider`]. Reads `MicrosoftGraphActivityLogs` for
+//! the granted-vs-used permission analysis; kept in this crate because it
+//! shares the ARM error/retry stack and its workspaces come from
+//! [`crate::ArmClient::list_log_analytics_workspaces`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,12 +40,11 @@ impl LogAnalyticsClient {
 
     /// Runs `kql` against the workspace identified by `workspace_customer_id`
     /// (the workspace GUID, not the ARM resource id) over an ISO-8601 `timespan`
-    /// (e.g. `P90D`), returning the first result table. A workspace that doesn't
-    /// contain a referenced table answers 400 (semantic error) — surfaced as
-    /// [`ArmError::Api`] so callers probing for table presence can treat it as
-    /// "not here" rather than a hard failure. A 200 that carries an `error`
-    /// object (Log Analytics' `PartialError`: the query hit a limit and the
-    /// rows are incomplete) is refused as [`ArmError::Protocol`] — the Kusto
+    /// (e.g. `P90D`), returning the first result table. A workspace missing a
+    /// referenced table answers 400 — surfaced as [`ArmError::Api`] so
+    /// table-presence probes can treat it as "not here". A 200 carrying an
+    /// `error` object (Log Analytics' `PartialError`: the query hit a limit,
+    /// rows are incomplete) is refused as [`ArmError::Protocol`] — Kusto's
     /// guidance is to ignore the entire result rather than read a truncated
     /// one as complete.
     ///

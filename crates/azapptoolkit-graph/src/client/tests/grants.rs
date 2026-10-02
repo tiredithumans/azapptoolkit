@@ -135,11 +135,11 @@ async fn upsert_admin_oauth2_grant_merges_scopes_when_existing_is_partial() {
     assert!(grant.scope.split_whitespace().any(|s| s == "User.Read"));
 }
 
-/// The pre-read variant must make NO grant-collection read of its own — that is
-/// the entire reason it exists. The admin-consent path upserts once per declared
-/// resource, so a read inside the call is an N+1 in the resource count. Only the
-/// PATCH is mocked here: any GET would fall through to wiremock's 404 and fail
-/// the upsert, so a reintroduced read cannot pass silently.
+/// The pre-read variant must make NO grant-collection read of its own — that is the entire
+/// reason it exists (the admin-consent path upserts once per declared resource, so a read
+/// inside the call is an N+1 in the resource count). Only the PATCH is mocked: any GET would
+/// fall through to wiremock's 404 and fail the upsert, so a reintroduced read cannot pass
+/// silently.
 #[tokio::test]
 async fn upsert_admin_oauth2_grant_in_reads_no_grants_of_its_own() {
     let server = MockServer::start().await;

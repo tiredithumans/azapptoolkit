@@ -170,7 +170,8 @@ pub fn aap_verdict_for(
 
 /// Folds a legacy Application Access Policy verdict over the lean (audit-path)
 /// RBAC verdicts for one principal — the bulk-run equivalent of the per-app
-/// `aap_override` `commands::exchange::mail_scopes::resolve_mail_scopes` applies on the enriched detail path.
+/// `aap_override` that `commands::exchange::mail_scopes::resolve_mail_scopes`
+/// applies on the enriched detail path.
 ///
 /// Applied by the caller, **after** the cached probe, so
 /// `resolve_mail_scopes_audit_cached` keeps caching the pure RBAC verdict and
@@ -272,12 +273,8 @@ mod tests {
     use super::*;
 
     /// Two scoped assignments mean the reach is the UNION, and the verdict must
-    /// name both rather than whichever row Exchange returned first.
-    ///
-    /// A principal can hold one Exchange role through more than one scoped
-    /// assignment. Reporting only the first named scope understated the reach
-    /// AND made the answer depend on response ordering, so the same tenant could
-    /// describe itself differently between two runs.
+    /// name both rather than whichever row Exchange returned first (the
+    /// ordering rule `verdict_from_rows`'s doc comment explains).
     #[test]
     fn several_distinct_scopes_are_all_named() {
         let a = row(

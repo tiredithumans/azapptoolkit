@@ -1,5 +1,4 @@
-// Pure serde-shape guards: no mock server, so only the patch/request types
-// (re-exported from the client module) are needed.
+// Pure serde-shape guards (no mock server) for the patch/request types.
 use super::super::*;
 
 #[test]
@@ -18,8 +17,7 @@ fn federated_credential_request_serializes_to_graph_shape() {
             "issuer": "https://token.actions.githubusercontent.com",
             "subject": "repo:org/app:ref:refs/heads/main",
             "audiences": ["api://AzureADTokenExchange"],
-            // description is sent as null when absent (not omitted), matching the
-            // body the command originally hand-built.
+            // description is sent as null when absent (not omitted), matching the hand-built body.
             "description": null,
         })
     );
@@ -107,9 +105,7 @@ fn application_sso_patch_matches_saml_body_and_skips_unset() {
 
 #[test]
 fn application_authentication_patch_nests_implicit_grant_and_skips_unset() {
-    // A full save: web (reply URLs + logout + implicit grant), spa, public
-    // client, and the fallback-public-client flag. implicitGrantSettings must
-    // nest under `web`, not appear at the top level.
+    // A full save; `implicitGrantSettings` must nest under `web`, not at the top level.
     let full = ApplicationAuthenticationPatch {
         web: Some(ApplicationWebPatch {
             redirect_uris: Some(vec!["https://app/cb".into()]),
@@ -144,8 +140,7 @@ fn application_authentication_patch_nests_implicit_grant_and_skips_unset() {
         })
     );
 
-    // An all-default patch serializes to an empty object: every field is
-    // skip_serializing_if = Option::is_none, so a no-op save sends nothing.
+    // All fields are skip_serializing_if = Option::is_none, so a no-op save serializes to {}.
     assert_eq!(
         serde_json::to_value(ApplicationAuthenticationPatch::default()).unwrap(),
         serde_json::json!({})

@@ -1,9 +1,9 @@
 //! ARM client errors.
 //!
-//! The taxonomy is generated from [`azapptoolkit_core::http_error_enum`] — one
+//! The taxonomy comes from [`azapptoolkit_core::http_error_enum`] — one
 //! definition shared with `GraphError` and `KeyVaultError`. `ui_hint` stays
-//! hand-written: it is the one method that genuinely differs per crate, naming
-//! this API's Azure RBAC role from the capabilities catalog.
+//! hand-written: the one method that genuinely differs per crate, naming this
+//! API's Azure RBAC role from the capabilities catalog.
 
 pub type Result<T> = std::result::Result<T, ArmError>;
 
@@ -16,13 +16,13 @@ azapptoolkit_core::http_error_enum! {
 }
 
 impl ArmError {
-    /// Actionable role guidance appended to the raw message when surfacing the
-    /// error (mirrors `ExchangeError::ui_hint`). A 403 on an ARM call means the
-    /// signed-in user's Azure RBAC role is insufficient — sourced from the
-    /// `azure_role_reads` capability so the text matches the readiness checklist
-    /// and the proactive label. The one ARM *write* path (assigning a role to a
-    /// managed identity) overrides this with more specific guidance at the
-    /// command layer (`azure_role_assign`), so this gives the read-path role.
+    /// Actionable role guidance appended to the raw message (mirrors
+    /// `ExchangeError::ui_hint`). A 403 means the signed-in user's Azure RBAC
+    /// role is insufficient — sourced from the `azure_role_reads` capability so
+    /// the text matches the readiness checklist and proactive label. The one
+    /// ARM *write* path (assigning a role to a managed identity) overrides it
+    /// with `azure_role_assign` at the command layer, so this is the read-path
+    /// role.
     pub fn ui_hint(&self) -> Option<&'static str> {
         match self {
             ArmError::Forbidden(_) => {
@@ -38,11 +38,11 @@ impl ArmError {
         }
     }
 
-    /// The ARM error envelope's `error.code` (e.g. `RoleAssignmentExists`) of a
-    /// terminal 4xx [`ArmError::Api`], so a caller can branch on the code rather
-    /// than substring-match the JSON. `None` for any other variant or a body
-    /// that is not the envelope. The body is sanitized and capped, which leaves
-    /// ARM's short envelopes intact.
+    /// The ARM envelope's `error.code` (e.g. `RoleAssignmentExists`) of a terminal
+    /// 4xx [`ArmError::Api`], so a caller can branch on the code instead of
+    /// substring-matching the JSON. `None` for other variants or a
+    /// non-envelope body; the sanitized, capped body leaves ARM's short
+    /// envelopes intact.
     pub fn arm_error_code(&self) -> Option<String> {
         let ArmError::Api { body, .. } = self else {
             return None;
