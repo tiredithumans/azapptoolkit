@@ -121,7 +121,11 @@ async fn mount_and_probe() -> ts::Mounted {
     m.session.open_permission_tester_for(GUID.into());
     ts::tick().await;
     ts::click_button_labelled("SharePoint resource");
+    // The tab swap is a reactive DOM write — without a tick the SharePoint URL
+    // input is not yet rendered and `set_input_value` below no-ops silently.
+    ts::tick().await;
     ts::set_input_value(URL_INPUT, URL);
+    ts::tick().await;
     ts::click_button_labelled("Test access");
     m
 }
