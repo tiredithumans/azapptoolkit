@@ -1063,6 +1063,10 @@ mod tests {
         goto_rows(query).0.iter().map(|d| d.label).collect()
     }
 
+    // Returns the mock IPC channel's exact double-`Option` `Result` shape;
+    // keeping the helper channel-shaped keeps the call sites `record_results()`
+    // instead of hand-stacked `Some(Some(Ok(…)))`.
+    #[allow(clippy::unnecessary_wraps)]
     fn record_results() -> Option<Option<Result<GlobalSearchResults, String>>> {
         Some(Some(Ok(GlobalSearchResults {
             query: String::new(),

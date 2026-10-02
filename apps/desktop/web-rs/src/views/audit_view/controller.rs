@@ -225,6 +225,9 @@ impl AuditController {
         });
     }
 
+    /// Receiver-shaped with the rest of the controller surface; the cancel
+    /// itself is a backend call, so there is no controller state to read.
+    #[allow(clippy::unused_self)]
     pub(crate) fn cancel(self) {
         leptos::task::spawn_local(async move {
             audit::cancel_audit().await;

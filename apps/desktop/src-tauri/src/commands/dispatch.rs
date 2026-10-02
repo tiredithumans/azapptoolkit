@@ -73,6 +73,9 @@ impl SessionDead {
     }
 
     /// The error a command should return instead of a partial result.
+    /// Method-shaped on purpose: `session.err(..)` keeps the dead-flag the
+    /// subject at every call site (the shape fanout.rs pins); it reads no state.
+    #[allow(clippy::unused_self)]
     pub(crate) fn err(&self, what: &str) -> UiError {
         UiError::new(
             "refresh_missing",

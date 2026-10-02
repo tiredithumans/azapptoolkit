@@ -21,7 +21,7 @@
 //! asked there ("what changes for me?") under implementation detail.
 //!
 //! So the default render is condensed: repo-internal sections are dropped, and
-//! every bullet is cut to its lede sentence (see [`first_sentence`]). Nothing is
+//! every bullet is cut to its lede sentence (see `first_sentence`). Nothing is
 //! lost — a "Show technical details" toggle renders the section verbatim, and
 //! it only appears when the two actually differ. Doing this at render time (not
 //! in `release.yml`'s extraction) keeps the manifest complete and means already

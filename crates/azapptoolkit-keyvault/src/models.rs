@@ -134,6 +134,9 @@ mod optional_unix_timestamp {
     use chrono::{DateTime, TimeZone, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
+    // `serialize_with` hands the helper `&Option<T>` by contract — the
+    // signature is serde's, not a style choice.
+    #[allow(clippy::ref_option)]
     pub fn serialize<S>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -157,6 +160,9 @@ mod optional_unix_timestamp_ser {
     use chrono::{DateTime, Utc};
     use serde::Serializer;
 
+    // `serialize_with` hands the helper `&Option<T>` by contract — the
+    // signature is serde's, not a style choice.
+    #[allow(clippy::ref_option)]
     pub fn serialize<S>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

@@ -311,6 +311,43 @@ clippy: _stub-frontend-dist
 test: _stub-frontend-dist
     cargo test --locked --workspace
 
+# Build docs for every workspace crate, failing on broken/inaccessible
+# intra-doc links (CI gate). `[workspace.lints.rustdoc]` denies
+# `broken_intra_doc_links` + `private_intra_doc_links`, and clippy never runs
+# rustdoc — this recipe is where that deny actually fires. The links carry
+# real weight here (module docs are the subsystem record agents are told to
+# read), so a rename that orphans one is a defect, not cosmetic noise.
+# --no-deps: the gate is our prose; third-party link resolution is not ours.
+# Needs the dist stub because documenting src-tauri runs `generate_context!`.
+doc: _stub-frontend-dist
+    cargo doc --locked --workspace --no-deps
+
+# Same rustdoc gate for the frontend tree (wasm target — on the host, web-rs's
+# components are cfg'd out, so host docs would prove nothing). web-rs is
+# excluded from the workspace, so its `[lints.rustdoc]` is a hand-mirror of the
+# root's, pinned by `web_rs_lint_block_matches_the_workspace_block`.
+[working-directory('apps/desktop/web-rs')]
+web-doc:
+    cargo doc --locked --no-deps --target wasm32-unknown-unknown
+
+# Advisory pedantic+nursery sweep — NOT a gate and deliberately not in any
+# verify chain (review F216). A curated low-FP subset is gated through
+# `[workspace.lints.clippy]` instead; this recipe shows the full tally with
+# the known-liar lints kept visible but the pure-noise families (doc links,
+# module-name echoes, must_use ceremony, …) allowed so the output is readable
+# in one command. Run it before a release, not on every commit.
+# Deliberately visible despite FP-proneness: redundant_clone,
+# needless_pass_by_value, derive_partial_eq_without_eq, map_unwrap_or,
+# future_not_send. `-W` not `-D`: nothing fails on a lie here.
+clippy-pedantic: _stub-frontend-dist
+    cargo clippy --locked --workspace --all-targets -- -W clippy::pedantic -W clippy::nursery --allow clippy::missing_errors_doc --allow clippy::missing_panics_doc --allow clippy::doc_markdown --allow clippy::module_name_repetitions --allow clippy::must_use_candidate --allow clippy::similar_names --allow clippy::type_complexity
+
+# The same advisory tally for the frontend tree (own lockfile, own lint
+# posture — see web-clippy).
+[working-directory('apps/desktop/web-rs')]
+web-clippy-pedantic:
+    cargo clippy --locked --target wasm32-unknown-unknown --all-targets --features test-support -- -W clippy::pedantic -W clippy::nursery --allow clippy::missing_errors_doc --allow clippy::missing_panics_doc --allow clippy::doc_markdown --allow clippy::module_name_repetitions --allow clippy::must_use_candidate --allow clippy::similar_names --allow clippy::type_complexity
+
 # The inner loop while iterating: type-check BOTH trees (the root workspace incl.
 # every test target, and the wasm frontend) with no codegen and no tests. Not a
 # CI gate — `verify` is — but it catches the compile error `verify` would take
@@ -400,7 +437,7 @@ web-test:
 # web build, matching the CI web job and failing fast on a logic regression.
 
 # The machine-independent gates shared by every verify entry point.
-_verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+_verify-core: fmt-check clippy test doc web-fmt-check web-clippy web-test web-build web-doc
 
 # Run the core CI gates locally, in order. Run this before declaring a change
 # done. The browser GUI tests run too WHEN this box can (see `web-itest-auto`)
@@ -490,11 +527,35 @@ machete:
     cargo machete --skip-target-dir
 
 # --- Release / packaging ----------------------------------------------------
-
-# Build the Windows MSI + NSIS installers (release; auto-builds the frontend).
+#
+# The release pipeline per platform is a COMPILE step (`cargo tauri build
+# --no-bundle`: frontend + Rust, no bundling, no signing) and a BUNDLE step
+# (`cargo tauri bundle`: bundling + updater signatures). release.yml runs them
+# as two steps and scopes TAURI_SIGNING_PRIVATE_KEY[_PASSWORD] to the bundle
+# step only (review F285): a single `cargo tauri build` used to run every
+# dependency build script with the updater's minisign key in its environment,
+# although the CLI only needs the key during bundling. The `build-*-updater`
+# recipes chain the pair so a local rehearsal is still one command, and
+# `cargo tauri bundle` runs only `beforeBundleCommand` and expects the binary
+# already built — so always chain or compile first.
 # Args after `--` go to the underlying cargo build: --locked enforces the
 # committed Cargo.lock on the one pipeline that produces shipped bytes (every
 # verify gate pins it; the release build must not silently re-resolve).
+
+# Release step 2: rewrite the three guarded version manifests to VERSION,
+# resync BOTH lockfiles (workspace-only `cargo update`, never --locked), then
+# run the release.rs identity tests — so roll the CHANGELOG section FIRST
+# (SKILL.md step 1), or the tail test fails on the stale header by design.
+# This is the sanctioned path — hand-typed `cargo update` is what AGENTS.md
+# forbids — and the release skill's steps 1-2 point here. The body lives in
+# scripts/bump.sh / bump.ps1. Usage: `just bump 0.31.0`.
+[unix]
+bump VERSION:
+    bash scripts/bump.sh {{VERSION}}
+
+[windows]
+bump VERSION:
+    powershell.exe -NoLogo -ExecutionPolicy Bypass -File scripts/bump.ps1 {{VERSION}}
 
 # Windows MSI + NSIS installers, release, --locked (no updater signing key needed).
 [working-directory('apps/desktop/src-tauri')]
@@ -502,19 +563,30 @@ build-windows:
     cargo tauri build --target x86_64-pc-windows-msvc -- --locked
 
 # Requires the updater signing key in TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
-# (`tauri build` fails without it when createUpdaterArtifacts is on); kept
-# separate from `build-windows` so local/test packaging needs no signing key.
-# Windows installers WITH signed updater artifacts (.sig → latest.json in CI).
-# The override comes from `updater-build.json`, not inline `--config '{...}'`:
-# PowerShell (the Windows recipe shell) strips the JSON's inner double quotes
-# when handing args to cargo.exe, so inline JSON parses as invalid ("key must be
-# a string"). A file path has no quoting to mangle. It is NOT a `tauri.*.conf.json`
-# name, so Tauri never auto-loads it — only this explicit `--config` does.
+# (`cargo tauri bundle` fails without it when createUpdaterArtifacts is on);
+# kept separate from `build-windows` so local/test packaging needs no signing
+# key. Windows installers WITH signed updater artifacts (.sig → latest.json in
+# CI). The override comes from `updater-build.json`, not inline `--config
+# '{...}'`: PowerShell (the Windows recipe shell) strips the JSON's inner double
+# quotes when handing args to cargo.exe, so inline JSON parses as invalid ("key
+# must be a string"). A file path has no quoting to mangle. It is NOT a
+# `tauri.*.conf.json` name, so Tauri never auto-loads it — only this explicit
+# `--config` (and the `bundle-*` recipes above) does.
+
+# Windows compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-windows:
+    cargo tauri build --no-bundle --target x86_64-pc-windows-msvc -- --locked
+
+# Windows bundle step: MSI + NSIS + updater .sig (needs TAURI_SIGNING_PRIVATE_KEY).
+# No `--bundles`: default `targets: "all"` is exactly msi + nsis on Windows.
+[working-directory('apps/desktop/src-tauri')]
+bundle-windows:
+    cargo tauri bundle --target x86_64-pc-windows-msvc --config updater-build.json
 
 # Windows installers WITH signed updater artifacts (needs TAURI_SIGNING_PRIVATE_KEY).
 [working-directory('apps/desktop/src-tauri')]
-build-windows-updater:
-    cargo tauri build --target x86_64-pc-windows-msvc --config updater-build.json -- --locked
+build-windows-updater: compile-windows bundle-windows
 
 # macOS bundles (.dmg download + .app.tar.gz updater payload) with signed updater
 # artifacts. Native Apple Silicon (aarch64) — a universal binary is deliberately
@@ -527,10 +599,19 @@ build-windows-updater:
 build-macos:
     cargo tauri build --target aarch64-apple-darwin --bundles app,dmg -- --locked
 
+# macOS compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-macos:
+    cargo tauri build --no-bundle --target aarch64-apple-darwin -- --locked
+
+# macOS bundle step: .app + .dmg + .app.tar.gz updater payload (needs the key).
+[working-directory('apps/desktop/src-tauri')]
+bundle-macos:
+    cargo tauri bundle --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg
+
 # macOS .dmg + .app.tar.gz with signed updater artifacts (Apple Silicon).
 [working-directory('apps/desktop/src-tauri')]
-build-macos-updater:
-    cargo tauri build --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg -- --locked
+build-macos-updater: compile-macos bundle-macos
 
 # Linux bundles (.AppImage download + updater payload, .deb for Debian/Ubuntu)
 # with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
@@ -542,10 +623,19 @@ build-macos-updater:
 build-linux:
     cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb -- --locked
 
+# Linux compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-linux:
+    cargo tauri build --no-bundle --target x86_64-unknown-linux-gnu -- --locked
+
+# Linux bundle step: .AppImage + .deb + updater payload (needs the key).
+[working-directory('apps/desktop/src-tauri')]
+bundle-linux:
+    cargo tauri bundle --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb
+
 # Linux AppImage + .deb with signed updater artifacts.
 [working-directory('apps/desktop/src-tauri')]
-build-linux-updater:
-    cargo tauri build --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb -- --locked
+build-linux-updater: compile-linux bundle-linux
 
 # Regenerate every bundled icon format from icons/icon.svg.
 [working-directory('apps/desktop/src-tauri')]

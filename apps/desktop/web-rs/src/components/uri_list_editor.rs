@@ -30,7 +30,7 @@
 //!    which makes that hazard structural rather than a rule a later sweep can
 //!    quietly delete; the multi-line paste path uses the same restriction.
 //! 4. **Focus is handed over through a signal, never scheduled on a frame.**
-//!    See [`UriListState::focus_key`] — `request_animation_frame` is the obvious
+//!    See `UriListState::focus_key` — `request_animation_frame` is the obvious
 //!    way to focus a row that does not exist yet, and it fails *invisibly* in a
 //!    hidden tab (measured: focus simply never moved, and the browser gate would
 //!    have inherited the flake).

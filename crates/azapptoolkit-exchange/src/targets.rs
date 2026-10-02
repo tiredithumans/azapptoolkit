@@ -549,7 +549,7 @@ pub fn group_dns_in_filter(filter: &str) -> HashSet<String> {
 /// groups a management scope confines access to).
 ///
 /// Occurrences **inside a quoted literal do not count** — the same rule
-/// [`member_of_group_clauses`] follows. This is what makes
+/// `member_of_group_clauses` follows. This is what makes
 /// [`scope_groups_in_filter`]'s `complete` flag meaningful: it compares the
 /// clauses parsed against the clauses present, so a group whose DN happens to
 /// contain the text `memberofgroup` (`CN=memberofgroup-admins,…` — an ordinary
@@ -1416,15 +1416,15 @@ mod tests {
         );
     }
 
-    fn managed() -> Option<&'static str> {
-        Some("CN=Managed,DC=x")
+    fn managed() -> &'static str {
+        "CN=Managed,DC=x"
     }
 
     #[test]
     fn consolidation_repoints_only_on_a_fully_verified_copy() {
         let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
         assert_eq!(
-            plan_consolidation(&legacy, managed(), &[], 0).unwrap(),
+            plan_consolidation(&legacy, Some(managed()), &[], 0).unwrap(),
             ConsolidationPlan {
                 scope_dns: vec!["CN=Managed,DC=x".to_string()],
                 repoint: true,
@@ -1438,7 +1438,7 @@ mod tests {
         // means repointing would cut it out of the app's reach.
         let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
         assert_eq!(
-            plan_consolidation(&legacy, managed(), &[], 1),
+            plan_consolidation(&legacy, Some(managed()), &[], 1),
             Err(Refusal::UnverifiedMembers(1)),
             "an unverified member must leave the scope alone"
         );
@@ -1448,7 +1448,7 @@ mod tests {
             "an unresolved managed-group DN must leave the scope alone"
         );
         assert_eq!(
-            plan_consolidation(&legacy, managed(), &["CN=Legacy,DC=x".to_string()], 0),
+            plan_consolidation(&legacy, Some(managed()), &["CN=Legacy,DC=x".to_string()], 0),
             Err(Refusal::UnreadableSourceGroups(vec![
                 "CN=Legacy,DC=x".to_string()
             ])),
@@ -1458,7 +1458,7 @@ mod tests {
             matches!(
                 plan_consolidation(
                     "MemberOfGroup -eq 'CN=Legacy,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
-                    managed(),
+                    Some(managed()),
                     &[],
                     0,
                 ),
@@ -1476,7 +1476,7 @@ mod tests {
             "CN=A,DC=x".to_string(),
             "CN=B,DC=x".to_string(),
         ]);
-        let plan = plan_consolidation(&legacy, managed(), &[], 0).unwrap();
+        let plan = plan_consolidation(&legacy, Some(managed()), &[], 0).unwrap();
         assert_eq!(plan.scope_dns.len(), 1);
         assert_eq!(
             count_member_of_group(&crate::client::member_of_group_filter(&plan.scope_dns)),
@@ -1487,12 +1487,12 @@ mod tests {
     #[test]
     fn consolidation_is_a_no_op_when_the_scope_is_already_managed() {
         let already = crate::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
-        let plan = plan_consolidation(&already, managed(), &[], 0).unwrap();
+        let plan = plan_consolidation(&already, Some(managed()), &[], 0).unwrap();
         assert!(!plan.repoint, "no rewrite when the scope already names it");
 
         // Exchange echoes DNs in its own casing: still the managed group.
         let echoed = crate::client::member_of_group_filter(&["cn=managed,dc=X".to_string()]);
-        let plan = plan_consolidation(&echoed, managed(), &[], 0).unwrap();
+        let plan = plan_consolidation(&echoed, Some(managed()), &[], 0).unwrap();
         assert!(!plan.repoint, "a case-only difference is not a repoint");
 
         // The same group named twice in two casings is still only that group.
@@ -1500,7 +1500,7 @@ mod tests {
             "CN=Managed,DC=x".to_string(),
             "CN=MANAGED,DC=X".to_string(),
         ]);
-        let plan = plan_consolidation(&twice, managed(), &[], 0).unwrap();
+        let plan = plan_consolidation(&twice, Some(managed()), &[], 0).unwrap();
         assert!(
             !plan.repoint,
             "case variants of the managed group are one group"
@@ -1511,7 +1511,7 @@ mod tests {
             "CN=Managed,DC=x".to_string(),
             "CN=Other,DC=x".to_string(),
         ]);
-        let plan = plan_consolidation(&extra, managed(), &[], 0).unwrap();
+        let plan = plan_consolidation(&extra, Some(managed()), &[], 0).unwrap();
         assert!(
             plan.repoint,
             "another group in the filter still needs a rewrite"

@@ -24,24 +24,32 @@ fn table_body(toml_src: &str, header: &str) -> Vec<String> {
 /// web-rs is EXCLUDED from the root workspace (it targets `wasm32` and carries
 /// its own lockfile), so it cannot inherit `[workspace.lints]` and restates the
 /// block by hand. AGENTS.md says "keep it in sync with the root block"; nothing
-/// but this test actually did.
+/// but this test actually did. Checked per table — today `[lints.rust]`,
+/// `[lints.rustdoc]` and `[lints.clippy]` (a deny or gated lint added in one
+/// table but not its mirror is exactly the silent drift this test exists to
+/// catch).
 #[test]
 fn web_rs_lint_block_matches_the_workspace_block() {
-    let root = table_body(
-        include_str!("../../../../../Cargo.toml"),
-        "[workspace.lints.rust]",
-    );
-    let web = table_body(include_str!("../../../web-rs/Cargo.toml"), "[lints.rust]");
-    assert!(
-        !root.is_empty(),
-        "no [workspace.lints.rust] block found in the root Cargo.toml — this test is checking nothing"
-    );
-    assert_eq!(
-        root, web,
-        "apps/desktop/web-rs/Cargo.toml's [lints.rust] has drifted from the root \
-         [workspace.lints.rust]. web-rs is outside the workspace, so it cannot inherit \
-         the block — restate it verbatim."
-    );
+    let root = include_str!("../../../../../Cargo.toml");
+    let web = include_str!("../../../web-rs/Cargo.toml");
+    for (root_h, web_h) in [
+        ("[workspace.lints.rust]", "[lints.rust]"),
+        ("[workspace.lints.rustdoc]", "[lints.rustdoc]"),
+        ("[workspace.lints.clippy]", "[lints.clippy]"),
+    ] {
+        let root_block = table_body(root, root_h);
+        let web_block = table_body(web, web_h);
+        assert!(
+            !root_block.is_empty(),
+            "no {root_h} block found in the root Cargo.toml — this test is checking nothing"
+        );
+        assert_eq!(
+            root_block, web_block,
+            "apps/desktop/web-rs/Cargo.toml's {web_h} has drifted from the root \
+             {root_h}. web-rs is outside the workspace, so it cannot inherit \
+             the block — restate it verbatim."
+        );
+    }
 }
 
 /// `## [X.Y.Z] - YYYY-MM-DD`, exactly — no `v` prefix, ASCII hyphen, one space.
@@ -426,9 +434,10 @@ fn verify_full_runs_every_gate_ci_runs() {
         }
     }
     assert!(
-        // fmt-check, clippy, test, web-fmt-check, web-clippy, web-test,
-        // web-build, web-itest, web-itest-size, audit, web-audit, deny,
-        // web-deny. A scan finding far fewer has stopped recognising the shape.
+        // fmt-check, clippy, test, doc, web-fmt-check, web-clippy, web-test,
+        // web-build, web-doc, web-itest, web-itest-size, audit, web-audit,
+        // deny, web-deny. A scan finding far fewer has stopped recognising
+        // the shape.
         invocations >= 10,
         "the scan found only {invocations} `just` invocation(s) in ci.yml — the recipe detector \
          is broken, and a parity rule that sees no gates passes vacuously"
@@ -730,4 +739,86 @@ fn nsis_install_mode_stays_current_user() {
              `currentUser` (per-user, no admin, UAC-free passive updates)"
         );
     }
+}
+
+/// The `tauri-cli` version is one hand-mirrored literal in three files
+/// (release.yml's `Install Tauri CLI` step and both setup scripts) plus
+/// Cargo.lock's `tauri` runtime — and Dependabot bumps the lockfile weekly while
+/// being blind to a `cargo install --version` string, so the CLI pin rots
+/// independently of the runtime it is supposed to track. Every other
+/// hand-mirrored literal here has a test; this adds the missing one.
+///
+/// The contract the comments state is "the newest published `tauri-cli` **at or
+/// below** the locked `tauri` runtime" — patch digits may differ (upstream does
+/// not cut a CLI release for every runtime patch), so this pins (a) all three
+/// literals agreeing and (b) CLI `<=` runtime, nothing stricter.
+#[test]
+fn tauri_cli_pin_agrees_across_files_and_tracks_the_locked_runtime() {
+    /// Extract the version from a `cargo install tauri-cli --locked --version
+    /// "=X.Y.Z"` literal wherever it appears (workflow `run:` line, shell line,
+    /// or inside a PowerShell string).
+    fn cli_pin(src: &str) -> Option<&str> {
+        let marker = "tauri-cli --locked --version \"=";
+        let at = src.find(marker)?;
+        let rest = &src[at + marker.len()..];
+        rest.split('"').next()
+    }
+
+    /// Semver tuple compare; returns None for anything not `X.Y.Z`.
+    fn semver(s: &str) -> Option<(u32, u32, u32)> {
+        let mut parts = s.split('.');
+        Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ))
+    }
+
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    let setup_sh = include_str!("../../../../../scripts/setup.sh");
+    let setup_ps = include_str!("../../../../../scripts/setup.ps1");
+    let lock = include_str!("../../../../../Cargo.lock");
+
+    let wf = cli_pin(release).expect("release.yml lost its `cargo install tauri-cli` step");
+    let sh = cli_pin(setup_sh).expect("scripts/setup.sh lost its `cargo install tauri-cli` line");
+    let ps = cli_pin(setup_ps).expect("scripts/setup.ps1 lost its `cargo install tauri-cli` line");
+    assert_eq!(
+        wf, sh,
+        "release.yml pins tauri-cli {wf} but scripts/setup.sh pins {sh} — dev and release \
+         would bundle with different CLIs"
+    );
+    assert_eq!(
+        wf, ps,
+        "release.yml pins tauri-cli {wf} but scripts/setup.ps1 pins {ps} — dev and release \
+         would bundle with different CLIs"
+    );
+
+    // The locked `tauri` runtime, read from its `[[package]]` block so
+    // `tauri-utils`/`tauri-plugin-*` lines cannot shadow it.
+    let runtime = lock
+        .split("[[package]]")
+        .find(|block| block.lines().any(|l| l.trim() == "name = \"tauri\""))
+        .and_then(|block| {
+            block
+                .lines()
+                .find(|l| l.trim().starts_with("version ="))
+                .map(|l| {
+                    l.trim()
+                        .trim_start_matches("version =")
+                        .trim()
+                        .trim_matches('"')
+                })
+        })
+        .expect("Cargo.lock has no `tauri` package — where is the runtime pinned?");
+
+    let (cli, rt) = match (semver(wf), semver(runtime)) {
+        (Some(c), Some(r)) => (c, r),
+        _ => panic!("unparsable versions: cli={wf} runtime={runtime}"),
+    };
+    assert!(
+        cli <= rt,
+        "tauri-cli {wf} is NEWER than the locked tauri runtime {runtime}; the release \
+         workflow documents its pin as 'at or below the locked tauri runtime' — either bump \
+         the runtime in Cargo.lock or lower the pin in release.yml + both setup scripts"
+    );
 }

@@ -7,6 +7,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
+  the tested resource.** After a SharePoint probe, a section under the verdict lists every app
+  grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL
+  ("Selected") grant made in the Grant-access wizard can be undone where it was verified.
+  User or group sharing entries are listed but carry no Revoke — removing one would cut a person's
+  access, not an app's. Because the read is by URL, an empty list means "no grants on this
+  resource", never that the app has no item-level access elsewhere (a file inherits from its
+  library and site); the section and its empty state say so, and a failed read shows an error
+  rather than an empty table. A revocation re-runs the probe, so the fresh verdict proves it landed.
 - **A managed identity's Azure role form accepts any role, and its consent button says what it does.**
   A "Custom role definition id…" option takes the GUID of any other built-in or custom Azure role
   (checked as a GUID before the request), where the form offered only eight common roles; and the

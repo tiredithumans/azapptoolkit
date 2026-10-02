@@ -50,7 +50,7 @@ apps/desktop/
 ├── src-tauri/                       # backend (main process)
 │   ├── src/lib.rs                   # Tauri builder, tracing, `generate_handler![]`
 │   ├── src/state.rs                 # AppState: auth singleton, clients, cache, cancel flags
-│   ├── src/commands/                # #[tauri::command] handlers (+ applications/ exchange/ sso/ subdirs)
+│   ├── src/commands/                # #[tauri::command] handlers (+ applications/ audit/ exchange/ permissions/ sso/ subdirs)
 │   ├── src/token_adapter.rs         # ScopedTokenAdapter (BearerProvider), per-scope tokens
 │   ├── tests/repo_invariants/       # source-scanning tests that pin the rules below
 │   ├── build.rs                     # bakes AZAPPTOOLKIT_CLIENT_ID/_TENANT_ID from .env
@@ -168,7 +168,7 @@ bake them via `.env`).
 
 Run the gates CI runs before declaring a change done, via the `just` recipes:
 
-1. `just verify` — fmt → clippy → test → web-fmt → web-clippy → web-test → web-build, then the browser GUI tests when this box can run them (`just verify-ui` to require them).
+1. `just verify` — fmt → clippy → test → doc → web-fmt → web-clippy → web-test → web-build → web-doc, then the browser GUI tests when this box can run them (`just verify-ui` to require them). `doc`/`web-doc` fail on broken intra-doc links (`[workspace.lints.rustdoc]` deny; clippy never runs rustdoc, so this is the only gate that does).
 2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny`/`machete` (required CI checks) + the shard ceiling.
 3. CI-side only: actionlint, shellcheck of `.claude/hooks/` + a whole-history secrets scan (never gated on the change detector), CodeQL (build-mode `none`; macro expansion is a known gap).
 

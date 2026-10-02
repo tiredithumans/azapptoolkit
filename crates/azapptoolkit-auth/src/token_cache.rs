@@ -407,7 +407,7 @@ pub enum PurgeOutcome {
 /// Refreshes for different audiences run concurrently, so a slow one can fail
 /// with the OLD token after the operator already re-authenticated and stored a
 /// new one; an unconditional purge would erase that fresh session. The check
-/// and the delete share [`CHUNK_SET_LOCK`] with every save, so no write can land
+/// and the delete share `CHUNK_SET_LOCK` with every save, so no write can land
 /// between them.
 pub fn delete_refresh_token_if_current(
     tenant_id: &str,

@@ -79,7 +79,7 @@ fn map_batch_response<T: DeserializeOwned>(r: BatchSubResponse) -> Result<T> {
 
 impl GraphClient {
     /// Issues many GETs in a single `POST /$batch` (max 20 per call; chunks
-    /// automatically, up to [`CHUNK_CONCURRENCY`] chunks in flight), returning one `Result<T>`
+    /// automatically, up to `CHUNK_CONCURRENCY` chunks in flight), returning one `Result<T>`
     /// per URL **in order**. Inner statuses map to the same typed `GraphError`s as an
     /// individual GET; inner 429/5xx re-batch just that subset (honoring an inner `Retry-After`)
     /// on the shared retry budget — the policy the GET would get sent alone. `urls` are relative

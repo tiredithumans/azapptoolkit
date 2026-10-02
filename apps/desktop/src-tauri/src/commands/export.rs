@@ -4,6 +4,8 @@
 //! were importing it from — the per-domain `*_to_csv` serializers stay with
 //! their domains; only the generic pieces live here.
 
+use std::fmt::Write;
+
 use tauri::AppHandle;
 
 use crate::dto::UiError;
@@ -202,12 +204,9 @@ pub(crate) fn coverage_comment_block(title: &str, summary: &str) -> String {
     if summary.trim().is_empty() {
         out.push_str("# Coverage: not stated by the exporting view — treat as incomplete\n");
     } else {
-        out.push_str(&format!("# {}\n", summary.trim()));
+        let _ = writeln!(out, "# {}", summary.trim());
     }
-    out.push_str(&format!(
-        "# Exported: {}\n",
-        chrono::Utc::now().to_rfc3339()
-    ));
+    let _ = writeln!(out, "# Exported: {}", chrono::Utc::now().to_rfc3339());
     out
 }
 

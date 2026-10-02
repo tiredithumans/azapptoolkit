@@ -3757,6 +3757,14 @@ h3 {
   margin-top: var(--space-2);
 }
 
+/* Selected-item grants table under the tester's SharePoint verdict (F094). */
+.permission-tester__grants {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
 /* Posture strip — the workbench header's read-only severity summary. */
 .posture-strip__counts {
   margin-top: var(--space-2);

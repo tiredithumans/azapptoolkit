@@ -23,13 +23,28 @@ repository = "https://github.com/tiredithumans/azapptoolkit"
 publish = false
 [workspace.dependencies]
 # Async
-tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+# Trimmed to what the non-test code actually uses (2026-10-02, review F230):
+# `sync` + `time`. The old union carried `macros`/`rt-multi-thread`/`net`/`io-util`
+# from the days before per-crate features, which hid the real shape — raw sockets
+# are opened in exactly one place (auth's OAuth loopback listener) and no crate
+# builds a runtime (Tauri owns the only one). Crates that need more re-add it
+# explicitly: `azapptoolkit-auth` (net, io-util, rt) and `src-tauri` (macros,
+# rt-multi-thread); test builds get `macros`/`rt*` through dev-dependencies.
+tokio = { version = "1.53", features = ["sync", "time"] }
 # No `executor` feature: nothing here blocks on a future outside tokio.
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # HTTP
 # `system-proxy`: OS proxy discovery for corporate Windows/macOS deployments, enabled
 # here on purpose rather than inherited from the updater plugin's defaults.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy"] }
+# `http2` (review F232, 2026-10-02): `default-features = false` silently dropped
+# reqwest's default `http2`, so every Graph/Exchange/Key Vault fan-out ran HTTP/1.1
+# and a `ConcurrencyThrottle` run at N in-flight requests held N TLS connections
+# per host. Re-enabled so h2 multiplexes streams over one ALPN-negotiated
+# connection. UNMEASURED: no tenant access when enabled, so the fan-out
+# before/after connection count (RUST_LOG=hyper_util=debug on a large-tenant audit
+# or site sweep) is still owed; revert to no-http2 if it loses. The auth crate's
+# TLS-intercepting-proxy special case checks ALPN-independent behavior only.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy", "http2"] }
 bytes = "1"
 # Auth
 #
@@ -77,6 +92,39 @@ wiremock = "0.6"
 # from the workspace and keeps its own lint posture.
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `cargo doc` gate (review F300): intra-doc links are the architecture record
+# (AGENTS.md routes every agent through them) and `clippy -D warnings` does not
+# run rustdoc, so without this a renamed item silently breaks the links. Both
+# flavours are denied: `broken_intra_doc_links` (unresolvable today) and
+# `private_intra_doc_links` (renders as dead plain text in the public docs, so
+# a link that "still works" privately is the silent version of the same rot).
+# Cargo forwards this table to rustdoc itself (no RUSTDOCFLAGS, so no Windows
+# env-var portability problem); the `just doc` / `web-doc` recipes run rustdoc
+# locally and in CI.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+# A curated LOW-FALSE-POSITIVE subset of pedantic/nursery, raised to `warn` so
+# the `-D warnings` clippy gates fail on them (review F216). Only lints whose
+# hits are mechanical are gated — the rest stay advisory in `just
+# clippy-pedantic` / `just web-clippy-pedantic`, including the FP-prone ones
+# (redundant_clone, needless_pass_by_value, derive_partial_eq_without_eq,
+# map_unwrap_or, future_not_send): nursery exists because those lints lie.
+# Keep this table in sync with apps/desktop/web-rs/Cargo.toml `[lints.clippy]`
+# — diffed by `repo_invariants/release.rs::web_rs_lint_block_matches_the_workspace_block`.
+#   unused_async        — the class that hid the blocking keyring call
+#   ref_option          — &Option<T> over Option<&T> at fn boundaries
+#   format_push_string  — `push_str(&format!(…))` waste
+#   unnecessary_wraps   — fns returning Option/Result that never fail
+#   unused_self         — `&self` methods that ignore self
+#   cast_possible_wrap  — silent u64→i64 wraps
+[workspace.lints.clippy]
+unused_async = "warn"
+ref_option = "warn"
+format_push_string = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+cast_possible_wrap = "warn"
 # `opt-level = "z"` is deliberate, and now measured rather than assumed.
 #
 # The worry was that a size-first build penalizes the app's heaviest work: the

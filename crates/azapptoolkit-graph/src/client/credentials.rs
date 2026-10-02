@@ -162,7 +162,7 @@ impl GraphClient {
 
     /// Appends a certificate-credential entry to the application's `keyCredentials` array:
     /// fetch the live array, append, PATCH the full array back (Graph full-replaces it) — as
-    /// raw JSON, so the surviving entries keep their `key` (see [`Self::live_key_credentials`]).
+    /// raw JSON, so the surviving entries keep their `key` (see `Self::live_key_credentials`).
     ///
     /// Writes a "verify-only" credential (no private key) — what users upload when an external
     /// issuer holds the key and signs JWTs. Full client-credentials flow still needs Graph's

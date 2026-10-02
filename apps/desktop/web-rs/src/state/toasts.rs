@@ -10,7 +10,7 @@ impl Session {
     /// Push a toast and return its id. `action_label` + `action` render an
     /// inline button (Retry, …). The id lets a caller dismiss the toast later.
     ///
-    /// Over [`MAX_TOASTS`] the oldest toast that is not sticky
+    /// Over `MAX_TOASTS` the oldest toast that is not sticky
     /// ([`Toast::is_sticky`]) is dropped first — a burst of successes never
     /// pushes a waiting Re-authenticate or Retry off the screen — and only
     /// then the oldest sticky one. The toast just pushed is never the one

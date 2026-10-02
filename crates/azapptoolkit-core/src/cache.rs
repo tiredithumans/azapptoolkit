@@ -923,7 +923,7 @@ impl Cache {
     ///
     /// `Drop` releases the watch, so a fetch that never reaches its store
     /// cannot leak the entry — and leaks matter: entries are never reclaimed,
-    /// so a trickle of them fills [`Cache::MAX_WATCHES`] and every pinned-index
+    /// so a trickle of them fills `Cache::MAX_WATCHES` and every pinned-index
     /// store then refuses permanently, with no recovery short of a restart. A
     /// genuinely full table yields [`Cache::WATCH_UNAVAILABLE`] — fail-closed,
     /// costing one re-fetch.

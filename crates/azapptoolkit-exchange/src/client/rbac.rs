@@ -276,7 +276,7 @@ impl ExchangeClient {
     /// Every legacy Application Access Policy in the organization.
     ///
     /// Same `invoke_command` (never `invoke_optional`) rule as
-    /// [`list_management_scopes`]: an identity-less list has no object to be
+    /// [`Self::list_management_scopes`]: an identity-less list has no object to be
     /// missing, so any rejection is an error, never "no policies". Its empty
     /// result is what the reverse-reference check behind the irreversible
     /// `delete_exchange_scope_group` reads as "no references".

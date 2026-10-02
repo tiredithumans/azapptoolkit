@@ -86,7 +86,7 @@ impl ArmClient {
     /// caller that only collects role GUIDs (readiness) is unaffected.
     ///
     /// Both ids must be GUIDs: the subscription id comes out of an ARM response
-    /// and is spliced into the path (see [`crate::validate`]).
+    /// and is spliced into the path (see `crate::validate`).
     pub async fn list_role_assignments_for_principal(
         &self,
         subscription_id: &str,

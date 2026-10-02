@@ -10,7 +10,10 @@ description = "Entra ID authentication (OAuth2 PKCE) for azapptoolkit"
 [dependencies]
 azapptoolkit-core = { path = "../azapptoolkit-core" }
 
-tokio = { workspace = true }
+# `net`/`io-util`: the OAuth loopback listener is the only raw-socket code in the
+# workspace (service/loopback.rs + the redirect listener in service/mod.rs).
+# `rt`: the refresh-token keyring reads/writes run on `tokio::task::spawn_blocking`.
+tokio = { workspace = true, features = ["net", "io-util", "rt"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
@@ -28,7 +31,9 @@ webbrowser = "1"
 [dev-dependencies]
 wiremock = { workspace = true }
 # `start_paused` lets the redirect-timeout test skip the 300s wait.
-tokio = { workspace = true, features = ["test-util"] }
+# `macros` + `rt-multi-thread`: the `#[tokio::test]`s (incl. two multi-thread
+# join tests) — previously carried by the workspace's blanket feature union.
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 
 # OS-native credential stores registered as keyring-core's default store
 # (replaces the dropped `keyring` meta-crate's `use_native_store`). One per

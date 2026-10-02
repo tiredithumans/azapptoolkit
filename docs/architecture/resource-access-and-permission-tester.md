@@ -176,3 +176,19 @@ by appId, tagged with `TypeChip`). It exercises the same live primitives the gra
 lacks Exchange-admin rights: the Entra layer answers alone (with the AAP caveat) before falling
 back to an `unknown` verdict (never a hard error); SharePoint reuses the `sharepoint` consent
 flow.
+
+**After a SharePoint probe the tester also lists the resolved resource's own Selected entries
+under the verdict (F094)** — one probe, two answers: `test_site_access` says whether the app
+reaches *here*, `list_selected_item_permissions` says what is granted *on* this resource. The
+entries are read with the same URL the probe resolved, so the revoke path lives where the grant is
+verified: a per-URL grant made in the Grant-access wizard can be undone here (same
+`remove_selected_item_permission` core as the wizard's, no cache involvement). Only
+application entries get a Revoke — a `grantedToV2` entry without an application is user or group
+sharing, and this surface never cuts a person's access (including when the app lookup simply
+failed: no button). The caveat from `sharepoint-selected.md` rides with the table: an empty list
+means "no grants on this resource", never "no item-level access elsewhere", and a *failed* entry
+read hides the table rather than rendering it empty (the read must answer before "no grants" is a
+provable claim; the verdict above still renders — it is complete on its own). A successful revoke
+re-runs the probe so the fresh verdict + fresh table prove it landed; no optimistic row removal.
+The section is pinned by the `tests/gui/permission_tester.rs` probes (table + full revoke round
+trip, empty-list wording, failed-read shape).

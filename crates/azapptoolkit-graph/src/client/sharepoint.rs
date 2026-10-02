@@ -39,7 +39,7 @@ impl GraphClient {
     /// transport documents as the throttle-happiest.
     ///
     /// A sub-response that still carries an `@odata.nextLink` is followed
-    /// outside the batch by [`Self::finish_paged_batch_scoped`] — on the same
+    /// outside the batch by `Self::finish_paged_batch_scoped` — on the same
     /// SharePoint token, which page 2 needs as much as page 1 — so a site whose grant
     /// list spans pages is never silently truncated — the same contract the
     /// single-site path guarantees.
@@ -128,16 +128,16 @@ impl GraphClient {
     ///
     /// Three reads in the common case — a site URL costs one, a library two, a
     /// folder three. The URL may be a clean browser address or a "Copy link"
-    /// share URL; both normalise through [`site_relative_path`].
+    /// share URL; both normalise through `site_relative_path`.
     ///
-    /// Note it starts from [`site_collection_url`], **not** the pasted URL:
-    /// [`site_lookup_path`] passes a clean deep path through verbatim, so
+    /// Note it starts from `site_collection_url`, **not** the pasted URL:
+    /// `site_lookup_path` passes a clean deep path through verbatim, so
     /// `.../sites/Finance/Shared Documents/Invoices` would be handed to Graph as
     /// a site address and 404. Only the share-link form was ever truncated,
     /// because only share links reached that code path before.
     ///
     /// Subsites are found by walking outward from the site collection
-    /// ([`Self::resolve_within_or_descend`]) rather than by probing the pasted
+    /// (`Self::resolve_within_or_descend`) rather than by probing the pasted
     /// path inward, which would spend a 404 per segment on every ordinary URL.
     ///
     /// **Boundary:** items are resolved through the site's *drives*, so an item
@@ -263,7 +263,7 @@ impl GraphClient {
                     level: SelectedScopeLevel::List,
                     display_path: join_path(&[
                         base.display_path.as_str(),
-                        name_or(&list_name, "list"),
+                        name_or(list_name.as_deref(), "list"),
                     ]),
                     list_id: Some(list.id),
                     list_name,
@@ -294,7 +294,7 @@ impl GraphClient {
                 level: SelectedScopeLevel::File,
                 display_path: join_path(&[
                     base.display_path.as_str(),
-                    name_or(&drive_name, "library"),
+                    name_or(drive_name.as_deref(), "library"),
                     &inner.replace('/', " / "),
                 ]),
                 list_id: Some(list_id),
@@ -331,7 +331,10 @@ impl GraphClient {
         let list_name = list.label().map(str::to_string);
         Ok(Some(ResolvedSharePointResource {
             level: SelectedScopeLevel::List,
-            display_path: join_path(&[base.display_path.as_str(), name_or(&list_name, "list")]),
+            display_path: join_path(&[
+                base.display_path.as_str(),
+                name_or(list_name.as_deref(), "list"),
+            ]),
             list_id: Some(list.id.clone()),
             list_name,
             ..base.clone()
@@ -399,7 +402,7 @@ impl GraphClient {
 
     /// Resolves a library-relative path (`Invoices/2026`) to a driveItem.
     ///
-    /// `rel_path` must already be percent-encoded — [`site_relative_path`]
+    /// `rel_path` must already be percent-encoded — `site_relative_path`
     /// produces it that way by routing through `url::Url`, so a hand-typed URL
     /// with literal spaces and a browser-copied one with `%20` both arrive here
     /// in the single form Graph accepts.
@@ -621,8 +624,8 @@ fn join_path(parts: &[&str]) -> String {
 
 /// The name Graph gave the resource, or a generic noun when it gave none — an
 /// unnamed library must still render as something an operator can read.
-fn name_or<'a>(name: &'a Option<String>, fallback: &'a str) -> &'a str {
-    name.as_deref().unwrap_or(fallback)
+fn name_or<'a>(name: Option<&'a str>, fallback: &'a str) -> &'a str {
+    name.unwrap_or(fallback)
 }
 
 /// Splits a server-relative path into its non-empty segments.

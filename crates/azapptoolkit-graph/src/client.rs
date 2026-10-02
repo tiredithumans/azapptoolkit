@@ -327,6 +327,7 @@ impl GraphClient {
 
     /// Unwrap an `Option<&Arc<dyn BearerProvider>>` into a typed error, or return the inner
     /// reference for chaining.
+    #[allow(clippy::unused_self)]
     fn require_token<'a>(
         &self,
         token: Option<&'a Arc<dyn BearerProvider>>,

@@ -51,7 +51,7 @@ impl LogAnalyticsClient {
     /// `workspace_customer_id` comes out of an ARM workspace listing and is
     /// spliced into the path, so anything but a GUID is refused as
     /// [`ArmError::Protocol`] before a request is sent — a `?` would override
-    /// the `timespan`, a `..` walk the path (see [`crate::validate`]).
+    /// the `timespan`, a `..` walk the path (see `crate::validate`).
     pub async fn query(
         &self,
         workspace_customer_id: &str,

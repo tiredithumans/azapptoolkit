@@ -29,7 +29,7 @@ impl Session {
     /// matches), so this deliberately does **not** call `set_active_tenant`:
     /// re-setting it would needlessly reset the user's filters and selection.
     /// The [`Self::report_command_error`] "Re-authenticate" toast action; it
-    /// shares [`Self::reauth_in_place`] with [`Self::refresh_token_in_place`]'s
+    /// shares `Self::reauth_in_place` with `Self::refresh_token_in_place`'s
     /// fallback, so both re-authentications have the same side effects.
     pub fn spawn_reauth(&self) {
         let session = *self;
@@ -180,7 +180,7 @@ impl Session {
     }
 
     /// Start the one in-place token refresh for the active tenant (see
-    /// [`Self::refresh_token_in_place`]) — the single entry behind both the
+    /// `Self::refresh_token_in_place`) — the single entry behind both the
     /// top-bar "Refresh token" button and the 401 toast's action
     /// ([`Self::report_if_token_rejected`]).
     ///

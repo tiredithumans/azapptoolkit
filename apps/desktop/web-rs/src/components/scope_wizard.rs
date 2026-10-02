@@ -35,6 +35,8 @@
 //! runs the grant reads `effective_mode`, which is org-wide whenever the cart
 //! has no mechanism: a scoped mode can never outlive the mechanism it belongs to.
 
+use std::fmt::Write;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
 
@@ -154,10 +156,11 @@ fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
         ),
     );
     if !r.warnings.is_empty() {
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             " {}.",
             count_noun(r.warnings.len(), "warning", "warnings")
-        ));
+        );
     }
     s
 }
@@ -176,10 +179,11 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
         s.push_str(" Added Sites.Selected to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             " {}.",
             count_noun(r.warnings.len(), "warning", "warnings")
-        ));
+        );
     }
     s
 }
@@ -196,10 +200,11 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
         s.push_str(" Added it to the app registration.");
     }
     if !r.warnings.is_empty() {
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             " {}.",
             count_noun(r.warnings.len(), "warning", "warnings")
-        ));
+        );
     }
     s
 }
@@ -347,11 +352,12 @@ async fn apply_orgwide(
             count_noun(items.len(), "permission", "permissions")
         );
         if !failures.is_empty() {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 " {}: {}",
                 count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
-            ));
+            );
         }
         Ok(s)
     } else {
@@ -383,15 +389,16 @@ async fn apply_orgwide(
             count_noun(granted, "permission", "permissions")
         );
         if skipped > 0 {
-            s.push_str(&format!(", {skipped} already present"));
+            let _ = write!(s, ", {skipped} already present");
         }
         s.push('.');
         if !failures.is_empty() {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 " {}: {}",
                 count_noun(failures.len(), "issue", "issues"),
                 failures.join("; ")
-            ));
+            );
         }
         Ok(s)
     }

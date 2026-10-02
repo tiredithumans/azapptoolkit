@@ -90,7 +90,7 @@ impl CommandState {
     /// dead end, which is exactly what every expired session and write-scope
     /// failure used to be here. It follows the sink's own rule
     /// (`report_if_session_dead`: surfaces with their own error affordance call
-    /// it first). See [`fail_inline`](Self::fail_inline).
+    /// it first). See `fail_inline`.
     pub fn run<T, Fut>(
         &self,
         on_ok: impl FnOnce(T) + 'static,
@@ -124,7 +124,7 @@ impl CommandState {
     /// failure transient (`UiError::retryable`: throttled, a 5xx, a network
     /// error) — carries a sticky **Retry** that re-runs this same call. That is
     /// why `on_ok` and `op` are `Clone`: every run, the first and each retry,
-    /// consumes a fresh clone. See [`fail_toast`](Self::fail_toast).
+    /// consumes a fresh clone. See `fail_toast`.
     ///
     /// A retry goes through this runner again, so it resolves the tenant anew
     /// (pinned to the one the call first ran for), and it is refused — with an

@@ -127,7 +127,7 @@ fn scope_cell_for(
     }
 }
 
-/// Renders the "Scope" cell for a permission row — see [`scope_cell_for`] for
+/// Renders the "Scope" cell for a permission row — see `scope_cell_for` for
 /// the decision (including why the Exchange verdict is resource-gated).
 /// `is_application` is whether the row is an *application* permission — only
 /// those are scopable via Exchange RBAC for Applications, so a delegated mail
@@ -189,7 +189,7 @@ pub fn permission_scope_cell(
 /// and so should sit beside a "Test access…" jump into the Permission tester.
 ///
 /// Takes the same arguments as [`permission_scope_cell`] and answers from the
-/// same [`scope_cell_for`] decision, so the affordance can never appear beside a
+/// same `scope_cell_for` decision, so the affordance can never appear beside a
 /// badge that does state its reach (or fail to appear beside one that doesn't).
 ///
 /// Three cells qualify, for one reason each:

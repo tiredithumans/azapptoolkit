@@ -1,6 +1,8 @@
 //! Per-row actions for an audit finding: the "Open" deep-link plus any
 //! one-click remediation the scorer attached.
 
+use std::fmt::Write;
+
 use azapptoolkit_core::audit::{
     AuditItem, AuditPrincipalKind, RemediationAction, RemediationKind, issue,
 };
@@ -360,11 +362,12 @@ fn redundant_outcome_report(o: &RedundantPermissionsOutcome) -> (String, bool) {
     let n = o.removed.len();
     let mut msg = format!("Removed {n} redundant permission{}", plural(n));
     if !o.skipped.is_empty() {
-        msg.push_str(&format!(
+        let _ = write!(
+            msg,
             "; kept {} — its covering permission isn't confirmed org-wide (revoked, scoped \
              via Exchange, or Exchange couldn't be checked)",
             o.skipped.join(", ")
-        ));
+        );
     }
     msg.push_str(" — re-run the audit to refresh scores.");
     (msg, o.skipped.is_empty())

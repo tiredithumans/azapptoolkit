@@ -13,7 +13,7 @@ use crate::dto::permissions::{PermissionKind, ResolvedPermission};
 /// inside the loop.
 fn resolve_one_permission(
     resource_app_id: &str,
-    resource_display_name: &Option<String>,
+    resource_display_name: Option<&str>,
     live_sp: Option<&ServicePrincipal>,
     access: &azapptoolkit_core::models::ResourceAccess,
     runtime_assignment_for: &impl Fn(&str) -> Option<String>,
@@ -24,7 +24,7 @@ fn resolve_one_permission(
         if let Some(role) = sp.app_roles.iter().find(|r| r.id == access.id) {
             return ResolvedPermission {
                 resource_app_id: resource_app_id.to_string(),
-                resource_display_name: resource_display_name.clone(),
+                resource_display_name: resource_display_name.map(str::to_string),
                 permission_id: access.id.clone(),
                 permission_value: Some(role.value.clone()),
                 permission_display_name: Some(role.display_name.clone()),
@@ -44,7 +44,7 @@ fn resolve_one_permission(
                 .unwrap_or_else(|| scope.value.clone());
             return ResolvedPermission {
                 resource_app_id: resource_app_id.to_string(),
-                resource_display_name: resource_display_name.clone(),
+                resource_display_name: resource_display_name.map(str::to_string),
                 permission_id: access.id.clone(),
                 permission_value: Some(scope.value.clone()),
                 permission_display_name: Some(display),
@@ -62,7 +62,7 @@ fn resolve_one_permission(
         .flatten();
     ResolvedPermission {
         resource_app_id: resource_app_id.to_string(),
-        resource_display_name: resource_display_name.clone(),
+        resource_display_name: resource_display_name.map(str::to_string),
         permission_id: access.id.clone(),
         permission_value: None,
         permission_display_name: None,
@@ -168,7 +168,7 @@ pub(super) async fn resolve_required_resource_access(
         for access in &resource.resource_access {
             out.push(resolve_one_permission(
                 &resource.resource_app_id,
-                &resource_display_name,
+                resource_display_name.as_deref(),
                 live_sp,
                 access,
                 &runtime_assignment_for,
@@ -338,7 +338,7 @@ mod tests {
             };
             resolve_one_permission(
                 GRAPH,
-                &name,
+                name.as_deref(),
                 Some(&sp),
                 &access,
                 &assignment_for,

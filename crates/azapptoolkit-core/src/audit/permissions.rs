@@ -414,7 +414,7 @@ const SUBSUMED_APP_PERMISSIONS: &[(&str, &[&str])] = &[
     ("Notes.Read.All", &["Notes.ReadWrite.All"]),
 ];
 
-/// Forward scan of [`SUBSUMED_APP_PERMISSIONS`] — see the table doc above.
+/// Forward scan of `SUBSUMED_APP_PERMISSIONS` — see the table doc above.
 pub fn subsuming_app_permissions(value: &str) -> &'static [&'static str] {
     SUBSUMED_APP_PERMISSIONS
         .iter()
@@ -424,7 +424,7 @@ pub fn subsuming_app_permissions(value: &str) -> &'static [&'static str] {
 }
 
 /// The narrower application permissions an admin could hold *instead of*
-/// `value` — inverse scan of [`SUBSUMED_APP_PERMISSIONS`], empty when already
+/// `value` — inverse scan of `SUBSUMED_APP_PERMISSIONS`, empty when already
 /// least-privilege.
 /// Unlike Rule-18 removal, acting on a downgrade is **not** safe by
 /// construction — it only suffices if the app genuinely never uses the broader

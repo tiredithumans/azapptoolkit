@@ -19,9 +19,9 @@
 //! refreshes lazily 60s ahead of expiry under the shared refresh locks and
 //! caches per scope set so the read and write tokens coexist.
 //!
-//! Module layout: [`wire`] (AAD response shapes, error classification and
-//! redaction, claims decoding), [`loopback`] (redirect listener + browser
-//! launch), [`scopes`] (the per-feature scope catalog). This file keeps the
+//! Module layout: `wire` (AAD response shapes, error classification and
+//! redaction, claims decoding), `loopback` (redirect listener + browser
+//! launch), `scopes` (the per-feature scope catalog). This file keeps the
 //! service struct, the token lifecycle, and the interactive/silent flows.
 
 mod loopback;
@@ -749,7 +749,9 @@ impl EntraAuthService {
         cae: bool,
         mut token: TokenResponse,
     ) -> Result<AccessToken> {
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
+        // A bogus `expires_in` above i64::MAX must clamp, not wrap negative.
+        let ttl = i64::try_from(token.expires_in).unwrap_or(i64::MAX);
+        let expires_at = Utc::now() + Duration::seconds(ttl);
         let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
         // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
         if let Some(refresh) = token.refresh_token.take() {
@@ -1008,7 +1010,7 @@ impl EntraAuthService {
     ///
     /// Takes the full [`TenantContext`] rather than a bare id because the
     /// `InvalidGrant` that sends the user here purges the `known_tenants` entry
-    /// (see [`Self::access_token_inner`]), so the caller — which still holds the
+    /// (see `Self::access_token_inner`), so the caller — which still holds the
     /// context — must supply the `login_hint`/identity to match against.
     pub async fn reauthenticate(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
         let initial_scopes = self.default_graph_read_scopes();

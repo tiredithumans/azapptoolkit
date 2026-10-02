@@ -75,7 +75,7 @@ impl GraphClient {
     }
 
     /// Lean variant of [`Self::get_service_principal_by_app_id`] for the
-    /// security audit: projects only [`SP_LEAN_SELECT`] and caches under a
+    /// security audit: projects only `SP_LEAN_SELECT` and caches under a
     /// distinct `|lean` key, so a huge first-party SP is neither transferred
     /// nor cached in full for a scan that needs two fields. The detail pane and
     /// the scoping/tester flows keep the full lookup (and its own cache key),
