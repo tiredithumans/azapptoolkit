@@ -1,9 +1,8 @@
 use super::*;
 
 impl GraphClient {
-    /// Creates a claims-mapping policy (`/policies/claimsMappingPolicies`).
-    /// `definition_json` is the policy JSON; Graph stores it as a single-element
-    /// `definition` array. Requires the `policy_write_token`.
+    /// Creates a claims-mapping policy; `definition_json` is wrapped in the single-element
+    /// `definition` array Graph stores. Requires `policy_write_token`.
     pub async fn create_claims_mapping_policy(
         &self,
         definition_json: &str,
@@ -20,9 +19,8 @@ impl GraphClient {
             .await
     }
 
-    /// Assigns a claims-mapping policy to a service principal
-    /// (`servicePrincipals/{id}/claimsMappingPolicies/$ref`). The `@odata.id` is
-    /// built from `base_url` so mock tests resolve. Requires `policy_write_token`.
+    /// Assigns a claims-mapping policy to a service principal. The `@odata.id` is built from
+    /// `base_url` so mock tests resolve. Requires `policy_write_token`.
     pub async fn assign_claims_mapping_policy(
         &self,
         service_principal_id: &str,
@@ -42,10 +40,9 @@ impl GraphClient {
             .await
     }
 
-    /// Lists the claims-mapping policies assigned to a service principal.
-    /// Requires `policy_write_token` (Learn documents the delegated pair
-    /// `Application.ReadWrite.All` + a `Policy.*` scope even for this read).
-    /// Returns an empty list when none.
+    /// Lists the claims-mapping policies assigned to a service principal; empty list when none.
+    /// Requires `policy_write_token` (Learn documents the delegated `Application.ReadWrite.All`
+    /// + `Policy.*` pair even for this read).
     pub async fn list_assigned_claims_mapping_policies(
         &self,
         service_principal_id: &str,
@@ -59,10 +56,8 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// Removes a claims-mapping policy assignment from a service principal
-    /// (`.../claimsMappingPolicies/{id}/$ref`). Unassign only — the tenant-level
-    /// policy object survives; [`Self::delete_claims_mapping_policy`] removes it.
-    /// Requires `policy_write_token`.
+    /// Unassigns a policy from a service principal — the tenant-level object survives;
+    /// [`Self::delete_claims_mapping_policy`] removes it. Requires `policy_write_token`.
     pub async fn remove_claims_mapping_policy(
         &self,
         service_principal_id: &str,
@@ -77,12 +72,10 @@ impl GraphClient {
             .await
     }
 
-    /// Replaces a claims-mapping policy's `definition` in place
-    /// (`PATCH /policies/claimsMappingPolicies/{id}`, 204). Only `definition` is
-    /// sent: properties left out keep their values (Learn "Update
-    /// claimsmappingpolicy"), so the display name survives. Every service
-    /// principal the policy applies to sees the change — the caller must prove
-    /// it is the sole subject first. Requires `policy_write_token`.
+    /// Replaces a policy's `definition` in place. Only `definition` is sent — omitted properties
+    /// keep their values (Learn "Update claimsmappingpolicy"). Every subject the policy applies
+    /// to sees the change, so the caller must prove it is the sole subject first.
+    /// Requires `policy_write_token`.
     pub async fn update_claims_mapping_policy(
         &self,
         policy_id: &str,
@@ -98,10 +91,8 @@ impl GraphClient {
             .await
     }
 
-    /// Deletes the tenant-level claims-mapping policy object
-    /// (`DELETE /policies/claimsMappingPolicies/{id}`) — not the `$ref`
-    /// assignment. The caller must prove nothing else uses it. Requires
-    /// `policy_write_token`.
+    /// Deletes the tenant-level policy object — not the `$ref` assignment. The caller must
+    /// prove nothing else uses it. Requires `policy_write_token`.
     pub async fn delete_claims_mapping_policy(&self, policy_id: &str) -> Result<()> {
         let token = self.policy_write_token()?;
         let url = format!(
@@ -112,12 +103,10 @@ impl GraphClient {
             .await
     }
 
-    /// Lists the ids of every directory object a claims-mapping policy applies
-    /// to (`/policies/claimsMappingPolicies/{id}/appliesTo`). The ownership
-    /// proof before an in-place PATCH or a delete: any id other than the
-    /// caller's service principal means the policy is shared. Sends `$top` and
-    /// follows `@odata.nextLink` (same-origin guarded); a paging error
-    /// propagates rather than truncating the proof. Requires `policy_write_token`.
+    /// Lists the directory-object ids a policy applies to (`appliesTo`) — the ownership proof
+    /// before an in-place PATCH or delete: any id other than the caller's service principal means
+    /// the policy is shared. Sends `$top` and follows `@odata.nextLink` (same-origin guarded);
+    /// a paging error propagates rather than truncating the proof. Requires `policy_write_token`.
     pub async fn list_claims_mapping_policy_subjects(
         &self,
         policy_id: &str,

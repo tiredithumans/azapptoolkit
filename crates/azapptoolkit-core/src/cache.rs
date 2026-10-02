@@ -31,13 +31,11 @@ pub enum CacheKind {
 
 impl CacheKind {
     /// All kinds, for whole-cache operations (clear, tenant sweep). The
-    /// per-kind bucket array is sized by it, so a kind missing from here would
-    /// index past the end. Stable Rust can't count enum variants, so the
-    /// completeness proof is structural instead: [`Self::idx`] is an exhaustive
-    /// `match` (no wildcard), so a new variant fails to compile there, and each
-    /// arm resolves its bucket through the `const` [`Self::position`] lookup,
-    /// so an arm whose kind is missing from `ALL` is a compile-time panic —
-    /// never an index-out-of-bounds inside a Tauri command.
+    /// per-kind bucket array is sized by it, so a missing kind would index past
+    /// the end. The completeness proof is structural: [`Self::idx`] is an
+    /// exhaustive `match` and each arm resolves its bucket through the `const`
+    /// [`Self::position`] lookup, so a variant missing from `ALL` is a
+    /// compile-time panic, never an index-out-of-bounds in a Tauri command.
     const ALL: [CacheKind; 4] = [
         CacheKind::ServicePrincipal,
         CacheKind::Permissions,
@@ -142,69 +140,58 @@ pub struct CacheStats {
 type TypedValue = Arc<dyn Any + Send + Sync>;
 
 struct Entry {
-    // `Arc` so a `get` clones a refcount, not the whole JSON tree, while holding
-    // the buckets mutex. The index entries (`sp_index`, the cached audit run) are
-    // multi-MB on a large tenant; deep-cloning one under the lock that every
-    // other list read, per-app SP lookup, and invalidation also needs was the
-    // cache's contention point. The deserialize then borrows the Arc'd value
-    // after the lock is dropped, so the tree is never duplicated.
+    // `Arc` so a `get` clones a refcount, not the JSON tree, under the buckets
+    // mutex. The index entries (`sp_index`, the cached audit run) are multi-MB
+    // on a large tenant; deep-cloning one under that lock was the cache's
+    // contention point. Deserialization borrows the Arc'd value after the lock
+    // drops, so the tree is never duplicated.
     value: Arc<serde_json::Value>,
-    // Optional typed handle, set by `put_typed`, so `get_typed` returns the
-    // original `Arc<T>` (a refcount clone) without re-deserializing — the hot
-    // path for the multi-MB tenant search corpus, which a debounced keystroke
-    // would otherwise rebuild from JSON every query.
+    // Set by `put_typed` so `get_typed` returns the original `Arc<T>` without
+    // re-deserializing — the hot path for the multi-MB tenant search corpus,
+    // which a debounced keystroke would otherwise rebuild from JSON.
     typed: Option<TypedValue>,
     inserted: Instant,
     // Monotonically-increasing counter used for LRU ordering.
     last_access: u64,
     // Exempt from LRU eviction. Set for the handful of tenant-wide *index*
-    // entries (the service-principal index, the app-registration pairing rows,
-    // the search/gallery corpora) that cost a full directory scan to rebuild and
-    // that many surfaces read. Without this they share a bucket with thousands
-    // of cheap per-app entries (`app_detail|…`, `mail_scopes|…`), so one
-    // mail-heavy audit run evicts the indexes and the next list visit pays for a
-    // fresh tenant scan. Pinned entries still expire on TTL and are still
-    // dropped by explicit/tenant invalidation — they are only invisible to LRU.
+    // entries (service-principal index, app-registration pairing rows,
+    // search/gallery corpora) that cost a full directory scan to rebuild. They
+    // share a bucket with thousands of cheap per-app entries, so without this
+    // one mail-heavy audit run evicts the indexes and the next list visit pays
+    // for a fresh scan. Pinned entries still expire on TTL and still drop on
+    // explicit/tenant invalidation — they are only invisible to LRU.
     pinned: bool,
-    // Identity of the `insert` that produced THIS entry, so a caller holding a
-    // stamp can prove the entry under a key is still its own before removing it.
-    //
-    // Distinct from `last_access` on purpose: `touch` bumps that on every read,
-    // so it identifies the most recent *access*, not the write. A rollback keyed
-    // on it would be defeated by any read landing in the window.
+    // Identity of the `insert` that produced THIS entry, so a caller can prove
+    // the entry under a key is still its own before removing it. Distinct from
+    // `last_access`, which `touch` bumps on every read: a rollback keyed on
+    // that would be defeated by any read landing in the window.
     stamp: u64,
 }
 
 struct Bucket {
     entries: HashMap<String, Entry>,
     // LRU ordering index: `last_access` tick -> key, so eviction pops the oldest
-    // in O(log n) instead of scanning every entry. Kept in step with `entries`
-    // on insert/touch/remove; `retain`/`clear` rebuild it wholesale. May briefly
-    // hold ticks whose entry is gone or has since been touched — `evict_lru`
-    // treats those as stale and skips them, which is what keeps the bookkeeping
-    // on the hot paths to a single `remove` + `insert`.
+    // in O(log n). Kept in step with `entries` on insert/touch/remove;
+    // `retain`/`clear` rebuild it wholesale. May briefly hold stale ticks (entry
+    // gone or re-touched) — `evict_lru` skips them, keeping hot-path
+    // bookkeeping to a single `remove` + `insert`.
     lru: BTreeMap<u64, String>,
     tick: u64,
-    /// `inserted` of the oldest live entry, i.e. the first moment at which a
-    /// TTL sweep could find anything to do. Lets the `put` path answer "is
-    /// anything expired yet?" in one comparison instead of a full scan — see
-    /// [`Bucket::evict_if_needed`].
-    ///
-    /// `None` when the bucket is empty. Recomputed after each sweep; never
-    /// narrowed on plain removal, so it is a conservative *lower* bound — at
-    /// worst it buys one unnecessary sweep, never a missed one.
+    /// `inserted` of the oldest live entry; `None` when the bucket is empty.
+    /// Lets the `put` path answer "is anything expired yet?" in one comparison
+    /// instead of a scan (see [`Bucket::evict_if_needed`]). Recomputed after
+    /// each sweep, never narrowed on plain removal: a conservative lower bound,
+    /// so it may buy one unnecessary sweep but never miss one.
     oldest_insert: Option<Instant>,
     /// Test-only count of full TTL sweeps, so the "don't sweep when nothing can
-    /// have expired" property is asserted rather than merely structural. Not in
-    /// [`CacheStats`]: this is an implementation detail of the eviction policy,
-    /// and it would otherwise become a public field the diagnostics UI has to
-    /// render.
+    /// have expired" property is asserted, not just structured. Kept out of
+    /// [`CacheStats`]: a public field would force the diagnostics UI to render
+    /// an eviction-policy detail.
     #[cfg(test)]
     expired_sweeps: u64,
-    /// Source of [`Entry::stamp`]. Only [`Bucket::insert`] advances it, and it
-    /// is deliberately NOT reset by [`Bucket::clear`] — reusing a stamp after a
-    /// clear would let a stale rollback match a brand-new entry, which is the
-    /// bug the stamp exists to prevent.
+    /// Source of [`Entry::stamp`]. Only [`Bucket::insert`] advances it, and
+    /// [`Bucket::clear`] deliberately does NOT reset it: reusing a stamp after
+    /// a clear would let a stale rollback match a brand-new entry.
     next_stamp: u64,
 }
 
@@ -308,13 +295,10 @@ impl Bucket {
             .collect();
     }
 
-    /// Drops every entry older than `ttl`.
-    ///
-    /// TTL was otherwise enforced only on read, so an entry nothing ever looks
-    /// up again occupied its slot until something evicted it — and a *pinned*
-    /// index is invisible to LRU, so it occupied one indefinitely. Called from
-    /// the eviction path, where the bucket lock is already held and the cost is
-    /// paid only when a bucket is at its cap.
+    /// Drops every entry older than `ttl`. Without it TTL is enforced only on
+    /// read, so an entry nothing reads again keeps its slot indefinitely — and
+    /// a *pinned* index is invisible to LRU, so forever. Called from
+    /// [`Bucket::evict_if_needed`].
     fn evict_expired(&mut self, ttl: Duration) {
         #[cfg(test)]
         {
@@ -325,40 +309,26 @@ impl Bucket {
         self.oldest_insert = self.entries.values().map(|e| e.inserted).min();
     }
 
-    /// The `put` path's eviction pass, run only when there is actually
-    /// something to evict.
-    ///
-    /// Both passes used to run on EVERY put, which made each write O(n):
-    /// `evict_expired` is a full `retain` followed by a `rebuild_lru` that
-    /// clones every key `String`, and `n` here runs to `MAX_CACHE_SIZE` — all
-    /// of it under the bucket mutex that interactive list reads contend on. So
-    /// the steady-state cost of caching one app's detail was proportional to
-    /// everything else already cached, paid on the path a user is waiting on.
-    ///
-    /// Both conditions are load-bearing and neither subsumes the other:
+    /// The `put` path's eviction pass, run only when there is something to
+    /// evict. Both passes used to run on EVERY put — O(n) per write under the
+    /// bucket mutex interactive list reads contend on. Both conditions here are
+    /// load-bearing and neither subsumes the other:
     ///
     /// * **At cap** — LRU has to make room. Nothing else does.
-    /// * **Something has expired** — the TTL sweep is what reclaims entries
-    ///   nothing reads again, and the only thing that reclaims an expired
-    ///   *pinned* index, which LRU cannot touch. A bucket that never reaches
-    ///   its cap would otherwise hold them until the process exits.
+    /// * **Something has expired** — the only pass that reclaims entries
+    ///   nothing reads again, including an expired *pinned* index LRU cannot
+    ///   touch; a below-cap bucket would hold those until the process exits.
     ///
-    /// The expiry test is one `Instant` comparison against the oldest live
-    /// entry, so the common put — bucket under cap, nothing expired yet — now
-    /// costs the insert alone.
+    /// The expiry test is one `Instant` comparison against `oldest_insert`, so
+    /// the common put — under cap, nothing expired — costs the insert alone.
     fn evict_if_needed(&mut self, ttl: Duration, max_size: usize) {
         let anything_expired = self.oldest_insert.is_some_and(|o| o.elapsed() > ttl);
         if !anything_expired && self.entries.len() <= max_size {
             return;
         }
-        // Honour the flag on BOTH branches, not just the early return. Past the
-        // cap the sweep ran on every single `put` even though
-        // `anything_expired == false` is a proof it would remove nothing — and
-        // that sweep is a `retain` over `n`, plus a `rebuild_lru` that clones
-        // every key `String` into a fresh `BTreeMap`, plus a `min()` scan, all
-        // under the bucket mutex the interactive list reads contend on. The doc
-        // above says both conditions are load-bearing; the code only honoured
-        // one of them.
+        // Honour the flag on BOTH branches, not just the early return: past the
+        // cap the sweep ran on every put even when `anything_expired == false`
+        // proves it removes nothing.
         if anything_expired {
             self.evict_expired(ttl);
         }
@@ -366,16 +336,11 @@ impl Bucket {
     }
 
     fn evict_lru(&mut self, max_size: usize) {
-        // Shrink down to the cap, not just by one. A single eviction per call is
-        // enough on the steady-insert path, but when `configure` lowers
-        // `max_size` on an already-oversized bucket it would take that many more
-        // `put`s to converge — and never converge at all if writes stop. Evict
-        // the least-recently-used entry repeatedly until within the bound.
-        //
-        // Pinned entries are skipped, so a bucket that is entirely (or almost
-        // entirely) pinned stops evicting rather than dropping an index: the
-        // pinned set is a fixed handful of tenant-wide keys, not something a
-        // caller can grow without bound.
+        // Shrink to the cap, not by one: after `configure` lowers `max_size`,
+        // one eviction per `put` would never converge if writes stop. Pinned
+        // entries are skipped, so an entirely-pinned bucket stops evicting
+        // rather than dropping an index — the pinned set is a fixed handful of
+        // tenant-wide keys, not caller-growable.
         let mut skipped: Vec<(u64, String)> = Vec::new();
         while self.entries.len() > max_size {
             let Some((tick, key)) = self.lru.pop_first() else {
@@ -408,53 +373,42 @@ pub struct Cache {
     buckets: [Mutex<Bucket>; CacheKind::ALL.len()],
     stats: Mutex<CacheStats>,
     config: Mutex<CacheConfig>,
-    /// Per-key invalidation counters, for the keys someone is currently
-    /// fetching. A reader that fetches a tenant-wide index live holds no lock
-    /// for the seconds that scan takes, so a mutation can invalidate the key
-    /// underneath it; storing the pre-mutation snapshot into a **pinned** entry
-    /// afterwards would serve stale authorization data for the full `Lists`
-    /// TTL, out of LRU's reach.
+    /// Per-key invalidation counters for keys being fetched. A live index
+    /// fetch holds no lock for seconds, so a mutation can invalidate the key
+    /// underneath it; re-storing the pre-mutation snapshot into a **pinned**
+    /// entry would serve stale authorization data for the full `Lists` TTL, out
+    /// of LRU's reach.
     ///
-    /// Deliberately per **key**, not one global counter and not per
-    /// (tenant, kind): the invalidation tiers exist precisely so a
-    /// credential-only mutation can drop `apps_pairing` and the per-app detail
-    /// while PRESERVING the two tenant-wide indexes. A coarser counter makes
-    /// those tier-preserved indexes refuse to store whenever any sibling key is
-    /// dropped — turning the guard into the very tenant-wide rescan the tier
-    /// was created to avoid, once per queued reader behind the single-flight
-    /// gate.
+    /// Per **key**, not global or per-(tenant, kind): the invalidation tiers
+    /// exist so a credential-only mutation preserves the two tenant-wide
+    /// indexes; a coarser counter would make those indexes refuse to store
+    /// whenever any sibling key drops — the very tenant-wide rescan the tier
+    /// exists to avoid, once per queued reader behind the single-flight gate.
     ///
-    /// Bounded by construction: an entry lives only as long as the
-    /// [`IndexWatch`] guard [`Cache::generation_for`] hands out — released by
-    /// the paired store, and by the guard's `Drop` on every path that never
-    /// reaches one (a failed fetch, a cancelled task, an early `?`). Without
-    /// that `Drop` the table only grows, and once it reaches
-    /// [`Cache::MAX_WATCHES`] every pinned-index store refuses **for the life
-    /// of the process** — a silent, unrecoverable full-rescan-on-every-read.
+    /// Bounded by construction: an entry lives only as long as its
+    /// [`IndexWatch`] guard — released by the paired store or by `Drop` on
+    /// paths that never reach one. Without that `Drop` the table only grows,
+    /// and past [`Cache::MAX_WATCHES`] every pinned-index store refuses for the
+    /// life of the process.
     watches: Mutex<HashMap<(usize, String), Watch>>,
 }
 
-/// One watched key: the invalidation counter, and how many in-flight fetches
-/// are relying on it. Refcounted because `generation_for` on an already-watched
-/// key hands both fetchers the same counter; releasing on the first one to
-/// finish would leave the other unable to prove its key current.
+/// One watched key: invalidation counter + in-flight fetch refcount. Refcounted
+/// because `generation_for` on an already-watched key shares the counter;
+/// releasing on the first finisher would strip the other's currency proof.
 #[derive(Debug)]
 struct Watch {
     counter: u64,
     refs: usize,
 }
 
-/// A live watch on one cache key, held across a long live index fetch.
+/// A live watch on one cache key, captured *before* a long index fetch and
+/// handed to the matching `put_*_if_current`, which stores only if this exact
+/// key was not invalidated in between. `Drop` ends the watch on paths that
+/// never reach a store (`Err`, cancel, lost `try_join` sibling) — a registered
+/// watch that outlives its fetch leaks forever.
 ///
-/// Capture one *before* the fetch and hand it to the matching
-/// `put_*_if_current`, which stores only if this exact key was not invalidated
-/// in between. The guard exists so that the paths which never reach a store —
-/// the fetch returned `Err`, the task was cancelled, a sibling future in a
-/// `try_join` lost — still end the watch: [`Cache::generation_for`] is the only
-/// thing that registers one, and a registration that outlives its fetch is
-/// leaked forever.
-///
-/// Not `Clone` and not `Copy` on purpose: exactly one owner releases it.
+/// Not `Clone`/`Copy` on purpose: exactly one owner releases it.
 #[must_use = "an IndexWatch must reach a put_*_if_current or be dropped promptly; \
               holding one open keeps the key watched"]
 pub struct IndexWatch<'a> {
@@ -481,11 +435,9 @@ impl IndexWatch<'_> {
     }
 
     /// The key's live counter **without** giving up the reference, or `None`
-    /// when this guard never held a watch.
-    ///
-    /// Exists so [`Cache::store_if_current`] can check currency while still
-    /// holding the watch: releasing it first removes the last reference, and a
-    /// concurrent invalidation then has nothing to bump.
+    /// when this guard never held a watch. [`Cache::store_if_current`] needs
+    /// this: releasing first removes the last reference, so a concurrent
+    /// invalidation would have nothing to bump.
     fn current(&self) -> Option<u64> {
         if !self.holds_ref {
             return None;
@@ -522,10 +474,10 @@ impl Drop for IndexWatch<'_> {
 
 impl Cache {
     /// Ceiling on concurrently watched keys. Only tenant-wide index fetches
-    /// watch, and `single_flight` already collapses concurrent fetchers of the
-    /// same key, so the live set is a handful — this is a runaway guard, not a
-    /// working limit. Past it `generation_for` returns
-    /// [`Cache::WATCH_UNAVAILABLE`] and the paired store refuses.
+    /// watch, and `single_flight` collapses same-key fetchers, so the live set
+    /// is a handful — a runaway guard, not a working limit. Past it
+    /// `generation_for` returns [`Cache::WATCH_UNAVAILABLE`] and the store
+    /// refuses.
     const MAX_WATCHES: usize = 256;
 
     /// Sentinel returned by [`Cache::generation_for`] when no watch could be
@@ -586,15 +538,15 @@ impl Cache {
             c.max_size = m;
         }
         let new_max = c.max_size;
-        // Release the config lock before taking any bucket lock: every other
-        // path (`limits_if_enabled` → `put_inner`) reads the config and drops it
-        // before locking a bucket, so never holding both keeps that ordering.
+        // Release the config lock before any bucket lock: every other path
+        // (`limits_if_enabled` → `put_inner`) drops config before locking a
+        // bucket, so this keeps a single lock order.
         drop(c);
 
-        // Lowering `max_size` has to shrink the live buckets too. `evict_lru`
-        // only ever runs from `put_inner`, so without this an oversized bucket
-        // converges one `put` at a time — and not at all if writes to that kind
-        // stop, which is exactly the case `evict_lru`'s own comment calls out.
+        // Lowering `max_size` has to shrink the live buckets too: `evict_lru`
+        // only runs from `put_inner`, so without this an oversized bucket
+        // converges one `put` at a time — or never, if writes to that kind
+        // stop.
         if max_size.is_some() {
             for kind in CacheKind::ALL {
                 let cap = Self::cap_for(kind, new_max);
@@ -610,36 +562,25 @@ impl Cache {
         *self.stats.lock()
     }
 
-    /// Effective entry cap for `kind` under the current configuration. Callers
-    /// that pre-seed a bucket in bulk use this to bound the pass, so seeding
-    /// can't evict its own earlier entries.
+    /// Effective entry cap for `kind`. Bulk pre-seed callers use it to bound
+    /// the pass so seeding can't evict its own earlier entries.
     ///
-    /// `max_size` is sized for kinds holding a handful of tenant-wide aggregates.
-    /// Two kinds instead hold **one entry per directory object** and so are
-    /// capped at the ceiling the tenant enumerations use
-    /// ([`MAX_PER_OBJECT_CACHE_SIZE`]):
-    ///
-    /// - [`CacheKind::ServicePrincipal`] — the audit's `|lean` seeding;
-    /// - [`CacheKind::Lists`] — despite the name it carries the per-app
-    ///   `app_detail|` and `mail_scopes|` entries alongside the tenant
-    ///   aggregates and pinned indexes, so the aggregate-sized cap let per-app
-    ///   churn thrash the bucket and silently truncated any bulk seeding bounded
-    ///   by `capacity_for(Lists)`.
-    ///
-    /// A caller that raises `max_size` past that ceiling gets the larger value
-    /// for every kind.
+    /// `max_size` targets kinds holding a handful of tenant-wide aggregates;
+    /// the two per-object kinds instead cap at [`MAX_PER_OBJECT_CACHE_SIZE`]:
+    /// [`CacheKind::ServicePrincipal`] (the audit's `|lean` seeding) and
+    /// [`CacheKind::Lists`] (carries per-app `app_detail|`/`mail_scopes|`
+    /// entries, which the aggregate-sized cap let thrash the bucket). Raising
+    /// `max_size` past the ceiling gives the larger value for every kind.
     pub fn capacity_for(&self, kind: CacheKind) -> usize {
         Self::cap_for(kind, self.config.lock().max_size)
     }
 
     fn cap_for(kind: CacheKind, max_size: usize) -> usize {
         match kind {
-            // The per-object headroom is a DEFAULT, not a floor an operator
-            // can't get under. Clamping unconditionally made `max_size` a
-            // no-op for the two buckets that actually hold the memory — so
-            // lowering the cache size shrank nothing while diagnostics
-            // reported the lowered number. Above the default the headroom
-            // still applies, so a normal install fits a whole tenant.
+            // A DEFAULT, not a floor: clamping unconditionally made `max_size`
+            // a no-op for the two buckets that hold the memory. Above the
+            // default the headroom still applies, so a normal install fits a
+            // whole tenant.
             CacheKind::ServicePrincipal | CacheKind::Lists if max_size >= MAX_CACHE_SIZE => {
                 max_size.max(MAX_PER_OBJECT_CACHE_SIZE)
             }
@@ -712,16 +653,13 @@ impl Cache {
                 Some(value)
             }
             Err(err) if typed => {
-                // A `put_typed` entry stores `Value::Null` as its untyped body
-                // (the payload lives in `typed`), so an untyped `get` against
-                // one ALWAYS fails to decode. Removing it here turned the
-                // documented "plain `get` = silent miss + rescan" footgun into
-                // a permanent eviction of a pinned tenant-wide index: one read
-                // through the wrong accessor destroyed the very entry pinning
-                // exists to protect, and every surface then paid for a full
-                // directory scan. The entry is not poisoned — the caller should
-                // be using `get_typed` / the `sp_index_*` / `app_name_index_*`
-                // accessors — so leave it alone and just miss.
+                // A `put_typed` entry stores `Value::Null` as its untyped body,
+                // so an untyped `get` against one ALWAYS fails to decode.
+                // Removing it here turned the "silent miss + rescan" footgun
+                // into a permanent eviction of a pinned tenant-wide index — one
+                // wrong-door read destroying the entry pinning exists to
+                // protect. Not poisoned: use `get_typed` / the `sp_index_*` /
+                // `app_name_index_*` accessors. Leave it and just miss.
                 tracing::warn!(
                     ?err,
                     "untyped `get` against a typed cache entry; use `get_typed`. Entry kept."
@@ -731,11 +669,9 @@ impl Cache {
             }
             Err(err) => {
                 tracing::warn!(?err, "cache value failed to deserialize; dropping entry");
-                // Drop it rather than leaving it to re-fail on every read. The
-                // `lookup` above already called `touch`, so a retained poisoned
-                // entry would also keep refreshing its own LRU position and
-                // survive until TTL expiry (60 min for `Lists`) while never
-                // once serving a hit.
+                // Drop rather than re-fail on every read: `lookup` already
+                // touched it, so a retained poisoned entry keeps refreshing its
+                // LRU position and survives to TTL without serving a hit.
                 self.buckets[kind.idx()].lock().remove(key);
                 self.record(kind, false);
                 None
@@ -750,16 +686,12 @@ impl Cache {
         self.put_inner(kind, key, value, false);
     }
 
-    /// Like [`Self::put`], but marks the entry **pinned**: exempt from LRU
-    /// eviction (TTL and invalidation still apply).
-    ///
-    /// Use only for tenant-wide *index* entries that cost a full directory scan
-    /// to rebuild and that several surfaces read — the service-principal index,
-    /// the app-registration pairing rows, the credential-expiry roll-up. These
-    /// share a bucket with thousands of cheap per-app entries, so without the
-    /// pin a single mail-heavy audit run evicts them and the next list visit
-    /// pays for a fresh scan. The pinned set must stay a bounded handful of
-    /// keys; never pin anything keyed per directory object.
+    /// Like [`Self::put`], but **pinned**: exempt from LRU eviction (TTL and
+    /// invalidation still apply). Use only for tenant-wide *index* entries that
+    /// cost a full directory scan to rebuild — they share a bucket with
+    /// thousands of cheap per-app entries, so without the pin one mail-heavy
+    /// audit run evicts them. The pinned set must stay a bounded handful of
+    /// keys; never pin a per-directory-object key.
     pub fn put_index<T>(&self, kind: CacheKind, key: String, value: &T)
     where
         T: serde::Serialize,
@@ -768,15 +700,12 @@ impl Cache {
     }
 
     /// [`Self::put_index`] under the store-after-invalidate guard — the
-    /// serializing twin of [`Self::put_typed_index_if_current`], with the same
-    /// contract: `since` is a [`Cache::generation_for`] captured **before** the
-    /// live fetch, and a store that lost the race is skipped (returns `false`)
-    /// rather than re-pinning a pre-mutation snapshot for the full TTL.
-    ///
-    /// Every pinned index built from a tenant-wide scan belongs on this path.
-    /// A pinned entry is out of LRU's reach, so losing the race there is not a
-    /// stale read that ages out in seconds — it is the wrong answer until the
-    /// TTL expires.
+    /// serializing twin of [`Self::put_typed_index_if_current`]: `since` comes
+    /// from a [`Cache::generation_for`] captured **before** the fetch, and a
+    /// lost race is skipped (`false`). Every pinned index built from a
+    /// tenant-wide scan belongs here — a pinned entry is out of LRU's reach,
+    /// so a lost race is the wrong answer until TTL expiry, not a stale read
+    /// that ages out.
     pub fn put_index_if_current<T>(&self, watch: IndexWatch<'_>, value: &T) -> bool
     where
         T: serde::Serialize,
@@ -789,25 +718,18 @@ impl Cache {
     /// Stores through `store` only if `watch`'s key was never invalidated —
     /// including during the store itself.
     ///
-    /// The watch is deliberately held **across** `store` and released after.
-    /// Releasing first (the obvious reading of "check, then write") left a real
-    /// window: `release_watch` drops the last reference and *removes* the watch
+    /// The watch is held **across** `store`. Releasing first (the obvious
+    /// "check, then write") leaves a window: `release_watch` removes the watch
     /// entry, so an `invalidate` landing between the check and the bucket lock
-    /// found no watch to bump and no entry to remove — and the pre-mutation
-    /// snapshot then landed, pinned, beyond LRU's reach for the whole TTL.
-    /// Holding the reference means that invalidation has something to bump, and
-    /// the post-store comparison sees it and undoes the write.
+    /// bumps nothing — the pre-mutation snapshot lands pinned for the whole
+    /// TTL. Holding the reference gives that invalidation something to bump,
+    /// and the post-store comparison sees it and undoes the write. Lock order
+    /// is unchanged (watches, then bucket, never both), so no deadlock risk.
     ///
-    /// Lock order is unchanged (watches, then bucket, never both at once), so
-    /// this adds no deadlock risk — only a second look.
-    ///
-    /// `store` returns the [`Entry::stamp`] of what it wrote, and the rollback
-    /// is a compare-and-remove against it. Removing by key name alone was a
-    /// second, opposite race: A stores → an invalidation bumps the counter → B
-    /// takes a fresh watch, fetches, and stores a *valid* index → A's second
-    /// look fails and A deletes B's entry. Both writers behaved correctly and
-    /// the tenant-wide index vanished anyway, costing a full rescan on the next
-    /// read with nothing in the logs to explain it.
+    /// `store` returns the [`Entry::stamp`] it wrote; rollback is a
+    /// compare-and-remove against it. Removing by key name was the opposite
+    /// race: A stores → invalidation bumps the counter → B stores a *valid*
+    /// index → A's rollback deletes B's entry, silently costing a rescan.
     fn store_if_current(
         &self,
         watch: IndexWatch<'_>,
@@ -816,9 +738,9 @@ impl Cache {
         let (kind, key, since) = (watch.kind, watch.key.clone(), watch.since);
 
         // Pre-check: cheap, and it keeps the common lost-race case from paying
-        // for a serialize + insert it is only going to undo. A key that is not
-        // watched at all cannot be proven current — that covers both the
-        // table-full case and a second store against a consumed watch.
+        // for a serialize + insert it is only going to undo. An unwatched key
+        // cannot be proven current — covers the table-full case and a second
+        // store against a consumed watch.
         match watch.current() {
             Some(now) if now == since => {}
             other => {
@@ -834,9 +756,9 @@ impl Cache {
 
         let stamp = store(self, kind, key.clone());
 
-        // Second look, now that the store has landed. `watch` still held its
-        // reference throughout, so any invalidation in the window bumped the
-        // counter rather than passing through unseen.
+        // Second look: `watch` held its reference throughout, so any
+        // invalidation in the window bumped the counter rather than passing
+        // unseen.
         let (_, _, _, after) = watch.release();
         match after {
             Some(now) if now == since => true,
@@ -975,27 +897,15 @@ impl Cache {
                 Some(arc)
             }
             None => {
-                // Miss, and leave the entry alone — the mirror of the wrong-door
-                // rule `get` already follows.
-                //
-                // This arm is reached in two ways, and NEITHER means the entry
-                // is unusable. The stored payload is untyped (a plain `put` /
-                // `put_index` entry, which has no `typed` body at all), or it is
-                // typed as some other `T` — in both cases it still serves every
-                // caller coming through the right door. It is *this* read that
-                // is wrong.
-                //
-                // Removing it made one read through the wrong accessor
+                // Miss, and leave the entry alone — the mirror of the
+                // wrong-door rule `get` follows. Reached when the entry is
+                // untyped or typed as another `T`; NEITHER means unusable — it
+                // still serves callers using the right door, so it is *this*
+                // read that is wrong. Removing it let one wrong-door read
                 // permanently evict a pinned tenant-wide index, the exact
-                // failure `get` was fixed for: pinned entries are exempt from
-                // LRU precisely so they survive pressure, and a `remove` here
-                // discards that protection on a caller's mistake. Every surface
-                // then pays for a full directory rescan.
-                //
-                // There is no poisoned case to clean up on this path. Unlike
-                // `get`, nothing is being decoded: a downcast either matches or
-                // it does not, so a failure says nothing about the entry's
-                // integrity.
+                // failure `get` was fixed for. And unlike `get` nothing is
+                // decoded here: a failed downcast says nothing about entry
+                // integrity, so there is no poisoned case to clean up.
                 tracing::warn!(
                     "`get_typed` against an entry stored untyped or as another type; \
                      use the matching accessor. Entry kept."
@@ -1007,24 +917,15 @@ impl Cache {
     }
 
     /// Start watching one key for invalidation across a long live fetch.
+    /// Capture it *before* the fetch and pass the guard to the matching
+    /// `put_*_if_current`. Watching an already-watched key joins its watch, so
+    /// two racing fetchers of one key both refuse if it was dropped.
     ///
-    /// Capture this *before* the fetch and pass the returned guard to the
-    /// matching `put_*_if_current`, which stores only if this exact key was not
-    /// invalidated in between. Watching a key already being watched joins its
-    /// existing watch, so two racing fetchers of the same key both refuse if it
-    /// was dropped.
-    ///
-    /// The guard releases the watch on `Drop`, so a fetch that fails, is
-    /// cancelled, or otherwise never reaches its store cannot leak the entry.
-    /// That matters more than it looks: the table is capped at
-    /// `Cache::MAX_WATCHES`, and leaked entries are never reclaimed, so a
-    /// steady trickle of failed index fetches would eventually fill it and make
-    /// *every* pinned-index store refuse permanently — degrading every
-    /// tenant-wide read to a full rescan with no signal and no way back short
-    /// of a restart.
-    ///
-    /// When the table is genuinely full the guard carries
-    /// [`Cache::WATCH_UNAVAILABLE`] and the paired store refuses — fail-closed,
+    /// `Drop` releases the watch, so a fetch that never reaches its store
+    /// cannot leak the entry — and leaks matter: entries are never reclaimed,
+    /// so a trickle of them fills `Cache::MAX_WATCHES` and every pinned-index
+    /// store then refuses permanently, with no recovery short of a restart. A
+    /// genuinely full table yields [`Cache::WATCH_UNAVAILABLE`] — fail-closed,
     /// costing one re-fetch.
     pub fn generation_for(&self, kind: CacheKind, key: &str) -> IndexWatch<'_> {
         let mut watches = self.watches.lock();
@@ -1085,10 +986,6 @@ impl Cache {
         }
     }
 
-    /// Drops one reference to a watch, returning the key's live counter and
-    /// removing the entry once the last holder lets go. `None` means the key
-    /// was not watched at all, which callers treat as "cannot prove this is
-    /// current" and therefore refuse.
     /// The live counter for a watched key, leaving the watch in place.
     fn peek_watch(&self, kind: CacheKind, key: &str) -> Option<u64> {
         self.watches
@@ -1097,6 +994,9 @@ impl Cache {
             .map(|w| w.counter)
     }
 
+    /// Drop one reference, returning the key's live counter and removing the
+    /// entry once the last holder lets go. `None` = never watched, which
+    /// callers treat as "cannot prove current" and refuse.
     fn release_watch(&self, kind: CacheKind, key: &str) -> Option<u64> {
         let mut watches = self.watches.lock();
         let id = (kind.idx(), key.to_string());

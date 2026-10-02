@@ -125,7 +125,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: needs.changes.outputs.code == 'true'
-      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         if: needs.changes.outputs.code == 'true'
         with:
           tool: just
@@ -167,7 +167,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: apps/desktop/web-rs
-      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           # trunk is version-pinned (like cargo-deny) so the release build and its
           # minifier (Trunk.toml `minify`) are reproducible across CI, Pages and
@@ -286,7 +286,7 @@ jobs:
       # list in .cargo/audit.toml). Covers BOTH lockfiles: the root workspace
       # and the frontend's own Cargo.lock (web-rs is excluded from the
       # workspace, so the root scan never sees it).
-      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: just,cargo-audit
       - name: audit (workspace)
@@ -312,7 +312,7 @@ jobs:
       # recipe's `--config` placement must match the pinned version's CLI.
       # `just machete` fails on a declared-but-unused dependency in either tree
       # (cargo-machete, version-pinned like cargo-deny).
-      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: just,cargo-deny@0.20.2,cargo-machete@0.9.2
       - name: deny (workspace)

@@ -1,15 +1,15 @@
 //! Access- and refresh-token storage.
 //!
-//! Access tokens stay in memory (never written to disk) and are keyed by
-//! `(tenant_id, scope_key, cae)` so multi-audience apps (Graph + Key Vault +
-//! ARM) can keep a fresh token per resource without evicting the others, and a
-//! token minted without the `cp1` client capability is never served to a
-//! Continuous Access Evaluation consumer (or vice versa).
-//! Refresh tokens, which are scope-agnostic, live in the OS secret store via
+//! Access tokens stay in memory (never written to disk), keyed by
+//! `(tenant_id, scope_key, cae)`: a multi-audience app keeps a fresh token per
+//! resource without evicting the others, and a token minted without the `cp1`
+//! client capability is never served to a Continuous Access Evaluation consumer
+//! (or vice versa).
+//! Refresh tokens are scope-agnostic and live in the OS secret store via
 //! [`keyring_core`] — Windows Credential Manager / macOS Keychain / the D-Bus
 //! Secret Service on Linux (a hard requirement there: without a provider,
-//! sign-in fails with [`AuthError::KeyringUnavailable`]) — and are shared
-//! across audiences for the same account.
+//! sign-in fails with [`AuthError::KeyringUnavailable`]) — shared across
+//! audiences for the same account.
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -23,14 +23,12 @@ pub const KEYRING_SERVICE: &str = "azapptoolkit";
 
 /// keyring v4 split out `keyring-core` and no longer auto-installs a platform
 /// credential store, so the first `Entry::new` fails with "No default store has
-/// been set" until one is registered. Register the OS-native store (macOS
-/// Keychain / Windows Credential Manager / the Secret Service via zbus on
-/// Linux/BSD) exactly once, on first use, memoizing the outcome so a
-/// registration failure surfaces the same error on every subsequent call.
+/// been set" until one is registered. Register the OS-native store exactly once
+/// on first use, memoizing the outcome so a registration failure surfaces the
+/// same error on every subsequent call.
 ///
-/// A registration failure is [`AuthError::KeyringUnavailable`] — there is no
-/// store at all (on Linux: no Secret Service provider on the session bus) —
-/// never [`AuthError::Keyring`], which means a store that exists but refused.
+/// A registration failure is [`AuthError::KeyringUnavailable`] (no store at
+/// all), never [`AuthError::Keyring`] (a store that exists but refused).
 fn ensure_keyring_store() -> Result<()> {
     static STORE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     STORE
@@ -49,13 +47,12 @@ fn ensure_keyring_store() -> Result<()> {
         .map_err(AuthError::KeyringUnavailable)
 }
 
-/// Registers the OS-native credential store as `keyring_core`'s default store.
+/// Registers the OS-native credential store as `keyring_core`'s default store,
+/// mirroring keyring's internal `v1::set_credential_store`: macOS Keychain,
+/// Windows Credential Manager, or (Linux/BSD) the Secret Service via zbus.
 /// keyring 4.1 moved `use_native_store` behind its `cli` feature (which drags in
 /// `rusqlite`), and its `v1` `Entry` auto-registration runs unconditionally —
-/// it would clobber an already-installed store (e.g. the test mock). So register
-/// the native store directly, mirroring keyring's internal
-/// `v1::set_credential_store`: macOS Keychain, Windows Credential Manager, or
-/// (Linux/BSD) the Secret Service via zbus.
+/// it would clobber an already-installed store (e.g. the test mock).
 fn register_native_store() -> std::result::Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -87,11 +84,10 @@ fn register_native_store() -> std::result::Result<(), String> {
     }
 }
 
-/// In-memory access token. The bearer string is zeroized on drop so freed
-/// heap pages cannot leak token material to a later allocation, and `Debug`
-/// renders the token as `<redacted>` so it cannot appear in tracing logs.
-/// Deliberately NOT serde-serializable: the type system enforces the
-/// memory-only contract (nothing in the workspace ever persisted one).
+/// In-memory access token. The bearer string is zeroized on drop so freed heap
+/// pages cannot leak token material, and `Debug` renders `<redacted>` so it
+/// cannot appear in tracing logs. Deliberately NOT serde-serializable: the type
+/// system enforces the memory-only contract.
 #[derive(Clone)]
 pub struct AccessToken {
     pub token: String,
@@ -122,8 +118,8 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
-/// Canonicalizes a scope list into a stable cache key: dedup, sort ASCII-
-/// ascending, space-join. Matches the identity `scope_key(["b","a"]) ==
+/// Canonicalizes a scope list into a stable cache key: dedup, sort
+/// ASCII-ascending, space-join — `scope_key(["b","a"]) ==
 /// scope_key(["a","b","a"])`.
 pub fn scope_key(scopes: &[String]) -> String {
     let mut owned: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
@@ -137,9 +133,9 @@ pub fn scope_key(scopes: &[String]) -> String {
 /// CAE-ness is part of the key because the same scope set is consumed both
 /// ways: the Graph adapters (`ScopedTokenAdapter::new_cae`) need a token minted
 /// with the `cp1` claims (revoked promptly on a password reset, disabled user
-/// or risky sign-in), while a plain probe or a non-Graph audience does not. A
-/// key without it let whichever flow seeded the slot first decide for both, so
-/// a mismatch now costs one extra silent refresh instead of a wrong token.
+/// or risky sign-in), while a plain probe or a non-Graph audience does not.
+/// Without it, whichever flow seeded the slot first decided for both; now a
+/// mismatch costs one extra silent refresh instead of a wrong token.
 #[derive(Default)]
 pub struct TokenCache {
     by_key: RwLock<HashMap<(String, String, bool), AccessToken>>,
@@ -170,14 +166,14 @@ impl TokenCache {
     }
 }
 
-/// Windows Credential Manager caps a single credential blob at
+/// Windows Credential Manager caps a credential blob at
 /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` = 2560 bytes of UTF-16, and Entra refresh
-/// tokens routinely exceed that. So the secret is split across
+/// tokens routinely exceed that, so the secret is split across
 /// consecutively-numbered keyring entries and reassembled on load. macOS
 /// Keychain and the Linux Secret Service have far larger limits, but chunking
-/// on every platform keeps one code path. The budget is measured in bytes of
-/// UTF-16 (how Windows counts it) with margin under the 2560 limit, and chunks
-/// are cut only on `char` boundaries so concatenation round-trips exactly.
+/// on every platform keeps one code path. The budget is UTF-16 bytes (how
+/// Windows counts) with margin under 2560, and chunks cut only on `char`
+/// boundaries so concatenation round-trips exactly.
 const MAX_CHUNK_UTF16_BYTES: usize = 2048;
 
 /// Keyring account label for chunk `idx`. Chunk 0 keeps the bare
@@ -194,15 +190,13 @@ fn chunk_account(tenant_id: &str, account_oid: &str, idx: usize) -> String {
 /// Marks a chunk-0 value that carries the set's chunk count, e.g. `azapp1:3:`.
 ///
 /// The count is what makes a torn set **detectable**. `CHUNK_SET_LOCK`
-/// serializes writers within one process, but it cannot cover a hard crash
-/// mid-write (the rollback is best-effort and may itself fail) or a second app
-/// instance writing the same keyring. Without the count there is "no length, no
-/// checksum, and nothing marking where this token ends", so a partial set loads
-/// as a splice of two tokens; Entra then rejects it as `invalid_grant`, which
-/// reads as a revoked session rather than a corrupt one.
+/// serializes writers within one process, but not a hard crash mid-write or a
+/// second app instance. Without it a partial set loads as a splice of two
+/// tokens; Entra rejects it as `invalid_grant`, which reads as a revoked
+/// session rather than a corrupt one.
 ///
-/// Absent on a value written before this existed — those are read as a legacy
-/// set and concatenated as before, so an upgrade does not sign everyone out.
+/// Absent on a value written before this existed — read as a legacy set and
+/// concatenated as before, so an upgrade does not sign everyone out.
 const CHUNK_COUNT_PREFIX: &str = "azapp1:";
 
 /// Builds chunk 0's stored value: the marker, the total chunk count, and the
@@ -244,42 +238,39 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
 ///
 /// `refresh_lock_for` is keyed per `(tenant, scope_key)` BY DESIGN, so refreshes
 /// for different audiences run concurrently — Access Readiness fans about six
-/// out at once — and every one of them ends in `store_token_outcome`, writing
-/// the rotated refresh token to the same `(tenant, oid)` chunk set on the
-/// blocking pool. Interleave a 3-chunk writer with a 2-chunk writer and the
-/// store holds `B0|A1|A2`; `load_refresh_token` has, in its own words, "no
-/// length, no checksum, and nothing marking where this token ends", so it
-/// returns the splice. The next silent refresh fails `invalid_grant` and the
-/// session is purged — reading as a revoked token rather than a corrupt one.
+/// out at once — and each ends in `store_token_outcome`, writing the rotated
+/// refresh token to the same `(tenant, oid)` chunk set on the blocking pool.
+/// Interleave a 3-chunk writer with a 2-chunk writer and the store holds
+/// `B0|A1|A2`; `load_refresh_token` returns the splice, the next silent refresh
+/// fails `invalid_grant`, and the session is purged — reading as a revoked
+/// token rather than a corrupt one.
 ///
 /// A single global mutex rather than a per-account map: these are OS keyring
 /// syscalls on a blocking thread, contention is a handful of writers, and a map
 /// is one more thing to get wrong for no measurable gain.
 ///
-/// `parking_lot`, so no poisoning — which is correct here: a panic mid-write
-/// leaves the store possibly torn, the state the load path already fails
-/// closed on, so later reads and writes proceed instead of turning a
-/// recoverable "sign in again" into a permanently broken keyring.
+/// `parking_lot`, so no poisoning — correct here: a panic mid-write leaves the
+/// store possibly torn, the state the load path already fails closed on, so
+/// later reads and writes proceed instead of turning a recoverable "sign in
+/// again" into a permanently broken keyring.
 static CHUNK_SET_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
     let _guard = CHUNK_SET_LOCK.lock();
-    // A refresh token is stored across N keyring entries, and `load` simply
-    // concatenates entries 0, 1, 2, … until one is missing. There is no length,
-    // no checksum, and nothing marking where this token ends — so a write that
-    // stops half way leaves chunks 0..k holding the NEW token and k..old_len
-    // still holding the OLD one's tail, and the next load returns that splice
-    // as if it were a token. Entra rejects it, and because it *looks* like a
-    // stored session the failure reads as a revoked refresh token rather than
-    // a corrupt one.
+    // A refresh token spans N keyring entries and `load` simply concatenates
+    // until one is missing — no length, no checksum, nothing marking where the
+    // token ends. A write that stops half way leaves chunks 0..k with the NEW
+    // token and k..old_len with the OLD one's tail, and the next load returns
+    // that splice as if it were a token: Entra rejects it, and the failure
+    // reads as a revoked refresh token rather than a corrupt one.
     //
     // So a partial write is rolled back to nothing: no session is a state the
-    // app already handles (it prompts to sign in), a spliced one is not.
+    // app already handles (it prompts to sign in); a spliced one is not.
     if let Err(err) = write_chunks(tenant_id, account_oid, token) {
-        // Best-effort: if the keyring is failing, the cleanup may fail too.
-        // Either way the original error is what the caller needs.
-        // The lock-free form: this thread already holds the guard.
+        // Best-effort: if the keyring is failing the cleanup may fail too;
+        // either way the original error is what the caller needs. Lock-free
+        // form: this thread already holds the guard.
         let _ = delete_chunks(tenant_id, account_oid);
         return Err(err);
     }
@@ -293,11 +284,10 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     for (idx, chunk) in chunks.iter().enumerate() {
         let account = chunk_account(tenant_id, account_oid, idx);
         // Chunk 0 carries the set's total count, so a load can tell a complete
-        // set from a torn one. Written FIRST, so a crash part-way through leaves
-        // a count that exceeds what is actually stored — which fails closed —
-        // rather than a plausible-looking short set.
-        // Wiped once written, mirroring `load_chunks`: each chunk copy is
-        // plaintext token material.
+        // set from a torn one. Written FIRST, so a crash leaves a count that
+        // exceeds what is stored — which fails closed — rather than a
+        // plausible-looking short set. Wiped once written (mirroring
+        // `load_chunks`): each chunk copy is plaintext token material.
         let value = Zeroizing::new(if idx == 0 {
             encode_chunk_zero(chunks.len(), chunk)
         } else {
@@ -322,12 +312,10 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
 /// Returns `Zeroizing<String>` rather than a bare `String`: the call site wraps
 /// the result to keep the secret off freed heap pages, and that guarantee was
 /// undone in here. Each `get_password()` chunk is a fully-materialized plaintext
-/// `String` that was dropped un-wiped, and `push_str` reallocates as it grows,
-/// stranding the earlier buffer too — a refresh token spans one to two 2048-byte
-/// chunks, so at least one growth realloc happened on every refresh.
-///
-/// Making it the return type is what turns the contract from a convention the
-/// caller has to remember into something structural.
+/// `String` dropped un-wiped, and `push_str` reallocates as it grows, stranding
+/// the earlier buffer too — a refresh token spans one to two 2048-byte chunks,
+/// so at least one growth realloc happened on every refresh. Making it the
+/// return type turns the contract from a convention into something structural.
 pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<String>>> {
     ensure_keyring_store()?;
     // Held for the read too: without it a load can observe a half-written set
@@ -348,12 +336,11 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
         let account = chunk_account(tenant_id, account_oid, idx);
         match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.get_password() {
             Ok(part) => {
-                // Bound mutably and wiped after appending: the chunk itself is
+                // Bound mutably and wiped after appending: the chunk is
                 // plaintext, and dropping it un-zeroized leaves the whole token
-                // recoverable from freed pages regardless of what the caller
-                // does. The wipe covers the marker-carrying chunk 0 too — the
-                // payload is a borrow of `part`, so it must be appended before
-                // the wipe, not after.
+                // recoverable from freed pages. The wipe covers the
+                // marker-carrying chunk 0 too — its payload is a borrow of
+                // `part`, so it must be appended before the wipe, not after.
                 let mut part = part;
                 if idx == 0 {
                     match decode_chunk_zero(&part) {
@@ -378,10 +365,10 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
     if idx == 0 {
         return Ok(None);
     }
-    // Fail closed on a set that does not match its own declared length. "No
-    // session" is a state the app already handles — it prompts to sign in — and
-    // a spliced token is not: it looks like a stored session right up until
-    // Entra rejects it as revoked.
+    // Fail closed on a set that does not match its own declared length: "no
+    // session" is a state the app already handles (it prompts to sign in); a
+    // spliced token is not — it looks like a stored session until Entra
+    // rejects it as revoked.
     if let Some(total) = declared
         && total != idx
     {
@@ -461,11 +448,11 @@ fn delete_chunks(tenant_id: &str, account_oid: &str) -> Result<()> {
 }
 
 /// Test-only: install the in-memory mock keyring store once per test binary so
-/// keyring round-trips don't touch the OS keychain (which needs entitlements and
-/// isn't available in CI). Shared across the crate's test modules so they all use
-/// the *same* store instance — otherwise two modules racing to register separate
-/// mocks would lose each other's entries. `ensure_keyring_store` keeps an
-/// already-registered store, so this only has to run before the first keyring op.
+/// keyring round-trips don't touch the OS keychain (which needs entitlements
+/// and isn't available in CI). Shared across the crate's test modules so they
+/// all use the *same* store instance — otherwise two modules racing to register
+/// separate mocks would lose each other's entries. `ensure_keyring_store` keeps
+/// an already-registered store, so this only has to run before the first op.
 #[cfg(test)]
 pub(crate) fn init_mock_keyring() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -601,15 +588,15 @@ mod tests {
     /// The rollback a failed `save_refresh_token` performs must clear **every**
     /// chunk, however many are there — not just the ones this write created.
     ///
-    /// That is the whole point: a partial write leaves chunks 0..k holding the
-    /// new token and k.. still holding the previous one's tail, and `load` just
-    /// concatenates until an entry is missing, so it would return the splice as
-    /// if it were a real token. A rollback bounded by the *new* token's chunk
-    /// count would leave exactly that tail behind.
+    /// A partial write leaves chunks 0..k holding the new token and k.. the
+    /// previous one's tail, and `load` just concatenates until an entry is
+    /// missing, so it would return the splice as if it were a real token. A
+    /// rollback bounded by the *new* token's chunk count would leave exactly
+    /// that tail behind.
     ///
-    /// The failing write itself needs a keyring that can be made to fail
-    /// mid-loop, which the mock store cannot do; this pins the property the
-    /// rollback depends on.
+    /// The failing write needs a keyring that can be made to fail mid-loop,
+    /// which the mock store cannot do; this pins the property the rollback
+    /// depends on.
     #[test]
     fn the_rollback_clears_chunks_it_did_not_write() {
         init_mock_keyring();
@@ -748,10 +735,10 @@ mod tests {
     /// session", not as a splice.
     ///
     /// The lock serializes writers within one process; it cannot cover a hard
-    /// crash mid-write or a second app instance. Without the count there is
-    /// nothing marking where the token ends, so a partial set loaded as a
-    /// plausible-looking token, Entra rejected it as `invalid_grant`, and the
-    /// failure read as a revoked session rather than a corrupt one.
+    /// crash mid-write or a second app instance. Without the count a partial
+    /// set loaded as a plausible-looking token, Entra rejected it as
+    /// `invalid_grant`, and the failure read as a revoked session rather than
+    /// a corrupt one.
     #[test]
     fn a_torn_chunk_set_fails_closed_instead_of_splicing() {
         init_mock_keyring();

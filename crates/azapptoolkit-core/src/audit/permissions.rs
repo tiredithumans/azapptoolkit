@@ -25,11 +25,9 @@ pub const STALE_APP_DAYS: i64 = 90;
 /// (no PowerShell origin) — drives [`unused_app_advisory`].
 pub const UNUSED_APP_DAYS: i64 = 90;
 
-/// Long-lived secret threshold. `Credential-Analysis.ps1:169`.
-///
-/// Applies to certificates as well as secrets: Rule 7 checks every credential
-/// kind against it, and names the two kinds on separate issue lines. The name
-/// keeps its ported spelling because it is public and re-exported.
+/// Long-lived secret threshold. `Credential-Analysis.ps1:169`. Applies to
+/// certificates too: Rule 7 checks every credential kind against it and names
+/// the two kinds on separate lines. Ported spelling kept (public, re-exported).
 pub const LONG_LIVED_SECRET_DAYS: i64 = 365;
 
 /// Score increments.
@@ -43,25 +41,21 @@ pub(super) const PTS_ALL_EXPIRING_SOON: u32 = 3;
 pub(super) const PTS_MIXED_EXPIRING: u32 = 2;
 pub(super) const PTS_LONG_LIVED: u32 = 3;
 pub(super) const PTS_STALE_APP: u32 = 2;
-/// Multi-tenant / personal-account sign-in audience on an app that actually
-/// holds something worth taking (application permissions or credentials).
-///
-/// Scored rather than advisory because the audience is a genuine *blast-radius
-/// multiplier*, not a preference: it decides whether the app's permissions are
-/// reachable by principals outside this directory at all. It is weighted below a
-/// single medium-risk permission — the audience alone is not a finding, it
-/// sharpens the ones already present, which is why it only fires alongside them.
+/// Multi-tenant / personal-account audience on an app that holds permissions or
+/// credentials. Scored, not advisory: the audience is a *blast-radius
+/// multiplier* — it decides whether permissions are reachable outside this
+/// directory. Weighted below one medium-risk permission; fires only alongside
+/// real findings, never alone.
 pub(super) const PTS_MULTITENANT_EXPOSURE: u32 = 3;
 /// Additional weight when a multi-tenant app also has **no verified publisher**.
 /// Publisher verification is what lets a consenting tenant's admin tell who the
 /// app's author actually is; without it, a multi-tenant app asking for consent
 /// is unattributable.
 pub(super) const PTS_UNVERIFIED_PUBLISHER: u32 = 2;
-/// Reduced weight for a high/medium-risk *mail* permission that is confirmed
-/// scoped to specific mailboxes via Exchange RBAC for Applications (see
-/// [`AppPermissions::mail_scopes`]). A `Mail.Send` confined to one shared
-/// mailbox is far lower risk than tenant-wide `Mail.Send`, but it is not zero —
-/// the scope can still cover many recipients — so it keeps a small residual.
+/// Reduced weight for a high/medium-risk *mail* permission confirmed scoped via
+/// Exchange RBAC for Applications (see [`AppPermissions::mail_scopes`]).
+/// Confined ≠ zero risk: the scope can still cover many recipients, so a small
+/// residual stays.
 pub(super) const PTS_SCOPED_HIGH_RISK_MAIL: u32 = 3;
 pub(super) const PTS_SCOPED_MEDIUM_RISK_MAIL: u32 = 2;
 
@@ -76,39 +70,29 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Mail.Send",
     "Files.ReadWrite.All",
     "Sites.FullControl.All",
-    // Net-new (not in the PowerShell `Constants.ps1` source): org-wide
-    // `Sites.ReadWrite.All` grants tenant-wide write to every site, so it is
-    // weighted alongside `Sites.FullControl.All` rather than left advisory-only.
-    // The scoped alternative is `Sites.Selected` (see Rule 12), which is not in
-    // any risk list and therefore scores zero.
+    // Net-new (not in `Constants.ps1`): org-wide `Sites.ReadWrite.All` is
+    // tenant-wide write, so it is weighted alongside `Sites.FullControl.All`
+    // rather than left advisory. The scoped alternative `Sites.Selected`
+    // (Rule 12) is in no risk list, by design.
     "Sites.ReadWrite.All",
     "User.ReadWrite.All",
     "Group.ReadWrite.All",
-    // Net-new. Microsoft's own permissions reference flags both of these with a
-    // "Caution" note for the reason that makes them tenant-compromising:
-    // `Application.ReadWrite.OwnedBy` "allows the same operations as
-    // Application.ReadWrite.All but only on applications it is an owner of" —
-    // including updating their secrets, i.e. acting as those entities — and it
-    // can still list every application and service principal in the tenant;
-    // `EntitlementManagement.ReadWrite.All` can "grant additional privileges to
-    // itself, other applications, or any user", covering Entra role
-    // assignments, app role assignments and API permissions. Both scored ZERO.
+    // Net-new; Microsoft's permissions reference flags both with a "Caution":
+    // `Application.ReadWrite.OwnedBy` can update the secrets of apps it owns
+    // (act as those entities) and lists every app/SP in the tenant;
+    // `EntitlementManagement.ReadWrite.All` can grant privileges to itself,
+    // other apps, or any user (Entra role, app role, and API permissions).
+    // Both scored ZERO.
     "Application.ReadWrite.OwnedBy",
     "EntitlementManagement.ReadWrite.All",
-    // Net-new, and every addition in this batch shares one origin: they appear in
-    // `SUBSUMED_APP_PERMISSIONS` as the BROADER side of a subsumption pair — the
-    // file already names them, and `subsuming_app_permissions` already advises
-    // operators to downgrade *to* the narrower one — yet none was in either risk
-    // table, so each scored ZERO. Every family this file adds is weighted by the
-    // split the ported tables mostly use: tenant-wide WRITE is high, tenant-wide
-    // READ is medium (`Mail.ReadWrite`/`Mail.Read`, `Files.ReadWrite.All`/
-    // `Files.Read.All`, `Sites.ReadWrite.All`/`Sites.Read.All`). The read halves
-    // sit in the medium list below. The one ported exception is
-    // `Calendars.ReadWrite`, which keeps its legacy medium tier (see its entry).
-    //
+    // Net-new batch, one shared origin: each appears in
+    // `SUBSUMED_APP_PERMISSIONS` as a BROADER side yet scored ZERO. Families
+    // follow the ported split — tenant-wide WRITE high, READ medium (read halves
+    // in the medium list). The one ported exception, `Calendars.ReadWrite`, keeps
+    // its legacy medium tier.
     // `MailboxSettings.ReadWrite` is the one to note: it sets mail forwarding on
-    // every mailbox in the tenant, which is the classic exfiltration primitive
-    // and needs no read permission to act.
+    // every mailbox — the classic exfiltration primitive, and needs no read
+    // permission to act.
     "MailboxSettings.ReadWrite",
     // Adds any principal — including the app's own service principal — to any
     // group, so it reaches whatever access those groups gate.
@@ -122,30 +106,24 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     "Contacts.ReadWrite",
     // Tenant-wide write over OneNote content, matching `Files.ReadWrite.All`.
     "Notes.ReadWrite.All",
-    // Net-new (not in the PowerShell `Constants.ps1:104-115` source): the
-    // newer Microsoft Graph mailbox permissions that RBAC for Applications
-    // exposes a scoped role for (Learn, "Supported Application Roles"). Each
-    // of these reaches every mailbox in the tenant and scored ZERO because no
-    // risk table named them. Tenant-wide write/delete of every mailbox item
-    // (`MailboxItem.ReadWrite.All`, `MailboxFolder.ReadWrite.All`) is at least
-    // `Mail.ReadWrite`; `Mail-Advanced.ReadWrite.All` additionally edits the
-    // contents of non-draft messages (Microsoft's own description); Export and
-    // ImportExport are the bulk-exfiltration primitives backup vendors request.
-    // `MailboxConfigItem.*` (UserConfiguration objects) and
-    // `MailTips.ReadBasic.All` (MailTips metadata, no message content) are
-    // deliberately in NEITHER table: they reach mailboxes, so they enter the
-    // org-wide mailbox advisory, but they do not read or write mailbox content.
+    // Net-new (not in `Constants.ps1:104-115`): the newer Graph mailbox
+    // permissions that RBAC for Applications exposes a scoped role for. Each
+    // reaches every mailbox and scored ZERO. Tenant-wide write/delete
+    // (`MailboxItem/MailboxFolder.ReadWrite.All`) is at least `Mail.ReadWrite`;
+    // `Mail-Advanced.ReadWrite.All` also edits non-draft message bodies; Export
+    // and ImportExport are bulk-exfiltration primitives.
+    // `MailboxConfigItem.*` (UserConfiguration) and `MailTips.ReadBasic.All`
+    // (metadata) are deliberately in NEITHER table: they reach mailboxes (so they
+    // enter the org-wide advisory) but do not read or write mailbox content.
     "MailboxItem.ReadWrite.All",
     "MailboxItem.Export.All",
     "MailboxItem.ImportExport.All",
     "MailboxFolder.ReadWrite.All",
     "Mail-Advanced.ReadWrite.All",
-    // Net-new (not in the PowerShell `Constants.ps1` source): the EWS
-    // `full_access_as_app` scope on the legacy Office 365 Exchange Online
-    // resource grants full access to *every* mailbox in the tenant — strictly
-    // broader than `Mail.ReadWrite`, which is already high-risk here. It scored
-    // zero before because the risk tables only ever listed Microsoft Graph
-    // names. Unambiguous as a bare value: no other resource exposes it (see
+    // Net-new (not in `Constants.ps1`): EWS `full_access_as_app` (legacy Office
+    // 365 Exchange Online) is strictly broader than the already-high
+    // `Mail.ReadWrite`; it scored zero because the risk tables only listed Graph
+    // names. Unambiguous as a bare value — no other resource exposes it (see
     // `scoping::EWS_FULL_ACCESS_AS_APP`).
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
 ];
@@ -158,28 +136,20 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     "Mail.Read",
     "Files.Read.All",
     "Sites.Read.All",
-    // `Calendars.ReadWrite`, PLURAL. This entry read `Calendar.ReadWrite` for
-    // its whole life, which is not a permission Microsoft Graph defines — every
-    // calendar permission is plural (`Calendars.Read`, `Calendars.ReadWrite`,
-    // `Calendars.ReadWrite.All`), and the rest of this codebase already used the
-    // plural form in `scoping.rs`'s role map and in the subsumption table below.
-    // So the entry could never match a real grant: an application holding
-    // org-wide `Calendars.ReadWrite` — create, read, update and delete events in
-    // EVERY mailbox — scored zero and could rank Low.
-    //
-    // Its MEDIUM tier is deliberate parity with `Constants.ps1:123-130`; the
-    // typo fix kept that tier. The write = high split described at the high
-    // list governs the families this file ADDED, not ported weights, so this
-    // entry is the one mailbox-family write that stays medium. Promoting it is
-    // a ranking decision that needs a CHANGELOG note. Pinned by
+    // `Calendars.ReadWrite`, PLURAL. The entry read `Calendar.ReadWrite` its
+    // whole life — a permission Graph does not define (calendar permissions are
+    // plural) that could never match, so org-wide `Calendars.ReadWrite` scored
+    // zero.
+    // The MEDIUM tier is deliberate parity with `Constants.ps1:123-130`; the
+    // typo fix kept it. The write = high split governs only families this file
+    // ADDED, so this is the one mailbox write that stays medium — promoting it
+    // needs a CHANGELOG note. Pinned by
     // `tests::mailbox_family_writes_are_high_unless_ported_otherwise`.
     "Calendars.ReadWrite",
-    // Net-new. Microsoft describes this as "the highest privileged read-only
-    // permission for Microsoft Entra ID resources", ranked immediately below
-    // `Directory.ReadWrite.All`. It sits in the medium band with the other
-    // tenant-wide reads (`User.Read.All`, `Group.Read.All`) rather than the high
-    // one, which is reserved for write and impersonation — but it reads strictly
-    // more than either of them and scored zero.
+    // Net-new: "the highest privileged read-only permission for Microsoft Entra
+    // ID resources" (Microsoft). Medium band with the other tenant-wide reads —
+    // high is reserved for write and impersonation — but it reads strictly more
+    // than `User/Group.Read.All` and scored zero.
     "Directory.Read.All",
     // Net-new — read halves weighted like `Mail.Read` rather than their write
     // counterparts: `Chat.Read.All` pairs with the high `Chat.ReadWrite.All`,
@@ -191,15 +161,13 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // `Constants.ps1:123-130` uses for every other family.
     "MailboxItem.Read.All",
     "MailboxFolder.Read.All",
-    // Net-new (no PowerShell origin) — the read halves of the families weighted
-    // HIGH above, following the same tenant-wide read = medium split. Each is
-    // the narrower side of a subsumption pair and scored ZERO until
-    // `tests::every_narrower_subsumed_permission_carries_a_risk_weight` forced
-    // the decision. A mailbox-family read confined through RBAC for Applications
-    // takes `PTS_SCOPED_MEDIUM_RISK_MAIL` like `Mail.Read` does.
-    //
-    // Reads every contact in every mailbox; Rule 11 already raised the org-wide
-    // mailbox advisory for it while it added no points.
+    // Net-new: read halves of the HIGH families, medium per the read = medium
+    // split. Each scored ZERO until
+    // `tests::every_narrower_subsumed_permission_carries_a_risk_weight`. A
+    // mailbox read confined through RBAC takes `PTS_SCOPED_MEDIUM_RISK_MAIL`
+    // like `Mail.Read`.
+    // Reads every contact; Rule 11 already raised the mailbox advisory without
+    // it adding points.
     "Contacts.Read",
     // Reads every mailbox's forwarding, auto-reply and delegate-facing settings.
     "MailboxSettings.Read",
@@ -238,24 +206,18 @@ const RISKY_DELEGATED_SCOPE_PREFIXES: &[&str] = &[
     "RoleManagement.",
 ];
 
-/// Splits held application permissions into `(high_risk, medium_risk)` hits
-/// using [`HIGH_RISK_APP_PERMISSIONS`] / [`MEDIUM_RISK_APP_PERMISSIONS`].
-/// Reusable for auditing the application permissions *held* by managed
-/// identities and enterprise-app service principals (not just app registrations).
+/// Splits held application permissions into `(high, medium)` hits by value.
+/// Reusable for permissions *held* by managed identities and enterprise-app SPs,
+/// not just app registrations.
 ///
-/// Takes whole [`ResourcePermission`]s, not bare values. AGENTS.md: permissions
-/// travel as `ResourcePermission` and operator-facing text names the resource —
-/// `Mail.ReadWrite` on Microsoft Graph and on Office 365 Exchange Online are
-/// different grants with different reach, and only Graph's is confinable, so a
-/// banner naming one without saying which leaves the operator to guess. The
-/// previous `&[String]` signature made that impossible for its caller to get
-/// right, whatever it wanted to do.
+/// Takes whole [`ResourcePermission`]s, not bare values (AGENTS.md: carry the
+/// resource): `Mail.ReadWrite` on Graph and on Office 365 Exchange Online are
+/// different grants with different reach, only Graph's is confinable, and the
+/// old `&[String]` signature made naming the resource impossible.
 ///
-/// Matching is still on the value alone, so this is behaviour-preserving: an
-/// app-role of the same name on an unrelated API is still counted. Whether it
-/// *should* be is a separate question about the risk model — over-reporting is
-/// the safe direction for a security tool, and narrowing it would need a
-/// deliberate decision rather than a refactor.
+/// Matching stays value-only (behaviour-preserving): an unrelated API's same-
+/// named role still counts. Over-reporting is the safe direction; narrowing the
+/// risk model needs a deliberate decision, not a refactor.
 pub fn classify_app_permission_risk(
     grants: &[ResourcePermission],
 ) -> (Vec<ResourcePermission>, Vec<ResourcePermission>) {
@@ -304,24 +266,15 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
 }
 
 /// A least-privilege alternative to a broad application permission on
-/// `resource_app_id`, as an advisory pointer shown at grant time — never an
-/// automatic rewrite. Returns `None` when the permission is already
-/// least-privilege or has no narrower equivalent. Derives from the shared
-/// resource-aware scope predicates so it stays consistent with Rule 11/12 and
-/// the scope badges.
+/// `resource_app_id` — advisory at grant time, never an automatic rewrite;
+/// `None` when already least-privilege. Derives from the shared resource-aware
+/// scope predicates (consistent with Rule 11/12 and the scope badges).
 ///
-/// There is deliberately no value-only form: one defaulted the resource to
-/// Microsoft Graph, so the permission picker offered mailbox-scoping advice for
-/// Office 365 Exchange Online's mail appRoles.
-///
-/// The resource decides whether the Exchange advice is even true: RBAC for
-/// Applications confines Microsoft Graph's mail family (and the EWS scope), not
-/// Office 365 Exchange Online's identically-named retired Outlook REST
-/// appRoles. Offering "scope this to specific mailboxes" for one of those sends
-/// an operator after a remediation that cannot be applied, and quietly implies
-/// the grant is containable when the only remedy is removing it.
-///
-/// A `None` resource yields no Exchange advice for the same reason. The
+/// Deliberately no value-only form: defaulting the resource to Graph made the
+/// picker offer mailbox-scoping advice for Office 365 Exchange Online's mail
+/// appRoles, which RBAC for Applications cannot confine (it covers Graph and
+/// the EWS scope, not the retired Outlook REST roles — whose only remedy is
+/// removal). A `None` resource yields no Exchange advice for the same reason.
 /// SharePoint advice follows [`crate::scoping::is_sharepoint_orgwide_permission`]:
 /// both SharePoint resources expose `Sites.Selected`, but another API's
 /// `Sites.`-named role is not SharePoint site access.
@@ -341,34 +294,26 @@ pub fn least_privilege_alternative_for(
 }
 
 /// The broader Microsoft Graph **application** permissions that fully cover
-/// `value` — i.e. every Graph call `value` authorizes is also authorized by
-/// each listed permission, per the "least to most privileged" orderings in the
-/// Graph permissions reference. Empty when `value` has no broader equivalent.
+/// `value` (every call it authorizes), per the "least to most privileged"
+/// orderings in the Graph permissions reference.
 ///
-/// Application permissions only: Graph authorizes app-only calls by the union
-/// of `roles` in the token (a client-credentials token always carries every
-/// granted role), so holding the broader role makes the narrower one pure
-/// surface area — removing it can never break a call. The same is NOT true of
-/// delegated scopes (token requests name scopes literally; removing a narrower
-/// consented scope can break an app that requests it by name), so delegated
-/// redundancy is deliberately out of scope here.
+/// Application permissions only: app-only tokens always carry every granted
+/// role, so the narrower role is pure surface area — removing it cannot break a
+/// call. Delegated scopes are NOT (token requests name scopes literally, so
+/// removing a consented narrower scope can break an app); delegated redundancy
+/// is deliberately out of scope.
 ///
-/// Pairs are conservative — only documented full-coverage relationships:
-/// - `Mail.Send` is NOT covered by `Mail.ReadWrite` (sending is separate).
-/// - `Directory.ReadWrite.All` does NOT cover `User.ReadWrite.All` /
-///   `Group.ReadWrite.All` (it can't delete users or reset passwords).
-/// - `Sites.Selected` is never listed as a narrower value: it is the
-///   least-privilege SharePoint model (Rule 12) — calling it redundant would
-///   push an admin to drop the scoped grant and keep the broad one, backwards.
+/// Conservative pairs — documented full coverage only:
+/// - `Mail.Send` is NOT covered by `Mail.ReadWrite` (sending is separate);
+/// - `Directory.ReadWrite.All` does NOT cover `User/Group.ReadWrite.All`
+///   (can't delete users or reset passwords);
+/// - `Sites.Selected` is never listed as narrower: calling it redundant would
+///   push admins to drop the scoped grant and keep the broad one, backwards.
 ///
 /// Chains are flattened to their transitive closure (e.g. `Sites.Read.All`
-/// lists all three broader `Sites.*` tiers) so detection needs no traversal.
-///
-/// One table serves both directions: [`subsuming_app_permissions`] (narrower →
-/// broaders, drives Rule 18 redundancy) and [`downgrade_alternatives`]
-/// (broader → narrowers, drives the least-privilege downgrade suggestions) are
-/// forward and inverse scans of it, so the two features can never disagree
-/// about what covers what.
+/// lists all three broader tiers) so detection needs no traversal.
+/// [`subsuming_app_permissions`] and [`downgrade_alternatives`] are forward and
+/// inverse scans of this one table, so the two features can never disagree.
 const SUBSUMED_APP_PERMISSIONS: &[(&str, &[&str])] = &[
     // Exchange families: ReadBasic ⊂ Read ⊂ ReadWrite.
     ("Mail.Read", &["Mail.ReadWrite"]),
@@ -479,18 +424,15 @@ pub fn subsuming_app_permissions(value: &str) -> &'static [&'static str] {
 }
 
 /// The narrower application permissions an admin could hold *instead of*
-/// `value` — the inverse scan of `SUBSUMED_APP_PERMISSIONS`, in table order.
-/// Empty when `value` is already least-privilege or has no narrower equivalent.
-///
-/// Unlike Rule-18 redundancy removal, acting on a downgrade is **not** safe by
-/// construction: the narrower permission only suffices if the app genuinely
-/// never uses the broader capability (e.g. never writes). Every surface that
-/// offers a downgrade must present it as an admin-judged choice, never an
-/// automatic fix.
-/// Ordered closest-tier-first: an alternative with fewer subsumers sits higher
-/// in the privilege ladder (e.g. for `Sites.FullControl.All`: `Sites.Manage.All`
-/// before `Sites.ReadWrite.All` before `Sites.Read.All`), so the first entry is
-/// the least disruptive downgrade and the natural default to surface.
+/// `value` — inverse scan of `SUBSUMED_APP_PERMISSIONS`, empty when already
+/// least-privilege.
+/// Unlike Rule-18 removal, acting on a downgrade is **not** safe by
+/// construction — it only suffices if the app genuinely never uses the broader
+/// capability — so every surface must offer it as an admin-judged choice, never
+/// an automatic fix.
+/// Ordered closest-tier-first (fewer subsumers = higher on the ladder, e.g.
+/// `Sites.Manage.All` before `Sites.ReadWrite.All` for FullControl), so the
+/// first entry is the least disruptive downgrade.
 pub fn downgrade_alternatives(value: &str) -> Vec<&'static str> {
     let mut alts: Vec<&'static str> = SUBSUMED_APP_PERMISSIONS
         .iter()
@@ -503,40 +445,27 @@ pub fn downgrade_alternatives(value: &str) -> Vec<&'static str> {
 
 /// The redundant application permissions among `grants`: each `(narrower,
 /// covered_by)` pair is a held permission whose access the held `covered_by`
-/// permissions already fully grant (per [`subsuming_app_permissions`]).
+/// permissions fully grant on the **same resource** (per
+/// [`subsuming_app_permissions`]).
 ///
-/// **Pairs only within one resource.** Mailbox and SharePoint permissions live
-/// on two resources each, and both Microsoft Graph and the legacy Office 365
-/// resources expose appRoles literally named `Sites.*` / `Mail.*`. Keyed on the
-/// bare value, this reported a Graph `Sites.Read.All` as "covered by"
-/// `Sites.ReadWrite.All` held on Office 365 SharePoint Online — two grants that
-/// authorize against different resources and cover nothing of each other. The
-/// one-click fix never acted on such a pair (`plan_redundant_removals` builds
-/// its `value_to_id` per resource and requires the broader grant live on the
-/// *same* `resource_app_id`), so this was advisory text disagreeing with the
-/// remediation beside it — an operator reading "covered by" and revoking by hand
-/// would have removed real access.
+/// Cross-resource pairs are excluded: Graph and the legacy Office 365 resources
+/// both expose literal `Sites.*` / `Mail.*` appRoles that authorize nothing of
+/// each other, and the old value-keyed pairing called a Graph grant "covered by"
+/// an Office 365 one — text the per-resource one-click fix contradicted, and
+/// following it by hand would have removed real access.
 ///
-/// A grant whose `resource_app_id` is `None` pairs with nothing: an unresolved
-/// resource cannot be *proven* to be the same one, and under-reporting a
-/// redundancy is a missing suggestion, while over-reporting one is advice to
-/// remove access that is not in fact covered.
+/// A `None` `resource_app_id` pairs with nothing: an unresolved resource cannot
+/// be *proven* to be the same one, and over-reporting is advice to remove access
+/// that is not in fact covered.
 ///
-/// `broader_is_confined` lets the caller veto a broader permission whose
-/// effective reach is *narrower than the permission name implies* — e.g. a
-/// `Mail.ReadWrite` confined to specific mailboxes via Exchange RBAC does NOT
-/// cover an org-wide `Mail.Read`, so the pair must not be flagged. Callers
-/// without scoping data pass `|_| false`.
+/// `broader_is_confined` vetoes a broader whose effective reach is *narrower
+/// than its name implies* — a mailbox-scoped `Mail.ReadWrite` does NOT cover an
+/// org-wide `Mail.Read`. Callers without scoping data pass `|_| false`.
 ///
-/// A value redundant on more than one resource is reported once — but the
-/// *first redundant* occurrence, not merely the first occurrence. The
-/// distinction is the whole of the ordering bug this signature replaced: the
-/// old code inserted into its `seen` set BEFORE computing coverage, so a value
-/// held on two resources was decided by whichever grant the iteration reached
-/// first. A `Mail.Read` on Microsoft Graph (no covering grant there) suppressed
-/// the genuinely redundant `Mail.Read` on Office 365 Exchange Online sitting
-/// beside a `Mail.ReadWrite`, and the finding vanished — order-dependently, so
-/// two tenants with identical grants could score differently.
+/// Reported once per (resource, value) — the *first redundant* occurrence. The
+/// old code deduped on the bare value BEFORE computing coverage, so iteration
+/// order decided: a non-redundant Graph `Mail.Read` suppressed the genuinely
+/// redundant Office 365 one, and identical tenants could score differently.
 pub fn redundant_app_permissions(
     grants: &[ResourcePermission],
     broader_is_confined: impl Fn(&str) -> bool,
@@ -585,14 +514,13 @@ pub fn redundant_app_permissions(
 
 /// One redundant application permission: a held `value` on `resource_app_id`
 /// whose access the held `covered_by` permissions **on that same resource**
-/// already fully grant.
+/// fully grant.
 ///
-/// Carries the resource because the pairing decision is resource-keyed and the
-/// consumers need it: the advisory text has to name which resource the pair
-/// lives on (`Mail.Read` is a different permission on Graph and on Office 365
-/// Exchange Online), and the one-click removal has to target the right one.
-/// Dropping it here was how the finding text and the Fix beside it came to
-/// describe different grants.
+/// Carries the resource because pairing is resource-keyed and both consumers
+/// need it: the advisory must name where the pair lives (`Mail.Read` is a
+/// different permission per resource), and the one-click removal must target the
+/// right grant. Dropping it is how the finding text and its Fix came to describe
+/// different grants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedundantPermission {
     pub resource_app_id: String,
@@ -683,20 +611,15 @@ mod tests {
     }
 
     /// Every mailbox-family name in the risk tables must be one `scoping.rs`
-    /// recognises — the guard that would have caught `Calendar.ReadWrite`.
-    ///
-    /// That entry sat in the medium table for its whole life naming a
-    /// permission Microsoft Graph does not define (all calendar permissions are
-    /// plural), so it could never match a real grant and an org-wide
-    /// `Calendars.ReadWrite` scored zero. Nothing could notice, because a risk
-    /// table is just a list of strings and a string that matches nothing looks
-    /// exactly like a string that has not come up yet.
+    /// recognises — the guard that would have caught `Calendar.ReadWrite`: a
+    /// permission Graph does not define (calendar permissions are plural), and a
+    /// string that matches nothing looks exactly like one that has not come up.
     ///
     /// `scoping.rs` independently maps every scopable mail/calendar/contacts
-    /// permission to its Exchange role, so it is a second spelling of the same
-    /// names — and a name in one list that the other rejects is a typo by
-    /// construction. Deliberately limited to that family: the tables also carry
-    /// Directory/Application/Sites names that `scoping.rs` has no opinion on.
+    /// permission to its Exchange role — a second spelling of the same names, so
+    /// a name in one list that the other rejects is a typo by construction.
+    /// Limited to that family: the tables also carry names `scoping.rs` has no
+    /// opinion on.
     #[test]
     fn mailbox_family_risk_entries_agree_with_the_scoping_role_map() {
         // `Mail` unterminated on purpose: it has to see `Mailbox*` and `Mail-*`
@@ -780,22 +703,15 @@ mod tests {
         ),
     ];
 
-    /// The reverse of the rule above, and the one that was missing.
+    /// The reverse guard, and the one that was missing: the role-map scan catches
+    /// typos in entries that exist, this catches entries never written (how nine
+    /// values scored zero while this file named them as broader sides).
     ///
-    /// `mailbox_family_risk_entries_agree_with_the_scoping_role_map` scans
-    /// table -> role map, so it catches a *typo* in an entry that exists. It
-    /// cannot catch an entry that was never written, which is how nine values
-    /// came to score zero while this same file named every one of them as the
-    /// broader side of a subsumption pair and advised downgrading away from it.
-    ///
-    /// So: if the file asserts B ⊇ N, then holding B is at least as much reach
-    /// as holding N, and B must carry a risk weight. Derived from
-    /// `SUBSUMED_APP_PERMISSIONS` itself rather than from a hand-kept list, so
-    /// it cannot drift — adding a subsumption pair now forces the weight
-    /// decision at the same time.
-    ///
-    /// A deliberately unscored broader value goes in `INTENTIONALLY_UNSCORED`
-    /// with a reason, which keeps the decision visible instead of silent.
+    /// If the file asserts B ⊇ N, holding B is at least N's reach, so B must
+    /// carry a weight. Derived from `SUBSUMED_APP_PERMISSIONS` itself, so it
+    /// cannot drift — adding a pair forces the weight decision. Deliberately
+    /// unscored values go in `INTENTIONALLY_UNSCORED` with a reason, keeping the
+    /// decision visible.
     #[test]
     fn every_broader_subsuming_permission_carries_a_risk_weight() {
         let scored = |v: &str| {
@@ -830,13 +746,11 @@ mod tests {
         );
     }
 
-    /// The narrower side of the same table. The broader walk above cannot see a
-    /// read half left unweighted: `Contacts.Read`, `MailboxSettings.Read`,
-    /// `Notes.Read.All`, `Device.Read.All`, `Application.Read.All`,
-    /// `GroupMember.Read.All` and `RoleManagement.Read.Directory` all scored
-    /// zero while their write halves scored high — `Contacts.Read` even raised
-    /// the org-wide mailbox advisory and still added nothing. Every narrower
-    /// value must carry a weight or a written `INTENTIONALLY_UNSCORED` reason.
+    /// The narrower side of the same table: read halves (e.g. `Contacts.Read`,
+    /// `MailboxSettings.Read`) scored zero while their write halves scored high —
+    /// `Contacts.Read` even raised the mailbox advisory while adding nothing.
+    /// Every narrower value needs a weight or a written `INTENTIONALLY_UNSCORED`
+    /// reason.
     #[test]
     fn every_narrower_subsumed_permission_carries_a_risk_weight() {
         let scored = |v: &str| {
@@ -1085,13 +999,10 @@ mod tests {
         );
         assert_eq!(got.len(), 1);
 
-        // A permission is NOT covered by a same-named broader one held on a
-        // DIFFERENT resource. Both Microsoft Graph and the legacy Office 365
-        // resources expose appRoles called `Sites.*`, and a grant on one
-        // authorizes nothing on the other — but keyed on the bare value this
-        // paired them and told the operator to remove live access. The one-click
-        // fix always re-planned per resource and did nothing here, so the
-        // advisory text and the remediation beside it disagreed.
+        // NOT covered by a same-named broader grant on a DIFFERENT resource:
+        // keyed on the bare value this paired them and told the operator to
+        // remove live access, while the per-resource re-plan did nothing — the
+        // advisory text and its remediation disagreed.
         let cross_resource = vec![
             ResourcePermission {
                 resource_app_id: Some(
@@ -1133,18 +1044,12 @@ mod tests {
         ];
         assert!(redundant_app_permissions(&unresolved, unconfined).is_empty());
 
-        // THE ORDERING CASE: one value held on two resources, redundant on
-        // only one of them. `Mail.Read` sits on Microsoft Graph (nothing
-        // covers it there) and on Office 365 Exchange Online beside that
-        // resource's own `Mail.ReadWrite` (which does cover it).
-        //
-        // The old code inserted into its dedup set BEFORE computing coverage,
-        // so whichever grant the iteration reached first decided the answer for
-        // the value. With Graph first — the order Graph returns manifests in —
-        // the genuine Office 365 redundancy was silently suppressed. Two
-        // tenants with identical grants could score differently depending on
-        // manifest order, which is why this is a correctness case and not a
-        // presentation one.
+        // THE ORDERING CASE: `Mail.Read` on Graph (nothing covers it there) and
+        // on Office 365 Exchange Online beside that resource's `Mail.ReadWrite`.
+        // The old dedup-before-coverage made iteration order decide: with Graph
+        // first, the real Office 365 redundancy was silently suppressed, and
+        // identical tenants could score differently. Correctness, not
+        // presentation.
         let ews = crate::scoping::OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string();
         let split = vec![
             // Graph first: the suppressing order.
@@ -1184,16 +1089,10 @@ mod tests {
         assert!(got.is_empty(), "scoped broader must not cover: {got:?}");
     }
 
-    /// Redundant on BOTH mailbox resources ⇒ TWO findings, not one.
-    ///
-    /// The loop keys `examined` on `(resource, value)` and so reaches each pair
-    /// once — but a second set keyed on the bare VALUE then collapsed the two
-    /// back together and emitted a single finding. The one-click Fix removed
-    /// the grant that finding named, reported success, and left the other
-    /// standing; the next audit found the survivor again. `Mail.Read` on
-    /// Microsoft Graph and on Office 365 Exchange Online are two separate
-    /// grants of two separate kinds of access, and only Graph's is confinable —
-    /// removing one says nothing about the other.
+    /// Redundant on BOTH mailbox resources ⇒ TWO findings, not one. A second
+    /// dedup set keyed on the bare value used to collapse them: the Fix removed
+    /// the named grant, reported success, and left the other standing. `Mail.Read`
+    /// per resource is two separate grants, and only Graph's is confinable.
     #[test]
     fn a_value_redundant_on_both_resources_is_reported_for_each() {
         let unconfined = |_: &str| false;

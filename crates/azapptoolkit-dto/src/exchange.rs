@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 /// One application permission a principal holds, **with the resource that
 /// exposes it** — the input to `get_mail_scopes_for_principal`.
 ///
-/// The resource is not decoration. Mailbox permissions live on two resources
+/// The resource is not decoration: mailbox permissions live on two resources
 /// (Microsoft Graph and the legacy Office 365 Exchange Online), both expose
 /// appRoles literally named `Mail.*`, and only Graph's are confinable — plus the
 /// EWS `full_access_as_app` scope, which exists *only* on the Office 365
-/// resource. So neither "assume Graph" nor "match on the value" is right.
+/// resource. Neither "assume Graph" nor "match on the value" is right.
 ///
 /// This crossed IPC as a bare `Vec<String>`, with the backend re-deriving
 /// scopability from the value alone. Both front-end callers happened to

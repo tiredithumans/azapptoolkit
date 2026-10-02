@@ -62,11 +62,10 @@ impl GroupIdentity {
 /// app was still scoped to. Reporting a scope that hasn't caught up yet only
 /// *withholds* the delete, which is the safe direction.
 ///
-/// What this can NOT see is the important part, and the UI says so: transport
-/// rules, DLP/retention policies, nesting inside other groups, anything outside
-/// Exchange, and — the common case — humans and systems that simply send mail to
-/// the address. An empty result is "no reference the toolkit can enumerate",
-/// never "safe to delete".
+/// What this can NOT see is the important part (the module doc's list —
+/// transport rules, DLP/retention, nesting, outside Exchange, humans who mail
+/// the address), and the UI says so. An empty result is "no reference the
+/// toolkit can enumerate", never "safe to delete".
 pub fn references_to_group(
     group: &GroupIdentity,
     scopes: &[ExoManagementScope],

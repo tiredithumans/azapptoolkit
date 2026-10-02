@@ -1,5 +1,5 @@
-//! Thin HTTP client over the ARM REST surface. Mirrors the Key Vault client's
-//! retry/jitter pattern (the knobs match `azapptoolkit_core::http_retry`).
+//! Thin HTTP client over the ARM REST surface; retry/jitter per
+//! `azapptoolkit_core::http_retry`, like the Key Vault client.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,9 +31,9 @@ const AUTHORIZATION_API: &str = "2022-04-01";
 /// (reviewed 2026-09).
 const LOG_ANALYTICS_WORKSPACES_API: &str = "2022-10-01";
 /// `Microsoft.KeyVault/vaults` (control plane): every version before
-/// 2026-02-01 retires on 2027-02-27 with no exception or extension. Only the
-/// vault listing uses it (`id`/`name`), and the 2026-02-01 RBAC-by-default
-/// change affects only vault creation. Pinned by
+/// 2026-02-01 retires on 2027-02-27, no extension. Only the vault listing
+/// (`id`/`name`) uses it; the 2026-02-01 RBAC-by-default change affects vault
+/// creation only. Pinned by
 /// `keyvault_control_plane_api_survives_the_2027_retirement`. Source:
 /// <https://learn.microsoft.com/azure/key-vault/general/migrate-api-version>
 /// (reviewed 2026-09).
@@ -79,11 +79,11 @@ impl ArmClient {
     /// Role assignments held by `principal_id` **at, above or below** the
     /// subscription scope. ARM's `$filter=principalId eq {id}` returns the
     /// subscription's own assignments, everything beneath it, and those
-    /// inherited from above it (a management group, the tenant root) — so an
-    /// above-subscription assignment comes back once per subscription queried.
-    /// A caller that fans out over subscriptions must dedupe by assignment id
-    /// (`managed_identity::flatten_assignments` in the desktop crate); a caller
-    /// that only collects role GUIDs into a set (readiness) is unaffected.
+    /// inherited from above it — so an above-subscription assignment comes
+    /// back once per subscription queried. A caller that fans out over
+    /// subscriptions must dedupe by assignment id
+    /// (`managed_identity::flatten_assignments` in the desktop crate); a
+    /// caller that only collects role GUIDs (readiness) is unaffected.
     ///
     /// Both ids must be GUIDs: the subscription id comes out of an ARM response
     /// and is spliced into the path (see `crate::validate`).
@@ -98,9 +98,9 @@ impl ArmClient {
             "{}/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleAssignments",
             self.base_url
         );
-        // Defense-in-depth: the principal id was just checked to be a GUID, so
-        // it holds no `'`; escape the OData single-quote literal anyway, in case
-        // that check is ever relaxed. Mirrors the Graph client's `escape_odata`.
+        // Defense-in-depth: the principal id was just checked to be a GUID
+        // (no `'`), but escape the OData single-quote anyway in case the check
+        // is ever relaxed. Mirrors the Graph client's `escape_odata`.
         let filter = format!("principalId eq '{}'", principal_id.replace('\'', "''"));
         self.collect_paged(
             &url,
@@ -169,18 +169,16 @@ impl ArmClient {
     /// Resolves a role-definition id (an absolute ARM path) to its definition,
     /// so the UI can show the role name instead of a GUID.
     ///
-    /// `role_definition_id` is never a caller constant: both call sites pass
-    /// `RoleAssignmentProperties::role_definition_id` straight out of an ARM
-    /// `roleAssignments` response. That is the same attacker-influenced
-    /// server-output class `collect_paged` guards `nextLink` for, so the
-    /// composed URL is re-checked against the ARM origin rather than trusted —
-    /// a value like `@evil.example/x` reinterprets the authority of a
+    /// `role_definition_id` is never a caller constant — both call sites pass
+    /// it straight out of an ARM `roleAssignments` response, the same
+    /// attacker-influenced server-output class `collect_paged` guards
+    /// `nextLink` for — so the composed URL is re-checked against the ARM
+    /// origin: a value like `@evil.example/x` reinterprets the authority of a
     /// `format!`-spliced URL, and the bearer would follow it.
     pub async fn get_role_definition(&self, role_definition_id: &str) -> Result<RoleDefinition> {
-        // Structure first: an ARM resource id is an absolute path, so anything
-        // that could reinterpret the *shape* of the composed URL is refused
-        // before it is composed. `?`/`#` would inject a second `api-version` or
-        // truncate the query the call depends on; a `..` segment would walk it.
+        // Structure first: refuse anything that could reshape the composed URL
+        // before composing — `?`/`#` inject a second `api-version` or truncate
+        // the query the call depends on; a `..` segment walks the path.
         require_arm_path("role definition id", role_definition_id)?;
         let url = format!("{}{role_definition_id}", self.base_url);
         // Then the authority: `@` turns everything composed so far into
@@ -226,13 +224,13 @@ impl ArmClient {
 
     /// Creates an Azure RBAC role assignment (PUT
     /// `{scope}/providers/Microsoft.Authorization/roleAssignments/{name}`).
-    /// `assignment_name` must be a client-generated GUID — the caller generates it
-    /// so a retry of this idempotent PUT reuses the same name rather than creating
-    /// a duplicate. `principalType=ServicePrincipal` is set so the assignment
-    /// survives directory replication delay for a freshly-created managed identity
-    /// (per the ARM `role-assignments-rest` guidance). `scope` is the resource
-    /// path the assignment applies to (subscription / resource group / resource);
-    /// `role_definition_id` is the full ARM role-definition path.
+    /// `assignment_name` must be a client-generated GUID so a retry of this
+    /// idempotent PUT reuses the name instead of creating a duplicate.
+    /// `principalType=ServicePrincipal` survives directory replication delay
+    /// for a freshly-created managed identity (per the ARM
+    /// `role-assignments-rest` guidance). `scope` is the resource path the
+    /// assignment applies to (subscription / resource group / resource);
+    /// `role_definition_id` the full ARM role-definition path.
     ///
     /// `scope` is typed by the operator, so it must be an absolute ARM path, and
     /// `assignment_name` and `principal_id` must be GUIDs; the composed URL is
@@ -311,8 +309,8 @@ mod tests {
         ArmClient::with_base_url(StaticTokenProvider::new("tok"), base.to_string())
     }
 
-    /// Subscription, principal and assignment ids are GUIDs on the wire, and the
-    /// client now refuses anything else before a request is sent.
+    /// Subscription, principal and assignment ids are GUIDs on the wire; the
+    /// client refuses anything else before a request is sent.
     const SUB: &str = "11111111-1111-1111-1111-111111111111";
     const PRINCIPAL: &str = "22222222-2222-2222-2222-222222222222";
     const ASSIGNMENT: &str = "33333333-3333-3333-3333-333333333333";
@@ -672,15 +670,13 @@ mod tests {
         );
     }
 
-    /// `role_definition_id` comes straight out of an ARM response, so it is
-    /// attacker-influenced server output — the same class `nextLink` is guarded
-    /// for. Spliced with `format!` and no leading slash it reinterprets the
-    /// authority of the composed URL and sends the ARM bearer to another host;
-    /// with `?`/`#` it rewrites the query the call depends on.
-    ///
-    /// Note an `@` *after* a leading `/` is inert — it sits in the path, past
-    /// the authority — which is why the structural check, not the origin check,
-    /// is what closes this.
+    /// `role_definition_id` comes straight out of an ARM response —
+    /// attacker-influenced server output, the same class `nextLink` is guarded
+    /// for. Without a leading slash, `@` reinterprets the authority of the
+    /// composed URL and sends the ARM bearer to another host; `?`/`#` rewrites
+    /// the query the call depends on. An `@` *after* a leading `/` is inert
+    /// (path, past the authority) — which is why the structural check, not the
+    /// origin check, closes this.
     #[tokio::test]
     async fn get_role_definition_refuses_an_id_that_redirects_off_origin() {
         let server = MockServer::start().await;
@@ -734,10 +730,10 @@ mod tests {
         assert_eq!(def.properties.role_name.as_deref(), Some("Reader"));
     }
 
-    /// Microsoft retires every Key Vault control-plane api-version before
-    /// 2026-02-01 on 2027-02-27; after that the vault sweep's per-subscription
-    /// listing would fail (logged and skipped) and report no vaults. Guards
-    /// against a downgrade. YYYY-MM-DD compares correctly as a string.
+    /// Every Key Vault control-plane api-version before 2026-02-01 retires on
+    /// 2027-02-27; after that the vault sweep's per-subscription listing would
+    /// fail (logged and skipped) and report no vaults. Guards against a
+    /// downgrade (YYYY-MM-DD compares correctly as a string).
     #[test]
     fn keyvault_control_plane_api_survives_the_2027_retirement() {
         assert!(KEYVAULT_API >= "2026-02-01", "{KEYVAULT_API}");
@@ -798,10 +794,10 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), MAX_PAGES);
     }
 
-    /// Subscription ids, principal ids and scopes come out of earlier ARM
-    /// responses (or the operator), and are spliced into the request path. A
-    /// `?`/`#` rewrites the query, a `..` walks the path — so each is refused
-    /// before any request, and the bearer never leaves.
+    /// Ids and scopes come out of earlier ARM responses (or the operator) and
+    /// are spliced into the request path: a `?`/`#` rewrites the query, a `..`
+    /// walks the path — each is refused before any request, and the bearer
+    /// never leaves.
     #[tokio::test]
     async fn arm_supplied_ids_are_refused_before_any_request() {
         let server = MockServer::start().await;

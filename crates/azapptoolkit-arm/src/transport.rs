@@ -16,13 +16,13 @@ use azapptoolkit_core::token::{BearerProvider, TokenError};
 use crate::error::{ArmError, Result};
 
 /// Sends one request through the shared retry loop and returns the raw success
-/// body. A failed response is classified by the shared
-/// [`azapptoolkit_core::http_error::failed_response`] (the same table the Key
-/// Vault client uses): a non-429 4xx is terminal — which lets a Logs `query`
-/// treat a 400 "table absent" as a probe miss — while 429 and 5xx are retried,
-/// honoring an explicit `Retry-After` exactly.
-/// `label` tags the retry warnings (e.g. `"arm"`, `"log analytics"`), followed by
-/// the verb and the endpoint family (ids masked, no query).
+/// body. Failed responses are classified by
+/// [`azapptoolkit_core::http_error::failed_response`] (the Key Vault client's
+/// same table): a non-429 4xx is terminal — letting a Logs `query` treat a 400
+/// "table absent" as a probe miss — while 429 and 5xx are retried, honoring an
+/// explicit `Retry-After` exactly. `label` tags the retry warnings (e.g.
+/// `"arm"`, `"log analytics"`), followed by the verb and endpoint family (ids
+/// masked, no query).
 pub(crate) async fn send_with_retry(
     http: &reqwest::Client,
     token: &Arc<dyn BearerProvider>,

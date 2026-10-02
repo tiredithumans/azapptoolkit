@@ -15,10 +15,9 @@ pub struct FederatedCredentialRequest {
     pub description: Option<String>,
 }
 
-/// Body for `PATCH /applications/{id}/federatedIdentityCredentials/{ficId}`.
-/// Graph rejects attempts to change `name` (it is immutable), so the field is
-/// deliberately absent. `description: None` serializes as JSON `null` to clear
-/// a previously-set description.
+/// Body for `PATCH /applications/{id}/federatedIdentityCredentials/{ficId}`. Graph rejects
+/// changing `name` (immutable), so the field is deliberately absent. `description: None`
+/// serializes as JSON `null` to clear a previously-set description.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FederatedCredentialPatch {
@@ -41,10 +40,9 @@ impl GraphClient {
             .await
     }
 
-    /// `addPassword` with an explicit validity window. `startDateTime` is only
-    /// sent when given — Graph defaults it to "now", and sending an explicit
-    /// value also lets callers schedule a not-yet-valid secret (the portal's
-    /// "Custom" expiry option).
+    /// `addPassword` with an explicit validity window; `startDateTime` is sent only when given
+    /// (Graph defaults it to "now"). The explicit value also lets callers schedule a
+    /// not-yet-valid secret (the portal's "Custom" expiry option).
     pub async fn add_password_window(
         &self,
         object_id: &str,
@@ -83,11 +81,10 @@ impl GraphClient {
         self.collect_all_pages(page, false).await
     }
 
-    /// Batched [`Self::list_federated_credentials`]: one `$batch` POST per 20
-    /// apps, returning each app's full credential list in input order. Graph
-    /// caps federated credentials at ~20/app, so the first (batched) page is
-    /// almost always complete; the rare overflow finishes via `collect_all_pages`
-    /// outside the batch. A per-app failure is one `Err` in the vec.
+    /// Batched [`Self::list_federated_credentials`]: one `$batch` POST per 20 apps, returning
+    /// each app's credentials in input order. Graph caps federated credentials at ~20/app, so
+    /// the first (batched) page is almost always complete; the rare overflow finishes via
+    /// `collect_all_pages` outside the batch. A per-app failure is one `Err` in the vec.
     pub async fn batch_list_federated_credentials(
         &self,
         object_ids: &[String],
@@ -116,8 +113,8 @@ impl GraphClient {
         self.send_json(Method::POST, &path, body).await
     }
 
-    /// Updates a federated identity credential in place. `name` is immutable
-    /// in Graph, so the patch body deliberately has no `name` field.
+    /// Updates a federated identity credential in place; `name` is immutable in Graph, so the
+    /// patch body deliberately has no `name` field.
     pub async fn update_federated_credential(
         &self,
         object_id: &str,
@@ -143,18 +140,15 @@ impl GraphClient {
 
     /// Reads an application's live `keyCredentials` as **raw JSON**.
     ///
-    /// The typed [`KeyCredential`] deliberately does not model `key` (the
-    /// base64 DER certificate blob), and Graph returns it precisely on a
-    /// `$select=keyCredentials` read of a single application. Since
-    /// `keyCredentials` is a not-nullable, full-replace collection, a typed
-    /// round-trip on the fetch-modify-PATCH path writes every *surviving*
-    /// certificate back **without its key** — silently destroying live
-    /// credentials on an operation that was supposed to touch one entry.
+    /// The typed [`KeyCredential`] deliberately does not model `key` (the base64 DER
+    /// certificate blob), and Graph returns it precisely on a `$select=keyCredentials` read.
+    /// `keyCredentials` is a not-nullable, full-replace collection, so a typed round-trip on the
+    /// fetch-modify-PATCH path writes every *surviving* certificate back **without its key** —
+    /// silently destroying live credentials on an operation that was supposed to touch one entry.
     ///
-    /// So both mutators below go through raw JSON, which round-trips `key` and
-    /// every other unmodeled field byte-for-byte. This is the same shape
-    /// [`Self::remove_service_principal_key_credential`] was written against for
-    /// exactly this reason.
+    /// Both mutators below therefore go through raw JSON, which round-trips `key` and every
+    /// other unmodeled field byte-for-byte — the same shape
+    /// [`Self::remove_service_principal_key_credential`] was written against for this reason.
     async fn live_key_credentials(&self, object_id: &str) -> Result<Vec<serde_json::Value>> {
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "keyCredentials")];
@@ -166,17 +160,13 @@ impl GraphClient {
             .unwrap_or_default())
     }
 
-    /// Appends a certificate-credential entry to the application's
-    /// `keyCredentials` array. Graph requires the full array on PATCH, so we
-    /// fetch the current state first, append, and send the new list back —
-    /// as raw JSON, so the surviving entries keep their `key` (see
-    /// `Self::live_key_credentials`).
+    /// Appends a certificate-credential entry to the application's `keyCredentials` array:
+    /// fetch the live array, append, PATCH the full array back (Graph full-replaces it) — as
+    /// raw JSON, so the surviving entries keep their `key` (see `Self::live_key_credentials`).
     ///
-    /// Note: this writes a "verify-only" credential (no private key), which
-    /// is what users typically upload when an external issuer holds the
-    /// private key and signs JWTs locally. For full client-credentials flow,
-    /// users still need to use Graph's `addKey` action with a proof-of-
-    /// possession JWT — out of scope for v1.
+    /// Writes a "verify-only" credential (no private key) — what users upload when an external
+    /// issuer holds the key and signs JWTs. Full client-credentials flow still needs Graph's
+    /// `addKey` action with a proof-of-possession JWT — out of scope for v1.
     pub async fn add_key_credential(
         &self,
         object_id: &str,
@@ -190,16 +180,15 @@ impl GraphClient {
             .await
     }
 
-    /// Drops a certificate credential by `key_id`. Mirrors `add_key_credential`'s
-    /// fetch-modify-patch shape, raw JSON included — the audit's one-click
-    /// "remove expired credentials" Fix reaches this on apps that also hold a
-    /// live certificate, so stripping `key` from the survivors here is the
-    /// worst case of the bug it guards against.
+    /// Drops a certificate credential by `key_id` — the same fetch-modify-patch shape as
+    /// `add_key_credential`, raw JSON included: the audit's one-click "remove expired
+    /// credentials" Fix reaches this on apps that also hold a live certificate, so stripping
+    /// `key` from the survivors here is the worst case of the bug it guards against.
     ///
-    /// A `key_id` that is not on the application is `Err(GraphError::NotFound)`
-    /// and sends no PATCH: another admin (or a stale finding) removed it first,
-    /// and writing the unchanged array back would report a removal that never
-    /// happened. Callers that want "already gone" to count as done match on it.
+    /// A `key_id` not on the application is `Err(GraphError::NotFound)` and sends no PATCH:
+    /// another admin (or a stale finding) removed it first, and writing the unchanged array
+    /// back would report a removal that never happened. Callers that want "already gone" to
+    /// count as done match on it.
     pub async fn remove_key_credential(&self, object_id: &str, key_id: &str) -> Result<()> {
         let live = self.live_key_credentials(object_id).await?;
         let before = live.len();
@@ -218,15 +207,13 @@ impl GraphClient {
             .await
     }
 
-    /// Generates a self-signed SAML token-signing certificate on the service
-    /// principal (`addTokenSigningCertificate`). Returns the new certificate,
-    /// including its thumbprint; the caller then sets the SP's
-    /// `preferredTokenSigningKeyThumbprint` to activate it.
+    /// Generates a self-signed SAML token-signing certificate on the service principal
+    /// (`addTokenSigningCertificate`); returns the new certificate, including its thumbprint —
+    /// activation is the caller setting `preferredTokenSigningKeyThumbprint`.
     ///
-    /// Self-invalidates `CacheKind::ServicePrincipal`: this POST appends to
-    /// `keyCredentials`, which the cached SP projection `$select`s. Staging a
-    /// certificate is a write that ends here (activation is a separate call),
-    /// so without this the rollover view would read the pre-stage array back.
+    /// Self-invalidates `CacheKind::ServicePrincipal`: this POST appends to `keyCredentials`,
+    /// which the cached SP projection `$select`s, and staging ends here (activation is a
+    /// separate call) — without this the rollover view would read the pre-stage array back.
     pub async fn add_token_signing_certificate(
         &self,
         service_principal_id: &str,
@@ -243,25 +230,21 @@ impl GraphClient {
         Ok(cert)
     }
 
-    /// Removes one `keyCredentials` entry from a **service principal** by
-    /// `key_id` — the SP-side twin of [`Self::remove_key_credential`], which
-    /// only targets applications.
+    /// Removes one `keyCredentials` entry from a **service principal** by `key_id` — the
+    /// SP-side twin of [`Self::remove_key_credential`], which only targets applications.
     ///
-    /// `keyCredentials` is a full-collection PATCH, so this re-reads live state
-    /// and writes the whole array back, round-tripping every surviving entry as
-    /// raw JSON. A dropped entry here deletes a live signing certificate, so a
-    /// serialization failure must abort rather than write a partial array.
+    /// `keyCredentials` is a full-collection PATCH: this re-reads live state and writes the
+    /// whole array back, round-tripping every surviving entry as raw JSON. A dropped entry
+    /// deletes a live signing certificate, so a serialization failure must abort rather than
+    /// write a partial array.
     ///
-    /// `addTokenSigningCertificate` writes **three** objects per certificate, all
-    /// sharing one `customKeyIdentifier`: a `Sign` key, a `Verify` key, and a
-    /// **`passwordCredentials` entry** (the PFX password). Removing only the key
-    /// halves stranded that password credential on the service principal
-    /// forever, so this sweeps `passwordCredentials` by the same identifier —
-    /// otherwise every retired certificate left a permanent orphan behind.
+    /// `addTokenSigningCertificate` writes **three** objects per certificate, all sharing one
+    /// `customKeyIdentifier`: a `Sign` key, a `Verify` key, and a **`passwordCredentials`
+    /// entry** (the PFX password). Removing only the key halves stranded that password
+    /// credential forever, so this sweeps `passwordCredentials` by the same identifier.
     ///
-    /// A `key_id` that is not on the service principal is
-    /// `Err(GraphError::NotFound)` and sends no PATCH (nothing was written, so
-    /// there is no cache to invalidate), exactly as for
+    /// A `key_id` not on the service principal is `Err(GraphError::NotFound)` and sends no
+    /// PATCH (nothing was written, so there is no cache to invalidate) — as for
     /// [`Self::remove_key_credential`].
     pub async fn remove_service_principal_key_credential(
         &self,
@@ -282,9 +265,8 @@ impl GraphClient {
             .cloned()
             .unwrap_or_default();
 
-        // Resolve the target first: an absent key is already gone, and a PATCH
-        // would rewrite the unchanged arrays and report a removal that never
-        // happened.
+        // Resolve the target first: an absent key is already gone — a PATCH would rewrite the
+        // unchanged arrays and report a removal that never happened.
         let Some(target) = entries
             .iter()
             .find(|c| c.get("keyId").and_then(|v| v.as_str()) == Some(key_id))
@@ -313,10 +295,10 @@ impl GraphClient {
             })
             .collect();
 
-        // The certificate's PFX password rides `passwordCredentials` under the
-        // same `customKeyIdentifier`. Only drop it when we resolved a thumbprint
-        // to match on — without one we can't tell which password belongs to the
-        // key being retired, and removing the wrong one breaks a live cert.
+        // The certificate's PFX password rides `passwordCredentials` under the same
+        // `customKeyIdentifier`. Only drop it when a thumbprint is resolved — without one we
+        // can't tell which password belongs to the key being retired, and removing the wrong
+        // one breaks a live cert.
         let kept_passwords: Vec<serde_json::Value> = passwords
             .into_iter()
             .filter(|c| {

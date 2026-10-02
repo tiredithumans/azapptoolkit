@@ -25,15 +25,14 @@ pub const EXCHANGE_BASE: &str = "https://outlook.office365.com";
 /// carrying a `CmdletInput` envelope.
 ///
 /// This is the ExchangeOnlineManagement PowerShell module's own REST transport
-/// (the captured traffic [`ExchangeClient`]'s `anchor_mailbox` cites) and it has
-/// been exercised against live tenants, but it is **not** a contract Microsoft
-/// publishes for third parties. The documented Admin API is the preview
-/// `adminapi/v2.0/{tenant}/{Endpoint}` surface with `Exchange.ManageV2`
-/// (<https://learn.microsoft.com/exchange/reference/admin-api-get-started>);
+/// (the captured traffic [`ExchangeClient`]'s `anchor_mailbox` cites), exercised
+/// against live tenants, but **not** a contract Microsoft publishes for third
+/// parties. The documented Admin API is the preview `adminapi/v2.0` surface with
+/// `Exchange.ManageV2` (<https://learn.microsoft.com/exchange/reference/admin-api-get-started>);
 /// its endpoints (AcceptedDomain, Mailbox, MailboxFolderPermission,
 /// OrganizationConfig, DistributionGroupMember, DynamicDistributionGroupMember)
-/// cover none of the RBAC-for-Applications cmdlets in `rbac.rs`, and this
-/// gateway rejects a `ManageV2` token (see
+/// cover none of the RBAC-for-Applications cmdlets in `rbac.rs`, and the gateway
+/// rejects a `ManageV2` token (see
 /// `azapptoolkit_core::constants::EXCHANGE_SCOPES`).
 ///
 /// Migration trigger: when `New-/Get-/Remove-ManagementRoleAssignment`,
@@ -48,8 +47,8 @@ const X_ANCHOR_MAILBOX: HeaderName = HeaderName::from_static("x-anchormailbox");
 /// Thin client over the Exchange Online `adminapi/beta/{tenant}/InvokeCommand` gateway.
 ///
 /// Every call is a POST carrying a `CmdletInput` envelope; the gateway
-/// requires an `X-AnchorMailbox` routing hint on every request, which for the
-/// delegated admin flow is the signed-in admin's UPN.
+/// requires an `X-AnchorMailbox` routing hint on every request — the signed-in
+/// admin's UPN for the delegated admin flow.
 ///
 /// The surface is split by concern: `transport` owns the envelope POST
 /// (retried through `core::http_retry::with_retries`, with the retry class

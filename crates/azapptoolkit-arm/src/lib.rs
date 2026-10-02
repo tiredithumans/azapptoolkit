@@ -1,13 +1,12 @@
 //! Minimal Azure Resource Manager (ARM) client + Azure Monitor Logs query.
 //!
-//! Scope: the pieces needed to show a managed identity's **Azure RBAC**
-//! footprint — list subscriptions the signed-in user can reach, the role
-//! assignments held by a principal within each, and resolve role-definition
-//! names — plus the Azure Monitor Logs *data-plane* query client
-//! ([`LogAnalyticsClient`], its own host + token audience) used to read
-//! `MicrosoftGraphActivityLogs` for usage analysis. Talks to
-//! `https://management.azure.com` / `https://api.loganalytics.azure.com` and
-//! pulls bearer tokens through the shared
+//! The pieces needed to show a managed identity's **Azure RBAC** footprint —
+//! subscriptions the signed-in user can reach, the role assignments held by a
+//! principal within each, role-definition names — plus the Azure Monitor Logs
+//! *data-plane* query client ([`LogAnalyticsClient`], its own host + token
+//! audience) that reads `MicrosoftGraphActivityLogs` for usage analysis.
+//! Talks to `https://management.azure.com` / `https://api.loganalytics.azure.com`
+//! and pulls bearer tokens through the shared
 //! [`azapptoolkit_core::token::BearerProvider`], like the Graph / Key Vault
 //! clients.
 

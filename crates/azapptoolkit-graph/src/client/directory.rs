@@ -1,10 +1,9 @@
 use super::*;
 
 impl GraphClient {
-    /// Lists the SCIM provisioning (synchronization) jobs for a service
-    /// principal. Requires a `Synchronization.Read.All` token (see
-    /// [`Self::with_sync_token`]). `NotFound` (404) means provisioning isn't
-    /// configured; the caller treats that as an empty result.
+    /// Lists a service principal's SCIM synchronization jobs; a 404 means
+    /// provisioning isn't configured (callers treat that as empty). Requires the
+    /// `Synchronization.Read.All` token (see [`Self::with_sync_token`]).
     pub async fn list_synchronization_jobs(
         &self,
         service_principal_id: &str,
@@ -18,17 +17,14 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// Directory audit-log entries whose `targetResources` include any of
-    /// `object_ids` (the app registration's object id, and optionally its paired
-    /// service-principal id), most-recent first, capped at `top`. Requires an
+    /// Directory audit entries whose `targetResources` include any of `object_ids` (the app's
+    /// object id, optionally its paired SP id), most-recent first, capped at `top`. Requires the
     /// `AuditLog.Read.All` token (see [`Self::with_audit_log_token`]).
     ///
-    /// The `targetResources/any(...)` lambda filter is not contractually
-    /// guaranteed on Graph v1.0; a tenant that rejects it surfaces as
-    /// `GraphError::Api { status: 400, .. }`, which the command catches and
-    /// retries unfiltered via [`Self::list_directory_audits`], filtering
-    /// client-side. The caller sorts the result; ordering is not requested
-    /// server-side (combining `$filter` with `$orderby` is the fragile combo).
+    /// The `targetResources/any(...)` lambda is not contractually guaranteed on Graph v1.0; a
+    /// tenant that rejects it surfaces `GraphError::Api { status: 400, .. }`, which the command
+    /// retries unfiltered via [`Self::list_directory_audits`] and filters client-side. The
+    /// caller sorts: combining `$filter` with `$orderby` is the fragile combo.
     pub async fn list_directory_audits_for_app(
         &self,
         object_ids: &[String],
@@ -54,9 +50,9 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// Most-recent `top` directory audit-log entries tenant-wide (no filter).
-    /// Used both for a tenant-wide activity feed and as the fallback when the
-    /// per-app lambda filter is rejected. Requires an `AuditLog.Read.All` token.
+    /// Most-recent `top` directory audit entries tenant-wide (no filter) — the activity feed
+    /// and the fallback when the per-app lambda filter is rejected. Requires the
+    /// `AuditLog.Read.All` token.
     pub async fn list_directory_audits(&self, top: u32) -> Result<Vec<DirectoryAuditLog>> {
         let token = self.audit_log_token()?;
         let mut url = url::Url::parse(&format!("{}/auditLogs/directoryAudits", self.base_url))
@@ -66,15 +62,12 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// All Conditional Access policies in the tenant (a thin fetch — the caller
-    /// decides which apply to a given app). Requires a `Policy.Read.All` token
-    /// (see [`Self::with_policy_token`]). Follows `@odata.nextLink` with the same
-    /// scoped token, refusing any link to a foreign origin.
+    /// All Conditional Access policies (the caller decides which apply to an app). Requires the
+    /// `Policy.Read.All` token (see [`Self::with_policy_token`]). Follows `@odata.nextLink` with
+    /// the same scoped token, refusing foreign-origin links.
     ///
-    /// A 404 on the *first* request means the endpoint reports no policies →
-    /// `Ok(empty)`. A 404 (or any error) while paging propagates instead of
-    /// silently truncating an already-partial result, so the caller never
-    /// mistakes "lost auth mid-scan" for "no policies".
+    /// A 404 on the *first* request means no policies → `Ok(empty)`; a 404 or any error while
+    /// paging propagates, so "lost auth mid-scan" is never mistaken for "no policies".
     pub async fn list_conditional_access_policies(&self) -> Result<Vec<ConditionalAccessPolicy>> {
         let token = self.policy_token()?;
         let url = format!(
@@ -97,25 +90,20 @@ impl GraphClient {
         }
     }
 
-    /// The signed-in user's **active** directory roles (display name +
-    /// immutable `roleTemplateId`). Reads
-    /// `/me/transitiveMemberOf/microsoft.graph.directoryRole` — the OData cast
-    /// keeps only directory roles — via the verb-selected read token
-    /// (`Directory.Read.All`, in the sign-in bundle). PIM-eligible-but-inactive
-    /// roles do **not** appear (only activated assignments are memberships),
-    /// which is exactly the signal the readiness checklist wants: a role the
-    /// user must still activate reads as absent. Best-effort — callers that
-    /// can't read it (e.g. a tenant restricting directory reads) degrade to "?".
+    /// The signed-in user's **active** directory roles (display name + immutable
+    /// `roleTemplateId`). Reads `/me/transitiveMemberOf/microsoft.graph.directoryRole` — the
+    /// OData cast keeps only directory roles — on the verb-selected read token
+    /// (`Directory.Read.All`, in the sign-in bundle). PIM-eligible-but-inactive roles do
+    /// **not** appear (only activated assignments are memberships), so a role the user must
+    /// still activate reads as absent — exactly the readiness signal. Best-effort: callers
+    /// that can't read it (e.g. a tenant restricting directory reads) degrade to "?".
     ///
-    /// Callers must match on `role_template_id`, not the display name: the
-    /// `directoryRole` objects in long-lived tenants carry legacy names
+    /// Match on `role_template_id`, not the display name: long-lived tenants carry legacy names
     /// ("SharePoint Service Administrator", "Company Administrator").
     ///
-    /// The OData cast is an advanced query on directory objects, so Graph
-    /// rejects it with `400 Request_UnsupportedQuery` unless **both**
-    /// `ConsistencyLevel: eventual` and `$count=true` are sent. `id` must be
-    /// in the `$select` — Graph returns only the selected properties, and
-    /// [`ActiveDirectoryRole`] requires `id` to deserialize.
+    /// The OData cast is an advanced query, so Graph rejects it with `400 Request_UnsupportedQuery`
+    /// unless **both** `ConsistencyLevel: eventual` and `$count=true` are sent; `id` must be in
+    /// the `$select` or [`ActiveDirectoryRole`] fails to deserialize.
     pub async fn me_active_directory_roles(&self) -> Result<Vec<ActiveDirectoryRole>> {
         let params: [(&str, &str); 2] = [
             ("$select", "id,displayName,roleTemplateId"),
@@ -157,12 +145,10 @@ impl GraphClient {
     }
 
     /// The security/M365 groups a service principal is a direct member of
-    /// (`/servicePrincipals/{id}/memberOf/microsoft.graph.group`). The OData
-    /// cast is an advanced query on directory objects, so — like
-    /// [`Self::me_active_directory_roles`] — it needs **both**
-    /// `ConsistencyLevel: eventual` and `$count=true`, and `id` must be in the
-    /// `$select` or [`GroupSummary`] fails to deserialize. Reads ride the
-    /// verb-selected read token (`Directory.Read.All`); no extra scope needed.
+    /// (`/servicePrincipals/{id}/memberOf/microsoft.graph.group`). The OData cast is an advanced
+    /// query, so — like [`Self::me_active_directory_roles`] — it needs **both**
+    /// `ConsistencyLevel: eventual` and `$count=true`, and `id` in the `$select`. Rides the
+    /// verb-selected read token (`Directory.Read.All`); no extra scope.
     pub async fn list_service_principal_groups(
         &self,
         service_principal_id: &str,
@@ -178,17 +164,13 @@ impl GraphClient {
         self.collect_all_pages(page, true).await
     }
 
-    /// Batched [`Self::list_service_principal_groups`]: the group memberships of
-    /// many SPs in one `$batch` POST per 20. The `memberOf/microsoft.graph.group`
-    /// cast is an advanced query, so each sub-request carries its own
-    /// `ConsistencyLevel: eventual` header (the outer POST's headers don't reach
-    /// batched sub-requests) alongside `$count=true`. Returns each SP's group
-    /// list in input order; the rare overflow paginates outside the batch —
-    /// as an advanced query too, since Graph does not carry the header into
-    /// the `nextLink` request. The
-    /// caller treats a per-SP `Err` as "no groups" (matching the un-batched
-    /// path's degrade-to-empty), so a tenant that rejects `$count` in a batch
-    /// loses group data but never fails the backup.
+    /// Batched [`Self::list_service_principal_groups`], 20 SPs per `$batch` POST. The cast is an
+    /// advanced query, so each sub-request carries its own `ConsistencyLevel: eventual` header
+    /// (the outer POST's don't reach batched sub-requests) alongside `$count=true`. Returns each
+    /// SP's groups in input order; the rare overflow paginates outside the batch — as an
+    /// advanced query too, since Graph does not carry the header into the `nextLink` request.
+    /// A per-SP `Err` degrades to "no groups" (matching the un-batched path), so a tenant that
+    /// rejects `$count` in a batch loses group data but never fails the backup.
     pub async fn batch_list_service_principal_groups(
         &self,
         sp_ids: &[String],
@@ -212,12 +194,11 @@ impl GraphClient {
         self.finish_paged_batch(pages, true).await
     }
 
-    /// Adds a directory object (here: a service principal) as a member of a
-    /// group (`POST /groups/{id}/members/$ref`). The `@odata.id` body is built
-    /// from the configured base URL so sovereign clouds (and mock tests) point
-    /// at the right Graph host. Rides the `GroupMember.ReadWrite.All` token —
-    /// the default write bundle does not cover group membership. Graph rejects
-    /// adds to dynamic-membership groups (membership is rule-based) with a 400.
+    /// Adds a directory object (here: an SP) to a group (`POST /groups/{id}/members/$ref`);
+    /// the `@odata.id` is built from the configured base URL so sovereign clouds (and mocks)
+    /// hit the right host. Rides the `GroupMember.ReadWrite.All` token — the default write
+    /// bundle does not cover group membership. Graph 400s adds to dynamic-membership groups
+    /// (membership is rule-based).
     pub async fn add_group_member(&self, group_id: &str, member_object_id: &str) -> Result<()> {
         let token = self.group_member_token()?;
         let url = format!("{}/groups/{group_id}/members/$ref", self.base_url);
@@ -228,9 +209,8 @@ impl GraphClient {
             .await
     }
 
-    /// Removes a member from a group
-    /// (`DELETE /groups/{id}/members/{member-id}/$ref`). Same token contract
-    /// as [`Self::add_group_member`].
+    /// Removes a group member (`DELETE /groups/{id}/members/{member-id}/$ref`); same token
+    /// contract as [`Self::add_group_member`].
     pub async fn remove_group_member(&self, group_id: &str, member_object_id: &str) -> Result<()> {
         let token = self.group_member_token()?;
         let url = format!(
@@ -257,10 +237,9 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// Searches **mail-enabled** groups (distribution lists + mail-enabled
-    /// security / M365 groups) by display-name prefix, returning only those with
-    /// a mail address — for picking an SSO notification recipient. Unlike
-    /// [`Self::search_groups`], selects `mail`.
+    /// Mail-enabled groups (DLs + mail-enabled security/M365) by display-name prefix, only those
+    /// with a mail address — the SSO notification recipient picker. Unlike [`Self::search_groups`],
+    /// selects `mail`.
     pub async fn search_distribution_lists(&self, prefix: &str) -> Result<Vec<DirectoryObject>> {
         let filter = format!(
             "mailEnabled eq true and startswith(displayName,'{esc}')",
@@ -279,31 +258,27 @@ impl GraphClient {
             .collect())
     }
 
-    /// Best-effort fetch of the tenant's service-principal sign-in activity
-    /// (Entra **beta** `reports/servicePrincipalSignInActivities`). Requires an
-    /// `AuditLog.Read.All` token (see [`Self::with_audit_log_token`]) — the
-    /// documented least-privileged scope for this report, **not** `Reports.Read.All`
-    /// — plus Entra ID P1/P2 and a supported directory role (Reports Reader /
-    /// Security Reader / Security Administrator / Global Reader) on the signed-in
-    /// user. Returns `Err` when the token / consent / license / role is missing so
-    /// callers degrade gracefully (no sign-in data ⇒ no "unused app" flags).
-    /// Follows `@odata.nextLink`. Deliberately bypasses the shared retry/throttle
-    /// loop: this is an optional report, and a failure is handled, not retried.
-    /// The `nextLink` still rides the privileged `AuditLog.Read.All` bearer and is
-    /// attacker-influenced server output, so — like [`Self::get_json_absolute_with`]
-    /// and [`Self::list_conditional_access_policies`] — the pages are followed by
-    /// `collect_pages_from`, which origin-checks each nextLink before the token is
-    /// attached and bounds the walk at `MAX_PAGES` against a cyclic link.
+    /// Best-effort tenant-wide SP sign-in activity (Entra **beta**
+    /// `reports/servicePrincipalSignInActivities`). Requires the `AuditLog.Read.All` token (see
+    /// [`Self::with_audit_log_token`]) — the documented least-privileged scope, **not**
+    /// `Reports.Read.All` — plus Entra ID P1/P2 and a Reports Reader / Security Reader /
+    /// Security Administrator / Global Reader role on the signed-in user. `Err` when the token /
+    /// consent / license / role is missing, so callers degrade (no data ⇒ no "unused app" flags).
+    ///
+    /// Deliberately bypasses the shared retry/throttle loop: an optional report — a failure is
+    /// handled, not retried. The `nextLink` still rides the privileged bearer and is
+    /// attacker-influenced server output, so pages follow via `collect_pages_from` (like
+    /// [`Self::get_json_absolute_with`] and [`Self::list_conditional_access_policies`]):
+    /// origin-checking each nextLink before the token attaches, bounded at `MAX_PAGES` against
+    /// a cyclic link.
     pub async fn list_service_principal_sign_in_activities(
         &self,
     ) -> Result<Vec<ServicePrincipalSignInActivity>> {
-        // Read-through cache: this report is a slow, rate-limited beta endpoint
-        // (up to 200 pages) that is fetched whole once per app on the Activity
-        // tab AND once by every audit run — all reading the same tenant-wide
-        // data. Cache the full Vec per tenant so clicking through N apps (and the
-        // audit) collapses to one fetch per TTL window. It's read-only telemetry,
-        // so the 60-min Permissions TTL + the sign-out tenant sweep are
-        // sufficient invalidation — no mutation makes it stale.
+        // Read-through cache: a slow, rate-limited beta endpoint (up to 200 pages) fetched whole
+        // once per app on the Activity tab AND once by every audit run — the same tenant-wide
+        // data. Caching the full Vec per tenant collapses N apps + the audit to one fetch per
+        // TTL window; it's read-only telemetry, so the 60-min Permissions TTL + the sign-out
+        // sweep are sufficient — no mutation makes it stale.
         let cache_key = format!("{}|sp_sign_in_activities", self.tenant_id);
         if let Some(cached) = self
             .cache
@@ -313,12 +288,10 @@ impl GraphClient {
         }
         let token = self.audit_log_token()?;
 
-        // `$top` matters more here than anywhere else: Graph's default page of
-        // 100 would make a 10k-SP tenant ~100 serial round trips against the
-        // slowest, most rate-limited read in the crate. The endpoint documents
-        // `$top` support, the size carries into every `@odata.nextLink`, and an
-        // over-ask is clamped silently — so one parameter also lifts the shared
-        // `MAX_PAGES` ceiling from 20k rows to ~200k.
+        // `$top` matters most here: the default page of 100 would make a 10k-SP tenant ~100
+        // serial round trips on the slowest, most rate-limited read in the crate. The endpoint
+        // documents `$top` support, the size carries into every nextLink, and an over-ask is
+        // clamped silently — so it also lifts the shared `MAX_PAGES` ceiling from 20k to ~200k.
         let url = format!(
             "{}/reports/servicePrincipalSignInActivities?$select=appId,lastSignInActivity&$top={MAX_PAGE_SIZE}",
             self.beta_base()

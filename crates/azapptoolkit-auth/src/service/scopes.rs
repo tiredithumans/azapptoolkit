@@ -52,12 +52,13 @@ impl EntraAuthService {
     /// customization in the SSO wizard and the detail "SSO" tab). Creating,
     /// updating and deleting the policy object needs only the Policy scope, but
     /// the service-principal `$ref` assign/list/remove are documented delegated
-    /// as "Application.ReadWrite.All and Policy.ReadWrite.ApplicationConfiguration"
-    /// (Learn "Assign claimsMappingPolicy", "List assigned claimsMappingPolicy"),
-    /// and the policy's `appliesTo` needs a Policy scope plus Application read.
-    /// One bundle covers all of them, so a single consent covers both reading
-    /// and saving. Admin-consent-only; acquired on demand, never at sign-in, so
-    /// SSO setups that don't customize claims never request it and a tenant that
+    /// as "Application.ReadWrite.All and
+    /// Policy.ReadWrite.ApplicationConfiguration" (Learn "Assign
+    /// claimsMappingPolicy", "List assigned claimsMappingPolicy"), and the
+    /// policy's `appliesTo` needs a Policy scope plus Application read. One
+    /// bundle covers all of them, so a single consent covers both reading and
+    /// saving. Admin-consent-only; acquired on demand, never at sign-in, so SSO
+    /// setups that don't customize claims never request it and a tenant that
     /// hasn't consented can still sign in and browse.
     pub fn default_graph_policy_write_scopes(&self) -> Vec<String> {
         self.graph_scopes(&[
@@ -99,9 +100,9 @@ impl EntraAuthService {
     /// every scope other than the reserved OIDC ones (`offline_access`,
     /// `openid`, `profile`) under this cloud's Graph resource. This is the CAE
     /// pairing: `AppState::graph_for` consumes every Graph scope set through
-    /// `ScopedTokenAdapter::new_cae`, so an interactive flow that seeds one of
-    /// them must mint a CAE token (the token cache keys on CAE-ness), while
-    /// Exchange / ARM / Key Vault / Log Analytics stay non-CAE.
+    /// `ScopedTokenAdapter::new_cae`, so an interactive flow that seeds one
+    /// must mint a CAE token (the token cache keys on CAE-ness), while Exchange
+    /// / ARM / Key Vault / Log Analytics stay non-CAE.
     pub fn is_graph_scope_set(&self, scopes: &[String]) -> bool {
         let prefix = format!("{}/", self.cloud.graph_resource());
         let mut resource_scopes = scopes
@@ -132,8 +133,8 @@ impl EntraAuthService {
     /// ([`CloudEnvironment::exchange_resource`](azapptoolkit_core::cloud::CloudEnvironment::exchange_resource);
     /// commercial `https://outlook.office365.com`), plus `offline_access`, for
     /// managing RBAC for Applications. A distinct audience, so a distinct token
-    /// from the Graph read/write tokens; it is redeemed on demand from the
-    /// sign-in refresh token the first time an Exchange operation runs.
+    /// from the Graph read/write tokens; redeemed on demand from the sign-in
+    /// refresh token the first time an Exchange operation runs.
     pub fn default_exchange_scopes(&self) -> Vec<String> {
         // `EXCHANGE_SCOPES` is the classic `Exchange.Manage` — the
         // InvokeCommand gateway rejects `ManageV2` (preview per-cmdlet API

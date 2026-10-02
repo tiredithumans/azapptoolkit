@@ -5,19 +5,19 @@
 //!   2. Build the authorize URL (read-only scopes from
 //!      `azapptoolkit_core::constants::GRAPH_READ_SCOPES` plus `offline_access`),
 //!      open it in the system browser — or, if that fails, hand the URL to the
-//!      app's browser fallback. Write scopes are consented incrementally
-//!      the first time a mutating Graph call needs them.
-//!   3. Accept requests on the listener until a redirect carrying the pending
-//!      `state` arrives (others are answered 400 and ignored), pull `code`,
-//!      reply with a result page, shut down.
+//!      app's browser fallback. Write scopes are consented incrementally the
+//!      first time a mutating Graph call needs them.
+//!   3. Accept requests until a redirect carrying the pending `state` arrives
+//!      (others are answered 400 and ignored), pull `code`, reply with a result
+//!      page, shut down.
 //!   4. Exchange the code at `/token` with our own reqwest call so we can read
 //!      `id_token` from the response.
 //!   5. Resolve tenant id + account oid from the ID token claims.
 //!
 //! Access tokens are kept in memory only. Callers invoke
 //! [`EntraAuthService::access_token_for_scopes`] on every Graph request; it
-//! refreshes lazily 60s ahead of expiry under a single shared mutex, and caches
-//! per scope set so the read and write tokens coexist.
+//! refreshes lazily 60s ahead of expiry under the shared refresh locks and
+//! caches per scope set so the read and write tokens coexist.
 //!
 //! Module layout: `wire` (AAD response shapes, error classification and
 //! redaction, claims decoding), `loopback` (redirect listener + browser
@@ -62,16 +62,16 @@ const REFRESH_LEEWAY_SECS: i64 = 60;
 /// and block the caller forever.
 const REDIRECT_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Per-`(tenant, scope_key)` refresh locks, created lazily. See the
-/// `EntraAuthService::refresh_locks` field.
+/// Per-`(tenant, scope_key)` refresh locks, created lazily. See
+/// `EntraAuthService::refresh_locks`.
 type RefreshLocks = Mutex<HashMap<(String, String), Arc<AsyncMutex<()>>>>;
 
-/// Launches the `/authorize` URL for an interactive flow. See the
-/// `EntraAuthService::open_browser` field.
+/// Launches the `/authorize` URL for an interactive flow. See
+/// `EntraAuthService::open_browser`.
 type BrowserOpener = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
 /// Offers the `/authorize` URL in the app when the browser can't be launched.
-/// See the `EntraAuthService::browser_fallback` field.
+/// See `EntraAuthService::browser_fallback`.
 type BrowserFallback = Arc<dyn Fn(Option<&str>) + Send + Sync>;
 
 /// Withdraws a manually offered sign-in link when the browser leg of the flow
@@ -94,20 +94,20 @@ pub struct EntraAuthService {
     /// `https://login.microsoftonline.com`). A field (not a const) so tests can
     /// point the token/authorize endpoints at a mock server.
     auth_root: String,
-    /// Selected Microsoft cloud — drives the Graph/Exchange scope audiences (and,
-    /// via `auth_root`, the login host). Chosen by the caller
-    /// ([`Self::new_in_cloud`]): `AZAPPTOOLKIT_CLOUD`, else the desktop build's
-    /// bake, else commercial.
+    /// Selected Microsoft cloud — drives the Graph/Exchange scope audiences
+    /// (and, via `auth_root`, the login host). Chosen by the caller
+    /// ([`Self::new_in_cloud`]): `AZAPPTOOLKIT_CLOUD`, else the desktop
+    /// build's bake, else commercial.
     cloud: CloudEnvironment,
     cache: Arc<TokenCache>,
     /// Per-`(tenant, scope_key)` refresh locks, created lazily. The token cache
     /// also keys on CAE-ness; the lock deliberately does not — a CAE and a
-    /// non-CAE refresh of the same scope set serialising is harmless and rare. A
-    /// refresh holds its lock across the token round trip (up to the 30s HTTP
-    /// timeout) and across `post_token`'s retry backoff — intended, because the
-    /// same-key waiters then get the retried result instead of each re-POSTing
-    /// into the same throttle. A single global lock would let a slow Graph
-    /// refresh stall an unrelated Key Vault or cross-tenant refresh. Same-key
+    /// non-CAE refresh of the same scope set serialising is harmless and rare.
+    /// A refresh holds its lock across the token round trip (up to the 30s HTTP
+    /// timeout) and across `post_token`'s retry backoff — intended, so the
+    /// same-key waiters get the retried result instead of each re-POSTing into
+    /// the same throttle. A single global lock would let a slow Graph refresh
+    /// stall an unrelated Key Vault or cross-tenant refresh. Same-key
     /// concurrency still collapses to one network call via the double-checked
     /// cache read taken under the lock.
     refresh_locks: RefreshLocks,
@@ -210,17 +210,18 @@ impl EntraAuthService {
                 .append_pair("scope", scope)
                 .append_pair("state", state)
                 // OIDC nonce binds the returned id_token to this request: it's
-                // echoed in the token's `nonce` claim and verified after exchange
-                // (Microsoft marks it required when an id_token is requested).
+                // echoed in the token's `nonce` claim and verified after
+                // exchange (Microsoft marks it required when an id_token is
+                // requested).
                 .append_pair("nonce", nonce)
                 .append_pair("code_challenge", challenge.as_str())
                 .append_pair("code_challenge_method", "S256")
                 .append_pair("prompt", prompt);
             // Best-effort pre-fill of the consent screen with the signed-in
             // account (absent when the ID token carried no `preferred_username`).
-            // This is a UX hint, not the identity guarantee — a consent screen
-            // can still switch tenant/account — but the post-exchange tid/oid
-            // check in `consent_for_scopes` rejects a token for a different one.
+            // A UX hint, not the identity guarantee — a consent screen can
+            // still switch tenant/account — but the post-exchange tid/oid check
+            // in `consent_for_scopes` rejects a token for a different one.
             if let Some(hint) = login_hint {
                 pairs.append_pair("login_hint", hint);
             }
@@ -239,8 +240,9 @@ impl EntraAuthService {
     /// other rejection is terminal and classified exactly as before. A timeout
     /// is terminal too — a 30s-silent endpoint retried would hold the caller's
     /// per-scope refresh lock for minutes — and so is a `Retry-After` above
-    /// [`TOKEN_RETRY_AFTER_MAX_SECS`], for the same reason. `params` carry the refresh token /
-    /// code verifier, so only the grant type ever reaches the log label.
+    /// [`TOKEN_RETRY_AFTER_MAX_SECS`], for the same reason. `params` carry the
+    /// refresh token / code verifier, so only the grant type ever reaches the
+    /// log label.
     async fn post_token(&self, authority: &str, params: &[(&str, &str)]) -> Result<TokenResponse> {
         let url = format!("{authority}/oauth2/v2.0/token");
         let label = format!("aad token {}", grant_type(params).unwrap_or("unknown"));
@@ -276,8 +278,8 @@ impl EntraAuthService {
         );
         // Captured before the body consumes `resp`: on the non-Entra branch
         // below it is the one genuinely diagnostic, non-content signal — an
-        // `text/html` here says "a proxy answered", which is the actual
-        // question an operator is asking.
+        // `text/html` here says "a proxy answered", which is the question an
+        // operator is asking.
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -317,8 +319,8 @@ impl EntraAuthService {
         } else {
             // Body wasn't a TokenErrorBody. Tracing is wired to a daily rolling
             // FILE appender at info, so this lands on disk — and every other AAD
-            // error path here is meticulously redacted (`redacted_aad_error`
-            // drops `error_description` because it embeds tenant/user GUIDs and
+            // error path here is redacted (`redacted_aad_error` drops
+            // `error_description` because it embeds tenant/user GUIDs and
             // client IPs). This branch fires precisely when the responder is
             // NOT Entra: a TLS-intercepting proxy, WAF or captive portal, which
             // commonly echo the offending request back in the block page. So
@@ -335,7 +337,7 @@ impl EntraAuthService {
         if retry_after_secs.is_some_and(|s| s > TOKEN_RETRY_AFTER_MAX_SECS) {
             // Waiting it out would hold the caller's per-scope refresh lock
             // (and, on the interactive paths, the operator) for minutes; fail
-            // now with the throttle error instead.
+            // now with the throttle error.
             return Attempt::Done(Err(err));
         }
         match status.as_u16() {
@@ -356,8 +358,8 @@ impl EntraAuthService {
     }
 }
 
-/// The longest `Retry-After` a `/token` retry waits out. A throttle or 5xx that
-/// asks for longer is terminal: the shared policy honours up to
+/// The longest `Retry-After` a `/token` retry waits out. A throttle or 5xx
+/// asking for longer is terminal: the shared policy honours up to
 /// `core::http_retry::RETRY_AFTER_MAX_SECS` (minutes) for Graph / ARM writes,
 /// but a token call runs under the per-(tenant, scope) refresh lock, so every
 /// same-key caller would queue behind the wait.
@@ -378,7 +380,7 @@ fn grant_type<'a>(params: &[(&str, &'a str)]) -> Option<&'a str> {
 /// [`RetryClass::NonIdempotent`] — only a 429 (refused before any work) is
 /// retried. That is narrower than "retry a transport error before any
 /// response", which the shared seam cannot express without inventing a reason;
-/// a failed code exchange is recovered by the operator selecting Sign in again.
+/// a failed code exchange is recovered by the operator signing in again.
 fn retry_class_for(params: &[(&str, &str)]) -> RetryClass {
     match grant_type(params) {
         Some("refresh_token") => RetryClass::Idempotent,
@@ -400,7 +402,8 @@ impl EntraAuthService {
     /// `cae` requests a Continuous Access Evaluation token: the `cp1` claims
     /// ride both the `/authorize` URL and the code redemption, so the token the
     /// caller seeds into the CAE cache slot is one the Graph adapters
-    /// (`ScopedTokenAdapter::new_cae`) may serve. Pass it for a Graph scope set.
+    /// (`ScopedTokenAdapter::new_cae`) may serve. Pass it for a Graph scope
+    /// set.
     async fn run_auth_code_flow(
         &self,
         scopes: &[String],
@@ -422,7 +425,7 @@ impl EntraAuthService {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let csrf_state = CsrfToken::new_random();
         // Fresh per-request nonce, verified against the id_token's `nonce` claim
-        // after the code exchange (reuses the CSPRNG-backed token primitive).
+        // after the code exchange (reuses the CSPRNG-backed primitive).
         let nonce = CsrfToken::new_random();
 
         let scope = scopes.join(" ");
@@ -441,7 +444,7 @@ impl EntraAuthService {
 
         // Log the non-sensitive fields needed to diagnose AAD rejections
         // (missing-scope, wrong-client, wrong-redirect). PKCE `code_challenge`
-        // and CSRF `state` stay redacted by stripping the query string for the
+        // and CSRF `state` stay redacted — the query string is stripped for the
         // endpoint URL; scope/client_id/redirect_uri are logged explicitly.
         let mut redacted_url = auth_url.clone();
         redacted_url.set_query(None);
@@ -484,8 +487,8 @@ impl EntraAuthService {
         drop(manual_link);
         let code = code.map_err(|_| AuthError::Cancelled)??;
 
-        // Moved, not copied: this is the only verifier string, and it is wiped
-        // on drop. (oauth2 has no zeroize, so the random pre-image inside its
+        // Moved, not copied: this is the only verifier string, wiped on drop.
+        // (oauth2 has no zeroize, so the random pre-image inside its
         // `new_random_len` is freed un-wiped — outside our control, and useful
         // only alongside the single-use code redeemed moments later.)
         let verifier_secret = Zeroizing::new(pkce_verifier.into_secret());
@@ -503,7 +506,7 @@ impl EntraAuthService {
         let token = self.post_token(&authority, &params).await?;
         let claims = parse_id_token(token.id_token.as_deref().map(String::as_str))?;
         // Bind the id_token to THIS request: its `nonce` must equal the value we
-        // sent. An absent/mismatched nonce means the token isn't ours — reject it.
+        // sent. An absent/mismatched nonce means the token isn't ours — reject.
         if claims.nonce.as_deref() != Some(nonce.secret().as_str()) {
             return Err(AuthError::TokenExchange("id_token nonce mismatch".into()));
         }
@@ -515,7 +518,7 @@ impl EntraAuthService {
         // by domain (env, settings.json or the `.env` bake — the config screen
         // only accepts a GUID) fails the tid check below every time. Say so
         // before sending the operator through the browser for nothing. A GUID
-        // never contains a dot, so this needs no second copy of the GUID rule.
+        // never contains a dot, so no second copy of the GUID rule is needed.
         if self.tenant_id.contains('.') {
             return Err(AuthError::TokenExchange(format!(
                 "configured tenant {} is a domain; azapptoolkit needs the Directory (tenant) ID GUID from the app registration's Overview page",
@@ -533,7 +536,7 @@ impl EntraAuthService {
             .ok_or_else(|| AuthError::TokenExchange("id token missing tid".into()))?;
         // Defense-in-depth: Entra already enforces the audience server-side
         // for single-tenant registrations, but a local check produces a
-        // clearer error if anything ever drifts (e.g. a misconfigured
+        // clearer error if anything drifts (e.g. a misconfigured
         // AZAPPTOOLKIT_TENANT_ID against a multi-tenant app reg).
         if tenant_id != self.tenant_id {
             return Err(AuthError::TokenExchange(format!(
@@ -562,15 +565,15 @@ impl EntraAuthService {
         Ok(SignInOutcome { tenant })
     }
 
-    /// Obtains **interactive incremental consent** for `scopes`: runs a fresh
+    /// Obtains **interactive incremental consent** for `scopes`: one fresh
     /// authorization-code round trip (system browser + loopback) with
     /// `prompt=consent`, pinned to the already-signed-in account, then seeds
     /// the token cache under `scopes` and persists the refreshed refresh token.
     ///
-    /// This is the recovery path for [`AuthError::ConsentRequired`]: a silent
+    /// The recovery path for [`AuthError::ConsentRequired`]: a silent
     /// `refresh_token` grant can only *use* consent that already exists, never
     /// *obtain* it, so the first use of a scope the tenant hasn't consented to
-    /// must take a user through the browser once. After this returns `Ok`, the
+    /// takes a user through the browser once. After this returns `Ok`, the
     /// next [`Self::access_token_for_scopes`] for the same `scopes` is silent.
     pub async fn consent_for_scopes(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
         self.interactive_for_scopes(tenant_id, scopes, "consent", "consent")
@@ -579,15 +582,15 @@ impl EntraAuthService {
 
     /// Completes a **Conditional Access step-up** for `scopes`' resource: one
     /// browser round trip with `prompt=login`, pinned to the signed-in account,
-    /// that forces the credential plus whatever interactive challenge (MFA,
+    /// forcing the credential plus whatever interactive challenge (MFA,
     /// registration, an external factor) a policy demands for that audience.
     /// The new refresh token carries the satisfied claims, so later silent
     /// refreshes for the resource succeed.
     ///
-    /// This is the recovery path for [`AuthError::InteractionRequired`]. It is
+    /// The recovery path for [`AuthError::InteractionRequired`]. It is
     /// scope-targeted on purpose: re-authenticating on the Graph read scopes
     /// never meets a policy scoped to ARM (or Exchange, or Log Analytics), so
-    /// the next refresh for that audience failed again — a loop.
+    /// the next refresh for that audience would fail again — a loop.
     pub async fn step_up_for_scopes(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
         self.interactive_for_scopes(tenant_id, scopes, "login", "verification")
             .await
@@ -607,13 +610,12 @@ impl EntraAuthService {
     ///   still valid while the refresh behind a write needs MFA), so this runs
     ///   unconditionally.
     /// - **Any other set** (ARM, Exchange, Key Vault, Log Analytics) is first
-    ///   acquired silently and stepped up only when that fails with
-    ///   [`AuthError::InteractionRequired`]. Nothing in the error names the
-    ///   audience that raised it, so a surface whose command touches two
-    ///   audiences (Log Analytics then ARM for the usage query) asks for both
-    ///   in order; the audience that needs no step-up costs no browser round
-    ///   trip. Any other silent failure (e.g. `ConsentRequired`) is returned
-    ///   as-is: `prompt=login` cannot fix it.
+    ///   acquired silently and stepped up only on [`AuthError::InteractionRequired`].
+    ///   Nothing in the error names the audience that raised it, so a surface
+    ///   whose command touches two audiences (Log Analytics then ARM for the
+    ///   usage query) asks for both in order; the one needing no step-up costs
+    ///   no browser round trip. Any other silent failure (e.g.
+    ///   `ConsentRequired`) is returned as-is: `prompt=login` cannot fix it.
     pub async fn step_up_where_required(&self, tenant_id: &str, scopes: &[String]) -> Result<()> {
         if self.is_graph_scope_set(scopes) {
             let read = self.default_graph_read_scopes();
@@ -631,7 +633,7 @@ impl EntraAuthService {
     /// [`Self::step_up_for_scopes`]: one interactive round trip for `scopes`
     /// with `prompt`, identity-checked against the session (`action` names the
     /// flow in a mismatch error), cached under the requested `scopes` — in the
-    /// CAE slot for a Graph scope set, matching the adapter that consumes it.
+    /// CAE slot for a Graph scope set, matching the consuming adapter.
     async fn interactive_for_scopes(
         &self,
         tenant_id: &str,
@@ -648,9 +650,10 @@ impl EntraAuthService {
 
         // The round trip needs an ID token (to confirm the same account
         // completed it) and a refresh token, so ensure the OIDC/offline scopes
-        // are present even for bare resource `.default` scopes (e.g. ARM), which
-        // omit them. The access token's audience is still set by the resource
-        // scope; these reserved scopes only affect the id/refresh tokens.
+        // are present even for bare resource `.default` scopes (e.g. ARM),
+        // which omit them. The access token's audience is still set by the
+        // resource scope; these reserved scopes only affect the id/refresh
+        // tokens.
         let mut auth_scopes = scopes.to_vec();
         for reserved in ["offline_access", "openid", "profile"] {
             if !auth_scopes.iter().any(|s| s == reserved) {
@@ -701,8 +704,8 @@ impl EntraAuthService {
     /// tokens (which revoke promptly on a policy/credential change). When
     /// `challenge` is set — the base64 claims from a `401 insufficient_claims`
     /// CAE challenge — it's forwarded to the token endpoint and the cache is
-    /// bypassed, so the re-minted token satisfies the resource's new claims. The
-    /// access-token audience is still set by `scopes`.
+    /// bypassed, so the re-minted token satisfies the resource's new claims.
+    /// The access-token audience is still set by `scopes`.
     pub async fn access_token_for_scopes_cae(
         &self,
         tenant_id: &str,
@@ -732,11 +735,11 @@ impl EntraAuthService {
     /// computes expiry, parses the issued scopes (`scope_fallback` covers
     /// responses that omit the `scope` echo), persists a rotated refresh token,
     /// and seeds the access-token cache under `cache_scopes` in the slot `cae`
-    /// names — which must be how the token was minted. The keyring write is
-    /// a blocking OS syscall (Windows Credential Manager iterates numbered
-    /// chunk entries), so it runs off the async worker via `spawn_blocking` —
-    /// centralizing here is what keeps the interactive flows from stalling
-    /// other tokio tasks with an inline write.
+    /// names — which must be how the token was minted. The keyring write is a
+    /// blocking OS syscall (Windows Credential Manager iterates numbered chunk
+    /// entries), so it runs off the async worker via `spawn_blocking` —
+    /// centralizing here keeps the interactive flows from stalling other tokio
+    /// tasks with an inline write.
     async fn store_token_outcome(
         &self,
         tenant_id: &str,
@@ -759,7 +762,7 @@ impl EntraAuthService {
         }
         let access = AccessToken {
             // Moves the buffer out without a copy: `AccessToken` wipes it on
-            // drop, and the emptied `Zeroizing` left behind wipes nothing.
+            // drop; the emptied `Zeroizing` left behind wipes nothing.
             token: std::mem::take(&mut *token.access_token),
             expires_at,
             scopes,
@@ -803,11 +806,11 @@ impl EntraAuthService {
             .ok_or(AuthError::NotSignedIn)?;
 
         // Hold the plaintext refresh secret in a Zeroizing buffer so the copy
-        // we POST is wiped from memory when this scope ends, not left on a freed
-        // heap page. The keyring read is a blocking OS syscall (Windows
-        // Credential Manager iterates numbered chunk entries), so run it off the
-        // async worker via spawn_blocking — otherwise it stalls other tokio
-        // tasks while this holds the refresh lock.
+        // we POST is wiped when this scope ends, not left on a freed heap
+        // page. The keyring read is a blocking OS syscall (Windows Credential
+        // Manager iterates numbered chunk entries), so run it off the async
+        // worker via spawn_blocking — otherwise it stalls other tokio tasks
+        // while this holds the refresh lock.
         let refresh_secret = zeroize::Zeroizing::new({
             let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
             tokio::task::spawn_blocking(move || load_refresh_token(&t, &oid))
@@ -824,7 +827,7 @@ impl EntraAuthService {
             ("refresh_token", refresh_secret.as_str()),
             ("scope", scope.as_str()),
         ];
-        // CAE: advertise cp1 and/or forward a claims challenge to the token endpoint.
+        // CAE: advertise cp1 and/or forward a claims challenge.
         if let Some(c) = claims {
             params.push(("claims", c));
         }
@@ -835,10 +838,10 @@ impl EntraAuthService {
                 // drop any cached access tokens for the tenant so the next call
                 // surfaces a clean "not signed in" rather than looping on a
                 // stale token — but only if the keyring still holds THAT token.
-                // Refresh locks are per scope set, so this POST can have been in
-                // flight while a `reauthenticate`/consent stored a new one; an
-                // unconditional purge would erase the session the operator just
-                // re-established. The compare and the delete run under the
+                // Refresh locks are per scope set, so this POST can have been
+                // in flight while a `reauthenticate`/consent stored a new one;
+                // an unconditional purge would erase the session the operator
+                // just re-established. The compare and delete run under the
                 // keyring's chunk-set lock (on the blocking pool), so no save
                 // can land between them.
                 tracing::warn!(tenant_id = %tenant.tenant_id, %reason, "refresh token rejected, purging");
@@ -850,7 +853,7 @@ impl EntraAuthService {
                 .await;
                 if let Ok(Ok(PurgeOutcome::Superseded)) = purge {
                     // The newer session stays; the caller's silent retry
-                    // (`refresh_session`) picks it up without a browser.
+                    // (`refresh_session`) picks it up.
                     tracing::info!(
                         tenant_id = %tenant.tenant_id,
                         "refresh token was replaced while this refresh was in flight; keeping the newer session"
@@ -859,10 +862,11 @@ impl EntraAuthService {
                 }
                 // Deleted, already gone, or the keyring failed (ignored, as the
                 // purge always was): the session is dead either way. One narrow
-                // window remains: a `reauthenticate` that stores a new token and
-                // re-registers the tenant after the delete above but before the
-                // two lines below would lose its cached tokens and registration
-                // (its keyring token survives, so launch restore still finds it).
+                // window remains: a `reauthenticate` that stores a new token
+                // and re-registers the tenant after the delete above but before
+                // the two lines below would lose its cached tokens and
+                // registration (its keyring token survives, so launch restore
+                // still finds it).
                 self.cache.invalidate_tenant(&tenant.tenant_id);
                 self.known_tenants.lock().remove(&tenant.tenant_id);
                 return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
@@ -908,7 +912,7 @@ impl EntraAuthService {
     /// truthfully says "still signed in" and Sign out can be retried), never a
     /// cleared session whose refresh token survives for the next launch to
     /// restore. For a refresh token split across several keyring chunks
-    /// (Windows) a failure after the first chunk is gone still leaves the
+    /// (Windows), a failure after the first chunk is gone still leaves the
     /// in-memory session, but the stored token can no longer be loaded, so the
     /// next launch does not restore it.
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
@@ -925,14 +929,14 @@ impl EntraAuthService {
     /// *current* directory state, so the new token reflects roles that became
     /// active after sign-in — notably a just-activated PIM role (its `wids`
     /// claim) — letting a user who activates e.g. "Exchange Administrator"
-    /// mid-session recover without a full sign-out/sign-in. Every other audience
-    /// token (Exchange, write, ARM, …) was dropped too, so each re-mints lazily
-    /// on its next use and likewise picks up the new role. Re-acquiring the
-    /// (already-consented) read scopes both validates the session and surfaces a
-    /// dead refresh token immediately as [`AuthError::RefreshTokenMissing`] —
-    /// the same "sign in again" signal a lazy refresh would have produced.
-    /// The read token is minted CAE, seeding the slot the Graph adapter
-    /// (`ScopedTokenAdapter::new_cae`) reads.
+    /// mid-session recover without a full sign-out/sign-in. Every other
+    /// audience token (Exchange, write, ARM, …) was dropped too, so each
+    /// re-mints lazily on its next use and likewise picks up the new role.
+    /// Re-acquiring the (already-consented) read scopes both validates the
+    /// session and surfaces a dead refresh token immediately as
+    /// [`AuthError::RefreshTokenMissing`] — the same "sign in again" signal a
+    /// lazy refresh would have produced. The read token is minted CAE, seeding
+    /// the slot the Graph adapter (`ScopedTokenAdapter::new_cae`) reads.
     pub async fn refresh_session(&self, tenant_id: &str) -> Result<()> {
         self.cache.invalidate_tenant(tenant_id);
         self.access_token_for_scopes_cae(tenant_id, &self.default_graph_read_scopes(), None)
@@ -948,9 +952,9 @@ impl EntraAuthService {
     /// [`TenantContext`] it persisted at sign-in (`settings.json`'s
     /// `last_account` — the pointer, never the token). From there this is an
     /// ordinary silent acquisition of the sign-in read scopes: the same lazy
-    /// shared refresh every Graph call takes, which is also what makes it a real
-    /// proof of the session rather than a claim — a revoked or expired token
-    /// fails here, at launch, instead of on the operator's first click.
+    /// shared refresh every Graph call takes, which is also what makes it a
+    /// real proof of the session rather than a claim — a revoked or expired
+    /// token fails here, at launch, instead of on the operator's first click.
     ///
     /// Errors exactly as [`Self::refresh_session`] does, `RefreshTokenMissing`
     /// included; a dead session is the *expected* outcome, so the caller shows
@@ -960,10 +964,10 @@ impl EntraAuthService {
     pub async fn restore_session(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
         // `access_token_inner` resolves the account — and therefore the keyring
         // key — through `known_tenants`, so the context has to be registered
-        // before the grant. This is the one flow where that entry comes off disk
-        // instead of a completed round trip, which is precisely why it must not
-        // outlive a failed attempt: an unproven context left behind would let
-        // any later command mint tokens for a session the operator was never
+        // before the grant. This is the one flow where that entry comes off
+        // disk instead of a completed round trip, which is precisely why it must
+        // not outlive a failed attempt: an unproven context left behind would
+        // let any later command mint tokens for a session the operator was never
         // shown as signed into. `InvalidGrant` already removes it; the removal
         // is idempotent and also covers the failures that don't (a network
         // outage, a locked keyring), leaving the service exactly as found.
@@ -986,21 +990,21 @@ impl EntraAuthService {
 
     /// Interactively re-authenticates the already-signed-in account, minting a
     /// fresh refresh + access token *without* ending the session or dropping the
-    /// tenant's data caches. This is the recovery path for a **dead** session —
-    /// an expired/revoked refresh token (surfaced as [`AuthError::InvalidGrant`],
+    /// tenant's data caches. The recovery path for a **dead** session — an
+    /// expired/revoked refresh token (surfaced as [`AuthError::InvalidGrant`],
     /// re-mapped to [`AuthError::RefreshTokenMissing`] after the stale token is
     /// purged) or a missing one — which the silent [`Self::refresh_session`]
-    /// can't fix, sparing the user a full sign-out/sign-in (the latter would also
-    /// wipe the cached lists + audit run). It is also the step-up for the Graph
-    /// read scopes: a tenant-wide MFA or sign-in-frequency policy fails
+    /// can't fix, sparing the user a full sign-out/sign-in (the latter would
+    /// also wipe the cached lists + audit run). It is also the step-up for the
+    /// Graph read scopes: a tenant-wide MFA or sign-in-frequency policy fails
     /// `refresh_session` with [`AuthError::InteractionRequired`], and this very
     /// round trip is what satisfies it.
     ///
     /// Runs one browser round trip with `prompt=login` (forcing a fresh
     /// credential entry — the right behaviour for a revoked session) pinned to
     /// the current account via `login_hint`. Like [`Self::consent_for_scopes`],
-    /// it refuses to cache a token for a different identity: re-authenticating as
-    /// another tenant/account would let that operator read this session's
+    /// it refuses to cache a token for a different identity: re-authenticating
+    /// as another tenant/account would let that operator read this session's
     /// tenant-keyed data caches, so a mismatch errors and the user is told to
     /// Sign Out to switch accounts.
     ///
@@ -1028,8 +1032,7 @@ impl EntraAuthService {
         )
         .await?;
         // Restore the (validated) context: a prior `InvalidGrant` removed it, and
-        // `tenant_context()` and every token lookup (`access_token_inner`) read
-        // `known_tenants`.
+        // `tenant_context()` and every token lookup read `known_tenants`.
         self.known_tenants
             .lock()
             .insert(tenant.tenant_id.clone(), tenant.clone());
@@ -1038,18 +1041,17 @@ impl EntraAuthService {
         })
     }
 
-    /// Synchronous lookup of a single signed-in tenant's context. Returns
-    /// `None` if that tenant has not signed in this session. Used by client
-    /// factories that need the account (e.g. the admin UPN for the Exchange
-    /// `X-AnchorMailbox`) without awaiting.
+    /// Synchronous lookup of a single signed-in tenant's context; `None` if that
+    /// tenant has not signed in this session. Used by client factories that
+    /// need the account (e.g. the admin UPN for the Exchange `X-AnchorMailbox`)
+    /// without awaiting.
     pub fn tenant_context(&self, tenant_id: &str) -> Option<TenantContext> {
         self.known_tenants.lock().get(tenant_id).cloned()
     }
 }
 
 /// Keyring delete on the blocking pool — the same per-chunk OS round trips as
-/// save/load, and it takes `CHUNK_SET_LOCK`, so never inline on a
-/// tokio worker.
+/// save/load, and it takes `CHUNK_SET_LOCK`, so never inline on a tokio worker.
 async fn delete_refresh_token_off_worker(tenant_id: &str, account_oid: &str) -> Result<()> {
     let (t, oid) = (tenant_id.to_string(), account_oid.to_string());
     tokio::task::spawn_blocking(move || delete_refresh_token(&t, &oid))
@@ -1061,10 +1063,10 @@ async fn delete_refresh_token_off_worker(tenant_id: &str, account_oid: &str) -> 
 /// consent/login screen can switch tenant or account even with a
 /// `login_hint`; caching such a token would cross this session's tenant-keyed
 /// data caches with another operator's view. One implementation for every
-/// interactive post-sign-in flow, so a future one can't check `tid` but
-/// forget `oid`. (`sign_in` has a different contract — a tid-only match
-/// against the *configured* tenant — and stays separate.) `action` names the
-/// flow in the error ("consent", "re-authentication").
+/// interactive post-sign-in flow, so a future one can't check `tid` but forget
+/// `oid`. (`sign_in` has a different contract — a tid-only match against the
+/// *configured* tenant — and stays separate.) `action` names the flow in the
+/// error ("consent", "re-authentication").
 fn ensure_same_identity(claims: &IdClaims, tenant: &TenantContext, action: &str) -> Result<()> {
     if claims.tid.as_deref() != Some(tenant.tenant_id.as_str()) {
         return Err(AuthError::Authorization(format!(
@@ -1587,10 +1589,10 @@ mod tests {
     }
 
     /// Every keyring call in the service runs on the blocking pool: they are
-    /// OS round trips per chunk and take a blocking mutex, so an inline one parks a
-    /// tokio worker (often while holding a refresh lock). The call must sit on
-    /// the `spawn_blocking` line or, where rustfmt wraps the closure, the line
-    /// right below it.
+    /// OS round trips per chunk and take a blocking mutex, so an inline one
+    /// parks a tokio worker (often while holding a refresh lock). The call must
+    /// sit on the `spawn_blocking` line or, where rustfmt wraps the closure, the
+    /// line right below it.
     #[test]
     fn keyring_calls_stay_on_the_blocking_pool() {
         let source = include_str!("mod.rs");
@@ -2620,8 +2622,8 @@ mod tests {
         let (tenant, oid) = ("per-key-tenant", "per-key-oid");
         // Each answer is held for `delay`; the responder records when each
         // request ARRIVED. Serialised behind one lock, the second cannot even
-        // be sent until the first is answered, so the gap between arrivals is
-        // at least `delay` by construction — no wall-clock budget to flake on.
+        // be sent until the first is answered, so the arrival gap is at least
+        // `delay` by construction — no wall-clock budget to flake on.
         let delay = std::time::Duration::from_secs(2);
         let arrivals = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
         let seen = arrivals.clone();
@@ -2647,7 +2649,7 @@ mod tests {
         b.unwrap();
         server.verify().await;
         // The per-key locks let the second audience's request reach the
-        // endpoint while the first was still being held.
+        // endpoint while the first was still held.
         let arrivals = arrivals.lock();
         assert_eq!(arrivals.len(), 2);
         let gap = arrivals[1].duration_since(arrivals[0]);

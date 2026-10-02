@@ -2,8 +2,8 @@
 //!
 //! The taxonomy is generated from [`azapptoolkit_core::http_error_enum`] — one
 //! definition shared with `GraphError` and `ArmError`. `InvalidName` is
-//! genuinely this crate's own (client-side vault/secret name validation), and
-//! `ui_hint` stays hand-written for the same reason it does in ARM.
+//! genuinely this crate's own (client-side vault/secret name validation);
+//! `ui_hint` stays hand-written, as in ARM.
 
 pub type Result<T> = std::result::Result<T, KeyVaultError>;
 
@@ -21,11 +21,11 @@ azapptoolkit_core::http_error_enum! {
 }
 
 impl KeyVaultError {
-    /// Actionable role guidance appended to the raw message when surfacing the
-    /// error (mirrors `ExchangeError::ui_hint`). A 403 means the signed-in user
-    /// lacks an Azure RBAC data-plane role on the vault — sourced from the
-    /// `keyvault_secrets` capability so the text matches the readiness checklist
-    /// and the proactive label (it also flags the RBAC-permission-mode caveat).
+    /// Actionable role guidance appended to the raw message (mirrors
+    /// `ExchangeError::ui_hint`). A 403 = the signed-in user lacks an Azure
+    /// RBAC data-plane role on the vault; sourced from the `keyvault_secrets`
+    /// capability so the text matches the readiness checklist and proactive
+    /// label (which also flags the RBAC-permission-mode caveat).
     pub fn ui_hint(&self) -> Option<&'static str> {
         match self {
             KeyVaultError::Forbidden(_) => {

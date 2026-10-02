@@ -1,13 +1,11 @@
 //! Microsoft Graph JSON batching (`POST /$batch`).
 //!
-//! Combines up to 20 GET requests into a single HTTP round trip, cutting the
-//! request count (and throttling exposure) on the audit's per-app fan-out. The
-//! outer POST goes through the shared retry/throttle loop; inner per-request
-//! statuses are mapped to the same typed [`GraphError`]s as an individual GET,
-//! and inner 429 and 5xx sub-responses re-batch just the retried sub-requests
-//! (honoring an inner `Retry-After`) on the shared `RetryBudget` — the outer
-//! retry loop can't see those, and the same GET sent alone would be retried.
-//! See <https://learn.microsoft.com/en-us/graph/json-batching>.
+//! Combines up to 20 GETs into one round trip, cutting the request count (and throttle exposure)
+//! on the audit's per-app fan-out. The outer POST goes through the shared retry/throttle loop;
+//! inner statuses map to the same typed [`GraphError`]s as an individual GET, and inner 429/5xx
+//! sub-responses re-batch just the retried sub-requests (honoring an inner `Retry-After`) on the
+//! shared `RetryBudget` — the outer loop can't see those, and the same GET sent alone would be
+//! retried. See <https://learn.microsoft.com/en-us/graph/json-batching>.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,10 +25,9 @@ use crate::error::{GraphError, Result};
 /// Max sub-requests Microsoft Graph accepts in one `$batch` POST.
 const BATCH_MAX: usize = 20;
 
-/// `$batch` POSTs in flight at once. The audit prewarm sends up to 250 chunks
-/// for a 5k-app tenant; strictly serial POSTs left the run idle for minutes
-/// before scoring started. 4 stays well under the scoring loop's own fan-out
-/// pressure while cutting the dead time roughly 4x.
+/// `$batch` POSTs in flight at once. The audit prewarm sends up to 250 chunks for a 5k-app
+/// tenant; serial POSTs left the run idle for minutes before scoring started. 4 cuts the dead
+/// time roughly 4x while staying well under the scoring loop's own fan-out pressure.
 const CHUNK_CONCURRENCY: usize = 4;
 
 #[derive(serde::Deserialize)]
@@ -81,15 +78,13 @@ fn map_batch_response<T: DeserializeOwned>(r: BatchSubResponse) -> Result<T> {
 }
 
 impl GraphClient {
-    /// Issues many GET requests in a single `POST /$batch` (max 20 per call;
-    /// chunks automatically, up to `CHUNK_CONCURRENCY` chunks in flight).
-    /// Returns one `Result<T>` per input URL, **in order**.
-    /// Inner per-request statuses map to the same typed `GraphError`s as an
-    /// individual GET; inner 429s and 5xx re-batch just that subset (honoring
-    /// an inner `Retry-After`) on the shared retry budget, the same policy the
-    /// GET would get sent alone. `urls` are relative to the Graph
-    /// version root (e.g. `"/servicePrincipals?$filter=..."`). The `$batch` POST
-    /// rides the **read** token — it wraps reads, so a browse-only session can use it.
+    /// Issues many GETs in a single `POST /$batch` (max 20 per call; chunks
+    /// automatically, up to `CHUNK_CONCURRENCY` chunks in flight), returning one `Result<T>`
+    /// per URL **in order**. Inner statuses map to the same typed `GraphError`s as an
+    /// individual GET; inner 429/5xx re-batch just that subset (honoring an inner `Retry-After`)
+    /// on the shared retry budget — the policy the GET would get sent alone. `urls` are relative
+    /// to the Graph version root (e.g. `"/servicePrincipals?$filter=..."`). Rides the **read**
+    /// token — it wraps reads, so a browse-only session can use it.
     pub async fn batch_get_json<T: DeserializeOwned>(
         &self,
         urls: &[String],
@@ -97,13 +92,11 @@ impl GraphClient {
         self.batch_get_json_with_headers(urls, &[]).await
     }
 
-    /// [`Self::batch_get_json`] on a **caller-supplied** bearer instead of the
-    /// default read token.
+    /// [`Self::batch_get_json`] on a **caller-supplied** bearer.
     ///
-    /// `/sites/{id}/permissions` is a `Sites.*`-scoped read, so the SharePoint
-    /// sweep can't ride the read token the way the directory batches do — yet it
-    /// is by far the largest un-batched fan-out in the app (one GET per site, up
-    /// to the sweep's 5000-site cap, where 20 GETs fit in one POST).
+    /// `/sites/{id}/permissions` is a `Sites.*`-scoped read and can't ride the read token the
+    /// way the directory batches do — yet it is by far the largest un-batched fan-out (one GET
+    /// per site, up to the sweep's 5000-site cap; 20 GETs fit in one POST).
     pub(crate) async fn batch_get_json_scoped<T: DeserializeOwned>(
         &self,
         token: &Arc<dyn BearerProvider>,
@@ -112,11 +105,10 @@ impl GraphClient {
         self.batch_get_json_inner(token, urls, &[]).await
     }
 
-    /// Like [`Self::batch_get_json`] but applies `headers` to **every**
-    /// sub-request. The lone caller that needs this is an advanced query
-    /// (`memberOf/microsoft.graph.group` with `$count`), which Graph rejects
-    /// without a per-sub-request `ConsistencyLevel: eventual` — the outer POST's
-    /// headers don't propagate to the batched sub-requests.
+    /// [`Self::batch_get_json`] applying `headers` to **every** sub-request. The lone caller
+    /// that needs this is an advanced query (`memberOf/microsoft.graph.group` with `$count`),
+    /// which Graph rejects without a per-sub-request `ConsistencyLevel: eventual` — the outer
+    /// POST's headers don't propagate to the batched sub-requests.
     pub async fn batch_get_json_with_headers<T: DeserializeOwned>(
         &self,
         urls: &[String],
@@ -132,11 +124,10 @@ impl GraphClient {
         urls: &[String],
         headers: &[(&str, &str)],
     ) -> Result<Vec<Result<T>>> {
-        // Grouped `join_all` rather than `stream::buffered`: the stream
-        // adapter's higher-ranked lifetime bounds break the Send inference the
-        // Tauri command handlers need (rust-lang/rust#64552). A group barrier
-        // costs a little wall-clock vs a sliding window, but results stay in
-        // input order, which the index-keyed callers depend on.
+        // Grouped `join_all` rather than `stream::buffered`: the stream adapter's higher-ranked
+        // lifetime bounds break the Send inference the Tauri command handlers need
+        // (rust-lang/rust#64552). The group barrier costs a little wall-clock vs a sliding
+        // window, but results stay in input order, which the index-keyed callers depend on.
         let chunks: Vec<&[String]> = urls.chunks(BATCH_MAX).collect();
         let mut out: Vec<Result<T>> = Vec::with_capacity(urls.len());
         for group in chunks.chunks(CHUNK_CONCURRENCY) {
@@ -153,27 +144,23 @@ impl GraphClient {
         Ok(out)
     }
 
-    /// Resolves a batch of `Paged<T>` sub-results into fully-paginated item
-    /// lists, preserving input order and the per-item `Result`. The common case
-    /// (a small collection whose first page is complete) does no extra I/O; only
-    /// a sub-response that still carries an `@odata.nextLink` follows it — once,
-    /// outside the batch — via `collect_all_pages`. The outer `Result` is always
-    /// `Ok` (a whole-batch failure was already surfaced by `batch_get_json`'s
-    /// `?`); it's kept so paged-batch helpers read uniformly with the rest.
+    /// Resolves a batch of `Paged<T>` sub-results into fully-paginated item lists, preserving
+    /// input order and the per-item `Result`. The common case (a small collection whose first
+    /// page is complete) does no extra I/O; only a sub-response carrying `@odata.nextLink` is
+    /// followed — once, outside the batch — via `collect_all_pages`. The outer `Result` is
+    /// always `Ok` (a whole-batch failure already surfaced via `batch_get_json`'s `?`); it's
+    /// kept so paged-batch helpers read uniformly.
     ///
-    /// `consistency_eventual` states whether the sub-requests were issued as
-    /// advanced queries (a `ConsistencyLevel: eventual` sub-request header, as
-    /// `batch_list_service_principal_groups` sends). Graph does not carry the
-    /// header into the `nextLink` request, so an overflow continuation must
-    /// restate it — and a plain batch must not add it, or pages 2+ come from
+    /// `consistency_eventual` states whether the sub-requests were advanced queries (the
+    /// `ConsistencyLevel: eventual` sub-request header, as `batch_list_service_principal_groups`
+    /// sends). Graph does not carry the header into the `nextLink` request, so an overflow
+    /// continuation must restate it — and a plain batch must not add it, or pages 2+ come from
     /// the eventually-consistent index while page 1 came from the directory.
     ///
-    /// The overflow continuations are resolved serially (one `collect_all_pages`
-    /// at a time) **by design**: an order-preserving `join_all` would parallelize
-    /// them, but the overflow path almost never fires — federated creds cap at
-    /// ~20/app and role assignments rarely page beyond the first response — so
-    /// concurrency here is speculative. Left serial until profiling shows it
-    /// matters (a deliberate no-action item from the caching/perf assessment).
+    /// Overflow continuations resolve serially **by design**: an order-preserving `join_all`
+    /// would parallelize them, but the path almost never fires (federated creds cap at ~20/app,
+    /// role assignments rarely page) — left serial until profiling shows it matters (a deliberate
+    /// no-action item from the caching/perf assessment).
     pub(crate) async fn finish_paged_batch<T: DeserializeOwned>(
         &self,
         pages: Vec<Result<Paged<T>>>,
@@ -189,19 +176,16 @@ impl GraphClient {
         Ok(out)
     }
 
-    /// [`Self::finish_paged_batch`] for a batch issued under a **specific**
-    /// token.
+    /// [`Self::finish_paged_batch`] for a batch issued under a **specific** token.
     ///
-    /// The unscoped version continues through `get_json_absolute_with`, which selects
-    /// its provider by verb and therefore picks the default read token. That is
-    /// right for the batches whose sub-requests the read token already covers,
-    /// and wrong for a batch deliberately issued via `batch_get_json_scoped`:
-    /// `/sites/{id}/permissions` needs `Sites.FullControl.All`, which the
-    /// verb-selected Directory.Read.All token does not carry, so page 2 of a
-    /// site whose grant list overflowed came back 403 while page 1 succeeded.
+    /// The unscoped version continues through `get_json_absolute_with`, which picks the default
+    /// read token by verb — right for batches the read token already covers, wrong for a batch
+    /// issued via `batch_get_json_scoped`: `/sites/{id}/permissions` needs `Sites.FullControl.All`,
+    /// which the verb-selected Directory.Read.All does not carry, so page 2 of a site whose grant
+    /// list overflowed came back 403 while page 1 succeeded.
     ///
-    /// `collect_pages_from` re-applies the same-origin guard on every hop, so
-    /// the scoped bearer never leaves the Graph origin.
+    /// `collect_pages_from` re-applies the same-origin guard on every hop, so the scoped bearer
+    /// never leaves the Graph origin.
     pub(crate) async fn finish_paged_batch_scoped<T: DeserializeOwned + Send>(
         &self,
         token: &Arc<dyn BearerProvider>,
@@ -236,10 +220,9 @@ impl GraphClient {
         // `pending` holds the original chunk indices still awaiting a non-retry
         // response; the sub-request `id` is the index so order is preserved.
         let mut pending: Vec<usize> = (0..urls.len()).collect();
-        // The SAME schedule the four unified clients use — this loop retries
-        // only the throttled or failed sub-requests, so it can't be
-        // `with_retries`, but the budget and the backoff curve are not its to
-        // re-derive.
+        // The SAME schedule the four unified clients use — this loop retries only
+        // throttled/failed sub-requests, so it can't be `with_retries`, but the budget
+        // and backoff curve are not its to re-derive.
         let mut budget = RetryBudget::new();
         // Inner 429s/5xx surfaced as `Throttled`/`Server` because the budget
         // was spent — logged once after the loop so an exhausted re-batch is
@@ -267,13 +250,11 @@ impl GraphClient {
             let bytes = self
                 .send_core_url_with(
                     token,
-                    // A POST by transport, a read by semantics: every
-                    // sub-request this helper builds is a GET (`batch_sub_url`
-                    // takes no body and the callers are all `batch_get_*`), so
-                    // replaying the batch cannot double-commit anything. Stated
-                    // explicitly rather than inferred from the verb, which would
-                    // read this as a mutation and stop retrying it — `$batch` is
-                    // the throttle-happiest endpoint in the API.
+                    // A POST by transport, a read by semantics: every sub-request is a GET
+                    // (`batch_sub_url` takes no body; callers are all `batch_get_*`), so replaying
+                    // cannot double-commit anything. Stated explicitly rather than inferred from
+                    // the verb, which would read this as a mutation and stop retrying — `$batch`
+                    // is the throttle-happiest endpoint in the API.
                     RetryClass::Idempotent,
                     Method::POST,
                     &batch_url,
@@ -361,12 +342,10 @@ impl GraphClient {
     }
 }
 
-/// Whether an inner `$batch` sub-response status is re-batched. Mirrors the
-/// single-request classification in `transport.rs` (`send_core_url_with`),
-/// where every status that is not a terminal 4xx — a 429 or any 5xx — is an
-/// `Attempt::Retry`: the same GET must get the same retry policy whether it
-/// travels batched or alone. Every sub-request here is a GET, so replaying a
-/// 5xx cannot double-commit anything.
+/// Whether an inner `$batch` sub-response status is re-batched. Mirrors the single-request
+/// classification in `transport.rs` (`send_core_url_with`): every status that is not a terminal
+/// 4xx — a 429 or any 5xx — is an `Attempt::Retry`, so the same GET gets the same policy
+/// batched or alone. Every sub-request here is a GET, so replaying a 5xx cannot double-commit.
 fn retried_sub_status(status: u16) -> bool {
     status == 429 || status >= 500
 }

@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::permissions::ResolvedPermission;
 
-/// Safety cap on total apps materialized for the App Registrations browse list,
-/// mirroring the audit/credential scans. Well above real-world app-registration
-/// counts.
+/// Safety cap on apps materialized by a tenant-wide enumeration; well above
+/// real-world app-registration counts.
 ///
 /// Shared by every tenant-wide enumeration so the caps can't drift: the browse
 /// list, the Enterprise Apps pairing join, the audit, the credential sweep and
@@ -27,10 +26,10 @@ pub const APPS_MAX: usize = 10_000;
 ///
 /// The App Registrations list can detect its own truncation (`total >=
 /// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
-/// and Managed Identities lists cannot: both filter the SP index down (dropping
-/// managed identities / keeping only them), so their row counts sit below the
-/// cap even on a tenant whose index truncated — a `len() >= cap` check there
-/// would never fire. They ask this instead.
+/// and Managed Identities lists cannot — both filter the SP index down
+/// (dropping / keeping only managed identities) — so their row counts sit
+/// below the cap even on a tenant whose index truncated, and a `len() >= cap`
+/// check would never fire. They ask this instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryIndexStatus {
     /// The SP index hit its row cap, so every surface reading it covers only
@@ -65,13 +64,13 @@ pub struct ApplicationDetail {
 }
 
 /// Lean App Registrations list row, flattened to the scalars the list and the
-/// inventory export actually render, plus the paired Enterprise App SP id
-/// (when one exists in this tenant). The credential arrays deliberately do
-/// **not** cross IPC — at thousands of rows they dominate the payload — so
-/// their list-relevant aspects arrive pre-computed (`credential_status`,
-/// per-kind counts, soonest expiry) and the detail pane re-fetches the full
-/// [`Application`]. Returned by `list_applications_with_pairing`; the original
-/// `list_applications` shape is unchanged.
+/// inventory export render, plus the paired Enterprise App SP id. The
+/// credential arrays deliberately do **not** cross IPC — at thousands of rows
+/// they dominate the payload — so their list-relevant aspects arrive
+/// pre-computed (`credential_status`, per-kind counts, soonest expiry) and the
+/// detail pane re-fetches the full [`Application`]. Returned by
+/// `list_applications_with_pairing`; the original `list_applications` shape is
+/// unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationListRowDto {
     pub id: String,
@@ -169,14 +168,14 @@ pub struct UpdateApplicationInput {
     pub notes: Option<String>,
 }
 
-/// Current Authentication-tab settings for an app registration: per-platform
-/// reply (redirect) URLs, the optional front-channel logout URL, the implicit-
-/// grant flags, and the fallback-public-client flag. Returned by
-/// `get_application_authentication`, which reads `web`/`spa`/`publicClient` —
-/// none of which are on the list-shape [`Application`] — and accepted back by
-/// `set_application_authentication` as its full-replace input (each list
-/// replaces that platform's set wholesale, so the editor loads current values
-/// before saving). One type for both directions so get/set can't drift.
+/// Authentication-tab settings for an app registration: per-platform reply
+/// (redirect) URLs, the front-channel logout URL, the implicit-grant flags,
+/// and the fallback-public-client flag. `get_application_authentication`
+/// returns it (reading `web`/`spa`/`publicClient` — none of which are on the
+/// list-shape [`Application`]) and `set_application_authentication` accepts it
+/// back as its full-replace input (each list replaces that platform's set
+/// wholesale, so the editor loads current values before saving). One type for
+/// both directions so get/set can't drift.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationAuthenticationDto {
@@ -284,10 +283,10 @@ pub struct UploadedCertificate {
 /// persisted by the backend.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GeneratedCertificateResult {
-    /// SHA-1 thumbprint, uppercase hex — the thumbprint Entra stores as
-    /// `customKeyIdentifier`, the Credentials tab lists, the portal displays,
-    /// and a client assertion carries as `x5t`. Unqualified "thumbprint" means
-    /// this one everywhere in Entra, so this is the value an operator acts on.
+    /// SHA-1 thumbprint, uppercase hex — the value Entra stores as
+    /// `customKeyIdentifier` and a client assertion carries as `x5t`.
+    /// Unqualified "thumbprint" means this one everywhere in Entra, so this is
+    /// the value an operator acts on.
     pub thumbprint: String,
     /// SHA-256 thumbprint of the same DER, uppercase hex. Offered alongside for
     /// verification/pinning; it matches nothing Entra reports, so it is always
@@ -306,11 +305,11 @@ pub struct GeneratedCertificateResult {
     pub expires: String,
 }
 
-// Hand-written rather than derived: the workspace treats a derived `Debug` on
-// a secret as a defect, because any `?dto` in a `tracing` macro puts the
-// plaintext straight into the daily rolling log file. Mirrors
-// `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
-// `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
+// Hand-written: the workspace treats a derived `Debug` on a secret as a
+// defect — any `?dto` in a `tracing` macro puts the plaintext straight into
+// the daily rolling log file. Mirrors `dto::backup::RegeneratedSecret`,
+// `core::models::PasswordCredential`, `auth::AccessToken`,
+// `keyvault::SecretValue` and `cert::GeneratedCert`.
 impl std::fmt::Debug for GeneratedCertificateResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GeneratedCertificateResult")
@@ -392,9 +391,9 @@ mod tests {
 
     /// A plaintext RSA private key must never reach a `Debug` string; the
     /// daily rolling log appender writes whatever a `?dto` produces. The .pfx
-    /// bundle and its password are the same key in another wrapper, so they are
-    /// held to the same rule — the thumbprints, which identify the certificate
-    /// and are the reason the reveal exists, must still come through.
+    /// bundle and its password are the same key in another wrapper — the same
+    /// rule — while the thumbprints, which identify the certificate, must
+    /// still come through.
     #[test]
     fn a_generated_private_key_and_pfx_are_redacted_in_debug() {
         let result = GeneratedCertificateResult {

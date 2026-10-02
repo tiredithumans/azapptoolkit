@@ -40,13 +40,13 @@ impl ExchangeClient {
         first_optional_as(values)
     }
 
-    /// Ensures a mail-enabled security group named `name` (alias `alias`) exists,
-    /// creating it via `New-DistributionGroup -Type Security` if missing.
-    /// Idempotent: returns the existing group when present. `-IgnoreNamingPolicy`
-    /// keeps the exact toolkit naming convention so a later lookup by name
-    /// resolves it. A freshly created group can return without its
-    /// `DistinguishedName` populated, so we re-resolve in that case — the DN is
-    /// what a `MemberOfGroup` management-scope filter must reference.
+    /// Ensures a mail-enabled security group named `name` (alias `alias`)
+    /// exists, creating it via `New-DistributionGroup -Type Security` if
+    /// missing; idempotent. `-IgnoreNamingPolicy` keeps the exact toolkit
+    /// naming convention so a later lookup by name resolves it. A freshly
+    /// created group can return without its `DistinguishedName` populated, so we
+    /// re-resolve in that case — the DN is what a `MemberOfGroup`
+    /// management-scope filter must reference.
     pub async fn ensure_security_group(&self, name: &str, alias: &str) -> Result<ExoGroup> {
         if let Some(existing) = self.get_distribution_group(name).await? {
             return Ok(existing);
