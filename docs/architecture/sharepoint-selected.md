@@ -50,7 +50,9 @@ Four things about the sub-site three that the site path does not have to deal wi
   every site in the tenant; *nothing* walks every folder, and there is no reverse `appId → items`
   lookup either. So there is no sweep, no cached index, and
   `list_selected_item_permissions` is a **verify-by-URL** read. An empty result means "this resource
-  has no app grants", never "this app has no item-level access". Any future panel must say so.
+  has no app grants", never "this app has no item-level access". Any future panel must say so —
+  the Permission tester's grants table (F094) says so on the section and in its empty-message, and
+  its GUI tests pin the wording.
 
 A grant at any sub-site level also **breaks SharePoint permission inheritance** on its target and
 consumes one of the library's unique permission scopes (guidance: stay under 5 000 per library).

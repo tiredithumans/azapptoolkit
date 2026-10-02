@@ -4,7 +4,9 @@
 //! resource"). The SharePoint side takes any securable a Selected scope can
 //! address — a site collection, a list or document library, a folder, or a
 //! single file — and the backend walks the inheritance chain, so a file with no
-//! entry of its own still reports the access it inherits.
+//! entry of its own still reports the access it inherits. After a SharePoint
+//! probe the resolved resource's own permission entries are listed underneath
+//! the verdict, with a confirm-gated revoke per app grant (F094).
 //! It exercises the authoritative live checks on the backend (`test_mailbox_access`
 //! / `test_site_access`) rather than reading the declared manifest, so it reflects
 //! effective access (org-wide grant vs scoped vs none). Both checks are keyed on
@@ -16,15 +18,16 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
-use crate::bindings::{TenantContext, auth, search};
+use crate::bindings::{TenantContext, auth, search, sharepoint};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, FormError, SectionHeader, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, DataTable, FormError, SectionHeader, TabBar, TabBarItem,
 };
 use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_deferred_blur::use_deferred_blur;
 use crate::state::use_session;
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 use crate::util::no_tenant;
 
@@ -66,6 +69,21 @@ pub fn PermissionTesterView() -> impl IntoView {
     // Sites.FullControl.All scope; a `consent_required` flips this on.
     let needs_consent = RwSignal::new(false);
 
+    // The tested SharePoint URL's own permission entries + the revoke dialog.
+    // The verdict answers "can this app reach here?"; the table shows what is
+    // actually granted ON the resolved resource, so a grant made in the
+    // wizard can be undone here (F094). Verify-by-URL: empty means "no grants
+    // on this resource", never "no item-level access" — the caveat travels
+    // with the table.
+    // The tuple carries the tested URL alongside the entries so a revoke
+    // targets the resource that was actually inspected, not whatever the field
+    // says meanwhile.
+    let item_perms: RwSignal<Option<(String, Vec<sharepoint::SelectedItemPermissionDto>)>> =
+        RwSignal::new(None);
+    let perms_busy = RwSignal::new(false);
+    // (grantee label, permission id) of the row whose revoke dialog is open.
+    let pending_revoke: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+
     // Reset state when the tenant changes.
     Effect::new(move |_| {
         let _ = tenant.get();
@@ -78,6 +96,9 @@ pub fn PermissionTesterView() -> impl IntoView {
         result.set(None);
         error.set(None);
         needs_consent.set(false);
+        item_perms.set(None);
+        perms_busy.set(false);
+        pending_revoke.set(None);
     });
 
     // A "Test access…" affordance beside a scope badge that can't state its own
@@ -204,8 +225,11 @@ pub fn PermissionTesterView() -> impl IntoView {
     };
 
     // Zero-arg so it can be called both from the button (wrapped) and from the
-    // post-consent retry, without the event-arg type leaking in.
-    let do_test = move || {
+    // post-consent retry, without the event-arg type leaking in. A `Callback`
+    // rather than a closure because three sites share it (button, post-consent
+    // retry, post-revoke re-probe) and `move` closures would each have to own
+    // it; a Callback is `Copy`.
+    let do_test = Callback::new(move |_: ()| {
         if busy.get() {
             return;
         }
@@ -231,6 +255,9 @@ pub fn PermissionTesterView() -> impl IntoView {
         busy.set(true);
         error.set(None);
         result.set(None);
+        // The table is always the *new* resource's, fetched as part of this
+        // same probe — stale rows from the previous URL must not survive it.
+        item_perms.set(None);
         let t: Option<TenantContext> = tenant.get();
         leptos::task::spawn_local(async move {
             let Some(t) = t else {
@@ -247,6 +274,31 @@ pub fn PermissionTesterView() -> impl IntoView {
                 Ok(res) => {
                     needs_consent.set(false);
                     result.set(Some(res));
+                    // SharePoint only: the verdict answers "can this app reach
+                    // here?"; the entries answer "what is granted ON this
+                    // resource?" — one probe renders both (F094). A failed
+                    // entry read keeps the table hidden rather than rendering
+                    // it empty: "no grants on this resource" is only provable
+                    // when the read actually answered.
+                    if tab == "sharepoint" {
+                        let listed =
+                            sharepoint::list_selected_item_permissions(&t.tenant_id, &resource)
+                                .await;
+                        match listed {
+                            Ok(perms) => item_perms.set(Some((resource, perms))),
+                            Err(e) => {
+                                if e.is_consent_required() {
+                                    needs_consent.set(true);
+                                }
+                                if !session.report_if_session_dead(&e) {
+                                    error.set(Some(format!(
+                                        "The verdict above is complete, but the permission entries on this resource could not be read: {}",
+                                        e.message
+                                    )));
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     if e.is_consent_required() {
@@ -261,7 +313,7 @@ pub fn PermissionTesterView() -> impl IntoView {
             }
             busy.set(false);
         });
-    };
+    });
 
     // Grant SharePoint consent, then re-run the test.
     let grant_consent = move |_| {
@@ -278,12 +330,44 @@ pub fn PermissionTesterView() -> impl IntoView {
                     // Clear `busy` first — `do_test` early-returns while it's set,
                     // and it re-sets it for the actual run.
                     busy.set(false);
-                    do_test();
+                    do_test.run(());
                 }
                 Err(e) => {
                     busy.set(false);
                     if !session.report_if_session_dead(&e) {
                         error.set(Some(e.message));
+                    }
+                }
+            }
+        });
+    };
+
+    // Revoke one Selected entry from the tested resource, then re-probe with
+    // the same identity: the fresh probe re-reads verdict and entries together,
+    // so the table and the "Granted via" line prove the revoke landed — never
+    // an optimistic row removal. The URL is the one the table was fetched for
+    // (not whatever the field says meanwhile), read off `item_perms`.
+    let do_revoke = move |url: String, perm_id: String| {
+        if perms_busy.get() {
+            return;
+        }
+        let Some(t) = tenant.get() else { return };
+        perms_busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            let r = sharepoint::remove_selected_item_permission(&t.tenant_id, &url, &perm_id).await;
+            // The dialog closes either way: a modal pinned over a failed
+            // revoke is worse than the same error as a line under the form.
+            pending_revoke.set(None);
+            perms_busy.set(false);
+            match r {
+                Ok(()) => do_test.run(()),
+                Err(e) => {
+                    if e.is_consent_required() {
+                        needs_consent.set(true);
+                    }
+                    if !session.report_if_session_dead(&e) {
+                        error.set(Some(format!("Revoke failed: {}", e.message)));
                     }
                 }
             }
@@ -455,8 +539,10 @@ pub fn PermissionTesterView() -> impl IntoView {
             <div class="actions-row">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| do_test())
-                    disabled=Signal::derive(move || busy.get())
+                    on_click=Box::new(move |_| do_test.run(()))
+                    // A revoke re-probes on success; disabling here keeps the
+                    // two probes from racing into one error/result signal.
+                    disabled=Signal::derive(move || busy.get() || perms_busy.get())
                 >
                     "Test access"
                 </Button>
@@ -519,6 +605,113 @@ pub fn PermissionTesterView() -> impl IntoView {
                         }
                     })
             }}
+
+            // The entries live on the *resource*, not in the app's manifest —
+            // this is where a per-URL grant made in the wizard gets undone,
+            // next to the probe that verified it (F094). Keyed on a
+            // *successful* read: `None` covers both "no probe yet" and "the
+            // read failed", and neither may render as "no grants".
+            {move || {
+                if resource_tab.get() != "sharepoint" {
+                    return ().into_any();
+                }
+                let Some((url, perms)) = item_perms.get() else {
+                    return ().into_any();
+                };
+                view! {
+                    <div class="permission-tester__grants">
+                        <Body1>
+                            <strong>"Selected item permissions on this resource"</strong>
+                        </Body1>
+                        <Body1 class="mono muted">{url}</Body1>
+                        <Body1 class="hint hint--field">
+                            "The permission entries on the resource the tested URL resolves to — every app grant on it, not just the tested app's. This is a verify-by-URL read: an empty list means no grants on this resource, never that the app has no item-level access elsewhere (a file inherits from its library and its site)."
+                        </Body1>
+                        <DataTable
+                            headers=vec!["Granted to", "Roles", ""]
+                            rows=perms
+                            empty_message="No app grants on this resource. This is not proof the app has no item-level access: check the library and site above it, and remember a file inherits."
+                            row=move |p: sharepoint::SelectedItemPermissionDto| {
+                                let perm_id = p.id.clone();
+                                let roles = p.roles.join(", ");
+                                // Only app grants are revocable here. A
+                                // `grantedToV2` entry without an application is
+                                // user or group sharing — revoking it would cut
+                                // a person's access, not an app's, and this view
+                                // has no business doing that. An entry whose
+                                // application fails to resolve also lands here
+                                // (no revoke), so a parse gap never deletes.
+                                let (who, app_grant) = match (&p.app_id, &p.app_display_name) {
+                                    (Some(id), Some(name)) => (name.clone(), Some(id.clone())),
+                                    (Some(id), None) => (id.clone(), Some(id.clone())),
+                                    (None, _) => (
+                                        "User or group (not a Selected app grant)".to_string(),
+                                        None,
+                                    ),
+                                };
+                                let secondary = p.app_id.clone().filter(|id| id != &who);
+                                let label = who.clone();
+                                // Precomputed: the `on_click` closure below
+                                // moves `label`, so the aria-label can't borrow
+                                // it inside the same `view!`.
+                                let aria = format!("Revoke {roles} for {label}");
+                                view! {
+                                    <tr>
+                                        <td class="permission-cell">
+                                            <div>{who}</div>
+                                            {secondary
+                                                .map(|s| {
+                                                    view! { <div class="mono muted">{s}</div> }
+                                                })}
+                                        </td>
+                                        <td class="cell-mid">{roles.clone()}</td>
+                                        <td class="cell-mid">
+                                            {app_grant
+                                                .map(|_| {
+                                                    view! {
+                                                        <Button
+                                                            class="button--danger"
+                                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                                            attr:aria-label=aria
+                                                            disabled=Signal::derive(move || perms_busy.get())
+                                                            on_click=Box::new(move |_| {
+                                                                pending_revoke
+                                                                    .set(Some((label.clone(), perm_id.clone())))
+                                                            })
+                                                        >
+                                                            "Revoke"
+                                                        </Button>
+                                                    }
+                                                })}
+                                        </td>
+                                    </tr>
+                                }
+                                    .into_any()
+                            }
+                        />
+                    </div>
+                }
+                    .into_any()
+            }}
+            <ConfirmDialog
+                open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
+                title="Revoke this item permission?"
+                body="Removes this permission entry from the resource. Everyone else keeps their own grants, and the app may still reach the item another way (its library, its site, or an org-wide grant) — re-test afterwards to confirm."
+                subject=Signal::derive(move || {
+                    pending_revoke
+                        .with(|p| p.clone())
+                        .map(|(who, id)| format!("{who} · {id}"))
+                        .unwrap_or_default()
+                })
+                confirm_label="Revoke"
+                busy=perms_busy
+                on_confirm=Callback::new(move |()| {
+                    let Some((_, perm_id)) = pending_revoke.get() else { return };
+                    let Some((url, _)) = item_perms.get() else { return };
+                    do_revoke(url, perm_id);
+                })
+                on_close=Callback::new(move |()| pending_revoke.set(None))
+            />
         </main>
     }
 }
