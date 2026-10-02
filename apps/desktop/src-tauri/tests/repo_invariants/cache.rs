@@ -922,7 +922,7 @@ fn every_index_accessor_counts_as_a_cache_read() {
 fn the_full_application_list_scan_has_one_home() {
     const EXPECTED: [(&str, usize); 3] = [
         ("commands/applications/mod.rs", 1),
-        ("commands/audit.rs", 1),
+        ("commands/audit/run.rs", 1),
         ("commands/bulk.rs", 1),
     ];
     let mut offenders: Vec<String> = Vec::new();
@@ -961,7 +961,7 @@ fn the_full_application_list_scan_has_one_home() {
 ///
 /// AGENTS.md: "a cancelled/truncated/degraded run is never cached nor shown as
 /// an all-clear". `run_is_cacheable` is exhaustively unit-tested in
-/// `commands/audit.rs`, but that pins the predicate, not its use — a refactor
+/// `commands/audit/tests.rs`, but that pins the predicate, not its use — a refactor
 /// that moved the write out of the `if`, or added a second one for a "partial
 /// snapshot", compiled and passed every test.
 ///

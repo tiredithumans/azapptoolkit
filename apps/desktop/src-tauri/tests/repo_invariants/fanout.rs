@@ -215,7 +215,7 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         for (n, site) in sites.iter().enumerate() {
             // Two accepted shapes. Either the spawn closure gates on the shared
             // `SessionDead` latch (`session.is_dead()`), or the module runs its
-            // own classified latch (`commands/audit.rs`'s `reauth_fatal` flag,
+            // own classified latch (`commands/audit/run.rs`'s `reauth_fatal` flag,
             // read in the spawn closure and set from `classify_audit_failure`).
             // Both must appear INSIDE the call: recording a dead session and
             // dispatching anyway is the bug this rule exists to catch.

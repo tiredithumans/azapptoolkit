@@ -50,7 +50,7 @@ apps/desktop/
 ├── src-tauri/                       # backend (main process)
 │   ├── src/lib.rs                   # Tauri builder, tracing, `generate_handler![]`
 │   ├── src/state.rs                 # AppState: auth singleton, clients, cache, cancel flags
-│   ├── src/commands/                # #[tauri::command] handlers (+ applications/ exchange/ permissions/ sso/ subdirs)
+│   ├── src/commands/                # #[tauri::command] handlers (+ applications/ audit/ exchange/ permissions/ sso/ subdirs)
 │   ├── src/token_adapter.rs         # ScopedTokenAdapter (BearerProvider), per-scope tokens
 │   ├── tests/repo_invariants/       # source-scanning tests that pin the rules below
 │   ├── build.rs                     # bakes AZAPPTOOLKIT_CLIENT_ID/_TENANT_ID from .env
