@@ -5,9 +5,9 @@ pub struct AppListQuery {
     pub search: Option<String>,
     pub top: Option<u32>,
     pub select: Option<Vec<&'static str>>,
-    /// `$expand` clause (e.g. `"owners($select=id)"`). Only the audit uses this
-    /// (to count owners inline without a per-app round trip); the list views
-    /// leave it `None` to keep page payloads lean.
+    /// `$expand` clause (e.g. `"owners($select=id)"`). Only the audit uses it (to count owners
+    /// inline, without a per-app round trip); the list views leave it `None` to keep page
+    /// payloads lean.
     pub expand: Option<&'static str>,
 }
 
@@ -67,9 +67,8 @@ pub struct AppPatch {
     /// can't send an explicit JSON `null`, so callers clear via `Some("")`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    /// Full replacement of the application's declared permissions. Graph
-    /// treats this as a set-operation — every call overwrites the existing
-    /// array, so callers must send the full desired state.
+    /// Full replacement of the application's declared permissions: Graph overwrites the
+    /// existing array on every call, so callers must send the full desired state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_resource_access: Option<Vec<RequiredResourceAccess>>,
 }
@@ -108,9 +107,9 @@ pub struct ApplicationSpaPatch {
     pub redirect_uris: Option<Vec<String>>,
 }
 
-/// `PATCH /applications/{id}` carrying SSO fields (`identifierUris`, `web`,
-/// `spa`). Replaces the previously hand-built JSON in the SSO commands; unset
-/// fields are omitted so each caller patches only what it provides.
+/// `PATCH /applications/{id}` carrying SSO fields (`identifierUris`, `web`, `spa`); replaces
+/// the previously hand-built JSON in the SSO commands. Unset fields are omitted so each caller
+/// patches only what it provides.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationSsoPatch {
@@ -122,11 +121,10 @@ pub struct ApplicationSsoPatch {
     pub spa: Option<ApplicationSpaPatch>,
 }
 
-/// `api` block of an Expose-an-API patch. Graph treats each array as a **full
-/// replacement** — every PATCH overwrites the existing list — so callers
-/// re-read live state and send the complete desired set. Unset fields are
-/// omitted so a scopes-only patch leaves `preAuthorizedApplications` (and the
-/// unmodeled `api` properties) untouched.
+/// `api` block of an Expose-an-API patch. Graph treats each array as a **full replacement**,
+/// so callers re-read live state and send the complete desired set. Unset fields are omitted
+/// so a scopes-only patch leaves `preAuthorizedApplications` (and the unmodeled `api`
+/// properties) untouched.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiApplicationPatch {
@@ -136,11 +134,10 @@ pub struct ApiApplicationPatch {
     pub pre_authorized_applications: Option<Vec<PreAuthorizedApplication>>,
 }
 
-/// `PATCH /applications/{id}` carrying the Expose-an-API fields
-/// (`identifierUris` + the `api` block). Kept distinct from
-/// [`ApplicationSsoPatch`] (which also writes `identifierUris`, but with SAML
-/// entity-id semantics); unset fields are omitted so each call patches only
-/// what it provides.
+/// `PATCH /applications/{id}` carrying the Expose-an-API fields (`identifierUris` + the `api`
+/// block). Kept distinct from [`ApplicationSsoPatch`] (which also writes `identifierUris`, but
+/// with SAML entity-id semantics). Unset fields are omitted so each call patches only what it
+/// provides.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationExposeApiPatch {
@@ -160,13 +157,11 @@ pub struct ApplicationPublicClientPatch {
     pub redirect_uris: Option<Vec<String>>,
 }
 
-/// `PATCH /applications/{id}` carrying the Authentication-tab fields: the `web`
-/// block (reply URLs + logout URL + implicit-grant flags), the `spa` reply
-/// URLs, the `publicClient` (mobile/desktop) reply URLs, and
-/// `isFallbackPublicClient` (the portal's "Allow public client flows" toggle).
-/// Kept distinct from [`ApplicationSsoPatch`] (which is SSO-semantic and used by
-/// the SSO commands); unset fields are omitted so each save patches only what it
-/// provides.
+/// `PATCH /applications/{id}` carrying the Authentication-tab fields: the `web` block (reply
+/// URLs + logout + implicit-grant flags), the `spa` reply URLs, the `publicClient`
+/// (mobile/desktop) reply URLs, and `isFallbackPublicClient` (the "Allow public client flows"
+/// toggle). Kept distinct from [`ApplicationSsoPatch`] (SSO-semantic, used by the SSO commands);
+/// unset fields are omitted so each save patches only what it provides.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationAuthenticationPatch {
@@ -199,37 +194,31 @@ fn default_application_select() -> &'static [&'static str] {
     ]
 }
 
-/// `$select` for the DR backup's single-shot app read: the typed-model fields
-/// **plus** the Authentication (`web`/`spa`/`publicClient`) and Expose-an-API
-/// (`identifierUris`/`api`) blocks the per-tab paths fetch separately, so one
-/// GET (or one `$batch` sub-request) captures an app's whole configuration.
-/// Shared by the single and batched backup reads so their projections can't drift.
+/// `$select` for the DR backup's single-shot app read: the typed-model fields **plus** the
+/// Authentication (`web`/`spa`/`publicClient`) and Expose-an-API (`identifierUris`/`api`) blocks
+/// the per-tab paths fetch separately, so one GET (or one `$batch` sub-request) captures the
+/// whole app. Shared by the single and batched backup reads so their projections can't drift.
 pub(super) const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,signInAudience,publisherDomain,\
      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
 
-/// Page size for `/applications` enumerations.
+/// Page size for `/applications` enumerations. Graph documents the default and **maximum**
+/// sizes as 100 and **999**; paging is strictly serial (each request needs the prior
+/// response's `@odata.nextLink`), so the page size is a direct divisor of wall-clock time on a
+/// full-tenant scan — at the 10 000-app enumeration ceiling, 11 round trips instead of 100.
 ///
-/// Graph documents the default and **maximum** page sizes for `/applications`
-/// as 100 and **999**. Paging is strictly serial (each request needs the prior
-/// response's `@odata.nextLink`), so the page size is a direct divisor of
-/// wall-clock time on a full-tenant scan: at the 10 000-app enumeration ceiling
-/// this is 11 round trips instead of 100.
-///
-/// Larger pages also *reduce* throttling on the credential-bearing projections —
-/// Graph applies a 150-request-per-minute-per-tenant limit specifically to
-/// requests that `$select` `keyCredentials`, which the app list, the audit, and
-/// the credential dashboard all do.
+/// Larger pages also *reduce* throttling on the credential-bearing projections: Graph applies a
+/// 150-request-per-minute-per-tenant limit specifically to requests that `$select`
+/// `keyCredentials`, which the app list, the audit, and the credential dashboard all do.
 pub const DEFAULT_APP_PAGE_SIZE: u32 = 999;
 
-/// Whether an [`AppListQuery`] makes an **advanced query** — i.e. one that must
-/// carry `ConsistencyLevel: eventual`.
+/// Whether an [`AppListQuery`] is an **advanced query** — i.e. one that must carry
+/// `ConsistencyLevel: eventual`.
 ///
-/// Single-sourced because page one and every continuation have to agree: only a
-/// `$search` needs it, and `$expand` combined with an advanced query is an
-/// officially unsupported combination that "might fail silently" — Graph
-/// answers 200 with the expanded property missing. Two copies of this predicate
-/// is exactly how page two drifted from page one.
+/// Single-sourced because page one and every continuation have to agree: only a `$search` needs
+/// it, and `$expand` combined with an advanced query is officially unsupported and "might fail
+/// silently" — Graph answers 200 with the expanded property missing. Two copies of this
+/// predicate is exactly how page two drifted from page one.
 fn is_advanced_query(q: &AppListQuery) -> bool {
     q.search.is_some()
 }
@@ -244,24 +233,21 @@ impl GraphClient {
         let top = q.top.unwrap_or(DEFAULT_APP_PAGE_SIZE).to_string();
 
         let mut params: Vec<(&str, String)> = vec![("$select", select), ("$top", top)];
-        // `$search` on `/applications` is an ADVANCED query: it requires both
-        // `$count=true` and `ConsistencyLevel: eventual`. Nothing else here does
-        // — so advanced-query mode is scoped to the search path alone.
+        // `$search` on `/applications` is an ADVANCED query: it requires both `$count=true` and
+        // `ConsistencyLevel: eventual`. Nothing else here does — so advanced-query mode is
+        // scoped to the search path alone.
         //
         // The plain enumerations deliberately send neither:
-        //   * `$count` — the `@odata.count` it returns has no reader on this
-        //     path (the lists report their own materialized row counts), and it
-        //     forces every page into advanced-query handling for a value that is
-        //     then discarded.
-        //   * `$orderby` — sorting is done in the frontend over the cached rows
-        //     (see `web-rs/src/views/`), so a server-side sort is wasted work
-        //     that additionally conflicts with `$expand`. `list_application_index`
-        //     already omits both for the same reason.
+        //   * `$count` — the `@odata.count` has no reader on this path (the lists report their
+        //     own materialized row counts), and it forces every page into advanced-query
+        //     handling for a value that is then discarded.
+        //   * `$orderby` — sorting is done in the frontend over the cached rows (see
+        //     `web-rs/src/views/`), so a server-side sort is wasted work that additionally
+        //     conflicts with `$expand`. `list_application_index` omits both for the same reason.
         //
-        // This also removes an officially UNSUPPORTED combination on the audit's
-        // expanding call: per Graph's documented query-parameter limitations,
-        // `$expand` is not supported together with advanced queries, and such
-        // combinations "might fail silently" rather than erroring.
+        // This also removes an officially UNSUPPORTED combination on the audit's expanding
+        // call: `$expand` is not supported together with advanced queries, and such combinations
+        // "might fail silently" rather than erroring.
         if let Some(s) = &q.search {
             // Neutralize double quotes so a term like `Test"App` can't break the
             // `$search` phrase (matches search_applications_by_name).
@@ -285,29 +271,23 @@ impl GraphClient {
         self.get_json(&path, &params, false).await
     }
 
-    /// One `GET /applications/{id}` for the DR backup: selects the full backup
-    /// projection (the typed-model fields **plus** the Authentication
-    /// `web`/`spa`/`publicClient` and Expose-an-API `identifierUris`/`api`
-    /// blocks the tabs otherwise fetch separately) and `$expand`s owners,
-    /// returned as raw JSON. This lets the backup capture an app's entire
-    /// configuration in a single round trip instead of the four reads
-    /// (`get_application` + auth-fields + expose-api + owners) the per-tab paths
-    /// make — cutting the backup's Graph call volume (and the throttling it
-    /// triggers) sharply. A single-item GET, so no `$orderby`/`ConsistencyLevel`
-    /// concerns.
+    /// One `GET /applications/{id}` for the DR backup: the full backup projection (the
+    /// typed-model fields **plus** the Authentication and Expose-an-API blocks the tabs
+    /// otherwise fetch separately) and `$expand=owners`, returned as raw JSON. This lets the
+    /// backup capture an app's entire configuration in a single round trip instead of the four
+    /// reads the per-tab paths make — cutting the backup's Graph call volume (and the throttling
+    /// it triggers) sharply. A single-item GET, so no `$orderby`/`ConsistencyLevel` concerns.
     pub async fn get_application_backup_json(&self, object_id: &str) -> Result<serde_json::Value> {
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 2] = [("$select", APP_BACKUP_SELECT), ("$expand", "owners")];
         self.get_json(&path, &params, false).await
     }
 
-    /// Batched [`Self::get_application_backup_json`]: one `$batch` POST per 20
-    /// object ids instead of an individual GET each, returning one
-    /// `Result<serde_json::Value>` per input id **in order**. The DR backup's
-    /// Pass-1 fan-out; cuts the round-trip count (and the throttling it triggers)
-    /// ~20×. A per-id failure is one `Err` in the vec (the caller skips that
-    /// app); a whole-batch failure surfaces as the outer `Err` so the caller can
-    /// fall back to per-id reads.
+    /// Batched [`Self::get_application_backup_json`], one `$batch` POST per 20 ids; returns one
+    /// `Result<serde_json::Value>` per id **in order**. The DR backup's Pass-1 fan-out; cuts
+    /// round trips (and the throttling) ~20×. A per-id failure is one `Err` in the vec (the
+    /// caller skips that app); a whole-batch failure is the outer `Err`, so the caller can fall
+    /// back to per-id reads.
     pub async fn batch_get_applications_backup_json(
         &self,
         object_ids: &[String],
@@ -324,15 +304,13 @@ impl GraphClient {
         self.batch_get_json(&urls).await
     }
 
-    /// Batched `GET /applications/{id}` projected to what the bulk
-    /// expired-secret sweep reads (`id,appId,displayName,passwordCredentials`) —
-    /// the sweep's **selection** read, so a "Fix all N" fetches exactly the
-    /// selected apps in one `$batch` POST per 20 ids instead of walking every
-    /// page of the tenant and discarding all but the selection. The projection
-    /// mirrors the sweep's tenant-walk `$select` so both read paths see the same
-    /// fields. One `Result<Application>` per input id **in order**; a per-id
-    /// failure is one `Err` in the vec, a whole-batch failure is the outer `Err`
-    /// so the caller can fall back to per-id reads.
+    /// Batched `GET /applications/{id}` projected to what the bulk expired-secret sweep reads
+    /// (`id,appId,displayName,passwordCredentials`) — the sweep's **selection** read, so a "Fix
+    /// all N" fetches exactly the selected apps instead of walking every page of the tenant and
+    /// discarding all but the selection. The projection mirrors the sweep's tenant-walk `$select`
+    /// so both read paths see the same fields. One `Result<Application>` per id **in order**; a
+    /// per-id failure is one `Err` in the vec, a whole-batch failure the outer `Err` (fall back
+    /// to per-id reads).
     pub async fn batch_get_applications_credentials(
         &self,
         object_ids: &[String],
@@ -349,55 +327,46 @@ impl GraphClient {
         self.batch_get_json(&urls).await
     }
 
-    /// Fetches every application in the tenant by following `@odata.nextLink`
-    /// until exhausted. A safety `cap` argument prevents unbounded memory in
-    /// pathological tenants; pass `None` to disable.
-    /// Every application in the tenant, up to `cap`, **and whether the cap cut
-    /// the scan short**.
+    /// Every application in the tenant, up to `cap` (a safety against unbounded memory in
+    /// pathological tenants; `None` disables), **and whether the cap cut the scan short**.
     ///
-    /// The `bool` is deliberately in the return type rather than dropped here:
-    /// a capped scan is a partial view of the tenant, and a caller that presents
-    /// it as complete (a cached "clean" audit, a bulk sweep reporting how many
-    /// apps it touched) is making a claim the data does not support. Forcing
-    /// each caller to bind the flag makes ignoring it a visible, commented
-    /// decision instead of an invisible default — this used to be
-    /// `let (items, _truncated)` right here, so no caller could see it at all.
+    /// The `bool` is deliberately in the return type rather than dropped here: a capped scan is
+    /// a partial view of the tenant, and a caller that presents it as complete (a cached "clean"
+    /// audit, a bulk sweep reporting how many apps it touched) is making a claim the data does
+    /// not support. Forcing each caller to bind the flag makes ignoring it a visible, commented
+    /// decision instead of an invisible default — this used to be `let (items, _truncated)`
+    /// right here, so no caller could see it at all.
     pub async fn list_applications_all(
         &self,
         q: AppListQuery,
         cap: Option<usize>,
     ) -> Result<(Vec<Application>, bool)> {
-        // The SAME predicate page one was issued with. Threading it — rather
-        // than letting the paging helper default to `true` — is what stops an
-        // `$expand` enumeration silently losing `owners` from page two onward:
-        // Graph answers an advanced query that also expands with a 200 and the
-        // expanded property simply missing.
+        // The SAME predicate page one was issued with. Threading it — rather than letting the
+        // paging helper default to `true` — is what stops an `$expand` enumeration silently
+        // losing `owners` from page two onward (Graph answers an advanced query that also
+        // expands with a 200 and the expanded property simply missing).
         let eventual = is_advanced_query(&q);
         let page = self.list_applications(q).await?;
-        // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX`
-        // paginates to exhaustion (never reaching the bound) without the
-        // hard-error past page limit that `collect_all_pages` raises — the right
-        // degradation for a tenant-wide scan.
+        // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX` paginates to
+        // exhaustion without the hard-error past page limit that `collect_all_pages` raises —
+        // the right degradation for a tenant-wide scan.
         self.collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), eventual)
             .await
     }
 
-    /// The tenant's app-registration index: `id`, `appId`, and `displayName`
-    /// for every app registration, following `@odata.nextLink` to exhaustion.
+    /// The tenant's app-registration index: `id`, `appId`, `displayName` for every
+    /// registration, paged to exhaustion.
     ///
-    /// One projection serves every reader — the pairing joins want
-    /// `appId -> id`, and the global search additionally substring-matches the
-    /// name client-side (Graph OData has no `contains()` for directory objects,
-    /// so "match anywhere in the name / a partial GUID" can only be done in
-    /// memory over an enumeration like this). Keeping it to one shape is what
-    /// lets the command layer cache a single shared entry
-    /// (`applications::app_name_index_cached`) instead of re-scanning
-    /// `/applications` once per surface.
+    /// One projection serves every reader — the pairing joins want `appId -> id`, and the
+    /// global search additionally substring-matches the name client-side (Graph OData has no
+    /// `contains()` for directory objects, so "match anywhere in the name / a partial GUID" can
+    /// only be done in memory over an enumeration like this). One shape is what lets the command
+    /// layer cache a single shared entry (`applications::app_name_index_cached`) instead of
+    /// re-scanning `/applications` once per surface.
     ///
-    /// A bare `$select` with no `$orderby`/`$count`: the result feeds a
-    /// `HashMap` / an in-memory ranker, so a server-side sort (and the
-    /// `ConsistencyLevel: eventual` it would require) is wasted work. `cap`
-    /// bounds memory in pathological tenants; pass `None` to disable.
+    /// A bare `$select`, no `$orderby`/`$count`: the result feeds a `HashMap` / in-memory ranker,
+    /// so a server-side sort (and the `ConsistencyLevel: eventual` it would require) is wasted
+    /// work. `cap` bounds memory in pathological tenants; `None` disables it.
     pub async fn list_application_index_named(
         &self,
         cap: Option<usize>,
@@ -451,10 +420,9 @@ impl GraphClient {
             .await
     }
 
-    /// Display-name **term** search over `/applications` via Graph `$search`,
-    /// so a term matches anywhere in the name (e.g. "smith" finds "John Smith"),
-    /// not just as a prefix. `top` caps the rows returned. Requires the
-    /// `ConsistencyLevel: eventual` header, which `get_json(.., true)` sends.
+    /// Display-name **term** search over `/applications` via `$search` — matches anywhere in the
+    /// name (e.g. "smith" finds "John Smith"), not just as a prefix; `top` caps the rows.
+    /// Requires `ConsistencyLevel: eventual`, which `get_json(.., true)` sends.
     pub async fn search_applications_by_name(
         &self,
         term: &str,
@@ -481,11 +449,10 @@ impl GraphClient {
         Ok(page.items.into_iter().next())
     }
 
-    /// Applications carrying the exact `tag` (`tags/any(t:t eq '…')`, a basic
-    /// query — no `ConsistencyLevel` needed). One page capped at 10: callers use
-    /// this to find an app they tagged themselves, so more than one hit is
-    /// already an anomaly they must refuse, not something to page through.
-    /// Selects `createdDateTime` so a caller can prove a hit is its own.
+    /// Applications carrying the exact `tag` (`tags/any(t:t eq '…')`, a basic query — no
+    /// `ConsistencyLevel` needed). One page capped at 10: callers use this to find an app they
+    /// tagged themselves, so more than one hit is an anomaly to refuse, not something to page
+    /// through. Selects `createdDateTime` so a caller can prove a hit is its own.
     pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<Application>> {
         let filter = format!("tags/any(t:t eq '{}')", escape_odata(tag));
         let params: [(&str, &str); 3] = [
@@ -500,10 +467,9 @@ impl GraphClient {
         Ok(page.items)
     }
 
-    /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw
-    /// JSON. `identifierUris` / `web` / `spa` aren't on the typed [`Application`]
-    /// (and aren't in the list `$select`), so the SSO detail tab reads them
-    /// directly. Returns `Ok(None)` for 404.
+    /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw JSON —
+    /// `identifierUris`/`web`/`spa` aren't on the typed [`Application`] (and aren't in the list
+    /// `$select`), so the SSO detail tab reads them directly. `Ok(None)` for 404.
     pub async fn get_application_sso_fields(
         &self,
         object_id: &str,
@@ -512,13 +478,11 @@ impl GraphClient {
             .await
     }
 
-    /// GET `/applications/{id}` selecting only the Authentication-tab fields, as
-    /// raw JSON. `web` / `spa` / `publicClient` carry the per-platform reply
-    /// (redirect) URLs, `web.implicitGrantSettings` the implicit-grant flags, and
-    /// `isFallbackPublicClient` the "Allow public client flows" toggle. Like
-    /// [`Self::get_application_sso_fields`] these aren't on the typed
-    /// [`Application`] list shape, so the Authentication tab reads them directly.
-    /// Returns `Ok(None)` for 404.
+    /// GET `/applications/{id}` selecting only the Authentication-tab fields, as raw JSON:
+    /// `web`/`spa`/`publicClient` carry the per-platform reply URLs, `web.implicitGrantSettings`
+    /// the implicit-grant flags, and `isFallbackPublicClient` the "Allow public client flows"
+    /// toggle. Like [`Self::get_application_sso_fields`] these aren't on the typed list shape, so
+    /// the Authentication tab reads them directly. `Ok(None)` for 404.
     pub async fn get_application_auth_fields(
         &self,
         object_id: &str,
@@ -541,11 +505,9 @@ impl GraphClient {
         self.get_json_optional(&path, &[("$select", select)]).await
     }
 
-    /// GET `/applications/{id}` selecting only the Expose-an-API fields
-    /// (`identifierUris` + the `api` block), typed. Like
-    /// [`Self::get_application_sso_fields`] these aren't on the typed
-    /// [`Application`] list shape, so the Expose an API tab reads them live.
-    /// Returns `Ok(None)` for 404.
+    /// GET `/applications/{id}` selecting only the Expose-an-API fields (`identifierUris` + the
+    /// `api` block), typed; like [`Self::get_application_sso_fields`] these aren't on the typed
+    /// list shape, so the Expose-an-API tab reads them live. `Ok(None)` for 404.
     pub async fn get_application_expose_api(
         &self,
         object_id: &str,
@@ -571,13 +533,12 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Instantiates a non-gallery application from an application template,
-    /// creating a paired application + service principal in one call. The SSO
-    /// wizard uses the configured cloud's generic custom template
-    /// (`CloudEnvironment::custom_app_template_id` in `azapptoolkit-core`; the
-    /// id differs per sovereign cloud). Newly created objects replicate
-    /// asynchronously, so an immediate follow-up read/PATCH can 404 briefly —
-    /// callers wrap subsequent steps in a `NotFound`-only retry.
+    /// Instantiates a non-gallery application from a template, creating a paired application +
+    /// service principal in one call. The SSO wizard uses the configured cloud's generic custom
+    /// template (`CloudEnvironment::custom_app_template_id` in `azapptoolkit-core`; the id
+    /// differs per sovereign cloud). Newly created objects replicate asynchronously, so an
+    /// immediate follow-up read/PATCH can 404 briefly — callers wrap subsequent steps in a
+    /// `NotFound`-only retry.
     pub async fn instantiate_application_template(
         &self,
         template_id: &str,
@@ -588,21 +549,18 @@ impl GraphClient {
         self.send_json(Method::POST, &path, &body).await
     }
 
-    /// Fetches the **entire** Microsoft Entra application gallery
-    /// (`GET /applicationTemplates`, no `$filter`) in a handful of round trips,
-    /// so the caller can cache it once and match every subsequent query in
-    /// memory instead of paying a non-indexable `contains(tolower(…))` server
-    /// scan per keystroke. (The per-query server-side search this replaced is
-    /// gone — `commands::enterprise_application::search_application_templates`
-    /// ranks against this cached corpus.)
+    /// Fetches the **entire** Entra application gallery (`GET /applicationTemplates`, no
+    /// `$filter`) in a handful of round trips, so the caller can cache it once and match
+    /// subsequent queries in memory instead of paying a non-indexable `contains(tolower(…))`
+    /// server scan per keystroke. (The per-query server-side search this replaced is gone —
+    /// `commands::enterprise_application::search_application_templates` ranks against this
+    /// cached corpus.)
     ///
-    /// Unfiltered, the endpoint honors `Prefer: odata.maxpagesize=2800` (its
-    /// documented ceiling — a *filtered* read is capped at 200/page, which is
-    /// why the per-query path can't page cheaply), so the whole ~tens-of-
-    /// thousands-row catalog arrives in ≈`ceil(total / 2800)` pages that
-    /// `collect_all_pages` walks to the end. `$select` trims each row to the
-    /// picker's fields to keep the payload small. Reading needs no permission
-    /// beyond a valid Graph token, and the gallery is tenant-independent.
+    /// Unfiltered, the endpoint honors `Prefer: odata.maxpagesize=2800` (its documented ceiling —
+    /// a *filtered* read is capped at 200/page, which is why the per-query path can't page
+    /// cheaply), so the ~tens-of-thousands-row catalog arrives in ≈`ceil(total / 2800)` pages.
+    /// `$select` trims each row to the picker's fields. Reading needs only a valid Graph token,
+    /// and the gallery is tenant-independent.
     pub async fn list_all_application_templates(&self) -> Result<Vec<ApplicationTemplate>> {
         let params: [(&str, &str); 1] = [(
             "$select",
@@ -615,11 +573,10 @@ impl GraphClient {
         self.collect_all_pages(page, false).await
     }
 
-    /// PATCH `/applications/{id}` with a caller-built body carrying the SSO
-    /// fields (`identifierUris`, `web.redirectUris`, `web.logoutUrl`,
-    /// `spa.redirectUris`). Kept separate from the typed `AppPatch` so the
-    /// widely-used struct stays untouched. Accepts any `Serialize` body (an
-    /// `ApplicationSsoPatch` or a `serde_json::Value`).
+    /// PATCH `/applications/{id}` with a caller-built body carrying the SSO fields
+    /// (`identifierUris`, `web.redirectUris`, `web.logoutUrl`, `spa.redirectUris`). Kept
+    /// separate from the typed `AppPatch` so the widely-used struct stays untouched; accepts any
+    /// `Serialize` body (an `ApplicationSsoPatch` or a `serde_json::Value`).
     pub async fn patch_application_web<B: serde::Serialize + Sync>(
         &self,
         object_id: &str,
@@ -629,11 +586,10 @@ impl GraphClient {
         self.send_no_content(Method::PATCH, &path, Some(body)).await
     }
 
-    /// GET `/applications/{id}?$select=appRoles`, returning the raw `appRoles`
-    /// array. Entries are kept as raw JSON for the same reason as the service
-    /// principal variant (`get_service_principal_app_roles_raw`): `appRoles`
-    /// round-trips through a full-collection PATCH and the SAML default role
-    /// carries a `value: null` that a typed shape would mangle.
+    /// GET `/applications/{id}?$select=appRoles`, returning the raw `appRoles` array. Entries
+    /// stay raw JSON for the same reason as the SP variant (`get_service_principal_app_roles_raw`):
+    /// `appRoles` round-trips through a full-collection PATCH and the SAML default role carries a
+    /// `value: null` that a typed shape would mangle.
     pub async fn get_application_app_roles_raw(
         &self,
         object_id: &str,

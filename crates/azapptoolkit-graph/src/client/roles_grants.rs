@@ -1,32 +1,29 @@
 use super::*;
 
-/// `$select` projections: the exact fields the typed models deserialize, so the
-/// (often paged, fanned-out) reads don't pull full objects. `appRoleAssignment`
-/// and `oauth2PermissionGrant` are their own entity types (not directoryObject
-/// casts), so projecting their fields is lossless.
+/// `$select` projections: the exact fields the typed models deserialize, so paged/fanned-out
+/// reads don't pull full objects. `appRoleAssignment` and `oauth2PermissionGrant` are their own
+/// entity types (not directoryObject casts), so projecting their fields is lossless.
 const APP_ROLE_ASSIGNMENT_SELECT: &str = "id,principalId,resourceId,appRoleId,principalDisplayName,principalType,resourceDisplayName,createdDateTime";
 const OAUTH2_GRANT_SELECT: &str = "id,clientId,resourceId,consentType,principalId,scope";
 
 impl GraphClient {
-    /// Cache key for the tenant-wide grant matrices. The shared `grants:`
-    /// segment is what [`Self::invalidate_grant_cache`] sweeps, so the sweep
-    /// cannot reach the sign-in-activity entry that also lives under
-    /// `CacheKind::Permissions` (a slow beta report — dumping it on every grant
-    /// write would be a bad trade).
+    /// Cache key for the tenant-wide grant matrices: the shared `grants:` segment is what
+    /// [`Self::invalidate_grant_cache`] sweeps, so the sweep cannot reach the sign-in-activity
+    /// entry that also lives under `CacheKind::Permissions` (a slow beta report — dumping it on
+    /// every grant write would be a bad trade).
     fn grant_cache_key(tenant_id: &str, what: &str) -> String {
         format!("{tenant_id}|grants:{what}")
     }
 
     /// Drops this tenant's cached grant matrices.
     ///
-    /// Lives in the client — NOT in the command aggregators — for the same
-    /// reason `CacheKind::ServicePrincipal` self-invalidates: grants are written
-    /// from seven different command files (consent, permissions, exchange,
-    /// sharepoint, remediation, enterprise_application, bulk), and a cached
-    /// security-posture read that outlives a revoke is the worst kind of
-    /// staleness — the UI would show access that no longer exists, or hide
-    /// access that does. Routing every mutator through here makes the
-    /// invalidation correct by construction rather than by remembering.
+    /// Lives in the client — NOT in the command aggregators — for the same reason
+    /// `CacheKind::ServicePrincipal` self-invalidates: grants are written from seven command
+    /// files (consent, permissions, exchange, sharepoint, remediation, enterprise_application,
+    /// bulk), and a cached security-posture read that outlives a revoke is the worst kind of
+    /// staleness — the UI would show access that no longer exists, or hide access that does.
+    /// Routing every mutator through here makes the invalidation correct by construction rather
+    /// than by remembering.
     pub(crate) fn invalidate_grant_cache(&self) {
         self.cache.invalidate_prefix(
             CacheKind::Permissions,
@@ -36,10 +33,9 @@ impl GraphClient {
     /// The application permissions **held by** one service principal
     /// (`appRoleAssignments`, the outbound direction).
     ///
-    /// Deliberately uncached. It is per-SP and small, and it is what the
-    /// pre-write `existing` checks read (the grant paths in permissions,
-    /// SharePoint, Exchange and remediation), which must see live state rather
-    /// than a copy up to the Permissions TTL old. The read-through cache belongs
+    /// Deliberately uncached: per-SP and small, and it is what the pre-write `existing` checks
+    /// read (the grant paths in permissions, SharePoint, Exchange and remediation), which must
+    /// see live state, not a copy up to the Permissions TTL old. The read-through cache belongs
     /// to the tenant-wide inbound read, [`Self::list_app_role_assigned_to_cached`].
     pub async fn list_app_role_assignments(
         &self,
@@ -54,17 +50,15 @@ impl GraphClient {
         self.collect_all_pages(page, false).await
     }
 
-    /// Principals (users/groups/SPs) assigned **to** this service principal's
-    /// app roles — the inbound "who has access" direction (`appRoleAssignedTo`),
-    /// as opposed to what the SP itself has been granted (`appRoleAssignments`).
+    /// Principals (users/groups/SPs) assigned **to** this SP's app roles — the inbound "who has
+    /// access" direction (`appRoleAssignedTo`), as opposed to what the SP itself has been
+    /// granted (`appRoleAssignments`).
     ///
-    /// Read live, every time. The Enterprise Access tab, the permission tester,
-    /// the audit's EWS full-access check and the DR backup's per-SP fallback
-    /// read it, and each of them must reflect a grant made outside the app (the
-    /// portal) the moment it is re-run — a reload that serves a copy up to the
-    /// Permissions TTL old would be a no-op Refresh. The two surfaces that walk
-    /// the tenant-wide collection end to end use
-    /// [`Self::list_app_role_assigned_to_cached`] instead.
+    /// Read live, every time: the Enterprise Access tab, the permission tester, the audit's EWS
+    /// full-access check and the DR backup's per-SP fallback all read it, and each must reflect a
+    /// grant made outside the app (the portal) the moment it is re-run — a reload serving a copy
+    /// up to the Permissions TTL old would be a no-op Refresh. The two surfaces that walk the
+    /// tenant-wide collection end to end use [`Self::list_app_role_assigned_to_cached`] instead.
     pub async fn list_app_role_assigned_to(
         &self,
         service_principal_id: &str,
@@ -81,19 +75,16 @@ impl GraphClient {
     /// [`Self::list_app_role_assigned_to`] read through the cache
     /// (`{tenant}|grants:assigned_to:{sp}`, Permissions kind).
     ///
-    /// The heaviest paged read in the app: pointed at the Microsoft Graph SP
-    /// this collection holds every app-permission grant in the tenant, so the
-    /// page size decides how many serial round trips run before a surface can
-    /// score anything (see [`MAX_PAGE_SIZE`]). The audit's
-    /// `prefetch_graph_app_roles` and the consent view's Application-permissions
-    /// scan BOTH walk it end to end, so browsing between them paid for the same
-    /// full-tenant scan twice. Those two are its ONLY callers; every other
-    /// reader stays on the live method.
+    /// The heaviest paged read in the app: pointed at the Microsoft Graph SP this collection
+    /// holds every app-permission grant in the tenant, so the page size decides how many serial
+    /// round trips run before a surface can score anything (see [`MAX_PAGE_SIZE`]). The audit's
+    /// `prefetch_graph_app_roles` and the consent view's Application-permissions scan BOTH walk
+    /// it end to end — browsing between them paid for the same full-tenant scan twice. Those two
+    /// are its ONLY callers; every other reader stays on the live method.
     ///
-    /// Every in-app grant writer sweeps the `grants:` prefix on `Ok`
-    /// ([`Self::invalidate_grant_cache`]), so an in-app revoke never survives
-    /// here. A grant changed OUTSIDE the app can lag by up to the Permissions
-    /// TTL — the same contract as `grants:oauth2_all`; the Cache dialog's
+    /// Every in-app grant writer sweeps the `grants:` prefix on `Ok` ([`Self::invalidate_grant_cache`]),
+    /// so an in-app revoke never survives here. A grant changed OUTSIDE the app can lag by up to
+    /// the Permissions TTL (the same contract as `grants:oauth2_all`); the Cache dialog's
     /// Permissions clear resets it.
     pub async fn list_app_role_assigned_to_cached(
         &self,
@@ -114,10 +105,9 @@ impl GraphClient {
         Ok(all)
     }
 
-    /// Batched [`Self::list_app_role_assigned_to`]: inbound role assignments for
-    /// many SPs in one `$batch` POST per 20. Returns each SP's full assignment
-    /// list (paginating the rare overflow outside the batch) in input order. The
-    /// DR backup's Pass-2 "who's assigned" read.
+    /// Batched [`Self::list_app_role_assigned_to`], many SPs per `$batch` POST: returns each SP's
+    /// assignments (the rare overflow paginates outside the batch) in input order. The DR
+    /// backup's Pass-2 "who's assigned" read.
     pub async fn batch_list_app_role_assigned_to(
         &self,
         sp_ids: &[String],
@@ -161,10 +151,10 @@ impl GraphClient {
         self.finish_paged_batch(pages, false).await
     }
 
-    /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants
-    /// access to the enterprise application. `app_role_id` may be the all-zero
-    /// GUID for the "default access" (no-specific-role) assignment. Posts to the
-    /// resource side (`appRoleAssignedTo`) so it works for any principal type.
+    /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants access to the
+    /// enterprise application; `app_role_id` may be the all-zero GUID for the "default access"
+    /// (no-specific-role) assignment. Posts to the resource side (`appRoleAssignedTo`) so it
+    /// works for any principal type.
     pub async fn assign_app_role_to(
         &self,
         resource_sp_id: &str,
@@ -215,10 +205,9 @@ impl GraphClient {
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
     /// unfiltered). Used by the consent-grant audit. Follows `@odata.nextLink`.
     pub async fn list_all_oauth2_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
-        // Read-through cache, same reasoning as
-        // `list_app_role_assigned_to_cached`: the audit's
-        // `prefetch_admin_consent_grants` and the Delegated-grants lens each
-        // walked this tenant-wide collection independently.
+        // Read-through cache, same reasoning as `list_app_role_assigned_to_cached`: the audit's
+        // `prefetch_admin_consent_grants` and the Delegated-grants lens each walked this
+        // tenant-wide collection independently.
         let cache_key = Self::grant_cache_key(&self.tenant_id, "oauth2_all");
         if let Some(cached) = self
             .cache
@@ -235,11 +224,10 @@ impl GraphClient {
         Ok(all)
     }
 
-    /// Grants an application permission (appRole) on a resource service
-    /// principal. Returns the created assignment; Graph returns 201 with the
-    /// new row. The `client_sp_id` is the service principal receiving the
-    /// permission (the app's own SP); `resource_sp_id` is the API provider
-    /// (e.g. Microsoft Graph's SP).
+    /// Grants an application permission (appRole) on a resource service principal; returns the
+    /// created assignment (201 with the new row). `client_sp_id` is the SP receiving the
+    /// permission (the app's own SP); `resource_sp_id` is the API provider (e.g. Microsoft
+    /// Graph's SP).
     pub async fn grant_app_role(
         &self,
         client_sp_id: &str,
@@ -315,9 +303,9 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Ensures an admin-consent OAuth2 grant exists for `(client_sp_id,
-    /// resource_sp_id)` and covers every scope in `desired_scopes`. Returns
-    /// the final grant (either newly created or updated). Idempotent.
+    /// Ensures an admin-consent OAuth2 grant exists for `(client_sp_id, resource_sp_id)` and
+    /// covers every scope in `desired_scopes`; returns the final grant (new or updated).
+    /// Idempotent.
     ///
     /// Reads the client's grant collection itself, so a caller upserting for
     /// **several** resources in a row should read it once and use
@@ -333,10 +321,9 @@ impl GraphClient {
             .await
     }
 
-    /// [`Self::upsert_admin_oauth2_grant`] against an **already-read** grant
-    /// list, so a per-resource upsert loop doesn't re-read the client's whole
-    /// `/oauth2PermissionGrants` collection on every iteration — the same hoist
-    /// the admin-consent path already applies to `appRoleAssignments` on its
+    /// [`Self::upsert_admin_oauth2_grant`] against an **already-read** grant list, so a
+    /// per-resource upsert loop doesn't re-read the client's whole grant collection on every
+    /// iteration — the same hoist the admin-consent path applies to `appRoleAssignments` on its
     /// Role branch.
     ///
     /// `existing_grants` may go stale as the loop writes, but only for the

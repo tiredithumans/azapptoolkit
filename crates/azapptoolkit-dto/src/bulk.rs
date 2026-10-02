@@ -6,13 +6,13 @@ use crate::UiError;
 
 /// A per-item failure inside a bulk run.
 ///
-/// Structured rather than a bare string. The handlers used to flatten a
-/// [`UiError`] into `Some(e.message)`, which threw away the two fields the UI
-/// needs to *act*: `code` and `retryable`. The consequence was specific and bad
-/// — a mid-run `refresh_missing` (the session died) became indistinguishable
-/// from "this one app failed", so the loop ground through every remaining app
-/// against a dead session and produced N identical opaque failures instead of
-/// one actionable re-auth prompt.
+/// Structured rather than a bare string: the handlers used to flatten a
+/// [`UiError`] into `Some(e.message)`, throwing away the `code` and
+/// `retryable` fields the UI needs to *act* on. The consequence — a
+/// mid-run `refresh_missing` (the session died) became indistinguishable
+/// from "this one app failed", so the loop ground through every remaining
+/// app against a dead session, producing N identical opaque failures
+/// instead of one actionable re-auth prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkError {
     pub code: String,
@@ -55,8 +55,8 @@ pub struct BulkProgress {
     /// runs under a [`ConcurrencyThrottle`](../../desktop) (the DR backup).
     /// `None` for the bulk-credential/create/delete flows, which use a fixed
     /// cap. The DR view surfaces a back-off notice when this drops below its
-    /// observed peak. Additive + skipped when absent, so existing emitters that
-    /// don't set it stay wire-compatible.
+    /// observed peak. Additive + skipped when absent, so existing emitters
+    /// stay wire-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight_cap: Option<usize>,
 }
@@ -131,7 +131,7 @@ pub struct BulkCreateOutcome {
     /// Set only when the failure came from a backend call, so the create path
     /// can participate in the run-level fatal check like every other bulk
     /// command. A validation rejection leaves this `None` — it carries no wire
-    /// code, and it says nothing about the health of the session.
+    /// code and says nothing about the health of the session.
     #[serde(default)]
     pub error: Option<BulkError>,
 }
@@ -218,8 +218,8 @@ pub struct BulkDisableSignInResult {
 ///
 /// `object_id` is the **service principal** id here, not an app-registration
 /// object id — SAML signing certificates live on the SP. The field keeps the
-/// shared name so the bar's failure-labelling machinery works unchanged; the
-/// host supplies SP-keyed display names to match.
+/// shared name so the bar's failure-labelling machinery works unchanged, and
+/// the host supplies SP-keyed display names to match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkStageCertOutcome {
     pub object_id: String,

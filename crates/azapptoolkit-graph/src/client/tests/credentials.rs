@@ -107,14 +107,11 @@ async fn add_key_credential_preserves_the_surviving_certificate_blob() {
                 "displayName": "existing-cert",
                 "type": "AsymmetricX509Cert",
                 "usage": "Verify",
-                // The certificate blob itself. `KeyCredential` does not model
-                // it, so a typed round-trip here wrote the survivor back
-                // keyless — silently destroying a live credential. Graph
-                // returns it on exactly this `$select=keyCredentials` read.
-                //
-                // Deliberately not base64-DER-shaped: the assertion is that the
-                // value survives byte-for-byte, and an `MII…` placeholder reads
-                // as a real certificate to the secrets scanner.
+                // The certificate blob itself. `KeyCredential` does not model it, so a typed
+                // round-trip would write the survivor back keyless — silently destroying a live
+                // credential (Graph returns it on exactly this `$select=keyCredentials` read).
+                // Deliberately not base64-DER-shaped: the assertion is byte-for-byte survival,
+                // and an `MII…` placeholder reads as a real certificate to the secrets scanner.
                 "key": "cert-blob-existing-must-survive"
             }]
         })))

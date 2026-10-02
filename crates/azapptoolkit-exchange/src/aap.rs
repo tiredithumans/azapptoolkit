@@ -2,13 +2,13 @@
 //! consolidating a management scope's source groups onto the toolkit-managed
 //! group.
 //!
-//! This is the half of `commands::exchange`'s migration flow that has no I/O in
-//! it. It lived in the command layer, where a Tauri `State<AppState>` and a live
-//! `ExchangeClient` sit between a test and the logic — for the most
-//! consequential decisions this app makes: which policies may be rebuilt as an
-//! allow-list, and whether a scope may be narrowed onto a group whose
-//! membership was only partly verified. Down here they are ordinary functions
-//! over ordinary data, so the awkward cases are cheap to pin.
+//! The I/O-free half of `commands::exchange`'s migration flow. It lived in the
+//! command layer, where a Tauri `State<AppState>` and a live `ExchangeClient`
+//! sit between a test and the logic — for the most consequential decisions this
+//! app makes: which policies may be rebuilt as an allow-list, and whether a
+//! scope may be narrowed onto a group whose membership was only partly
+//! verified. Here they are ordinary functions over ordinary data, so the
+//! awkward cases are cheap to pin.
 //!
 //! The command layer keeps what genuinely needs the client: enumerating
 //! policies and group membership, creating the group, copying members in, and
@@ -28,11 +28,11 @@ use crate::models::{ExoApplicationAccessPolicy, ExoGroupMember};
 /// Two rules, both load-bearing:
 ///
 /// - **`RestrictAccess` only.** A `DenyAccess` policy is a *blocklist* (every
-///   mailbox EXCEPT its group), while an RBAC management scope is an allow-list.
-///   Rebuilding one as the other inverts the policy — the app would gain exactly
-///   the mailboxes it was denied and lose the rest — so those are reported,
-///   never migrated. A policy with no readable `AccessRight` is equally unsafe
-///   to guess at, so it is excluded too.
+///   mailbox EXCEPT its group), while an RBAC management scope is an allow-list;
+///   rebuilding one as the other inverts the policy — the app would gain exactly
+///   the mailboxes it was denied — so those are reported, never migrated. A
+///   policy with no readable `AccessRight` is equally unsafe to guess at, so it
+///   is excluded too.
 /// - **One batch per application.** Several `RestrictAccess` policies on one app
 ///   grant access to the *union* of their groups
 ///   (`New-ApplicationAccessPolicy` evaluation rule 3), and an app gets exactly
@@ -41,12 +41,11 @@ use crate::models::{ExoApplicationAccessPolicy, ExoGroupMember};
 ///   existing scope — after which both policies were deleted and those mailboxes
 ///   lost access.
 ///
-/// Batching is **case-insensitive on the AppId**. Exchange echoes the value back
-/// in whatever case it stored, and a GUID differing only in case is the same
-/// application — so a case-sensitive grouping splits one app into two batches
-/// and reproduces exactly the failure the second rule exists to prevent. Every
-/// other comparison in this module already casefolds (the `AccessRight`, parsed
-/// once into [`AapAccessRight`](crate::models::AapAccessRight), and
+/// Batching is **case-insensitive on the AppId**: Exchange echoes the value back
+/// in whatever case it stored, and a case-sensitive grouping splits one app into
+/// two batches and reproduces the failure the second rule exists to prevent.
+/// Every other comparison in this module already casefolds (the `AccessRight`,
+/// parsed once into [`AapAccessRight`](crate::models::AapAccessRight), and
 /// `SourceMember::key`); this one did not.
 pub fn group_policies_for_migration(
     policies: Vec<ExoApplicationAccessPolicy>,
@@ -140,14 +139,13 @@ pub struct SourceGroupRead<'a> {
 /// A non-empty `Err` means **refuse**: the caller leaves the scope on its source
 /// groups.
 ///
-/// The rule that matters is the empty-list one. An EMPTY source group is treated
-/// as unreadable, **not** as "this group has no mailboxes":
+/// The rule that matters is the empty-list one: an EMPTY source group is treated
+/// as unreadable, **not** as "this group has no mailboxes".
 /// `Get-DistributionGroupMember` also returns nothing for a Microsoft 365 group
 /// (whose members need `Get-UnifiedGroupLinks`), and consolidating that onto an
 /// empty managed group would cut the app off from every mailbox at once — the
 /// exact outage this module exists to prevent. "Nothing came back" and "there is
-/// nothing" are indistinguishable here, so the ambiguous answer must fail
-/// closed.
+/// nothing" are indistinguishable here, so the ambiguous answer fails closed.
 pub fn plan_source_membership(
     reads: &[SourceGroupRead<'_>],
 ) -> Result<Vec<SourceMember>, Vec<String>> {
@@ -188,11 +186,10 @@ pub fn plan_source_membership(
 /// The members that could NOT be confirmed present in the managed group, by
 /// identity.
 ///
-/// Compares against the group's **actual** re-read membership rather than
-/// trusting the add calls: EXO accepts some recipient types and then does not
-/// list them, so a successful `Add-DistributionGroupMember` is not evidence the
-/// mailbox is in the group. Any non-empty result makes `plan_consolidation`
-/// refuse.
+/// Compares against the group's **actual** re-read membership rather than the
+/// add calls: EXO accepts some recipient types and then does not list them, so
+/// a successful `Add-DistributionGroupMember` is not evidence the mailbox is in
+/// the group. Any non-empty result makes `plan_consolidation` refuse.
 pub fn unverified_members(intended: &[SourceMember], present_keys: &[String]) -> Vec<String> {
     let present: std::collections::HashSet<&str> =
         present_keys.iter().map(String::as_str).collect();

@@ -1,8 +1,8 @@
 //! Directory activity / change-log DTOs crossing the IPC boundary.
 //!
-//! Flattened, display-ready projection of a Graph `directoryAudits` entry: the
-//! initiator and target resources are already resolved to human strings so the
-//! frontend renders a flat table without re-deriving identity shapes.
+//! Flattened, display-ready projection of a Graph `directoryAudits` entry:
+//! initiator and target resources are already resolved to human strings, so
+//! the frontend renders a flat table.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -34,11 +34,11 @@ pub struct ModifiedPropertyDto {
     pub new_value: Option<String>,
 }
 
-/// Per-app sign-in summary for the Activity tab: the service principal's most
-/// recent recorded sign-in (from the beta `servicePrincipalSignInActivities`
-/// report). Degrades gracefully — a missing scope/license/consent yields a
-/// populated "unavailable" DTO (never an error), so the Activity tab keeps
-/// rendering directory changes regardless.
+/// Per-app sign-in summary for the Activity tab: the SP's most recent recorded
+/// sign-in (beta `servicePrincipalSignInActivities` report). Degrades
+/// gracefully — a missing scope/license/consent yields a populated
+/// "unavailable" DTO (never an error), so the Activity tab keeps rendering
+/// directory changes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignInActivityDto {

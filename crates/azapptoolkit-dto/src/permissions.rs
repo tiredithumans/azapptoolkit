@@ -131,8 +131,8 @@ pub enum RevokeScopeOutcome {
 
 /// Outcome of swapping a broad application permission for a narrower one
 /// (the least-privilege "Downgrade…" action). Flags report what actually
-/// changed against live state — all `false` means there was nothing to do
-/// (the broad permission was already gone), so the UI can report honestly.
+/// changed against live state — all `false` means nothing to do (the broad
+/// permission was already gone), so the UI can report honestly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DowngradeOutcome {

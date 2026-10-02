@@ -2,8 +2,8 @@
 //!
 //! Managed identities are surfaced as service principals
 //! (`servicePrincipalType == "ManagedIdentity"`); granting one an application
-//! permission is an app-role assignment on that service principal, reusing the
-//! same Graph machinery as ordinary admin consent.
+//! permission is an app-role assignment on that SP, reusing the same Graph
+//! machinery as ordinary admin consent.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,9 +52,9 @@ pub struct ManagedIdentityDto {
 }
 
 /// One application permission (app-role assignment) **held by** a service
-/// principal — a managed identity *or* an enterprise application. Both surface
-/// the permissions a principal has been granted via the same Graph
-/// `appRoleAssignments` call, so they share this shape.
+/// principal — a managed identity *or* an enterprise application. Both
+/// surface the granted permissions via the same Graph `appRoleAssignments`
+/// call, so they share this shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRoleGrantDto {
     pub assignment_id: String,

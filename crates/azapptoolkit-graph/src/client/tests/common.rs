@@ -1,5 +1,5 @@
-//! Shared fixtures for the per-domain client test modules: the
-//! mock-server-backed client constructor and canned Graph payloads.
+//! Shared fixtures for the per-domain client test modules: the mock-server-backed client
+//! constructor and canned Graph payloads.
 
 pub(crate) use azapptoolkit_core::cache::Cache;
 pub(crate) use azapptoolkit_core::token::StaticTokenProvider;
@@ -10,9 +10,8 @@ pub(crate) use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::super::GraphClient;
 
-/// Asserts a request header is **absent**. wiremock 0.6 ships `header_exists`
-/// but no negation, and "this request must not opt into advanced-query
-/// handling" is a property several transport tests need to pin.
+/// Asserts a request header is **absent**: wiremock 0.6 ships `header_exists` but no negation,
+/// and "must not opt into advanced-query handling" is a property several transport tests pin.
 pub(crate) fn header_is_missing(name: &'static str) -> impl wiremock::Match {
     move |req: &wiremock::Request| !req.headers.contains_key(name)
 }
