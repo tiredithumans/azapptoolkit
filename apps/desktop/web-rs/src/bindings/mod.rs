@@ -14,7 +14,7 @@
 //! DTOs come from `azapptoolkit_dto`. Only argument structs are local to each
 //! submodule (shapes several share live in `common.rs`).
 //!
-//! Every IPC call goes through [`ipc`], which turns a rejection that is not a
+//! Every IPC call goes through `ipc`, which turns a rejection that is not a
 //! `UiError` (Tauri's own string errors) into `UiError { code: "ipc" }` instead
 //! of the panic upstream `tauri-sys` would raise. `repo_invariants/ipc.rs`
 //! pins the registry, the command literal, the arg keys and the return type of

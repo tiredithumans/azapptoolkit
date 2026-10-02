@@ -92,6 +92,18 @@ wiremock = "0.6"
 # from the workspace and keeps its own lint posture.
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `cargo doc` gate (review F300): intra-doc links are the architecture record
+# (AGENTS.md routes every agent through them) and `clippy -D warnings` does not
+# run rustdoc, so without this a renamed item silently breaks the links. Both
+# flavours are denied: `broken_intra_doc_links` (unresolvable today) and
+# `private_intra_doc_links` (renders as dead plain text in the public docs, so
+# a link that "still works" privately is the silent version of the same rot).
+# Cargo forwards this table to rustdoc itself (no RUSTDOCFLAGS, so no Windows
+# env-var portability problem); the `just doc` / `web-doc` recipes run rustdoc
+# locally and in CI.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
 # `opt-level = "z"` is deliberate, and now measured rather than assumed.
 #
 # The worry was that a size-first build penalizes the app's heaviest work: the

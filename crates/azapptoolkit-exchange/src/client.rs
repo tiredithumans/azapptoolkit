@@ -51,11 +51,11 @@ const X_ANCHOR_MAILBOX: HeaderName = HeaderName::from_static("x-anchormailbox");
 /// requires an `X-AnchorMailbox` routing hint on every request, which for the
 /// delegated admin flow is the signed-in admin's UPN.
 ///
-/// The surface is split by concern: [`transport`] owns the envelope POST
+/// The surface is split by concern: `transport` owns the envelope POST
 /// (retried through `core::http_retry::with_retries`, with the retry class
-/// taken from the cmdlet verb) and the bodyless-403 diagnostics capture, [`rbac`] the
+/// taken from the cmdlet verb) and the bodyless-403 diagnostics capture, `rbac` the
 /// RBAC-for-Applications cmdlets (service principals / scopes / role
-/// assignments / legacy AAP / verification), [`groups`] the recipient-group
+/// assignments / legacy AAP / verification), `groups` the recipient-group
 /// scope sources and the managed scope group.
 pub struct ExchangeClient {
     http: reqwest::Client,

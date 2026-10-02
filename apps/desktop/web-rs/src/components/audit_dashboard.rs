@@ -53,7 +53,7 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     #[prop(optional)]
     facet: Option<RwSignal<String>>,
     /// Optional external reload counter, on the same lifting principle as
-    /// [`facet`]: a host that mutates the underlying data from *outside* this
+    /// `facet`: a host that mutates the underlying data from *outside* this
     /// component (the SSO board's bulk-stage bar) must be able to pull fresh
     /// rows afterwards. Without it the table keeps showing pre-mutation state
     /// until the user notices and hits refresh — and a board that contradicts

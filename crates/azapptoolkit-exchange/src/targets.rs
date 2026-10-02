@@ -549,7 +549,7 @@ pub fn group_dns_in_filter(filter: &str) -> HashSet<String> {
 /// groups a management scope confines access to).
 ///
 /// Occurrences **inside a quoted literal do not count** — the same rule
-/// [`member_of_group_clauses`] follows. This is what makes
+/// `member_of_group_clauses` follows. This is what makes
 /// [`scope_groups_in_filter`]'s `complete` flag meaningful: it compares the
 /// clauses parsed against the clauses present, so a group whose DN happens to
 /// contain the text `memberofgroup` (`CN=memberofgroup-admins,…` — an ordinary

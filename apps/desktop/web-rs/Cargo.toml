@@ -21,6 +21,13 @@ publish = false
 [lints.rust]
 unsafe_code = "deny"
 
+# Hand-mirror of `[workspace.lints.rustdoc]` in the root Cargo.toml (same
+# reason as above — the workspace exclusion stops `[workspace.lints]` from
+# reaching here, and `just web-doc` is what fires it on the wasm tree).
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+
 [dependencies]
 azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto" }

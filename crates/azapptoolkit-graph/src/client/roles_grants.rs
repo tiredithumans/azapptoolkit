@@ -84,14 +84,14 @@ impl GraphClient {
     /// The heaviest paged read in the app: pointed at the Microsoft Graph SP
     /// this collection holds every app-permission grant in the tenant, so the
     /// page size decides how many serial round trips run before a surface can
-    /// score anything (see [`MAX_PAGE_SIZE`]). The audit's
+    /// score anything (see `MAX_PAGE_SIZE`). The audit's
     /// `prefetch_graph_app_roles` and the consent view's Application-permissions
     /// scan BOTH walk it end to end, so browsing between them paid for the same
     /// full-tenant scan twice. Those two are its ONLY callers; every other
     /// reader stays on the live method.
     ///
     /// Every in-app grant writer sweeps the `grants:` prefix on `Ok`
-    /// ([`Self::invalidate_grant_cache`]), so an in-app revoke never survives
+    /// (`Self::invalidate_grant_cache`), so an in-app revoke never survives
     /// here. A grant changed OUTSIDE the app can lag by up to the Permissions
     /// TTL — the same contract as `grants:oauth2_all`; the Cache dialog's
     /// Permissions clear resets it.

@@ -14,7 +14,7 @@
 //! key, remediation and provenance are catalogued in
 //! `docs/architecture/audit-findings-and-remediation.md` ("Rule catalog").
 //!
-//! The scoring function is pure: it takes an [`Application`] plus already-
+//! The scoring function is pure: it takes an [`crate::models::Application`] plus already-
 //! resolved dependencies (SP, permission names, granted-consent flag) and
 //! returns an [`AuditItem`]. The Tauri layer owns the orchestration — fetching
 //! those dependencies, streaming concurrent scans, caching results, emitting

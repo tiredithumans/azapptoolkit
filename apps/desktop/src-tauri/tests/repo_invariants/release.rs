@@ -24,24 +24,30 @@ fn table_body(toml_src: &str, header: &str) -> Vec<String> {
 /// web-rs is EXCLUDED from the root workspace (it targets `wasm32` and carries
 /// its own lockfile), so it cannot inherit `[workspace.lints]` and restates the
 /// block by hand. AGENTS.md says "keep it in sync with the root block"; nothing
-/// but this test actually did.
+/// but this test actually did. Checked per table — today `[lints.rust]` and
+/// `[lints.rustdoc]` (a rustdoc deny added here but not in web-rs, or vice
+/// versa, is exactly the silent drift this test exists to catch).
 #[test]
 fn web_rs_lint_block_matches_the_workspace_block() {
-    let root = table_body(
-        include_str!("../../../../../Cargo.toml"),
-        "[workspace.lints.rust]",
-    );
-    let web = table_body(include_str!("../../../web-rs/Cargo.toml"), "[lints.rust]");
-    assert!(
-        !root.is_empty(),
-        "no [workspace.lints.rust] block found in the root Cargo.toml — this test is checking nothing"
-    );
-    assert_eq!(
-        root, web,
-        "apps/desktop/web-rs/Cargo.toml's [lints.rust] has drifted from the root \
-         [workspace.lints.rust]. web-rs is outside the workspace, so it cannot inherit \
-         the block — restate it verbatim."
-    );
+    let root = include_str!("../../../../../Cargo.toml");
+    let web = include_str!("../../../web-rs/Cargo.toml");
+    for (root_h, web_h) in [
+        ("[workspace.lints.rust]", "[lints.rust]"),
+        ("[workspace.lints.rustdoc]", "[lints.rustdoc]"),
+    ] {
+        let root_block = table_body(root, root_h);
+        let web_block = table_body(web, web_h);
+        assert!(
+            !root_block.is_empty(),
+            "no {root_h} block found in the root Cargo.toml — this test is checking nothing"
+        );
+        assert_eq!(
+            root_block, web_block,
+            "apps/desktop/web-rs/Cargo.toml's {web_h} has drifted from the root \
+             {root_h}. web-rs is outside the workspace, so it cannot inherit \
+             the block — restate it verbatim."
+        );
+    }
 }
 
 /// `## [X.Y.Z] - YYYY-MM-DD`, exactly — no `v` prefix, ASCII hyphen, one space.
@@ -426,9 +432,10 @@ fn verify_full_runs_every_gate_ci_runs() {
         }
     }
     assert!(
-        // fmt-check, clippy, test, web-fmt-check, web-clippy, web-test,
-        // web-build, web-itest, web-itest-size, audit, web-audit, deny,
-        // web-deny. A scan finding far fewer has stopped recognising the shape.
+        // fmt-check, clippy, test, doc, web-fmt-check, web-clippy, web-test,
+        // web-build, web-doc, web-itest, web-itest-size, audit, web-audit,
+        // deny, web-deny. A scan finding far fewer has stopped recognising
+        // the shape.
         invocations >= 10,
         "the scan found only {invocations} `just` invocation(s) in ci.yml — the recipe detector \
          is broken, and a parity rule that sees no gates passes vacuously"

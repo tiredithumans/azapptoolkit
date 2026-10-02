@@ -6,14 +6,14 @@
 //! [`crate::hooks::use_grid_keynav`] — not here.
 //!
 //! **Typing must never be hijacked.** Every bare-key binding is skipped while
-//! focus is in text entry ([`crate::hooks::is_text_entry`] — the one predicate,
+//! focus is in text entry (`crate::hooks::is_text_entry` — the one predicate,
 //! shared with the grid hook; a focused checkbox, radio or button is not
 //! typing), except the modified ones (Cmd/Ctrl-…) that can't collide with
 //! typing. This is why `/` is safe as a bare key: it reaches the handler only
 //! when the operator is not in a text field.
 //!
 //! **A dialog owns the keyboard.** Bare keys also no-op while any modal is open
-//! ([`crate::hooks::modal_is_open`]): `?` would otherwise stack the sheet over
+//! (`crate::hooks::modal_is_open`): `?` would otherwise stack the sheet over
 //! the dialog (one Escape then closed both), and `/` would pull focus out of the
 //! dialog's trap to a list filter behind the backdrop. The one exception is `?`
 //! closing the sheet it opened — the sheet is itself a modal.

@@ -311,6 +311,25 @@ clippy: _stub-frontend-dist
 test: _stub-frontend-dist
     cargo test --locked --workspace
 
+# Build docs for every workspace crate, failing on broken/inaccessible
+# intra-doc links (CI gate). `[workspace.lints.rustdoc]` denies
+# `broken_intra_doc_links` + `private_intra_doc_links`, and clippy never runs
+# rustdoc — this recipe is where that deny actually fires. The links carry
+# real weight here (module docs are the subsystem record agents are told to
+# read), so a rename that orphans one is a defect, not cosmetic noise.
+# --no-deps: the gate is our prose; third-party link resolution is not ours.
+# Needs the dist stub because documenting src-tauri runs `generate_context!`.
+doc: _stub-frontend-dist
+    cargo doc --locked --workspace --no-deps
+
+# Same rustdoc gate for the frontend tree (wasm target — on the host, web-rs's
+# components are cfg'd out, so host docs would prove nothing). web-rs is
+# excluded from the workspace, so its `[lints.rustdoc]` is a hand-mirror of the
+# root's, pinned by `web_rs_lint_block_matches_the_workspace_block`.
+[working-directory('apps/desktop/web-rs')]
+web-doc:
+    cargo doc --locked --no-deps --target wasm32-unknown-unknown
+
 # The inner loop while iterating: type-check BOTH trees (the root workspace incl.
 # every test target, and the wasm frontend) with no codegen and no tests. Not a
 # CI gate — `verify` is — but it catches the compile error `verify` would take
@@ -400,7 +419,7 @@ web-test:
 # web build, matching the CI web job and failing fast on a logic regression.
 
 # The machine-independent gates shared by every verify entry point.
-_verify-core: fmt-check clippy test web-fmt-check web-clippy web-test web-build
+_verify-core: fmt-check clippy test doc web-fmt-check web-clippy web-test web-build web-doc
 
 # Run the core CI gates locally, in order. Run this before declaring a change
 # done. The browser GUI tests run too WHEN this box can (see `web-itest-auto`)

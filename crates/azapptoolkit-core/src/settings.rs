@@ -116,7 +116,7 @@ impl UserSettings {
     /// temp-and-rename in `private_file`, a concurrent *reader* also never sees
     /// a partial file. A second app instance is kept out by an OS advisory lock
     /// on [`SETTINGS_LOCK_FILE`], taken inside the process lock (best-effort:
-    /// see [`Self::lock_across_instances`]).
+    /// see `Self::lock_across_instances`).
     ///
     /// Refuses, rather than overwrites, a `settings.json` that exists but
     /// cannot be read or parsed (a hand-edit typo, a transient read failure):

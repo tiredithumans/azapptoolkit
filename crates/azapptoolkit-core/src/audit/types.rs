@@ -305,7 +305,7 @@ pub struct AppPermissions {
     /// the Exchange-admin rights the per-app RBAC probe needs).
     ///
     /// Keyed by value alone, which is unambiguous **only because** every read
-    /// goes through [`AppPermissions::is_scoped`], which gates on the grant's own
+    /// goes through `AppPermissions::is_scoped`, which gates on the grant's own
     /// resource first: the two mailbox resources share no *scopable* value names
     /// (`full_access_as_app` exists only on Office 365 Exchange Online, the mail
     /// family maps only on Graph). Read this map directly and that guarantee is

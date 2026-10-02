@@ -135,9 +135,7 @@ impl ExchangeClient {
     }
 
     /// Lists the direct members of `group`. Returns an empty list when the group
-    /// doesn't exist (via [`invoke_optional`]).
-    ///
-    /// [`invoke_optional`]: Self::invoke_optional
+    /// doesn't exist (via `invoke_optional`).
     pub async fn list_group_members(&self, group: &str) -> Result<Vec<ExoGroupMember>> {
         let values = self
             .invoke_optional("Get-DistributionGroupMember", json!({ "Identity": group }))

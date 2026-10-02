@@ -140,6 +140,11 @@ jobs:
       - name: clippy
         if: needs.changes.outputs.code == 'true'
         run: just clippy
+      # rustdoc is not covered by clippy, and the intra-doc deny in
+      # [workspace.lints.rustdoc] only fires here (review F300).
+      - name: doc
+        if: needs.changes.outputs.code == 'true'
+        run: just doc
       - name: test
         if: needs.changes.outputs.code == 'true'
         run: just test
@@ -181,6 +186,10 @@ jobs:
         run: just web-test
       - name: Build frontend
         run: just web-build
+      # The wasm tree's own rustdoc gate — web-rs is excluded from the root
+      # workspace, so the `rust` job's `just doc` never reaches it.
+      - name: docs
+        run: just web-doc
       # GUI functionality tests in a headless browser (mocked Tauri IPC, no
       # tenant). Pin the runner's chromedriver — GitHub keeps it version-matched
       # to the installed Chrome — so wasm-pack uses it instead of downloading a

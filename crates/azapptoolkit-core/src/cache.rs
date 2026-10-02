@@ -1017,7 +1017,7 @@ impl Cache {
     /// The guard releases the watch on `Drop`, so a fetch that fails, is
     /// cancelled, or otherwise never reaches its store cannot leak the entry.
     /// That matters more than it looks: the table is capped at
-    /// [`Cache::MAX_WATCHES`], and leaked entries are never reclaimed, so a
+    /// `Cache::MAX_WATCHES`, and leaked entries are never reclaimed, so a
     /// steady trickle of failed index fetches would eventually fill it and make
     /// *every* pinned-index store refuse permanently — degrading every
     /// tenant-wide read to a full rescan with no signal and no way back short

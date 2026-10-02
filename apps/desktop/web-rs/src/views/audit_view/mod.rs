@@ -2,9 +2,9 @@
 //! "All apps" pane.
 //!
 //! The workbench shell ([`crate::views::security_view::SecurityView`]) owns
-//! the run lifecycle via [`AuditController`] (posture strip: run / cancel /
+//! the run lifecycle via `AuditController` (posture strip: run / cancel /
 //! export / progress / consent) and hosts two audit panes over the same scan:
-//! [`FindingsPane`] (grouped by finding, remediation-centric — the default)
+//! `FindingsPane` (grouped by finding, remediation-centric — the default)
 //! and [`AuditAppsPane`] (this file: the ranked per-app table for search /
 //! score triage, filtered by ONE severity control).
 
@@ -42,7 +42,7 @@ use row::AuditRowActions;
 use sort::SortCol;
 
 /// The ranked per-app audit table. Reads the shared scan from the
-/// [`AuditController`] context; its one filter dimension is the severity
+/// `AuditController` context; its one filter dimension is the severity
 /// TabBar (`Session.tenant_ui.audit_severity`, so Home's Critical/High/Medium drills
 /// seed it) intersected with the name/appId search. Finding-shaped filtering
 /// and remediation grouping live in the Findings pane — this table's bulk bar

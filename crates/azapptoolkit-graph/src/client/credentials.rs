@@ -170,7 +170,7 @@ impl GraphClient {
     /// `keyCredentials` array. Graph requires the full array on PATCH, so we
     /// fetch the current state first, append, and send the new list back —
     /// as raw JSON, so the surviving entries keep their `key` (see
-    /// [`Self::live_key_credentials`]).
+    /// `Self::live_key_credentials`).
     ///
     /// Note: this writes a "verify-only" credential (no private key), which
     /// is what users typically upload when an external issuer holds the
