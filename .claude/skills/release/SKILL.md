@@ -80,8 +80,10 @@ git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha>   # the MERGE COMMIT on main, not the 
 git push origin vX.Y.Z
 ```
 
-The tag push triggers `release.yml`: guard (version/pubkey/audit) → 3-OS build matrix
-(`just build-windows-updater` · `build-macos-updater` · `build-linux-updater`) → a **draft**
+The tag push triggers `release.yml`: guard (version/pubkey/audit) → 3-OS build matrix —
+each leg runs `just compile-<os>` (no signing env) then `just bundle-<os>` (updater
+signing key scoped to that step; the paired `build-<os>-updater` recipe chains the two
+for local rehearsal) → a **draft**
 release with ONE aggregated `latest.json` + `SHA256SUMS`.
 
 ## 7. Verify the draft

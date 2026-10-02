@@ -147,6 +147,16 @@ The release workflow builds packages for all three platforms — Windows
 you can build for your own host with the keyless recipes (`just build-windows`,
 `just build-macos`, `just build-linux`); the `-updater` variants need the signing key.
 
+Each `-updater` recipe is a **compile → bundle pair**, not one command:
+`cargo tauri build --no-bundle` (frontend + Rust, no signing) followed by
+`cargo tauri bundle --config updater-build.json` (bundling + updater
+signatures). The release workflow runs the two steps separately and scopes
+`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` to the **bundle step only**, so the
+minisign key is not in the environment of the ~600-crate dependency compile
+(every `build.rs` and proc-macro) which never reads it. Running just the
+`bundle-*` recipe on its own expects the binary to already be built —
+`cargo tauri bundle` does not compile Rust, so chain it or compile first.
+
 ### Windows
 
 The build produces both an MSI and an NSIS installer in one pass.
@@ -174,23 +184,29 @@ Outputs:
 | `target/x86_64-pc-windows-msvc/release/azapptoolkit.exe` | Raw binary. Needs the WebView2 runtime on the target machine; use only if you're bundling the app in a larger distribution container. |
 
 `just build-windows` does **not** produce updater artifacts. The
-release workflow uses `just build-windows-updater` (which adds
-`--config updater-build.json`); with the
-signing key in the environment, that variant writes `-setup.exe.sig`
-next to the NSIS installer. (The override lives in
+release workflow uses `just build-windows-updater`, which chains
+`compile-windows` (`cargo tauri build --no-bundle --target
+x86_64-pc-windows-msvc -- --locked`) with `bundle-windows`
+(`cargo tauri bundle --target x86_64-pc-windows-msvc --config
+updater-build.json`); with the signing key in the bundle step's
+environment, that pair writes `-setup.exe.sig` next to the NSIS
+installer. (The override lives in
 `apps/desktop/src-tauri/updater-build.json` rather than inline
 `--config '{...}'`: PowerShell, the Windows recipe shell, strips the
 JSON's inner double quotes when handing args to `cargo.exe`, so inline
-JSON parses as invalid — a file path has no quoting to mangle.) `cargo tauri build` does not emit
+JSON parses as invalid — a file path has no quoting to mangle.) Neither
+`cargo tauri build` nor `cargo tauri bundle` emits
 `latest.json` — the workflow assembles it (see [CI](#ci) below). The
 auto-update target is the **NSIS `-setup.exe`** (per-user, no admin);
 the MSI is published for manual/enterprise download only.
 
 ### macOS
 
-`just build-macos-updater` runs `cargo tauri build --target
-aarch64-apple-darwin --config updater-build.json --bundles app,dmg` and
-writes a `.dmg` (under `bundle/dmg/`) plus the `.app.tar.gz` updater
+`just build-macos-updater` chains `compile-macos` (`cargo tauri build
+--no-bundle --target aarch64-apple-darwin -- --locked`) with
+`bundle-macos` (`cargo tauri bundle --target aarch64-apple-darwin
+--config updater-build.json --bundles app,dmg`), writing a `.dmg`
+(under `bundle/dmg/`) plus the `.app.tar.gz` updater
 payload + `.sig` (under `bundle/macos/`). **Apple Silicon only** — a
 universal binary is deliberately not built (it's the historically-flaky
 bundling step on this stack; an Intel `macos-13` matrix leg can be added
@@ -208,9 +224,11 @@ not.
 
 ### Linux
 
-`just build-linux-updater` runs `cargo tauri build --target
-x86_64-unknown-linux-gnu --config updater-build.json --bundles
-appimage,deb` and writes a `.AppImage` (+ `.sig`, the updater payload) and
+`just build-linux-updater` chains `compile-linux` (`cargo tauri build
+--no-bundle --target x86_64-unknown-linux-gnu -- --locked`) with
+`bundle-linux` (`cargo tauri bundle --target x86_64-unknown-linux-gnu
+--config updater-build.json --bundles appimage,deb`), writing a
+`.AppImage` (+ `.sig`, the updater payload) and
 a `.deb`. The build host needs the GTK/WebKit dev libraries + `patchelf`
 (`libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 libssl-dev patchelf`); the release runner installs them. `rpm` is omitted
@@ -345,8 +363,11 @@ Required GitHub Actions secrets for `release.yml`:
 
 The release workflow passes the private key through
 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-environment variables. With those set, `build-windows-updater` signs the
-NSIS payload; the workflow then (re)signs the final binary — Authenticode
+environment variables **on the bundle step only** (the compile step runs
+without them; see "Packaging installers"). With those set, the macOS and
+Linux legs' `bundle-macos`/`bundle-linux` steps and, on Windows,
+`bundle-windows` sign the updater payloads; the workflow then (re)signs
+the final binary — Authenticode
 signing changes the bytes — and assembles the `latest.json` the installed
 app pulls from the `endpoints` URL in `tauri.conf.json` (only when
 `active: true`).

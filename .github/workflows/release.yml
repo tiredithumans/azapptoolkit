@@ -100,18 +100,21 @@ jobs:
         include:
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            recipe: build-windows-updater
+            compile_recipe: compile-windows
+            bundle_recipe: bundle-windows
             artifact: windows
           # Native Apple Silicon (aarch64); Intel/universal is a future addition.
           - os: macos-latest
             rust_target: aarch64-apple-darwin
-            recipe: build-macos-updater
+            compile_recipe: compile-macos
+            bundle_recipe: bundle-macos
             artifact: macos
           # Pinned, NOT ubuntu-latest: the build host's glibc is the oldest the
           # AppImage/.deb can start on (see "Check the Linux binary's glibc floor").
           - os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-            recipe: build-linux-updater
+            compile_recipe: compile-linux
+            bundle_recipe: bundle-linux
             artifact: linux
     runs-on: ${{ matrix.os }}
     env:
@@ -145,11 +148,20 @@ jobs:
         # patch digit. Bump in lockstep with the crate. --locked pins its deps.
         run: cargo install tauri-cli --locked --version "=2.11.5"
 
-      - name: Build bundles (with updater artifacts)
+      # Compile and bundle are separate steps so TAURI_SIGNING_PRIVATE_KEY is
+      # only in the environment of the bundling step (review F285). A single
+      # `cargo tauri build` put the minisign key — the trust root for silent
+      # code delivery to every installed copy — in the env of every dependency
+      # build script and proc-macro during compilation, which never needs it;
+      # the CLI only reads it when creating updater artifacts.
+      - name: Compile (frontend + Rust, no bundling, no signing key)
+        run: just ${{ matrix.compile_recipe }}
+
+      - name: Bundle (signed updater artifacts; signing key scoped here)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: just ${{ matrix.recipe }}
+        run: just ${{ matrix.bundle_recipe }}
 
       # Raw + gzip sizes of the shipped wasm/js/css (the beforeBuildCommand's
       # release Trunk build), published to the run's summary. Every leg ships

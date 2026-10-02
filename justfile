@@ -490,8 +490,17 @@ machete:
     cargo machete --skip-target-dir
 
 # --- Release / packaging ----------------------------------------------------
-
-# Build the Windows MSI + NSIS installers (release; auto-builds the frontend).
+#
+# The release pipeline per platform is a COMPILE step (`cargo tauri build
+# --no-bundle`: frontend + Rust, no bundling, no signing) and a BUNDLE step
+# (`cargo tauri bundle`: bundling + updater signatures). release.yml runs them
+# as two steps and scopes TAURI_SIGNING_PRIVATE_KEY[_PASSWORD] to the bundle
+# step only (review F285): a single `cargo tauri build` used to run every
+# dependency build script with the updater's minisign key in its environment,
+# although the CLI only needs the key during bundling. The `build-*-updater`
+# recipes chain the pair so a local rehearsal is still one command, and
+# `cargo tauri bundle` runs only `beforeBundleCommand` and expects the binary
+# already built — so always chain or compile first.
 # Args after `--` go to the underlying cargo build: --locked enforces the
 # committed Cargo.lock on the one pipeline that produces shipped bytes (every
 # verify gate pins it; the release build must not silently re-resolve).
@@ -502,19 +511,30 @@ build-windows:
     cargo tauri build --target x86_64-pc-windows-msvc -- --locked
 
 # Requires the updater signing key in TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]
-# (`tauri build` fails without it when createUpdaterArtifacts is on); kept
-# separate from `build-windows` so local/test packaging needs no signing key.
-# Windows installers WITH signed updater artifacts (.sig → latest.json in CI).
-# The override comes from `updater-build.json`, not inline `--config '{...}'`:
-# PowerShell (the Windows recipe shell) strips the JSON's inner double quotes
-# when handing args to cargo.exe, so inline JSON parses as invalid ("key must be
-# a string"). A file path has no quoting to mangle. It is NOT a `tauri.*.conf.json`
-# name, so Tauri never auto-loads it — only this explicit `--config` does.
+# (`cargo tauri bundle` fails without it when createUpdaterArtifacts is on);
+# kept separate from `build-windows` so local/test packaging needs no signing
+# key. Windows installers WITH signed updater artifacts (.sig → latest.json in
+# CI). The override comes from `updater-build.json`, not inline `--config
+# '{...}'`: PowerShell (the Windows recipe shell) strips the JSON's inner double
+# quotes when handing args to cargo.exe, so inline JSON parses as invalid ("key
+# must be a string"). A file path has no quoting to mangle. It is NOT a
+# `tauri.*.conf.json` name, so Tauri never auto-loads it — only this explicit
+# `--config` (and the `bundle-*` recipes above) does.
+
+# Windows compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-windows:
+    cargo tauri build --no-bundle --target x86_64-pc-windows-msvc -- --locked
+
+# Windows bundle step: MSI + NSIS + updater .sig (needs TAURI_SIGNING_PRIVATE_KEY).
+# No `--bundles`: default `targets: "all"` is exactly msi + nsis on Windows.
+[working-directory('apps/desktop/src-tauri')]
+bundle-windows:
+    cargo tauri bundle --target x86_64-pc-windows-msvc --config updater-build.json
 
 # Windows installers WITH signed updater artifacts (needs TAURI_SIGNING_PRIVATE_KEY).
 [working-directory('apps/desktop/src-tauri')]
-build-windows-updater:
-    cargo tauri build --target x86_64-pc-windows-msvc --config updater-build.json -- --locked
+build-windows-updater: compile-windows bundle-windows
 
 # macOS bundles (.dmg download + .app.tar.gz updater payload) with signed updater
 # artifacts. Native Apple Silicon (aarch64) — a universal binary is deliberately
@@ -527,10 +547,19 @@ build-windows-updater:
 build-macos:
     cargo tauri build --target aarch64-apple-darwin --bundles app,dmg -- --locked
 
+# macOS compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-macos:
+    cargo tauri build --no-bundle --target aarch64-apple-darwin -- --locked
+
+# macOS bundle step: .app + .dmg + .app.tar.gz updater payload (needs the key).
+[working-directory('apps/desktop/src-tauri')]
+bundle-macos:
+    cargo tauri bundle --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg
+
 # macOS .dmg + .app.tar.gz with signed updater artifacts (Apple Silicon).
 [working-directory('apps/desktop/src-tauri')]
-build-macos-updater:
-    cargo tauri build --target aarch64-apple-darwin --config updater-build.json --bundles app,dmg -- --locked
+build-macos-updater: compile-macos bundle-macos
 
 # Linux bundles (.AppImage download + updater payload, .deb for Debian/Ubuntu)
 # with signed updater artifacts. Needs the GTK/WebKit/AppIndicator dev libs +
@@ -542,10 +571,19 @@ build-macos-updater:
 build-linux:
     cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb -- --locked
 
+# Linux compile step: frontend + Rust, no bundles, no signing env.
+[working-directory('apps/desktop/src-tauri')]
+compile-linux:
+    cargo tauri build --no-bundle --target x86_64-unknown-linux-gnu -- --locked
+
+# Linux bundle step: .AppImage + .deb + updater payload (needs the key).
+[working-directory('apps/desktop/src-tauri')]
+bundle-linux:
+    cargo tauri bundle --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb
+
 # Linux AppImage + .deb with signed updater artifacts.
 [working-directory('apps/desktop/src-tauri')]
-build-linux-updater:
-    cargo tauri build --target x86_64-unknown-linux-gnu --config updater-build.json --bundles appimage,deb -- --locked
+build-linux-updater: compile-linux bundle-linux
 
 # Regenerate every bundled icon format from icons/icon.svg.
 [working-directory('apps/desktop/src-tauri')]
