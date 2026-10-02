@@ -1,8 +1,8 @@
 //! Readiness-checklist IPC DTOs.
 //!
-//! The `check_readiness` command checks what the signed-in user currently holds
-//! against the capability catalog (`azapptoolkit_core::capabilities`) and returns
-//! a per-capability verdict on **two axes** — the standing **role** and the
+//! `check_readiness` checks what the signed-in user holds against the
+//! capability catalog (`azapptoolkit_core::capabilities`) and returns a
+//! per-capability verdict on **two axes** — the standing **role** and the
 //! consented **scope** ("Two halves, both required", `OPERATOR-ROLES.md`). The
 //! frontend renders ✓ / ✗ / ? per axis, grouped by authorization plane.
 

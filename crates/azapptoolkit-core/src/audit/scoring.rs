@@ -17,10 +17,9 @@ use super::permissions::{
     RedundantPermission,
 };
 
-/// One scoring rule's contribution: a risk-score delta plus the issues and
-/// recommendations it raises. Each `rule_*` helper returns one; `score_application`
-/// folds them in rule order so the issue / recommendation ordering is preserved
-/// by construction.
+/// One rule's contribution: score delta plus the issues/recommendations it
+/// raises. `score_application` folds the `rule_*` helpers in rule order, so
+/// issue / recommendation ordering is preserved by construction.
 #[derive(Default)]
 struct RuleContribution {
     score: u32,
@@ -37,17 +36,16 @@ impl RuleContribution {
     }
 }
 
-/// Rules 1 & 2: high- and medium-risk application permissions. A high/medium-risk
-/// *mail* permission confirmed scoped to specific mailboxes via Exchange RBAC
-/// earns the reduced scoped weight instead. With an empty `mail_scopes` (scoping
-/// not resolved) every hit is treated as org-wide — byte-for-byte the original.
+/// Rules 1 & 2: high/medium-risk application permissions. A high/medium-risk
+/// *mail* permission confirmed scoped via Exchange RBAC earns the reduced
+/// scoped weight. Empty `mail_scopes` (unresolved) ⇒ every hit is org-wide —
+/// byte-for-byte the original.
 fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     let mut c = RuleContribution::default();
 
     // Partitioned on the *grant*, not the value: `is_scoped` gates on the
-    // grant's own resource, so an unscopable legacy Exchange Online namesake
-    // keeps full weight even while the Graph permission of the same name is
-    // confirmed scoped.
+    // grant's resource, so an unscopable legacy Exchange Online namesake keeps
+    // full weight even while its same-named Graph permission is scoped.
     let (high_scoped, high_full): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
         .app_role_grants
         .iter()
@@ -88,14 +86,12 @@ fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     c
 }
 
-/// The reduced-weight advisory for one risk tier's confirmed-scoped mailbox
-/// permissions, **split by the mechanism confining them**. The score is
-/// identical either way (both genuinely confine the access) — only the wording
-/// differs, and it has to: the RBAC line carries [`issue::SCOPED_VIA_RBAC`],
+/// The reduced-weight advisory for one tier's confirmed-scoped mailbox
+/// permissions, **split by confining mechanism** (score identical either way —
+/// only wording differs). The RBAC line carries [`issue::SCOPED_VIA_RBAC`],
 /// which the UI matches mid-string to populate the *healthy* "Mailbox access
-/// scoped" group. Emitting it for a legacy Application Access Policy would file
-/// the row under a positive signal and bury the migration finding Rule 11
-/// raises for the very same permission.
+/// scoped" group; emitting it for a legacy AAP would bury Rule 11's migration
+/// finding for the same permission.
 fn push_scoped_risk_issue(
     c: &mut RuleContribution,
     tier: &str,
@@ -125,9 +121,9 @@ fn push_scoped_risk_issue(
 }
 
 /// Rules 5/6 (expired), 8/9 (expiring-soon, only when nothing is expired), and
-/// 7 (long-lived credentials: secrets and certificates alike), emitted in that
-/// order. Takes the precomputed credential subsets — `expired` is also consumed
-/// by the remediation block, so it is resolved once in `score_application`.
+/// 7 (long-lived secrets and certificates), in that order. Credential subsets
+/// are precomputed once in `score_application` (`expired` is reused by the
+/// remediation block).
 fn rule_credentials(
     expired: &[&CredentialSummary],
     expiring: &[&CredentialSummary],
@@ -135,13 +131,11 @@ fn rule_credentials(
     long_lived: &[&CredentialSummary],
 ) -> RuleContribution {
     let mut c = RuleContribution::default();
-    // `active_count` deliberately excludes `ExpiringSoon` so the expiring-soon
-    // rules below can say "nothing but expiring credentials left". That is sound
-    // there and NOT sound here: with one expired secret and one expiring-soon
-    // secret, `active_count == 0` while a working credential is still
-    // authenticating. Reporting "All credentials expired" then reads as a dead
-    // app, so an operator stops looking — and the ranking overstates the risk.
-    // Only the count of credentials that still WORK decides this branch.
+    // `active_count` excludes `ExpiringSoon` (sound for the expiring-soon rules
+    // below, NOT here): one expired + one expiring-soon secret gives
+    // `active_count == 0` while a working credential still authenticates, so
+    // "All credentials expired" would misread as a dead app and overstate risk.
+    // Only credentials that still WORK decide this branch.
     let still_working = active_count + expiring.len();
     if !expired.is_empty() && still_working == 0 {
         c.score += PTS_ALL_CREDS_EXPIRED;
@@ -250,38 +244,34 @@ fn rule_stale_app(days_since_created: Option<i64>) -> RuleContribution {
 }
 
 /// Rule 11 (advisory, no score): organization-wide mailbox access. Splits the
-/// mailbox-reaching grants five ways, because the remedy differs per bucket:
+/// mailbox-reaching grants five ways because the remedy differs per bucket:
 ///
 /// - **confirmed scoped** via Exchange RBAC → informational only;
-/// - **confirmed scoped by a legacy Application Access Policy** → its own
-///   finding plus the `MigrateApplicationAccessPolicy` fix. The access really is
-///   confined (so it keeps the reduced scoped weight the risk rules give it —
-///   this is not an org-wide finding), but the mechanism is legacy: AAPs are
-///   an all-or-nothing per-app gate that only constrains Entra grants, and
-///   Microsoft's replacement is RBAC for Applications;
-/// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation. Decided
-///   by [`crate::scoping::is_scopable_exchange_resource_permission`], the same
-///   positive gate [`AppPermissions::is_scoped`] uses — never by the negation
-///   of the legacy test below, which admits three unscopable shapes;
-/// - **org-wide on the legacy Office 365 Exchange Online resource** → its own
-///   finding and **no** remediation. RBAC for Applications covers Microsoft
-///   Graph and EWS only, so nothing can confine that resource's Outlook REST
-///   `Mail.*` roles — removing the grant is the only remedy, and a "Scope…"
-///   button there would promise a fix that cannot be honoured;
-/// - **org-wide but unconfinable for any other reason** — a `Mail.*` /
-///   `MailboxSettings.*` name outside the mapped role set, a resource this
-///   build doesn't map, or a resource that failed to resolve at all → its own
-///   finding and **no** remediation, because "remove the legacy grant" is the
+/// - **legacy Application Access Policy** → its own finding + the
+///   `MigrateApplicationAccessPolicy` fix. The access really is confined (keeps
+///   the reduced scoped weight, so it is not an org-wide finding), but AAP is a
+///   legacy all-or-nothing per-app gate that only constrains Entra grants; its
+///   replacement is RBAC for Applications;
+/// - **org-wide and scopable** → the `ScopeMailboxAccess` remediation, decided
+///   by [`crate::scoping::is_scopable_exchange_resource_permission`] — the same
+///   positive gate [`AppPermissions::is_scoped`] uses, never the negation of the
+///   legacy test below (which admits three unscopable shapes);
+/// - **org-wide on legacy Office 365 Exchange Online** → its own finding, **no**
+///   remediation: RBAC for Applications covers Graph and EWS only, so nothing
+///   can confine that resource's Outlook REST `Mail.*` roles; a "Scope…" button
+///   would promise a fix that cannot be honoured;
+/// - **org-wide but unconfinable otherwise** (a `Mail.*`/`MailboxSettings.*`
+///   name outside the mapped role set, an unmapped resource, or a failed
+///   resolution) → its own finding, **no** remediation — "remove the grant" is
 ///   wrong advice for access that may be entirely legitimate.
 ///
-/// Membership comes from [`crate::scoping::is_mailbox_reaching_permission`],
-/// which is resource-aware — a bare `Mail.*` name test misses the EWS
-/// `full_access_as_app` scope entirely, and that grant reaches every mailbox in
-/// the tenant.
+/// Membership comes from [`crate::scoping::is_mailbox_reaching_permission`]
+/// (resource-aware): a bare `Mail.*` name test misses the tenant-wide EWS
+/// `full_access_as_app` scope.
 ///
 /// Returns the *scopable* org-wide set and the legacy-policy-scoped set, for
-/// their two remediations. Empty `mail_scopes` ⇒ nothing is scoped ⇒ every
-/// scopable hit is org-wide (the original behavior).
+/// their two remediations. Empty `mail_scopes` ⇒ nothing scoped ⇒ every scopable
+/// hit is org-wide (the original behavior).
 type MailboxAdvisory<'a> = (
     RuleContribution,
     Vec<&'a ResourcePermission>,
@@ -290,9 +280,8 @@ type MailboxAdvisory<'a> = (
 
 fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     let mut c = RuleContribution::default();
-    // Partitioned straight off the filter — this runs once per application in a
-    // tenant-wide audit, and the intermediate `Vec` was built only to be
-    // consumed by the very next line.
+    // Partitioned straight off the filter (runs once per app in a tenant-wide
+    // audit; the intermediate `Vec` existed only for the next line).
     let (mailbox_scoped, mailbox_orgwide): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         perms
             .app_role_grants
@@ -304,15 +293,11 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
                 )
             })
             .partition(|g| perms.is_scoped(g));
-    // Positive test, deliberately: only a permission RBAC for Applications can
-    // actually confine may carry the ScopeMailboxAccess remediation. Asking the
-    // negative question ("is it *not* the legacy Outlook-REST case?") let three
-    // other shapes through into the fix — a `None` resource, a resource this
-    // build doesn't map, and a `Mail.*`/`MailboxSettings.*` name on Microsoft
-    // Graph outside the mapped role set — every one of which
-    // `is_scopable_exchange_resource_permission` declares unscopable, so the
-    // handler could only fail on (or worse, mis-apply) the Fix it was offered.
-    // This mirrors the gate `AppPermissions::is_scoped` already uses.
+    // Positive gate, deliberately: only permissions RBAC for Applications can
+    // confine get the ScopeMailboxAccess fix. A negative test let through
+    // `None`/unmapped resources and unmapped Graph `Mail.*`/`MailboxSettings.*`
+    // names — all declared unscopable, so their Fix could only fail or
+    // mis-apply. Mirrors the gate `AppPermissions::is_scoped` uses.
     let (mailbox_unscoped, unconfinable): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         mailbox_orgwide.into_iter().partition(|g| {
             crate::scoping::is_scopable_exchange_resource_permission(
@@ -320,9 +305,9 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
                 &g.value,
             )
         });
-    // Split what cannot be confined by *why*, because the advice differs:
-    // removing the grant is the only remedy for the legacy Outlook-REST roles,
-    // but plain wrong for a permission whose resource merely failed to resolve.
+    // Split the unconfinable by *why*: removing the grant is the only remedy for
+    // the legacy Outlook-REST roles, but wrong for a resource that failed to
+    // resolve.
     let (unscopable_legacy, unconfinable_other): (
         Vec<&ResourcePermission>,
         Vec<&ResourcePermission>,
@@ -370,10 +355,9 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
                 .to_string(),
         );
     }
-    // Confined access, split by the mechanism doing the confining: RBAC for
-    // Applications is the end state, a legacy Application Access Policy is a
-    // legacy one to migrate off. Both keep the reduced scoped weight the
-    // risk rules already applied — the policy really does confine the grant.
+    // Confined access, split by confining mechanism (RBAC = end state, legacy AAP
+    // = migrate off). Both keep the reduced scoped weight — the policy really
+    // does confine the grant.
     let (scoped_legacy, scoped_rbac): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) =
         mailbox_scoped.into_iter().partition(|g| {
             matches!(
@@ -406,16 +390,13 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     (c, mailbox_unscoped, scoped_legacy)
 }
 
-/// Rule 12 (advisory, no score): organization-wide SharePoint access. SharePoint
-/// scoping is encoded by the permission itself (`Sites.Selected` is scoped,
-/// every other `Sites.*` is org-wide), so no live lookup is needed. Returns the
-/// Graph (confinable) org-wide set for the ScopeSharePointAccess remediation.
-///
-/// Takes the grants and gates on each one's resource: only a Microsoft Graph
-/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries
-/// the `ScopeSharePointAccess` fix, Office 365 SharePoint Online's goes to
-/// `UNCONFINABLE_SHAREPOINT`, and the healthy note needs
-/// `is_scoped_sharepoint_resource_permission`.
+/// Rule 12 (advisory, no score): organization-wide SharePoint access. Scoping
+/// is encoded by the permission itself (`Sites.Selected` scoped, other `Sites.*`
+/// org-wide) — no live lookup. Gates on each grant's resource: only Graph's
+/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries the
+/// `ScopeSharePointAccess` fix; Office 365 SharePoint Online's goes to
+/// `UNCONFINABLE_SHAREPOINT`; the healthy note needs
+/// `is_scoped_sharepoint_resource_permission`. Returns the Graph org-wide set.
 fn rule_sharepoint_advisory(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<&ResourcePermission>) {
@@ -424,9 +405,9 @@ fn rule_sharepoint_advisory(
     };
     let mut c = RuleContribution::default();
 
-    // Split on the POSITIVE gate, never on the negation of a legacy test: only
-    // grants the Sites.Selected handler can actually confine may carry the fix.
-    // Partitioned straight off the filter, as in the mailbox rule above.
+    // POSITIVE gate, never the negation of a legacy test: only grants the
+    // Sites.Selected handler can confine carry the fix. Partitioned straight
+    // off the filter, as in the mailbox rule.
     let (scopable, unconfinable): (Vec<&ResourcePermission>, Vec<&ResourcePermission>) = perms
         .app_role_grants
         .iter()
@@ -445,7 +426,7 @@ fn rule_sharepoint_advisory(
             .push("Restrict SharePoint access to specific sites using Sites.Selected".to_string());
     }
     if !unconfinable.is_empty() {
-        // Its own finding, and no Fix: converting these would grant Graph's
+        // Its own finding, and no Fix: converting would grant Graph's
         // `Sites.Selected`, strip nothing, and leave the app org-wide while the
         // audit reported it confined.
         c.issues.push(format!(
@@ -459,12 +440,11 @@ fn rule_sharepoint_advisory(
                 .to_string(),
         );
     }
-    // POSITIVE gate, like the org-wide split above and the mailbox rule's — not
-    // a bare `value == "Sites.Selected"`. Office 365 SharePoint Online exposes
-    // `Sites.Selected` too, and this healthy note claims the app's SharePoint
-    // reach is confined AND knowable; for a legacy-resource grant it is neither
-    // (the per-site grants the toolkit reads are Graph's). A value-keyed check
-    // here reported an app the toolkit cannot inspect as confirmed-scoped.
+    // POSITIVE gate, not a bare `value == "Sites.Selected"`: Office 365 SharePoint
+    // Online exposes that value too, and the healthy note claims reach is
+    // confined AND knowable — a legacy-resource grant is neither (the per-site
+    // grants read here are Graph's). A value-keyed check reported uninspectable
+    // apps as confirmed-scoped.
     if perms.app_role_grants.iter().any(|g| {
         crate::scoping::is_scoped_sharepoint_resource_permission(
             g.resource_app_id.as_deref(),
@@ -477,33 +457,29 @@ fn rule_sharepoint_advisory(
     (c, scopable)
 }
 
-/// Rule 13 (advisory, no score): high-risk delegated permissions. The legacy
-/// module weighted delegated permissions only via the admin-consent check
-/// (Rule 3), so this surfaces the specific scopes without altering the score.
-///
-/// Two halves, gated differently:
+/// Rule 13 (advisory, no score): high-risk delegated permissions — the legacy
+/// module weighted delegated only via Rule 3, so this surfaces specific scopes
+/// without altering the score. Two halves, gated differently:
 /// - the ported pair [`HIGH_RISK_DELEGATED_PERMISSIONS`] (`Constants.ps1:104-130`)
-///   is reported whenever the app requests it, consented or not;
+///   is reported whenever requested, consented or not;
 /// - the net-new broad-reach prefixes ([`is_risky_delegated_scope`]: `Mail.`,
-///   `Files.`, `Directory.`, `Group.`, `Sites.`, …) are reported only when an
-///   admin consented to the scope for every user (an AllPrincipals grant). A
-///   delegated scope a user consented to reaches only that user's data, so a
-///   merely declared `Mail.Read` is not the tenant-wide reach this finding names.
+///   `Files.`, `Directory.`, `Group.`, `Sites.`, …) only when an admin
+///   consented for every user (AllPrincipals) — a user-consented delegated
+///   scope reaches only that user's data, so a declared `Mail.Read` is not the
+///   tenant-wide reach this finding names.
 ///
-/// `declared` is the principal's requested scopes; `admin_consented` is the
-/// scope set its service principal holds under AllPrincipals grants.
-/// Consented-but-undeclared scopes (dynamic consent) are included. `None` means
-/// the consent state is unknown (the grants read failed): the broad prefixes
-/// then fall back to the declared scopes — over-reporting rather than hiding.
+/// `declared` = requested scopes; `admin_consented` = the AllPrincipals grant
+/// set (includes consented-but-undeclared dynamic-consent scopes). `None` =
+/// consent state unknown → broad prefixes fall back to declared scopes,
+/// over-reporting rather than hiding.
 fn rule_high_risk_delegated(
     declared: &[String],
     admin_consented: Option<&[String]>,
 ) -> RuleContribution {
     let mut c = RuleContribution::default();
-    // The module's OWN broader predicate, not just the two-entry exact list:
-    // `is_risky_delegated_scope` is what "risky delegated scope" means here, and
-    // the consent-grant audit uses it. Declared order first, then any consented
-    // scope the manifest does not declare, each named once.
+    // The module's OWN broader predicate (`is_risky_delegated_scope`, also used by
+    // the consent-grant audit), not just the two-entry exact list. Declared
+    // first, then consented-but-undeclared, each named once.
     let mut hits: Vec<&str> = Vec::new();
     for v in declared.iter().chain(admin_consented.unwrap_or_default()) {
         let v = v.as_str();
@@ -602,23 +578,15 @@ fn rule_app_hygiene(
     c
 }
 
-/// Rules 19 & 20: exposure beyond this directory.
-///
-/// `signInAudience` decides whether an app's permissions and credentials are
-/// reachable by principals in *other* directories at all, so it is a blast-radius
-/// multiplier on every other finding rather than a finding on its own. It is
-/// therefore scored **only when the app has something worth reaching** — an
-/// application permission or a credential. A multi-tenant app holding neither is
-/// not interesting, and flagging it would bury the ones that matter.
-///
-/// Publisher verification rides the same rule because it is only meaningful in
-/// the same situation: it is how a *consenting* tenant's admin attributes the
-/// app to a real, MPN-verified author. On a single-tenant internal app there is
-/// nobody to attribute it to, so the absence is not a finding.
-///
-/// This is the reasoning Rule 15's own guidance already leans on ("especially
-/// for multitenant apps, where a foreign tenant's admin could otherwise add
-/// credentials"), previously with nothing scoring the audience it named.
+/// Rules 19 & 20: exposure beyond this directory. `signInAudience` decides
+/// whether permissions and credentials are reachable from *other* directories,
+/// so it is a blast-radius multiplier, scored **only when the app has something
+/// worth reaching** (an app permission or a credential) — flagging empty
+/// multi-tenant apps buries the ones that matter. Publisher verification rides
+/// the same rule: it is how a *consenting* tenant's admin attributes the app to
+/// a real MPN-verified author, meaningless on a single-tenant internal app.
+/// (Rule 15's guidance already leaned on this reasoning without anything
+/// scoring the audience it named.)
 fn rule_external_exposure(
     app: &Application,
     has_app_permissions: bool,
@@ -680,21 +648,17 @@ fn rule_redundant_permissions(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<RedundantPermission>) {
     let mut c = RuleContribution::default();
-    // `value_fully_scoped`, not `is_scoped`: the broader permission only
-    // confines the narrower one if EVERY grant of that name is confined. A
-    // `Mail.ReadWrite` scoped on Graph while its unscopable legacy Exchange
-    // Online namesake survives still reaches every mailbox.
-    // The GRANTS, not a resource-stripped value list: stripping the resource here
-    // let a Graph permission pair with a same-named one on the legacy Office 365
-    // resource, which covers nothing of it. See `redundant_app_permissions`.
+    // `value_fully_scoped`, not `is_scoped`: the broader permission confines the
+    // narrower only if EVERY grant of that name is confined (a surviving
+    // unscopable legacy namesake still reaches every mailbox). Takes GRANTS, not
+    // a resource-stripped value list — stripping let a Graph permission pair with
+    // a legacy same-name covering nothing. See `redundant_app_permissions`.
     let redundant =
         redundant_app_permissions(&perms.app_role_grants, |b| perms.value_fully_scoped(b));
     if !redundant.is_empty() {
-        // Name the resource: `Mail.Read` exists on Microsoft Graph AND on the
-        // legacy Office 365 Exchange Online resource, and only the pair on ONE
-        // of them is redundant. "Mail.Read (covered by Mail.ReadWrite)" left the
-        // operator to guess which grant to remove — and guessing wrong removes
-        // access nothing covers.
+        // Name the resource: `Mail.Read` exists on both Graph and the legacy resource,
+        // and only the pair on ONE is redundant — an unqualified listing made
+        // the operator guess, and guessing wrong removes uncovered access.
         let listing = redundant
             .iter()
             .map(|r| {
@@ -718,17 +682,11 @@ fn rule_redundant_permissions(
 }
 
 /// Least-privilege downgrade pointers (recommendation only — no issue, no
-/// score): names the concrete narrower alternative for each risk-flagged
-/// permission so the Rule-1/2 advice is actionable. Admin-judged, so never a
-/// one-click remediation.
-/// Takes the GRANTS, not bare values. It was the last rule reading
-/// a resource-stripped value list, and stripping the resource made it wrong twice
-/// over: the narrower alternatives in [`SUBSUMED_APP_PERMISSIONS`] are Microsoft
-/// Graph permissions, so pointing an Office 365 Exchange Online `Mail.Read` at
-/// "Mail.ReadBasic" named a permission that resource does not expose; and a
-/// grant already confined via Exchange RBAC does not need a narrower
-/// alternative, so the advice fired on permissions the operator had already
-/// dealt with.
+/// score): names the concrete narrower alternative per risk-flagged permission.
+/// Admin-judged, so never a one-click remediation. Takes the GRANTS, not bare
+/// values: the alternatives in [`SUBSUMED_APP_PERMISSIONS`] are Graph-only (a
+/// legacy-resource `Mail.Read` has no `Mail.ReadBasic` to name), and an
+/// already-confined grant needs no narrower alternative.
 fn rule_downgrade_pointers(
     grants: &[ResourcePermission],
     is_confined: impl Fn(&ResourcePermission) -> bool,
@@ -743,9 +701,7 @@ fn rule_downgrade_pointers(
             .filter(|g| {
                 g.resource_app_id.as_deref() == Some(crate::scoping::MICROSOFT_GRAPH_APP_ID)
             })
-            // Already confined ⇒ the broader capability is not org-wide, so
-            // "narrower alternatives exist" is advice for a problem that has
-            // been solved by a different mechanism.
+            // Already confined ⇒ not org-wide; the advice names a solved problem.
             .filter(|g| !is_confined(g))
             .map(|g| g.value.as_str())
             .filter(|v| {
@@ -773,14 +729,12 @@ fn rule_downgrade_pointers(
     c
 }
 
-/// Structured one-click remediations, keyed off the same rule-computed sets
-/// that raised the corresponding issues — so a "Fix" button appears exactly
-/// when its finding does. The backend re-resolves live state before acting;
-/// `targets`/`detail` are the advisory preview. Emitted in a fixed order:
-/// remove-expired, scope-mailbox, migrate-legacy-policy, scope-SharePoint,
-/// remove-redundant, add-owner. `owner_count` is the same `app.owners` data
-/// Rule 14 keys off (`None` = owners not fetched — SP-only rows — so no
-/// AddOwner is attached).
+/// One-click remediations, keyed off the same rule-computed sets as their
+/// issues — a "Fix" button appears exactly when its finding does. The backend
+/// re-resolves live state before acting; `targets`/`detail` are the preview.
+/// Fixed order: remove-expired, scope-mailbox, migrate-legacy-policy,
+/// scope-SharePoint, remove-redundant, add-owner. `None` `owner_count` =
+/// owners not fetched (SP-only rows) ⇒ no AddOwner.
 fn build_remediations(
     expired: &[&CredentialSummary],
     mailbox_unscoped: &[&ResourcePermission],
@@ -827,10 +781,8 @@ fn build_remediations(
                 if n == 1 { "" } else { "s" },
                 join_values(mailbox_legacy)
             ),
-            // The migration is keyed on the application, not per permission —
-            // one Application Access Policy gates every mailbox permission the
-            // app holds — but the values ride along as the in-row preview of
-            // what the new management scope will carry.
+            // Migration is keyed per app (one AAP gates every mailbox
+            // permission); the values ride along as the scope-preview.
             targets: mailbox_legacy.iter().map(|g| g.value.clone()).collect(),
         });
     }
@@ -915,10 +867,9 @@ pub fn score_application(
     now: DateTime<Utc>,
 ) -> AuditItem {
     // Collapse duplicate grants on (resource, value) BEFORE any rule counts
-    // them: the risk rules scale their point constants by the length of the
-    // matching grant vector, so a permission listed twice in the manifest
-    // scored twice and could cross a risk-level threshold. Done here rather
-    // than in each caller so none can forget it. See `AppPermissions::deduped`.
+    // them: risk points scale with grant count, so a twice-listed permission
+    // scored twice and could cross a risk threshold. Done here so no caller can
+    // forget it. See `AppPermissions::deduped`.
     let deduped = perms.deduped();
     let perms = &deduped;
 
@@ -945,18 +896,12 @@ pub fn score_application(
         .copied()
         .filter(|c| c.status == CredentialStatus::ExpiringSoon)
         .collect();
-    // Credentials that STILL WORK — which includes one with no end date.
-    //
-    // `CredentialStatus::from_days_to_expiry(None)` is `Unknown`, and counting
-    // only `Active` meant a never-expiring credential counted as nothing: an
-    // app holding one expired secret plus one that never expires reported "All
-    // credentials expired" and scored as though it had no working credential at
-    // all. That reads as a dead app, so an operator stops looking — while the
-    // app in fact holds a permanent, never-rotating credential, which is the one
-    // most worth finding.
-    // `ExpiringSoon` is deliberately NOT counted here: the branches below use
-    // `active_count == 0` to mean "nothing but expiring credentials left", and
-    // folding it in would silence that warning entirely.
+    // Credentials that STILL WORK, including no-end-date (`Unknown`) ones.
+    // Counting only `Active` let an app with one expired + one never-expiring
+    // secret report "All credentials expired" — it reads as a dead app, hiding
+    // the permanent credential that most needs finding.
+    // `ExpiringSoon` is deliberately NOT counted: the branches below use
+    // `active_count == 0` for "nothing but expiring left".
     let active_count = all_creds
         .iter()
         .filter(|c| {
@@ -982,10 +927,8 @@ pub fn score_application(
     let days_since_created = app.created_date_time.map(|c| (now - c).num_days());
     acc.merge(rule_stale_app(days_since_created));
 
-    // (No resource-stripped value list any more: `rule_downgrade_pointers` was
-    // the last rule reading one, and it now takes the grants. Every rule in
-    // `score_application` classifies from `app_role_grants`, so the resource is
-    // available at every decision — which is the invariant, not an optimization.)
+    // Invariant: every rule classifies from `app_role_grants`, so the resource
+    // is available at every decision (the resource-stripped value list is gone).
 
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
     let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
@@ -1082,16 +1025,12 @@ pub struct SpAuditInput {
 }
 
 /// Builds an [`AuditItem`] for a service principal with no local application
-/// object. Only the rules that read *granted* state apply: permission risk
-/// (Rules 1 & 2), admin consent (3), disabled SP (4), the mailbox / SharePoint
-/// scoping advisories (11, 12), and high-risk delegated permissions (13).
-/// Credential rules (5-9) and manifest rules (10, 14-18, downgrade pointers)
-/// are deliberately absent — credentials and the manifest live on the
-/// application object in its home tenant, which this tenant can neither see
-/// nor fix. `perms.app_role_grants` are the SP's *granted* app roles (its
-/// `appRoleAssignments`), not a declared manifest, and `perms.scope_values`
-/// are its admin-consented (AllPrincipals) delegated scopes — so Rule 13 treats
-/// them as the consented set and ignores `perms.admin_consented_scopes`.
+/// object. Only *granted*-state rules apply (1/2, 3, 4, 11, 12, 13); credential
+/// and manifest rules (5-9, 10, 14-18, downgrade pointers) are absent — those
+/// live on the home tenant's application, which this tenant can neither see nor
+/// fix. `app_role_grants` are the SP's *granted* app roles
+/// (`appRoleAssignments`) and `scope_values` its AllPrincipals delegated scopes,
+/// so Rule 13 treats them as consented and ignores `admin_consented_scopes`.
 pub fn score_service_principal(
     sp: &SpAuditInput,
     perms: &AppPermissions,
@@ -1118,11 +1057,10 @@ pub fn score_service_principal(
         Some(&perms.scope_values),
     )); // Rule 13
 
-    // No expired credentials (unknowable), no redundant-permission removal
-    // (its remediation edits the application manifest), and no add-owner
-    // (`None`: SP owners aren't audited) — only the scope remediations, whose
-    // SP-only command cores exist. The legacy-policy migration is keyed on the
-    // appId and works from *granted* roles, so it applies to a bare SP too.
+    // Only the scope remediations (SP-only cores exist): expired credentials
+    // are unknowable, redundancy removal edits the manifest, and SP owners
+    // aren't audited. Legacy-policy migration keys on appId from *granted*
+    // roles, so it applies to a bare SP too.
     let remediations = build_remediations(
         &[],
         &mailbox_unscoped,
@@ -1174,10 +1112,9 @@ fn join_refs<S: AsRef<str>>(items: &[S]) -> String {
         .join(", ")
 }
 
-/// `join_refs` over the *values* of a set of resource-qualified grants. The
-/// resource stays out of the operator-facing text: two identically named grants
-/// on different resources read as one name, which is exactly what the reader
-/// sees in the portal.
+/// `join_refs` over grant *values*. The resource stays out of operator-facing
+/// text — same-named grants on different resources read as one name, as in the
+/// portal.
 fn join_values(items: &[&ResourcePermission]) -> String {
     items
         .iter()

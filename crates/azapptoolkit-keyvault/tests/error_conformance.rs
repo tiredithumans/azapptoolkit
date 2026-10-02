@@ -1,16 +1,15 @@
 //! Key Vault conforms to the shared HTTP error + retry policy.
 //!
-//! The twin of `azapptoolkit-arm/tests/error_conformance.rs`, and the same
-//! reasoning: AGENTS.md requires the taxonomy to come from
-//! `core::http_error_enum!` and the retry budget from `core::http_retry`, with
-//! each client supplying "only what is genuinely its own" — and nothing pinned
-//! it here either. This crate had 12 inline tests across 775 lines, no
-//! out-of-line tree, and it writes secrets.
+//! Twin of `azapptoolkit-arm/tests/error_conformance.rs`, same reasoning:
+//! AGENTS.md requires the taxonomy from `core::http_error_enum!` and the
+//! retry budget from `core::http_retry`, each client supplying "only what is
+//! genuinely its own" — and nothing pinned it here. Its error tests had been
+//! 12 inline tests across 775 lines of a client that writes secrets.
 //!
-//! Deliberately a near-copy rather than a shared helper crate: a dev-dependency
-//! between two leaf clients to share four assertions would couple them for less
-//! than it costs, and each crate's `extra` variants differ (`InvalidName` is
-//! Key Vault's alone).
+//! Deliberately a near-copy, not a shared helper crate: a dev-dependency
+//! between two leaf clients to share four assertions would couple them for
+//! less than it costs, and the `extra` variants differ (`InvalidName` is Key
+//! Vault's alone).
 
 use azapptoolkit_core::http_retry::is_retryable_code;
 use azapptoolkit_core::token::TokenError;
@@ -56,10 +55,9 @@ fn retryability_comes_from_the_shared_policy_for_every_variant() {
     }
 }
 
-/// The crate's own variant must not accidentally become retryable.
-///
-/// `InvalidName` is rejected before any request is sent — it is a caller bug,
-/// so retrying it loops on a call that can never be made.
+/// The crate's own variant must not accidentally become retryable:
+/// `InvalidName` is rejected before any request — a caller bug, so retrying
+/// loops on a call that can never be made.
 #[test]
 fn the_retryable_set_is_exactly_throttle_server_network() {
     let retryable: Vec<&str> = every_variant()
@@ -112,10 +110,8 @@ fn forbidden_carries_role_guidance_from_the_capabilities_catalog() {
 }
 
 /// A throttled request that outlived the retries tells the operator how long
-/// to wait, in words.
-///
-/// The Display used to interpolate `{retry_after_secs:?}`, so the UI read
-/// "throttled (429); retry after Some(30)s" or "retry after Nones".
+/// to wait, in words. The Display used to interpolate `{retry_after_secs:?}`,
+/// so the UI read "throttled (429); retry after Some(30)s" or "retry after Nones".
 #[test]
 fn throttled_message_is_readable() {
     assert_eq!(

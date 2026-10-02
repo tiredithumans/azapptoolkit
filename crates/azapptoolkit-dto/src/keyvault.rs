@@ -15,9 +15,9 @@ pub struct KeyVaultSweepProgress {
 
 /// One Azure-RBAC role assignment that applies to a Key Vault — made on the
 /// vault itself or inherited from its resource group / subscription /
-/// management group (`inherited`) — the reverse-lookup's
-/// row unit ("which principal holds which role on which vault"). `principal_id`
-/// resolves to `principal_display_name` for service principals (apps + managed
+/// management group (`inherited`) — the reverse-lookup's row unit (which
+/// principal, which role, which vault). `principal_id` resolves to
+/// `principal_display_name` for service principals (apps + managed
 /// identities); users/groups carry only `principal_type` + the id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,9 +71,9 @@ pub struct KvSecretValueDto {
     pub content_type: Option<String>,
     pub expires: Option<String>,
 }
-// Hand-written rather than derived: the workspace treats a derived `Debug` on
-// a secret as a defect, because any `?dto` in a `tracing` macro puts the
-// plaintext straight into the daily rolling log file. Mirrors
+// Hand-written rather than derived: a derived `Debug` on a secret is a defect
+// in this workspace — any `?dto` in a `tracing` macro puts the plaintext
+// straight into the daily rolling log file. Mirrors
 // `dto::backup::RegeneratedSecret`, `core::models::PasswordCredential`,
 // `auth::AccessToken`, `keyvault::SecretValue` and `cert::GeneratedCert`.
 impl std::fmt::Debug for KvSecretValueDto {
@@ -127,8 +127,8 @@ mod tests {
 
     /// A derived `Debug` on a secret-bearing DTO is a defect in this workspace:
     /// any `?dto` in a `tracing` macro puts the plaintext straight into the
-    /// daily rolling log file. Pinned rather than left to convention, which is
-    /// what let four of these opt out.
+    /// daily rolling log file. Pinned rather than left to convention (that is
+    /// what let four of these opt out).
     #[test]
     fn secret_bearing_dtos_redact_their_secret_in_debug() {
         let read = KvSecretValueDto {

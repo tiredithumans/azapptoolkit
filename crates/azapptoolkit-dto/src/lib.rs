@@ -4,16 +4,15 @@
 //! exchange over `invoke()` / event payloads — with one sanctioned exception:
 //! a few `azapptoolkit-core` domain types (`Application`, `Organization`,
 //! `AuditItem` + its remediation/scope subtree) also cross IPC by direct
-//! re-use, embedded in or alongside the DTOs here, because both sides share
-//! the same Rust definitions. Kept dependency-light (`serde` + `chrono`) so it
-//! compiles cleanly to `wasm32-unknown-unknown`. Backend-only
-//! `From<…Error>` conversions are gated behind the `backend` feature.
+//! re-use, since both sides share the same Rust definitions. Kept
+//! dependency-light (`serde` + `chrono`) so it compiles cleanly to
+//! `wasm32-unknown-unknown`. Backend-only `From<…Error>` conversions are gated
+//! behind the `backend` feature.
 //!
 //! # Timestamps
 //!
-//! A timestamp crosses IPC in one of two Rust types, which put identical
-//! RFC3339 UTC text on the wire (chrono's `DateTime<Utc>` serializes to
-//! exactly that):
+//! Timestamps cross IPC in one of two Rust types, both putting identical
+//! RFC3339 UTC text on the wire:
 //!
 //! - **`DateTime<Utc>`** — the default for a **new** field whenever the
 //!   backend holds a parsed value: a typed Graph model (`credentials.rs`) or a
@@ -26,7 +25,7 @@
 //!   frontend parses these only through `util::time_ago` (a stamp it can't
 //!   read renders nothing), or takes the date part for display.
 //!
-//! Existing `String` stamps are grandfathered. Converting one is a per-module
+//! Existing `String` stamps are grandfathered; converting one is a per-module
 //! change that must keep the wire text and every frontend consumer in step.
 
 pub mod activity;
@@ -101,17 +100,11 @@ impl UiError {
     /// no session at all (`not_signed_in`). Both need ONE interactive round trip
     /// (`reauthenticate`) — not a sign-out, which would drop every data cache.
     ///
-    /// **The single definition**, now genuinely single: the code set itself
-    /// lives in [`azapptoolkit_core::reauth::REAUTH_FATAL_CODES`] and this is a
-    /// thin reading of it.
-    ///
-    /// It was previously three hand-maintained `matches!` arms across the
-    /// frontend, which AGENTS.md called out as a footgun ("a new re-auth-fatal
-    /// code must extend BOTH `matches!` sets"). Collapsing those into this
-    /// method fixed the frontend but left `core::token::TokenError` — which sits
-    /// *below* this crate and so cannot call it — hardcoding the same two
-    /// literals behind a comment admitting it was a mirror. Both now read one
-    /// slice, so adding a code is one edit and cannot half-land.
+    /// **The single definition**: the code set lives in
+    /// [`azapptoolkit_core::reauth::REAUTH_FATAL_CODES`] and this is a thin
+    /// reading of it. `core::token::TokenError` — below this crate and unable to
+    /// call it — reads the same slice, so adding a code is one edit and cannot
+    /// half-land.
     ///
     /// Retryability is orthogonal: these are never `retryable`, because
     /// retrying without re-auth just fails again.
@@ -125,16 +118,16 @@ impl UiError {
     ///
     /// Not re-auth-fatal (the session is fine, a fan-out carries on) and not
     /// retryable (a silent grant cannot obtain consent): the recovery is the
-    /// interactive `request_scope_consent`, which is what every "Grant consent"
-    /// affordance branches on this to offer.
+    /// interactive `request_scope_consent` every "Grant consent" affordance
+    /// branches on this to offer.
     pub fn is_consent_required(&self) -> bool {
         self.code == azapptoolkit_core::reauth::CONSENT_REQUIRED
     }
 
-    /// True when a Conditional Access policy demands an interactive step
-    /// (MFA, registration, an external challenge) for one resource
-    /// (`interaction_required`, from `AuthError::InteractionRequired`), read
-    /// from the one literal in [`azapptoolkit_core::reauth::INTERACTION_REQUIRED`].
+    /// True when a Conditional Access policy demands an interactive step (MFA,
+    /// registration, an external challenge) for one resource
+    /// (`interaction_required`, from `AuthError::InteractionRequired`), read from
+    /// the one literal in [`azapptoolkit_core::reauth::INTERACTION_REQUIRED`].
     ///
     /// Not re-auth-fatal (the refresh token is fine for every other audience)
     /// and not retryable (a silent grant cannot satisfy the challenge): the
@@ -148,8 +141,8 @@ impl UiError {
     /// from the one literal in [`azapptoolkit_core::reauth::UNAUTHORIZED`].
     ///
     /// Not re-auth-fatal (one 401 does not prove the session is dead) and not
-    /// retryable as-is: the recovery is the in-place token refresh the top bar
-    /// and the 401 toast offer.
+    /// retryable as-is: recovery is the in-place token refresh the top bar and
+    /// the 401 toast offer.
     pub fn is_unauthorized(&self) -> bool {
         self.code == azapptoolkit_core::reauth::UNAUTHORIZED
     }
@@ -158,8 +151,7 @@ impl UiError {
     /// the bare status line ([`azapptoolkit_core::reauth::UNAUTHORIZED_STATUS`])
     /// — Exchange, Key Vault and ARM append what to check if a refresh doesn't
     /// help; a Graph surface may replace the line entirely. `None` when the
-    /// message is only the status line (nothing to show but a generic lead), or
-    /// when this is not a rejected token at all.
+    /// message is only the status line, or when this is not a rejected token.
     pub fn unauthorized_guidance(&self) -> Option<&str> {
         if !self.is_unauthorized() {
             return None;
@@ -189,9 +181,9 @@ mod backend_conv {
 
     /// Generates `From<E> for UiError` for an error type exposing `ui_code()`,
     /// `is_retryable()`, and `Display`. The `hint` form appends `ui_hint()` —
-    /// the role/RBAC guidance behind a 403 (Exchange, Key Vault, ARM) — to the
-    /// message so the UI shows *what to do*, not just an opaque status; the
-    /// `no_hint` form is for error types without that guidance (Graph).
+    /// the role/RBAC guidance behind a 403 — to the message so the UI shows
+    /// *what to do*; the `no_hint` form is for types without that guidance
+    /// (Graph).
     macro_rules! ui_error_from {
         ($err:ty, hint) => {
             impl From<$err> for UiError {
@@ -261,16 +253,16 @@ mod backend_conv {
         use super::*;
         use azapptoolkit_auth::AuthError;
 
-        /// Pins the machine-readable `code` + `retryable` the front-end branches
-        /// on for every constructible `AuthError` variant. These strings are a
-        /// wire contract — `not_signed_in` drives the re-auth flow, and the
+        /// Pins the machine-readable `code` + `retryable` the front-end branches on
+        /// for every constructible `AuthError` variant. The strings are a wire
+        /// contract: `not_signed_in` drives the re-auth flow, and the
         /// `consent_required` / `interaction_required` vs `refresh_missing`
-        /// split is load-bearing (AGENTS.md): `InvalidGrant` must purge the
-        /// refresh token while `ConsentRequired` and `InteractionRequired` (a
-        /// per-resource Conditional Access step-up) must not. A silent change here breaks a UI branch
-        /// with no compile error, so lock it down. Completeness is enforced by
-        /// the compiler (the `From` match is exhaustive, `AuthError` is not
-        /// `#[non_exhaustive]`); this test pins the values.
+        /// split is load-bearing (AGENTS.md) — `InvalidGrant` purges the
+        /// refresh token; `ConsentRequired` / `InteractionRequired` (a
+        /// per-resource CA step-up) must not. A silent change breaks a UI
+        /// branch with no compile error, so lock it down. Completeness is
+        /// compiler-enforced (the `From` match is exhaustive); this pins the
+        /// values.
         #[test]
         fn auth_error_maps_to_stable_code_and_retryable() {
             let cases: Vec<(AuthError, &str, bool)> = vec![
@@ -340,11 +332,11 @@ mod backend_conv {
             // it end to end (auth-plane `network` → client-plane `network_error`).
         }
 
-        /// A classified `TokenError` crossing a client's `Token` arm keeps its
-        /// code — and its retryability — in every client's `UiError`. Before,
-        /// only the re-auth-fatal codes survived: `consent_required` became a
-        /// generic `token_error` (so no "Grant consent" action could appear) and
-        /// a refresh-time network outage became a non-retryable `token_error`.
+        /// A classified `TokenError` crossing a client's `Token` arm keeps its code
+        /// and retryability in every client's `UiError`. Before, only
+        /// re-auth-fatal codes survived: `consent_required` became a generic
+        /// `token_error` (no "Grant consent" action could appear) and a
+        /// refresh-time network outage became a non-retryable `token_error`.
         #[test]
         fn classified_token_codes_survive_every_client_error() {
             use azapptoolkit_core::token::TokenError;
@@ -388,8 +380,8 @@ mod backend_conv {
         }
 
         /// The front end's 401 toast shows a client's curated guidance (what to
-        /// check if a refresh doesn't help) and falls back to a generic lead
-        /// only for a bare status line. That split reads the shared
+        /// check if a refresh doesn't help), falling back to a generic lead
+        /// only for a bare status line; that split reads the shared
         /// `UNAUTHORIZED_STATUS` prefix, so pin it for every client.
         #[test]
         fn a_401_keeps_its_curated_guidance_past_the_status_line() {
@@ -444,15 +436,10 @@ mod reauth_agreement_tests {
 
     /// The two predicates sit on opposite sides of a dependency edge — `UiError`
     /// here, `TokenError` in the crate below — and used to hardcode the same two
-    /// literals independently, behind a comment that admitted the mirror. A code
-    /// added to one and not the other desyncs silently, and the consequence is
-    /// the one the classification exists to prevent: a long-running fan-out that
-    /// never learns the session is dead, warns its way to the end, and returns a
-    /// partial result the UI presents as complete.
-    ///
-    /// This is the test that makes "the single definition" true rather than
-    /// aspirational: it walks the shared set, so a new code that reaches only
-    /// one side cannot pass.
+    /// literals independently. A code added to one side only desyncs silently:
+    /// a long-running fan-out never learns the session is dead and returns a
+    /// partial result the UI presents as complete. Walking the shared set makes
+    /// "the single definition" true rather than aspirational.
     #[test]
     fn ui_error_and_token_error_agree_on_every_fatal_code() {
         assert!(

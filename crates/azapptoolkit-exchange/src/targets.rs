@@ -1,15 +1,15 @@
 //! Deriving what to scope: turning an application's declared or granted mailbox
 //! permissions into concrete Exchange RBAC targets.
 //!
-//! This is the invariant-bearing half of mailbox scoping, and it is pure — given
-//! resolved resource role indexes it needs no `State`, no Tauri, and no live
-//! Graph client. It lived inside the Tauri command handler, where the only way
-//! to reach it was a signed-in session, so the rules below could be checked by
-//! review but not by tests. Two of them had already gone wrong that way: the
-//! app-registration entry point scoped an empty target set (pinning a
-//! management scope forever), and target derivation once read Microsoft Graph
-//! alone, which made the EWS `full_access_as_app` scope invisible and silently
-//! widened an app's reach to every mailbox.
+//! The invariant-bearing half of mailbox scoping, and pure: given resolved
+//! resource role indexes it needs no `State`, no Tauri, no live Graph client.
+//! It lived inside the Tauri command handler, reachable only through a
+//! signed-in session — the rules below could be checked by review but not by
+//! tests. Two of them had already gone wrong that way: the app-registration
+//! entry point scoped an empty target set (pinning a management scope forever),
+//! and target derivation once read Microsoft Graph alone, which made the EWS
+//! `full_access_as_app` scope invisible and silently widened an app's reach to
+//! every mailbox.
 //!
 //! The load-bearing rule throughout: mailbox permissions live on **two**
 //! resources, and both expose appRoles literally named `Mail.Read`. Every target

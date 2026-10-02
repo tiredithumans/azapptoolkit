@@ -1,8 +1,8 @@
 //! Enterprise-application (non-MI service principal) IPC DTOs.
 //!
-//! Surfaces the third Azure identity-object type alongside App Registrations
-//! and Managed Identities. Includes the foreign-tenant marker, paired App
-//! Registration id, credential data, and app roles.
+//! The third Azure identity-object type alongside App Registrations and
+//! Managed Identities: foreign-tenant marker, paired App Registration id,
+//! credential data, app roles.
 
 use serde::{Deserialize, Serialize};
 
@@ -129,9 +129,9 @@ pub struct AppAssignmentDto {
 
 /// A Microsoft Entra application-gallery template surfaced in the "Browse the
 /// gallery" search — the fields the picker renders. Mirrors
-/// `azapptoolkit_core::models::ApplicationTemplate`, whose `display_name` is
-/// optional; the command falls back to the publisher, then the template id, so
-/// a nameless template stays findable instead of silently vanishing.
+/// `azapptoolkit_core::models::ApplicationTemplate`; its optional
+/// `display_name` falls back to the publisher, then the template id, so a
+/// nameless template stays findable instead of silently vanishing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationTemplateDto {
     pub id: String,
@@ -144,10 +144,10 @@ pub struct ApplicationTemplateDto {
     pub supported_single_sign_on_modes: Vec<String>,
 }
 
-/// Ranked gallery matches for one query, plus the counts the picker needs to
-/// tell "nothing matched" apart from "showing the best of many" — an empty
-/// `Vec` alone can't distinguish those, and reading it as "no query yet" was
-/// what made a genuine zero-result search look like the search was broken.
+/// Ranked gallery matches for one query, plus the counts that tell "nothing
+/// matched" apart from "showing the best of many" — an empty `Vec` alone can't
+/// distinguish those (reading it as "no query yet" made a genuine zero-result
+/// search look broken).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GallerySearchResultsDto {
     /// Best matches, ranked, capped at the command's display limit.
