@@ -36,7 +36,15 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 # HTTP
 # `system-proxy`: OS proxy discovery for corporate Windows/macOS deployments, enabled
 # here on purpose rather than inherited from the updater plugin's defaults.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy"] }
+# `http2` (review F232, 2026-10-02): `default-features = false` silently dropped
+# reqwest's default `http2`, so every Graph/Exchange/Key Vault fan-out ran HTTP/1.1
+# and a `ConcurrencyThrottle` run at N in-flight requests held N TLS connections
+# per host. Re-enabled so h2 multiplexes streams over one ALPN-negotiated
+# connection. UNMEASURED: no tenant access when enabled, so the fan-out
+# before/after connection count (RUST_LOG=hyper_util=debug on a large-tenant audit
+# or site sweep) is still owed; revert to no-http2 if it loses. The auth crate's
+# TLS-intercepting-proxy special case checks ALPN-independent behavior only.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy", "http2"] }
 bytes = "1"
 # Auth
 #
