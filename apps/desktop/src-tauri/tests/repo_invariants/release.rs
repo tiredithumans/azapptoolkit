@@ -731,3 +731,85 @@ fn nsis_install_mode_stays_current_user() {
         );
     }
 }
+
+/// The `tauri-cli` version is one hand-mirrored literal in three files
+/// (release.yml's `Install Tauri CLI` step and both setup scripts) plus
+/// Cargo.lock's `tauri` runtime — and Dependabot bumps the lockfile weekly while
+/// being blind to a `cargo install --version` string, so the CLI pin rots
+/// independently of the runtime it is supposed to track. Every other
+/// hand-mirrored literal here has a test; this adds the missing one.
+///
+/// The contract the comments state is "the newest published `tauri-cli` **at or
+/// below** the locked `tauri` runtime" — patch digits may differ (upstream does
+/// not cut a CLI release for every runtime patch), so this pins (a) all three
+/// literals agreeing and (b) CLI `<=` runtime, nothing stricter.
+#[test]
+fn tauri_cli_pin_agrees_across_files_and_tracks_the_locked_runtime() {
+    /// Extract the version from a `cargo install tauri-cli --locked --version
+    /// "=X.Y.Z"` literal wherever it appears (workflow `run:` line, shell line,
+    /// or inside a PowerShell string).
+    fn cli_pin(src: &str) -> Option<&str> {
+        let marker = "tauri-cli --locked --version \"=";
+        let at = src.find(marker)?;
+        let rest = &src[at + marker.len()..];
+        rest.split('"').next()
+    }
+
+    /// Semver tuple compare; returns None for anything not `X.Y.Z`.
+    fn semver(s: &str) -> Option<(u32, u32, u32)> {
+        let mut parts = s.split('.');
+        Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ))
+    }
+
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    let setup_sh = include_str!("../../../../../scripts/setup.sh");
+    let setup_ps = include_str!("../../../../../scripts/setup.ps1");
+    let lock = include_str!("../../../../../Cargo.lock");
+
+    let wf = cli_pin(release).expect("release.yml lost its `cargo install tauri-cli` step");
+    let sh = cli_pin(setup_sh).expect("scripts/setup.sh lost its `cargo install tauri-cli` line");
+    let ps = cli_pin(setup_ps).expect("scripts/setup.ps1 lost its `cargo install tauri-cli` line");
+    assert_eq!(
+        wf, sh,
+        "release.yml pins tauri-cli {wf} but scripts/setup.sh pins {sh} — dev and release \
+         would bundle with different CLIs"
+    );
+    assert_eq!(
+        wf, ps,
+        "release.yml pins tauri-cli {wf} but scripts/setup.ps1 pins {ps} — dev and release \
+         would bundle with different CLIs"
+    );
+
+    // The locked `tauri` runtime, read from its `[[package]]` block so
+    // `tauri-utils`/`tauri-plugin-*` lines cannot shadow it.
+    let runtime = lock
+        .split("[[package]]")
+        .find(|block| block.lines().any(|l| l.trim() == "name = \"tauri\""))
+        .and_then(|block| {
+            block
+                .lines()
+                .find(|l| l.trim().starts_with("version ="))
+                .map(|l| {
+                    l.trim()
+                        .trim_start_matches("version =")
+                        .trim()
+                        .trim_matches('"')
+                })
+        })
+        .expect("Cargo.lock has no `tauri` package — where is the runtime pinned?");
+
+    let (cli, rt) = match (semver(wf), semver(runtime)) {
+        (Some(c), Some(r)) => (c, r),
+        _ => panic!("unparsable versions: cli={wf} runtime={runtime}"),
+    };
+    assert!(
+        cli <= rt,
+        "tauri-cli {wf} is NEWER than the locked tauri runtime {runtime}; the release \
+         workflow documents its pin as 'at or below the locked tauri runtime' — either bump \
+         the runtime in Cargo.lock or lower the pin in release.yml + both setup scripts"
+    );
+}
