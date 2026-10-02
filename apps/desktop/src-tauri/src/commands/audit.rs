@@ -17,6 +17,7 @@
 //! loop polls it between dispatches.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -801,7 +802,8 @@ fn audit_to_json(items: &[AuditItem], coverage: &AuditExportCoverage) -> Result<
 fn audit_to_html(items: &[AuditItem], coverage: &AuditExportCoverage) -> String {
     let mut rows = String::new();
     for item in items {
-        rows.push_str(&format!(
+        let _ = write!(
+            rows,
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             html_escape(&item.application_name),
             html_escape(&item.app_id),
@@ -809,7 +811,7 @@ fn audit_to_html(items: &[AuditItem], coverage: &AuditExportCoverage) -> String 
             html_escape(item.risk_level.as_str()),
             html_escape(item.credential_status.as_str()),
             html_escape(&item.issues.join("; ")),
-        ));
+        );
     }
 
     // Coverage first, above everything it qualifies. The old header said
@@ -827,15 +829,12 @@ fn audit_to_html(items: &[AuditItem], coverage: &AuditExportCoverage) -> String 
         generated = html_escape(&Utc::now().to_rfc3339()),
     );
     for sentence in coverage_sentences(items.len(), coverage) {
-        header.push_str(&format!(
-            "<p class=\"caveat\">{}</p>",
-            html_escape(&sentence)
-        ));
+        let _ = write!(header, "<p class=\"caveat\">{}</p>", html_escape(&sentence));
     }
     if !coverage.degraded.is_empty() {
         header.push_str("<ul class=\"caveat\">");
         for gap in &coverage.degraded {
-            header.push_str(&format!("<li>{}</li>", html_escape(gap.description())));
+            let _ = write!(header, "<li>{}</li>", html_escape(gap.description()));
         }
         header.push_str("</ul>");
     }
@@ -893,27 +892,29 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
     // because nothing here is directory data: the counts are integers, the
     // timestamp is our own RFC3339 stamp, and the sentences and gap
     // descriptions are `&'static str`s from this binary.
-    out.push_str(&format!(
-        "# azapptoolkit security audit — {scored} of {total} principal(s) scored\n",
+    let _ = writeln!(
+        out,
+        "# azapptoolkit security audit — {scored} of {total} principal(s) scored",
         scored = items.len(),
         total = coverage.total_apps.max(items.len()),
-    ));
-    out.push_str(&format!(
-        "# Scan completed: {}\n",
+    );
+    let _ = writeln!(
+        out,
+        "# Scan completed: {}",
         coverage.completed_at.as_deref().unwrap_or("unknown")
-    ));
-    out.push_str(&format!("# Exported: {}\n", Utc::now().to_rfc3339()));
+    );
+    let _ = writeln!(out, "# Exported: {}", Utc::now().to_rfc3339());
     for (label, n) in severity_summary(&items) {
-        out.push_str(&format!("# {label}: {n}\n"));
+        let _ = writeln!(out, "# {label}: {n}");
     }
     if coverage.is_complete() {
         out.push_str("# Coverage: complete\n");
     }
     for sentence in coverage_sentences(items.len(), coverage) {
-        out.push_str(&format!("# {sentence}\n"));
+        let _ = writeln!(out, "# {sentence}");
     }
     for gap in &coverage.degraded {
-        out.push_str(&format!("# - {}\n", gap.description()));
+        let _ = writeln!(out, "# - {}", gap.description());
     }
     out.push_str("ApplicationName,AppId,ObjectId,CreatedDate,Publisher,SignInAudience,RiskScore,RiskLevel,CredentialStatus,PermissionCount,DaysSinceCreated,ServicePrincipalEnabled,Issues,Recommendations,PrincipalKind,AppOwnerOrgId\n");
     for item in items {

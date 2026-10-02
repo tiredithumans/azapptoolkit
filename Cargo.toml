@@ -104,6 +104,27 @@ unsafe_code = "deny"
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "deny"
+# A curated LOW-FALSE-POSITIVE subset of pedantic/nursery, raised to `warn` so
+# the `-D warnings` clippy gates fail on them (review F216). Only lints whose
+# hits are mechanical are gated — the rest stay advisory in `just
+# clippy-pedantic` / `just web-clippy-pedantic`, including the FP-prone ones
+# (redundant_clone, needless_pass_by_value, derive_partial_eq_without_eq,
+# map_unwrap_or, future_not_send): nursery exists because those lints lie.
+# Keep this table in sync with apps/desktop/web-rs/Cargo.toml `[lints.clippy]`
+# — diffed by `repo_invariants/release.rs::web_rs_lint_block_matches_the_workspace_block`.
+#   unused_async        — the class that hid the blocking keyring call
+#   ref_option          — &Option<T> over Option<&T> at fn boundaries
+#   format_push_string  — `push_str(&format!(…))` waste
+#   unnecessary_wraps   — fns returning Option/Result that never fail
+#   unused_self         — `&self` methods that ignore self
+#   cast_possible_wrap  — silent u64→i64 wraps
+[workspace.lints.clippy]
+unused_async = "warn"
+ref_option = "warn"
+format_push_string = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+cast_possible_wrap = "warn"
 # `opt-level = "z"` is deliberate, and now measured rather than assumed.
 #
 # The worry was that a size-first build penalizes the app's heaviest work: the

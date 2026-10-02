@@ -498,6 +498,9 @@ impl AppState {
     /// extra sign-in next launch and must never fail the sign-in that just
     /// succeeded. Every settings.json writer goes through `UserSettings::mutate`;
     /// several read-modify-write this file from different threads.
+    // Kept on AppState for discoverability beside the other auth helpers; it
+    // resolves paths through `config_directory()`, not state.
+    #[allow(clippy::unused_self)]
     pub fn remember_account(&self, tenant: &TenantContext) {
         let tenant = tenant.clone();
         if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
@@ -515,6 +518,8 @@ impl AppState {
     /// sign-in card. The keyring token is deleted by `EntraAuthService::sign_out`
     /// in the same command; clearing the pointer too keeps the two from
     /// disagreeing about whether anyone is signed in.
+    // Same shape as `remember_account` above.
+    #[allow(clippy::unused_self)]
     pub fn forget_account(&self) {
         if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
             settings.last_account = None;

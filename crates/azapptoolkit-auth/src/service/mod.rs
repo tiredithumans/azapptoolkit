@@ -746,7 +746,9 @@ impl EntraAuthService {
         cae: bool,
         mut token: TokenResponse,
     ) -> Result<AccessToken> {
-        let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
+        // A bogus `expires_in` above i64::MAX must clamp, not wrap negative.
+        let ttl = i64::try_from(token.expires_in).unwrap_or(i64::MAX);
+        let expires_at = Utc::now() + Duration::seconds(ttl);
         let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
         // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
         if let Some(refresh) = token.refresh_token.take() {

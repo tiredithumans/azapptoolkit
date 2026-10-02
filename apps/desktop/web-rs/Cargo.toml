@@ -28,6 +28,16 @@ unsafe_code = "deny"
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "deny"
 
+# Hand-mirror of `[workspace.lints.clippy]`; keep the two tables identical,
+# diffed by `web_rs_lint_block_matches_the_workspace_block`.
+[lints.clippy]
+unused_async = "warn"
+ref_option = "warn"
+format_push_string = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+cast_possible_wrap = "warn"
+
 [dependencies]
 azapptoolkit-core = { path = "../../../crates/azapptoolkit-core" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto" }

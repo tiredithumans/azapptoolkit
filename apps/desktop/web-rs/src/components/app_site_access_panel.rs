@@ -16,6 +16,8 @@
 //! empty list only means "no grants" when the underlying sweep was complete
 //! (`AppSiteAccessDto::is_complete`).
 
+use std::fmt::Write;
+
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
@@ -315,16 +317,18 @@ fn coverage_summary(access: &AppSiteAccessDto) -> String {
         plural(access.total_sites),
     );
     if access.sites_failed > 0 {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             " ({} failed to read — coverage is partial)",
             access.sites_failed
-        ));
+        );
     }
     if access.truncated {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             " — stopped at the {}-site scan cap, so coverage is partial",
             access.total_sites
-        ));
+        );
     }
     if access.cancelled {
         out.push_str(" — the scan was cancelled early");

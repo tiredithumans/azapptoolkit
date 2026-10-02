@@ -5,6 +5,8 @@
 //! from the cmdlet verb (`retry_class_for`) — every call is a POST, so the
 //! HTTP method says nothing about whether a replay is safe.
 
+use std::fmt::Write;
+
 use azapptoolkit_core::net::{redacted_host, same_origin};
 use azapptoolkit_core::token::TokenError;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -236,7 +238,12 @@ impl ExchangeClient {
                 // rides `WWW-Authenticate` — captured for the log line below.
                 let www_authenticate = header_str("www-authenticate");
                 let raw_body = resp.text().await.unwrap_or_default();
-                let body_text = compose_error_detail(cmdlet, &raw_body, &diagnostics, &request_id);
+                let body_text = compose_error_detail(
+                    cmdlet,
+                    &raw_body,
+                    diagnostics.as_deref(),
+                    request_id.as_deref(),
+                );
                 let code = status.as_u16();
                 // Any non-429 4xx is a terminal client error (401/403/404 get
                 // their own variants below; everything else falls through to
@@ -371,18 +378,18 @@ fn retry_class_for(cmdlet: &str) -> RetryClass {
 fn compose_error_detail(
     cmdlet: &str,
     raw_body: &str,
-    diagnostics: &Option<String>,
-    request_id: &Option<String>,
+    diagnostics: Option<&str>,
+    request_id: Option<&str>,
 ) -> String {
-    let reason = match diagnostics.as_deref().map(str::trim) {
+    let reason = match diagnostics.map(str::trim) {
         Some(d) if !d.is_empty() => sanitize_error_body(d),
         _ => sanitize_error_body(raw_body),
     };
     let mut out = format!("[{cmdlet}] {reason}");
-    if let Some(id) = request_id.as_deref().map(str::trim)
+    if let Some(id) = request_id.map(str::trim)
         && !id.is_empty()
     {
-        out.push_str(&format!(" (request-id: {id})"));
+        let _ = write!(out, " (request-id: {id})");
     }
     out
 }
@@ -434,8 +441,8 @@ mod tests {
         let detail = compose_error_detail(
             "New-ManagementRoleAssignment",
             &"\0".repeat(64),
-            &Some("2000003;reason=\"role required\"".to_string()),
-            &Some("abc-123".to_string()),
+            Some("2000003;reason=\"role required\""),
+            Some("abc-123"),
         );
         assert!(detail.starts_with("[New-ManagementRoleAssignment] "));
         assert!(detail.contains("role required"));
@@ -447,7 +454,7 @@ mod tests {
     fn compose_error_detail_falls_back_to_no_body_when_nothing_present() {
         // No diagnostics and an empty/NUL body: still `<no body>`, but now the
         // failing cmdlet is identified.
-        let detail = compose_error_detail("Get-Group", &"\0".repeat(16), &None, &None);
+        let detail = compose_error_detail("Get-Group", &"\0".repeat(16), None, None);
         assert_eq!(detail, "[Get-Group] <no body>");
     }
 

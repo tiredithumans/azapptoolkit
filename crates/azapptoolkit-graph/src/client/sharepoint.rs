@@ -263,7 +263,7 @@ impl GraphClient {
                     level: SelectedScopeLevel::List,
                     display_path: join_path(&[
                         base.display_path.as_str(),
-                        name_or(&list_name, "list"),
+                        name_or(list_name.as_deref(), "list"),
                     ]),
                     list_id: Some(list.id),
                     list_name,
@@ -294,7 +294,7 @@ impl GraphClient {
                 level: SelectedScopeLevel::File,
                 display_path: join_path(&[
                     base.display_path.as_str(),
-                    name_or(&drive_name, "library"),
+                    name_or(drive_name.as_deref(), "library"),
                     &inner.replace('/', " / "),
                 ]),
                 list_id: Some(list_id),
@@ -331,7 +331,10 @@ impl GraphClient {
         let list_name = list.label().map(str::to_string);
         Ok(Some(ResolvedSharePointResource {
             level: SelectedScopeLevel::List,
-            display_path: join_path(&[base.display_path.as_str(), name_or(&list_name, "list")]),
+            display_path: join_path(&[
+                base.display_path.as_str(),
+                name_or(list_name.as_deref(), "list"),
+            ]),
             list_id: Some(list.id.clone()),
             list_name,
             ..base.clone()
@@ -621,8 +624,8 @@ fn join_path(parts: &[&str]) -> String {
 
 /// The name Graph gave the resource, or a generic noun when it gave none — an
 /// unnamed library must still render as something an operator can read.
-fn name_or<'a>(name: &'a Option<String>, fallback: &'a str) -> &'a str {
-    name.as_deref().unwrap_or(fallback)
+fn name_or<'a>(name: Option<&'a str>, fallback: &'a str) -> &'a str {
+    name.unwrap_or(fallback)
 }
 
 /// Splits a server-relative path into its non-empty segments.

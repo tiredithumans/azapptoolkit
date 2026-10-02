@@ -2,6 +2,7 @@
 //! mailbox (the Entra ∪ Exchange-RBAC union) to answer "who can read this
 //! mailbox?".
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
@@ -49,9 +50,10 @@ fn summary_line(r: &MailboxReachersResult) -> String {
     if unknowns > 0 {
         // An Unknown row means a path (usually the Exchange RBAC check)
         // couldn't be evaluated — treat as possible access, not noise.
-        summary.push_str(&format!(
+        let _ = write!(
+            summary,
             " · {unknowns} couldn’t be confirmed (need Exchange admin rights)"
-        ));
+        );
     }
     if !r.exchange_available {
         summary.push_str(

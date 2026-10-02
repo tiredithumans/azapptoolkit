@@ -24,9 +24,10 @@ fn table_body(toml_src: &str, header: &str) -> Vec<String> {
 /// web-rs is EXCLUDED from the root workspace (it targets `wasm32` and carries
 /// its own lockfile), so it cannot inherit `[workspace.lints]` and restates the
 /// block by hand. AGENTS.md says "keep it in sync with the root block"; nothing
-/// but this test actually did. Checked per table — today `[lints.rust]` and
-/// `[lints.rustdoc]` (a rustdoc deny added here but not in web-rs, or vice
-/// versa, is exactly the silent drift this test exists to catch).
+/// but this test actually did. Checked per table — today `[lints.rust]`,
+/// `[lints.rustdoc]` and `[lints.clippy]` (a deny or gated lint added in one
+/// table but not its mirror is exactly the silent drift this test exists to
+/// catch).
 #[test]
 fn web_rs_lint_block_matches_the_workspace_block() {
     let root = include_str!("../../../../../Cargo.toml");
@@ -34,6 +35,7 @@ fn web_rs_lint_block_matches_the_workspace_block() {
     for (root_h, web_h) in [
         ("[workspace.lints.rust]", "[lints.rust]"),
         ("[workspace.lints.rustdoc]", "[lints.rustdoc]"),
+        ("[workspace.lints.clippy]", "[lints.clippy]"),
     ] {
         let root_block = table_body(root, root_h);
         let web_block = table_body(web, web_h);
