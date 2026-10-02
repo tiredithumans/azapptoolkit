@@ -542,6 +542,21 @@ machete:
 # committed Cargo.lock on the one pipeline that produces shipped bytes (every
 # verify gate pins it; the release build must not silently re-resolve).
 
+# Release step 2: rewrite the three guarded version manifests to VERSION,
+# resync BOTH lockfiles (workspace-only `cargo update`, never --locked), then
+# run the release.rs identity tests — so roll the CHANGELOG section FIRST
+# (SKILL.md step 1), or the tail test fails on the stale header by design.
+# This is the sanctioned path — hand-typed `cargo update` is what AGENTS.md
+# forbids — and the release skill's steps 1-2 point here. The body lives in
+# scripts/bump.sh / bump.ps1. Usage: `just bump 0.31.0`.
+[unix]
+bump VERSION:
+    bash scripts/bump.sh {{VERSION}}
+
+[windows]
+bump VERSION:
+    powershell.exe -NoLogo -ExecutionPolicy Bypass -File scripts/bump.ps1 {{VERSION}}
+
 # Windows MSI + NSIS installers, release, --locked (no updater signing key needed).
 [working-directory('apps/desktop/src-tauri')]
 build-windows:

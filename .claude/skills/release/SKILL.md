@@ -1,10 +1,10 @@
 ---
 name: release
-description: Cut and publish a release — bump the 3 guarded manifests, sync both lockfiles, finalize CHANGELOG.md [Unreleased] → [X.Y.Z], release PR, tag the merge commit, verify the 3-OS draft, publish on human sign-off. Use when the user says "release", "bump version", or asks to publish a new release.
+description: Cut and publish a release — finalize CHANGELOG.md [Unreleased] → [X.Y.Z], bump the 3 guarded manifests + sync both lockfiles with `just bump`, release PR, tag the merge commit, verify the 3-OS draft, publish on human sign-off. Use when the user says "release", "bump version", or asks to publish a new release.
 argument-hint: "[version bump type: patch, minor, major]"
 ---
 
-# Release — bump → lockfiles → changelog → PR → tag → draft → publish
+# Release — changelog → bump (manifests + lockfiles) → PR → tag → draft → publish
 
 The pipeline: release PR onto `main` → annotated tag on the **merge commit** →
 `release.yml` builds a 3-OS **draft** with one aggregated `latest.json` → a human publishes.
@@ -20,30 +20,7 @@ directly; everything lands via the release PR.
   - Breaking changes (`!` types or CHANGELOG notes) → major bump.
   - Only `fix:` / `chore:` / `docs:` → patch bump.
 
-## 1. Bump the 3 guarded manifests
-
-`release.yml`'s `guard` job fails the whole build unless ALL THREE equal the tag:
-
-- `apps/desktop/src-tauri/tauri.conf.json` — `"version"`
-- root `Cargo.toml` — `[workspace.package] version`
-- `apps/desktop/web-rs/Cargo.toml` — `version` (also feeds the in-app version line)
-
-These three are the complete set — there is no other version manifest in the repo.
-
-## 2. Sync BOTH lockfiles
-
-Every verify/CI gate runs `--locked`, so a stale lockfile fails CI after a version bump:
-
-```bash
-cargo update --workspace                                # root Cargo.lock
-(cd apps/desktop/web-rs && cargo update --workspace)    # web-rs Cargo.lock (workspace-excluded)
-```
-
-This touches only the `azapptoolkit-*` member version lines — no dep churn. Don't
-`cargo build`/`check` just to refresh a lock (needs the frontend-dist stub); `cargo update -w`
-is clean.
-
-## 3. Finalize the changelog
+## 1. Finalize the changelog (before the bump — the bump verifies against it)
 
 - Roll `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` — **no `v` prefix, ASCII hyphen**
   (e.g. `## [0.15.0] - 2026-07-04`). This exact shape is load-bearing: `release.yml` (line
@@ -52,7 +29,34 @@ is clean.
   matches every existing entry in `CHANGELOG.md`.
 - Re-add an empty `## [Unreleased]` stub above the new section.
 
-## 4. Verify, commit, PR
+Roll first because `just bump` (next step) ends with the `release.rs` identity tests, which
+require the newest CHANGELOG header to equal the manifests. After the roll they go green on
+the happy path; a malformed or missing header then fails there instead of on the PR.
+
+## 2. Bump the 3 guarded manifests + sync BOTH lockfiles — `just bump X.Y.Z`
+
+One recipe (`scripts/bump.sh` / `bump.ps1`) rewrites the three version literals, runs
+`cargo update --workspace` in both trees, then the identity tests. Hand-typing the
+`cargo update` pair is what AGENTS.md forbids — the recipe exists so you never have to.
+A partial bump is caught by the recipe itself on unix/windows dev boxes and by
+`every_manifest_states_the_same_version` in `just test` on the release PR (the guard job
+plus this test are why partial bumps fail PR CI, not only after a tag push).
+
+The three it rewrites — `release.yml`'s `guard` job fails the whole build unless ALL THREE
+equal the tag:
+
+- `apps/desktop/src-tauri/tauri.conf.json` — `"version"`
+- root `Cargo.toml` — `[workspace.package] version`
+- `apps/desktop/web-rs/Cargo.toml` — `version` (also feeds the in-app version line)
+
+These three are the complete set — there is no other version manifest in the repo.
+
+Lockfile context if the recipe's `cargo update` leg ever needs doing by hand: every
+verify/CI gate runs `--locked`, so a stale lockfile fails CI after a version bump. The
+workspace-only update touches only the `azapptoolkit-*` member version lines — no dep
+churn. Don't `cargo build`/`check` just to refresh a lock (needs the frontend-dist stub).
+
+## 3. Verify, commit, PR
 
 - `just verify` (lockfiles now match). Prefer `just verify-full` for full CI parity
   (adds audit/web-audit/deny/web-deny/web-itest) — the guard job re-runs the RustSec scan
@@ -61,7 +65,7 @@ is clean.
   a `release` commit type is not in the validator hook's accepted list.
 - Push, then `gh pr create --base main` with the usual Summary/Test-plan body.
 
-## 5. Wait for the required checks, merge
+## 4. Wait for the required checks, merge
 
 - 8 required checks: Rust workspace (ubuntu/windows/macos), Frontend (Leptos/WASM),
   actionlint, cargo-audit, cargo-deny, secrets + hooks. Watch with `gh pr checks <num> --watch`, or a
@@ -72,7 +76,7 @@ is clean.
 - `gh pr merge <num> --merge --delete-branch`. Auto-merge is not enabled on this repo;
   never merge with `--admin`.
 
-## 6. Tag the merge commit
+## 5. Tag the merge commit
 
 ```bash
 git checkout main && git pull origin main
@@ -86,7 +90,7 @@ signing key scoped to that step; the paired `build-<os>-updater` recipe chains t
 for local rehearsal) → a **draft**
 release with ONE aggregated `latest.json` + `SHA256SUMS`.
 
-## 7. Verify the draft
+## 6. Verify the draft
 
 `gh release view vX.Y.Z --json isDraft,isPrerelease,assets` — expect:
 
@@ -98,7 +102,7 @@ release with ONE aggregated `latest.json` + `SHA256SUMS`.
   their updater payloads, every `signature` non-empty
 - `SHA256SUMS`
 
-## 8. Pre-publish checklist (human gates — surface, never skip silently)
+## 7. Pre-publish checklist (human gates — surface, never skip silently)
 
 - Surface the open walkthrough backlog: `gh issue list --label walkthrough` → the issue
   titled **"Live walkthrough backlog"**. Put its contents in front of the human alongside
@@ -107,7 +111,7 @@ release with ONE aggregated `latest.json` + `SHA256SUMS`.
   headless). Remind the human it's outstanding; publishing auto-updates users, so skipping
   it must be their explicit call, never a silent omission.
 
-## 9. Publish — ONLY on explicit human instruction
+## 8. Publish — ONLY on explicit human instruction
 
 ```bash
 gh release edit vX.Y.Z --draft=false --latest
@@ -120,10 +124,10 @@ bypasses the assembled `latest.json`/assets and confuses the updater endpoint.
 
 Validated on v0.11.0, where pre-publish testing caught a bug:
 
-1. Fix on a **new** release branch, PR + merge as usual (steps 4–5).
+1. Fix on a **new** release branch, PR + merge as usual (steps 3–4).
 2. Delete the stale draft + tag: `gh release delete vX.Y.Z --yes`, then
    `git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`.
-3. Re-tag the new merge commit (step 6). The same version number is fine — the first draft
+3. Re-tag the new merge commit (step 5). The same version number is fine — the first draft
    never published.
 
 ## Optional local packaging checks
@@ -138,9 +142,8 @@ matrix builds all three legs from the tag.
 ```
 release: v0.15.0 (minor)
 
-✅ manifests bumped (tauri.conf.json · Cargo.toml [workspace.package] · web-rs Cargo.toml)
-✅ lockfiles synced (root + web-rs) · verify green
-✅ PR #NNN merged · tagged v0.15.0 on <merge-sha> · release.yml running
+✅ changelog rolled · `just bump` green (3 manifests + both lockfiles + identity tests)
+✅ just verify green · PR #NNN merged · tagged v0.15.0 on <merge-sha> · release.yml running
 ✅ draft verified: 3 platform payloads + 3 .sig + latest.json + SHA256SUMS
 
 ⏸ awaiting human: walkthrough backlog + `just dev` eyeball, then publish with
