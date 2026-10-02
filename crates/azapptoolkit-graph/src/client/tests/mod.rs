@@ -1,6 +1,6 @@
-//! Wiremock tests for the Graph client, split per domain module (the impl
-//! files under `client/`). Shared fixtures live in `common`; pure-function
-//! unit tests (e.g. `site_lookup_path`) live beside their subject instead.
+//! Wiremock tests for the Graph client, split per domain module (the impl files under
+//! `client/`). Shared fixtures in `common`; pure-function unit tests (e.g. `site_lookup_path`)
+//! live beside their subject.
 
 mod common;
 

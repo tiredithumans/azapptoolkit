@@ -72,7 +72,7 @@ pub struct TenantBackup {
     /// (an enterprise app's assignees, a managed identity's held app-roles):
     /// that object restores without the named part.
     ///
-    /// A non-empty list does not invalidate the backup; it bounds it. Restore
+    /// A non-empty list does not invalidate the backup; it bounds it; restore
     /// surfaces the same list so the gap is visible at the moment it matters.
     /// `#[serde(default)]` so manifests written before this field load as
     /// "nothing known to be missing" — which is what they claimed.
@@ -255,11 +255,10 @@ pub struct ManagedIdentityBackup {
 
 /// Credential **metadata** — never a value. Client-secret values and cert
 /// private keys are unrecoverable by Graph design (returned once at creation),
-/// so a backup can only *describe* a credential, never reproduce it. There is
-/// deliberately no value/secret field here — that absence is what guarantees
-/// secrets never touch the backup file. Restore mints a fresh secret (or
-/// re-uploads a cert from the operator's own PKI) and emits a redistribution
-/// report.
+/// so a backup can only *describe* a credential, never reproduce it; the
+/// deliberately absent value/secret field is what guarantees secrets never
+/// touch the backup file. Restore mints a fresh secret (or re-uploads a cert
+/// from the operator's own PKI) and emits a redistribution report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialMeta {
@@ -430,13 +429,13 @@ pub struct RestoreReport {
     /// apps that *were* created are still fully wired and reported.
     pub cancelled: bool,
     /// True when the run stopped because the sign-in session died mid-restore
-    /// (a re-auth-fatal error), rather than because the operator cancelled.
+    /// (a re-auth-fatal error), rather than the operator cancelling.
     ///
-    /// Distinct from [`Self::cancelled`] because the remedy differs and because
-    /// a restore has already made irreversible changes: unlike the read-only
+    /// Distinct from [`Self::cancelled`] because the remedy differs and a
+    /// restore has already made irreversible changes: unlike the read-only
     /// fan-outs, which discard a partial result and return `session.err(..)`,
-    /// this flow must still hand back the report — an operator who has just had
-    /// N applications created in their tenant needs to know which ones. The
+    /// this flow must still hand back the report — an operator who just had N
+    /// applications created in their tenant needs to know which ones. The
     /// front end pairs this with the re-auth prompt.
     #[serde(default)]
     pub session_expired: bool,

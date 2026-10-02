@@ -21,23 +21,22 @@ const PER_CONNECTION_READ_TIMEOUT_SECS: u64 = 5;
 ///
 /// Robustness over a bare accept-and-read: browsers open speculative
 /// ("preconnect") sockets and fire stray requests (`/favicon.ico`) at loopback
-/// servers — with a single `accept()`, one of those consumes the slot and the
-/// real redirect is lost until the caller's timeout ("sign-in hangs"). So this
+/// servers — with a single `accept()`, one consumes the slot and the real
+/// redirect is lost until the caller's timeout ("sign-in hangs"). So this
 /// loops: a connection that closes without sending, or whose request carries
 /// none of `code`/`state`/`error`, or that is not a `GET` (a CORS/PNA
 /// `OPTIONS` preflight), gets a 404 and the listener keeps waiting.
 ///
 /// Only a redirect carrying the pending `state` ends the wait. Any local
-/// process — or any web page open in the operator's browser, via a blind
-/// cross-origin request — can reach the ephemeral port, so a request whose
-/// `state` is missing or foreign (including a bare `error=`) is answered 400
-/// with a neutral page, logged at warn, and ignored: it can neither abort the
-/// sign-in nor choose the error text the app shows. The consequence is
-/// deliberate: a genuinely mismatched redirect no longer fails fast as
-/// [`AuthError::StateMismatch`]; it waits out the caller's `REDIRECT_WAIT` and
-/// surfaces as [`AuthError::Cancelled`]. The browser page is written only after
-/// `state` validates, and says what is true at that point (the code exchange
-/// still follows).
+/// process — or any web page via a blind cross-origin request — can reach the
+/// ephemeral port, so a request whose `state` is missing or foreign (including
+/// a bare `error=`) is answered 400 with a neutral page, logged at warn, and
+/// ignored: it can neither abort the sign-in nor choose the error text the app
+/// shows. Deliberate consequence: a genuinely mismatched redirect no longer
+/// fails fast as [`AuthError::StateMismatch`]; it waits out the caller's
+/// `REDIRECT_WAIT` and surfaces as [`AuthError::Cancelled`]. The browser page
+/// is written only after `state` validates, and says what is true at that
+/// point (the code exchange still follows).
 pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str) -> Result<String> {
     loop {
         let (mut socket, _peer) = listener
@@ -49,13 +48,12 @@ pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str)
         //
         // The accept loop reads one connection to completion before accepting
         // the next, and `read_request_head` returns only on EOF, a complete
-        // head, or 16 KiB. That covered a preconnect which *closes*; it did not
+        // head, or 16 KiB. That covered a preconnect that *closes*; it did not
         // cover one that stays open idle — which is what browsers actually do,
-        // holding speculative sockets in the pool for seconds. The browser opens
-        // an idle socket, sends the redirect on a second one, and this loop sits
-        // parked on the first — never accepting the second — until the caller's
-        // 300s timeout fires. The user sees sign-in hang after a successful
-        // consent.
+        // holding speculative sockets in the pool for seconds. The browser
+        // opens an idle socket, sends the redirect on a second one, and this
+        // loop sits parked on the first until the caller's 300s timeout fires:
+        // sign-in hangs after a successful consent.
         let read = tokio::time::timeout(
             Duration::from_secs(PER_CONNECTION_READ_TIMEOUT_SECS),
             read_request_head(&mut socket),
@@ -237,10 +235,9 @@ mod tests {
 
         // 1b: the case the old mitigation did NOT cover — a socket that opens
         // and stays open, sending nothing. Chrome and Edge hold speculative
-        // sockets in the pool for seconds, so this is what browsers actually do.
-        // Held for the whole test: without a per-connection read bound the
-        // accept loop parks here and never reaches the real redirect below,
-        // hanging sign-in until the caller's 300s timeout.
+        // sockets in the pool for seconds, so this is what browsers actually
+        // do. Held for the whole test: without a per-connection read bound the
+        // accept loop parks here and never reaches the real redirect below.
         let _idle = TcpStream::connect(addr).await.unwrap();
 
         // 2: stray probe — must get a 404, not steal the redirect slot.

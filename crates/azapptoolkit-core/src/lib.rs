@@ -5,14 +5,14 @@ pub mod cache;
 pub mod capabilities;
 pub mod cloud;
 pub mod constants;
-// Pure data types (no fs I/O), so ungated — the wasm frontend uses them as the
-// IPC payload for get/set_tenant_defaults. Persistence lives in `settings`.
+// Pure data types, ungated for wasm: used as the get/set_tenant_defaults IPC
+// payload; persistence lives in `settings`.
 pub mod defaults;
 pub mod federation;
-// Pure shape check, ungated: the ARM client and the command layer share it.
+// Pure shape check, ungated: shared by the ARM client and the command layer.
 pub mod guid;
-// Both are server-side only: the macro's generated `is_retryable` calls into
-// `http_retry`, and no WASM surface constructs a client error.
+// Server-side only: the macro's generated `is_retryable` calls `http_retry`,
+// and no WASM surface constructs a client error.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_error;
 #[cfg(not(target_arch = "wasm32"))]

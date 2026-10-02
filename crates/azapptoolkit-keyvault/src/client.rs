@@ -1,12 +1,11 @@
 //! Thin HTTP client over Key Vault's REST surface.
 //!
-//! Retry budget, backoff, jitter and `Retry-After` handling come from the
-//! shared [`azapptoolkit_core::http_retry::with_retries`] loop — the same one
-//! the Graph, ARM and Exchange transports run — and the per-attempt HTTP
-//! status → [`KeyVaultError`] mapping is the one the ARM transport uses too,
-//! [`azapptoolkit_core::http_error::failed_response`]. Only each verb's
-//! [`RetryClass`] (`retry_class_for`, with its `set_secret` PUT decision) is
-//! local to this crate.
+//! Retry budget, backoff, jitter and `Retry-After` come from the shared
+//! [`azapptoolkit_core::http_retry::with_retries`] loop (the same one Graph,
+//! ARM and Exchange run); the per-attempt status → [`KeyVaultError`] mapping
+//! is [`azapptoolkit_core::http_error::failed_response`], as in ARM. Only
+//! each verb's [`RetryClass`] (`retry_class_for`, with its `set_secret` PUT
+//! decision) is local.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,16 +24,16 @@ use crate::error::{KeyVaultError, Result};
 use crate::models::{Paged, SecretItem, SecretSetRequest, SecretValue};
 
 /// Key Vault **data-plane** api-version (`{vault}.vault.azure.net/secrets`).
-/// The announced Key Vault api-version retirement (every version before
-/// 2026-02-01 on 2027-02-27) covers the control plane only; stable data-plane
-/// versions are explicitly unaffected. Source:
+/// The announced api-version retirement (every version before 2026-02-01 on
+/// 2027-02-27) covers the control plane only; stable data-plane versions are
+/// explicitly unaffected. Source:
 /// <https://learn.microsoft.com/rest/api/keyvault/secrets/get-secret/get-secret>,
 /// <https://learn.microsoft.com/azure/key-vault/general/migrate-api-version>
 /// (reviewed 2026-09).
 pub const DEFAULT_API_VERSION: &str = "7.4";
 
-/// Defensive bound on `nextLink` paging: a misbehaving server returning a
-/// self-referencing `nextLink` must not page forever (far above any real vault).
+/// Defensive bound on `nextLink` paging: a self-referencing link must not
+/// page forever (far above any real vault).
 const MAX_PAGES: usize = 1000;
 
 pub struct KeyVaultClient {
@@ -50,9 +49,8 @@ impl KeyVaultClient {
         Self::new_with_dns_suffix(token, vault_name, "vault.azure.net")
     }
 
-    /// Like [`Self::new`] but with a sovereign-cloud Key Vault DNS suffix (e.g.
-    /// `vault.usgovcloudapi.net` for US Gov, `vault.azure.cn` for China). The
-    /// vault URL is `https://{vault-name}.{dns_suffix}`.
+    /// Like [`Self::new`] but with a sovereign-cloud Key Vault DNS suffix
+    /// (e.g. `vault.usgovcloudapi.net` for US Gov, `vault.azure.cn` for China).
     pub fn new_with_dns_suffix(
         token: Arc<dyn BearerProvider>,
         vault_name: &str,
@@ -153,12 +151,13 @@ impl KeyVaultClient {
         self.send_core_url(method, &url, true, body, false).await
     }
 
-    /// Unified transport for both path-relative and absolute (`nextLink`)
-    /// requests: one retry + jitter + `Retry-After` loop whose attempts map HTTP
-    /// status → typed `KeyVaultError` through the shared `failed_response`. `check_origin` rejects an off-vault URL before the
-    /// bearer is attached (a `nextLink` is attacker-influenced server output);
-    /// `attach_api_version` appends the `api-version` query, which a `nextLink`
-    /// already carries and so is skipped for it.
+    /// Unified transport for path-relative and absolute (`nextLink`) requests:
+    /// one retry + jitter + `Retry-After` loop mapping each HTTP status →
+    /// typed `KeyVaultError` through the shared `failed_response`.
+    /// `check_origin` rejects an off-vault URL before the bearer is attached
+    /// (a `nextLink` is attacker-influenced server output);
+    /// `attach_api_version` skips the `api-version` query that a `nextLink`
+    /// already carries.
     async fn send_core_url(
         &self,
         method: Method,
@@ -185,9 +184,9 @@ impl KeyVaultClient {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
 
-        // Retry budget, backoff and `Retry-After` handling live in
+        // Retry budget, backoff and `Retry-After` live in
         // `http_retry::with_retries`; this closure only classifies one attempt.
-        // Names the verb and endpoint family (ids masked, no query) in the log.
+        // The label names verb + endpoint family (ids masked, no query).
         let label = format!("key vault {method} {}", endpoint_family(url));
         with_retries(&label, retry_class_for(&method), |_| {
             let http = self.http.clone();
@@ -227,8 +226,8 @@ impl KeyVaultClient {
         .await
     }
 
-    /// GET against an absolute URL (a `nextLink`). The link already carries its
-    /// own `api-version` query, so we don't append one; its origin is checked
+    /// GET against an absolute URL (a `nextLink`): the link already carries
+    /// its own `api-version`, so none is appended; its origin is checked
     /// before the bearer is attached.
     async fn send_core_absolute(&self, method: Method, url: &str) -> Result<bytes::Bytes> {
         self.send_core_url(method, url, false, None, true).await
@@ -237,13 +236,12 @@ impl KeyVaultClient {
 
 /// The retry class for an HTTP verb.
 ///
-/// `GET`/`HEAD`/`DELETE` are idempotent. `PUT` is replayed too, but here that
-/// is a decision, not a definition: `PUT /secrets/{name}`
-/// ([`KeyVaultClient::set_secret`]) appends a new version on every call, so a
-/// replay after a 5xx or connection reset that followed a committed write
-/// leaves a second version. The replay carries the identical value, so the
-/// current version is still the right secret; the cost is one duplicate
-/// same-value version. Refusing the replay would be worse:
+/// `GET`/`HEAD`/`DELETE` are idempotent. `PUT` is replayed as a decision, not
+/// a definition: `PUT /secrets/{name}` ([`KeyVaultClient::set_secret`])
+/// appends a new version per call, so a replay after a post-commit 5xx or
+/// connection reset leaves a second version — but the replay carries the
+/// identical value, so the current version is still the right secret; the
+/// cost is one duplicate same-value version. Refusing would be worse:
 /// `rotate_app_credential` rolls back the freshly minted app secret when this
 /// write fails, so a post-commit transient would leave the vault holding a
 /// credential Entra no longer accepts. `POST`/`PATCH` replay only an explicit
@@ -480,8 +478,7 @@ mod tests {
         assert_eq!(resp.value, "v");
     }
 
-    /// A self-referencing `nextLink` stops at `MAX_PAGES` instead of paging
-    /// forever.
+    /// A self-referencing `nextLink` stops at `MAX_PAGES` instead of paging forever.
     #[tokio::test]
     async fn list_secrets_stops_at_the_page_cap() {
         let server = MockServer::start().await;
