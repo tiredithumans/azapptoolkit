@@ -32,7 +32,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 
-tokio = { workspace = true }
+# `macros`: `tokio::join!` in the command fan-outs. `rt-multi-thread`: no runtime
+# is constructed here (Tauri owns it), but `tokio::spawn`/`JoinHandle`/`JoinSet`
+# need `rt`, and the dispatch test uses `flavor = "multi_thread"` which needs the
+# multi-thread variant; both also cover the `#[tokio::test]`s below (dep features
+# unify into the test build).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }

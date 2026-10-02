@@ -23,7 +23,14 @@ repository = "https://github.com/tiredithumans/azapptoolkit"
 publish = false
 [workspace.dependencies]
 # Async
-tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+# Trimmed to what the non-test code actually uses (2026-10-02, review F230):
+# `sync` + `time`. The old union carried `macros`/`rt-multi-thread`/`net`/`io-util`
+# from the days before per-crate features, which hid the real shape — raw sockets
+# are opened in exactly one place (auth's OAuth loopback listener) and no crate
+# builds a runtime (Tauri owns the only one). Crates that need more re-add it
+# explicitly: `azapptoolkit-auth` (net, io-util, rt) and `src-tauri` (macros,
+# rt-multi-thread); test builds get `macros`/`rt*` through dev-dependencies.
+tokio = { version = "1.53", features = ["sync", "time"] }
 # No `executor` feature: nothing here blocks on a future outside tokio.
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # HTTP
