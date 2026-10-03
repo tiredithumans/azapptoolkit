@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 48 entries by area (read the section for each item's Problem +
+Remaining 39 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -143,8 +143,30 @@ Proposal; #### items are full entries, one-liners are bullets):
   (`Verdict::Eligible` via `roleEligibilityScheduleInstances` needs a new
   consent scope + a sovereign-aware `portal_root()`); both are design-level,
   not drop-in.
-- **Auth, sign-in & network resilience (9)** — F110 · F112 · F181 · F183 ·
-  F427 · F114 · F113 · F354 · F018
+- **Auth, sign-in & network resilience (9)** — **all closed 2026-10-02,
+  verified against current code.** F110 (`PASSTHROUGH_NON_FATAL_CODES` =
+  `consent_required` + `network_error` + `interaction_required` flows through
+  `passthrough_code`, `is_consent_required` keys on it, and the reauth.rs docs
+  tell the pass-through story — no `String`-boundary residue in
+  auth-and-consent.md or `state.rs`). F112 (README + DEVELOPMENT.md state the
+  Linux Secret Service requirement, `token_cache.rs` calls it a hard
+  requirement, and sign_in.rs splits `keyring` (locked) from
+  `keyring_unavailable` (no store) hints, test-asserted). F181
+  (`scoped_send_core` runs through `send_core_url_with` with
+  `retry_class_for(&method)`, so scoped writes replay on 429/5xx and DELETEs
+  stay idempotent-replayable). F183 (`retried_sub_status` = 429 or any 5xx
+  re-batches under budget; the throttle observer is notified for 429 only).
+  F427 (permission_tester, resource-access sites/keyvault/mailboxes and
+  key_vault_view route `Err(e)` through `report_if_session_dead` or the shared
+  `report_recovery_action` ladder; global_search reports in its resource).
+  F114 (`components::browser_fallback_notice` renders the copy-the-link
+  banner when the browser launch fails). F113 (timeout and code-less
+  `access_denied` map to `AuthError::Cancelled` → UiError code `cancelled`
+  with a live sign-in hint; unit-tested). F354 (both pre-sign-in hints point
+  at the card's **Change** link; the pinning test asserts no hint mentions
+  Settings). F018 (`KeyFailure`/`OwnerChangeFailure` carry the `code`,
+  `is_reauth_fatal` keys on it, and both credential loops and both owner
+  loops `break` on a fatal code, flagged in the result).
 - **Frontend consistency & polish (8)** — F341 · F357 · F355 · F322 · F321 ·
   F327 · F325 · F326
 - **Graph API capabilities not yet adopted (9)** — F161 · F078 · F268 ·
