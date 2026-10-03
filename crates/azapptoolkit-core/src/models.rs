@@ -641,6 +641,46 @@ pub struct ConditionalAccessPolicy {
 pub struct CaConditions {
     #[serde(default)]
     pub applications: Option<CaApplications>,
+    /// The **client axis** of the policy (`conditionalAccessClientApplications`):
+    /// which workload identities / service principals may act as the client.
+    /// `None` (or an all-empty body) means the policy does not constrain
+    /// clients — the pre-workload-identity shape every user policy uses.
+    #[serde(default)]
+    pub client_applications: Option<CaClientApplications>,
+}
+
+/// `conditionalAccessClientApplications`. Targets the *client* of a sign-in
+/// (who is connecting), as opposed to `applications`, which targets the
+/// *resource* (what is being reached). A workload-identity CA policy is often
+/// `applications: All` + `clientApplications: <workload ids>` — reading only
+/// the resource axis reports it as "applies (all)" to every app.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CaClientApplications {
+    /// Service-principal **object ids**, or the well-known all-client tokens
+    /// (`All`, `workloadIdentityAll` …) the CA blade writes for workload
+    /// identities.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub include_service_principals: Vec<String>,
+    /// Excluded client SP object ids — exclude wins over any include.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub exclude_service_principals: Vec<String>,
+    /// Attribute filter on clients (`servicePrincipalFilter`); same
+    /// `{mode, rule}` shape as the application filter and equally
+    /// non-evaluable client-side.
+    #[serde(default)]
+    pub service_principal_filter: Option<CaApplicationFilter>,
+}
+
+impl CaClientApplications {
+    /// True when the axis carries no targeting at all (Graph echoes
+    /// `"clientApplications": {"excludeServicePrincipals": [], …}` for plain
+    /// user policies) — treated as "clients unconstrained".
+    pub fn is_empty(&self) -> bool {
+        self.include_service_principals.is_empty()
+            && self.exclude_service_principals.is_empty()
+            && self.service_principal_filter.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

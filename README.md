@@ -129,7 +129,9 @@ toolkit-owned service principal storing tokens you cannot audit.
   Graph calls it *actually makes* (`MicrosoftGraphActivityLogs` via Azure
   Monitor Log Analytics) to spot grants that nothing uses.
 - **Conditional Access visibility** — see which Conditional Access policies
-  target an application (on-demand, via `Policy.Read.All`).
+  target an application — as a resource or as a client (its service principal /
+  workload identities) — and honour its exclusions on either axis (on-demand,
+  via `Policy.Read.All`).
 - **Activity log** — recent directory activity / change log for an app, from the
   Entra audit logs (on-demand, via `AuditLog.Read.All`).
 

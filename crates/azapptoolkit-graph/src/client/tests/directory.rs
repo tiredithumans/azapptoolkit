@@ -237,23 +237,30 @@ async fn conditional_access_policies_parse_and_follow_paging() {
     let server = MockServer::start().await;
     let uri = server.uri();
     Mock::given(method("GET"))
-            .and(path("/identity/conditionalAccess/policies"))
-            .and(query_param_is_missing("page"))
-            // Every paged read sends `$top`: paging is serial, so Graph's
-            // default page is a round-trip multiplier on a large tenant.
-            .and(query_param("$top", "999"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [{
-                    "id": "ca-1",
-                    "displayName": "Require MFA",
-                    "state": "enabled",
-                    "conditions": {"applications": {"includeApplications": ["All"], "excludeApplications": null}},
-                    "grantControls": {"builtInControls": ["mfa"], "operator": "OR"}
-                }],
-                "@odata.nextLink": format!("{uri}/identity/conditionalAccess/policies?page=2")
-            })))
-            .mount(&server)
-            .await;
+        .and(path("/identity/conditionalAccess/policies"))
+        .and(query_param_is_missing("page"))
+        // Every paged read sends `$top`: paging is serial, so Graph's
+        // default page is a round-trip multiplier on a large tenant.
+        .and(query_param("$top", "999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "ca-1",
+                "displayName": "Require MFA",
+                "state": "enabled",
+                "conditions": {
+                    "applications": {"includeApplications": ["All"], "excludeApplications": null},
+                    "clientApplications": {
+                        "includeServicePrincipals": ["workloadIdentityAll"],
+                        "excludeServicePrincipals": null,
+                        "servicePrincipalFilter": null
+                    }
+                },
+                "grantControls": {"builtInControls": ["mfa"], "operator": "OR"}
+            }],
+            "@odata.nextLink": format!("{uri}/identity/conditionalAccess/policies?page=2")
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/identity/conditionalAccess/policies"))
         .and(query_param("page", "2"))
@@ -274,6 +281,20 @@ async fn conditional_access_policies_parse_and_follow_paging() {
         .unwrap();
     assert_eq!(apps.include_applications, vec!["All".to_string()]);
     assert!(apps.exclude_applications.is_empty());
+    // The workload-identity client axis must survive deserialisation — the
+    // CA applicability decision reads it, and null-shaped nulls must default
+    // rather than error.
+    let clients = policies[0]
+        .conditions
+        .as_ref()
+        .and_then(|c| c.client_applications.as_ref())
+        .expect("clientApplications should parse");
+    assert_eq!(
+        clients.include_service_principals,
+        vec!["workloadIdentityAll".to_string()]
+    );
+    assert!(clients.exclude_service_principals.is_empty());
+    assert!(clients.service_principal_filter.is_none());
 }
 
 #[tokio::test]

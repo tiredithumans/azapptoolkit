@@ -56,7 +56,7 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
                 </Button>
             </header>
             <Body1>
-                "Conditional Access policies that target this application (directly, or via an \"All apps\" / grouping include). Requires Policy.Read.All consent and an Entra ID P1/P2 license."
+                "Conditional Access policies that target this application — as a resource (directly, or via an \"All apps\" / grouping include) or as a client (its service principal / workload-identity clients). Requires Policy.Read.All consent and an Entra ID P1/P2 license."
             </Body1>
 
             <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
@@ -96,7 +96,7 @@ fn ca_table(list: Vec<ConditionalAccessPolicyDto>) -> impl IntoView {
 
 fn ca_row(p: ConditionalAccessPolicyDto) -> impl IntoView {
     let (state_label, state_tone) = state_badge(&p.state);
-    let applies = applies_label(&p.applies_reason);
+    let applies = applies_label(&p.applies_reason, p.workload_clients);
     let controls = if p.grant_controls.is_empty() {
         "—".to_string()
     } else {
@@ -131,15 +131,35 @@ fn state_badge(state: &str) -> (&'static str, BadgeTone) {
     }
 }
 
-fn applies_label(reason: &str) -> &'static str {
-    match reason {
+/// Renders the `Applies` cell. Resource-axis codes say which *resource* set
+/// the policy targets; a set `workload_clients` flag narrows it to policies
+/// whose client axis names this app's service principal (or workload
+/// identities generally), so the suffix keeps "All apps" honest when only
+/// workload clients are gated. The `sp`/`allWorkload`/`clientFilter*` codes
+/// are client-only policies — they gate this app signing in *elsewhere*
+/// with its credentials, which the resource-only view used to drop.
+fn applies_label(reason: &str, workload_clients: bool) -> String {
+    let base = match reason {
         "appId" => "This app",
         "all" => "All apps",
         "office365" => "Office 365 (may apply)",
         "adminPortals" => "Admin portals (may apply)",
         "filter" => "App filter (may apply)",
         "filterExclude" => "App filter (applies unless excluded)",
+        "sp" => "This app's service principal (as a client)",
+        "allWorkload" => "All workload identities (as clients)",
+        "clientFilter" => "Client filter (may apply)",
+        "clientFilterExclude" => "Client filter (applies unless excluded)",
         _ => "May apply",
+    };
+    let narrowed = matches!(
+        reason,
+        "appId" | "all" | "office365" | "adminPortals" | "filter" | "filterExclude"
+    ) && workload_clients;
+    if narrowed {
+        format!("{base} — workload-identity clients only")
+    } else {
+        base.to_string()
     }
 }
 

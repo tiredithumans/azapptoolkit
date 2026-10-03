@@ -7,6 +7,17 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **Conditional Access visibility now reads both policy axes, so workload-identity policies stop lying.**
+  The Conditional Access tab previously matched only the resource axis (`applications`), which made
+  every workload-identity policy claiming `All apps` look like it applied to every app — and hid
+  policies that block an app's **service principal** while naming other resources. The tab now also
+  evaluates `clientApplications` (the client axis: specific SPs, `workloadIdentityAll`, or a client
+  attribute filter) against the app's own service principal, resolved through the existing cached SP
+  lookup — no extra scope, and tenants without a P1/P2 license still see the graceful "unavailable"
+  note. Exclusions still win on either axis; a policy whose client axis names neither this app's SP
+  nor workload identities no longer shows; a block that only gates the app's SP signing in elsewhere
+  now surfaces as "This app's service principal (as a client)"; and combined rows are labelled
+  "workload-identity clients only". Apps without a service principal behave exactly as before.
 - **Apps Microsoft has disabled for a policy violation are now impossible to miss.** The audit
   reads Graph's `disabledByMicrosoftStatus` — Microsoft's own flag for suspicious, abusive or
   malicious activity, set on the application and its service principal — and scores it +15, so a

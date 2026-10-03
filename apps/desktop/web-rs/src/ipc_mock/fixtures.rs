@@ -1119,18 +1119,41 @@ pub fn conditional_access_policy(
         display_name: display_name.to_string(),
         state: state.to_string(),
         applies_reason: applies_reason.to_string(),
+        workload_clients: false,
         grant_controls: grant_controls.iter().map(|c| c.to_string()).collect(),
         grant_operator: Some("OR".to_string()),
     }
 }
 
+/// One client-axis (workload-identity) policy for the demo: it gates this
+/// app's service principal signing in *elsewhere*, which is the case the
+/// resource-only view used to drop.
+pub fn conditional_access_policy_wi(
+    display_name: &str,
+    state: &str,
+    applies_reason: &str,
+    grant_controls: &[&str],
+) -> azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+    azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+        workload_clients: true,
+        ..conditional_access_policy(display_name, state, applies_reason, grant_controls)
+    }
+}
+
 /// The tenant's sample Conditional Access policies: an enforced MFA baseline,
-/// a legacy-auth block, and a report-only policy that only *may* apply.
+/// a legacy-auth block, a report-only policy that only *may* apply, and a
+/// workload-identity client-axis block.
 pub fn conditional_access_policies()
 -> Vec<azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto> {
     vec![
         conditional_access_policy("Require MFA for all users", "enabled", "all", &["mfa"]),
         conditional_access_policy("Block legacy authentication", "enabled", "all", &["block"]),
+        conditional_access_policy_wi(
+            "Block workload-identity sign-ins to storage",
+            "enabled",
+            "sp",
+            &["block"],
+        ),
         conditional_access_policy(
             "Admin portals need a compliant device",
             "enabledForReportingButNotEnforced",
