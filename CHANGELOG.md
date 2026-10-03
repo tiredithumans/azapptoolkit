@@ -33,6 +33,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   "nothing was minted". Untagged secrets remain rotatable (no ownership is claimed from absent
   tags), and a transient failure of the ownership check skips the check rather than blocking a
   legitimate rotation.
+- **The claims editor now warns about edits that quietly strip claims from tokens.** While a
+  claims policy is being edited (SSO tab and the New SSO application wizard alike), the editor
+  flags: switching the basic claim set off with no claims defined, a claim with neither a SAML
+  URI nor a JWT name, a transformation-sourced claim naming no transformation (or one that
+  doesn't exist), duplicate SAML claim URIs, and transformations with no output claim. The
+  warnings are advisory — Save stays enabled, because a deliberate lockdown is legitimate.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL

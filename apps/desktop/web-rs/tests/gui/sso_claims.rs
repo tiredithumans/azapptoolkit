@@ -98,6 +98,62 @@ async fn an_unreadable_claims_policy_blocks_save_until_it_loads() {
     ts::wait_for(|| ts::call_count("set_claims_mapping") == 1).await;
 }
 
+/// F385: the editor's advisory validation. A policy that switched the basic
+/// claim set off without defining any claim strips name/email/givenname/
+/// surname from every assertion — the editor must warn while it is being
+/// edited, and stay advisory: Save keeps working (a deliberate lockdown is
+/// legitimate).
+#[wasm_bindgen_test]
+async fn a_strip_everything_policy_warns_without_blocking_save() {
+    // Control: the healthy default (basic set on, nothing defined) renders no
+    // advisory at all.
+    ts::reset();
+    ts::mock_ok("set_claims_mapping", &Option::<String>::None);
+    let m1 = mount(false);
+    ts::wait_for(|| ts::body_contains("Save claims")).await;
+    assert!(
+        ts::query(".claims-editor .alert--warn").is_none(),
+        "the healthy default shows no advisory"
+    );
+    drop(m1);
+
+    // Same view over a policy that switched the basic set off with no claims
+    // defined: the editor warns.
+    ts::reset();
+    ts::mock_ok("set_claims_mapping", &Option::<String>::None);
+    let mut broken = fixtures::sso_config("sp-demo", "app-demo");
+    broken.rollover = Some(fixtures::signing_cert_rollover_steady(
+        "sp-demo", "app-demo",
+    ));
+    broken.claims_policy = Some(azapptoolkit_dto::sso::ClaimsPolicyDto {
+        include_basic_claim_set: false,
+        ..Default::default()
+    });
+    ts::mock_ok("get_sso_config", &broken);
+    ts::mock_ok(
+        "get_signing_cert_rollover",
+        &fixtures::signing_cert_rollover_steady("sp-demo", "app-demo"),
+    );
+
+    let detail = Arc::new(fixtures::enterprise_application_detail(
+        "sp-demo",
+        "Contoso SSO Portal",
+    ));
+    let _m2 = ts::mount_view(move || {
+        let d = detail.clone();
+        view! { <SsoContent signal=Signal::derive(move || d.clone()) /> }
+    });
+
+    ts::wait_for(|| ts::body_contains("no identity claims at all")).await;
+    assert!(ts::query(".claims-editor .alert--warn").is_some());
+
+    // Advisory only: Save is still enabled and still sends.
+    let save = button("Save claims");
+    assert!(!save.disabled());
+    save.click();
+    ts::wait_for(|| ts::call_count("set_claims_mapping") == 1).await;
+}
+
 #[wasm_bindgen_test]
 async fn a_read_claims_policy_can_be_saved() {
     ts::reset();
