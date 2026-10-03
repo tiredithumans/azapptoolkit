@@ -10,8 +10,12 @@
 //!
 //! Reply URIs are edited one per row (`components::uri_list_editor`) and checked
 //! against the same `core::redirect` validator the backend runs, so an offender
-//! is marked on its own row before the round trip. That check is advisory: Save
-//! is never blocked and `set_application_authentication` stays the authority.
+//! is marked on its own row before the round trip. That check is advisory: a
+//! flagged URI can still be saved and `set_application_authentication` stays the
+//! authority. What Save *does* wait for is a change — the form is a full
+//! replace, so dispatching an unchanged form is a pure cache-bust with no write
+//! behind it (F342). Dirty state also drives the Reset button, which rebuilds
+//! the editor from the loaded DTO.
 
 use std::sync::Arc;
 
@@ -100,6 +104,35 @@ fn AuthenticationForm(
     let fallback = RwSignal::new(dto.is_fallback_public_client);
     let access_token = RwSignal::new(dto.enable_access_token_issuance);
     let id_token = RwSignal::new(dto.enable_id_token_issuance);
+
+    // The loaded state, for the dirty comparison and Reset (F342): a form
+    // that matches it would re-PATCH byte-identical data and bust the list
+    // caches, so Save waits for an actual change.
+    let loaded = Arc::new(dto);
+    let dirty = {
+        let loaded = loaded.clone();
+        move || {
+            let l = loaded.as_ref();
+            !web.same_as(&l.web_redirect_uris)
+                || !spa.same_as(&l.spa_redirect_uris)
+                || !public_client.same_as(&l.public_client_redirect_uris)
+                || logout.get().trim() != l.logout_url.as_deref().unwrap_or("")
+                || fallback.get() != l.is_fallback_public_client
+                || access_token.get() != l.enable_access_token_issuance
+                || id_token.get() != l.enable_id_token_issuance
+        }
+    };
+    let reset = move |_| {
+        let l = loaded.as_ref();
+        web.reset(&l.web_redirect_uris);
+        spa.reset(&l.spa_redirect_uris);
+        public_client.reset(&l.public_client_redirect_uris);
+        logout.set(l.logout_url.clone().unwrap_or_default());
+        fallback.set(l.is_fallback_public_client);
+        access_token.set(l.enable_access_token_issuance);
+        id_token.set(l.enable_id_token_issuance);
+        cmd.error.set(None);
+    };
 
     let save = move |_| {
         let object_id = object_id.clone();
@@ -191,7 +224,7 @@ fn AuthenticationForm(
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save)
-                    disabled=Signal::derive(move || cmd.busy.get())
+                    disabled=Signal::derive(move || cmd.busy.get() || !dirty())
                 >
                     {move || {
                         if cmd.busy.get() {
@@ -200,6 +233,12 @@ fn AuthenticationForm(
                             view! { "Save" }.into_any()
                         }
                     }}
+                </Button>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(reset)
+                >
+                    "Reset"
                 </Button>
             </div>
         </div>

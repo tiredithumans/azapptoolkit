@@ -103,6 +103,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   could be launched (a confined `xdg-open`, or a policy that blocks the browser handler). The link
   now appears at the top of the window with a Copy button. Paste it into a browser on this computer
   to continue.
+- **The Authentication and Overview forms now wait for an actual change before they write.**
+  Both are full-replace or whole-patch forms, so clicking Save on a form you hadn't edited used to
+  re-send byte-identical settings — a pointless round trip that also busted every cached app list
+  behind the write. Save is now disabled until something actually differs from the loaded state
+  (whitespace and blank URI rows don't count), and the backend treats an all-empty update patch as
+  a no-op too. The Authentication tab also gains a Reset button that restores the loaded URIs,
+  logout URL and toggles, and Cancel on the Overview tab now discards half-typed edits instead of
+  parking them until the next edit session.
 
 ### Fixed
 

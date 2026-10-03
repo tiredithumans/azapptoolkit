@@ -158,7 +158,10 @@ pub struct CreateApplicationResult {
     pub failed_owner_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `PartialEq` + `Default` give both sides one definition of "nothing
+/// changed": the Overview tab disables Save on `patch == default`, and
+/// `update_application` treats that patch as a no-op (F342).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateApplicationInput {
     pub display_name: Option<String>,
