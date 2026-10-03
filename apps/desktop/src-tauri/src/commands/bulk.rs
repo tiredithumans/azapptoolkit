@@ -18,7 +18,10 @@ use std::future::Future;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::expired_password_key_ids;
-use azapptoolkit_core::models::{Application, DeletedApplication, DeletedServicePrincipal};
+use azapptoolkit_core::models::{
+    Application, DeletedApplication, DeletedServicePrincipal, RequiredResourceAccess,
+    ServicePrincipal,
+};
 use azapptoolkit_graph::client::{AppListQuery, DELETED_APPS_MAX, DELETED_SPS_MAX};
 
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
@@ -33,6 +36,7 @@ use crate::dto::bulk::{
     BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkRestoreOutcome, BulkRestoreResult,
     BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome, BulkStageCertResult,
 };
+use crate::dto::permissions::PermissionKind;
 use crate::state::{AppState, CancelToken};
 
 const CONCURRENCY: usize = 4;
@@ -96,7 +100,151 @@ fn validate_create_spec(spec: &BulkCreateSpec) -> Option<BulkCreateOutcome> {
     {
         return invalid(format!("unrecognised signInAudience: {aud}"));
     }
+    if let Some(upn) = spec.owner_upns.iter().find(|u| !u.contains('@')) {
+        return invalid(format!("owner \"{upn}\" is not a user principal name"));
+    }
+    for p in &spec.permissions {
+        if p.kind == PermissionKind::Unknown {
+            return invalid(format!(
+                "permission {}: kind must be Application or Delegated",
+                p.value
+            ));
+        }
+        if resource_app_id_for(&p.resource).is_none() {
+            return invalid(format!(
+                "unknown resource \"{}\" — give its appId, or a resource name from the permission picker",
+                p.resource
+            ));
+        }
+    }
     None
+}
+
+/// A bulk-create permission's resource as an `appId`: a GUID as given, else a
+/// bundled-directory display name (case-insensitive). Anything else is
+/// unknown — guessing at a resource the operator named loosely would declare a
+/// permission on the wrong API.
+fn resource_app_id_for(resource: &str) -> Option<String> {
+    let resource = resource.trim();
+    if azapptoolkit_core::guid::is_guid(resource) {
+        return Some(resource.to_ascii_lowercase());
+    }
+    azapptoolkit_permissions::bundled_resources_slice()
+        .iter()
+        .find(|r| r.display_name.eq_ignore_ascii_case(resource))
+        .map(|r| r.app_id.clone())
+}
+
+/// The id of the enabled permission `value` of `kind` on a resource SP: an app
+/// role an application may hold, or a delegated scope. Exact match on `value`
+/// — permission values are case-sensitive identifiers.
+fn permission_id_on(sp: &ServicePrincipal, value: &str, kind: PermissionKind) -> Option<String> {
+    let enabled = |e: Option<bool>| e != Some(false);
+    match kind {
+        PermissionKind::Application => sp
+            .app_roles
+            .iter()
+            .find(|r| {
+                r.value == value
+                    && enabled(r.is_enabled)
+                    && r.allowed_member_types.iter().any(|t| t == "Application")
+            })
+            .map(|r| r.id.clone()),
+        PermissionKind::Delegated => sp
+            .oauth2_permission_scopes
+            .iter()
+            .find(|s| s.value == value && enabled(s.is_enabled))
+            .map(|s| s.id.clone()),
+        PermissionKind::Unknown => None,
+    }
+}
+
+/// A spec's Owners and Permissions, resolved live.
+#[derive(Default)]
+struct ResolvedCreateExtras {
+    /// `(object id, UPN)`, deduplicated by id.
+    owners: Vec<(String, String)>,
+    required_resource_access: Vec<RequiredResourceAccess>,
+}
+
+/// Why a spec's extras did not resolve: the directory answered and the name is
+/// not there (`Invalid` — the row is wrong), or the read itself failed
+/// (`Failed` — carries the code, so a dead session stops the run).
+enum Unresolved {
+    Invalid(String),
+    Failed(UiError),
+}
+
+/// Resolves every owner UPN and permission of an already statically-valid spec,
+/// **before** anything is created: an inventory row naming a departed owner or
+/// a misspelt permission is rejected whole rather than half-created.
+async fn resolve_create_extras(
+    client: &azapptoolkit_graph::GraphClient,
+    spec: &BulkCreateSpec,
+) -> Result<ResolvedCreateExtras, Unresolved> {
+    let mut out = ResolvedCreateExtras::default();
+    for upn in &spec.owner_upns {
+        match client.find_user_by_upn(upn).await {
+            Ok(Some(user)) => {
+                if !out.owners.iter().any(|(id, _)| *id == user.id) {
+                    out.owners.push((user.id, upn.clone()));
+                }
+            }
+            Ok(None) => return Err(Unresolved::Invalid(format!("owner {upn} not found"))),
+            Err(e) => return Err(Unresolved::Failed(e.into())),
+        }
+    }
+    for p in &spec.permissions {
+        // Validated by `validate_create_spec`, which runs first.
+        let Some(app_id) = resource_app_id_for(&p.resource) else {
+            return Err(Unresolved::Invalid(format!(
+                "unknown resource {}",
+                p.resource
+            )));
+        };
+        let sp = match client.resolve_resource_sp(&app_id).await {
+            Ok(Some(sp)) => sp,
+            Ok(None) => {
+                return Err(Unresolved::Invalid(format!(
+                    "resource {} has no service principal in this tenant",
+                    p.resource
+                )));
+            }
+            Err(e) => return Err(Unresolved::Failed(e.into())),
+        };
+        let Some(id) = permission_id_on(&sp, &p.value, p.kind) else {
+            let kind = match p.kind {
+                PermissionKind::Delegated => "delegated",
+                _ => "application",
+            };
+            return Err(Unresolved::Invalid(format!(
+                "{} exposes no enabled {kind} permission {}",
+                sp.display_name, p.value
+            )));
+        };
+        let entry_type = match p.kind {
+            PermissionKind::Delegated => "Scope",
+            _ => "Role",
+        };
+        super::permissions::declare_resource_access(
+            &mut out.required_resource_access,
+            &app_id,
+            &id,
+            entry_type,
+        );
+    }
+    Ok(out)
+}
+
+/// The row note for owners the create core could not add, by UPN.
+fn owners_not_added(failed_ids: &[String], ids: &[String], upns: &[String]) -> Option<String> {
+    let failed: Vec<&str> = ids
+        .iter()
+        .zip(upns)
+        .filter(|(id, _)| failed_ids.contains(id))
+        .map(|(_, upn)| upn.as_str())
+        .collect();
+    (!failed.is_empty()).then(|| format!("Owner(s) not added: {}.", failed.join(", ")))
 }
 
 /// Accepted `signInAudience` values for bulk-create validation.
@@ -636,6 +784,31 @@ pub async fn bulk_create_applications(
                 if let Some(rejection) = validate_create_spec(&spec) {
                     return rejection;
                 }
+                // Resolved in a validate-only run too: "valid" has to mean every
+                // owner and permission exists, or the dry run proves nothing
+                // about an imported inventory. A spec without either makes no
+                // Graph call here.
+                let extras = match resolve_create_extras(&client, &spec).await {
+                    Ok(extras) => extras,
+                    Err(Unresolved::Invalid(message)) => {
+                        return BulkCreateOutcome {
+                            display_name: spec.display_name,
+                            status: "invalid".into(),
+                            app_id: None,
+                            message: Some(message),
+                            error: None,
+                        };
+                    }
+                    Err(Unresolved::Failed(e)) => {
+                        return BulkCreateOutcome {
+                            display_name: spec.display_name,
+                            status: "failed".into(),
+                            app_id: None,
+                            message: Some(e.message.clone()),
+                            error: Some(e.into()),
+                        };
+                    }
+                };
                 if validate_only {
                     return BulkCreateOutcome {
                         display_name: spec.display_name,
@@ -645,18 +818,30 @@ pub async fn bulk_create_applications(
                         error: None,
                     };
                 }
+                let (owner_ids, owner_upns): (Vec<String>, Vec<String>) =
+                    extras.owners.into_iter().unzip();
                 let input = CreateApplicationInput {
                     display_name: spec.display_name.clone(),
                     sign_in_audience: spec.sign_in_audience,
                     description: spec.description,
+                    initial_owner_ids: owner_ids.clone(),
                     ..Default::default()
                 };
-                match super::applications::create_application_core(&client, input).await {
+                let extras = super::applications::CreateExtras {
+                    required_resource_access: extras.required_resource_access,
+                    ..Default::default()
+                };
+                match super::applications::create_application_core_with(&client, input, extras)
+                    .await
+                {
+                    // An owner add that failed without stopping the run (not
+                    // re-auth-fatal) is listed on the row by UPN — the app is
+                    // there, but not as the inventory described it.
                     Ok((r, None)) => BulkCreateOutcome {
+                        message: owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns),
                         display_name: r.application.display_name,
                         status: "created".into(),
                         app_id: Some(r.application.app_id),
-                        message: None,
                         error: None,
                     },
                     // The registration landed and a later step failed: the app
@@ -667,7 +852,12 @@ pub async fn bulk_create_applications(
                         display_name: r.application.display_name,
                         status: "created".into(),
                         app_id: Some(r.application.app_id),
-                        message: Some(e.message.clone()),
+                        message: Some(
+                            match owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns) {
+                                Some(owners) => format!("{} {owners}", e.message),
+                                None => e.message.clone(),
+                            },
+                        ),
                         error: Some(e.into()),
                     },
                     Err(e) => BulkCreateOutcome {
@@ -1274,6 +1464,7 @@ mod tests {
     use super::*;
     // Tests build their own runs; the commands only ever hold a token.
     use crate::commands::test_support::Recorder;
+    use crate::dto::bulk::BulkCreatePermission;
     use crate::state::CancelFlag;
 
     fn del_app(id: &str, app_id: Option<&str>) -> DeletedApplication {
@@ -1540,7 +1731,7 @@ mod tests {
         let spec = |name: &str, aud: Option<&str>| BulkCreateSpec {
             display_name: name.into(),
             sign_in_audience: aud.map(str::to_string),
-            description: None,
+            ..Default::default()
         };
 
         assert!(validate_create_spec(&spec("Ok", None)).is_none());
@@ -1562,5 +1753,225 @@ mod tests {
         // trip and fail.
         let blank = validate_create_spec(&spec("   ", None)).unwrap();
         assert_eq!(blank.status, "invalid");
+    }
+
+    const GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
+
+    fn perm(resource: &str, value: &str, kind: PermissionKind) -> BulkCreatePermission {
+        BulkCreatePermission {
+            resource: resource.into(),
+            value: value.into(),
+            kind,
+        }
+    }
+
+    fn imported(owners: &[&str], permissions: Vec<BulkCreatePermission>) -> BulkCreateSpec {
+        BulkCreateSpec {
+            display_name: "Imported".into(),
+            owner_upns: owners.iter().map(|o| o.to_string()).collect(),
+            permissions,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn imported_owners_and_permissions_are_checked_before_any_round_trip() {
+        let ok = imported(
+            &["a@contoso.com"],
+            vec![
+                perm(
+                    "microsoft graph",
+                    "User.Read.All",
+                    PermissionKind::Application,
+                ),
+                perm(GRAPH_APP_ID, "openid", PermissionKind::Delegated),
+            ],
+        );
+        assert!(validate_create_spec(&ok).is_none());
+
+        for (spec, needle) in [
+            (imported(&["alice"], vec![]), "not a user principal name"),
+            (
+                imported(
+                    &[],
+                    vec![perm("Graph-ish", "X", PermissionKind::Application)],
+                ),
+                "unknown resource",
+            ),
+            (
+                imported(&[], vec![perm(GRAPH_APP_ID, "X", PermissionKind::Unknown)]),
+                "Application or Delegated",
+            ),
+        ] {
+            let rejected = validate_create_spec(&spec).expect(needle);
+            assert_eq!(rejected.status, "invalid");
+            assert!(rejected.message.unwrap().contains(needle), "{needle}");
+            assert!(rejected.error.is_none());
+        }
+    }
+
+    #[test]
+    fn a_resource_is_an_app_id_or_a_bundled_name_never_a_guess() {
+        assert_eq!(
+            resource_app_id_for("Microsoft Graph").as_deref(),
+            Some(GRAPH_APP_ID)
+        );
+        assert_eq!(
+            resource_app_id_for(&GRAPH_APP_ID.to_uppercase()).as_deref(),
+            Some(GRAPH_APP_ID)
+        );
+        assert_eq!(resource_app_id_for("Graph"), None);
+    }
+
+    #[test]
+    fn permission_ids_match_kind_value_and_enabled_state() {
+        let sp: ServicePrincipal = serde_json::from_value(serde_json::json!({
+            "id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph",
+            "appRoles": [
+                { "id": "r-user", "value": "User.Read.All", "allowedMemberTypes": ["Application"], "isEnabled": true },
+                { "id": "r-off", "value": "Old.Role", "allowedMemberTypes": ["Application"], "isEnabled": false },
+                { "id": "r-users-only", "value": "Users.Only", "allowedMemberTypes": ["User"] }
+            ],
+            "oauth2PermissionScopes": [
+                { "id": "s-user", "value": "User.Read.All", "isEnabled": true }
+            ]
+        }))
+        .unwrap();
+        let id = |v, k| permission_id_on(&sp, v, k);
+        assert_eq!(
+            id("User.Read.All", PermissionKind::Application).as_deref(),
+            Some("r-user")
+        );
+        assert_eq!(
+            id("User.Read.All", PermissionKind::Delegated).as_deref(),
+            Some("s-user")
+        );
+        assert_eq!(id("user.read.all", PermissionKind::Application), None);
+        assert_eq!(id("Old.Role", PermissionKind::Application), None);
+        assert_eq!(id("Users.Only", PermissionKind::Application), None);
+    }
+
+    #[test]
+    fn owners_not_added_names_the_failed_upns() {
+        let ids = ["u-1".to_string(), "u-2".to_string()];
+        let upns = ["a@c.com".to_string(), "b@c.com".to_string()];
+        assert_eq!(owners_not_added(&[], &ids, &upns), None);
+        assert_eq!(
+            owners_not_added(&["u-2".into()], &ids, &upns).as_deref(),
+            Some("Owner(s) not added: b@c.com.")
+        );
+    }
+
+    mod resolve {
+        use super::*;
+        use crate::commands::test_support::{dead_token, mock_graph, mock_graph_with};
+        use azapptoolkit_core::cache::Cache;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn graph_with_directory() -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/users"))
+                .and(query_param("$filter", "userPrincipalName eq 'a@contoso.com'"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "value": [{ "id": "u-a", "userPrincipalName": "a@contoso.com" }] }),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/users"))
+                .and(query_param(
+                    "$filter",
+                    "userPrincipalName eq 'gone@contoso.com'",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/servicePrincipals"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{
+                        "id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph",
+                        "appRoles": [{ "id": "r-user", "value": "User.Read.All", "allowedMemberTypes": ["Application"] }],
+                        "oauth2PermissionScopes": [{ "id": "s-openid", "value": "openid" }]
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            server
+        }
+
+        #[tokio::test]
+        async fn owners_and_permissions_resolve_into_ids_and_one_manifest() {
+            let server = graph_with_directory().await;
+            let client = mock_graph(&server);
+            let spec = imported(
+                &["a@contoso.com", "a@contoso.com"],
+                vec![
+                    perm(
+                        "Microsoft Graph",
+                        "User.Read.All",
+                        PermissionKind::Application,
+                    ),
+                    perm(GRAPH_APP_ID, "openid", PermissionKind::Delegated),
+                ],
+            );
+            let Ok(r) = resolve_create_extras(&client, &spec).await else {
+                panic!("should resolve");
+            };
+            assert_eq!(r.owners, [("u-a".to_string(), "a@contoso.com".to_string())]);
+            assert_eq!(
+                r.required_resource_access.len(),
+                1,
+                "one entry per resource"
+            );
+            let access: Vec<(&str, &str)> = r.required_resource_access[0]
+                .resource_access
+                .iter()
+                .map(|a| (a.id.as_str(), a.r#type.as_str()))
+                .collect();
+            assert_eq!(access, [("r-user", "Role"), ("s-openid", "Scope")]);
+        }
+
+        #[tokio::test]
+        async fn a_missing_owner_or_permission_is_invalid_not_failed() {
+            let server = graph_with_directory().await;
+            let client = mock_graph(&server);
+            for (spec, needle) in [
+                (
+                    imported(&["gone@contoso.com"], vec![]),
+                    "owner gone@contoso.com not found",
+                ),
+                (
+                    imported(
+                        &[],
+                        vec![perm(
+                            "Microsoft Graph",
+                            "Mail.Nope",
+                            PermissionKind::Application,
+                        )],
+                    ),
+                    "no enabled application permission Mail.Nope",
+                ),
+            ] {
+                match resolve_create_extras(&client, &spec).await {
+                    Err(Unresolved::Invalid(m)) => assert!(m.contains(needle), "{m}"),
+                    _ => panic!("{needle}: expected Invalid"),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_dead_session_surfaces_as_a_fatal_failure() {
+            let server = MockServer::start().await;
+            let client = mock_graph_with(&server, dead_token(), Cache::new());
+            match resolve_create_extras(&client, &imported(&["a@contoso.com"], vec![])).await {
+                Err(Unresolved::Failed(e)) => assert!(e.is_reauth_fatal(), "{}", e.code),
+                _ => panic!("expected Failed"),
+            }
+        }
     }
 }

@@ -18,6 +18,8 @@
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+#[path = "gui/bulk_create.rs"]
+mod bulk_create;
 #[path = "gui/consent_posture.rs"]
 mod consent_posture;
 #[path = "gui/credentials_dashboard.rs"]

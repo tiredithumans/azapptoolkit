@@ -8,7 +8,7 @@
 //! 1. **Create shells** — create every app (+ paired SP) and build the
 //!    `source_app_id → new_app_id` remap, or adopt the app an earlier run of
 //!    this restore already created (see below). Reuses
-//!    `create_application_core_tagged`.
+//!    `create_application_core_with`.
 //! 2. **Wire references** — declared permissions (remapped), identifier URIs
 //!    (every `api://` segment naming the source appId / source tenant →
 //!    the new appId / destination tenant), Expose-an-API scopes + pre-authorized
@@ -61,7 +61,9 @@ use azapptoolkit_graph::client::{
     FederatedCredentialRequest, ImplicitGrantSettingsPatch,
 };
 
-use crate::commands::applications::{create_application_core_tagged, invalidate_app_lists};
+use crate::commands::applications::{
+    CreateExtras, create_application_core_with, invalidate_app_lists,
+};
 use crate::commands::dispatch::SessionDead;
 use crate::commands::managed_identity::{grant_managed_identity_roles_core, mi_subtype_label};
 use crate::commands::permissions::grant_admin_consent_core;
@@ -546,7 +548,16 @@ pub async fn restore_tenant(
         // The tag rides the create POST itself, so no app this restore creates
         // can exist without it — not even one whose SP create then failed.
         let marker = restore_marker(&app.source_app_id);
-        match create_application_core_tagged(&client, input, vec![marker]).await {
+        match create_application_core_with(
+            &client,
+            input,
+            CreateExtras {
+                tags: vec![marker],
+                ..Default::default()
+            },
+        )
+        .await
+        {
             // The registration landed even when its SP then failed (the only
             // later step this input runs): record it as created — so it is
             // wired, counted and cache-busted — with the SP failure as a

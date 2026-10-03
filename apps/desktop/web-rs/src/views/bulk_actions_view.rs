@@ -6,7 +6,10 @@
 //!   of the bulk command-calling logic; this page just hosts it. It reviews the
 //!   selection by name too — that disclosure started here and moved into the
 //!   bar, where the other four hosts get it as well.
-//! - **Create apps** — a JSON form that ignores the selection.
+//! - **Create apps** — a JSON form that ignores the selection. "Load from
+//!   file…" fills it from a CSV inventory or a JSON array (F283); the textarea
+//!   stays the review surface, so a loaded file is validated and run exactly
+//!   like a pasted one.
 //!
 //! Promoted from a modal to a page: the modal used to cover the very App
 //! Registrations selection it operates on. The selection persists in the
@@ -57,8 +60,36 @@ pub fn BulkActionsView() -> impl IntoView {
         progress.set(None);
     });
 
+    // Its own flag, not `busy`: `busy` also shows the run's progress row, and
+    // the file dialog is not a run.
+    let loading = RwSignal::new(false);
+    let load_file = move || {
+        if busy.get() || loading.get() {
+            return;
+        }
+        loading.set(true);
+        leptos::task::spawn_local(async move {
+            match bulk::load_bulk_create_specs_from_file().await {
+                Ok(Some(specs)) => {
+                    summary.set(None);
+                    failures.set(Vec::new());
+                    error.set(None);
+                    // Pretty JSON so the operator can read (and edit) every row
+                    // the file produced before validating it.
+                    match serde_json::to_string_pretty(&specs) {
+                        Ok(json) => create_json.set(json),
+                        Err(e) => error.set(Some(e.to_string())),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => error.set(Some(e.message)),
+            }
+            loading.set(false);
+        });
+    };
+
     let do_create = move |validate_only: bool| {
-        if busy.get() {
+        if busy.get() || loading.get() {
             return;
         }
         let specs: Vec<bulk::BulkCreateSpec> = match serde_json::from_str(&create_json.get()) {
@@ -72,6 +103,9 @@ pub fn BulkActionsView() -> impl IntoView {
             error.set(Some("JSON array is empty.".into()));
             return;
         }
+        // Declaring a permission is not consenting to it; say so after a run
+        // that declared any, so nobody reads "created" as "has access".
+        let declares = specs.iter().any(|s| !s.permissions.is_empty());
         busy.set(true);
         summary.set(None);
         failures.set(Vec::new());
@@ -87,7 +121,12 @@ pub fn BulkActionsView() -> impl IntoView {
                     let fails: Vec<BulkFailure> = r
                         .outcomes
                         .iter()
-                        .filter(|o| o.status != "created" && o.status != "valid")
+                        // A created row with a message is a partial success
+                        // (an owner not added, a later step failed): the app
+                        // exists, but not as the input described it.
+                        .filter(|o| {
+                            !matches!(o.status.as_str(), "created" | "valid") || o.message.is_some()
+                        })
                         .map(|o| BulkFailure {
                             label: o.display_name.clone(),
                             reason: o.message.clone().unwrap_or_else(|| o.status.clone()),
@@ -102,8 +141,16 @@ pub fn BulkActionsView() -> impl IntoView {
                         })
                         .collect();
                     let ok = r.outcomes.len() - fails.len();
+                    let consent_note = if declares
+                        && !r.validate_only
+                        && r.outcomes.iter().any(|o| o.status == "created")
+                    {
+                        " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant consent."
+                    } else {
+                        ""
+                    };
                     summary.set(Some(format!(
-                        "{}: {ok} ok, {}{}.",
+                        "{}: {ok} ok, {}{}.{consent_note}",
                         if r.validate_only {
                             "Validated"
                         } else {
@@ -143,21 +190,28 @@ pub fn BulkActionsView() -> impl IntoView {
                         view! {
                             <div class="bulk-action">
                                 <Body1>
-                                    "Create apps from a JSON array, e.g. [{\"displayName\":\"App A\",\"signInAudience\":\"AzureADMyOrg\"}]. Validate first to check inputs without creating anything."
+                                    "Create apps from a JSON array, e.g. [{\"displayName\":\"App A\",\"signInAudience\":\"AzureADMyOrg\"}], or load a CSV inventory (DisplayName, SignInAudience, Description, Owners, Permissions). Owners are UPNs; permissions are declared, not consented. Validate first to check every name against the tenant without creating anything."
                                 </Body1>
                                 <Textarea value=create_json />
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(move |_| load_file())
+                                        disabled=Signal::derive(move || busy.get() || loading.get())
+                                    >
+                                        "Load from file…"
+                                    </Button>
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         on_click=Box::new(move |_| do_create(true))
-                                        disabled=Signal::derive(move || busy.get())
+                                        disabled=Signal::derive(move || busy.get() || loading.get())
                                     >
                                         "Validate"
                                     </Button>
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(move |_| do_create(false))
-                                        disabled=Signal::derive(move || busy.get())
+                                        disabled=Signal::derive(move || busy.get() || loading.get())
                                     >
                                         "Create apps"
                                     </Button>

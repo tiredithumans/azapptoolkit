@@ -1,5 +1,6 @@
-# gitleaks fingerprints for the TEMPORARY review checkpoint (.review-state/): the two hits are the literal PEM armour
-# text quoted in a review finding's rationale (F008), not key material. Remove those two lines together with .review-state/; keep the rest.
+# gitleaks fingerprints for the since-removed review checkpoint (.review-state/): the two hits are the literal PEM armour
+# text quoted in a review finding's rationale (F008), not key material. The folder is gone from the tree, but CI scans the
+# whole history (`SCAN_SCOPE: all`) and commit f28e3d3 still carries it, so these two lines stay.
 f28e3d364863519e352c19e214a40dd420cb7a57:.review-state/buckets/1-bugs-security.json:private-key:1273
 f28e3d364863519e352c19e214a40dd420cb7a57:.review-state/all-findings.json:private-key:129
 # Test fixture, not key material: a fake private-key armour around the four characters `MIIB` in

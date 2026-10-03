@@ -7,6 +7,17 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **Bulk create can load a CSV or JSON inventory, owners and permissions included.** Bulk
+  Actions → Create apps has a **Load from file…** button that fills the form from a CSV
+  (`DisplayName`, `SignInAudience`, `Description`, `Owners`, `Permissions`) or a JSON array,
+  so a legacy inventory can seed a migration without retyping it. Owners are user principal
+  names; permissions are `Kind:Resource/Value` entries such as
+  `Application:Microsoft Graph/User.Read.All`. Every owner and permission is checked against
+  the tenant before its app is created, and **Validate** runs the same check. A row naming an
+  unknown user or permission is rejected and nothing is created for it. Permissions are
+  declared on the new app, not consented: grant consent from App Registrations afterwards. A
+  created app whose owner could not be added is now listed as a problem rather than counted
+  as a clean success. The column format is in `docs/DEVELOPMENT.md`.
 - **The tenant's own consent settings are now visible above the delegated grants.** Two
   mount-time reads on the existing `Policy.Read.All` token (`authorizationPolicy` +
   `adminConsentRequestPolicy` — no new scope, no new consent) answer whether users in this
