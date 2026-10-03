@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 39 entries by area (read the section for each item's Problem +
+Remaining 31 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -167,8 +167,25 @@ Proposal; #### items are full entries, one-liners are bullets):
   Settings). F018 (`KeyFailure`/`OwnerChangeFailure` carry the `code`,
   `is_reauth_fatal` keys on it, and both credential loops and both owner
   loops `break` on a fatal code, flagged in the result).
-- **Frontend consistency & polish (8)** — F341 · F357 · F355 · F322 · F321 ·
-  F327 · F325 · F326
+- **Frontend consistency & polish (8)** — **all closed 2026-10-02, verified
+  against current code.** F341 (every named hand-rolled red-text site now
+  renders `DetailLoadError` with `on_retry`: all five app tabs,
+  permission_picker and sharepoint_sites_section in `components/`, and the
+  enterprise pane's permissions/app_roles/sso/access/panels). F357 (scroll
+  offsets are lifted to `TenantScopedUi` — `apps_scroll_top` +
+  `enterprise_scroll_top` — carried across the refetch remount via
+  `reset_scroll_offset_on_change`, and the `virtual_list.rs` comment tells the
+  remount story). F355 (`push_toast` takes a `dedupe_key` collapsing identical
+  toasts, and the cap evicts non-sticky toasts first with two host tests).
+  F322 (`util::plural` is `pub` and `count_noun` exists with its pairing test;
+  the operator-facing `(s)` literals are gone — the three remaining grep hits
+  are a doc comment, a fixture and a test assertion). F321 (`fmt_date`,
+  `fmt_datetime` and `expiry_label` live in util.rs with host tests; the SSO
+  tab calls `expiry_label` and the pane's private `fmt_date` copy is deleted).
+  F327 (all eight action `<td>`s carry `cell-mid`). F325 (Settings falls back
+  to `DetailSkeleton`; the three plain-"Loading…" text sites are gone).
+  F326 (table-level empties route through DataTable's `empty_message`, e.g.
+  credentials_tab's secrets/certs tables; section empties use `EmptyState`).
 - **Graph API capabilities not yet adopted (9)** — F161 · F078 · F268 ·
   F264+F276 · F259 · F260 · F270 · F265 · F274
 - **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
