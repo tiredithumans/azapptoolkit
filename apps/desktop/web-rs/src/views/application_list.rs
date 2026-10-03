@@ -318,6 +318,8 @@ pub fn ApplicationList() -> impl IntoView {
                     facet=cred_filter
                     filters_open=filters_open
                     active_filters=active_filters
+                    after=Some(created_after)
+                    before=Some(created_before)
                     drawer=move || {
                         view! {
                             <DateRangeFilter after=created_after before=created_before noun="apps" />

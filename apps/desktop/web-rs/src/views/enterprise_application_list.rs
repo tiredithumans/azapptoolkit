@@ -158,6 +158,8 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                     facet=ent_filter
                     filters_open=filters_open
                     active_filters=active_filters
+                    after=Some(created_after)
+                    before=Some(created_before)
                     drawer=move || {
                         view! {
                             <DateRangeFilter

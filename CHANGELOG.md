@@ -111,6 +111,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   a no-op too. The Authentication tab also gains a Reset button that restores the loaded URIs,
   logout URL and toggles, and Cancel on the Overview tab now discards half-typed edits instead of
   parking them until the next edit session.
+- **Saved views now carry the "created on" date window, and applying one says
+  whether it changes.** A saved view used to snapshot only the facet and search,
+  so "Disabled, created this quarter" couldn't be saved, and applying a view
+  left whatever date range was active silently narrowing the list. Saved views
+  on the App Registrations and Enterprise Applications lists now store the
+  created-on window too; applying one restores it — or, if it was saved without
+  a range, clears the active one. Each chip's tooltip names the window it will
+  restore, and the chips gained accessible names ("Apply saved view …").
+  Views saved before this change keep working (the new fields default).
 
 ### Fixed
 

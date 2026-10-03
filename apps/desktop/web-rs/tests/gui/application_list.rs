@@ -505,3 +505,75 @@ async fn filter_toggle_and_chips_expose_their_state() {
     })
     .await;
 }
+
+/// F369: the drawer's created-on window is part of a saved view. A view
+/// restores it; a view saved WITHOUT one clears an active window — applying
+/// must never silently keep fewer rows than the view's name promises.
+#[wasm_bindgen_test]
+async fn saved_views_carry_the_date_range_and_clear_it() {
+    use wasm_bindgen::JsCast;
+    ts::reset();
+    // Views persist in localStorage across tests on the same origin; start
+    // from an empty "apps" view list so chip assertions are about THIS test.
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = ls.remove_item("azapptoolkit:savedviews:test-tenant:apps");
+        let _ = ls.remove_item("azapptoolkit:savedviews::apps");
+    }
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM"]),
+    );
+
+    let _m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "1 app registrations").await;
+
+    if ts::query_all(".date-range-field__native").is_empty() {
+        ts::click(".filter-toggle");
+    }
+    ts::wait_for(|| ts::query_all(".date-range-field__native").len() == 2).await;
+    let dates = || {
+        ts::query_all(".date-range-field__native")
+            .into_iter()
+            .filter_map(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
+            .map(|i| i.value())
+            .collect::<Vec<_>>()
+    };
+    let clear_dates = || {
+        ts::set_input_value("input[aria-label=\"Created before\"]", "");
+        ts::set_input_value("input[aria-label=\"Created after\"]", "");
+    };
+
+    // Save a view WITH a window (created 2026-01-02…2026-01-10) — the chip's
+    // tooltip names the window it will restore.
+    ts::set_input_value("input[aria-label=\"Created before\"]", "2026-01-10");
+    ts::set_input_value("input[aria-label=\"Created after\"]", "2026-01-02");
+    ts::click_button_labelled("+ Save view");
+    ts::wait_for(|| ts::query("input.saved-views__input").is_some()).await;
+    ts::set_input_value("input.saved-views__input", "Q1 window");
+    ts::click_button_labelled("Save");
+    ts::wait_for(|| ts::body_contains("Q1 window")).await;
+    assert!(
+        ts::query(".saved-view-chip__apply[title=\"Q1 window · created 2026-01-02…2026-01-10\"]")
+            .is_some(),
+        "the chip says which window it restores"
+    );
+
+    // Clearing the drawer, then applying the chip, restores both dates.
+    clear_dates();
+    ts::wait_for(|| dates().iter().all(|v| v.is_empty())).await;
+    ts::click(".saved-view-chip__apply");
+    ts::wait_for(|| dates() == ["2026-01-10", "2026-01-02"]).await;
+
+    // A view saved WITHOUT a range clears an active one on apply.
+    clear_dates();
+    ts::click_button_labelled("+ Save view");
+    ts::wait_for(|| ts::query("input.saved-views__input").is_some()).await;
+    ts::set_input_value("input.saved-views__input", "All time");
+    ts::click_button_labelled("Save");
+    ts::wait_for(|| ts::body_contains("All time")).await;
+
+    ts::set_input_value("input[aria-label=\"Created after\"]", "2026-01-02");
+    ts::wait_for(|| dates()[1] == "2026-01-02").await;
+    ts::click(".saved-view-chip__apply[aria-label=\"Apply saved view All time\"]");
+    ts::wait_for(|| dates().iter().all(|v| v.is_empty())).await;
+}
