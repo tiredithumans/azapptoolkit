@@ -7,10 +7,13 @@ use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
+use crate::bindings::consent::TenantConsentPostureDto;
 use crate::bindings::managed_identity::MiSubtype;
-use crate::bindings::{applications, audit, credentials, enterprise_application, managed_identity};
+use crate::bindings::{
+    applications, audit, consent, credentials, enterprise_application, managed_identity,
+};
 use crate::components::icon::{Icon, IconName};
-use crate::components::ui::{BadgeTone, DetailLoadError, SectionHeader, Skeleton};
+use crate::components::ui::{BadgeTone, Callout, DetailLoadError, SectionHeader, Skeleton};
 use crate::state::{ActiveView, Session, use_session};
 use crate::util::{TimeAgo, time_ago};
 use crate::views::audit_view::ranked_actionable_findings;
@@ -92,6 +95,22 @@ pub fn HomeDashboard() -> impl IntoView {
         async move {
             match tenant {
                 Some(t) => audit::get_cached_audit_summary(&t.tenant_id).await,
+                None => None,
+            }
+        }
+    });
+
+    // Tenant consent posture (F274): mount-time tenant config, deliberately NOT
+    // riding `audit_reload` — it is not run-derived — and served by its own
+    // Suspense so the posture counts never wait on a live Graph read. A failed
+    // read is `None` and renders nothing (the command never errors); unknown
+    // fields render nothing too.
+    let consent_posture = LocalResource::new(move || {
+        let tenant = tenant.get();
+        let _ = reload.get();
+        async move {
+            match tenant {
+                Some(t) => consent::get_tenant_consent_posture(&t.tenant_id).await.ok(),
                 None => None,
             }
         }
@@ -416,6 +435,21 @@ pub fn HomeDashboard() -> impl IntoView {
 
                 <section class="dash-card">
                     <h3 class="dash-card__title">"Security Posture"</h3>
+                    // The consent-posture note sits ABOVE the run-derived counts
+                    // and outside their Suspense: it answers "how did this tenant
+                    // get these grants" (tenant config, live read at mount), not
+                    // "what did the scan find". An unreachable Graph must not
+                    // delay or alter the counts.
+                    <Suspense fallback=move || view! { <></> }>
+                        {move || Suspend::new(async move {
+                            match consent_posture.await {
+                                Some(p) if p.available => {
+                                    consent_posture_note(&p).into_any()
+                                }
+                                _ => ().into_any(),
+                            }
+                        })}
+                    </Suspense>
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match cached_audit.await {
@@ -609,6 +643,36 @@ fn card_lists(key: &str) -> bool {
             | "ownership"
             | "unused"
     )
+}
+
+/// The consent-posture note (F274) for one posture read. Mirrors the grants
+/// view's header Callout but sized for the card. Whole-DTO contract: an absent
+/// `default_user_role_consent_policies` is UNKNOWN — neither "consent is
+/// restricted" nor "all clear" — so it renders nothing, exactly like the
+/// credential-lifetime line's policy-unavailable case below it.
+fn consent_posture_note(p: &TenantConsentPostureDto) -> impl IntoView {
+    let Some(names) = p.default_user_role_consent_policies.as_ref() else {
+        return ().into_any();
+    };
+    if !names.is_empty() {
+        let mut text = format!(
+            "Users here can grant delegated permissions to themselves — the app-consent policies \
+             ({}) assigned to the default user role make every per-user grant in the audit \
+             potentially self-granted.",
+            names.join(", ")
+        );
+        if p.risky_app_user_consent == Some(true) {
+            text.push_str(" This tenant also allows user consent for risky apps.");
+        }
+        return view! { <Callout tone="warn">{text}</Callout> }.into_any();
+    }
+    let mut line = String::from("User self-consent is off for the default user role.");
+    match p.admin_consent_workflow_enabled {
+        Some(true) => line.push_str(" Admin consent workflow: on."),
+        Some(false) => line.push_str(" Admin consent workflow: off."),
+        None => {}
+    }
+    view! { <p class="muted">{line}</p> }.into_any()
 }
 
 /// One ranked "Top findings" line: tone dot · title · count · chevron, drilling

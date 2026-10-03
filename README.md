@@ -132,7 +132,10 @@ toolkit-owned service principal storing tokens you cannot audit.
 - **Consent & application-permission audits** — tenant-wide views of every
   delegated (OAuth2) consent grant and every application permission apps hold
   on Microsoft Graph / Exchange / SharePoint, with high-risk highlighting,
-  filters, CSV export, and a jump to the granting app.
+  filters, CSV export, and a jump to the granting app. The grants view is headed
+  by the **tenant consent posture** — whether users can grant delegated
+  permissions to themselves and whether the admin consent workflow is on
+  (read-only, on the existing `Policy.Read.All` token; silent when unknown).
 - **Observed Graph activity** — compare an app's *granted* permissions with the
   Graph calls it *actually makes* (`MicrosoftGraphActivityLogs` via Azure
   Monitor Log Analytics) to spot grants that nothing uses.
@@ -406,7 +409,7 @@ one-click **Grant consent** prompt.
 | Graph | `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
 | Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
 | Graph | `AuditLog.Read.All` | **Activity** tab (directory change log), **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**), and the per-credential **Last used** column + unused-credential advisory (the beta `appCredentialSignInActivities` report is served in the **Global cloud only**; elsewhere the feature quietly stays off) | Optional |
-| Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) — and the **app-management policies** read behind the Credentials-tab lifetime markers and the pre-add lifetime warning (any plan) | Optional |
+| Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) — the **app-management policies** read behind the Credentials-tab lifetime markers and the pre-add lifetime warning, and the tenant **consent-posture** pair (`authorizationPolicy` + `adminConsentRequestPolicy`) shown above the delegated grants (any plan) | Optional |
 | Graph | `IdentityRiskyServicePrincipal.Read.All` | **Risky-service-principal** signal in the security audit (Identity Protection `atRisk`/`confirmedCompromised`; also needs Entra ID **Workload Identities premium**, and the audit skips the check without it) | Optional |
 | Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |
 | Graph | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |

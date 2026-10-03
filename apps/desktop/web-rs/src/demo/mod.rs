@@ -1340,6 +1340,9 @@ fn register_fixtures() {
     // feature should be.
     mock_ok("list_oauth2_grants_audit", &f::oauth2_grants());
     mock_ok("list_app_permission_grants", &f::app_permission_grants());
+    // The posture context over those lenses (F274): showcase posture is
+    // per-user consent ON, matching why the grant list looks the way it does.
+    mock_ok("get_tenant_consent_posture", &f::consent_posture());
 
     // ---- Key Vault ----
     mock_ok(

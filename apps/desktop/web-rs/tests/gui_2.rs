@@ -18,6 +18,8 @@
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+#[path = "gui/consent_posture.rs"]
+mod consent_posture;
 #[path = "gui/credentials_dashboard.rs"]
 mod credentials_dashboard;
 #[path = "gui/home_dashboard.rs"]

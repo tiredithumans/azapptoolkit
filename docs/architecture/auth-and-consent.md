@@ -339,6 +339,34 @@ toggle may only be added with evidence the PATCH lands. The tab also does not sc
 adding a rule would need a per-app SSO read inside the audit fan-out and is CHANGELOG-gated as a
 ranking change.
 
+## Tenant consent posture — decidable-only, no new scope
+
+The portal's three consent modes ("allow user consent for Microsoft-verified apps" /
+"for any app" / "block") are not a single readable v1.0 property, so F274 ships only what is
+decidable on the existing `Policy.Read.All` token: `get_tenant_consent_posture`
+(`commands/consent.rs`) runs the `authorizationPolicy` + `adminConsentRequestPolicy` pair
+through `tokio::join!` and normalises it via `consent_posture_from` (table-tested).
+`defaultUserRolePermissions.permissionGrantPoliciesAssigned` IS the assignment list —
+`Some(vec![])` confirms users cannot self-consent, a non-empty list means they can under those
+policies (names shown verbatim: whether each still allows what its name implies is not knowable
+from this read). `allowUserConsentForRiskyApps: null` is **unknown** (the docs say default-false,
+real payloads emit `null`), and a 404 on the ACW policy really does read "not enabled" — enabling
+the workflow requires the policy object to exist.
+
+**Deliberately not read.** `permissionGrantPolicies` is a *catalog*, not the assignment; Learn
+also warns against treating the assignment principals as an exhaustive list, and reading the
+bodies needs `Policy.Read.PermissionGrant`, which the policy token does not carry — while the
+assignment list above already names what the default user role holds. Pending
+`appConsentRequests` are a deferred second step needing a dedicated consent-requests scope.
+Both deferrals are recorded in the `TenantConsentPostureDto` doc comment.
+
+**Rendering contract.** The pair is all-or-nothing — a partial policy picture is deliberately no
+picture (`available: false`) — and the command never `Err`s and never degrades a run. Both
+surfaces (the grants view's `AuditDashboard` `header_note` Callout and the Home posture card's
+independent Suspense island) render *nothing* on unknown, the same never-flag-on-unknown contract
+as signed-request visibility above. The reads are mount-time and uncached: one tiny pair per
+view mount, not fan-out scale, and freshness is the feature (portal edits show up on reopen).
+
 ## SAML signing-certificate rollover — staged, resumable, revertible
 
 A SAML signing certificate is the trust the *application* validates assertions against, so replacing

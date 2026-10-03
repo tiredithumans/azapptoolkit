@@ -217,6 +217,7 @@ pub fn run() {
             commands::consent::save_oauth2_grants_to_file,
             commands::consent::list_app_permission_grants,
             commands::consent::save_app_permission_grants_to_file,
+            commands::consent::get_tenant_consent_posture,
             commands::search::global_search,
             commands::search::prefetch_search_corpus,
             commands::sharepoint::grant_site_access,

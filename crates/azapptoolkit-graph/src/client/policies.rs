@@ -227,4 +227,41 @@ impl GraphClient {
         self.cache.put(CacheKind::Permissions, cache_key, &policies);
         Ok(policies)
     }
+
+    /// The tenant-wide `authorizationPolicy` (F274 consent posture). Returned
+    /// as raw JSON: the two properties the posture reads
+    /// (`allowUserConsentForRiskyApps`, and
+    /// `defaultUserRolePermissions.permissionGrantPoliciesAssigned`) are
+    /// sometimes `null` or absent, and the command side renders that as
+    /// "unknown" — a typed model would force every absent property to pose as
+    /// a default. Requires the `Policy.Read.All` token.
+    ///
+    /// No read-through cache: both consent-posture surfaces read once at mount
+    /// (never in a fan-out), and the consent module's contract is "always
+    /// fresh" — unlike the app-management trio above, a TTL cache would trade
+    /// its only real benefit (mount-time freshness after a portal change) for
+    /// one saved tiny read per view.
+    pub async fn get_authorization_policy(&self) -> Result<serde_json::Value> {
+        let token = self.policy_token()?;
+        let url = format!("{}/policies/authorizationPolicy", self.base_url);
+        self.scoped_get(token, &url).await
+    }
+
+    /// The tenant admin consent request (workflow) policy
+    /// (`GET /policies/adminConsentRequestPolicy`, v1.0, `Policy.Read.All`).
+    /// `Ok(None)` means 404 — the workflow has never been enabled, since
+    /// enabling it requires the policy object to be created. Absence is
+    /// decidable here (same reading as an absent default app-management
+    /// policy); no cache, as [`Self::get_authorization_policy`].
+    pub async fn get_admin_consent_request_policy(
+        &self,
+    ) -> Result<Option<AdminConsentRequestPolicy>> {
+        let token = self.policy_token()?;
+        let url = format!("{}/policies/adminConsentRequestPolicy", self.base_url);
+        match self.scoped_get(token, &url).await {
+            Ok(policy) => Ok(Some(policy)),
+            Err(GraphError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
 }

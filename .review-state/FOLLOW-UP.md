@@ -223,8 +223,22 @@ Proposal; #### items are full entries, one-liners are bullets):
   on an auth-trust control; reopen only with proof a PATCH lands. The optional low-weight
   `rsaSha1` audit rule is also deferred: scoring would need a per-app SSO-field read added to
   the audit fan-out for every app, and any ranking change needs its own CHANGELOG-gated
-  justification. Remaining 4: F161 · F078 · F268 ·
-  F274
+  justification. **F274 closed 2026-10-03** (tenant consent posture as mount-time
+  context: a two-read pair `authorizationPolicy` + `adminConsentRequestPolicy` on the
+  shared `policy` / `Policy.Read.All` token via `tokio::join!`, all-or-nothing — any
+  failure or missing token ⇒ `available:false` ⇒ renders nothing, never an `Err` nor a
+  degraded run, no new scope; `defaultUserRolePermissions.permissionGrantPoliciesAssigned`
+  is decidable (empty = confirmed no self-consent, non-empty = warn naming the assigned
+  policies) and a missing ACW policy object reads as "never enabled"; rendered as the
+  grants-view header Callout (new `header_note` prop on `AuditDashboard`) and an
+  independent Suspense note on the Home posture card, pinned by
+  `gui/consent_posture.rs`). Partial by evidence, not by choice: the review's third
+  read `permissionGrantPolicies` was NOT implemented — it is a *catalog* (assignment to
+  the default user role is what enables self-consent, and the assignment list already
+  names the policies) and needs `Policy.Read.PermissionGrant`, which the
+  `Policy.Read.All` token does not carry; pending `appConsentRequests` deferred to the
+  second step — its read needs a dedicated consent-requests scope and its own feature.
+  Remaining 3: F161 · F078 · F268
 - **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·
   F283

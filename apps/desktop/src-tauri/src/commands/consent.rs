@@ -8,7 +8,9 @@
 //! the audit/credentials exports.
 //!
 //! No read-through cache (always fresh, like the credential dashboard) — but it
-//! reuses the cached per-tenant SP index for name resolution.
+//! reuses the cached per-tenant SP index for name resolution. The consent
+//! posture pair (F274) follows the same always-fresh stance: both surfaces read
+//! it once at mount, never in a fan-out.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -18,6 +20,7 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::audit::{
     HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS, is_risky_delegated_scope,
 };
+use azapptoolkit_core::models::AdminConsentRequestPolicy;
 use azapptoolkit_core::scoping::{
     MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
 };
@@ -25,7 +28,7 @@ use azapptoolkit_core::scoping::{
 use crate::commands::applications::sp_index_cached;
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
-use crate::dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
+use crate::dto::consent::{AppPermissionGrantDto, OAuth2GrantDto, TenantConsentPostureDto};
 use crate::state::AppState;
 
 /// High-value first-party resource APIs scanned for application-permission
@@ -269,6 +272,80 @@ fn app_permissions_to_csv(rows: &[AppPermissionGrantDto]) -> String {
     out
 }
 
+/// Reads the tenant consent-setting posture (F274): the `authorizationPolicy`
+/// + `adminConsentRequestPolicy` pair that *produces* the delegated grants the
+/// audit above inventories. Both reads ride the `Policy.Read.All` token.
+///
+/// Best-effort by contract: this always answers `Ok`, because the posture is
+/// mount-time context for the Home posture card and the grants header, not
+/// audit data — a failed pair must render nothing, never a degraded run or an
+/// error toast. `default()` is the all-unknown state (no session, either read
+/// failed). No session proof failure even reaches the reads.
+#[tauri::command]
+pub async fn get_tenant_consent_posture(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<TenantConsentPostureDto, UiError> {
+    Ok(read_consent_posture(&state, &tenant_id).await)
+}
+
+async fn read_consent_posture(state: &AppState, tenant_id: &str) -> TenantConsentPostureDto {
+    // Without a live session both scoped reads fail at token acquisition
+    // anyway; proving first skips the adapter build and the doomed round
+    // trips. This is not the cache-only proof duty (nothing here is cached) —
+    // it is the "never attempt a doomed read" shortcut.
+    if crate::commands::session::prove_tenant_session(state, tenant_id).is_err() {
+        tracing::info!(tenant = %tenant_id, "consent posture: no live session; unknown");
+        return TenantConsentPostureDto::default();
+    }
+    let client = state.graph_for(tenant_id);
+    let (authz, acw) = tokio::join!(
+        client.get_authorization_policy(),
+        client.get_admin_consent_request_policy()
+    );
+    // All-or-nothing: a partial policy picture is deliberately no picture
+    // (whole-DTO contract in `dto::consent`).
+    match (authz, acw) {
+        (Ok(authz), Ok(acw)) => consent_posture_from(&authz, acw),
+        (authz, acw) => {
+            tracing::info!(?authz, ?acw, tenant = %tenant_id, "consent posture: policy pair incomplete; unknown");
+            TenantConsentPostureDto::default()
+        }
+    }
+}
+
+/// Normalises the raw policy payloads into the DTO. Never flags on unknown:
+/// `allowUserConsentForRiskyApps` arrives `null` on real tenants (the docs say
+/// default-false, the example response says `null`), and a
+/// `permissionGrantPoliciesAssigned` array with anything non-string in it is
+/// treated as unreadable rather than half-parsed.
+fn consent_posture_from(
+    authz: &serde_json::Value,
+    acw: Option<AdminConsentRequestPolicy>,
+) -> TenantConsentPostureDto {
+    let risky = authz
+        .get("allowUserConsentForRiskyApps")
+        .and_then(serde_json::Value::as_bool);
+    let policies = authz
+        .get("defaultUserRolePermissions")
+        .and_then(|d| d.get("permissionGrantPoliciesAssigned"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .map(|v| v.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+        });
+    TenantConsentPostureDto {
+        available: true,
+        risky_app_user_consent: risky,
+        default_user_role_consent_policies: policies,
+        // An absent policy object really is "not enabled": the workflow needs
+        // the object created (same reading as an absent default
+        // app-management policy).
+        admin_consent_workflow_enabled: Some(acw.is_some_and(|p| p.is_enabled)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +401,89 @@ mod tests {
         assert!(risk_rank("medium") < risk_rank("low"));
         // Unknown labels sort last, alongside low.
         assert_eq!(risk_rank("unknown"), risk_rank("low"));
+    }
+
+    fn posture_from(authz: serde_json::Value, acw: Option<bool>) -> TenantConsentPostureDto {
+        consent_posture_from(
+            &authz,
+            acw.map(|e| AdminConsentRequestPolicy { is_enabled: e }),
+        )
+    }
+
+    #[test]
+    fn posture_flags_user_self_consent_only_from_a_non_empty_policy_list() {
+        // The Learn example response ships a legacy policy id in the array:
+        // users CAN self-consent, and that is the warn case.
+        let p = posture_from(
+            serde_json::json!({"defaultUserRolePermissions": {"permissionGrantPoliciesAssigned":
+                ["ManagePermissionGrantsForSelf.microsoft-user-default-legacy"]}}),
+            None,
+        );
+        assert!(p.available);
+        assert_eq!(
+            p.default_user_role_consent_policies.as_deref(),
+            Some(&["ManagePermissionGrantsForSelf.microsoft-user-default-legacy".to_string()][..])
+        );
+        // An empty array is decidable the other way: confirmed NO self-consent.
+        let p = posture_from(
+            serde_json::json!({"defaultUserRolePermissions": {"permissionGrantPoliciesAssigned": []}}),
+            None,
+        );
+        assert_eq!(
+            p.default_user_role_consent_policies.as_deref(),
+            Some(&[][..])
+        );
+        // Absent or malformed is UNKNOWN — never rendered as either verdict.
+        let p = posture_from(serde_json::json!({"id": "authorizationPolicy"}), None);
+        assert_eq!(p.default_user_role_consent_policies, None);
+        let p = posture_from(
+            serde_json::json!({"defaultUserRolePermissions": {"permissionGrantPoliciesAssigned": null}}),
+            None,
+        );
+        assert_eq!(p.default_user_role_consent_policies, None);
+        // A non-string member makes the whole array unreadable, not half-parsed.
+        let p = posture_from(
+            serde_json::json!({"defaultUserRolePermissions": {"permissionGrantPoliciesAssigned":
+                ["ok.policy", {"id": "weird"}]}}),
+            None,
+        );
+        assert_eq!(p.default_user_role_consent_policies, None);
+    }
+
+    #[test]
+    fn posture_reads_risky_app_consent_as_tri_state() {
+        // Real tenants emit `null` here even though docs claim a false default;
+        // only Some(true) is actionable, and Some(false) must not render as
+        // unknown (it IS the restricted answer).
+        let p = posture_from(
+            serde_json::json!({"allowUserConsentForRiskyApps": null}),
+            None,
+        );
+        assert_eq!(p.risky_app_user_consent, None);
+        let p = posture_from(
+            serde_json::json!({"allowUserConsentForRiskyApps": false}),
+            None,
+        );
+        assert_eq!(p.risky_app_user_consent, Some(false));
+        let p = posture_from(
+            serde_json::json!({"allowUserConsentForRiskyApps": true}),
+            None,
+        );
+        assert_eq!(p.risky_app_user_consent, Some(true));
+    }
+
+    #[test]
+    fn absent_admin_consent_policy_is_decidedly_disabled() {
+        // `None` (404) = the workflow object was never created = not enabled —
+        // decidable, unlike the unknowns above.
+        let p = posture_from(serde_json::json!({}), None);
+        assert_eq!(p.admin_consent_workflow_enabled, Some(false));
+        let p = posture_from(serde_json::json!({}), Some(false));
+        assert_eq!(p.admin_consent_workflow_enabled, Some(false));
+        let p = posture_from(serde_json::json!({}), Some(true));
+        assert_eq!(p.admin_consent_workflow_enabled, Some(true));
+        // A fully-empty authz payload still yields `available`: the pair was
+        // read; every field just stayed unknown.
+        assert!(p.available);
     }
 }

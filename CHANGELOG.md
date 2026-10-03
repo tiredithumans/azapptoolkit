@@ -7,6 +7,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The tenant's own consent settings are now visible above the delegated grants.** Two
+  mount-time reads on the existing `Policy.Read.All` token (`authorizationPolicy` +
+  `adminConsentRequestPolicy` — no new scope, no new consent) answer whether users in this
+  tenant can grant delegated permissions to themselves, whether risky apps can obtain user
+  consent, and whether the admin consent workflow is on. When self-consent is open, the
+  Consent-grants view shows a warning in its header naming the app-consent policies assigned
+  to the default user role — those policies make every "User" grant in the list potentially
+  self-granted — and the Home Security Posture card says the same in shorter form. A tenant
+  with self-consent confirmed off gets a quiet one-liner instead, naming the admin consent
+  workflow state. A failed read — or a tenant that never enabled the workflow — shows nothing
+  at all: unknown is never rendered as "consent is restricted" or as an all-clear. Pending
+  admin-consent requests are deliberately deferred (their read needs a dedicated
+  consent-requests scope). **No ranking change** — the audit is untouched.
 - **The SSO tab now shows SAML signed-request enforcement.** The enterprise-app SSO tab's SAML
   section reads Microsoft's v1.0 `requestSignatureVerification` property on the paired application
   (one more field on the SSO read that already happens — no new scope, no new consent) and shows

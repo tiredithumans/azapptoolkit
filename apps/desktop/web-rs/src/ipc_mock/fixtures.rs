@@ -20,7 +20,7 @@ use azapptoolkit_dto::applications::{
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
 use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
-use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
+use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto, TenantConsentPostureDto};
 use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
@@ -2146,6 +2146,22 @@ pub fn oauth2_grants() -> Vec<OAuth2GrantDto> {
             &[],
         ),
     ]
+}
+
+/// Tenant consent posture (F274) for the demo and the grants/home posture
+/// tests: user self-consent is ON — the legacy per-user consent policy is
+/// still assigned to the default user role — which is the exact posture the
+/// grants lens above it exists to review. `risky_app_user_consent: false`
+/// keeps the demo Callout to the self-consent claim alone.
+pub fn consent_posture() -> TenantConsentPostureDto {
+    TenantConsentPostureDto {
+        available: true,
+        risky_app_user_consent: Some(false),
+        default_user_role_consent_policies: Some(vec![
+            "ManagePermissionGrantsForSelf.microsoft-user-default-legacy".to_string(),
+        ]),
+        admin_consent_workflow_enabled: Some(true),
+    }
 }
 
 fn app_permission_grant(

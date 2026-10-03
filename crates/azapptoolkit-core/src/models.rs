@@ -636,6 +636,20 @@ pub struct PolicySubjectRef {
     pub odata_type: Option<String>,
 }
 
+/// The tenant admin consent request (workflow) policy
+/// (`GET /policies/adminConsentRequestPolicy`). Only `isEnabled` is modeled —
+/// the payload also carries `version`, `notifyReviewers`, `remindersEnabled`,
+/// `requestDurationInDays` and reviewer scopes, none of which any display
+/// shows. A missing policy object is read as "never enabled": the workflow
+/// requires the object to be created, so absence really is "not enabled"
+/// (same reading as an absent default app-management policy above).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminConsentRequestPolicy {
+    #[serde(default)]
+    pub is_enabled: bool,
+}
+
 /// A SCIM provisioning (synchronization) job on a service principal.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

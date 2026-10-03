@@ -18,8 +18,8 @@ use crate::components::export_menu::ExportMenu;
 use crate::components::icon::IconName;
 use crate::components::saved_views::SavedViews;
 use crate::components::ui::{
-    DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, ShowMore, SkeletonList,
-    TabBar, TabBarItem,
+    Callout, DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, ShowMore,
+    SkeletonList, TabBar, TabBarItem,
 };
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -61,6 +61,13 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     /// → a fresh local counter, unchanged behaviour for every other caller.
     #[prop(optional)]
     reload: Option<RwSignal<u32>>,
+    /// Optional tenant-context note `(tone, text)` rendered above the error and
+    /// banner blocks — the consent posture's warn Callout lives here so the
+    /// host view owns the read without hand-rolling the scaffold's top block.
+    /// A `Signal` (not a value) so the host can fill it after its async read
+    /// lands; `None` renders nothing, permanently.
+    #[prop(optional)]
+    header_note: Option<Signal<Option<(String, String)>>>,
     /// Column header labels (use `""` for an action column with no heading;
     /// a trailing `""` renders a visually-hidden "Actions" name).
     headers: Vec<&'static str>,
@@ -230,6 +237,11 @@ where
                 />
             </SectionHeader>
 
+            {move || {
+                header_note
+                    .and_then(|n| n.get())
+                    .map(|(tone, text)| view! { <Callout tone>{text}</Callout> })
+            }}
             {move || {
                 error
                     .get()

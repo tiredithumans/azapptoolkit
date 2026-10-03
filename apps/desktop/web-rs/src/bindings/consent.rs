@@ -5,7 +5,9 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
 use crate::bindings::TenantArg;
-pub use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
+pub use azapptoolkit_dto::consent::{
+    AppPermissionGrantDto, OAuth2GrantDto, TenantConsentPostureDto,
+};
 
 /// Lists every delegated permission grant in the tenant, risk-classified and
 /// sorted risky-first. Always fetched fresh.
@@ -53,4 +55,14 @@ pub async fn save_app_permission_grants_to_file(
         SaveAppPermsArgs { rows, format },
     )
     .await
+}
+
+/// Reads the tenant consent-setting posture (user self-consent policies, risky
+/// app consent, admin consent workflow). Best-effort: the backend always
+/// answers, with `available: false` when the policy pair could not be read —
+/// unknown renders nothing.
+pub async fn get_tenant_consent_posture(
+    tenant_id: &str,
+) -> Result<TenantConsentPostureDto, UiError> {
+    invoke_result("get_tenant_consent_posture", TenantArg { tenant_id }).await
 }
