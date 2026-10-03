@@ -22,8 +22,8 @@ use crate::state::AppState;
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_ews_full_access_grants,
-    prefetch_graph_app_roles, prefetch_legacy_access_policies, prefetch_sign_in_activity,
-    prefetch_sp_index,
+    prefetch_graph_app_roles, prefetch_legacy_access_policies, prefetch_risky_service_principals,
+    prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{derive_orgwide_mail_scopes, score_one, score_sp_only, sp_audit_candidates};
 use super::{AuditFailure, ResourceResolver, ScoreCtx, classify_audit_failure};
@@ -58,7 +58,7 @@ pub async fn run_audit(
 
     // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
     // generation and `cancel()` stamps whatever generation is current at the
-    // moment it runs, so a token claimed *after* the six-way join carries a
+    // moment it runs, so a token claimed *after* the seven-way join carries a
     // HIGHER generation than the cancel the operator issued during it — and
     // `is_cancelled()` compares `cancelled >= generation`, so that cancel was
     // silently discarded. The prefetch is the longest phase of a large run, so
@@ -85,18 +85,18 @@ pub async fn run_audit(
         },
     );
 
-    // These six tenant-wide reads are INDEPENDENT — every join between them
+    // These seven tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
-    // `sp_audit_candidates`) is synchronous and runs below, after all six land.
-    // Awaiting them serially made a large tenant wait out five full page-walks
+    // `sp_audit_candidates`) is synchronous and runs below, after all seven land.
+    // Awaiting them serially made a large tenant wait out six full page-walks
     // before the progress bar left 0/N; overlapped, that is one wait instead of
-    // the sum. Five of the six are best-effort (they swallow errors and return
+    // the sum. Six of the seven are best-effort (they swallow errors and return
     // empty), so overlapping changes no failure semantics, and the
     // `ThrottleGuard` attached above plus the transport's Retry-After handling
     // already absorb the extra concurrent 429 pressure.
     //
     // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
-    // and short-circuiting it would abandon the other five mid-flight.
+    // and short-circuiting it would abandon the other six mid-flight.
     let (
         apps,
         sp_index,
@@ -104,6 +104,7 @@ pub async fn run_audit(
         graph_roles_by_sp,
         ews_full_access_sps,
         sign_in,
+        risky_sps,
         legacy_policies,
     ) = futures::join!(
         client.list_applications_all(
@@ -155,6 +156,11 @@ pub async fn run_audit(
         // surfacing a "Grant consent" button; either failure disables unused-app
         // detection.
         prefetch_sign_in_activity(&state, &client, &tenant_id),
+        // ONE tenant-wide Identity Protection risky-service-principal read
+        // (needs IdentityRiskyServicePrincipal.Read.All + a Workload Identities
+        // premium license). Feeds Rule 22 for BOTH phases: risky grantless SPs
+        // are admitted to the SP-only candidate set by this map, not by grants.
+        prefetch_risky_service_principals(&state, &client, &tenant_id),
         // ONE tenant-wide `Get-ApplicationAccessPolicy` read → the legacy-policy
         // verdict per appId. The per-app RBAC probe deliberately skips the AAP
         // lookup on this path (it would be an extra admin-API call per app), so
@@ -169,6 +175,7 @@ pub async fn run_audit(
     let (apps, truncated) = apps?;
     let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    let (risky_available, risky_by_sp, risky_gap) = risky_sps;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
     // the scan reached every app, but with part of the analysis switched off
@@ -179,7 +186,7 @@ pub async fn run_audit(
     let (sp_index, sp_index_gap) = sp_index;
     // `mut` because a third kind of gap — per-principal scoring failures — can
     // only be known after the fan-out below has run.
-    let mut degraded: Vec<AuditCoverageGap> = [graph_roles_gap, ews_gap, sp_index_gap]
+    let mut degraded: Vec<AuditCoverageGap> = [graph_roles_gap, ews_gap, sp_index_gap, risky_gap]
         .into_iter()
         .flatten()
         .collect();
@@ -197,13 +204,16 @@ pub async fn run_audit(
 
     // SP-only phase candidates: service principals whose appId has NO local
     // application object (foreign enterprise apps, managed identities, orphaned
-    // SPs) and that hold at least one Graph application-permission grant.
+    // SPs) and that hold at least one Graph application-permission grant — OR
+    // are flagged risky by Identity Protection, so a risky grantless principal
+    // is still scored.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     let sp_candidates = sp_audit_candidates(
         &sp_index,
         &local_app_ids,
         &graph_roles_by_sp,
         &ews_full_access_sps,
+        &risky_by_sp,
     );
     let total = apps.len() + sp_candidates.len();
 
@@ -243,6 +253,8 @@ pub async fn run_audit(
         mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available,
         sign_in_map,
+        risky_available,
+        risky_by_sp,
     });
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must

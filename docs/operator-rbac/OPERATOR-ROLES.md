@@ -83,6 +83,7 @@ Administrator or Global Administrator), then make it PIM-eligible in **Entra PIM
 | Activity tab | `auditLogs/allProperties/read` |
 | Unused-app / sign-in activity | `signInReports/allProperties/read` |
 | Conditional Access tab | `conditionalAccessPolicies/standard/read` |
+| Risky-SP audit signal | No custom-role permission expresses this read — it rides the `IdentityRiskyServicePrincipal.Read.All` scope plus a member of **Security Reader** / **Security Administrator** / **Global Reader** / **Global Administrator**, and the tenant needs Entra ID **Workload Identities premium** (otherwise the audit skips the check) |
 
 Built-in equivalent: **Cloud Application Administrator** + **Reports Reader** + **Security Reader**.
 
@@ -164,6 +165,8 @@ then sign out and back in so a fresh token is issued.
    scopes must include: `Directory.Read.All`, `Application.ReadWrite.All`,
    `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, and — optionally,
    per feature — `Synchronization.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`,
+   `IdentityRiskyServicePrincipal.Read.All` (the risky-service-principal audit signal; the tenant
+   also needs Entra ID **Workload Identities premium**, and the audit skips the check without it),
    `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,
    `GroupMember.ReadWrite.All`,
    `https://outlook.office365.com/Exchange.Manage`, `https://management.azure.com/.default`,

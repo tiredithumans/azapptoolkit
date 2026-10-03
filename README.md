@@ -120,7 +120,11 @@ toolkit-owned service principal storing tokens you cannot audit.
   export, adaptive throttling on 429s, and cancellable scans. Also covers
   **principals without a local app registration** — foreign-tenant enterprise
   apps and managed identities holding Graph application grants — with fixes
-  that route to the SP-native scoping paths.
+  that route to the SP-native scoping paths. It also folds in Microsoft's own
+  security view: the **Identity Protection risky-service-principal report**
+  (on-demand, via `IdentityRiskyServicePrincipal.Read.All`, needs Entra ID
+  **Workload Identities premium**) flags principals reported as risky or
+  compromised — even ones with no enumerable grants, like managed identities.
 - **Consent & application-permission audits** — tenant-wide views of every
   delegated (OAuth2) consent grant and every application permission apps hold
   on Microsoft Graph / Exchange / SharePoint, with high-risk highlighting,
@@ -394,6 +398,7 @@ one-click **Grant consent** prompt.
 | Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
 | Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
 | Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
+| Graph | `IdentityRiskyServicePrincipal.Read.All` | **Risky-service-principal** signal in the security audit (Identity Protection `atRisk`/`confirmedCompromised`; also needs Entra ID **Workload Identities premium**, and the audit skips the check without it) | Optional |
 | Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |
 | Graph | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
 | Graph | `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |

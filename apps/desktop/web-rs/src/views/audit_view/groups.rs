@@ -140,6 +140,21 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "overview",
         section: GroupSection::Actionable,
     },
+    // Rule 22 — Identity Protection flags the service principal itself as
+    // `atRisk` / `confirmedCompromised`. Its own group, not folded into
+    // `unused` or `disabled_by_microsoft`: it fires on principals that are
+    // usually still ENABLED and possibly mid-abuse — the opposite urgency
+    // from both. Advisory here (no group Fix, and `DisableSignIn` stays
+    // owned by the `unused` group's row-mapping); the risky row still offers
+    // its DisableSignIn Fix in the All-apps pane, where no per-group filter
+    // narrows it.
+    GroupSpec {
+        key: "risky_service_principal",
+        title: "Risky service principal (Identity Protection)",
+        blurb: "Microsoft Identity Protection flags these service principals as risky or compromised (`atRisk` / `confirmedCompromised`) — token issuance may be happening now. Open each in Identity Protection before trusting it again; if it is unknown to you, disable sign-in (reversible) to stop its tokens.",
+        tab: "overview",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "external_exposure",
         title: "Reachable outside this tenant",
@@ -314,8 +329,8 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// the others are one click away in the section that owns them.
 ///
 /// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
-/// `unconfinable_orgwide`, `disabled_by_microsoft`, `external_exposure`,
-/// `high_risk_delegated`,
+/// `unconfinable_orgwide`, `disabled_by_microsoft`, `risky_service_principal`,
+/// `external_exposure`, `high_risk_delegated`,
 /// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
@@ -362,6 +377,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -732,6 +749,7 @@ mod tests {
             issue::SINGLE_OWNER,
             issue::MULTITENANT_AUDIENCE,
             issue::UNVERIFIED_PUBLISHER,
+            issue::RISKY_SERVICE_PRINCIPAL,
         ] {
             let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
             assert!(
@@ -796,6 +814,7 @@ mod tests {
             "high_risk_delegated",
             "external_exposure",
             "disabled_by_microsoft",
+            "risky_service_principal",
             "no_local_app",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",

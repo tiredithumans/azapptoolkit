@@ -41,6 +41,13 @@ pub(super) const PTS_SP_DISABLED: u32 = 2;
 /// flagged principal is at least High on this signal alone (+15 ≥ the 15-point
 /// High threshold). Ranking change over the legacy port — CHANGELOG-gated.
 pub(super) const PTS_DISABLED_BY_MICROSOFT: u32 = 15;
+/// Identity Protection flags the service principal `confirmedCompromised` or
+/// `atRisk` (the risky-service-principal report). Above the disable flag: a
+/// *confirmed-compromised* principal may already be minting tokens — this is
+/// the one signal that can mean live abuse, so it is worth more than any
+/// single permission and pushes any other finding to Critical. Ranking change
+/// over the legacy port — CHANGELOG-gated.
+pub(super) const PTS_RISKY_SERVICE_PRINCIPAL: u32 = 20;
 pub(super) const PTS_ALL_CREDS_EXPIRED: u32 = 8;
 pub(super) const PTS_MIXED_EXPIRED: u32 = 4;
 pub(super) const PTS_ALL_EXPIRING_SOON: u32 = 3;

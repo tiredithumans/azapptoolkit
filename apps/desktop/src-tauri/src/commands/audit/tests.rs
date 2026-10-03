@@ -131,6 +131,8 @@ fn sample(name: &str) -> AuditItem {
         sign_in_report_available: false,
         principal_kind: AuditPrincipalKind::Application,
         app_owner_organization_id: None,
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 
@@ -224,9 +226,10 @@ fn orgwide_mail_scopes_drop_principals_with_no_mailbox_grant() {
     assert!(derive_orgwide_mail_scopes(&graph_roles, &HashSet::new()).is_empty());
 }
 
-// The SP-only candidate filter: no local application AND ≥1 application
-// grant on either mailbox-bearing resource. Managed identities and disabled
-// SPs are candidates; paired and grantless SPs are not.
+// The SP-only candidate filter: no local application AND (≥1 application
+// grant on either mailbox-bearing resource OR a risky flag from Identity
+// Protection). Managed identities and disabled SPs are candidates; paired and
+// grantless-unflagged SPs are not.
 #[test]
 fn sp_audit_candidates_filters_paired_and_grantless() {
     let local_app_ids: HashSet<String> = ["paired-app".to_string()].into();
@@ -244,10 +247,16 @@ fn sp_audit_candidates_filters_paired_and_grantless() {
         sp("sp-grantless", "gallery-app", Some("Application")),
         sp("sp-empty", "empty-app", Some("Application")),
     ];
-    let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles, &HashSet::new())
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    let got: Vec<String> = sp_audit_candidates(
+        &index,
+        &local_app_ids,
+        &roles,
+        &HashSet::new(),
+        &HashMap::new(),
+    )
+    .into_iter()
+    .map(|s| s.id)
+    .collect();
     // Paired (has a local app), grantless (not in the matrix), and
     // empty-role-list SPs are all excluded; the foreign SP and the MI stay.
     assert_eq!(got, vec!["sp-foreign".to_string(), "sp-mi".to_string()]);
@@ -266,11 +275,40 @@ fn sp_holding_only_the_ews_blanket_scope_is_still_a_candidate() {
         &HashSet::new(),
         &HashMap::new(), // no Graph grants at all
         &ews,
+        &HashMap::new(),
     )
     .into_iter()
     .map(|s| s.id)
     .collect();
     assert_eq!(got, vec!["sp-ews".to_string()]);
+}
+
+#[test]
+fn a_risky_grantless_sp_is_a_candidate_without_any_grant() {
+    // Identity Protection flags a managed identity that holds no enumerable
+    // grant (or holds it on a resource no matrix reads). "No grants ⇒ skip"
+    // is the wrong inference exactly when a live security vendor says the
+    // principal is compromised, so the risky set admits on its own.
+    let index = vec![
+        sp("sp-clean-gallery", "gallery-app", Some("Application")),
+        sp("sp-risky-mi", "mi-app", Some("ManagedIdentity")),
+    ];
+    let risky: HashMap<String, (String, String)> = [(
+        "sp-risky-mi".to_string(),
+        ("confirmedCompromised".to_string(), "high".to_string()),
+    )]
+    .into();
+    let got: Vec<String> = sp_audit_candidates(
+        &index,
+        &HashSet::new(),
+        &HashMap::new(),
+        &HashSet::new(),
+        &risky,
+    )
+    .into_iter()
+    .map(|s| s.id)
+    .collect();
+    assert_eq!(got, vec!["sp-risky-mi".to_string()]);
 }
 
 /// A run that covered everything — the shape every export took before the
@@ -516,6 +554,8 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available: false,
         sign_in_map: Arc::default(),
+        risky_available: false,
+        risky_by_sp: Arc::default(),
     }
 }
 
@@ -750,4 +790,73 @@ async fn a_dead_session_during_the_sp_lookup_stops_the_run() {
         .expect_err("a dead session must surface, not score the app");
     // Swallowed to `None` before, this now stops the run for re-auth.
     assert_eq!(classify_audit_failure(&err), AuditFailure::SessionDead);
+}
+
+/// Rule 22 end-to-end at the command layer: the run's tenant-wide risky map
+/// joins onto the app row by the SP's object id, and a risky AND unused SP
+/// keeps exactly one DisableSignIn fix (the risky pass attaches it first; the
+/// unused post-pass must not stack a second).
+#[tokio::test]
+async fn a_risky_sp_anchors_its_row_at_high_with_one_disable_fix() {
+    let server = wiremock::MockServer::start().await;
+    mock_sp_lookup(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"id": "sp-1", "appId": "app-1", "accountEnabled": true}]
+        })),
+    )
+    .await;
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.risky_available = true;
+    ctx.risky_by_sp = Arc::new(HashMap::from([(
+        "sp-1".to_string(),
+        ("atRisk".to_string(), "high".to_string()),
+    )]));
+    // Old + never signed in: the unused post-pass runs too, so this pins the
+    // dedupe as well as the join.
+    let app = Application {
+        created_date_time: Some(Utc::now() - chrono::Duration::days(400)),
+        ..bare_app()
+    };
+
+    let item = score_one(&ctx, &app, Some(None)).await.expect("scores");
+    assert!(item.unused, "the unused post-pass must have run");
+    assert_eq!(item.sp_risk_state.as_deref(), Some("atRisk"));
+    assert_eq!(item.sp_risk_level.as_deref(), Some("high"));
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(azapptoolkit_core::audit::issue::RISKY_SERVICE_PRINCIPAL)),
+        "{:?}",
+        item.issues
+    );
+    assert_eq!(
+        item.remediations
+            .iter()
+            .filter(|r| r.kind == azapptoolkit_core::audit::RemediationKind::DisableSignIn)
+            .count(),
+        1,
+        "a risky AND unused SP gets one Fix, not two"
+    );
+}
+
+/// The `unavailable` half of the Rule 22 contract: when the report could not
+/// be read, `risk_for` answers `None` even for a principal that IS in the
+/// map — the run must not fire a security finding on an unchecked assumption.
+#[tokio::test]
+async fn risk_for_is_silent_while_the_report_is_unavailable() {
+    // No request is ever made; the mock server just hosts the client.
+    let server = wiremock::MockServer::start().await;
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.risky_by_sp = Arc::new(HashMap::from([(
+        "sp-1".to_string(),
+        ("confirmedCompromised".to_string(), "high".to_string()),
+    )]));
+    assert!(
+        ctx.risk_for("sp-1").is_none(),
+        "a present entry must not fire while risky_available is false"
+    );
+    ctx.risky_available = true;
+    assert_eq!(ctx.risk_for("sp-1"), Some(("confirmedCompromised", "high")));
+    assert!(ctx.risk_for("sp-absent").is_none());
 }

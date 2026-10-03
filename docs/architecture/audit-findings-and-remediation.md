@@ -16,6 +16,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | Rule | Helper | Score | Issue marker | Finding key | Fix | Provenance |
 |---|---|---|---|---|---|---|
 | 21 | `rule_disabled_by_microsoft` | +15 flat (folded **first**, despite the number: alone it reaches High) | `DISABLED_BY_MICROSOFT` | `disabled_by_microsoft` | — (delete/disable is admin-judged) | net-new |
+| 22 | `apply_service_principal_risk` (runner post-pass, **before** the unused post-pass) | +20 flat (alone it reaches High; stacks any other finding to Critical) | `RISKY_SERVICE_PRINCIPAL` | `risky_service_principal` | `DisableSignIn` (shared with the unused post-pass — deduped to one per row) | net-new |
 | 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
 | 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
 | 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
@@ -35,7 +36,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
 
 Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
-Rules 1–4, 11–13 and 21 plus the sign-in post-pass (see
+Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
 
 ## Scope-aware audit risk
@@ -264,12 +265,15 @@ Two kinds vary the pattern:
   status never reads as success. The command now busts `invalidate_app_lists` on a **non-dry** run
   that produced any item (partial included — the grants really were removed); a dry run busts
   nothing.
-- **`DisableSignIn`** (unused app) is attached by the **audit runner's sign-in post-pass**, not
-  `score_application` — `unused` is a post-pass flag (the sign-in report is fetched after scoring),
-  and it's skipped when the SP is already disabled. Safe because it's reversible: the handler
+- **`DisableSignIn`** is attached by **two runner post-passes**, deduped to one Fix per row: the
+  risky-SP pass (`apply_service_principal_risk`) attaches it first for a risky *enabled* principal,
+  and the sign-in pass (`unused` app) skips when that already happened — or when the SP is already
+  disabled or absent. Neither attaches it inside `score_application` — both flags (`sp_risk_state`,
+  `unused`) are post-pass facts. Safe because it's reversible: the handler
   (`remediate_disable_sign_in`) re-resolves the SP from the live application and sets
   `accountEnabled: false`; the enterprise app's Overview toggle re-enables. SP-only unused rows
-  don't get it (their Open lands on the enterprise/MI detail, which has the toggle).
+  don't get it (their Open lands on the enterprise/MI detail, which has the toggle) — SP-only
+  *risky* rows do, since that finding is about live abuse, not staleness.
 
 ## Redundant application permissions (Rule 18)
 
@@ -342,6 +346,36 @@ cores), then swap the declaration in one `requiredResourceAccess` patch (`swap_d
 pure — note `remove_declared_access` prunes an emptied resource entry, so a broad-only resource is
 recreated to carry the narrow role). Idempotent: a broad permission already gone is a no-op
 success with every `DowngradeOutcome` flag `false`.
+
+## The risky-service-principal signal (Rule 22)
+
+The run's tenant-wide Identity Protection read — ONE `GET /identityProtection/riskyServicePrincipals`
+per audit, paged with `$top = MAX_PAGE_SIZE`, served by the one-shot `scoped_get` (premium reports
+deliberately skip the retry budget; a first-page 404 is an empty answer). Only
+`confirmedCompromised` / `atRisk` rows are kept, keyed by `servicePrincipalId` — the SP **object**
+id, the same join key the grant matrices use — and joined onto audit rows in BOTH phases
+(`score_one` and `score_sp_only`), never via a per-principal read. Deliberately **uncached**: a
+compromise flag must be re-read by every run, and the payload is one row per flagged principal.
+
+- **Auth:** an on-demand `ScopedTokenAdapter` token for `IdentityRiskyServicePrincipal.Read.All`
+  (CAE), capability `identity_protection_risk`. Audit surfaces carry no Grant-consent button, so
+  consent arrives only through the readiness checklist's silent probe of every `scope_feature`.
+- **Unavailable ≠ gap:** no consent or no Workload Identities premium license (the endpoint 403s
+  `Authentication_RequestFromNonPremiumTenantOrB2CTenant`) means the check reads as *unavailable* —
+  no coverage gap, no degraded banner, following the sign-in-report precedent that most tenants
+  are not entitled. A genuine failed read on an entitled tenant IS
+  `AuditCoverageGap::RiskyServicePrincipals`: unlike the sign-in report, a failed risky read means
+  the security check silently stopped working, so the run is degraded — never cached, never shown
+  as an all-clear. While unavailable, `ScoreCtx::risk_for` answers `None` even for a principal
+  present in the map; Rule 22 never fires on an unchecked assumption.
+- **Scoring:** `apply_service_principal_risk` adds +20 (alone ⇒ High; stacks any other finding to
+  Critical — a CHANGELOG-gated ranking shift), the `RISKY_SERVICE_PRINCIPAL` marker issue, and a
+  `DisableSignIn` Fix while the SP is still enabled. It runs BEFORE the unused post-pass, which
+  then skips its own Fix — one Fix per row either way.
+- **UI:** the `risky_service_principal` finding group is advisory (no `group_bulk_actions`, no
+  `group_remediation_kinds` entry — `DisableSignIn` stays solely owned by the `unused` group, which
+  the exactly-one-owner test pins); risky rows still render their Fix in the All-apps pane, where
+  no per-group kinds filter narrows the row buttons.
 
 ## Structured audit signals over issue-text parsing
 
@@ -439,10 +473,14 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 
 - **Candidates** (`sp_audit_candidates`, pure + unit-tested): shared `{tenant}|sp_index` rows whose
   `appId` joins to no scanned application AND that hold ≥1 **Microsoft Graph** application grant in
-  the tenant-wide `appRoleAssignedTo` matrix. The grant requirement is the noise filter (grantless
-  first-party Microsoft SPs vanish); disabled SPs stay in (Rule 4). Known limitation: roles held
-  only on non-Graph resources (e.g. legacy Office 365 Exchange Online `full_access_as_app`) aren't
-  in the matrix, so such an SP isn't scored.
+  the tenant-wide `appRoleAssignedTo` matrix, OR hold the EWS `full_access_as_app` scope (the
+  second mailbox resource, read separately), OR are flagged risky by the run's Identity Protection
+  map. The grant/risk requirement is the noise filter (grantless first-party Microsoft SPs vanish);
+  disabled SPs stay in (Rule 4). The risky admission path is deliberate: a compromised managed
+  identity or foreign SP often holds no *enumerable* grant, and "no grants ⇒ skip it" is exactly
+  the wrong inference when Identity Protection says the principal is compromised. Known limitation:
+  roles held only on other non-Graph resources still aren't in any matrix, so an *unflagged* SP
+  holding only those isn't scored.
 - **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
   `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
   subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now

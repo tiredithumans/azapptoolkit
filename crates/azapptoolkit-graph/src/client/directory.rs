@@ -305,4 +305,37 @@ impl GraphClient {
         self.cache.put(CacheKind::Permissions, cache_key, &out);
         Ok(out)
     }
+
+    /// Tenant-wide **Identity Protection** risky-service-principal report
+    /// (Entra v1.0 `identityProtection/riskyServicePrincipals`). Requires the
+    /// `IdentityRiskyServicePrincipal.Read.All` token (see
+    /// [`Self::with_risky_sp_token`]) *and* a Workload Identities premium
+    /// license — without either the endpoint answers 403, so callers degrade
+    /// (no risky data ⇒ no risky-SP audit flags).
+    ///
+    /// Deliberately one-shot `scoped_get` (no retry) like the other optional
+    /// premium reports: a failure is handled by the audit runner, not retried.
+    /// Deliberately **not cached**: this is a live security signal — a
+    /// compromised-SP flag must be re-read by every audit run, and the payload
+    /// is tiny (one row per flagged principal, not the sign-in report's 200
+    /// pages), so freshness is cheap here. `nextLink` paging follows via
+    /// `collect_pages_from` (origin-checked bearer attachment).
+    ///
+    /// A 404 on the *first* request means the report is not provisioned →
+    /// `Ok(empty)`; errors while paging propagate.
+    pub async fn list_risky_service_principals(&self) -> Result<Vec<RiskyServicePrincipal>> {
+        let token = self.risky_sp_token()?;
+        let url = format!(
+            "{}/identityProtection/riskyServicePrincipals?$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
+        match self.scoped_get(token, &url).await {
+            Ok(page) => {
+                self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
+                    .await
+            }
+            Err(GraphError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
 }

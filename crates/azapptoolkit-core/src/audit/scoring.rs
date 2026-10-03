@@ -12,9 +12,9 @@ use super::credentials::{is_long_lived, overall_credential_status};
 use super::permissions::{
     PTS_ADMIN_CONSENT_DELEGATED, PTS_ALL_CREDS_EXPIRED, PTS_ALL_EXPIRING_SOON,
     PTS_DISABLED_BY_MICROSOFT, PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM,
-    PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
-    PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP, PTS_UNVERIFIED_PUBLISHER,
-    RedundantPermission,
+    PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_RISKY_SERVICE_PRINCIPAL,
+    PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP,
+    PTS_UNVERIFIED_PUBLISHER, RedundantPermission,
 };
 
 /// One rule's contribution: score delta plus the issues/recommendations it
@@ -910,6 +910,57 @@ pub fn disable_sign_in_remediation() -> RemediationAction {
     }
 }
 
+/// Rule 22: Identity Protection flags the service principal risky
+/// (`confirmedCompromised` / `atRisk` in the risky-service-principal report).
+/// A **post-pass** like the unused-app sign-in pass, not a rule folded in the
+/// two entry points: the report is a tenant-wide prefetch joined per
+/// principal AFTER scoring, so the caller sets [`AuditItem::sp_risk_state`] /
+/// [`AuditItem::sp_risk_level`] first, then calls this. Alone it takes the
+/// item to High; with any other finding it crosses to Critical — deliberate:
+/// a vendor-confirmed compromise is the one signal that can mean live abuse.
+/// When the SP is still enabled it carries the [`RemediationKind::DisableSignIn`]
+/// one-click fix (reuses the unused-app handler; the report's own advice is
+/// "disable while investigating"). A dedupe guard keeps the unused post-pass
+/// from stacking a second identical Fix on the same row.
+pub fn apply_service_principal_risk(item: &mut AuditItem) {
+    let Some(state) = item.sp_risk_state.as_deref() else {
+        return;
+    };
+    if !matches!(state, "confirmedCompromised" | "atRisk") {
+        return;
+    }
+    let level = item.sp_risk_level.as_deref().unwrap_or("unknown");
+    item.risk_score += PTS_RISKY_SERVICE_PRINCIPAL;
+    item.risk_level = RiskLevel::from_score(item.risk_score);
+    item.issues.push(format!(
+        "{} — Identity Protection flags this service principal as `{}` (risk level `{}`)",
+        issue::RISKY_SERVICE_PRINCIPAL,
+        state,
+        level
+    ));
+    item.recommendations.push(
+        "Open this principal in Identity Protection and investigate now — disable sign-in if \
+         it is not a known integration or the compromise looks real"
+            .to_string(),
+    );
+    if item.service_principal_enabled == Some(true)
+        && !item
+            .remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn)
+    {
+        item.remediations.push(RemediationAction {
+            kind: RemediationKind::DisableSignIn,
+            label: "Disable sign-in".to_string(),
+            detail:
+                "Identity Protection flags this service principal as risky — disabling it stops \
+                 its token issuance (reversible)"
+                    .to_string(),
+            targets: Vec::new(),
+        });
+    }
+}
+
 /// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
 /// caller is responsible for turning Graph IDs into permission name strings
 /// (via a live resource-SP lookup).
@@ -1058,6 +1109,11 @@ pub fn score_application(
         // An application lives in this tenant; the owner-tenant column is for
         // SP-only rows.
         app_owner_organization_id: None,
+        // Identity Protection risk is populated by the audit runner (the
+        // report is fetched separately and is optional), like the sign-in
+        // fields above.
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 
@@ -1080,8 +1136,8 @@ pub struct SpAuditInput {
     /// Graph `servicePrincipalType`; `ManagedIdentity` selects
     /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
     pub service_principal_type: Option<String>,
-    /// Graph `disabledByMicrosoftStatus` on the service principal — feeds
-    /// [`rule_disabled_by_microsoft`], which SP-only rows can carry even when
+    /// Graph `disabledByMicrosoftStatus` on the service principal — feeds the
+    /// Rule 21 disable-flag rule, which SP-only rows can carry even when
     /// the application object lives in another tenant.
     pub disabled_by_microsoft_status: Option<String>,
 }
@@ -1167,6 +1223,8 @@ pub fn score_service_principal(
         } else {
             AuditPrincipalKind::ServicePrincipal
         },
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 

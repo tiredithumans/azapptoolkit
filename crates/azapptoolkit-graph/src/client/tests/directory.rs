@@ -441,3 +441,88 @@ async fn group_member_write_without_token_degrades_to_forbidden() {
     let err = client.add_group_member("g-1", "sp-1").await.unwrap_err();
     assert!(matches!(err, GraphError::Forbidden(_)));
 }
+
+#[tokio::test]
+async fn risky_service_principals_parse_and_follow_paging() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param_is_missing("page"))
+        .and(query_param("$top", "999"))
+        .and(header("authorization", "Bearer r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "risk-1",
+                "servicePrincipalId": "sp-obj-1",
+                "isAiApplication": false,
+                "riskState": "confirmedCompromised",
+                "riskDetail": "anonymousIP",
+                "riskLevel": "high",
+                "riskLastUpdatedDateTime": "2026-09-30T10:00:00Z"
+            }, {
+                // Explicit nulls must deserialize to `None`, not fail the page.
+                "id": "risk-2",
+                "servicePrincipalId": "sp-obj-2",
+                "isAiApplication": null,
+                "riskState": "atRisk",
+                "riskDetail": null,
+                "riskLevel": null,
+                "riskLastUpdatedDateTime": null
+            }],
+            "@odata.nextLink": format!("{uri}/identityProtection/riskyServicePrincipals?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param("page", "2"))
+        // The continuation rides the same scoped bearer.
+        .and(header("authorization", "Bearer r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "risk-3",
+                "servicePrincipalId": "sp-obj-3",
+                "riskState": "dismissed"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&uri).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let rows = client.list_risky_service_principals().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].service_principal_id.as_deref(), Some("sp-obj-1"));
+    assert_eq!(rows[0].risk_state.as_deref(), Some("confirmedCompromised"));
+    assert_eq!(rows[0].risk_level.as_deref(), Some("high"));
+    assert_eq!(rows[1].risk_detail, None);
+    assert_eq!(rows[1].risk_last_updated_date_time, None);
+    // Non-risky states arrive on the wire too; filtering is the caller's call.
+    assert_eq!(rows[2].risk_state.as_deref(), Some("dismissed"));
+}
+
+#[tokio::test]
+async fn risky_service_principals_first_page_404_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {"code": "Request_ResourceNotFound"}
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let rows = client.list_risky_service_principals().await.unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn risky_service_principals_without_token_is_forbidden() {
+    // No with_risky_sp_token → the optional scope isn't wired; the call must
+    // surface Forbidden (graceful degradation), not panic.
+    let client = make_client("http://127.0.0.1:0");
+    let err = client.list_risky_service_principals().await.unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}

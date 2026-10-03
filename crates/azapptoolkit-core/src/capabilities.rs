@@ -263,6 +263,27 @@ pub static CAPABILITIES: &[Capability] = &[
                       P1/P2 license.",
     },
     Capability {
+        key: "identity_protection_risk",
+        plane: Plane::EntraDirectory,
+        label: "Identity Protection risky-service-principal report (read)",
+        description: "Read the risky-service-principal report so the tenant audit flags \
+                      service principals Identity Protection marks at risk or compromised.",
+        directory_roles_any: &[
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["IdentityRiskyServicePrincipal.Read.All"],
+        scope_feature: Some("risky_service_principals"),
+        remediation: "The risky-service-principal report needs the \
+                      IdentityRiskyServicePrincipal.Read.All scope and a security-read role \
+                      (Security Reader or Global Reader), plus a Workload Identities premium \
+                      license — without the license the endpoint answers 403 \
+                      Authentication_RequestFromNonPremiumTenantOrB2CTenant.",
+    },
+    Capability {
         key: "sharepoint_sites_selected",
         plane: Plane::EntraDirectory,
         label: "SharePoint resource access (Selected permissions)",

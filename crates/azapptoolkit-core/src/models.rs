@@ -721,6 +721,33 @@ pub struct CaGrantControls {
     pub operator: Option<String>,
 }
 
+/// One row of the Identity Protection risky-service-principal report
+/// (`GET /identityProtection/riskyServicePrincipals`). The audit joins these
+/// onto principals by `service_principal_id` (the SP **object** id, not its
+/// appId). `risk_state` is the finding (`confirmedCompromised` / `atRisk` are
+/// the risky ones); the rest is context for the operator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskyServicePrincipal {
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The service principal's object id — the join key onto `AuditItem`.
+    #[serde(default)]
+    pub service_principal_id: Option<String>,
+    /// `none` | `confirmedCompromised` | `atRisk` | `remediated` |
+    /// `dismissed` | `atRiskConfirmed`.
+    #[serde(default)]
+    pub risk_state: Option<String>,
+    /// `low` | `medium` | `high` | `none`.
+    #[serde(default)]
+    pub risk_level: Option<String>,
+    /// e.g. `adminGeneratedAccountCompromised`, `anonymousIP`, `maliciousIP`.
+    #[serde(default)]
+    pub risk_detail: Option<String>,
+    #[serde(default)]
+    pub risk_last_updated_date_time: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Organization {

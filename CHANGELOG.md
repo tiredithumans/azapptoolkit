@@ -7,6 +7,20 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The security audit now reads Microsoft's own risky-service-principal report.** Each audit run
+  makes one tenant-wide Identity Protection call (`atRisk` / `confirmedCompromised` service
+  principals, delegated `IdentityRiskyServicePrincipal.Read.All`, consented on demand) and joins it
+  onto audit rows by the service principal's object id. A flagged principal scores +20 — High on
+  that signal alone, Critical alongside any other finding (**this shifts audit ranking**: a
+  compromised-but-otherwise-clean principal now surfaces at the top of the Findings workbench
+  instead of reading clean). Risky principals that hold no enumerable grants — a managed identity
+  or foreign app whose grant lives on a resource the matrices don't read — are now scored too,
+  and a risky *enabled* principal offers a one-click **Disable sign-in** fix (reversible, one Fix
+  per row shared with the Unused rule) alongside an Identity Protection deep-read recommendation.
+  Tenants that haven't consented the scope or lack a Workload Identities premium license degrade
+  to a quiet "report unavailable" (no permanent coverage-gap banner); a genuinely failed read on an
+  entitled tenant is reported as a coverage gap, and such a run is never cached or shown as an
+  all-clear.
 - **Conditional Access visibility now reads both policy axes, so workload-identity policies stop lying.**
   The Conditional Access tab previously matched only the resource axis (`applications`), which made
   every workload-identity policy claiming `All apps` look like it applied to every app — and hid

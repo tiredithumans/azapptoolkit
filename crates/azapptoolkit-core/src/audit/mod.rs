@@ -10,7 +10,7 @@
 //! corresponding test in the owning submodule. Net-new rules, weights and list
 //! entries say so where they are defined.
 //!
-//! The numbered rules (1–20) with their helper, weight, issue marker, finding
+//! The numbered rules (1–22) with their helper, weight, issue marker, finding
 //! key, remediation and provenance are catalogued in
 //! `docs/architecture/audit-findings-and-remediation.md` ("Rule catalog").
 //!
@@ -40,7 +40,8 @@ pub use permissions::{
 };
 pub use posture::{POSTURE_FINDING_KEYS, PostureCounts, finding_worst, posture_counts};
 pub use scoring::{
-    SpAuditInput, disable_sign_in_remediation, score_application, score_service_principal,
+    SpAuditInput, apply_service_principal_risk, disable_sign_in_remediation, score_application,
+    score_service_principal,
 };
 pub use types::{
     AppPermissions, AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus,

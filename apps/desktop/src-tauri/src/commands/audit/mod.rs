@@ -101,6 +101,17 @@ pub(crate) struct ScoreCtx {
     pub(crate) mail_scoping_unresolved: AtomicBool,
     pub(crate) sign_in_available: bool,
     pub(crate) sign_in_map: Arc<HashMap<String, Option<DateTime<Utc>>>>,
+    /// Whether the Identity Protection risky-service-principal report was
+    /// readable for this run (consented scope + Workload Identities premium).
+    /// `false` skips Rule 22 entirely — the run either says "report not
+    /// available here" (unlicensed/un-consented, no gap) or carries the
+    /// `RiskyServicePrincipals` coverage gap (failed read); it never silently
+    /// pretends the check ran.
+    pub(crate) risky_available: bool,
+    /// `sp_objectId -> (riskState, riskLevel)` for principals flagged
+    /// `confirmedCompromised`/`atRisk`. Joined onto audit rows by the SP's
+    /// **object** id — the same join key the grant matrices use.
+    pub(crate) risky_by_sp: Arc<HashMap<String, (String, String)>>,
 }
 
 impl ScoreCtx {
@@ -113,6 +124,18 @@ impl ScoreCtx {
         } else {
             None
         }
+    }
+
+    /// The Identity Protection risk flag for a service-principal object id.
+    /// `None` when the report was unavailable (Rule 22 must not fire on an
+    /// unchecked assumption) or the principal is absent/unflagged.
+    pub(crate) fn risk_for(&self, sp_object_id: &str) -> Option<(&str, &str)> {
+        if !self.risky_available {
+            return None;
+        }
+        self.risky_by_sp
+            .get(sp_object_id)
+            .map(|(state, level)| (state.as_str(), level.as_str()))
     }
 }
 

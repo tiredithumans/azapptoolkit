@@ -275,6 +275,15 @@ pub enum AuditCoverageGap {
     /// authoritative. An operator could not tell "no SP-only findings" from
     /// "never looked".
     ServicePrincipalIndex,
+    /// The Identity Protection risky-service-principal report could not be
+    /// read even though the tenant looked entitled to it (a genuine request
+    /// failure — an un-consented or unlicensed tenant reports the feature as
+    /// *unavailable* instead, which is not a gap).
+    ///
+    /// The report is the audit's compromised-principal signal: without it, a
+    /// service principal Identity Protection flags `confirmedCompromised` is
+    /// scored and shown as if no vendor flagged it.
+    RiskyServicePrincipals,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -308,6 +317,11 @@ impl AuditCoverageGap {
                 "The permissions an application programming interface defines could not be \
                  read, so applications holding those permissions were scored as though they \
                  held none — they may look clean here while holding high-risk access."
+            }
+            AuditCoverageGap::RiskyServicePrincipals => {
+                "The Identity Protection risky-service-principal report could not be read, so \
+                 this run did not check for compromised or risky service principals — one may \
+                 be flagged in Identity Protection while reading clean here."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
@@ -346,6 +360,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         };
         let items = [
             item(RiskLevel::High, CredentialStatus::Expired, false),
@@ -381,6 +397,7 @@ mod tests {
             AuditCoverageGap::EwsFullAccessGrants,
             AuditCoverageGap::PerPrincipalScoring,
             AuditCoverageGap::PermissionResolution,
+            AuditCoverageGap::RiskyServicePrincipals,
             AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");

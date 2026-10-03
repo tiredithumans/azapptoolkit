@@ -591,6 +591,17 @@ pub struct AuditItem {
     /// verified publisher domain.
     #[serde(default)]
     pub app_owner_organization_id: Option<String>,
+    /// The Identity Protection **risky-service-principal report's** `riskState`
+    /// for this row's principal (`confirmedCompromised` / `atRisk`), set by the
+    /// audit runner after [`super::scoring::score_application`] — `None` when
+    /// the report didn't flag it *or* the report was unavailable (the run's
+    /// `RiskyServicePrincipals` coverage gap says which). The vendor flag; do
+    /// not confuse with [`Self::risk_level`], this app's computed level.
+    #[serde(default)]
+    pub sp_risk_state: Option<String>,
+    /// The report's `riskLevel` (`low`/`medium`/`high`) for the same flag.
+    #[serde(default)]
+    pub sp_risk_level: Option<String>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -664,6 +675,11 @@ pub mod issue {
     /// admin-judged (delete/disable is not a safe one-click fix), so this
     /// marker carries **no** remediation.
     pub const DISABLED_BY_MICROSOFT: &str = "Disabled by Microsoft";
+    /// Identity Protection's risky-service-principal report flags this
+    /// principal `confirmedCompromised` or `atRisk`. Carries the
+    /// [`super::RemediationKind::DisableSignIn`] fix when the SP is still
+    /// enabled (disabling it stops token issuance, reversibly).
+    pub const RISKY_SERVICE_PRINCIPAL: &str = "Risky service principal";
     /// Sign-in audience reaches beyond this directory (multi-tenant, or
     /// multi-tenant + personal Microsoft accounts).
     pub const MULTITENANT_AUDIENCE: &str = "Sign-in audience reaches outside this tenant";

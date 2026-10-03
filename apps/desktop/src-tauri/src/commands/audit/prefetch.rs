@@ -11,9 +11,11 @@ use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLI
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::verdict::aap_verdict_for;
 use azapptoolkit_graph::GraphClient;
+use azapptoolkit_graph::GraphError;
 use chrono::{DateTime, Utc};
 
 use crate::commands::exchange::exchange_client;
+use crate::commands::graph_err::looks_like_missing_license;
 use crate::commands::graph_roles::graph_role_index;
 use crate::dto::UiError;
 use crate::dto::audit::AuditCoverageGap;
@@ -316,6 +318,90 @@ pub(crate) async fn prefetch_sign_in_activity(
                 "AuditLog.Read.All token unavailable; skipping unused-app detection"
             );
             (false, consent_required, Arc::new(HashMap::new()))
+        }
+    }
+}
+
+/// The tenant-wide Identity Protection risky-service-principal report →
+/// `(available, sp_objectId -> (riskState, riskLevel), gap)`.
+///
+/// The availability split follows the sign-in/report precedent, NOT the
+/// grant-matrix reads: a tenant that has not consented `IdentityRiskyService
+/// Principal.Read.All` (or lacks a Workload Identities premium license — the
+/// endpoint 403s `Authentication_RequestFromNonPremiumTenantOrB2CTenant` for
+/// unlicensed tenants) reads as *unavailable*, no gap, so most tenants do not
+/// get a permanent "degraded" banner that would train operators to ignore it.
+/// A genuine failed read on an entitled tenant IS a coverage gap: the
+/// risky-SP check silently stopped working there, so the run must not be
+/// cached or shown as an all-clear.
+///
+/// Only `confirmedCompromised` / `atRisk` rows are kept — the report ships
+/// every principal it tracks, and Rule 22 fires on those two states only.
+/// Deliberately not cached (unlike the sign-in report): a compromised-SP flag
+/// must be re-read by every run, and the payload is one row per flagged
+/// principal.
+pub(crate) async fn prefetch_risky_service_principals(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> (
+    bool,
+    Arc<HashMap<String, (String, String)>>,
+    Option<AuditCoverageGap>,
+) {
+    let empty = || (false, Arc::new(HashMap::new()), None);
+    // Pre-acquire the scoped token so a missing consent/license surfaces
+    // before the read. Failure means the tenant cannot use the feature today
+    // — unavailable, not a gap (see the doc comment).
+    let Ok(()) = state.ensure_risky_service_principal_token(tenant_id).await else {
+        tracing::info!(
+            "audit: risky-service-principal report unavailable; skipping risky-SP check"
+        );
+        return empty();
+    };
+    match client.list_risky_service_principals().await {
+        Ok(rows) => {
+            let map: HashMap<String, (String, String)> = rows
+                .into_iter()
+                .filter(|r| {
+                    matches!(
+                        r.risk_state.as_deref(),
+                        Some("confirmedCompromised") | Some("atRisk")
+                    )
+                })
+                .filter_map(|r| {
+                    Some((
+                        r.service_principal_id?,
+                        (
+                            r.risk_state?,
+                            r.risk_level.unwrap_or_else(|| "unknown".to_string()),
+                        ),
+                    ))
+                })
+                .collect();
+            (true, Arc::new(map), None)
+        }
+        Err(err) if matches!(&err, GraphError::Forbidden(body) if looks_like_missing_license(body)) =>
+        {
+            // Entitlement failed at the endpoint, not the token: the tenant is
+            // not on Workload Identities premium (or the feature is not
+            // provisioned). Same "unavailable" class as the token arm.
+            tracing::info!(
+                ?err,
+                "audit: risky-service-principal report not licensed in this tenant; skipping risky-SP check"
+            );
+            (false, Arc::new(HashMap::new()), None)
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "audit: risky-service-principal read failed; risky-SP coverage gap"
+            );
+            (
+                false,
+                Arc::new(HashMap::new()),
+                Some(AuditCoverageGap::RiskyServicePrincipals),
+            )
         }
     }
 }

@@ -2683,3 +2683,129 @@ fn disabled_by_microsoft_flags_sp_only_rows() {
     // …and the flag alone trips no other finding group.
     assert_eq!(item.issues.len(), 1);
 }
+
+// ---- Rule 22: Identity Protection risky service principals --------------
+
+/// Builds a scored item, stamps the vendor risk fields the way the audit
+/// runner does, then runs the Rule 22 post-pass.
+fn risky_item(
+    state: Option<&str>,
+    level: Option<&str>,
+    sp_enabled: Option<bool>,
+    perms: &AppPermissions,
+) -> AuditItem {
+    let mut item = score_application(&base_app(), sp_enabled, perms, now());
+    item.sp_risk_state = state.map(str::to_string);
+    item.sp_risk_level = level.map(str::to_string);
+    apply_service_principal_risk(&mut item);
+    item
+}
+
+#[test]
+fn risky_flag_alone_is_high_and_stacks_to_critical() {
+    // 20 alone ≥ the 15-point High threshold; 20 + one high-risk grant
+    // (10) crosses the 25-point Critical line. The flag multiplies whatever
+    // else the row already carries — deliberate for a live-abuse signal.
+    let alone = risky_item(
+        Some("atRisk"),
+        Some("medium"),
+        Some(true),
+        &AppPermissions::default(),
+    );
+    assert_eq!(alone.risk_score, PTS_RISKY_SERVICE_PRINCIPAL);
+    assert_eq!(alone.risk_level, RiskLevel::High);
+    assert!(
+        alone
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL)),
+        "{:?}",
+        alone.issues
+    );
+    let stacked = risky_item(
+        Some("confirmedCompromised"),
+        Some("high"),
+        Some(true),
+        &sp_perms(&["Mail.ReadWrite"]),
+    );
+    assert_eq!(
+        stacked.risk_score,
+        PTS_RISKY_SERVICE_PRINCIPAL + PTS_HIGH_RISK_APP_PERM
+    );
+    assert_eq!(stacked.risk_level, RiskLevel::Critical);
+}
+
+#[test]
+fn only_the_risky_states_emit() {
+    // The report ships every principal it tracks, not just risky ones;
+    // non-risky states must leave the item byte-identical.
+    for state in [
+        None,
+        Some("none"),
+        Some("remediated"),
+        Some("dismissed"),
+        Some("SomethingNew"),
+    ] {
+        let item = risky_item(state, Some("low"), Some(true), &AppPermissions::default());
+        assert_eq!(item.risk_score, 0, "state {state:?} must not inflate");
+        assert!(item.issues.is_empty(), "state {state:?}");
+        assert!(item.remediations.is_empty(), "state {state:?}");
+    }
+}
+
+#[test]
+fn risky_flag_offers_disable_sign_in_only_while_enabled_and_once() {
+    let on = risky_item(Some("atRisk"), None, Some(true), &AppPermissions::default());
+    assert!(
+        on.remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn),
+        "an enabled risky SP must carry the one-click Fix"
+    );
+    // Already disabled: the Fix would be a no-op; the issue + advice stay.
+    let off = risky_item(
+        Some("atRisk"),
+        None,
+        Some(false),
+        &AppPermissions::default(),
+    );
+    assert!(
+        !off.remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn),
+        "a disabled SP needs no disable Fix"
+    );
+    assert!(
+        off.issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL))
+    );
+    // Dedupe: an item that already got the Fix from the unused pass gets no
+    // second copy from the risk pass.
+    let mut item = score_application(&base_app(), Some(true), &AppPermissions::default(), now());
+    item.remediations.push(disable_sign_in_remediation());
+    item.sp_risk_state = Some("confirmedCompromised".into());
+    item.sp_risk_level = Some("high".into());
+    apply_service_principal_risk(&mut item);
+    let fixes = item
+        .remediations
+        .iter()
+        .filter(|r| r.kind == RemediationKind::DisableSignIn)
+        .count();
+    assert_eq!(fixes, 1, "{:?}", item.remediations);
+}
+
+#[test]
+fn risky_flag_applies_to_sp_only_rows_too() {
+    let mut item = score_service_principal(&base_sp(), &sp_perms(&[]), now());
+    item.sp_risk_state = Some("confirmedCompromised".into());
+    item.sp_risk_level = Some("high".into());
+    apply_service_principal_risk(&mut item);
+    assert_eq!(item.risk_score, PTS_RISKY_SERVICE_PRINCIPAL);
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert!(
+        item.issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL))
+    );
+}

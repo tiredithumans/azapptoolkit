@@ -75,6 +75,11 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // into the credential or exposure findings): the flag is about the
         // principal's conduct, and fires on SP-only rows too.
         "disabled_by_microsoft" => |x| x.starts_with(issue::DISABLED_BY_MICROSOFT),
+        // Rule 22 — the vendor's own risk flag from the Identity Protection
+        // risky-service-principal report. Its own group (not folded into the
+        // disabled flag): a risky SP is *still enabled* most of the time, and
+        // the two findings call for opposite urgency — investigate/disable now.
+        "risky_service_principal" => |x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL),
         "ownership" => |x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER),
         _ => return None,
     };
@@ -136,6 +141,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -228,6 +235,13 @@ mod tests {
                 ),
                 "disabled_by_microsoft",
             ),
+            (
+                format!(
+                    "{} — Identity Protection flags it",
+                    issue::RISKY_SERVICE_PRINCIPAL
+                ),
+                "risky_service_principal",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -244,6 +258,7 @@ mod tests {
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
             "disabled_by_microsoft",
+            "risky_service_principal",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

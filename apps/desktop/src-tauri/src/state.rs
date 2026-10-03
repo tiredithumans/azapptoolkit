@@ -225,6 +225,7 @@ pub(crate) enum ConsentFeature {
     Sync,
     AuditLog,
     Policy,
+    RiskyServicePrincipals,
     PolicyWrite,
     SharePoint,
     GroupMembership,
@@ -235,11 +236,12 @@ pub(crate) enum ConsentFeature {
 }
 
 impl ConsentFeature {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Write,
         Self::Sync,
         Self::AuditLog,
         Self::Policy,
+        Self::RiskyServicePrincipals,
         Self::PolicyWrite,
         Self::SharePoint,
         Self::GroupMembership,
@@ -257,6 +259,7 @@ impl ConsentFeature {
             Self::Sync => "sync",
             Self::AuditLog => "audit_log",
             Self::Policy => "policy",
+            Self::RiskyServicePrincipals => "risky_service_principals",
             Self::PolicyWrite => "policy_write",
             Self::SharePoint => "sharepoint",
             Self::GroupMembership => "group_membership",
@@ -637,6 +640,15 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_policy_scopes(),
             );
+            // IdentityRiskyServicePrincipal.Read.All for the Identity Protection
+            // risky-service-principal audit signal — same on-demand, gracefully-
+            // degrading contract; the endpoint also needs a Workload Identities
+            // premium license, so an unlicensed tenant keeps working without it.
+            let risky_sp_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_risky_service_principal_scopes(),
+            );
             // Policy.ReadWrite.ApplicationConfiguration + Application.ReadWrite.All
             // for claims-mapping policies (SAML claim customization). Same on-demand, incremental-consent
             // contract — never part of the sign-in bundle.
@@ -674,6 +686,7 @@ impl AppState {
                 .with_sync_token(sync_token)
                 .with_audit_log_token(audit_log_token)
                 .with_policy_token(policy_token)
+                .with_risky_sp_token(risky_sp_token)
                 .with_policy_write_token(policy_write_token)
                 .with_sharepoint_token(sharepoint_token)
                 .with_group_member_token(group_member_token),
@@ -734,6 +747,9 @@ impl AppState {
             ConsentFeature::Sync => self.auth.default_graph_sync_scopes(),
             ConsentFeature::AuditLog => self.auth.default_graph_audit_log_scopes(),
             ConsentFeature::Policy => self.auth.default_graph_policy_scopes(),
+            ConsentFeature::RiskyServicePrincipals => {
+                self.auth.default_graph_risky_service_principal_scopes()
+            }
             ConsentFeature::PolicyWrite => self.auth.default_graph_policy_write_scopes(),
             ConsentFeature::SharePoint => self.auth.default_graph_sharepoint_scopes(),
             ConsentFeature::GroupMembership => self.auth.default_graph_group_member_scopes(),
@@ -878,6 +894,24 @@ impl AppState {
     /// sign-in activity fetch, so the happy path costs no extra round trip.
     pub async fn ensure_audit_log_token(&self, tenant_id: &str) -> azapptoolkit_auth::Result<()> {
         self.ensure_feature_token(tenant_id, ConsentFeature::AuditLog)
+            .await
+    }
+
+    /// Acquires (and caches) the `IdentityRiskyServicePrincipal.Read.All` token
+    /// up front so the audit runner can distinguish an un-consented/unlicensed
+    /// tenant (feature unavailable → the risky-SP signal is skipped, NOT a
+    /// coverage gap) from a failed read of a feature the tenant does have
+    /// (→ `AuditCoverageGap::RiskyServicePrincipals`, which makes the run
+    /// degraded). Consent is requested from the readiness checklist's silent
+    /// probe of the `identity_protection_risk` catalog row — audit surfaces
+    /// carry no "Grant consent" button. CAE, matching the `new_cae` Graph
+    /// adapter that consumes this scope set; the cached token is reused by the
+    /// subsequent report fetch, so the happy path costs no extra round trip.
+    pub async fn ensure_risky_service_principal_token(
+        &self,
+        tenant_id: &str,
+    ) -> azapptoolkit_auth::Result<()> {
+        self.ensure_feature_token(tenant_id, ConsentFeature::RiskyServicePrincipals)
             .await
     }
 
