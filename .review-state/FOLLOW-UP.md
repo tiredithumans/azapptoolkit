@@ -17,7 +17,7 @@ Remaining work from the 2026-09-26 review (`azapptoolkit-review-2026-09-26.md`) 
 - F028 `commands/audit.rs` → directory module → `9ef935b`
 - F076 `commands/sso/mod.rs` → directory module → `d482f56`
 
-## Tier 4 — Enhancements & feature opportunities (not started)
+## Tier 4 — Enhancements & feature opportunities (in progress)
 
 The per-item set IS defined: the review doc's **"## Enhancements and feature
 opportunities"** section (108 findings / 106 entries after the F042+F428 and
@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 74 entries by area (read the section for each item's Problem +
+Remaining 69 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -83,8 +83,23 @@ Proposal; #### items are full entries, one-liners are bullets):
   wizard alike) · F382 (wizard lifetime fields gate Next on the real
   1..=1095/1..=730 bounds instead of `parse().ok()` defaulting). **F392 stays
   open as a product-gap idea** (same spirit as the Product-gap bucket below).
-- **App-reg editing: auth / Expose an API / federation (5)** — F017 · F158 ·
-  F162 · F342 · F350
+- **App-reg editing: auth / Expose an API / federation (5)** — **all closed
+  2026-10-02.** Verified already implemented on main: F017
+  (`validate_authentication_input` runs `redirect::validate_logout_url` on the
+  logout URL before any mutation, pinned by
+  `the_logout_url_is_validated_before_the_patch`) · F158 (redirect.rs drops the
+  `::1` IPv6 loopback with the Microsoft citation and caps URIs at 256 chars,
+  both mirrored in the frontend's row hints) · F162 (federation.rs rejects
+  `len() > 1` audiences; `rejects_more_than_one_audience` pins it) · F350
+  (expose_api_tab's add is a DirectorySearch typeahead over apps + SPs, and
+  rows resolve client display names via `client_display_names`). F342
+  implemented here: both forms gate Save on a real diff (Authentication via
+  `UriListState::same_as`, Overview via a shared `overview_patch` helper whose
+  result is compared to default), Authentication gained Reset, and
+  `update_application` treats an all-default patch as a no-op (no round trip,
+  no list-cache bust). Deviation from the proposal: a clean form disables Save
+  rather than firing a toast, and Cancel on Overview now re-seeds instead of
+  parking edits.
 - **Enterprise apps & managed identities (5)** — F377 · F378 · F391 · F389 ·
   F206
 - **Operator tooling: search, DR, settings, readiness (18)** — F040 ·
