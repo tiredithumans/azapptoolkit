@@ -208,6 +208,18 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   a range, clears the active one. Each chip's tooltip names the window it will
   restore, and the chips gained accessible names ("Apply saved view …").
   Views saved before this change keep working (the new fields default).
+- **Deleted app registrations are recoverable, and the app now says so.** A deleted app
+  registration sits in the Entra recycle bin for ~30 days and can be restored (its paired
+  enterprise application comes back with it), but the app presented deletion as irreversible and
+  the bin was invisible. The App Registrations header gains a **Recently deleted…** dialog listing
+  the bin — per row, when it was deleted and how much of the window is left — with **Restore**
+  (carries the paired enterprise app along) and a two-step **Delete forever** for skipping the
+  window deliberately. After a bulk delete the action bar's result summary offers **Undo
+  (restore N deleted)**, replaying exactly the ids that run confirmed gone, and the delete
+  confirmation copy now points at both exits instead of saying "cannot be undone". The bin is
+  read live and never cached — a restore or purge refetches rather than serving a stale bin —
+  and a read that hits its row cap says "this list is partial" rather than showing a short bin
+  as the whole truth.
 
 ### Fixed
 

@@ -27,6 +27,8 @@ mod certificate_reveal;
 mod credential_policy;
 #[path = "gui/credential_sweep.rs"]
 mod credential_sweep;
+#[path = "gui/deleted_apps.rs"]
+mod deleted_apps;
 #[path = "gui/enterprise_access_tab.rs"]
 mod enterprise_access_tab;
 #[path = "gui/enterprise_application_list.rs"]

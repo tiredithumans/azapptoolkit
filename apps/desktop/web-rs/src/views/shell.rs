@@ -24,8 +24,8 @@ use crate::hooks::use_shortcuts::use_shortcuts;
 use crate::state::{ActiveView, use_session};
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
-    gallery_dialog::GalleryDialog, new_app_chooser_dialog::NewAppChooserDialog,
-    sso_wizard_dialog::SsoWizardDialog,
+    deleted_apps_dialog::DeletedAppsDialog, gallery_dialog::GalleryDialog,
+    new_app_chooser_dialog::NewAppChooserDialog, sso_wizard_dialog::SsoWizardDialog,
 };
 
 #[component]
@@ -588,6 +588,19 @@ fn ToolDialogs() -> impl IntoView {
                         open=open
                         on_close=on_close
                         on_created=Callback::new(move |()| session.bump_apps_reload())
+                    />
+                }
+            },
+        )}
+        {tool_dialog(
+            ActiveView::Apps,
+            ui.deleted_open,
+            move |open, on_close| {
+                view! {
+                    <DeletedAppsDialog
+                        open=open
+                        on_close=on_close
+                        on_mutated=Callback::new(move |()| session.bump_apps_reload())
                     />
                 }
             },

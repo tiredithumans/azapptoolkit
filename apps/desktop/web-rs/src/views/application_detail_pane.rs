@@ -282,7 +282,7 @@ pub fn ApplicationDetailPane(
                                     <ConfirmDialog
                                         open=Signal::derive(move || delete_open.get())
                                         title="Delete this app registration?"
-                                        body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. Deletion can be undone from the Entra admin center within 30 days."
+                                        body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. The app stays recoverable for 30 days — restore it from \"Recently deleted…\" on the App Registrations view."
                                         // Several app windows can be open at once and the
                                         // modal covers all of them, so it names the app it
                                         // will delete instead of relying on the header it

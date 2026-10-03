@@ -90,6 +90,26 @@ pub struct BulkDeleteResult {
     pub cancelled: bool,
 }
 
+// ---------------- Bulk restore (recycle bin) ----------------
+
+/// One recycle-bin restore: the app, then its paired service principals (Graph
+/// does not cascade-restore them). `sp_restored` is `false` both when there
+/// were no paired SPs to restore and when one failed — `error` carries the
+/// message in the failure case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkRestoreOutcome {
+    pub object_id: String,
+    pub restored: bool,
+    pub sp_restored: bool,
+    pub error: Option<BulkError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkRestoreResult {
+    pub outcomes: Vec<BulkRestoreOutcome>,
+    pub cancelled: bool,
+}
+
 // ---------------- Bulk grant admin consent ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

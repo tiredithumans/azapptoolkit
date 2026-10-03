@@ -8,7 +8,6 @@
 //! shared [`ListScaffold`].
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::ListCredentialStatus;
@@ -303,6 +302,14 @@ pub fn ApplicationList() -> impl IntoView {
                 />
                 <Button
                     class="btn-icon-label"
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(move |_| session.open_deleted_apps())
+                >
+                    <Icon name=IconName::Trash size=16 />
+                    "Recently deleted…"
+                </Button>
+                <Button
+                    class="btn-icon-label"
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| session.open_create_app())
                 >
@@ -326,6 +333,20 @@ pub fn ApplicationList() -> impl IntoView {
                         }
                     }
                 >
+                    // Persistent chrome, deliberately OUTSIDE the `Suspense`
+                    // body: a refetch remounts everything inside it, and this
+                    // bar's own `on_done` bumps `apps_reload` — mounting it
+                    // inside would wipe its run summary (and Undo) on the very
+                    // refetch the run triggers. Self-gating: renders nothing
+                    // until a selection or a run result exists.
+                    <BulkActionBar
+                        names=Signal::derive(move || session.tenant_ui.app_names.get())
+                        selection=session.tenant_ui.selected_app_ids
+                        actions=Signal::derive(|| {
+                            vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
+                        })
+                        on_done=Callback::new(move |_| session.bump_apps_reload())
+                    />
                     <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                         {move || {
                             // Re-runs only on an actual refetch (tenant switch / reload
@@ -397,22 +418,19 @@ fn LoadedApps(
 ) -> impl IntoView {
     let session = use_session();
 
-    // `object_id -> display name` so a bulk failure names the app instead of
-    // printing its GUID. Built once per fetch from the rows the selection is
-    // made from; the bar falls back to the id for anything missing.
-    let names: Signal<Arc<HashMap<String, String>>> = {
-        let map: Arc<HashMap<String, String>> = Arc::new(
-            items
-                .iter()
-                .map(|r| (r.id.clone(), r.display_name.clone()))
-                .collect(),
-        );
-        // Publish for the standalone Bulk Actions page, which operates on this
-        // same selection but owns no rows to build the map from — without it its
-        // failure list is a column of raw GUIDs.
-        session.tenant_ui.app_names.set(Arc::clone(&map));
-        Signal::stored(map)
-    };
+    // Publish the `object_id -> display name` map for the bulk bars (here and
+    // the standalone Bulk Actions page), which operate on this same selection
+    // but own no rows to build the map from — without it their failure lists
+    // are columns of raw GUIDs. It lives on `tenant_ui`, not a local signal,
+    // because the bar mounts OUTSIDE this subtree (see `ApplicationList`): the
+    // bar must read the map published by the *current* fetch, not one frozen
+    // at its own mount.
+    session.tenant_ui.app_names.set(Arc::new(
+        items
+            .iter()
+            .map(|r| (r.id.clone(), r.display_name.clone()))
+            .collect(),
+    ));
 
     let list = use_filtered_list(FilteredListSpec {
         items,
@@ -585,18 +603,6 @@ fn LoadedApps(
             count_label=count_label
             visible_ids=visible_ids
             selected=session.tenant_ui.selected_app_ids
-        />
-        // Inline bulk-action bar — self-gating: appears once ≥1 app is checked
-        // (and stays to show the run summary), so the user can grant consent /
-        // remove expired creds / delete without leaving the list (the separate
-        // Bulk Actions page remains for Create-apps).
-        <BulkActionBar
-            names=names
-            selection=session.tenant_ui.selected_app_ids
-            actions=Signal::derive(|| {
-                vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
-            })
-            on_done=Callback::new(move |_| session.bump_apps_reload())
         />
         {capped
             .then(|| {

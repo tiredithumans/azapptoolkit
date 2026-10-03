@@ -949,6 +949,10 @@ fn register_fixtures() {
     let apps = catalog();
     let rows: Vec<ApplicationListRowDto> = apps.iter().map(|a| list_row(a, now)).collect();
     mock_ok("list_applications_with_pairing", &rows);
+    // Recycle-bin read for the "Recently deleted" dialog. Its Restore / Delete
+    // forever MUTATIONS stay unregistered — same policy as every other
+    // mutation: they degrade to the friendly demo error, never a fake success.
+    mock_ok("list_recently_deleted", &f::deleted_apps());
 
     let detail_by_id = app_details(&apps);
     // objectId → appId, for the tabs keyed on the object but reporting the app.

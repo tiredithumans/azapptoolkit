@@ -88,6 +88,7 @@ bulk_row!(
     bulk::BulkOwnerOutcome,
     bulk::BulkDisableOutcome,
     bulk::BulkStageCertOutcome,
+    bulk::BulkRestoreOutcome,
 );
 
 /// The failed rows of a bulk run, labelled for display.
@@ -451,7 +452,9 @@ impl BulkAction {
                 },
             },
             // Entra soft-deletes app registrations for 30 days, so the copy
-            // must not call this permanent (the single-app dialog says the same).
+            // must not call this permanent (the single-app dialog says the
+            // same), and since F266 the undo is IN-app: the bar's own Undo
+            // button right after the run, then the "Recently deleted" view.
             BulkAction::Delete => Spec {
                 label: "Delete",
                 destructive: true,
@@ -459,7 +462,7 @@ impl BulkAction {
                 confirm_label: "Delete",
                 description: |n| {
                     format!(
-                        "Delete the {}. Their service principals' permission grants are revoked and any credentials stop working immediately. Deletion can be undone from the Entra admin center within 30 days.",
+                        "Delete the {}. Their service principals' permission grants are revoked and any credentials stop working immediately. The apps stay recoverable for 30 days — undo below right after the run, or restore them from \"Recently deleted…\".",
                         count_noun(n, "selected app registration", "selected app registrations")
                     )
                 },
@@ -513,6 +516,68 @@ pub fn BulkActionBar(
 
     let progress: RwSignal<Option<bulk::BulkProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::bulk_progress);
+
+    // The delete run's confirmed-gone ids, kept for exactly one follow-up:
+    // "Undo (restore N deleted)" replays them through the recycle bin. Cleared
+    // when any new run starts, so it can only ever name the LAST run.
+    let undo_ids: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+
+    // Sequential restore over the deleted ids — the same `bulk_*` shape as
+    // every action here: one busy flag, summary + per-item failures, and a
+    // toast because the host's `on_done` refetch may re-mount the bar before
+    // the summary is read.
+    let undo = Callback::new(move |ids: Vec<String>| {
+        if busy.get() || ids.is_empty() {
+            return;
+        }
+        undo_ids.set(Vec::new());
+        busy.set(true);
+        summary.set(None);
+        failures.set(Vec::new());
+        error.set(None);
+        progress.set(None);
+        let attempted = ids.len();
+        let tenant = session.active_tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            let tid = &t.tenant_id;
+            match bulk::bulk_restore_deleted(tid, &ids).await {
+                Ok(r) => {
+                    let reached = r.outcomes.len();
+                    let restored = r.outcomes.iter().filter(|o| o.restored).count();
+                    let fails = failures_of(&r.outcomes, |id| label_with(names, id));
+                    if let Some(dead) = session_dead_error(&fails) {
+                        session.report_if_session_dead(&dead);
+                    }
+                    // Read before `failures.set(fails)` moves the vec.
+                    let clean = fails.is_empty();
+                    summary.set(Some(format!(
+                        "Restored {restored} of {}.{}",
+                        count_noun(attempted, "deleted app", "deleted apps"),
+                        unattempted_note(attempted, Some(reached))
+                    )));
+                    failures.set(fails);
+                    if !r.cancelled && restored > 0 && clean {
+                        session.toast_success(format!(
+                            "Restored {restored} of {attempted} deleted apps."
+                        ));
+                    }
+                    if let Some(cb) = on_done {
+                        cb.run(());
+                    }
+                }
+                Err(e) => {
+                    let msg = e.message.clone();
+                    session.report_command_error(&e);
+                    error.set(Some(msg));
+                }
+            }
+            busy.set(false);
+        });
+    });
 
     // Arming: every action except Grant reveals an inline panel (a typed
     // confirmation for the destructive ones, a target form for the scoping ones)
@@ -614,6 +679,7 @@ pub fn BulkActionBar(
         summary.set(None);
         failures.set(Vec::new());
         error.set(None);
+        undo_ids.set(Vec::new());
         // The last run's terminal event is still in place (a full bar for a
         // completed run); leaving it opens the new run on a stale bar.
         progress.set(None);
@@ -692,6 +758,12 @@ pub fn BulkActionBar(
                     )));
                     failures.set(p.failures);
                     armed.set(None);
+                    // A completed delete leaves its confirmed-gone ids on hand
+                    // for one Undo run (recycle-bin restore). Snapshot first:
+                    // the selection cleanup below consumes them.
+                    if matches!(action, BulkAction::Delete) {
+                        undo_ids.set(p.deleted.clone());
+                    }
                     // ONLY the ids the backend confirmed gone leave the
                     // selection. Clearing the whole set — what a bare
                     // "clears-selection" flag did — threw away the apps a
@@ -829,6 +901,28 @@ pub fn BulkActionBar(
                                                 </div>
                                             }
                                         })}
+                                </div>
+                            }
+                        })
+                }}
+                {move || {
+                    // Undo for the last delete: the run's confirmed-gone ids,
+                    // replayed through the recycle bin. Sits above the error
+                    // slot and disappears as soon as a new run starts, so a
+                    // second Undo can never target a stale id set.
+                    let ids = undo_ids.get();
+                    let is_busy = busy.get();
+                    (!ids.is_empty() && !is_busy)
+                        .then(move || {
+                            let n = ids.len();
+                            view! {
+                                <div class="actions-row">
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                        on_click=Box::new(move |_| undo.run(ids.clone()))
+                                    >
+                                        {format!("Undo (restore {n} deleted)")}
+                                    </Button>
                                 </div>
                             }
                         })

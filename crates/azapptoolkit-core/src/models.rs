@@ -1215,6 +1215,43 @@ pub struct ClaimsMappingPolicy {
     pub is_organization_default: Option<bool>,
 }
 
+/// One entry of the app-recycle-bin read
+/// `/directory/deletedItems/microsoft.graph.application`.
+///
+/// Deleted items are `directoryObject` projections, not full `Application`s:
+/// Graph answers with the pairing scalars (`appId`, `displayName`) and
+/// `deletedDateTime`, but entries for some deleted objects carry **limited
+/// info** (only `id` + `@odata.type`), so every non-key field is optional and
+/// defaults through `serde`. Unknown keys (`@odata.type` and friends) are
+/// ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedApplication {
+    pub id: String,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub deleted_date_time: Option<DateTime<Utc>>,
+}
+
+/// One entry of the recycle-bin read
+/// `/directory/deletedItems/microsoft.graph.servicePrincipal`. Used only to
+/// find the service principals paired with a restored application (Graph does
+/// NOT cascade-restore the paired SP) — same limited-info caveat as
+/// [`DeletedApplication`], which is why `app_id` is optional and an SP that
+/// reports no `appId` simply cannot be paired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedServicePrincipal {
+    pub id: String,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paged<T> {
     #[serde(rename = "value")]
@@ -1228,6 +1265,31 @@ pub struct Paged<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_items_decode_full_and_limited_info_entries() {
+        // A full app entry (with `@odata.type` + fields a typed read ignores)
+        // next to the documented "limited info" shape — only id and type.
+        let json = r##"{"value":[
+            {"@odata.type":"#microsoft.graph.application","id":"app-1","deletedDateTime":"2026-09-20T10:00:00Z","appId":"11111111-1111-1111-1111-111111111111","displayName":"CRM","extraKey":"ignored"},
+            {"@odata.type":"#microsoft.graph.application","id":"app-2"}
+        ]}"##;
+        let page: Paged<DeletedApplication> = serde_json::from_str(json).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].display_name.as_deref(), Some("CRM"));
+        assert!(page.items[0].deleted_date_time.is_some());
+        assert!(page.items[1].display_name.is_none());
+        assert!(page.items[1].app_id.is_none());
+
+        let json = r##"{"value":[
+            {"@odata.type":"#microsoft.graph.servicePrincipal","id":"sp-1","appId":"11111111-1111-1111-1111-111111111111","displayName":"CRM"},
+            {"id":"sp-2","displayName":null}
+        ]}"##;
+        let page: Paged<DeletedServicePrincipal> = serde_json::from_str(json).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items[0].app_id.is_some());
+        assert!(page.items[1].display_name.is_none());
+    }
 
     #[test]
     fn application_deserializes_with_missing_optional_fields() {

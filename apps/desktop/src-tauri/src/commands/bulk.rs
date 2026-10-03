@@ -12,13 +12,14 @@
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
+use std::collections::HashMap;
 use std::future::Future;
 
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::expired_password_key_ids;
-use azapptoolkit_core::models::Application;
-use azapptoolkit_graph::client::AppListQuery;
+use azapptoolkit_core::models::{Application, DeletedApplication, DeletedServicePrincipal};
+use azapptoolkit_graph::client::{AppListQuery, DELETED_APPS_MAX, DELETED_SPS_MAX};
 
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::{ProgressSink, emit_progress};
@@ -29,8 +30,8 @@ use crate::dto::bulk::{
     AppRemovalSummary, BulkAddOwnerResult, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec,
     BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult, BulkError,
     BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
-    BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkScopeOutcome, BulkScopeResult,
-    BulkStageCertOutcome, BulkStageCertResult,
+    BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkRestoreOutcome, BulkRestoreResult,
+    BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome, BulkStageCertResult,
 };
 use crate::state::{AppState, CancelToken};
 
@@ -68,6 +69,7 @@ bulk_outcome_error_field!(
     BulkOwnerOutcome,
     BulkDisableOutcome,
     BulkStageCertOutcome,
+    BulkRestoreOutcome,
 );
 
 /// Rejects a bulk-create spec that cannot possibly succeed, without touching
@@ -961,6 +963,147 @@ pub async fn bulk_disable_sign_in(
     })
 }
 
+/// Restores deleted applications from the recycle bin — the Undo path behind
+/// the bulk-delete confirmation and the "Recently deleted" dialog.
+///
+/// Restoring an application does NOT restore its paired service principals
+/// (Graph documents the cascade as absent), and an app without its SP cannot
+/// be assigned or signed in to, so each restore carries its paired deleted SPs
+/// along. The pairing pre-read is best-effort: if the recycle-bin reads fail,
+/// the run degrades to app-only restores (logged) rather than failing every
+/// Undo outright.
+///
+/// Sequential on purpose (small admin-chosen selections, and an SP restore must
+/// follow its app's) and cancel-aware; a re-auth-fatal code stops the run via
+/// [`BulkOutcome::session_fatal`] like every other bulk command. The name is
+/// `bulk_*` and it rides `state.bulk_cancel` so the existing `cancel_bulk`
+/// stops it — the shape `repo_invariants::cancel` pins.
+#[tauri::command]
+pub async fn bulk_restore_deleted(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_ids: Vec<String>,
+) -> Result<BulkRestoreResult, UiError> {
+    // Claim before the first await (pinned by `repo_invariants::cancel`).
+    let cancel = state.bulk_cancel.claim();
+    let client = state.graph_for(&tenant_id);
+
+    // Pairing + progress labels both come from the recycle-bin reads, done
+    // once up front instead of per item. Truncation is ignored deliberately:
+    // a capped bin read still pairs everything it saw; a restore beyond the
+    // cap just lands as an app-only outcome the user can re-run.
+    let pair_read = async {
+        let (apps, _apps_truncated) = client.list_deleted_applications(DELETED_APPS_MAX).await?;
+        let names: HashMap<String, String> = apps
+            .iter()
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    a.display_name.clone().unwrap_or_else(|| a.id.clone()),
+                )
+            })
+            .collect();
+        let (sps, _sps_truncated) = client
+            .list_deleted_service_principals(DELETED_SPS_MAX)
+            .await?;
+        Ok::<_, azapptoolkit_graph::GraphError>((sp_pairs_for(&apps, &sps), names))
+    };
+    let (pairs, names) = match pair_read.await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "recycle-bin pairing pre-read failed; restoring apps without their paired \
+                 service principals: {e}"
+            );
+            (HashMap::new(), HashMap::new())
+        }
+    };
+
+    let (outcomes, cancelled) = run_bulk_seq(
+        &app_handle,
+        &cancel,
+        object_ids,
+        |id| names.get(id).cloned().unwrap_or_else(|| id.clone()),
+        |object_id| {
+            let client = client.clone();
+            // Resolve the SP list before the async block so the pairing map is
+            // not held across the awaits.
+            let sp_ids: Vec<String> = pairs.get(&object_id).cloned().unwrap_or_default();
+            async move {
+                match client.restore_deleted_item(&object_id).await {
+                    Err(e) => BulkRestoreOutcome {
+                        object_id,
+                        restored: false,
+                        sp_restored: false,
+                        error: Some(UiError::from(e).into()),
+                    },
+                    Ok(()) => {
+                        // Paired SPs restore after their app, serially and
+                        // fail-stop within the item: a second failure would
+                        // only add noise, and the app — the user's target —
+                        // is already back.
+                        let mut sp_restored = false;
+                        let mut error = None;
+                        for sp_id in sp_ids {
+                            match client.restore_deleted_item(&sp_id).await {
+                                Ok(()) => sp_restored = true,
+                                Err(e) => {
+                                    error = Some(UiError::from(e).into());
+                                    break;
+                                }
+                            }
+                        }
+                        BulkRestoreOutcome {
+                            object_id,
+                            restored: true,
+                            sp_restored,
+                            error,
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    // Restored apps are back in the live set: bust the list caches so the
+    // App Registrations list and the pairing joins re-read. (The recycle bin
+    // itself is never cached — see `commands::applications::deleted`.)
+    if outcomes.iter().any(|o| o.restored) {
+        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    }
+
+    Ok(BulkRestoreResult {
+        outcomes,
+        cancelled,
+    })
+}
+
+/// Groups deleted service principals under the deleted application they pair
+/// with (by `appId`). An SP entry that reports no `appId` — Graph's
+/// "limited info" recycle-bin shape — cannot be paired and is left alone:
+/// restoring it blindly could revive a principal whose app was never selected.
+/// Apps with no pairing entry get none, which is the correct answer when the
+/// SP was never deleted or its app id is unknown.
+fn sp_pairs_for(
+    apps: &[DeletedApplication],
+    sps: &[DeletedServicePrincipal],
+) -> HashMap<String, Vec<String>> {
+    let mut by_app_id: HashMap<&str, Vec<&str>> = HashMap::new();
+    for sp in sps {
+        if let Some(app_id) = sp.app_id.as_deref() {
+            by_app_id.entry(app_id).or_default().push(&sp.id);
+        }
+    }
+    apps.iter()
+        .filter_map(|a| {
+            let ids = a.app_id.as_deref().and_then(|id| by_app_id.get(id))?;
+            Some((a.id.clone(), ids.iter().map(|s| (*s).to_string()).collect()))
+        })
+        .collect()
+}
+
 /// Stages a fresh SAML token-signing certificate on each selected service
 /// principal — **without activating any of them**.
 ///
@@ -1132,6 +1275,49 @@ mod tests {
     // Tests build their own runs; the commands only ever hold a token.
     use crate::commands::test_support::Recorder;
     use crate::state::CancelFlag;
+
+    fn del_app(id: &str, app_id: Option<&str>) -> DeletedApplication {
+        DeletedApplication {
+            id: id.into(),
+            app_id: app_id.map(str::to_string),
+            display_name: None,
+            deleted_date_time: None,
+        }
+    }
+
+    fn del_sp(id: &str, app_id: Option<&str>) -> DeletedServicePrincipal {
+        DeletedServicePrincipal {
+            id: id.into(),
+            app_id: app_id.map(str::to_string),
+            display_name: None,
+        }
+    }
+
+    #[test]
+    fn sp_pairs_groups_by_app_id_and_skips_unpairable() {
+        let apps = vec![
+            del_app("app-1", Some("1111")),
+            // Limited-info app (no appId): nothing can be paired to it.
+            del_app("app-2", None),
+        ];
+        let sps = vec![
+            del_sp("sp-1", Some("1111")),
+            del_sp("sp-2", Some("1111")),
+            // Limited-info SP shape — no appId to join on.
+            del_sp("sp-3", None),
+            // Orphan: its app is not part of this run's recycle-bin read.
+            del_sp("sp-4", Some("2222")),
+        ];
+        let pairs = sp_pairs_for(&apps, &sps);
+        assert_eq!(
+            pairs.get("app-1").map(|v| v.as_slice()),
+            Some(&["sp-1".to_string(), "sp-2".to_string()][..])
+        );
+        assert!(!pairs.contains_key("app-2"));
+        // A degraded (or simply empty) pre-read yields no pairings at all, so
+        // the run degrades to app-only restores rather than wrong restores.
+        assert!(sp_pairs_for(&[], &sps).is_empty());
+    }
 
     fn err(code: &str) -> BulkError {
         BulkError {

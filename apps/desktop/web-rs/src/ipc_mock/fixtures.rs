@@ -15,7 +15,8 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{
-    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, FederatedCredentialDto,
+    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, DeletedAppDto,
+    DeletedAppsDto, FederatedCredentialDto,
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
@@ -1687,6 +1688,29 @@ pub fn key_credential(display_name: &str, end: Option<DateTime<Utc>>) -> KeyCred
         start_date_time: date(2024, 6, 1),
         end_date_time: end,
         custom_key_identifier: Some("0f7a2c9b1e4d6a8f3b5c2e1d9a4f6b8c0e2d4a6f".to_string()),
+    }
+}
+
+/// Recycle-bin sample for the "Recently deleted" dialog: one app mid-window,
+/// one nearing its 30-day expiry. Restore/purge are deliberately NOT mocked
+/// (mutations stay unregistered in the demo).
+pub fn deleted_apps() -> DeletedAppsDto {
+    DeletedAppsDto {
+        apps: vec![
+            DeletedAppDto {
+                object_id: guid("deleted-crm"),
+                app_id: Some(guid("deleted-crm-app")),
+                display_name: Some("Contoso CRM".to_string()),
+                deleted_date_time: Some(Utc::now() - chrono::Duration::days(4)),
+            },
+            DeletedAppDto {
+                object_id: guid("deleted-sync"),
+                app_id: Some(guid("deleted-sync-app")),
+                display_name: Some("HR Sync".to_string()),
+                deleted_date_time: Some(Utc::now() - chrono::Duration::days(27)),
+            },
+        ],
+        truncated: false,
     }
 }
 

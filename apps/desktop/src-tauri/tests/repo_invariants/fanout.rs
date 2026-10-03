@@ -25,6 +25,10 @@ const TENANT_WIDE_READS: &[&str] = &[
     "app_name_index_cached(",
     "indexes_cached(",
     "list_all_sites(",
+    // Recycle-bin reads are tenant-wide too: the restore run pre-reads both
+    // deleted collections, so its per-item write loop must carry the same
+    // cancel/session-proof as every other tenant-wide fan-out.
+    "list_deleted_applications(",
 ];
 
 /// Method-call fragments that mutate tenant state.

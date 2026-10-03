@@ -239,7 +239,13 @@ Proposal; #### items are full entries, one-liners are bullets):
   `Policy.Read.All` token does not carry; pending `appConsentRequests` deferred to the
   second step — its read needs a dedicated consent-requests scope and its own feature.
   Remaining 3: F161 · F078 · F268
-- **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
+- **Product-gap proposals (11)** — **F266 closed 2026-10-03** (recycle bin:
+  `list_recently_deleted` / `bulk_restore_deleted` / `purge_deleted_application` over
+  `/directory/deletedItems`, the "Recently deleted…" dialog, post-delete Undo on the bulk bar,
+  and the delete copy now pointing at real exits; the bin is never cached, a successful restore
+  busts the list tier; the App-list `BulkActionBar` moved to persistent chrome above
+  `Suspense` — inside it, its own `on_done` refetch remounted and wiped the run summary +
+  Undo. Pinned by `gui/deleted_apps.rs`.) · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·
   F283
 - **Docs, demo, packaging & release tooling (7)** — F247 · F413 · F420 · F222 ·

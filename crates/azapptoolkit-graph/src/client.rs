@@ -11,12 +11,12 @@ use azapptoolkit_core::models::{
     ActiveDirectoryRole, AdminConsentRequestPolicy, AppCredentialSignInActivity,
     AppManagementPolicy, AppRoleAssignment, Application, ApplicationExposeApi,
     ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy, ConditionalAccessPolicy,
-    DirectoryAuditLog, DirectoryObject, Drive, DriveItem, FederatedIdentityCredential,
-    GroupSummary, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope, Organization,
-    Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
-    ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission, SelfSignedCertificate,
-    ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList, SitePermission,
-    SynchronizationJob, TenantAppManagementPolicy,
+    DeletedApplication, DeletedServicePrincipal, DirectoryAuditLog, DirectoryObject, Drive,
+    DriveItem, FederatedIdentityCredential, GroupSummary, NewKeyCredential, OAuth2PermissionGrant,
+    OAuth2PermissionScope, Organization, Paged, PasswordCredential, PreAuthorizedApplication,
+    RequiredResourceAccess, ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission,
+    SelfSignedCertificate, ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList,
+    SitePermission, SynchronizationJob, TenantAppManagementPolicy,
 };
 use azapptoolkit_core::scoping::SelectedScopeLevel;
 use url::Url;
@@ -85,7 +85,7 @@ pub use applications::{
     ApiApplicationPatch, AppListQuery, AppPatch, ApplicationAuthenticationPatch,
     ApplicationExposeApiPatch, ApplicationPublicClientPatch, ApplicationSpaPatch,
     ApplicationSsoPatch, ApplicationWebPatch, CreateApplicationRequest, DEFAULT_APP_PAGE_SIZE,
-    ImplicitGrantSettingsPatch,
+    DELETED_APPS_MAX, DELETED_SPS_MAX, ImplicitGrantSettingsPatch,
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};

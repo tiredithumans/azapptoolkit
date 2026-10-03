@@ -18,6 +18,7 @@ use crate::state::AppState;
 mod authentication;
 mod cache;
 mod credentials;
+mod deleted;
 mod federated;
 mod owners;
 mod permissions_resolve;
@@ -29,6 +30,7 @@ mod permissions_resolve;
 pub use authentication::*;
 pub(crate) use cache::*;
 pub use credentials::*;
+pub use deleted::*;
 pub use federated::*;
 pub use owners::*;
 

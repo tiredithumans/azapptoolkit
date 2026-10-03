@@ -117,6 +117,25 @@ pub async fn delete_application(tenant_id: &str, object_id: &str) -> Result<(), 
     .await
 }
 
+/// The tenant's recycle bin (recently deleted app registrations, ~30-day
+/// window). `truncated` on the payload means the cap was hit — the dialog must
+/// say so, never render a partial bin as complete.
+pub async fn list_recently_deleted(tenant_id: &str) -> Result<DeletedAppsDto, UiError> {
+    invoke_result("list_recently_deleted", TenantArg { tenant_id }).await
+}
+
+/// Permanently deletes one recycle-bin entry (skips the ~30-day window).
+pub async fn purge_deleted_application(tenant_id: &str, object_id: &str) -> Result<(), UiError> {
+    invoke_result(
+        "purge_deleted_application",
+        ObjectIdArgs {
+            tenant_id,
+            object_id,
+        },
+    )
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OwnerArgs<'a> {
