@@ -8,13 +8,15 @@ use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
-    ActiveDirectoryRole, AppRoleAssignment, Application, ApplicationExposeApi,
+    ActiveDirectoryRole, AdminConsentRequestPolicy, AppCredentialSignInActivity,
+    AppManagementPolicy, AppRoleAssignment, Application, ApplicationExposeApi,
     ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy, ConditionalAccessPolicy,
-    DirectoryAuditLog, DirectoryObject, Drive, DriveItem, FederatedIdentityCredential,
-    GroupSummary, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope, Organization,
-    Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
-    ResolvedSharePointResource, SelectedPermission, SelfSignedCertificate, ServicePrincipal,
-    ServicePrincipalSignInActivity, Site, SiteList, SitePermission, SynchronizationJob,
+    DeletedApplication, DeletedServicePrincipal, DirectoryAuditLog, DirectoryObject, Drive,
+    DriveItem, FederatedIdentityCredential, GroupSummary, NewKeyCredential, OAuth2PermissionGrant,
+    OAuth2PermissionScope, Organization, Paged, PasswordCredential, PreAuthorizedApplication,
+    RequiredResourceAccess, ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission,
+    SelfSignedCertificate, ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList,
+    SitePermission, SynchronizationJob, TenantAppManagementPolicy,
 };
 use azapptoolkit_core::scoping::SelectedScopeLevel;
 use url::Url;
@@ -83,7 +85,7 @@ pub use applications::{
     ApiApplicationPatch, AppListQuery, AppPatch, ApplicationAuthenticationPatch,
     ApplicationExposeApiPatch, ApplicationPublicClientPatch, ApplicationSpaPatch,
     ApplicationSsoPatch, ApplicationWebPatch, CreateApplicationRequest, DEFAULT_APP_PAGE_SIZE,
-    ImplicitGrantSettingsPatch,
+    DELETED_APPS_MAX, DELETED_SPS_MAX, ImplicitGrantSettingsPatch,
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
@@ -116,6 +118,12 @@ pub struct GraphClient {
     /// Optional `Policy.Read.All` token for reading Conditional Access policies,
     /// acquired on demand. Same graceful-degradation contract as `audit_log_token`.
     policy_token: Option<Arc<dyn BearerProvider>>,
+    /// Optional `IdentityRiskyServicePrincipal.Read.All` token for the Identity
+    /// Protection risky-service-principal report (the audit's compromised-SP
+    /// signal), acquired on demand. Same graceful-degradation contract — the
+    /// endpoint additionally needs a Workload Identities premium license, so an
+    /// un-licensed tenant simply gets no risky-SP data.
+    risky_sp_token: Option<Arc<dyn BearerProvider>>,
     /// Optional `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` token
     /// (one token) for claims-mapping policies. The default `write_token` does NOT cover
     /// `/policies/claimsMappingPolicies`, and the service-principal `$ref` assign/list/remove are
@@ -177,6 +185,7 @@ impl GraphClient {
             sync_token: None,
             audit_log_token: None,
             policy_token: None,
+            risky_sp_token: None,
             policy_write_token: None,
             sharepoint_token: None,
             group_member_token: None,
@@ -199,6 +208,13 @@ impl GraphClient {
     /// Attaches a `Policy.Read.All` token enabling Conditional Access reads.
     pub fn with_policy_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.policy_token = Some(token);
+        self
+    }
+
+    /// Attaches an `IdentityRiskyServicePrincipal.Read.All` token enabling the
+    /// Identity Protection risky-service-principal report.
+    pub fn with_risky_sp_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
+        self.risky_sp_token = Some(token);
         self
     }
 
@@ -313,6 +329,16 @@ impl GraphClient {
     /// `None` → `Forbidden` so the UI degrades rather than panics.
     fn policy_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(self.policy_token.as_ref(), "Policy.Read.All")
+    }
+
+    /// The `IdentityRiskyServicePrincipal.Read.All` token the risky-service-principal
+    /// report read rides (see [`Self::with_risky_sp_token`]); `None` → `Forbidden`
+    /// so the audit degrades rather than failing.
+    fn risky_sp_token(&self) -> Result<&Arc<dyn BearerProvider>> {
+        self.require_token(
+            self.risky_sp_token.as_ref(),
+            "IdentityRiskyServicePrincipal.Read.All",
+        )
     }
 
     /// The `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` token the

@@ -2,6 +2,7 @@
 //! "Expiring ≤7d", "High-risk") and reapply it in one click. Persisted to
 //! `localStorage`, scoped per tenant + view so they don't cross-contaminate.
 
+use chrono::NaiveDate;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,24 @@ struct SavedView {
     name: String,
     facet: String,
     search: String,
+    /// The drawer's "created on" window when the view was saved, kept in the
+    /// ISO form the native date inputs use (F369). Serde-defaulted because
+    /// localStorage still holds views saved before this field existed.
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    before: Option<String>,
+}
+
+/// Same format `DateRangeFilter`'s native date inputs read and write.
+const ISO: &str = "%Y-%m-%d";
+
+fn iso_of(d: Option<NaiveDate>) -> Option<String> {
+    d.map(|d| d.format(ISO).to_string())
+}
+
+fn parse_iso(s: Option<&String>) -> Option<NaiveDate> {
+    s.and_then(|s| NaiveDate::parse_from_str(s, ISO).ok())
 }
 
 /// A row of saved-view chips plus a save-current control. `facet`/`search` are
@@ -24,6 +43,11 @@ pub fn SavedViews(
     view_key: &'static str,
     facet: RwSignal<String>,
     search: RwSignal<String>,
+    /// The host's "created on" window, saved and applied with the facet +
+    /// search (F369). Lists without a date filter omit them.
+    #[prop(optional_no_strip)]
+    after: Option<RwSignal<Option<NaiveDate>>>,
+    #[prop(optional_no_strip)] before: Option<RwSignal<Option<NaiveDate>>>,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
@@ -59,6 +83,8 @@ pub fn SavedViews(
             name,
             facet: facet.get_untracked(),
             search: search.get_untracked(),
+            after: after.and_then(|s| iso_of(s.get_untracked())),
+            before: before.and_then(|s| iso_of(s.get_untracked())),
         };
         views.update(|v| {
             v.retain(|x| x.name != sv.name);
@@ -79,14 +105,39 @@ pub fn SavedViews(
                         let applied = sv.clone();
                         let removed = sv.name.clone();
                         let remove_label = format!("Remove saved view {}", sv.name);
+                        // Range text so the chip's tooltip says which window it
+                        // will restore (the visible label is just the name).
+                        let title = match (sv.after.as_deref(), sv.before.as_deref()) {
+                            (None, None) => sv.name.clone(),
+                            (Some(f), Some(t)) => {
+                                format!("{} · created {f}…{t}", sv.name)
+                            }
+                            (Some(f), None) => format!("{} · created from {f}", sv.name),
+                            (None, Some(t)) => format!("{} · created until {t}", sv.name),
+                        };
+                        let apply_label = format!("Apply saved view {}", sv.name);
+                        let (after_sig, before_sig) = (after, before);
                         view! {
                             <span class="saved-view-chip">
                                 <button
                                     type="button"
                                     class="saved-view-chip__apply"
+                                    title=title
+                                    aria-label=apply_label
                                     on:click=move |_| {
                                         facet.set(applied.facet.clone());
                                         search.set(applied.search.clone());
+                                        // Apply *includes* clearing (F369): a
+                                        // view without a range resets the
+                                        // drawer's, or applying it would
+                                        // silently keep the old window and
+                                        // show fewer rows than it promises.
+                                        if let Some(a) = after_sig {
+                                            a.set(parse_iso(applied.after.as_ref()));
+                                        }
+                                        if let Some(b) = before_sig {
+                                            b.set(parse_iso(applied.before.as_ref()));
+                                        }
                                     }
                                 >
                                     {sv.name.clone()}

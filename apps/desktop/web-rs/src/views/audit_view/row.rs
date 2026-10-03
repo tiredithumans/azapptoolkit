@@ -70,6 +70,9 @@ fn scan_item_for_tab(item: &AuditItem) -> &'static str {
         || has(issue::UNCONFINABLE_MAILBOX)
         || has(issue::UNCONFINABLE_SHAREPOINT)
         || has(issue::ORG_WIDE_SHAREPOINT)
+        // Org-wide Files is advisory too — the only action is on the
+        // Permissions tab (remove the grant, or add the item-level scope).
+        || has(issue::ORG_WIDE_FILES)
         || has(issue::SCOPED_SHAREPOINT)
         || has(issue::HIGH_RISK_APP_PERMS)
         || has(issue::HIGH_RISK_DELEGATED_PERMS)
@@ -570,6 +573,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -651,6 +656,10 @@ mod tests {
         );
         assert_eq!(
             tab(format!("{} x", issue::ORG_WIDE_SHAREPOINT)),
+            "permissions"
+        );
+        assert_eq!(
+            tab(format!("{}: Files.ReadWrite.All", issue::ORG_WIDE_FILES)),
             "permissions"
         );
         assert_eq!(

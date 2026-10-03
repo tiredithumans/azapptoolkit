@@ -8,7 +8,7 @@ use tauri::State;
 
 use azapptoolkit_core::defaults::AppVaultBinding;
 use azapptoolkit_core::settings::UserSettings;
-use azapptoolkit_keyvault::SecretSetRequest;
+use azapptoolkit_keyvault::{KeyVaultError, SecretSetRequest};
 
 use crate::commands::applications::invalidate_app_credentials;
 use crate::dto::UiError;
@@ -44,6 +44,7 @@ pub async fn kv_list_secrets(
                 .and_then(|a| a.expires)
                 .map(|d| d.to_rfc3339()),
             content_type: item.content_type,
+            managed: item.managed,
         })
         .collect())
 }
@@ -68,6 +69,57 @@ pub async fn kv_get_secret(
     })
 }
 
+/// Ownership tag keys stamped on every secret version this app mints (F079).
+/// A vault reader (or the next rotation) can tell which app — and which
+/// credential generation — a version was written for; the collision guard
+/// below refuses to overwrite a secret whose tags name a DIFFERENT app.
+const TAG_APP_ID: &str = "azapptoolkit-app-id";
+const TAG_OBJECT_ID: &str = "azapptoolkit-object-id";
+const TAG_KEY_ID: &str = "azapptoolkit-key-id";
+
+/// Builds the provenance tags for a rotated secret version. The ids are
+/// identifiers, never secret material (the value itself never appears here —
+/// see the app's "never write secrets to disk or logs" rule).
+fn rotation_tags(
+    app_id: Option<&str>,
+    object_id: &str,
+    key_id: &str,
+) -> std::collections::HashMap<String, String> {
+    let mut tags = std::collections::HashMap::new();
+    tags.insert(
+        TAG_OBJECT_ID.to_string(),
+        object_id.trim().to_ascii_lowercase(),
+    );
+    if let Some(a) = app_id.map(str::trim).filter(|a| !a.is_empty()) {
+        tags.insert(TAG_APP_ID.to_string(), a.to_ascii_lowercase());
+    }
+    tags.insert(TAG_KEY_ID.to_string(), key_id.to_string());
+    tags
+}
+
+/// True when the existing vault secret's tags provably name a different
+/// application. Tag-less secrets (and tag sets without our keys) are NOT
+/// treated as foreign: the tags only became trustworthy with this change, and
+/// hand-made secrets legitimately carry no ownership claim. Decision order:
+/// the object-id tag is decisive; the app-id tag is the fallback.
+fn owned_by_other_app(
+    tags: &std::collections::HashMap<String, String>,
+    object_id: &str,
+    app_id: Option<&str>,
+) -> Option<String> {
+    if let Some(owner) = tags.get(TAG_OBJECT_ID) {
+        return Some(owner.clone()).filter(|o| *o != object_id.trim().to_ascii_lowercase());
+    }
+    if let Some(owner) = tags.get(TAG_APP_ID) {
+        return match app_id.map(str::trim).filter(|a| !a.is_empty()) {
+            Some(mine) => Some(owner.clone()).filter(|o| *o != mine.to_ascii_lowercase()),
+            // No identity on the rotation input: any recorded owner wins.
+            None => Some(owner.clone()),
+        };
+    }
+    None
+}
+
 /// Rotates an application's client secret into Key Vault: mint a fresh app
 /// secret, store it as a new version of the named vault secret, then remove the
 /// previous credential(s) in `remove_key_ids` (empty = keep them / overlap).
@@ -81,6 +133,38 @@ pub async fn rotate_app_credential(
 ) -> Result<RotateCredentialResult, UiError> {
     let graph = state.graph_for(&tenant_id);
     let kv = state.kv_for(&tenant_id, &input.vault_name)?;
+
+    // 0. Provenance gate BEFORE minting: a secret version written by this app
+    //    carries the ownership tags below, so a typed-in secret name that
+    //    belongs to another app is refused without minting anything. A tag-less
+    //    secret stays rotatable (legacy/manual write — the operator chose the
+    //    name); a failed ownership read is logged and skipped so a transient
+    //    vault error can't lock a legitimate rotation.
+    match kv.get_secret(&input.secret_name, None).await {
+        Ok(sv) => {
+            if let Some(owner) = sv.tags.as_ref().and_then(|tags| {
+                owned_by_other_app(tags, &input.object_id, input.app_id.as_deref())
+            }) {
+                return Err(UiError::validation(
+                    "secret_owned_by_other_app",
+                    format!(
+                        "'{}' is tagged as owned by a different app ({owner}). Rotate it from \
+                         that app, or pick another secret name — nothing was minted.",
+                        input.secret_name
+                    ),
+                ));
+            }
+        }
+        // No secret yet under that name: a fresh version carries no collision risk.
+        Err(KeyVaultError::NotFound(_)) => {}
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                secret = %input.secret_name,
+                "rotation ownership read failed; continuing without the collision check",
+            );
+        }
+    }
 
     let days = input.lifetime_days.unwrap_or(180).clamp(1, 730);
     let lifetime = std::time::Duration::from_secs(u64::from(days) * 86_400);
@@ -117,7 +201,13 @@ pub async fn rotate_app_credential(
     let req = SecretSetRequest {
         value: secret_value,
         content_type: None,
-        tags: None,
+        // Provenance, not secrecy: which app + which credential generation this
+        // version was minted for (see `TAG_*`).
+        tags: Some(rotation_tags(
+            input.app_id.as_deref(),
+            &input.object_id,
+            &new_cred.key_id,
+        )),
         attributes: attrs,
     };
     if let Err(err) = kv.set_secret(&input.secret_name, &req).await {
@@ -227,4 +317,83 @@ pub async fn list_available_key_vaults(
         .filter_map(|v| v.name)
         .collect();
     Ok(names.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tags(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn rotation_tags_always_name_the_app_and_generation() {
+        let t = rotation_tags(Some("app-id-1"), "OBJ-1", "key-9");
+        assert_eq!(t.get(TAG_OBJECT_ID).map(String::as_str), Some("obj-1"));
+        assert_eq!(t.get(TAG_APP_ID).map(String::as_str), Some("app-id-1"));
+        assert_eq!(t.get(TAG_KEY_ID).map(String::as_str), Some("key-9"));
+
+        // A free-text rotation carries no appId: the object-id tag still
+        // establishes ownership, and a blank app id is not written as a tag.
+        let t = rotation_tags(Some("  "), "obj-2", "key-1");
+        assert!(!t.contains_key(TAG_APP_ID));
+        let t = rotation_tags(None, "obj-3", "key-1");
+        assert!(!t.contains_key(TAG_APP_ID));
+    }
+
+    /// The collision guard must fire on a provably foreign secret and stay
+    /// silent on tag-less / own-tagged / unrelated-tag sets — an absent tag is
+    /// never asserted as "not another app's" in a way that blocks rotation,
+    /// and never as "foreign" either.
+    #[test]
+    fn collision_guard_keys_on_the_ownership_tags_only() {
+        const OBJ: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+        const OTHER: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+
+        // No tags, or only unrelated tags → not claimed by another app.
+        assert_eq!(owned_by_other_app(&tags(&[]), OBJ, None), None);
+        assert_eq!(
+            owned_by_other_app(&tags(&[("owner", "someone-else")]), OBJ, None),
+            None
+        );
+        // Our own secret → rotatable.
+        assert_eq!(
+            owned_by_other_app(&tags(&[(TAG_OBJECT_ID, OBJ)]), OBJ, None),
+            None
+        );
+        assert_eq!(
+            owned_by_other_app(&tags(&[(TAG_APP_ID, "app-1")]), OBJ, Some("APP-1")),
+            None,
+            "case-insensitive id comparison"
+        );
+        // Another app's secret → refused, whatever else is in the tags.
+        assert_eq!(
+            owned_by_other_app(&tags(&[(TAG_OBJECT_ID, OTHER)]), OBJ, None),
+            Some(OTHER.to_string())
+        );
+        assert_eq!(
+            owned_by_other_app(&tags(&[(TAG_APP_ID, "other-app")]), OBJ, Some("app-1")),
+            Some("other-app".to_string())
+        );
+        // A rotation input with no appId cannot prove it is the owner: a
+        // recorded owner wins (fail closed against clobbering).
+        assert_eq!(
+            owned_by_other_app(&tags(&[(TAG_APP_ID, "app-2")]), OBJ, None),
+            Some("app-2".to_string())
+        );
+        // Object-id tag is decisive even when the app-id tag matches the input
+        // (a mismatched pair means the provenance is not this app's).
+        assert_eq!(
+            owned_by_other_app(
+                &tags(&[(TAG_OBJECT_ID, OTHER), (TAG_APP_ID, "app-1")]),
+                OBJ,
+                Some("app-1")
+            ),
+            Some(OTHER.to_string())
+        );
+    }
 }

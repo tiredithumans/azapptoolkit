@@ -39,6 +39,11 @@ pub struct EnterpriseApplicationDto {
     /// populated on the detail (the list index doesn't `$select` tags).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Graph `disabledByMicrosoftStatus` — Microsoft's own "disabled for a
+    /// Services Agreement violation" flag. Drives the Enterprise pane's
+    /// "Disabled by Microsoft" badge and the audit's Rule 21 on SP-only rows.
+    #[serde(default)]
+    pub disabled_by_microsoft_status: Option<String>,
     /// Free-text management notes (max 1024 chars). Only populated on the detail
     /// (the list index doesn't `$select` it); the Overview tab edits it.
     #[serde(default)]

@@ -34,6 +34,7 @@ fn base_sp() -> SpAuditInput {
         account_enabled: Some(true),
         app_owner_organization_id: Some("11111111-2222-3333-4444-555555555555".into()),
         service_principal_type: Some("Application".into()),
+        disabled_by_microsoft_status: None,
     }
 }
 
@@ -789,6 +790,7 @@ fn emitted_issue_markers_are_stable() {
             ResourcePermission::graph("Mail.Read"),          // ORG_WIDE_MAILBOX
             ResourcePermission::graph("Sites.Read.All"),     // ORG_WIDE_SHAREPOINT
             ResourcePermission::graph("Sites.Selected"),     // SCOPED_SHAREPOINT
+            ResourcePermission::graph("Files.ReadWrite.All"), // ORG_WIDE_FILES
         ],
         scope_values: vec!["Directory.AccessAsUser.All".into()], // HIGH_RISK_DELEGATED_PERMS
         ..Default::default()
@@ -800,6 +802,7 @@ fn emitted_issue_markers_are_stable() {
         issue::HIGH_RISK_DELEGATED_PERMS,
         issue::ORG_WIDE_MAILBOX,
         issue::ORG_WIDE_SHAREPOINT,
+        issue::ORG_WIDE_FILES,
         issue::SCOPED_SHAREPOINT,
         issue::NO_OWNERS,
         issue::REDUNDANT_APP_PERMS,
@@ -2627,5 +2630,182 @@ fn the_same_value_on_two_resources_is_not_a_duplicate() {
         score_application(&base_app(), Some(true), &both, now()).risk_score
             > score_application(&base_app(), Some(true), &one, now()).risk_score,
         "two resources means two grants, and must score higher than one"
+    );
+}
+
+/// Rule 21 (`disabledByMicrosoftStatus`). Net-new signal (no PowerShell
+/// ancestor): Microsoft's own disable flag alone takes an item to High, leads
+/// the issue list, and never inflates on any other status value.
+#[test]
+fn disabled_by_microsoft_alone_reaches_high_and_leads_the_issues() {
+    let flagged = Application {
+        disabled_by_microsoft_status: Some("DisabledDueToViolationOfServicesAgreement".into()),
+        ..base_app()
+    };
+    let item = score_application(&flagged, Some(true), &AppPermissions::default(), now());
+    assert_eq!(item.risk_score, 15, "flag alone: High is 15");
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert_eq!(item.issues.len(), 1);
+    assert!(
+        item.issues[0].starts_with(issue::DISABLED_BY_MICROSOFT),
+        "issue must lead with the finding-group marker: {:?}",
+        item.issues[0]
+    );
+
+    // Unknown/absent statuses score nothing — an unrecognised value must never
+    // inflate, the same guard the audience rule keeps.
+    for status in [None, Some("Success"), Some(""), Some("SomethingNew")] {
+        let app = Application {
+            disabled_by_microsoft_status: status.map(str::to_string),
+            ..base_app()
+        };
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        assert_eq!(item.risk_score, 0, "status {status:?} must not inflate");
+    }
+}
+
+/// The flag rides the service principal too, so SP-only rows (foreign apps,
+/// managed identities — no local application object) surface it.
+#[test]
+fn disabled_by_microsoft_flags_sp_only_rows() {
+    let sp = SpAuditInput {
+        disabled_by_microsoft_status: Some("DisabledDueToViolationOfServicesAgreement".into()),
+        ..base_sp()
+    };
+    let item = score_service_principal(&sp, &sp_perms(&[]), now());
+    assert_eq!(item.risk_score, 15);
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert!(
+        item.issues
+            .iter()
+            .any(|x| x.starts_with(issue::DISABLED_BY_MICROSOFT))
+    );
+    // …and the flag alone trips no other finding group.
+    assert_eq!(item.issues.len(), 1);
+}
+
+// ---- Rule 22: Identity Protection risky service principals --------------
+
+/// Builds a scored item, stamps the vendor risk fields the way the audit
+/// runner does, then runs the Rule 22 post-pass.
+fn risky_item(
+    state: Option<&str>,
+    level: Option<&str>,
+    sp_enabled: Option<bool>,
+    perms: &AppPermissions,
+) -> AuditItem {
+    let mut item = score_application(&base_app(), sp_enabled, perms, now());
+    item.sp_risk_state = state.map(str::to_string);
+    item.sp_risk_level = level.map(str::to_string);
+    apply_service_principal_risk(&mut item);
+    item
+}
+
+#[test]
+fn risky_flag_alone_is_high_and_stacks_to_critical() {
+    // 20 alone ≥ the 15-point High threshold; 20 + one high-risk grant
+    // (10) crosses the 25-point Critical line. The flag multiplies whatever
+    // else the row already carries — deliberate for a live-abuse signal.
+    let alone = risky_item(
+        Some("atRisk"),
+        Some("medium"),
+        Some(true),
+        &AppPermissions::default(),
+    );
+    assert_eq!(alone.risk_score, PTS_RISKY_SERVICE_PRINCIPAL);
+    assert_eq!(alone.risk_level, RiskLevel::High);
+    assert!(
+        alone
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL)),
+        "{:?}",
+        alone.issues
+    );
+    let stacked = risky_item(
+        Some("confirmedCompromised"),
+        Some("high"),
+        Some(true),
+        &sp_perms(&["Mail.ReadWrite"]),
+    );
+    assert_eq!(
+        stacked.risk_score,
+        PTS_RISKY_SERVICE_PRINCIPAL + PTS_HIGH_RISK_APP_PERM
+    );
+    assert_eq!(stacked.risk_level, RiskLevel::Critical);
+}
+
+#[test]
+fn only_the_risky_states_emit() {
+    // The report ships every principal it tracks, not just risky ones;
+    // non-risky states must leave the item byte-identical.
+    for state in [
+        None,
+        Some("none"),
+        Some("remediated"),
+        Some("dismissed"),
+        Some("SomethingNew"),
+    ] {
+        let item = risky_item(state, Some("low"), Some(true), &AppPermissions::default());
+        assert_eq!(item.risk_score, 0, "state {state:?} must not inflate");
+        assert!(item.issues.is_empty(), "state {state:?}");
+        assert!(item.remediations.is_empty(), "state {state:?}");
+    }
+}
+
+#[test]
+fn risky_flag_offers_disable_sign_in_only_while_enabled_and_once() {
+    let on = risky_item(Some("atRisk"), None, Some(true), &AppPermissions::default());
+    assert!(
+        on.remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn),
+        "an enabled risky SP must carry the one-click Fix"
+    );
+    // Already disabled: the Fix would be a no-op; the issue + advice stay.
+    let off = risky_item(
+        Some("atRisk"),
+        None,
+        Some(false),
+        &AppPermissions::default(),
+    );
+    assert!(
+        !off.remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn),
+        "a disabled SP needs no disable Fix"
+    );
+    assert!(
+        off.issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL))
+    );
+    // Dedupe: an item that already got the Fix from the unused pass gets no
+    // second copy from the risk pass.
+    let mut item = score_application(&base_app(), Some(true), &AppPermissions::default(), now());
+    item.remediations.push(disable_sign_in_remediation());
+    item.sp_risk_state = Some("confirmedCompromised".into());
+    item.sp_risk_level = Some("high".into());
+    apply_service_principal_risk(&mut item);
+    let fixes = item
+        .remediations
+        .iter()
+        .filter(|r| r.kind == RemediationKind::DisableSignIn)
+        .count();
+    assert_eq!(fixes, 1, "{:?}", item.remediations);
+}
+
+#[test]
+fn risky_flag_applies_to_sp_only_rows_too() {
+    let mut item = score_service_principal(&base_sp(), &sp_perms(&[]), now());
+    item.sp_risk_state = Some("confirmedCompromised".into());
+    item.sp_risk_level = Some("high".into());
+    apply_service_principal_risk(&mut item);
+    assert_eq!(item.risk_score, PTS_RISKY_SERVICE_PRINCIPAL);
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert!(
+        item.issues
+            .iter()
+            .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL))
     );
 }

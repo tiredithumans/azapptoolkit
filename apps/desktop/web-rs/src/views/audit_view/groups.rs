@@ -52,6 +52,18 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "credentials",
         section: GroupSection::Actionable,
     },
+    // The credential twin of `unused`: the report *tracks* these credentials
+    // and says they went unused for over 90 days — an absent credential is
+    // unknown, never flagged. Advisory (removing a credential is admin-judged,
+    // and only `expired` carries the sweep Fix), with a Credentials-tab
+    // deep-link where the Last-used column shows the evidence.
+    GroupSpec {
+        key: "unused_credential",
+        title: "Unused credentials",
+        blurb: "Client secrets and certificates the sign-in report tracked with no use for over 90 days (or none recorded at all). Credentials whose usage the report couldn't see are never listed — open the app's Credentials tab to read each one's Last used.",
+        tab: "credentials",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "orgwide_mailbox",
         title: "Org-wide mailbox access",
@@ -70,6 +82,17 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         key: "orgwide_sharepoint",
         title: "Org-wide SharePoint access",
         blurb: "Sites.* permissions that reach every site collection. Convert them to the Sites.Selected model on the sites the app actually needs.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
+    // Files is its own finding, not a variant of the SharePoint one: the site
+    // path has a one-click Sites.Selected conversion, the file path has none —
+    // the wizard only scopes Files.SelectedOperations.Selected to chosen
+    // files/libraries, and removing the org-wide grant stays admin-judged.
+    GroupSpec {
+        key: "orgwide_files",
+        title: "Org-wide Files access",
+        blurb: "Files.* permissions (e.g. Files.ReadWrite.All) that reach every file across all site collections and OneDrive. Convert to Files.SelectedOperations.Selected and grant only the files or libraries the app actually uses — advisory, no bulk Fix.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },
@@ -115,6 +138,33 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         title: "Org-wide access that can't be confined here",
         blurb: "Mailbox or SharePoint permissions that reach every mailbox or site, but that neither RBAC for Applications nor Sites.Selected can confine from this toolkit: a mail permission with no supported Exchange application role or whose resource could not be resolved, or Sites.* granted on Office 365 SharePoint Online. Review whether each grant is needed; where it is, re-declare it as a Microsoft Graph permission that can be scoped.",
         tab: "permissions",
+        section: GroupSection::Actionable,
+    },
+    // Rule 21 — Microsoft disabled the app/SP for a Services Agreement
+    // violation. Its own group, not folded into `expired` or
+    // `external_exposure`: the flag is about the principal's conduct and
+    // fires on SP-only rows too, where the credential and audience lenses
+    // don't apply. No group Fix — deleting or disabling is admin-judged.
+    GroupSpec {
+        key: "disabled_by_microsoft",
+        title: "Disabled by Microsoft",
+        blurb: "Microsoft blocked these apps for suspicious, abusive or malicious activity (disabledByMicrosoftStatus). Sign-ins are already blocked; the credentials and grants remain. Investigate why each was blocked before re-enabling anything — delete the ones that aren't mistaken blocks.",
+        tab: "overview",
+        section: GroupSection::Actionable,
+    },
+    // Rule 22 — Identity Protection flags the service principal itself as
+    // `atRisk` / `confirmedCompromised`. Its own group, not folded into
+    // `unused` or `disabled_by_microsoft`: it fires on principals that are
+    // usually still ENABLED and possibly mid-abuse — the opposite urgency
+    // from both. Advisory here (no group Fix, and `DisableSignIn` stays
+    // owned by the `unused` group's row-mapping); the risky row still offers
+    // its DisableSignIn Fix in the All-apps pane, where no per-group filter
+    // narrows it.
+    GroupSpec {
+        key: "risky_service_principal",
+        title: "Risky service principal (Identity Protection)",
+        blurb: "Microsoft Identity Protection flags these service principals as risky or compromised (`atRisk` / `confirmedCompromised`) — token issuance may be happening now. Open each in Identity Protection before trusting it again; if it is unknown to you, disable sign-in (reversible) to stop its tokens.",
+        tab: "overview",
         section: GroupSection::Actionable,
     },
     GroupSpec {
@@ -291,7 +341,8 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// the others are one click away in the section that owns them.
 ///
 /// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
-/// `unconfinable_orgwide`, `external_exposure`, `high_risk_delegated`,
+/// `unconfinable_orgwide`, `disabled_by_microsoft`, `risky_service_principal`,
+/// `external_exposure`, `high_risk_delegated`, `unused_credential`,
 /// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
@@ -338,6 +389,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -527,7 +580,7 @@ mod tests {
                 RiskLevel::High,
             ),
         ];
-        let summary = CachedAuditSummary::from_items(&items, None);
+        let summary = CachedAuditSummary::from_items(&items, None, false, None);
         let from_summary: Vec<(&str, BadgeTone, usize)> =
             ranked_actionable_findings(|k| summary.finding_tally(k))
                 .into_iter()
@@ -567,6 +620,7 @@ mod tests {
             marker(issue::UNCONFINABLE_MAILBOX),
             marker(issue::UNCONFINABLE_SHAREPOINT),
             marker(issue::ORG_WIDE_SHAREPOINT),
+            marker(issue::ORG_WIDE_FILES),
             marker(issue::SCOPED_SHAREPOINT),
             marker(issue::NO_OWNERS),
             marker(issue::SINGLE_OWNER),
@@ -631,6 +685,10 @@ mod tests {
         // re-declaring the grant is the operator's call.
         assert!(group_bulk_actions("unscopable_legacy_mailbox").is_empty());
         assert!(group_bulk_actions("unconfinable_orgwide").is_empty());
+        // Org-wide Files is advisory: the wizard scopes the
+        // `Files.SelectedOperations.Selected` end state, nothing rewrites a
+        // held `Files.*.All`, so there is no uniform mutation to offer.
+        assert!(group_bulk_actions("orgwide_files").is_empty());
     }
 
     /// The scorer keeps unconfinable reach out of the fixable org-wide groups
@@ -667,6 +725,7 @@ mod tests {
         for key in [
             "orgwide_mailbox",
             "orgwide_sharepoint",
+            "orgwide_files",
             "legacy_mailbox_scope",
             "scoped_mailbox",
             "scoped_sites",
@@ -692,6 +751,7 @@ mod tests {
             issue::UNCONFINABLE_MAILBOX,
             issue::LEGACY_MAILBOX_POLICY,
             issue::ORG_WIDE_SHAREPOINT,
+            issue::ORG_WIDE_FILES,
             issue::UNCONFINABLE_SHAREPOINT,
             issue::SCOPED_SHAREPOINT,
             issue::HIGH_RISK_APP_PERMS,
@@ -701,6 +761,8 @@ mod tests {
             issue::SINGLE_OWNER,
             issue::MULTITENANT_AUDIENCE,
             issue::UNVERIFIED_PUBLISHER,
+            issue::RISKY_SERVICE_PRINCIPAL,
+            issue::UNUSED_CREDENTIAL,
         ] {
             let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
             assert!(
@@ -764,9 +826,12 @@ mod tests {
             "high_risk_perms",
             "high_risk_delegated",
             "external_exposure",
+            "disabled_by_microsoft",
+            "risky_service_principal",
             "no_local_app",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
+            "unused_credential",
         ] {
             assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
         }

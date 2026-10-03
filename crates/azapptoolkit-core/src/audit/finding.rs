@@ -45,6 +45,13 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // both match.
         "legacy_mailbox_scope" => |x| x.starts_with(issue::LEGACY_MAILBOX_POLICY),
         "orgwide_sharepoint" => |x| x.starts_with(issue::ORG_WIDE_SHAREPOINT),
+        // Org-wide FILES reach is its own finding, not a variant of
+        // `orgwide_sharepoint`: the site path has a one-click `Sites.Selected`
+        // conversion and the file path has none (the wizard only scopes the
+        // Selected end state). Folding them would put Files rows under a group
+        // whose bulk Fix cannot apply — the same trap the unconfinable markers
+        // were split out to avoid.
+        "orgwide_files" => |x| x.starts_with(issue::ORG_WIDE_FILES),
         // Org-wide reach the toolkit cannot confine. Kept out of
         // `orgwide_mailbox` / `orgwide_sharepoint` so these rows never sit under
         // a group whose bulk Fix can't apply to them, and split in two because
@@ -64,6 +71,21 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // fixes.
         "redundant_perms" => |x| x.starts_with(issue::REDUNDANT_APP_PERMS),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
+        // Rule 21 — Microsoft's own disable flag. Its own group (not folded
+        // into the credential or exposure findings): the flag is about the
+        // principal's conduct, and fires on SP-only rows too.
+        "disabled_by_microsoft" => |x| x.starts_with(issue::DISABLED_BY_MICROSOFT),
+        // Rule 22 — the vendor's own risk flag from the Identity Protection
+        // risky-service-principal report. Its own group (not folded into the
+        // disabled flag): a risky SP is *still enabled* most of the time, and
+        // the two findings call for opposite urgency — investigate/disable now.
+        "risky_service_principal" => |x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL),
+        // Advisory post-pass (per-credential last-used). Its own group, kept
+        // out of the expired-credential finding: an unused-but-valid secret
+        // has no expiry problem, and the two call for different actions
+        // (rotate/renew vs confirm-then-remove). No remediation, so no bulk
+        // action pairs with it.
+        "unused_credential" => |x| x.starts_with(issue::UNUSED_CREDENTIAL),
         "ownership" => |x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER),
         _ => return None,
     };
@@ -125,6 +147,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -182,6 +206,10 @@ mod tests {
                 "orgwide_sharepoint",
             ),
             (
+                format!("{} something", issue::ORG_WIDE_FILES),
+                "orgwide_files",
+            ),
+            (
                 format!("{} something", issue::SCOPED_SHAREPOINT),
                 "scoped_sites",
             ),
@@ -206,6 +234,27 @@ mod tests {
                 format!("{}: Sites.Read.All", issue::UNCONFINABLE_SHAREPOINT),
                 "unconfinable_orgwide",
             ),
+            (
+                format!(
+                    "{} — Services Agreement violation",
+                    issue::DISABLED_BY_MICROSOFT
+                ),
+                "disabled_by_microsoft",
+            ),
+            (
+                format!(
+                    "{} — Identity Protection flags it",
+                    issue::RISKY_SERVICE_PRINCIPAL
+                ),
+                "risky_service_principal",
+            ),
+            (
+                format!(
+                    "{} secret \"x\" — no sign-in activity",
+                    issue::UNUSED_CREDENTIAL
+                ),
+                "unused_credential",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -214,12 +263,16 @@ mod tests {
             "scoped_mailbox",
             "legacy_mailbox_scope",
             "orgwide_sharepoint",
+            "orgwide_files",
             "scoped_sites",
             "ownership",
             "redundant_perms",
             "external_exposure",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
+            "disabled_by_microsoft",
+            "risky_service_principal",
+            "unused_credential",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

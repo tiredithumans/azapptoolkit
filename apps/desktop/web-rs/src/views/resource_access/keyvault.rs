@@ -92,7 +92,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                         ids.len()
                     };
                     format!(
-                        "{} role assignment{} across {} vault{} — scanned {} of {} vault{}{}{}",
+                        "{} role assignment{} across {} vault{} — scanned {} of {} vault{}{}{}{}",
                         rows.len(),
                         plural(rows.len()),
                         distinct_vaults,
@@ -102,6 +102,18 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                         plural(r.total_vaults),
                         if r.vaults_failed > 0 {
                             format!(" ({} failed — coverage is partial)", r.vaults_failed)
+                        } else {
+                            String::new()
+                        },
+                        // The other "empty ≠ no access": these vaults answer the
+                        // RBAC listing empty by design — their grants are made
+                        // through access policies this scan cannot enumerate.
+                        if r.vaults_access_policy_mode > 0 {
+                            format!(
+                                " ({} vault{} in legacy access-policy mode — their access grants are invisible to this scan)",
+                                r.vaults_access_policy_mode,
+                                plural(r.vaults_access_policy_mode)
+                            )
                         } else {
                             String::new()
                         },

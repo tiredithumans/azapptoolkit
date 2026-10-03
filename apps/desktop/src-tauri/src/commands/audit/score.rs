@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, ResourcePermission, SpAuditInput, score_application,
-    score_service_principal, unused_app_advisory,
+    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, RemediationKind,
+    ResourcePermission, SpAuditInput, apply_service_principal_risk, is_expired, score_application,
+    score_service_principal, secret_lifetime_advisory, unused_app_advisory,
+    unused_credential_advisory,
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
@@ -123,10 +125,18 @@ pub(crate) fn score_sp_only(
         sp_object_id: sp.id.clone(),
         created_date_time: sp.created_date_time,
         account_enabled: sp.account_enabled,
+        disabled_by_microsoft_status: sp.disabled_by_microsoft_status.clone(),
         app_owner_organization_id: sp.app_owner_organization_id.clone(),
         service_principal_type: sp.service_principal_type.clone(),
     };
     let mut item = score_service_principal(&input, &perms, now);
+    // Rule 22: join the run's tenant-wide risky-SP map before the unused
+    // post-pass so the DisableSignIn dedupe in core sees one Fix per row.
+    if let Some((state, level)) = ctx.risk_for(&sp.id) {
+        item.sp_risk_state = Some(state.to_string());
+        item.sp_risk_level = Some(level.to_string());
+        apply_service_principal_risk(&mut item);
+    }
     let last_sign_in = ctx.last_sign_in_for(&sp.app_id);
     item.sign_in_report_available = last_sign_in.is_some();
     item.last_sign_in = last_sign_in.flatten();
@@ -142,21 +152,28 @@ pub(crate) fn score_sp_only(
 /// The SP-only scoring candidates: service principals whose `appId` has no
 /// local application object (foreign enterprise apps, managed identities,
 /// orphaned SPs — paired SPs are already scored via the app-registration
-/// phase) AND that hold at least one Graph application-permission grant. The
-/// grant requirement is the noise filter: it drops the hundreds of grantless
-/// first-party Microsoft SPs every tenant carries. Disabled SPs stay in (Rule
-/// 4 flags them).
+/// phase) AND that hold at least one Graph application-permission grant OR are
+/// flagged risky by Identity Protection. The grant requirement is the noise
+/// filter: it drops the hundreds of grantless first-party Microsoft SPs every
+/// tenant carries. Disabled SPs stay in (Rule 4 flags them).
 ///
 /// "Holds a grant" spans **both** mailbox resources: an SP holding only the EWS
 /// `full_access_as_app` scope has no Graph role at all, yet reaches every mailbox
 /// in the tenant — filtering on the Graph matrix alone dropped exactly the
 /// principal most worth scoring. Known limitation: roles held only on *other*
 /// non-Graph resources still aren't in any matrix, so such an SP is not scored.
+///
+/// The risky set joins as a second admission path: a compromised managed
+/// identity or foreign SP often holds NO enumerable grant (or its grant lives
+/// on a resource no matrix reads), and "Identity Protection says it is
+/// compromised" is precisely the case where "no grants ⇒ skip it" is the wrong
+/// inference.
 pub(crate) fn sp_audit_candidates(
     sp_index: &[ServicePrincipal],
     local_app_ids: &HashSet<String>,
     graph_roles_by_sp: &HashMap<String, Vec<String>>,
     ews_full_access_sps: &HashSet<String>,
+    risky_by_sp: &HashMap<String, (String, String)>,
 ) -> Vec<ServicePrincipal> {
     sp_index
         .iter()
@@ -164,6 +181,7 @@ pub(crate) fn sp_audit_candidates(
         .filter(|sp| {
             graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty())
                 || ews_full_access_sps.contains(&sp.id)
+                || risky_by_sp.contains_key(&sp.id)
         })
         .cloned()
         .collect()
@@ -366,6 +384,15 @@ pub(crate) async fn score_one(
     let sp_enabled = sp.as_ref().and_then(|s| s.account_enabled);
     let now = chrono::Utc::now();
     let mut item = score_application(app, sp_enabled, &perms, now);
+    // Rule 22: the risky-SP report is tenant-wide; join it onto this row by
+    // the SP's object id (the same key the grant matrices use), then let the
+    // core post-pass fold in the +20, the marker and the DisableSignIn fix.
+    // Runs BEFORE the unused post-pass, which must not stack a second Fix.
+    if let Some((state, level)) = sp.as_ref().and_then(|s| ctx.risk_for(&s.id)) {
+        item.sp_risk_state = Some(state.to_string());
+        item.sp_risk_level = Some(level.to_string());
+        apply_service_principal_risk(&mut item);
+    }
     // Carry the sign-in signal as structured fields (the "Unused" facet keys off
     // `unused`, the table shows `last_sign_in`) and keep the human-readable
     // advisory in `issues` for export/detail. Outer `Some` = report available.
@@ -378,10 +405,92 @@ pub(crate) async fn score_one(
         item.recommendations.push(rec);
         // Attached here rather than in `score_application` because `unused` is
         // this post-pass's flag. Skip when there's no SP to disable, or the SP
-        // is already disabled — either way the fix has nothing to do.
-        if sp.is_some() && item.service_principal_enabled != Some(false) {
+        // is already disabled — either way the fix has nothing to do. Skip also
+        // when the risky pass already attached one for this row (a risky AND
+        // unused SP gets one Fix, not two).
+        if sp.is_some()
+            && item.service_principal_enabled != Some(false)
+            && !item
+                .remediations
+                .iter()
+                .any(|r| r.kind == RemediationKind::DisableSignIn)
+        {
             item.remediations
                 .push(azapptoolkit_core::audit::disable_sign_in_remediation());
+        }
+    }
+    // Per-credential last-used advisory (SP-only rows are skipped: a
+    // service principal carries no local credentials to judge). Only
+    // still-valid credentials are considered — an expired one is the
+    // expired-credential finding's job — and only ones the report actually
+    // tracks can flag: everything without a report row resolves to `Unknown`
+    // inside `unused_credential_advisory`, so a missing or partial report
+    // never mis-flags a credential. Credential age falls back to the app's
+    // creation date; a secret with no start date is as old as its app.
+    if ctx.credential_usage_available {
+        let activity = |key_id: &str| ctx.credential_activity_for(&app.app_id, key_id);
+        let usage: Vec<(String, CredentialActivity, Option<DateTime<Utc>>)> = app
+            .password_credentials
+            .iter()
+            .filter(|c| !is_expired(c.end_date_time, now))
+            .map(|c| {
+                (
+                    format!("secret \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                    activity(&c.key_id),
+                    c.start_date_time.or(app.created_date_time),
+                )
+            })
+            .chain(
+                app.key_credentials
+                    .iter()
+                    .filter(|c| !is_expired(c.end_date_time, now))
+                    .map(|c| {
+                        (
+                            format!("cert \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                            activity(&c.key_id),
+                            c.start_date_time.or(app.created_date_time),
+                        )
+                    }),
+            )
+            .collect();
+        let usage_refs: Vec<(&str, CredentialActivity, Option<DateTime<Utc>>)> =
+            usage.iter().map(|(l, a, s)| (l.as_str(), *a, *s)).collect();
+        if let Some((issue, rec)) = unused_credential_advisory(&usage_refs, now) {
+            item.issues.push(issue);
+            item.recommendations.push(rec);
+        }
+    }
+    // Per-app secret-lifetime advisory: judge still-valid secrets against the
+    // app-management policy cap enforced ON THIS PRINCIPAL (assigned override
+    // first, tenant default only without one). Recommendation-only — the cap
+    // is operator context, so there is no issue marker, no finding key and no
+    // score. `secret_cap_for` yielding `None` means NO verdict (policy
+    // unreadable, unenforced, grandfathered by a date gate, or an unknowable
+    // multi-policy combination), never "compliant".
+    if let Some(cap) = ctx.secret_cap_for(
+        &app.id,
+        sp.as_ref().map(|s| s.id.as_str()),
+        app.created_date_time,
+    ) {
+        type OwnedLifetime = (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+        let lifetimes: Vec<OwnedLifetime> = app
+            .password_credentials
+            .iter()
+            .filter(|c| !is_expired(c.end_date_time, now))
+            .map(|c| {
+                (
+                    format!("secret \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                    c.end_date_time,
+                    c.start_date_time.or(app.created_date_time),
+                )
+            })
+            .collect();
+        let lifetime_refs: Vec<CredentialLifetime> = lifetimes
+            .iter()
+            .map(|(l, e, s)| (l.as_str(), *e, *s))
+            .collect();
+        if let Some(rec) = secret_lifetime_advisory(&lifetime_refs, cap) {
+            item.recommendations.push(rec);
         }
     }
     Ok(item)

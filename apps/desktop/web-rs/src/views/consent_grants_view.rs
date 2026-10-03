@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::consent::{self, OAuth2GrantDto};
+use crate::bindings::consent::{self, OAuth2GrantDto, TenantConsentPostureDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
@@ -26,6 +26,50 @@ pub fn ConsentGrantsView() -> impl IntoView {
         consent::save_oauth2_grants_to_file(&data, format).await
     };
 
+    // Tenant consent posture (F274): the config that *produced* the grants
+    // below. Shares the `reload` counter with the row fetch — Refresh pulls
+    // both — and is deliberately independent of it: a failed posture read or an
+    // `available: false` answer renders nothing (unknown is never a verdict).
+    let reload = RwSignal::new(0_u32);
+    let posture = RwSignal::new(TenantConsentPostureDto::default());
+    Effect::new(move |_| {
+        let Some(t) = session.active_tenant.get() else {
+            return;
+        };
+        let _ = reload.get();
+        posture.set(TenantConsentPostureDto::default());
+        let tenant_id = t.tenant_id.clone();
+        leptos::task::spawn_local(async move {
+            if let Ok(p) = consent::get_tenant_consent_posture(&tenant_id).await {
+                let still_active = session
+                    .active_tenant
+                    .get_untracked()
+                    .map(|t| t.tenant_id == tenant_id)
+                    .unwrap_or(false);
+                if still_active {
+                    posture.set(p);
+                }
+            }
+        });
+    });
+    let header_note = Signal::derive(move || {
+        let p = posture.get();
+        let names = p.default_user_role_consent_policies.unwrap_or_default();
+        if names.is_empty() {
+            return None;
+        }
+        let mut text = format!(
+            "Users in this tenant can grant delegated permissions to themselves — the app-consent \
+             policies ({}) assigned to the default user role make every 'User' grant below \
+             potentially self-granted.",
+            names.join(", ")
+        );
+        if p.risky_app_user_consent == Some(true) {
+            text.push_str(" This tenant also allows user consent for risky apps.");
+        }
+        Some(("warn".to_string(), text))
+    });
+
     view! {
         <AuditDashboard
             title="Consent grants"
@@ -35,6 +79,8 @@ pub fn ConsentGrantsView() -> impl IntoView {
             view_key="consent"
             noun="grants"
             empty_message="No grants match this filter."
+            reload=reload
+            header_note=header_note
             facets=vec![("all", "All"), ("risky", "High-risk"), ("admin", "Admin consent")]
             headers=vec!["Client", "Resource", "Consent", "Scopes", ""]
             fetch=fetch

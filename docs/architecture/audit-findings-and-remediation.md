@@ -15,6 +15,8 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 
 | Rule | Helper | Score | Issue marker | Finding key | Fix | Provenance |
 |---|---|---|---|---|---|---|
+| 21 | `rule_disabled_by_microsoft` | +15 flat (folded **first**, despite the number: alone it reaches High) | `DISABLED_BY_MICROSOFT` | `disabled_by_microsoft` | — (delete/disable is admin-judged) | net-new |
+| 22 | `apply_service_principal_risk` (runner post-pass, **before** the unused post-pass) | +20 flat (alone it reaches High; stacks any other finding to Critical) | `RISKY_SERVICE_PRINCIPAL` | `risky_service_principal` | `DisableSignIn` (shared with the unused post-pass — deduped to one per row) | net-new |
 | 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
 | 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
 | 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
@@ -24,7 +26,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 8 / 9 | same | +3 all expiring / +2 mixed (only when none expired) | none | — | — | threshold `Constants.ps1:202` |
 | 10 | `rule_stale_app` | +2 (older than `STALE_APP_DAYS`) | none | — | — | `MaxAuditHistoryDays` in `Constants.ps1` |
 | 11 | `rule_mailbox_advisory` | advisory | `ORG_WIDE_MAILBOX`, `LEGACY_MAILBOX_POLICY`, `UNSCOPABLE_LEGACY_MAILBOX`, `UNCONFINABLE_MAILBOX`, `SCOPED_VIA_RBAC` (contains) | `orgwide_mailbox`, `legacy_mailbox_scope`, `unscopable_legacy_mailbox`, `unconfinable_orgwide`, `scoped_mailbox` | `ScopeMailboxAccess`, `MigrateApplicationAccessPolicy` | `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis` |
-| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `scoped_sites` | `ScopeSharePointAccess` | not cited |
+| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `ORG_WIDE_FILES`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `orgwide_files`, `scoped_sites` | `ScopeSharePointAccess` (Sites only — the Files advisory has no fix) | not cited |
 | 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130` |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
@@ -32,9 +34,12 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 19 / 20 | `rule_external_exposure` | +3 audience / +2 unverified publisher | `MULTITENANT_AUDIENCE`, `UNVERIFIED_PUBLISHER` | `external_exposure` | — | not cited |
 | — | `rule_downgrade_pointers` | recommendation only | none | — | — (Downgrade… is admin-judged) | not cited |
 | runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
+| runner | `unused_credential_advisory` (credential-usage post-pass, **Application rows only**) | advisory | `UNUSED_CREDENTIAL` | `unused_credential` | — (removing a credential is admin-judged) | net-new |
+| per-app | `secret_lifetime_advisory` (against the app-management policy cap, **Application rows only**) | recommendation only (no marker, key or score) | none | — | — | net-new (rides beside the Rule 7 floor; no ranking change) |
 
 Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
-Rules 1–4 and 11–13 plus the sign-in post-pass (see
+Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (not the credential-usage
+one: a service principal carries no local credentials to judge; see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
 
 ## Scope-aware audit risk
@@ -177,7 +182,10 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
 exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined
-once in `azapptoolkit-core::scoping`).
+once in `azapptoolkit-core::scoping`). Org-wide **Files** reach is the opposite shape — an explicit
+two-value list (`is_files_orgwide_permission` / `FILES_ORGWIDE_PERMISSIONS`, also in `scoping`) —
+because the `Files.` family contains scopes that are *not* tenant-wide file reach
+(`Files.SelectedOperations.Selected`, app-folder scopes), so a prefix rule would misclassify them.
 
 **To teach the app a new mechanism**, touch:
 
@@ -260,12 +268,15 @@ Two kinds vary the pattern:
   status never reads as success. The command now busts `invalidate_app_lists` on a **non-dry** run
   that produced any item (partial included — the grants really were removed); a dry run busts
   nothing.
-- **`DisableSignIn`** (unused app) is attached by the **audit runner's sign-in post-pass**, not
-  `score_application` — `unused` is a post-pass flag (the sign-in report is fetched after scoring),
-  and it's skipped when the SP is already disabled. Safe because it's reversible: the handler
+- **`DisableSignIn`** is attached by **two runner post-passes**, deduped to one Fix per row: the
+  risky-SP pass (`apply_service_principal_risk`) attaches it first for a risky *enabled* principal,
+  and the sign-in pass (`unused` app) skips when that already happened — or when the SP is already
+  disabled or absent. Neither attaches it inside `score_application` — both flags (`sp_risk_state`,
+  `unused`) are post-pass facts. Safe because it's reversible: the handler
   (`remediate_disable_sign_in`) re-resolves the SP from the live application and sets
   `accountEnabled: false`; the enterprise app's Overview toggle re-enables. SP-only unused rows
-  don't get it (their Open lands on the enterprise/MI detail, which has the toggle).
+  don't get it (their Open lands on the enterprise/MI detail, which has the toggle) — SP-only
+  *risky* rows do, since that finding is about live abuse, not staleness.
 
 ## Redundant application permissions (Rule 18)
 
@@ -339,6 +350,110 @@ pure — note `remove_declared_access` prunes an emptied resource entry, so a br
 recreated to carry the narrow role). Idempotent: a broad permission already gone is a no-op
 success with every `DowngradeOutcome` flag `false`.
 
+## The risky-service-principal signal (Rule 22)
+
+The run's tenant-wide Identity Protection read — ONE `GET /identityProtection/riskyServicePrincipals`
+per audit, paged with `$top = MAX_PAGE_SIZE`, served by the one-shot `scoped_get` (premium reports
+deliberately skip the retry budget; a first-page 404 is an empty answer). Only
+`confirmedCompromised` / `atRisk` rows are kept, keyed by `servicePrincipalId` — the SP **object**
+id, the same join key the grant matrices use — and joined onto audit rows in BOTH phases
+(`score_one` and `score_sp_only`), never via a per-principal read. Deliberately **uncached**: a
+compromise flag must be re-read by every run, and the payload is one row per flagged principal.
+
+- **Auth:** an on-demand `ScopedTokenAdapter` token for `IdentityRiskyServicePrincipal.Read.All`
+  (CAE), capability `identity_protection_risk`. Audit surfaces carry no Grant-consent button, so
+  consent arrives only through the readiness checklist's silent probe of every `scope_feature`.
+- **Unavailable ≠ gap:** no consent or no Workload Identities premium license (the endpoint 403s
+  `Authentication_RequestFromNonPremiumTenantOrB2CTenant`) means the check reads as *unavailable* —
+  no coverage gap, no degraded banner, following the sign-in-report precedent that most tenants
+  are not entitled. A genuine failed read on an entitled tenant IS
+  `AuditCoverageGap::RiskyServicePrincipals`: unlike the sign-in report, a failed risky read means
+  the security check silently stopped working, so the run is degraded — never cached, never shown
+  as an all-clear. While unavailable, `ScoreCtx::risk_for` answers `None` even for a principal
+  present in the map; Rule 22 never fires on an unchecked assumption.
+- **Scoring:** `apply_service_principal_risk` adds +20 (alone ⇒ High; stacks any other finding to
+  Critical — a CHANGELOG-gated ranking shift), the `RISKY_SERVICE_PRINCIPAL` marker issue, and a
+  `DisableSignIn` Fix while the SP is still enabled. It runs BEFORE the unused post-pass, which
+  then skips its own Fix — one Fix per row either way.
+- **UI:** the `risky_service_principal` finding group is advisory (no `group_bulk_actions`, no
+  `group_remediation_kinds` entry — `DisableSignIn` stays solely owned by the `unused` group, which
+  the exactly-one-owner test pins); risky rows still render their Fix in the All-apps pane, where
+  no per-group kinds filter narrows the row buttons.
+
+## The per-credential last-used signal (credential-usage post-pass)
+
+One tenant-wide read per audit — `GET /beta/reports/appCredentialSignInActivities` (beta preview,
+**Global cloud only**, `AuditLog.Read.All`) — returns the last observed sign-in use of every
+credential, per origin. Same transport shape as the sign-in report (`$top = MAX_PAGE_SIZE`,
+origin-checked paging), but unlike the risky read it IS read-through cached
+(`{tenant}|app_credential_sign_in_activities` under `CacheKind::Permissions`): last-used moves on
+a days-scale, and the identical read backs the Credentials tab's `list_credential_usage`, so a
+fresh audit warms the tab and vice versa. Rows fold into one `"appId|keyId" → CredentialActivity`
+map with the newest date winning (one credential can appear under both the `application` and the
+`servicePrincipal` origin); the Credentials tab re-applies the fold client-side because the join
+happens there too. Application rows only — `score_sp_only` never runs it.
+
+- **Unknown is never unused.** A credential with no report row resolves to `Unknown` and is never
+  flagged — absence from the report is not evidence of no use (the report covers only some sign-in
+  flows). Only a `Never` credential older than the window, or a `LastSeen` one whose last use is
+  past 90 days (`UNUSED_CREDENTIAL_DAYS`), becomes the advisory. The never-false-positive contract;
+  pinned by `unused_credential_advisory_never_flags_unknown`.
+- **Scope of the judgment:** only still-valid credentials are considered (an expired one is the
+  `expired` finding's job, which keeps the sole `RemoveExpiredCredentials` Fix), age counts from
+  each credential's `start_date_time` (falling back to the app's creation date — the unused-app
+  rule's brand-new guard, per credential), and one issue line names up to three stale credentials
+  ("and N more") per the mixed-credential-status line precedent. Advisory only: no score —
+  last-used is operator context on top of the expiry signals, not a new severity — and no Fix;
+  removal stays admin-judged.
+- **Unavailable disables, never degrades:** a failed read, a missing `AuditLog.Read.All` consent or
+  a non-global cloud sets `ScoreCtx.credential_usage_available = false` and the advisory is simply
+  off — no coverage gap, no degraded banner (the sign-in-report precedent: most tenants can never
+  see this report, and it only feeds an advisory). `list_credential_usage` degrades the same way
+  (`available: false` + empty rows) rather than failing the command.
+- **UI:** the `unused_credential` finding group sits in the Actionable section with a
+  Credentials-tab deep link, and deliberately has no `group_bulk_actions` /
+  `group_remediation_kinds` entry (pinned by `advisory_and_healthy_groups_offer_no_row_fix`). The
+  Credentials tab shows a **Last used** column on both tables, three-state by construction:
+  dated → the day, tracked-with-no-use → "No use recorded", unknown → "—". "—" is a real answer
+  ("we don't know"), never rendered as "unused"; when the report is unavailable the whole column
+  reads "—" under one info `Callout`.
+
+## The credential-lifetime policy (app-management policies, v1.0)
+
+Two v1.0 reads per audit (`prefetch_app_management_policy`): `policies/defaultAppManagementPolicy` and
+`policies/appManagementPolicies?$expand=appliesTo`, joined in one pair on the shared `policy` bearer
+(`Policy.Read.All`, acquired on demand like Conditional Access — these are v1.0, not beta, so there is no
+preview/sovereign caveat to carry). Either read failing makes the WHOLE pair unavailable: without the
+`appliesTo` target map a default-policy cap could mis-flag an app that adopted an override, so partial
+policy data is no data. That is an unavailable advisory, not a coverage gap — the lifetime signal is
+operator context on top of the expiry findings, its absence hides no finding, and a tenant that never
+consented `Policy.Read.All` must not carry a permanent degraded banner (the sign-in-report precedent).
+The Credentials tab's per-app `get_app_credential_policy` (three reads joined, same token) degrades the
+same way: `available: false`, `Ok` never `Err`.
+
+- **One cap rule, two surfaces.** `ScoreCtx::secret_cap_for` + `enforced_secret_max_days` (core) resolve
+  the cap enforced ON one principal: an assigned per-app override REPLACES the tenant default — even
+  disabled or holding no lifetime rule, so the default must not leak onto an app that adopted an override
+  either; ≥2 assigned overrides is a shape Graph does not document → no verdict; a disabled policy enforces
+  no cap; an app predating a date-gated restriction is grandfathered → no cap. `credential_over_cap(end,
+  start, cap)` is the ONE over-cap predicate, shared by the audit advisory and the Credentials-tab markers
+  (expiry-state filtering stays with the caller: expired secrets keep their single Expired signal), so the
+  two surfaces can never name different secrets for one app. `None` is "no verdict", never "compliant".
+  Application rows only — a service principal carries no local secrets, and the join starts from
+  `app.password_credentials`.
+- **Recommendation-only.** The audit emits one per-app recommendation line when a cap is knowable — no
+  issue marker, no finding key, no score, no `groups.rs` entry; the 365-day Rule 7 floor is untouched and
+  this compares ALONGSIDE it (replacing the floor would be a CHANGELOG-gated ranking change). The tab
+  shows a section `Callout` only for a known cap (info tone, warn while violations exist), an "Over cap"
+  `Badge` on valid provably-over secrets only, and the add-secret dialog warns — never clamps or blocks,
+  for a chosen lifetime over the cap ("the add would be rejected"); only Graph decides.
+- **Never "no cap enforced."** Unknown (pair unavailable) and known-capless both render NOTHING on every
+  surface — the same never-flag-on-unknown contract as the Last-used column, and a permanent notice on
+  every healthy tenant trains operators to ignore it. Home's one-line
+  "Tenant policy caps secret lifetimes at N days." comes from `tenant_secret_max_days` (the gate-ignoring
+  tenant lens, paired with `credential_policy_available` on `CachedAuditSummary`), not from any per-app
+  verdict.
+
 ## Structured audit signals over issue-text parsing
 
 The Security workbench's finding groups and filters key off structured `AuditItem` fields
@@ -379,6 +494,14 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   because the recommendations differ. `every_reach_marker_has_a_group` pins that every reach/risk
   marker the scorer emits lands in some group; the three hygiene notes (instance lock, public
   client, secret-over-cert) are deliberately left to the All-apps issue column.
+- **Org-wide Files reach is advisory with its own group.** `orgwide_files` (`ORG_WIDE_FILES`)
+  fires for the two tenant-wide file grants on Microsoft Graph (`Files.Read.All`,
+  `Files.ReadWrite.All`). Actionable with **no bulk action and no row Fix**: the wizard scopes
+  `Files.SelectedOperations.Selected` to chosen files/libraries, but no handler converts a held
+  `Files.*.All`, so removal stays admin-judged — the same reason it is kept out of
+  `orgwide_sharepoint`, whose Sites.Selected bulk Fix cannot apply to a Files grant. The picker
+  hint, this rule's recommendation and the wizard all name the one scoped value; its single source
+  is `audit::least_privilege_alternative_for`, whose Files arm must stay worded off the helper.
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
   core `audit/finding.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
@@ -391,7 +514,7 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   used to ship it over IPC on every audit reload. The buckets classify through `matches_finding`,
   so a count can't diverge from the group it summarizes (pinned by
   `posture_counts_agree_with_finding_groups`); `PostureCounts::finding(key)` is the one key→bucket
-  map. The Home card counts the two unconfinable-reach groups too. `groups::tone` is the one
+  map. The Home card counts the two unconfinable-reach groups and the org-wide Files finding too. `groups::tone` is the one
   `RiskLevel` → tone map (group dots, risk badges, the Home card). The Home card's ranked
   Top-findings list goes through `groups::ranked_actionable_findings`, which ranks the summary's
   tallies with the same `rank_key` as `group_findings`, so the finding *order* and tone can't
@@ -427,10 +550,14 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 
 - **Candidates** (`sp_audit_candidates`, pure + unit-tested): shared `{tenant}|sp_index` rows whose
   `appId` joins to no scanned application AND that hold ≥1 **Microsoft Graph** application grant in
-  the tenant-wide `appRoleAssignedTo` matrix. The grant requirement is the noise filter (grantless
-  first-party Microsoft SPs vanish); disabled SPs stay in (Rule 4). Known limitation: roles held
-  only on non-Graph resources (e.g. legacy Office 365 Exchange Online `full_access_as_app`) aren't
-  in the matrix, so such an SP isn't scored.
+  the tenant-wide `appRoleAssignedTo` matrix, OR hold the EWS `full_access_as_app` scope (the
+  second mailbox resource, read separately), OR are flagged risky by the run's Identity Protection
+  map. The grant/risk requirement is the noise filter (grantless first-party Microsoft SPs vanish);
+  disabled SPs stay in (Rule 4). The risky admission path is deliberate: a compromised managed
+  identity or foreign SP often holds no *enumerable* grant, and "no grants ⇒ skip it" is exactly
+  the wrong inference when Identity Protection says the principal is compromised. Known limitation:
+  roles held only on other non-Graph resources still aren't in any matrix, so an *unflagged* SP
+  holding only those isn't scored.
 - **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
   `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
   subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now

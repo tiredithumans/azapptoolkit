@@ -11,10 +11,10 @@ use super::*;
 use super::credentials::{is_long_lived, overall_credential_status};
 use super::permissions::{
     PTS_ADMIN_CONSENT_DELEGATED, PTS_ALL_CREDS_EXPIRED, PTS_ALL_EXPIRING_SOON,
-    PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM, PTS_MIXED_EXPIRED,
-    PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
-    PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP, PTS_UNVERIFIED_PUBLISHER,
-    RedundantPermission,
+    PTS_DISABLED_BY_MICROSOFT, PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM,
+    PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_RISKY_SERVICE_PRINCIPAL,
+    PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP,
+    PTS_UNVERIFIED_PUBLISHER, RedundantPermission,
 };
 
 /// One rule's contribution: score delta plus the issues/recommendations it
@@ -34,6 +34,33 @@ impl RuleContribution {
         self.issues.extend(other.issues);
         self.recommendations.extend(other.recommendations);
     }
+}
+
+/// Rule 21: Microsoft disabled the principal for a Services Agreement
+/// violation (`disabledByMicrosoftStatus`). Folded FIRST in both entry points:
+/// it is the single strongest signal an item can carry — Microsoft's own
+/// "suspicious, abusive or malicious activity" verdict — so it leads the issue
+/// list and alone takes the item to High. Admin-judged like the other
+/// exposure findings: deleting or disabling is not a safe one-click fix, so no
+/// remediation rides it. Unrecognised statuses never inflate (same rule as
+/// `rule_external_exposure`'s audience arm).
+fn rule_disabled_by_microsoft(status: Option<&str>) -> RuleContribution {
+    let mut c = RuleContribution::default();
+    if status != Some("DisabledDueToViolationOfServicesAgreement") {
+        return c;
+    }
+    c.score += PTS_DISABLED_BY_MICROSOFT;
+    c.issues.push(format!(
+        "{} — Microsoft disabled this application for a Services Agreement violation \
+         (suspicious, abusive or malicious activity); sign-ins and token issuance are blocked",
+        issue::DISABLED_BY_MICROSOFT
+    ));
+    c.recommendations.push(
+        "Treat its credentials and grants as suspect: investigate why it was disabled before \
+         re-enabling anything; delete the app if it is not a mistaken block"
+            .to_string(),
+    );
+    c
 }
 
 /// Rules 1 & 2: high/medium-risk application permissions. A high/medium-risk
@@ -390,18 +417,23 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     (c, mailbox_unscoped, scoped_legacy)
 }
 
-/// Rule 12 (advisory, no score): organization-wide SharePoint access. Scoping
-/// is encoded by the permission itself (`Sites.Selected` scoped, other `Sites.*`
-/// org-wide) — no live lookup. Gates on each grant's resource: only Graph's
-/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries the
+/// Rule 12 (advisory, no score): organization-wide SharePoint **and file**
+/// access. Scoping is encoded by the permission itself (`Sites.Selected`
+/// scoped, other `Sites.*` org-wide) — no live lookup. Gates on each grant's
+/// resource: only Graph's org-wide `Sites.*`
+/// (`is_scopable_sharepoint_resource_permission`) carries the
 /// `ScopeSharePointAccess` fix; Office 365 SharePoint Online's goes to
 /// `UNCONFINABLE_SHAREPOINT`; the healthy note needs
-/// `is_scoped_sharepoint_resource_permission`. Returns the Graph org-wide set.
+/// `is_scoped_sharepoint_resource_permission`. The org-wide Files family
+/// (`is_files_orgwide_permission`) gets the `ORG_WIDE_FILES` advisory only —
+/// there is no auto-conversion from `Files.*.All`, so it joins no fix and never
+/// enters the returned set. Returns the Graph org-wide *site* set.
 fn rule_sharepoint_advisory(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<&ResourcePermission>) {
     use crate::scoping::{
-        is_scopable_sharepoint_resource_permission, is_sharepoint_orgwide_permission,
+        is_files_orgwide_permission, is_scopable_sharepoint_resource_permission,
+        is_sharepoint_orgwide_permission,
     };
     let mut c = RuleContribution::default();
 
@@ -437,6 +469,29 @@ fn rule_sharepoint_advisory(
         c.recommendations.push(
             "Remove the org-wide Sites.* grant on Office 365 SharePoint Online, or re-declare it \
              on Microsoft Graph where it can be confined to selected sites"
+                .to_string(),
+        );
+    }
+    // The Files family gets the same advisory treatment and deliberately NO
+    // remediation: the item wizard confines `Files.SelectedOperations.Selected`
+    // to chosen files/libraries, but nothing converts a held `Files.*.All`, so a
+    // Fix here would promise a mutation no handler performs. Kept out of the
+    // `scopable` partition above by construction — that filter is `Sites.`-only,
+    // which is why this reads reach, not reach-plus-fix.
+    let files: Vec<&ResourcePermission> = perms
+        .app_role_grants
+        .iter()
+        .filter(|g| is_files_orgwide_permission(g.resource_app_id.as_deref(), &g.value))
+        .collect();
+    if !files.is_empty() {
+        c.issues.push(format!(
+            "{}: {}",
+            issue::ORG_WIDE_FILES,
+            join_values(&files)
+        ));
+        c.recommendations.push(
+            "Restrict file access to individual files and libraries using \
+             Files.SelectedOperations.Selected"
                 .to_string(),
         );
     }
@@ -855,6 +910,57 @@ pub fn disable_sign_in_remediation() -> RemediationAction {
     }
 }
 
+/// Rule 22: Identity Protection flags the service principal risky
+/// (`confirmedCompromised` / `atRisk` in the risky-service-principal report).
+/// A **post-pass** like the unused-app sign-in pass, not a rule folded in the
+/// two entry points: the report is a tenant-wide prefetch joined per
+/// principal AFTER scoring, so the caller sets [`AuditItem::sp_risk_state`] /
+/// [`AuditItem::sp_risk_level`] first, then calls this. Alone it takes the
+/// item to High; with any other finding it crosses to Critical — deliberate:
+/// a vendor-confirmed compromise is the one signal that can mean live abuse.
+/// When the SP is still enabled it carries the [`RemediationKind::DisableSignIn`]
+/// one-click fix (reuses the unused-app handler; the report's own advice is
+/// "disable while investigating"). A dedupe guard keeps the unused post-pass
+/// from stacking a second identical Fix on the same row.
+pub fn apply_service_principal_risk(item: &mut AuditItem) {
+    let Some(state) = item.sp_risk_state.as_deref() else {
+        return;
+    };
+    if !matches!(state, "confirmedCompromised" | "atRisk") {
+        return;
+    }
+    let level = item.sp_risk_level.as_deref().unwrap_or("unknown");
+    item.risk_score += PTS_RISKY_SERVICE_PRINCIPAL;
+    item.risk_level = RiskLevel::from_score(item.risk_score);
+    item.issues.push(format!(
+        "{} — Identity Protection flags this service principal as `{}` (risk level `{}`)",
+        issue::RISKY_SERVICE_PRINCIPAL,
+        state,
+        level
+    ));
+    item.recommendations.push(
+        "Open this principal in Identity Protection and investigate now — disable sign-in if \
+         it is not a known integration or the compromise looks real"
+            .to_string(),
+    );
+    if item.service_principal_enabled == Some(true)
+        && !item
+            .remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::DisableSignIn)
+    {
+        item.remediations.push(RemediationAction {
+            kind: RemediationKind::DisableSignIn,
+            label: "Disable sign-in".to_string(),
+            detail:
+                "Identity Protection flags this service principal as risky — disabling it stops \
+                 its token issuance (reversible)"
+                    .to_string(),
+            targets: Vec::new(),
+        });
+    }
+}
+
 /// Builds an [`AuditItem`] for `app`. All inputs must be pre-resolved: the
 /// caller is responsible for turning Graph IDs into permission name strings
 /// (via a live resource-SP lookup).
@@ -877,6 +983,9 @@ pub fn score_application(
     // in call order, so the issue / recommendation ordering is preserved by
     // construction (pinned by the characterization tests).
     let mut acc = RuleContribution::default();
+    acc.merge(rule_disabled_by_microsoft(
+        app.disabled_by_microsoft_status.as_deref(),
+    )); // Rule 21, folded first — see its doc
     acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
     acc.merge(rule_admin_consent(perms)); // Rule 3
     acc.merge(rule_sp_disabled(sp_enabled)); // Rule 4
@@ -1000,6 +1109,11 @@ pub fn score_application(
         // An application lives in this tenant; the owner-tenant column is for
         // SP-only rows.
         app_owner_organization_id: None,
+        // Identity Protection risk is populated by the audit runner (the
+        // report is fetched separately and is optional), like the sign-in
+        // fields above.
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 
@@ -1022,10 +1136,15 @@ pub struct SpAuditInput {
     /// Graph `servicePrincipalType`; `ManagedIdentity` selects
     /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
     pub service_principal_type: Option<String>,
+    /// Graph `disabledByMicrosoftStatus` on the service principal — feeds the
+    /// Rule 21 disable-flag rule, which SP-only rows can carry even when
+    /// the application object lives in another tenant.
+    pub disabled_by_microsoft_status: Option<String>,
 }
 
 /// Builds an [`AuditItem`] for a service principal with no local application
-/// object. Only *granted*-state rules apply (1/2, 3, 4, 11, 12, 13); credential
+/// object. Only *granted*-state rules apply (1/2, 3, 4, 11, 12, 13, plus the
+/// Rule 21 disable flag, which Microsoft sets on the SP too); credential
 /// and manifest rules (5-9, 10, 14-18, downgrade pointers) are absent — those
 /// live on the home tenant's application, which this tenant can neither see nor
 /// fix. `app_role_grants` are the SP's *granted* app roles
@@ -1042,6 +1161,9 @@ pub fn score_service_principal(
     let perms = &deduped;
 
     let mut acc = RuleContribution::default();
+    acc.merge(rule_disabled_by_microsoft(
+        sp.disabled_by_microsoft_status.as_deref(),
+    )); // Rule 21, folded first — see its doc
     acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
     acc.merge(rule_admin_consent(perms)); // Rule 3
     acc.merge(rule_sp_disabled(sp.account_enabled)); // Rule 4
@@ -1101,6 +1223,8 @@ pub fn score_service_principal(
         } else {
             AuditPrincipalKind::ServicePrincipal
         },
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 

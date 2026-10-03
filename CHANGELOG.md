@@ -7,6 +7,133 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The tenant's own consent settings are now visible above the delegated grants.** Two
+  mount-time reads on the existing `Policy.Read.All` token (`authorizationPolicy` +
+  `adminConsentRequestPolicy` — no new scope, no new consent) answer whether users in this
+  tenant can grant delegated permissions to themselves, whether risky apps can obtain user
+  consent, and whether the admin consent workflow is on. When self-consent is open, the
+  Consent-grants view shows a warning in its header naming the app-consent policies assigned
+  to the default user role — those policies make every "User" grant in the list potentially
+  self-granted — and the Home Security Posture card says the same in shorter form. A tenant
+  with self-consent confirmed off gets a quiet one-liner instead, naming the admin consent
+  workflow state. A failed read — or a tenant that never enabled the workflow — shows nothing
+  at all: unknown is never rendered as "consent is restricted" or as an all-clear. Pending
+  admin-consent requests are deliberately deferred (their read needs a dedicated
+  consent-requests scope). **No ranking change** — the audit is untouched.
+- **The SSO tab now shows SAML signed-request enforcement.** The enterprise-app SSO tab's SAML
+  section reads Microsoft's v1.0 `requestSignatureVerification` property on the paired application
+  (one more field on the SSO read that already happens — no new scope, no new consent) and shows
+  its state: **"Required"**, **"Required, but allows rsaSha1"**, or **"Not verified"** — the last
+  with a warning that unsigned SAML authentication requests are accepted, and a warning naming
+  `rsaSha1` when verification is on but the weak algorithm is still allowed (a SHA-1-signed
+  request is spoofable anyway). A missing property means **unknown**: the tab shows nothing at all
+  rather than implying unsigned requests are fine. Read-only by design — the v1.0
+  `application-update` property list does not document `requestSignatureVerification` as
+  patchable, so the tab shows the state instead of offering an unverifiable toggle; change it in
+  the Entra admin center. **No ranking change** — the audit is untouched.
+- **Tenant app-management policies are now visible, and explain policy-driven secret adds before they fail.**
+  Each audit run and each Credentials-tab open read Microsoft's v1.0 app-management policy endpoints
+  (tenant default + the overrides assigned to the app) on the on-demand `Policy.Read.All` token —
+  no new consent surface, and a tenant without the permission or a failed read simply shows nothing,
+  never a degraded run. The add-secret dialog now warns when the chosen lifetime exceeds the
+  effective cap ("… the add would be rejected. Pick a shorter expiry, or a certificate instead.") —
+  warn only, never clamp or block; valid secrets provably over the cap carry an **"Over cap"** badge
+  beside their expiry status (expired ones keep their single, louder signal). The Home Security
+  Posture card gains a one-line "Tenant policy caps secret lifetimes at N days." — shown only when
+  a cap is actually knowable, never "no cap enforced" (unknown and known-capless both stay silent).
+  The audit's lifetime advisory compares against the same effective cap instead of the fixed
+  365-day floor where a policy exists: ≥2 assigned overrides mean no verdict, an assigned override
+  *replaces* the tenant default, a grandfathered app gets no cap. One shared predicate
+  (`credential_over_cap`) drives the audit advice and the tab markers, so they can never name
+  different secrets for one app. **No ranking change** — the 365-day legacy rule is untouched;
+  this only adds advice.
+- **The security audit and Credentials tab now show whether a credential is actually used.** Each
+  audit run makes one tenant-wide read of the beta `appCredentialSignInActivities` report (same
+  on-demand `AuditLog.Read.All` token as the sign-in reports; **Global cloud only** — a sovereign
+  cloud or a failed read simply leaves the feature off, never a degraded run). Credentials the
+  report tracked but hadn't seen used for over 90 days raise an advisory **"Unused
+  credential(s)"** finding — no score added (ranking is unchanged) and no Fix, removing a
+  credential stays admin-judged — naming up to three per app and deep-linking to the Credentials
+  tab, which gained a **Last used** column on both tables. Three-state honesty: a dated
+  credential shows the day, a tracked-never-used one reads "No use recorded", and anything the
+  report couldn't observe reads "—" — absence from the report is never treated as "unused", so
+  the rule never mis-flags an unobserved credential. The same read backs the Credentials tab
+  live (per-tenant read-through cache), and the `audit_reports` capability description now names
+  the Global-cloud-only limit.
+- **The security audit now reads Microsoft's own risky-service-principal report.** Each audit run
+  makes one tenant-wide Identity Protection call (`atRisk` / `confirmedCompromised` service
+  principals, delegated `IdentityRiskyServicePrincipal.Read.All`, consented on demand) and joins it
+  onto audit rows by the service principal's object id. A flagged principal scores +20 — High on
+  that signal alone, Critical alongside any other finding (**this shifts audit ranking**: a
+  compromised-but-otherwise-clean principal now surfaces at the top of the Findings workbench
+  instead of reading clean). Risky principals that hold no enumerable grants — a managed identity
+  or foreign app whose grant lives on a resource the matrices don't read — are now scored too,
+  and a risky *enabled* principal offers a one-click **Disable sign-in** fix (reversible, one Fix
+  per row shared with the Unused rule) alongside an Identity Protection deep-read recommendation.
+  Tenants that haven't consented the scope or lack a Workload Identities premium license degrade
+  to a quiet "report unavailable" (no permanent coverage-gap banner); a genuinely failed read on an
+  entitled tenant is reported as a coverage gap, and such a run is never cached or shown as an
+  all-clear.
+- **Conditional Access visibility now reads both policy axes, so workload-identity policies stop lying.**
+  The Conditional Access tab previously matched only the resource axis (`applications`), which made
+  every workload-identity policy claiming `All apps` look like it applied to every app — and hid
+  policies that block an app's **service principal** while naming other resources. The tab now also
+  evaluates `clientApplications` (the client axis: specific SPs, `workloadIdentityAll`, or a client
+  attribute filter) against the app's own service principal, resolved through the existing cached SP
+  lookup — no extra scope, and tenants without a P1/P2 license still see the graceful "unavailable"
+  note. Exclusions still win on either axis; a policy whose client axis names neither this app's SP
+  nor workload identities no longer shows; a block that only gates the app's SP signing in elsewhere
+  now surfaces as "This app's service principal (as a client)"; and combined rows are labelled
+  "workload-identity clients only". Apps without a service principal behave exactly as before.
+- **Apps Microsoft has disabled for a policy violation are now impossible to miss.** The audit
+  reads Graph's `disabledByMicrosoftStatus` — Microsoft's own flag for suspicious, abusive or
+  malicious activity, set on the application and its service principal — and scores it +15, so a
+  disabled principal is at least High on that signal alone (**this shifts audit ranking**: a
+  previously-invisible flag now leads the issue list and moves apps up). Disables appear as a
+  "Disabled by Microsoft" group in the Findings workbench, as a red badge on the App Registration
+  and Enterprise Application headers, and on SP-only rows (foreign enterprise apps, managed
+  identities) where the application object lives in another tenant. A no-credential, no-permission
+  disabled app now finally reads as what it is; there is deliberately no one-click fix — deleting
+  or re-enabling is admin-judged.
+- **The Security audit and the permission picker now flag tenant-wide Files permissions.** An app
+  holding `Files.Read.All` or `Files.ReadWrite.All` — which reach every file across all site
+  collections and OneDrive — now gets an "Org-wide Files access" advisory finding, counted on the
+  posture strip and Home, with its rows drilling to the Permissions tab. It carries no one-click
+  Fix: only removal, or re-declaring as the item-scoped `Files.SelectedOperations.Selected`, is
+  possible. In the grant-time permission picker those two permissions now show "Org-wide — reaches
+  every file. Prefer Files.SelectedOperations.Selected.", and the Grant-access wizard's item
+  scoping accepts that scoped model, so the picker hint, the audit recommendation and the wizard
+  point at one answer. Audit scores are unchanged — this is visibility, not re-ranking.
+- **Key Vault access scans flag vaults whose access the scan cannot see.** A vault set to the
+  legacy Access Policy permission model grants data access through a mechanism the Azure RBAC
+  listing does not enumerate, so an empty result from such a vault previously looked the same as a
+  vault with no access. The scan's summary line — and its CSV/JSON export — now names how many
+  vaults are in access-policy mode and that their grants are invisible to the scan. A vault whose
+  model Azure did not report is never guessed either way.
+- **The Key Vault secret browser now distinguishes certificate-backed entries from real secrets.**
+  Every vault certificate appears in the secret listing as a *managed* entry, previously
+  indistinguishable from a rotatable app secret; those rows now carry a "certificate-backed" badge
+  and a hint that they are not writable secrets.
+- **A rotated Key Vault secret records what it belongs to, and refuses to overwrite another
+  app's secret.** Every secret version written by credential rotation is tagged with the owning
+  app and its key id, so a vault reader can tell which app minted it. Before rotation mints
+  anything it checks the target secret's tags: a secret tagged to a different app is refused with
+  "nothing was minted". Untagged secrets remain rotatable (no ownership is claimed from absent
+  tags), and a transient failure of the ownership check skips the check rather than blocking a
+  legitimate rotation.
+- **The SSO wizard's lifetime fields now reject impossible values instead of
+  silently using the default.** A mistyped certificate or secret lifetime ("3650",
+  "abc") used to be dropped and the app created with the 365/180-day default the
+  operator never typed; Next now stays disabled while the value is outside 1–1095
+  (cert) or 1–730 (secret) days, with the reason shown under the field. Blank
+  remains a deliberate "use the default", and the create call re-checks the same
+  bounds behind the button.
+- **The claims editor now warns about edits that quietly strip claims from tokens.** While a
+  claims policy is being edited (SSO tab and the New SSO application wizard alike), the editor
+  flags: switching the basic claim set off with no claims defined, a claim with neither a SAML
+  URI nor a JWT name, a transformation-sourced claim naming no transformation (or one that
+  doesn't exist), duplicate SAML claim URIs, and transformations with no output claim. The
+  warnings are advisory — Save stays enabled, because a deliberate lockdown is legitimate.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL
@@ -64,9 +191,41 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   could be launched (a confined `xdg-open`, or a policy that blocks the browser handler). The link
   now appears at the top of the window with a Copy button. Paste it into a browser on this computer
   to continue.
+- **The Authentication and Overview forms now wait for an actual change before they write.**
+  Both are full-replace or whole-patch forms, so clicking Save on a form you hadn't edited used to
+  re-send byte-identical settings — a pointless round trip that also busted every cached app list
+  behind the write. Save is now disabled until something actually differs from the loaded state
+  (whitespace and blank URI rows don't count), and the backend treats an all-empty update patch as
+  a no-op too. The Authentication tab also gains a Reset button that restores the loaded URIs,
+  logout URL and toggles, and Cancel on the Overview tab now discards half-typed edits instead of
+  parking them until the next edit session.
+- **Saved views now carry the "created on" date window, and applying one says
+  whether it changes.** A saved view used to snapshot only the facet and search,
+  so "Disabled, created this quarter" couldn't be saved, and applying a view
+  left whatever date range was active silently narrowing the list. Saved views
+  on the App Registrations and Enterprise Applications lists now store the
+  created-on window too; applying one restores it — or, if it was saved without
+  a range, clears the active one. Each chip's tooltip names the window it will
+  restore, and the chips gained accessible names ("Apply saved view …").
+  Views saved before this change keep working (the new fields default).
+- **Deleted app registrations are recoverable, and the app now says so.** A deleted app
+  registration sits in the Entra recycle bin for ~30 days and can be restored (its paired
+  enterprise application comes back with it), but the app presented deletion as irreversible and
+  the bin was invisible. The App Registrations header gains a **Recently deleted…** dialog listing
+  the bin — per row, when it was deleted and how much of the window is left — with **Restore**
+  (carries the paired enterprise app along) and a two-step **Delete forever** for skipping the
+  window deliberately. After a bulk delete the action bar's result summary offers **Undo
+  (restore N deleted)**, replaying exactly the ids that run confirmed gone, and the delete
+  confirmation copy now points at both exits instead of saying "cannot be undone". The bin is
+  read live and never cached — a restore or purge refetches rather than serving a stale bin —
+  and a read that hits its row cap says "this list is partial" rather than showing a short bin
+  as the whole truth.
 
 ### Fixed
 
+- **The Permission tester's open resource tab now resets on tenant switch.** The mailbox and site
+  URL fields already cleared between tenants; the open tab (Exchange or SharePoint) survived the
+  switch. It now returns to Exchange like the rest.
 - **Screen readers now name every field and remove button in the SAML claims editor.** Its inputs
   were named only by placeholders, which vanish once a value is typed, and each input claim,
   parameter and output claim had an unnamed "✕" remove button; they now carry labels (the remove

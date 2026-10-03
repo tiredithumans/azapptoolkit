@@ -23,8 +23,12 @@ mod application_list;
 mod authentication_tab;
 #[path = "gui/certificate_reveal.rs"]
 mod certificate_reveal;
+#[path = "gui/credential_policy.rs"]
+mod credential_policy;
 #[path = "gui/credential_sweep.rs"]
 mod credential_sweep;
+#[path = "gui/deleted_apps.rs"]
+mod deleted_apps;
 #[path = "gui/enterprise_access_tab.rs"]
 mod enterprise_access_tab;
 #[path = "gui/enterprise_application_list.rs"]
@@ -41,5 +45,7 @@ mod provisioning_tab;
 mod sso_claims;
 #[path = "gui/sso_rollover.rs"]
 mod sso_rollover;
+#[path = "gui/sso_signed_requests.rs"]
+mod sso_signed_requests;
 #[path = "gui/sso_wizard.rs"]
 mod sso_wizard;

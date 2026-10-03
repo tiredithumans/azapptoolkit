@@ -43,7 +43,8 @@ pub struct KeyVaultAccessRow {
 
 /// Result of a tenant-wide Key Vault RBAC sweep, with coverage so the UI can
 /// warn when a scan was partial — a vault with "no rows" that actually failed
-/// to read must never read as "no access".
+/// to read must never read as "no access", and neither must one whose access
+/// model is legacy access policies.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyVaultSweepResult {
@@ -51,6 +52,12 @@ pub struct KeyVaultSweepResult {
     pub total_vaults: usize,
     pub vaults_scanned: usize,
     pub vaults_failed: usize,
+    /// Scanned vaults reporting `enableRbacAuthorization: false` — their data
+    /// grants ride access policies, which the RBAC listing cannot return, so
+    /// an empty result over them is NOT "no access". `#[serde(default)]` keeps
+    /// older cached sweeps deserializable.
+    #[serde(default)]
+    pub vaults_access_policy_mode: usize,
     pub rows: Vec<KeyVaultAccessRow>,
     pub cancelled: bool,
 }
@@ -62,6 +69,11 @@ pub struct KvSecretItemDto {
     pub enabled: Option<bool>,
     pub expires: Option<String>,
     pub content_type: Option<String>,
+    /// Key Vault's `managed` flag: `Some(true)` marks a certificate-backed
+    /// secret (not a writable secret — rotation into it must fail). `None` =
+    /// the listing carried no flag, which is never shown as "plain secret".
+    #[serde(default)]
+    pub managed: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

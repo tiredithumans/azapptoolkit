@@ -619,6 +619,15 @@ fn SsoEditor(
     // which may be false, so Save stays off until a read succeeds. Plain bool —
     // every reload re-mounts this editor through `SsoContent`'s Suspense.
     let claims_unread = cfg.claims_read_failed;
+    // Signed-AuthnRequest enforcement, read from the paired application.
+    // Read-only by design: v1.0 documents `requestSignatureVerification` on the
+    // read side but its `application-update` property list omits it, so there is
+    // no documented PATCH and the tab shows this state, it can't set it. `None`
+    // is *unknown* (no block came back) and renders nothing at all — never
+    // "verification off" (the never-flag-on-unknown contract the
+    // credential-lifetime advisory established).
+    let signed_state = cfg.signed_requests_required;
+    let weak_algos = cfg.allowed_weak_signature_algorithms.clone();
 
     let cmd = use_command();
     let needs_consent = RwSignal::new(false);
@@ -808,6 +817,34 @@ fn SsoEditor(
             // ---- editable config (branches on the SAVED mode) ----
             <Show when=move || is_saml fallback=|| ()>
                 <h4>"SAML configuration"</h4>
+                {signed_state.map(|required| {
+                    let (state_label, tone, alert) = if !required {
+                        (
+                            "Not verified".to_string(),
+                            "warn",
+                            "Entra checks nothing: this application accepts unsigned SAML authentication requests. Turn on \"Require signed authentication requests\" in the Entra admin center — it can't be changed here.".to_string(),
+                        )
+                    } else if let Some(weak) = &weak_algos {
+                        (
+                            format!("Required, but allows {weak}"),
+                            "warn",
+                            "Signed requests are required, yet a weak signing algorithm is still accepted — a request signed that way is spoofable. Restrict the accepted algorithms in the Entra admin center.".to_string(),
+                        )
+                    } else {
+                        (
+                            "Required".to_string(),
+                            "info",
+                            "Entra verifies the signature on every authentication request from this application.".to_string(),
+                        )
+                    };
+                    view! {
+                        <dl class="read-field">
+                            <dt>"Signed authentication requests"</dt>
+                            <dd>{state_label}</dd>
+                        </dl>
+                        <Callout tone=tone>{alert}</Callout>
+                    }
+                })}
                 <UriListEditor
                     state=identifiers
                     class="uri-list--saml-identifiers"

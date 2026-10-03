@@ -15,13 +15,14 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::applications::{
-    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, FederatedCredentialDto,
+    ApplicationAuthenticationDto, ApplicationDetail, ApplicationListRowDto, DeletedAppDto,
+    DeletedAppsDto, FederatedCredentialDto,
 };
 use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
 use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
-use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
-use azapptoolkit_dto::credentials::CredentialRowDto;
+use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto, TenantConsentPostureDto};
+use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
     AppAssignmentDto, AppRolesView, ApplicationTemplateDto, EnterpriseApplicationDetail,
@@ -159,6 +160,7 @@ pub fn enterprise_app(id: &str, display_name: &str) -> EnterpriseApplicationDto 
         oauth2_permission_scopes: Vec::new(),
         created_date_time: None,
         tags: Vec::new(),
+        disabled_by_microsoft_status: None,
         notes: None,
     }
 }
@@ -324,6 +326,12 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         claims_policy: None,
         claims_policy_id: None,
         claims_read_failed: false,
+        // The demo app's posture is the healthy one: verification on, no weak
+        // algorithms. The alert shapes are exercised by the gui tests, which
+        // mutate this fixture — the demo shows what a live tenant typically
+        // looks like, not its worst case.
+        signed_requests_required: Some(true),
+        allowed_weak_signature_algorithms: None,
         summary: Some(SsoSummary::Saml(saml_sso_summary(object_id, app_id))),
         rollover: Some(signing_cert_rollover(object_id, app_id)),
     }
@@ -604,6 +612,8 @@ pub fn audit_item(name: &str, risk: RiskLevel, issues: &[String]) -> AuditItem {
         sign_in_report_available: true,
         principal_kind: AuditPrincipalKind::Application,
         app_owner_organization_id: None,
+        sp_risk_state: None,
+        sp_risk_level: None,
     }
 }
 
@@ -809,6 +819,11 @@ pub fn audit_run_result() -> AuditRunResult {
         cancelled: false,
         sign_in_report_available: true,
         sign_in_consent_required: false,
+        // The shared fixture states "policy unknown" — the Pages demo opts
+        // into a visible 90-day cap (demo::audit_run), and tests opt into
+        // whatever their assertions need.
+        credential_policy_available: false,
+        credential_policy_max_days: None,
         truncated: false,
         // The demo tenant is a fully-covered run — the coverage-gap banner is a
         // real-failure surface, and showing it here would misrepresent the
@@ -880,6 +895,41 @@ pub fn credential_expirations() -> Vec<CredentialRowDto> {
     ]
 }
 
+/// A tenant-wide last-used answer where the report read fine but holds no
+/// rows: the Credentials tab renders every Last-used cell as the unknown "—".
+/// Tests that mount the tab to exercise something else pin the healthy path
+/// (report available) so the column must not read as degraded — an unmocked
+/// command would reject instead, and the tab would show its "unavailable"
+/// notice instead.
+pub fn credential_usage_empty() -> CredentialUsageDto {
+    CredentialUsageDto {
+        available: true,
+        rows: Vec::new(),
+    }
+}
+
+/// The Credentials tab's secret-lifetime policy answer for tests that mount
+/// the tab to exercise something else: policy **unknown** (the honest default
+/// — no `Policy.Read.All`), which renders no Callout and no markers, exactly
+/// as the real tab degrades. Tests stay on the silent path instead of
+/// accidentally pinning the policy surface.
+pub fn credential_policy_unknown() -> azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+    azapptoolkit_dto::credentials::AppCredentialPolicyDto::default()
+}
+
+/// A readable policy capping this app's secrets at `cap_days`, optionally
+/// naming the assigned override(s) (what the Callout must name).
+pub fn credential_policy_cap(
+    cap_days: i64,
+    names: &[&str],
+) -> azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+    azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+        available: true,
+        effective_cap_days: Some(cap_days),
+        custom_policy_names: names.iter().map(|n| n.to_string()).collect(),
+    }
+}
+
 // ---------------- Key Vault ----------------
 
 pub fn kv_secret_item(name: &str) -> KvSecretItemDto {
@@ -889,6 +939,16 @@ pub fn kv_secret_item(name: &str) -> KvSecretItemDto {
         enabled: Some(true),
         expires: None,
         content_type: None,
+        managed: None,
+    }
+}
+
+/// A certificate-backed secret entry (Key Vault's `managed: true`) — listed
+/// like a secret but not a writable one; the browser badges it.
+pub fn kv_managed_secret_item(name: &str) -> KvSecretItemDto {
+    KvSecretItemDto {
+        managed: Some(true),
+        ..kv_secret_item(name)
     }
 }
 
@@ -1108,18 +1168,41 @@ pub fn conditional_access_policy(
         display_name: display_name.to_string(),
         state: state.to_string(),
         applies_reason: applies_reason.to_string(),
+        workload_clients: false,
         grant_controls: grant_controls.iter().map(|c| c.to_string()).collect(),
         grant_operator: Some("OR".to_string()),
     }
 }
 
+/// One client-axis (workload-identity) policy for the demo: it gates this
+/// app's service principal signing in *elsewhere*, which is the case the
+/// resource-only view used to drop.
+pub fn conditional_access_policy_wi(
+    display_name: &str,
+    state: &str,
+    applies_reason: &str,
+    grant_controls: &[&str],
+) -> azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+    azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto {
+        workload_clients: true,
+        ..conditional_access_policy(display_name, state, applies_reason, grant_controls)
+    }
+}
+
 /// The tenant's sample Conditional Access policies: an enforced MFA baseline,
-/// a legacy-auth block, and a report-only policy that only *may* apply.
+/// a legacy-auth block, a report-only policy that only *may* apply, and a
+/// workload-identity client-axis block.
 pub fn conditional_access_policies()
 -> Vec<azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto> {
     vec![
         conditional_access_policy("Require MFA for all users", "enabled", "all", &["mfa"]),
         conditional_access_policy("Block legacy authentication", "enabled", "all", &["block"]),
+        conditional_access_policy_wi(
+            "Block workload-identity sign-ins to storage",
+            "enabled",
+            "sp",
+            &["block"],
+        ),
         conditional_access_policy(
             "Admin portals need a compliant device",
             "enabledForReportingButNotEnforced",
@@ -1310,6 +1393,7 @@ pub fn key_vault_access(
         total_vaults: vaults,
         vaults_scanned: vaults,
         vaults_failed: 0,
+        vaults_access_policy_mode: 0,
         rows,
         cancelled: false,
     }
@@ -1604,6 +1688,29 @@ pub fn key_credential(display_name: &str, end: Option<DateTime<Utc>>) -> KeyCred
         start_date_time: date(2024, 6, 1),
         end_date_time: end,
         custom_key_identifier: Some("0f7a2c9b1e4d6a8f3b5c2e1d9a4f6b8c0e2d4a6f".to_string()),
+    }
+}
+
+/// Recycle-bin sample for the "Recently deleted" dialog: one app mid-window,
+/// one nearing its 30-day expiry. Restore/purge are deliberately NOT mocked
+/// (mutations stay unregistered in the demo).
+pub fn deleted_apps() -> DeletedAppsDto {
+    DeletedAppsDto {
+        apps: vec![
+            DeletedAppDto {
+                object_id: guid("deleted-crm"),
+                app_id: Some(guid("deleted-crm-app")),
+                display_name: Some("Contoso CRM".to_string()),
+                deleted_date_time: Some(Utc::now() - chrono::Duration::days(4)),
+            },
+            DeletedAppDto {
+                object_id: guid("deleted-sync"),
+                app_id: Some(guid("deleted-sync-app")),
+                display_name: Some("HR Sync".to_string()),
+                deleted_date_time: Some(Utc::now() - chrono::Duration::days(27)),
+            },
+        ],
+        truncated: false,
     }
 }
 
@@ -2063,6 +2170,22 @@ pub fn oauth2_grants() -> Vec<OAuth2GrantDto> {
             &[],
         ),
     ]
+}
+
+/// Tenant consent posture (F274) for the demo and the grants/home posture
+/// tests: user self-consent is ON — the legacy per-user consent policy is
+/// still assigned to the default user role — which is the exact posture the
+/// grants lens above it exists to review. `risky_app_user_consent: false`
+/// keeps the demo Callout to the self-consent claim alone.
+pub fn consent_posture() -> TenantConsentPostureDto {
+    TenantConsentPostureDto {
+        available: true,
+        risky_app_user_consent: Some(false),
+        default_user_role_consent_policies: Some(vec![
+            "ManagePermissionGrantsForSelf.microsoft-user-default-legacy".to_string(),
+        ]),
+        admin_consent_workflow_enabled: Some(true),
+    }
 }
 
 fn app_permission_grant(

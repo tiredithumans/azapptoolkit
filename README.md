@@ -102,7 +102,9 @@ toolkit-owned service principal storing tokens you cannot audit.
   security-group memberships (the access model for group-gated APIs such as
   Power BI / Fabric admin settings).
 - **SAML single sign-on** — a guided wizard to configure SAML-based SSO and
-  customize the attribute & claim mapping (claims-mapping policies).
+  customize the attribute & claim mapping (claims-mapping policies). The SSO tab
+  also shows each SAML app's signed-request enforcement state, flagging apps that
+  accept unsigned (or SHA-1-signed) authentication requests.
 - **Managed identities** — discover system- and user-assigned identities, grant
   Graph application permissions, see over-privilege at a glance, and view their
   **Azure RBAC** role assignments across subscriptions (via Azure Resource
@@ -113,23 +115,39 @@ toolkit-owned service principal storing tokens you cannot audit.
 - **Security audit** — risk-scored dashboard of every app
   registration with per-rule findings (high-risk app/delegated permissions,
   ownerless/single-owner apps, unused apps via sign-in activity, expiring
-  credentials, and more), one-click **fixes** for safely remediable findings
+  credentials, long-unused credentials — each with per-credential
+  **Last used** evidence in the Credentials tab — and more), one-click
+  **fixes** for safely remediable findings
   (remove expired credentials, scope mailbox/SharePoint access, remove
   redundant permissions), **scope-aware risk** (a mail permission confined via
   Exchange RBAC scores below an org-wide one), facet filters, CSV/JSON/HTML
   export, adaptive throttling on 429s, and cancellable scans. Also covers
   **principals without a local app registration** — foreign-tenant enterprise
   apps and managed identities holding Graph application grants — with fixes
-  that route to the SP-native scoping paths.
+  that route to the SP-native scoping paths. It also folds in Microsoft's own
+  security view: the **Identity Protection risky-service-principal report**
+  (on-demand, via `IdentityRiskyServicePrincipal.Read.All`, needs Entra ID
+  **Workload Identities premium**) flags principals reported as risky or
+  compromised — even ones with no enumerable grants, like managed identities.
 - **Consent & application-permission audits** — tenant-wide views of every
   delegated (OAuth2) consent grant and every application permission apps hold
   on Microsoft Graph / Exchange / SharePoint, with high-risk highlighting,
-  filters, CSV export, and a jump to the granting app.
+  filters, CSV export, and a jump to the granting app. The grants view is headed
+  by the **tenant consent posture** — whether users can grant delegated
+  permissions to themselves and whether the admin consent workflow is on
+  (read-only, on the existing `Policy.Read.All` token; silent when unknown).
 - **Observed Graph activity** — compare an app's *granted* permissions with the
   Graph calls it *actually makes* (`MicrosoftGraphActivityLogs` via Azure
   Monitor Log Analytics) to spot grants that nothing uses.
 - **Conditional Access visibility** — see which Conditional Access policies
-  target an application (on-demand, via `Policy.Read.All`).
+  target an application — as a resource or as a client (its service principal /
+  workload identities) — and honour its exclusions on either axis (on-demand,
+  via `Policy.Read.All`).
+- **App-management policy visibility** — show the tenant's secret-lifetime
+  restrictions (the default policy plus any per-app override) on the Credentials
+  tab and the Home security-posture card, mark valid secrets that exceed the cap
+  "Over cap", and warn before a secret add whose lifetime the policy would
+  reject (on-demand, via the same `Policy.Read.All` token; no license tier needed).
 - **Activity log** — recent directory activity / change log for an app, from the
   Entra audit logs (on-demand, via `AuditLog.Read.All`).
 
@@ -390,8 +408,9 @@ one-click **Grant consent** prompt.
 | Graph | `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
 | Graph | `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
 | Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
-| Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
-| Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
+| Graph | `AuditLog.Read.All` | **Activity** tab (directory change log), **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**), and the per-credential **Last used** column + unused-credential advisory (the beta `appCredentialSignInActivities` report is served in the **Global cloud only**; elsewhere the feature quietly stays off) | Optional |
+| Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) — the **app-management policies** read behind the Credentials-tab lifetime markers and the pre-add lifetime warning, and the tenant **consent-posture** pair (`authorizationPolicy` + `adminConsentRequestPolicy`) shown above the delegated grants (any plan) | Optional |
+| Graph | `IdentityRiskyServicePrincipal.Read.All` | **Risky-service-principal** signal in the security audit (Identity Protection `atRisk`/`confirmedCompromised`; also needs Entra ID **Workload Identities premium**, and the audit skips the check without it) | Optional |
 | Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |
 | Graph | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` | **Group memberships** — add/remove a service principal in security groups (the access model for group-gated APIs like Power BI / Fabric) | Optional |
 | Graph | `Synchronization.Read.All` | SCIM **provisioning** job status on enterprise apps (needs Entra ID **P1/P2**) | Optional |

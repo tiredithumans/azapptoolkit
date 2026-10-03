@@ -72,6 +72,14 @@ pub struct Application {
     /// "fetched, no owners". Drives the audit's ownership rules.
     #[serde(default)]
     pub owners: Option<Vec<DirectoryObject>>,
+    /// Graph `disabledByMicrosoftStatus`. Microsoft sets this to
+    /// `DisabledDueToViolationOfServicesAgreement` when it disables an app for
+    /// suspicious, abusive or malicious activity — Microsoft's own "this app is
+    /// malicious" flag, and the explanation for "the integration silently
+    /// stopped working" tickets. `None`/`Some("Success")` = never disabled.
+    /// Read on both the application and its service principal.
+    #[serde(default)]
+    pub disabled_by_microsoft_status: Option<String>,
     /// Free-text internal notes (Graph `notes`, max 1024 chars) — the portal
     /// surfaces this as "Internal notes" under Branding & properties. Only
     /// fetched for the detail view; the Overview tab edits it.
@@ -138,6 +146,14 @@ pub struct ServicePrincipal {
     pub display_name: String,
     #[serde(default)]
     pub account_enabled: Option<bool>,
+    /// Graph `disabledByMicrosoftStatus` — see
+    /// [`Application::disabled_by_microsoft_status`]. Microsoft disables the
+    /// service principal alongside the application when it blocks an app for
+    /// policy violation, so SP-only rows (foreign apps, managed identities)
+    /// can carry the flag even where the application object lives in another
+    /// tenant.
+    #[serde(default)]
+    pub disabled_by_microsoft_status: Option<String>,
     #[serde(default)]
     pub app_role_assignment_required: Option<bool>,
     #[serde(default)]
@@ -479,6 +495,161 @@ pub struct SignInActivity {
     pub last_sign_in_date_time: Option<DateTime<Utc>>,
 }
 
+/// One row of the Entra beta `reports/appCredentialSignInActivities` report
+/// (preview, **global cloud only**): a credential's last-seen sign-in plus
+/// context. The audit joins these onto credential rows by `(appId, keyId)`.
+/// Rows appear for credentials the preview report tracks; a null
+/// `signInActivity.lastSignInDateTime` means tracked but no use observed,
+/// while a credential **absent** from the report is unknown, not unused —
+/// see the audit deep-dive before inferring anything from absence.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCredentialSignInActivity {
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// The credential's keyId — matches `PasswordCredential::key_id` /
+    /// `KeyCredential::key_id` on the application (and its mirrored SP copy).
+    #[serde(default)]
+    pub key_id: Option<String>,
+    /// `clientSecret` | `certificate` | `unknownFutureValue`.
+    #[serde(default)]
+    pub key_type: Option<String>,
+    /// `application` | `servicePrincipal` — the same credential can report
+    /// from either side; both rows carry the same `keyId` and dates.
+    #[serde(default)]
+    pub credential_origin: Option<String>,
+    #[serde(default)]
+    pub service_principal_object_id: Option<String>,
+    /// The resource the credential last presented to.
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub sign_in_activity: Option<SignInActivity>,
+}
+
+// ---------- App management policies (tenant credential-lifetime caps) ----------
+
+/// One `passwordCredentials`/`keyCredentials` restriction entry inside an
+/// app-management policy. The secret and certificate planes share this shape;
+/// only `*Lifetime` entries carry `max_lifetime` (an ISO 8601 duration string,
+/// e.g. `P90D` or `P4DT12H30M5S`).
+///
+/// `restrict_for_apps_created_after_date_time` gates the restriction: `null`
+/// is **retroactive** (applies to every app, whenever created); a date means
+/// it applies only to apps created *after* it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRestrictionConfiguration {
+    /// `passwordAddition` | `passwordLifetime` | `symmetricKeyAddition` |
+    /// `symmetricKeyLifetime` | `customPasswordAddition` — each appears at
+    /// most once per policy, and only `passwordLifetime` caps secrets.
+    #[serde(default)]
+    pub restriction_type: Option<String>,
+    /// `enabled` | `disabled` — only `enabled` is enforced.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub max_lifetime: Option<String>,
+    #[serde(default)]
+    pub restrict_for_apps_created_after_date_time: Option<DateTime<Utc>>,
+}
+
+/// The restriction container shared by the policy shapes: the tenant default's
+/// `applicationRestrictions` (`appManagementApplicationConfiguration`), the
+/// per-app `restrictions` (`customAppManagementConfiguration`, which repeats
+/// the same fields *and* nests one under `applicationRestrictions`), and
+/// `servicePrincipalRestrictions`. Tolerating the doubled shape is the read
+/// side's job — see [`AppManagementConfiguration::password_entries`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppManagementConfiguration {
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub key_credentials: Vec<CredentialRestrictionConfiguration>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub password_credentials: Vec<CredentialRestrictionConfiguration>,
+    #[serde(default)]
+    pub application_restrictions: Option<Box<AppManagementConfiguration>>,
+}
+
+impl AppManagementConfiguration {
+    /// Every secret-restriction entry this container carries — top level and
+    /// the nested `applicationRestrictions` copy alike. The per-app
+    /// `customAppManagementConfiguration` has been seen storing the array in
+    /// either place, so resolution must read both.
+    pub fn password_entries(&self) -> impl Iterator<Item = &CredentialRestrictionConfiguration> {
+        self.password_credentials.iter().chain(
+            self.application_restrictions
+                .as_deref()
+                .into_iter()
+                .flat_map(|nested| nested.password_credentials.iter()),
+        )
+    }
+}
+
+/// The tenant-wide default app-management policy
+/// (`GET /policies/defaultAppManagementPolicy`). `is_enabled` defaults to
+/// **false**: a tenant that never touched the feature has either no policy
+/// object or a disabled one — both mean "no enforced credential lifetime".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantAppManagementPolicy {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub application_restrictions: Option<AppManagementConfiguration>,
+}
+
+/// A per-application (or per-service-principal) policy override
+/// (`appManagementPolicy`, read via the `applications/{id}/appManagementPolicies`
+/// nav or the `/policies/appManagementPolicies` collection with
+/// `$expand=appliesTo`). When one is assigned, the app adopts it **over** the
+/// tenant-wide default — and only one policy is typically assigned per app.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppManagementPolicy {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub restrictions: Option<AppManagementConfiguration>,
+    /// Filled only when the read used `$expand=appliesTo`; empty otherwise
+    /// (including on the per-app nav read, which needs no targets).
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub applies_to: Vec<PolicySubjectRef>,
+}
+
+/// One `appliesTo` subject — a heterogeneous `directoryObject` collection, so
+/// the `@odata.type` discriminator may or may not ride along. Kept for the
+/// app↔SP matching only; the value itself is never shown.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicySubjectRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, rename = "@odata.type")]
+    pub odata_type: Option<String>,
+}
+
+/// The tenant admin consent request (workflow) policy
+/// (`GET /policies/adminConsentRequestPolicy`). Only `isEnabled` is modeled —
+/// the payload also carries `version`, `notifyReviewers`, `remindersEnabled`,
+/// `requestDurationInDays` and reviewer scopes, none of which any display
+/// shows. A missing policy object is read as "never enabled": the workflow
+/// requires the object to be created, so absence really is "not enabled"
+/// (same reading as an absent default app-management policy above).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminConsentRequestPolicy {
+    #[serde(default)]
+    pub is_enabled: bool,
+}
+
 /// A SCIM provisioning (synchronization) job on a service principal.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -625,6 +796,46 @@ pub struct ConditionalAccessPolicy {
 pub struct CaConditions {
     #[serde(default)]
     pub applications: Option<CaApplications>,
+    /// The **client axis** of the policy (`conditionalAccessClientApplications`):
+    /// which workload identities / service principals may act as the client.
+    /// `None` (or an all-empty body) means the policy does not constrain
+    /// clients — the pre-workload-identity shape every user policy uses.
+    #[serde(default)]
+    pub client_applications: Option<CaClientApplications>,
+}
+
+/// `conditionalAccessClientApplications`. Targets the *client* of a sign-in
+/// (who is connecting), as opposed to `applications`, which targets the
+/// *resource* (what is being reached). A workload-identity CA policy is often
+/// `applications: All` + `clientApplications: <workload ids>` — reading only
+/// the resource axis reports it as "applies (all)" to every app.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CaClientApplications {
+    /// Service-principal **object ids**, or the well-known all-client tokens
+    /// (`All`, `workloadIdentityAll` …) the CA blade writes for workload
+    /// identities.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub include_service_principals: Vec<String>,
+    /// Excluded client SP object ids — exclude wins over any include.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub exclude_service_principals: Vec<String>,
+    /// Attribute filter on clients (`servicePrincipalFilter`); same
+    /// `{mode, rule}` shape as the application filter and equally
+    /// non-evaluable client-side.
+    #[serde(default)]
+    pub service_principal_filter: Option<CaApplicationFilter>,
+}
+
+impl CaClientApplications {
+    /// True when the axis carries no targeting at all (Graph echoes
+    /// `"clientApplications": {"excludeServicePrincipals": [], …}` for plain
+    /// user policies) — treated as "clients unconstrained".
+    pub fn is_empty(&self) -> bool {
+        self.include_service_principals.is_empty()
+            && self.exclude_service_principals.is_empty()
+            && self.service_principal_filter.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -663,6 +874,33 @@ pub struct CaGrantControls {
     /// "AND" / "OR" — how the controls combine.
     #[serde(default)]
     pub operator: Option<String>,
+}
+
+/// One row of the Identity Protection risky-service-principal report
+/// (`GET /identityProtection/riskyServicePrincipals`). The audit joins these
+/// onto principals by `service_principal_id` (the SP **object** id, not its
+/// appId). `risk_state` is the finding (`confirmedCompromised` / `atRisk` are
+/// the risky ones); the rest is context for the operator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskyServicePrincipal {
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The service principal's object id — the join key onto `AuditItem`.
+    #[serde(default)]
+    pub service_principal_id: Option<String>,
+    /// `none` | `confirmedCompromised` | `atRisk` | `remediated` |
+    /// `dismissed` | `atRiskConfirmed`.
+    #[serde(default)]
+    pub risk_state: Option<String>,
+    /// `low` | `medium` | `high` | `none`.
+    #[serde(default)]
+    pub risk_level: Option<String>,
+    /// e.g. `adminGeneratedAccountCompromised`, `anonymousIP`, `maliciousIP`.
+    #[serde(default)]
+    pub risk_detail: Option<String>,
+    #[serde(default)]
+    pub risk_last_updated_date_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -977,6 +1215,43 @@ pub struct ClaimsMappingPolicy {
     pub is_organization_default: Option<bool>,
 }
 
+/// One entry of the app-recycle-bin read
+/// `/directory/deletedItems/microsoft.graph.application`.
+///
+/// Deleted items are `directoryObject` projections, not full `Application`s:
+/// Graph answers with the pairing scalars (`appId`, `displayName`) and
+/// `deletedDateTime`, but entries for some deleted objects carry **limited
+/// info** (only `id` + `@odata.type`), so every non-key field is optional and
+/// defaults through `serde`. Unknown keys (`@odata.type` and friends) are
+/// ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedApplication {
+    pub id: String,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub deleted_date_time: Option<DateTime<Utc>>,
+}
+
+/// One entry of the recycle-bin read
+/// `/directory/deletedItems/microsoft.graph.servicePrincipal`. Used only to
+/// find the service principals paired with a restored application (Graph does
+/// NOT cascade-restore the paired SP) — same limited-info caveat as
+/// [`DeletedApplication`], which is why `app_id` is optional and an SP that
+/// reports no `appId` simply cannot be paired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedServicePrincipal {
+    pub id: String,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paged<T> {
     #[serde(rename = "value")]
@@ -990,6 +1265,31 @@ pub struct Paged<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_items_decode_full_and_limited_info_entries() {
+        // A full app entry (with `@odata.type` + fields a typed read ignores)
+        // next to the documented "limited info" shape — only id and type.
+        let json = r##"{"value":[
+            {"@odata.type":"#microsoft.graph.application","id":"app-1","deletedDateTime":"2026-09-20T10:00:00Z","appId":"11111111-1111-1111-1111-111111111111","displayName":"CRM","extraKey":"ignored"},
+            {"@odata.type":"#microsoft.graph.application","id":"app-2"}
+        ]}"##;
+        let page: Paged<DeletedApplication> = serde_json::from_str(json).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].display_name.as_deref(), Some("CRM"));
+        assert!(page.items[0].deleted_date_time.is_some());
+        assert!(page.items[1].display_name.is_none());
+        assert!(page.items[1].app_id.is_none());
+
+        let json = r##"{"value":[
+            {"@odata.type":"#microsoft.graph.servicePrincipal","id":"sp-1","appId":"11111111-1111-1111-1111-111111111111","displayName":"CRM"},
+            {"id":"sp-2","displayName":null}
+        ]}"##;
+        let page: Paged<DeletedServicePrincipal> = serde_json::from_str(json).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items[0].app_id.is_some());
+        assert!(page.items[1].display_name.is_none());
+    }
 
     #[test]
     fn application_deserializes_with_missing_optional_fields() {

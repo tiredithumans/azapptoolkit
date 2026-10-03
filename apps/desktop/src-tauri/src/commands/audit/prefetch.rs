@@ -4,20 +4,24 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::ServicePrincipal;
 use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::verdict::aap_verdict_for;
 use azapptoolkit_graph::GraphClient;
+use azapptoolkit_graph::GraphError;
 use chrono::{DateTime, Utc};
 
 use crate::commands::exchange::exchange_client;
+use crate::commands::graph_err::looks_like_missing_license;
 use crate::commands::graph_roles::graph_role_index;
 use crate::dto::UiError;
 use crate::dto::audit::AuditCoverageGap;
 use crate::state::AppState;
+
+use super::AppPolicyData;
 
 /// Best-effort Exchange client for mailbox-scoping resolution. `None` (with an
 /// info log) when the Exchange client can't be built — the signed-in user isn't
@@ -318,4 +322,219 @@ pub(crate) async fn prefetch_sign_in_activity(
             (false, consent_required, Arc::new(HashMap::new()))
         }
     }
+}
+
+/// The tenant-wide Identity Protection risky-service-principal report →
+/// `(available, sp_objectId -> (riskState, riskLevel), gap)`.
+///
+/// The availability split follows the sign-in/report precedent, NOT the
+/// grant-matrix reads: a tenant that has not consented `IdentityRiskyService
+/// Principal.Read.All` (or lacks a Workload Identities premium license — the
+/// endpoint 403s `Authentication_RequestFromNonPremiumTenantOrB2CTenant` for
+/// unlicensed tenants) reads as *unavailable*, no gap, so most tenants do not
+/// get a permanent "degraded" banner that would train operators to ignore it.
+/// A genuine failed read on an entitled tenant IS a coverage gap: the
+/// risky-SP check silently stopped working there, so the run must not be
+/// cached or shown as an all-clear.
+///
+/// Only `confirmedCompromised` / `atRisk` rows are kept — the report ships
+/// every principal it tracks, and Rule 22 fires on those two states only.
+/// Deliberately not cached (unlike the sign-in report): a compromised-SP flag
+/// must be re-read by every run, and the payload is one row per flagged
+/// principal.
+pub(crate) async fn prefetch_risky_service_principals(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> (
+    bool,
+    Arc<HashMap<String, (String, String)>>,
+    Option<AuditCoverageGap>,
+) {
+    let empty = || (false, Arc::new(HashMap::new()), None);
+    // Pre-acquire the scoped token so a missing consent/license surfaces
+    // before the read. Failure means the tenant cannot use the feature today
+    // — unavailable, not a gap (see the doc comment).
+    let Ok(()) = state.ensure_risky_service_principal_token(tenant_id).await else {
+        tracing::info!(
+            "audit: risky-service-principal report unavailable; skipping risky-SP check"
+        );
+        return empty();
+    };
+    match client.list_risky_service_principals().await {
+        Ok(rows) => {
+            let map: HashMap<String, (String, String)> = rows
+                .into_iter()
+                .filter(|r| {
+                    matches!(
+                        r.risk_state.as_deref(),
+                        Some("confirmedCompromised") | Some("atRisk")
+                    )
+                })
+                .filter_map(|r| {
+                    Some((
+                        r.service_principal_id?,
+                        (
+                            r.risk_state?,
+                            r.risk_level.unwrap_or_else(|| "unknown".to_string()),
+                        ),
+                    ))
+                })
+                .collect();
+            (true, Arc::new(map), None)
+        }
+        Err(err) if matches!(&err, GraphError::Forbidden(body) if looks_like_missing_license(body)) =>
+        {
+            // Entitlement failed at the endpoint, not the token: the tenant is
+            // not on Workload Identities premium (or the feature is not
+            // provisioned). Same "unavailable" class as the token arm.
+            tracing::info!(
+                ?err,
+                "audit: risky-service-principal report not licensed in this tenant; skipping risky-SP check"
+            );
+            (false, Arc::new(HashMap::new()), None)
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "audit: risky-service-principal read failed; risky-SP coverage gap"
+            );
+            (
+                false,
+                Arc::new(HashMap::new()),
+                Some(AuditCoverageGap::RiskyServicePrincipals),
+            )
+        }
+    }
+}
+
+/// ONE tenant-wide per-credential last-used read (beta
+/// `appCredentialSignInActivities`, **global cloud only**) → `(available,
+/// "appId|keyId" -> CredentialActivity)`. Rides the same `AuditLog.Read.All`
+/// token as [`prefetch_sign_in_activity`]; a missing-consent failure there
+/// already surfaces the "Grant consent" button, so this report has no consent
+/// state of its own — either way `available = false` just disables the
+/// unused-credential advisory, and on a sovereign build the 404 lands here as
+/// the same graceful degradation.
+///
+/// An app's own credential can appear twice (once per `credentialOrigin`);
+/// the fold keeps the NEWEST date per credential, and a credential with any
+/// dated row never collapses to `Never`. A credential absent from the report
+/// has no key at all and scores `Unknown` — never "unused": the preview
+/// report's coverage of never-used credentials is not contractual, so
+/// inferring non-use from absence would flag live credentials whose use it
+/// simply does not surface.
+pub(crate) async fn prefetch_credential_activity(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> (bool, Arc<HashMap<String, CredentialActivity>>) {
+    let unavailable = || (false, Arc::new(HashMap::new()));
+    match state.ensure_audit_log_token(tenant_id).await {
+        Ok(()) => match client.list_app_credential_sign_in_activities().await {
+            Ok(rows) => {
+                let mut map: HashMap<String, CredentialActivity> = HashMap::new();
+                for row in rows {
+                    let (Some(app_id), Some(key_id)) =
+                        (row.app_id.as_deref(), row.key_id.as_deref())
+                    else {
+                        continue;
+                    };
+                    if app_id.is_empty() || key_id.is_empty() {
+                        continue;
+                    }
+                    // A present row says the credential IS tracked: no dated
+                    // activity reads as `Never` (the one case the advisory may
+                    // flag alongside stale-but-used). Any dated row upgrades —
+                    // and refreshes — that, newest date winning across origins.
+                    let entry = map
+                        .entry(format!("{app_id}|{key_id}"))
+                        .or_insert(CredentialActivity::Never);
+                    if let Some(dt) = row
+                        .sign_in_activity
+                        .as_ref()
+                        .and_then(|s| s.last_sign_in_date_time)
+                    {
+                        let fresher = match *entry {
+                            CredentialActivity::LastSeen(prev) => dt > prev,
+                            _ => true,
+                        };
+                        if fresher {
+                            *entry = CredentialActivity::LastSeen(dt);
+                        }
+                    }
+                }
+                (true, Arc::new(map))
+            }
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "audit: credential sign-in report unavailable; skipping unused-credential checks"
+                );
+                unavailable()
+            }
+        },
+        Err(err) => {
+            tracing::info!(
+                code = %UiError::from(err).code,
+                "audit: AuditLog.Read.All token unavailable; skipping unused-credential checks"
+            );
+            unavailable()
+        }
+    }
+}
+
+/// ONE tenant-wide app-management policy pair (default policy + custom
+/// policies with their `appliesTo` targets, both v1.0 on the `Policy.Read.All`
+/// token) → `(available, policy data)`. Either read failing makes the pair
+/// unavailable: without the target map, a default-policy cap could mis-flag an
+/// app that adopted an override, so partial policy data is no data.
+///
+/// Like the credential reports, a failure here is an unavailable advisory, not
+/// a coverage gap: the lifetime signal is operator context on top of the
+/// expiry findings, its absence never hides a finding, and a tenant that never
+/// consented `Policy.Read.All` would otherwise carry a permanent "degraded"
+/// banner that trains operators to ignore it. The token rides the client's
+/// policy bearer (acquired on demand, like Conditional Access) — no
+/// consent-state UI is needed because no audit finding depends on this pair.
+pub(crate) async fn prefetch_app_management_policy(
+    client: &GraphClient,
+) -> (bool, Arc<AppPolicyData>) {
+    let unavailable = || (false, Arc::new(AppPolicyData::default()));
+    let (default_read, custom_read) = tokio::join!(
+        client.get_default_app_management_policy(),
+        client.list_app_management_policies()
+    );
+    let (default_policy, policies) = match (default_read, custom_read) {
+        (Ok(default_policy), Ok(policies)) => (default_policy, policies),
+        (Err(err), _) | (_, Err(err)) => {
+            tracing::info!(
+                ?err,
+                "audit: app-management policy pair unavailable; skipping credential-lifetime checks"
+            );
+            return unavailable();
+        }
+    };
+    let mut by_target: HashMap<String, Vec<_>> = HashMap::new();
+    for policy in policies {
+        // A policy with no listed targets is assigned to nobody; a disabled
+        // override still lands in the map, because "assigned but disabled"
+        // still replaces the default in a way the audit cannot resolve —
+        // `secret_cap_for` then returns no verdict for that app.
+        for target in &policy.applies_to {
+            if !target.id.is_empty() {
+                by_target
+                    .entry(target.id.clone())
+                    .or_default()
+                    .push(policy.clone());
+            }
+        }
+    }
+    (
+        true,
+        Arc::new(AppPolicyData {
+            default: default_policy,
+            by_target,
+        }),
+    )
 }

@@ -101,6 +101,12 @@ impl Session {
         self.tenant_ui.gallery_open.set(true);
     }
 
+    /// Open the "Recently deleted" (recycle bin) dialog. Lifted to the shell
+    /// like the create-app dialog, so it survives view switches.
+    pub fn open_deleted_apps(&self) {
+        self.tenant_ui.deleted_open.set(true);
+    }
+
     /// Open an app registration in the workspace on a specific tab (e.g.
     /// `"credentials"`). Used to deep-link from the credential-expiry dashboard
     /// straight into the rotation workflow. The detail pane consumes

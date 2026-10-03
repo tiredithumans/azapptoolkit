@@ -81,18 +81,37 @@ pub(crate) async fn get_sso_config_core(
     // Resolve the paired application object id, then read its SSO web fields.
     // Web `redirectUris` double as the SAML reply URLs and the OIDC redirect
     // URIs on a custom app, so they populate both fields.
-    let (object_id, identifier_uris, web_redirects, logout_url, spa_redirect_uris) =
-        match client.find_application_by_app_id(&app_id).await? {
-            Some(app) => {
-                let app_sso = client.get_application_sso_fields(&app.id).await?;
-                let (ids, redirects, logout, spa) = app_sso
-                    .as_ref()
-                    .map(extract_app_sso_fields)
-                    .unwrap_or_default();
-                (app.id, ids, redirects, logout, spa)
-            }
-            None => (String::new(), Vec::new(), Vec::new(), None, Vec::new()),
-        };
+    let (
+        object_id,
+        identifier_uris,
+        web_redirects,
+        logout_url,
+        spa_redirect_uris,
+        signed_requests_required,
+        allowed_weak_signature_algorithms,
+    ) = match client.find_application_by_app_id(&app_id).await? {
+        Some(app) => {
+            let app_sso = client.get_application_sso_fields(&app.id).await?;
+            let (ids, redirects, logout, spa) = app_sso
+                .as_ref()
+                .map(extract_app_sso_fields)
+                .unwrap_or_default();
+            let (signed, weak) = app_sso
+                .as_ref()
+                .map(extract_request_signature_verification)
+                .unwrap_or_default();
+            (app.id, ids, redirects, logout, spa, signed, weak)
+        }
+        None => (
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+            None,
+        ),
+    };
     // `entity_id` keeps the first identifier for the app-owner summary; the
     // editor uses the full `identifier_uris` list.
     let entity_id = identifier_uris.first().cloned();
@@ -140,6 +159,8 @@ pub(crate) async fn get_sso_config_core(
         claims_policy,
         claims_policy_id,
         claims_read_failed,
+        signed_requests_required,
+        allowed_weak_signature_algorithms,
         summary: None,
         rollover,
     };
@@ -286,6 +307,31 @@ pub(crate) fn extract_app_sso_fields(
         logout_url,
         spa_redirect_uris,
     )
+}
+
+/// Pulls `requestSignatureVerification` out of the raw application JSON:
+/// `(isSignedRequestRequired, allowedWeakAlgorithms)`. Both halves are `None`
+/// when the block is absent or malformed — **unknown**, not "verification off":
+/// the tab renders nothing rather than implying an unsigned AuthnRequest is
+/// accepted (the same never-flag-on-unknown contract as the credential-lifetime
+/// advisory). `"none"` normalises to `None`: it means no weak algorithm is
+/// allowed, so a present value is always a real allowance worth flagging.
+/// Read-only on purpose — the v1.0 `application-update` property list omits
+/// `requestSignatureVerification`, so there is no documented PATCH for it and
+/// the tab shows this state, it can't set it.
+pub(crate) fn extract_request_signature_verification(
+    app: &serde_json::Value,
+) -> (Option<bool>, Option<String>) {
+    let block = app.get("requestSignatureVerification");
+    let required = block
+        .and_then(|b| b.get("isSignedRequestRequired"))
+        .and_then(|v| v.as_bool());
+    let weak = block
+        .and_then(|b| b.get("allowedWeakAlgorithms"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+        .map(str::to_string);
+    (required, weak)
 }
 
 /// Sets a service principal's `preferredSingleSignOnMode`. `mode` is a typed

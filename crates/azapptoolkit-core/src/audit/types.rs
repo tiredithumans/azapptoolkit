@@ -591,6 +591,17 @@ pub struct AuditItem {
     /// verified publisher domain.
     #[serde(default)]
     pub app_owner_organization_id: Option<String>,
+    /// The Identity Protection **risky-service-principal report's** `riskState`
+    /// for this row's principal (`confirmedCompromised` / `atRisk`), set by the
+    /// audit runner after [`super::scoring::score_application`] — `None` when
+    /// the report didn't flag it *or* the report was unavailable (the run's
+    /// `RiskyServicePrincipals` coverage gap says which). The vendor flag; do
+    /// not confuse with [`Self::risk_level`], this app's computed level.
+    #[serde(default)]
+    pub sp_risk_state: Option<String>,
+    /// The report's `riskLevel` (`low`/`medium`/`high`) for the same flag.
+    #[serde(default)]
+    pub sp_risk_level: Option<String>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -644,13 +655,37 @@ pub mod issue {
     pub const UNCONFINABLE_SHAREPOINT: &str =
         "Org-wide SharePoint access that Sites.Selected cannot confine";
     pub const SCOPED_SHAREPOINT: &str = "SharePoint access scoped to selected sites";
+    /// Org-wide reach over **file** content across every site collection and
+    /// every user's OneDrive (`Files.Read.All` / `Files.ReadWrite.All` on
+    /// Microsoft Graph). Files sibling of [`ORG_WIDE_SHAREPOINT`], with its own
+    /// finding: no auto-conversion exists (the item wizard scopes only the
+    /// `Files.SelectedOperations.Selected` end state), so this marker carries
+    /// **no** remediation — it points at the scoped model, removal stays
+    /// admin-judged.
+    pub const ORG_WIDE_FILES: &str = "Org-wide Files access";
     pub const NO_OWNERS: &str = "No owners assigned";
     pub const SINGLE_OWNER: &str = "Single owner";
     pub const INSTANCE_LOCK_DISABLED: &str = "App instance property lock is not fully enabled";
     pub const PUBLIC_CLIENT_CREDENTIALS: &str =
         "Public client flows are enabled and credentials are present";
     pub const PREFER_CERT_OVER_SECRET: &str = "Uses client secret(s)";
+    /// Still-valid credential(s) with no sign-in activity for over
+    /// `UNUSED_CREDENTIAL_DAYS`. Advisory marker emitted by the audit
+    /// runner's credential-usage post-pass, not by the scorer itself —
+    /// credentials absent from the beta report stay unflagged (`Unknown`).
+    /// Carries **no** remediation: removal stays admin-judged.
+    pub const UNUSED_CREDENTIAL: &str = "Unused credential(s):";
     pub const REDUNDANT_APP_PERMS: &str = "Redundant application permissions:";
+    /// Microsoft disabled the principal for a Services Agreement violation
+    /// (`disabledByMicrosoftStatus`). The finding group keeps its rows
+    /// admin-judged (delete/disable is not a safe one-click fix), so this
+    /// marker carries **no** remediation.
+    pub const DISABLED_BY_MICROSOFT: &str = "Disabled by Microsoft";
+    /// Identity Protection's risky-service-principal report flags this
+    /// principal `confirmedCompromised` or `atRisk`. Carries the
+    /// [`super::RemediationKind::DisableSignIn`] fix when the SP is still
+    /// enabled (disabling it stops token issuance, reversibly).
+    pub const RISKY_SERVICE_PRINCIPAL: &str = "Risky service principal";
     /// Sign-in audience reaches beyond this directory (multi-tenant, or
     /// multi-tenant + personal Microsoft accounts).
     pub const MULTITENANT_AUDIENCE: &str = "Sign-in audience reaches outside this tenant";

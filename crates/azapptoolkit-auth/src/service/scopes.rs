@@ -47,6 +47,17 @@ impl EntraAuthService {
         self.graph_scopes(&["Policy.Read.All"])
     }
 
+    /// `IdentityRiskyServicePrincipal.Read.All` Graph scope for the Identity
+    /// Protection risky-service-principal report (the audit's compromised-SP
+    /// signal). Acquired on demand (incremental consent), never at sign-in,
+    /// with the same graceful-degradation contract as the audit-log scope —
+    /// the endpoint additionally needs a Workload Identities premium license,
+    /// so a tenant that hasn't consented *or* isn't licensed still signs in
+    /// and browses; the audit run simply skips the risky-SP check.
+    pub fn default_graph_risky_service_principal_scopes(&self) -> Vec<String> {
+        self.graph_scopes(&["IdentityRiskyServicePrincipal.Read.All"])
+    }
+
     /// `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All`
     /// — ONE token for every claims-mapping-policy call (SAML attribute & claim
     /// customization in the SSO wizard and the detail "SSO" tab). Creating,
@@ -249,6 +260,7 @@ mod tests {
             svc.default_graph_sync_scopes(),
             svc.default_graph_audit_log_scopes(),
             svc.default_graph_policy_scopes(),
+            svc.default_graph_risky_service_principal_scopes(),
             svc.default_graph_policy_write_scopes(),
             svc.default_graph_sharepoint_scopes(),
             svc.default_graph_group_member_scopes(),

@@ -109,6 +109,8 @@ mod tests {
             sign_in_report_available: false,
             principal_kind: AuditPrincipalKind::Application,
             app_owner_organization_id: None,
+            sp_risk_state: None,
+            sp_risk_level: None,
         }
     }
 
@@ -263,6 +265,7 @@ mod tests {
                     issue::ORG_WIDE_MAILBOX
                 ),
                 format!("{}: Sites.ReadWrite.All", issue::ORG_WIDE_SHAREPOINT),
+                format!("{}: Files.ReadWrite.All", issue::ORG_WIDE_FILES),
                 "Long-lived secrets (>1 year): old-secret".to_string(),
             ],
             ..blank()
@@ -274,6 +277,12 @@ mod tests {
         assert_eq!(
             issue_lines_for(&item, "orgwide_sharepoint"),
             vec![item.issues[1].as_str()]
+        );
+        // The Files marker must quote only its own line — same wording shape
+        // as its SharePoint sibling, so a prefix mix-up would show two lines.
+        assert_eq!(
+            issue_lines_for(&item, "orgwide_files"),
+            vec![item.issues[2].as_str()]
         );
         // A finding this item doesn't trip quotes nothing — never the unmatched
         // rest of the issue list.

@@ -85,6 +85,14 @@ Azure-roles view — and principal ids to display names. Rows are flagged `high_
   `vaults_failed` — never read as "no access" — and the panel renders "scanned X of Y (Z failed —
   coverage is partial)". The CSV/JSON export (`save_key_vault_access_to_file`) leads with that
   coverage line, because a failed vault contributes no rows.
+- **Empty ≠ no access, second form: legacy access-policy vaults.** ARM's vault list carries
+  `properties.enableRbacAuthorization`, and where it is `false` the vault grants data access through
+  access policies, which the RBAC role-assignment listing *never* returns — a clean read over those
+  must not show all-clear either. `KeyVaultResource::access_policy_mode` is true only for an
+  explicit `false` (an absent flag is never asserted either way); the sweep counts it into
+  `KeyVaultSweepResult::vaults_access_policy_mode` and the panel's summary names it beside
+  `vaults_failed` — and, like the coverage line, it rides into the export. This labels the blind
+  spot, it does not fill it: access policies still have no reverse lookup.
 - Only a run that was not cancelled **and** has `vaults_failed == 0` is cached, under
   `{tenant}|keyvault_sweep` (`CacheKind::Audit`, audit TTL); `get_cached_key_vault_access`
   rehydrates it and proves the session first. Invalidation (an in-app Azure role assignment busts

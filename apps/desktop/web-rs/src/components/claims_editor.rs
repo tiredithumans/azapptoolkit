@@ -18,6 +18,7 @@ use crate::bindings::sso::{
     ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, TransformInputClaimDto,
     TransformOutputClaimDto, TransformParamDto,
 };
+use crate::components::ui::Callout;
 
 /// The directory `Source` values plus the UI-only `constant` sentinel (a claim
 /// with no source, just a static `Value`).
@@ -298,6 +299,112 @@ impl ClaimsEditorState {
         Self::from_dto(&ClaimsPolicyDto::default())
     }
 
+    /// Advisory checks on the edited state (F385) — edits that Graph would
+    /// reject, or that would silently strip claims, named BEFORE the operator
+    /// saves. Deliberately advisory, never a gate: saving a rejected policy
+    /// still leaves the app usable, and the save path now re-resolves live
+    /// state first (the `ClaimsWrite` ladder), so blocking was never needed —
+    /// the operator just must not type into these blind.
+    ///
+    /// Reads are tracked (`get`, not `get_untracked`) so the callout re-renders
+    /// while the operator edits, not only when a row is added or removed.
+    pub fn problems(&self) -> Vec<String> {
+        // Build the same DTO `to_dto` would send, then read the footguns off
+        // it — the advisory must describe what would actually reach Graph,
+        // including which half-typed rows get dropped on the way.
+        let dto = {
+            let schema: Vec<ClaimSchemaEntryDto> = self
+                .schema
+                .get()
+                .into_iter()
+                .filter_map(schema_row_to_dto)
+                .collect();
+            let transformations: Vec<ClaimsTransformationDto> = self
+                .transforms
+                .get()
+                .into_iter()
+                .filter_map(transform_row_to_dto)
+                .collect();
+            ClaimsPolicyDto {
+                include_basic_claim_set: self.include_basic.get(),
+                schema,
+                transformations,
+                preserved_options: None,
+            }
+        };
+        let mut problems: Vec<String> = Vec::new();
+
+        if !dto.include_basic_claim_set && dto.schema.is_empty() {
+            problems.push(
+                "The basic claim set is off and no claims are defined: tokens will carry no \
+                 identity claims at all — name, emailaddress, givenname and surname disappear \
+                 from every assertion."
+                    .to_string(),
+            );
+        }
+
+        let transform_ids: Vec<&str> = dto
+            .transformations
+            .iter()
+            .map(|t| t.id.as_str())
+            .filter(|id| !id.trim().is_empty())
+            .collect();
+
+        for (i, e) in dto.schema.iter().enumerate() {
+            let n = i + 1;
+            if e.saml_claim_type.is_none() && e.jwt_claim_type.is_none() {
+                problems.push(format!(
+                    "Claim #{n} sets neither a SAML claim URI nor a JWT claim name — it cannot \
+                     appear in a token."
+                ));
+            }
+            if e.source.as_deref() == Some("transformation") {
+                match e.transformation_id.as_deref() {
+                    None => problems.push(format!(
+                        "Claim #{n} is sourced from a transformation but names none — it emits \
+                         no value."
+                    )),
+                    Some(tid) if !transform_ids.contains(&tid) => problems.push(format!(
+                        "Claim #{n} names transformation '{tid}', which no transformation \
+                         below defines."
+                    )),
+                    _ => {}
+                }
+            }
+        }
+
+        // A repeated "Edit" on the same basic claim (or a hand-made duplicate)
+        // emits the same URI twice; only one value can land.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut reported: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for e in &dto.schema {
+            if let Some(uri) = e.saml_claim_type.as_deref()
+                && !seen.insert(uri)
+                && reported.insert(uri)
+            {
+                problems.push(format!(
+                    "More than one claim emits '{uri}' — only one value can land; remove or \
+                     rename a duplicate."
+                ));
+            }
+        }
+
+        for t in &dto.transformations {
+            if t.output_claims.is_empty() {
+                let label = if t.id.trim().is_empty() {
+                    "A transformation".to_string()
+                } else {
+                    format!("Transformation '{}'", t.id.trim())
+                };
+                problems.push(format!(
+                    "{label} has no output claim — it computes a value that no claim emits."
+                ));
+            }
+        }
+
+        problems
+    }
+
     /// Reads the edited policy back. Fully-empty schema/transformation rows are
     /// dropped so a half-typed row doesn't reach Graph.
     pub fn to_dto(&self) -> ClaimsPolicyDto {
@@ -564,6 +671,25 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
                             </Body1>
                         }
                     })
+            }}
+
+            // ---- advisory validation (F385) ----
+            // Sits directly above the caller's Save (in the SSO tab and the
+            // wizard alike). Advisory by design — see `ClaimsEditorState::problems`.
+            {move || {
+                let problems = state.problems();
+                (!problems.is_empty()).then(|| {
+                    view! {
+                        <Callout tone="warn">
+                            <ul>
+                                {problems
+                                    .into_iter()
+                                    .map(|p| view! { <li>{p}</li> })
+                                    .collect_view()}
+                            </ul>
+                        </Callout>
+                    }
+                })
             }}
         </div>
     }
@@ -1020,6 +1146,158 @@ mod tests {
             params: RwSignal::new(Vec::new()),
             outputs: RwSignal::new(Vec::new()),
         }
+    }
+
+    fn editor_state(
+        basic: bool,
+        schema: Vec<SchemaRow>,
+        transforms: Vec<TransformRow>,
+    ) -> ClaimsEditorState {
+        ClaimsEditorState {
+            include_basic: RwSignal::new(basic),
+            schema: RwSignal::new(schema),
+            transforms: RwSignal::new(transforms),
+            preserved: RwSignal::new(None),
+            seq: RwSignal::new(0),
+        }
+    }
+
+    /// A transformation with one output claim — the "well-formed" side of the
+    /// advisory's transformation rules.
+    fn transform_with_output(id: &str) -> TransformRow {
+        let t = transform_row(id, "Join");
+        t.outputs.set(vec![TOutputRow {
+            key: 99,
+            reference_id: RwSignal::new("claim1".to_string()),
+            claim_type: RwSignal::new("JoinedData".to_string()),
+        }]);
+        t
+    }
+
+    #[test]
+    fn a_well_formed_edit_reports_no_problems() {
+        with_owner(|| {
+            let plain = schema_row("user", "mail", "", "urn:email");
+            let joined = schema_row("transformation", "claim1", "", "urn:joined");
+            joined.transformation_id.set("DataJoin".to_string());
+            let state = editor_state(
+                true,
+                vec![plain, joined],
+                vec![transform_with_output("DataJoin")],
+            );
+            assert_eq!(state.problems(), Vec::<String>::new());
+
+            // The empty editor a fresh wizard starts with: basic set on, no
+            // rows. Nothing to warn about.
+            assert!(
+                editor_state(true, Vec::new(), Vec::new())
+                    .problems()
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn switching_the_basic_set_off_with_an_empty_schema_warns() {
+        with_owner(|| {
+            // This is the one edit that removes name/email/givenname/surname
+            // from every assertion — the case the advisory exists for.
+            let state = editor_state(false, Vec::new(), Vec::new());
+            let problems = state.problems();
+            assert_eq!(problems.len(), 1);
+            assert!(
+                problems[0].contains("no identity claims at all"),
+                "{problems:?}"
+            );
+
+            // Unchecking with at least one defined claim is a legitimate edit.
+            let state = editor_state(
+                false,
+                vec![schema_row("user", "mail", "", "urn:email")],
+                Vec::new(),
+            );
+            assert!(state.problems().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_claim_without_any_name_warns_but_a_jwt_only_claim_does_not() {
+        with_owner(|| {
+            // No SAML URI and no JWT name: the entry ships and emits nothing.
+            let state = editor_state(true, vec![schema_row("user", "mail", "", "")], Vec::new());
+            let problems = state.problems();
+            assert_eq!(problems.len(), 1);
+            assert!(problems[0].contains("neither a SAML claim URI nor a JWT claim name"));
+
+            let jwt_only = schema_row("user", "mail", "", "");
+            jwt_only.jwt_claim_type.set("email".to_string());
+            assert!(
+                editor_state(true, vec![jwt_only], Vec::new())
+                    .problems()
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn transformation_sourced_claims_must_name_a_defined_transformation() {
+        with_owner(|| {
+            // Names nothing.
+            let state = editor_state(
+                true,
+                vec![schema_row("transformation", "claim1", "", "urn:x")],
+                Vec::new(),
+            );
+            assert!(
+                state.problems()[0].contains("names none"),
+                "{:?}",
+                state.problems()
+            );
+
+            // Names a transformation no row defines.
+            let row = schema_row("transformation", "claim1", "", "urn:x");
+            row.transformation_id.set("NopeJoin".to_string());
+            let state = editor_state(true, vec![row], Vec::new());
+            assert!(state.problems()[0].contains("NopeJoin"));
+
+            // Names one that exists (with outputs) → no advisory.
+            let row = schema_row("transformation", "claim1", "", "urn:x");
+            row.transformation_id.set("DataJoin".to_string());
+            let state = editor_state(true, vec![row], vec![transform_with_output("DataJoin")]);
+            assert!(state.problems().is_empty());
+        });
+    }
+
+    #[test]
+    fn duplicate_saml_uris_warn_once() {
+        with_owner(|| {
+            // Repeated "Edit" clicks seed exactly this: two rows emitting the
+            // same URI, where only one value can land.
+            let rows = vec![
+                schema_row("user", "mail", "", "urn:email"),
+                schema_row("user", "userprincipalname", "", "urn:email"),
+                schema_row("user", "givenname", "", "urn:email"),
+            ];
+            let state = editor_state(true, rows, Vec::new());
+            let problems = state.problems();
+            assert_eq!(
+                problems.len(),
+                1,
+                "one advisory per duplicated URI: {problems:?}"
+            );
+            assert!(problems[0].contains("urn:email"));
+        });
+    }
+
+    #[test]
+    fn a_transformation_without_output_claims_warns() {
+        with_owner(|| {
+            let state = editor_state(true, Vec::new(), vec![transform_row("DataJoin", "Join")]);
+            let problems = state.problems();
+            assert_eq!(problems.len(), 1);
+            assert!(problems[0].contains("DataJoin"));
+            assert!(problems[0].contains("no output claim"));
+        });
     }
 
     #[test]

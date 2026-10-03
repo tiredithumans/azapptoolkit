@@ -18,6 +18,7 @@ use crate::state::AppState;
 mod authentication;
 mod cache;
 mod credentials;
+mod deleted;
 mod federated;
 mod owners;
 mod permissions_resolve;
@@ -29,6 +30,7 @@ mod permissions_resolve;
 pub use authentication::*;
 pub(crate) use cache::*;
 pub use credentials::*;
+pub use deleted::*;
 pub use federated::*;
 pub use owners::*;
 
@@ -494,6 +496,13 @@ pub async fn update_application(
     object_id: String,
     patch: UpdateApplicationInput,
 ) -> Result<(), UiError> {
+    // A patch that names nothing is not a write (F342): a clean Overview form
+    // used to dispatch `{}`, which cost a Graph round trip AND busted every
+    // list-tier cache for zero change. `None` means "untouched" on every
+    // field, so a default patch can only ever be a no-op — skip it entirely.
+    if patch == UpdateApplicationInput::default() {
+        return Ok(());
+    }
     let client = state.graph_for(&tenant_id);
     let graph_patch = AppPatch {
         display_name: patch.display_name,
@@ -1009,5 +1018,44 @@ mod handler_tests {
             !indexes_intact(&state, TENANT),
             "the landed create still busts the list tier"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dto::applications::UpdateApplicationInput;
+
+    /// The no-op gate in `update_application` compares against `default()`
+    /// field-by-field (derived `PartialEq`). Pin the two directions that
+    /// matter: a clean Overview form must be skipped, and any field the form
+    /// actually touched — including a deliberate `Some("")` clear — must not
+    /// be.
+    #[test]
+    fn only_an_all_none_patch_reads_as_no_change() {
+        assert_eq!(
+            UpdateApplicationInput::default(),
+            UpdateApplicationInput::default()
+        );
+        let clear_notes = UpdateApplicationInput {
+            notes: Some(String::new()),
+            ..Default::default()
+        };
+        assert_ne!(UpdateApplicationInput::default(), clear_notes);
+        for touched in [
+            UpdateApplicationInput {
+                display_name: Some("x".into()),
+                ..Default::default()
+            },
+            UpdateApplicationInput {
+                sign_in_audience: Some("AzureADMultipleOrgs".into()),
+                ..Default::default()
+            },
+            UpdateApplicationInput {
+                description: Some("d".into()),
+                ..Default::default()
+            },
+        ] {
+            assert_ne!(UpdateApplicationInput::default(), touched);
+        }
     }
 }

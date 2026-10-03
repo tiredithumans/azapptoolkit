@@ -216,6 +216,14 @@ mutation that can add/remove/rename a service principal or app registration (`cr
 `grant_exchange_mailbox_access`) must call it, or a stale pairing/search index survives until the
 TTL.
 
+**The recycle bin is the deliberate non-cache.** `list_recently_deleted` reads
+`/directory/deletedItems/microsoft.graph.application` live on every dialog open and keeps nothing:
+entries expire on their own (~30 days), a restore or purge changes what the *next* read must show,
+and a cached stale bin would invite restoring the wrong thing. `bulk_restore_deleted` is a
+set-changing mutation — restored apps rejoin the live set, so it calls `invalidate_app_lists` once
+after any successful restore (pairing joins and the app list must re-read); a purge removes only
+recycle-bin entries, touches no cached key, and busts nothing.
+
 **Credential-only mutations are tiered.** `add_password`, `remove_password`, the certificate
 add/remove pair, `generate_self_signed_certificate`, `remove_expired_passwords`,
 `remediate_remove_expired_credentials` and the bulk `bulk_remove_expired_credentials` sweep (once

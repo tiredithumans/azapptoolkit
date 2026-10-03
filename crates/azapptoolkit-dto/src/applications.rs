@@ -21,6 +21,25 @@ use crate::permissions::ResolvedPermission;
 /// than in the backend so the frontend's cap notice reads the same constant.
 pub const APPS_MAX: usize = 10_000;
 
+/// One recycle-bin row for the "Recently deleted" dialog. `display_name` is
+/// `None` for the limited-info entries Graph returns for some deleted objects;
+/// the row still lists, with the object id as its label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedAppDto {
+    pub object_id: String,
+    pub app_id: Option<String>,
+    pub display_name: Option<String>,
+    pub deleted_date_time: Option<DateTime<Utc>>,
+}
+
+/// The full recycle-bin payload: rows plus the truncation flag, so a partial
+/// read is never rendered as the whole bin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedAppsDto {
+    pub apps: Vec<DeletedAppDto>,
+    pub truncated: bool,
+}
+
 /// Coverage of the shared per-tenant service-principal index, for the surfaces
 /// that render a filtered *subset* of it.
 ///
@@ -158,7 +177,10 @@ pub struct CreateApplicationResult {
     pub failed_owner_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `PartialEq` + `Default` give both sides one definition of "nothing
+/// changed": the Overview tab disables Save on `patch == default`, and
+/// `update_application` treats that patch as a no-op (F342).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateApplicationInput {
     pub display_name: Option<String>,

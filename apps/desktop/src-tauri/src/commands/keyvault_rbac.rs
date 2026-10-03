@@ -159,6 +159,7 @@ pub async fn sweep_key_vault_access(
     let mut pairs: Vec<(KeyVaultResource, Vec<RoleAssignment>)> = Vec::new();
     let mut vaults_scanned = 0usize;
     let mut vaults_failed = 0usize;
+    let mut vaults_ap_mode = 0usize;
     let session = SessionDead::new();
     let mut cancelled = dispatch_capped(
         scoped_vaults,
@@ -191,6 +192,13 @@ pub async fn sweep_key_vault_access(
         |joined| match joined {
             Ok((vault, Ok(assignments))) => {
                 vaults_scanned += 1;
+                // A legacy access-policy vault answers the RBAC listing empty
+                // BY DESIGN — its data grants ride access policies. Count it so
+                // the summary says "invisible here" instead of letting a clean
+                // run read as all-clear.
+                if vault.access_policy_mode() {
+                    vaults_ap_mode += 1;
+                }
                 pairs.push((vault, assignments));
             }
             Ok((vault, Err(err))) => {
@@ -280,6 +288,7 @@ pub async fn sweep_key_vault_access(
         total,
         vaults_scanned,
         vaults_failed,
+        vaults_ap_mode,
         rows = rows.len(),
         cancelled,
         "key vault rbac sweep complete"
@@ -290,6 +299,7 @@ pub async fn sweep_key_vault_access(
         total_vaults: total,
         vaults_scanned,
         vaults_failed,
+        vaults_access_policy_mode: vaults_ap_mode,
         rows,
         cancelled,
     };
@@ -525,6 +535,7 @@ mod tests {
             total_vaults: 1,
             vaults_scanned: 1,
             vaults_failed: 0,
+            vaults_access_policy_mode: 0,
             rows: Vec::new(),
             cancelled: false,
         };

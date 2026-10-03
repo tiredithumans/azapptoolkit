@@ -233,27 +233,150 @@ async fn sign_in_activities_follow_next_link_on_the_audit_token() {
 }
 
 #[tokio::test]
+async fn credential_activities_parse_and_follow_paging_on_the_audit_token() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .and(query_param_is_missing("page"))
+        .and(query_param("$top", "999"))
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "appId": "app-1",
+                "keyId": "key-1",
+                "keyType": "certificate",
+                "credentialOrigin": "application",
+                "resourceId": "res-1",
+                "signInActivity": { "lastSignInDateTime": "2026-04-01T00:00:00Z" }
+            }, {
+                // A tracked credential with no observed use: null date must
+                // deserialize, and a missing signInActivity object too.
+                "appId": "app-1",
+                "keyId": "key-2",
+                "keyType": "clientSecret",
+                "credentialOrigin": "servicePrincipal"
+            }],
+            "@odata.nextLink": format!("{uri}/reports/appCredentialSignInActivities?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .and(query_param("page", "2"))
+        // The continuation rides the same scoped `AuditLog.Read.All` bearer.
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "appId": "app-2",
+                "keyId": "key-3",
+                "signInActivity": { "lastSignInDateTime": null }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&uri).with_audit_log_token(StaticTokenProvider::new("a"));
+    let rows = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].app_id.as_deref(), Some("app-1"));
+    assert_eq!(rows[0].key_id.as_deref(), Some("key-1"));
+    assert_eq!(
+        rows[0]
+            .sign_in_activity
+            .as_ref()
+            .and_then(|a| a.last_sign_in_date_time),
+        Some(
+            chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
+    );
+    // Absent signInActivity and an explicit null date both read as
+    // "no use recorded", NOT as a parsed timestamp — callers must not
+    // infer "unused" for credentials that are simply absent from the report.
+    assert!(rows[1].sign_in_activity.is_none());
+    assert_eq!(
+        rows[2]
+            .sign_in_activity
+            .as_ref()
+            .and_then(|a| a.last_sign_in_date_time),
+        None
+    );
+}
+
+#[tokio::test]
+async fn credential_activities_are_cached_per_tenant() {
+    let server = MockServer::start().await;
+    // Same read-through cache as the SP sign-in report: the slow beta endpoint
+    // is hit exactly ONCE per client per TTL window (audit run + Credentials
+    // tab share the entry). `.expect(1)` fails if caching is dropped.
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "appId": "app-1", "keyId": "key-1" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_audit_log_token(StaticTokenProvider::new("a"));
+    let first = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    let second = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].key_id.as_deref(), Some("key-1"));
+}
+
+#[tokio::test]
+async fn credential_activities_without_audit_token_is_forbidden() {
+    // No with_audit_log_token → graceful degradation path: Forbidden, not panic.
+    let client = make_client("http://127.0.0.1:0");
+    let err = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn conditional_access_policies_parse_and_follow_paging() {
     let server = MockServer::start().await;
     let uri = server.uri();
     Mock::given(method("GET"))
-            .and(path("/identity/conditionalAccess/policies"))
-            .and(query_param_is_missing("page"))
-            // Every paged read sends `$top`: paging is serial, so Graph's
-            // default page is a round-trip multiplier on a large tenant.
-            .and(query_param("$top", "999"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [{
-                    "id": "ca-1",
-                    "displayName": "Require MFA",
-                    "state": "enabled",
-                    "conditions": {"applications": {"includeApplications": ["All"], "excludeApplications": null}},
-                    "grantControls": {"builtInControls": ["mfa"], "operator": "OR"}
-                }],
-                "@odata.nextLink": format!("{uri}/identity/conditionalAccess/policies?page=2")
-            })))
-            .mount(&server)
-            .await;
+        .and(path("/identity/conditionalAccess/policies"))
+        .and(query_param_is_missing("page"))
+        // Every paged read sends `$top`: paging is serial, so Graph's
+        // default page is a round-trip multiplier on a large tenant.
+        .and(query_param("$top", "999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "ca-1",
+                "displayName": "Require MFA",
+                "state": "enabled",
+                "conditions": {
+                    "applications": {"includeApplications": ["All"], "excludeApplications": null},
+                    "clientApplications": {
+                        "includeServicePrincipals": ["workloadIdentityAll"],
+                        "excludeServicePrincipals": null,
+                        "servicePrincipalFilter": null
+                    }
+                },
+                "grantControls": {"builtInControls": ["mfa"], "operator": "OR"}
+            }],
+            "@odata.nextLink": format!("{uri}/identity/conditionalAccess/policies?page=2")
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/identity/conditionalAccess/policies"))
         .and(query_param("page", "2"))
@@ -274,6 +397,20 @@ async fn conditional_access_policies_parse_and_follow_paging() {
         .unwrap();
     assert_eq!(apps.include_applications, vec!["All".to_string()]);
     assert!(apps.exclude_applications.is_empty());
+    // The workload-identity client axis must survive deserialisation — the
+    // CA applicability decision reads it, and null-shaped nulls must default
+    // rather than error.
+    let clients = policies[0]
+        .conditions
+        .as_ref()
+        .and_then(|c| c.client_applications.as_ref())
+        .expect("clientApplications should parse");
+    assert_eq!(
+        clients.include_service_principals,
+        vec!["workloadIdentityAll".to_string()]
+    );
+    assert!(clients.exclude_service_principals.is_empty());
+    assert!(clients.service_principal_filter.is_none());
 }
 
 #[tokio::test]
@@ -419,4 +556,89 @@ async fn group_member_write_without_token_degrades_to_forbidden() {
     let client = make_client(&server.uri());
     let err = client.add_group_member("g-1", "sp-1").await.unwrap_err();
     assert!(matches!(err, GraphError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn risky_service_principals_parse_and_follow_paging() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param_is_missing("page"))
+        .and(query_param("$top", "999"))
+        .and(header("authorization", "Bearer r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "risk-1",
+                "servicePrincipalId": "sp-obj-1",
+                "isAiApplication": false,
+                "riskState": "confirmedCompromised",
+                "riskDetail": "anonymousIP",
+                "riskLevel": "high",
+                "riskLastUpdatedDateTime": "2026-09-30T10:00:00Z"
+            }, {
+                // Explicit nulls must deserialize to `None`, not fail the page.
+                "id": "risk-2",
+                "servicePrincipalId": "sp-obj-2",
+                "isAiApplication": null,
+                "riskState": "atRisk",
+                "riskDetail": null,
+                "riskLevel": null,
+                "riskLastUpdatedDateTime": null
+            }],
+            "@odata.nextLink": format!("{uri}/identityProtection/riskyServicePrincipals?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param("page", "2"))
+        // The continuation rides the same scoped bearer.
+        .and(header("authorization", "Bearer r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "risk-3",
+                "servicePrincipalId": "sp-obj-3",
+                "riskState": "dismissed"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&uri).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let rows = client.list_risky_service_principals().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].service_principal_id.as_deref(), Some("sp-obj-1"));
+    assert_eq!(rows[0].risk_state.as_deref(), Some("confirmedCompromised"));
+    assert_eq!(rows[0].risk_level.as_deref(), Some("high"));
+    assert_eq!(rows[1].risk_detail, None);
+    assert_eq!(rows[1].risk_last_updated_date_time, None);
+    // Non-risky states arrive on the wire too; filtering is the caller's call.
+    assert_eq!(rows[2].risk_state.as_deref(), Some("dismissed"));
+}
+
+#[tokio::test]
+async fn risky_service_principals_first_page_404_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {"code": "Request_ResourceNotFound"}
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let rows = client.list_risky_service_principals().await.unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn risky_service_principals_without_token_is_forbidden() {
+    // No with_risky_sp_token → the optional scope isn't wired; the call must
+    // surface Forbidden (graceful degradation), not panic.
+    let client = make_client("http://127.0.0.1:0");
+    let err = client.list_risky_service_principals().await.unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
 }

@@ -223,8 +223,10 @@ pub static CAPABILITIES: &[Capability] = &[
         key: "audit_reports",
         plane: Plane::EntraDirectory,
         label: "Activity & sign-in reports",
-        description: "Directory audit log (Activity tab) and service-principal sign-in activity \
-                      (unused-app detection).",
+        description: "Directory audit log (Activity tab), service-principal sign-in activity \
+                      (unused-app detection), and per-credential last-used data. The credential \
+                      report is beta and served in the Global cloud only — elsewhere the \
+                      Last-used signals degrade to unknown.",
         directory_roles_any: &[
             ("Reports Reader", Some(TID_REPORTS_READER)),
             ("Security Reader", Some(TID_SECURITY_READER)),
@@ -261,6 +263,54 @@ pub static CAPABILITIES: &[Capability] = &[
         remediation: "Conditional Access visibility needs the Policy.Read.All scope and a role \
                       that can read policies (Security Reader or Global Reader), plus an Entra ID \
                       P1/P2 license.",
+    },
+    Capability {
+        key: "app_management_policies",
+        plane: Plane::EntraDirectory,
+        label: "App-management policies (credential lifetime, read)",
+        description: "Read the tenant default app-management policy and the per-app overrides \
+                      so the Credentials tab and the audit's lifetime advisory can explain a \
+                      policy-capped secret lifetime or a policy-rejected secret add. Read-only \
+                      v1.0 reads on the same on-demand Policy.Read.All token as Conditional \
+                      Access; without it the lifetime advisory degrades to silent, never to a \
+                      wrong \u{201c}no cap\u{201d}.",
+        // Same policy-read roles as Conditional Access — the token is shared
+        // (`policy`), so the role half must not claim a role the read does not
+        // actually honor.
+        directory_roles_any: &[
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["Policy.Read.All"],
+        scope_feature: Some("policy"),
+        remediation: "Credential-lifetime policy visibility needs the Policy.Read.All scope and \
+                      a policy-read role (Security Reader or Global Reader). It shares \
+                      Conditional Access's on-demand policy token, so consenting for one \
+                      covers both.",
+    },
+    Capability {
+        key: "identity_protection_risk",
+        plane: Plane::EntraDirectory,
+        label: "Identity Protection risky-service-principal report (read)",
+        description: "Read the risky-service-principal report so the tenant audit flags \
+                      service principals Identity Protection marks at risk or compromised.",
+        directory_roles_any: &[
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["IdentityRiskyServicePrincipal.Read.All"],
+        scope_feature: Some("risky_service_principals"),
+        remediation: "The risky-service-principal report needs the \
+                      IdentityRiskyServicePrincipal.Read.All scope and a security-read role \
+                      (Security Reader or Global Reader), plus a Workload Identities premium \
+                      license — without the license the endpoint answers 403 \
+                      Authentication_RequestFromNonPremiumTenantOrB2CTenant.",
     },
     Capability {
         key: "sharepoint_sites_selected",

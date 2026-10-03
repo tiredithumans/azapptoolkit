@@ -25,6 +25,14 @@ pub const STALE_APP_DAYS: i64 = 90;
 /// (no PowerShell origin) — drives [`unused_app_advisory`].
 pub const UNUSED_APP_DAYS: i64 = 90;
 
+/// Days without ANY credential sign-in activity before a still-valid
+/// credential is flagged "unused" — drives
+/// [`unused_credential_advisory`](super::unused_credential_advisory). Set
+/// equal to [`UNUSED_APP_DAYS`] deliberately: both answers come from the same
+/// beta sign-in-activity reports and a credential unused as long as its app
+/// is exactly the case the two advisories are meant to surface together.
+pub const UNUSED_CREDENTIAL_DAYS: i64 = 90;
+
 /// Long-lived secret threshold. `Credential-Analysis.ps1:169`. Applies to
 /// certificates too: Rule 7 checks every credential kind against it and names
 /// the two kinds on separate lines. Ported spelling kept (public, re-exported).
@@ -35,6 +43,19 @@ pub(super) const PTS_HIGH_RISK_APP_PERM: u32 = 10;
 pub(super) const PTS_MEDIUM_RISK_APP_PERM: u32 = 5;
 pub(super) const PTS_ADMIN_CONSENT_DELEGATED: u32 = 5;
 pub(super) const PTS_SP_DISABLED: u32 = 2;
+/// Microsoft has disabled the app/SP for a Services Agreement violation
+/// (`disabledByMicrosoftStatus`). Highest single-item weight: it is
+/// Microsoft's own "suspicious, abusive or malicious activity" verdict, so a
+/// flagged principal is at least High on this signal alone (+15 ≥ the 15-point
+/// High threshold). Ranking change over the legacy port — CHANGELOG-gated.
+pub(super) const PTS_DISABLED_BY_MICROSOFT: u32 = 15;
+/// Identity Protection flags the service principal `confirmedCompromised` or
+/// `atRisk` (the risky-service-principal report). Above the disable flag: a
+/// *confirmed-compromised* principal may already be minting tokens — this is
+/// the one signal that can mean live abuse, so it is worth more than any
+/// single permission and pushes any other finding to Critical. Ranking change
+/// over the legacy port — CHANGELOG-gated.
+pub(super) const PTS_RISKY_SERVICE_PRINCIPAL: u32 = 20;
 pub(super) const PTS_ALL_CREDS_EXPIRED: u32 = 8;
 pub(super) const PTS_MIXED_EXPIRED: u32 = 4;
 pub(super) const PTS_ALL_EXPIRING_SOON: u32 = 3;
@@ -277,7 +298,10 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
 /// removal). A `None` resource yields no Exchange advice for the same reason.
 /// SharePoint advice follows [`crate::scoping::is_sharepoint_orgwide_permission`]:
 /// both SharePoint resources expose `Sites.Selected`, but another API's
-/// `Sites.`-named role is not SharePoint site access.
+/// `Sites.`-named role is not SharePoint site access. The org-wide Files family
+/// ([`crate::scoping::is_files_orgwide_permission`]) points at
+/// `Files.SelectedOperations.Selected`, the item-level model the Scope wizard
+/// applies.
 pub fn least_privilege_alternative_for(
     resource_app_id: Option<&str>,
     value: &str,
@@ -285,6 +309,12 @@ pub fn least_privilege_alternative_for(
     if crate::scoping::is_sharepoint_orgwide_permission(resource_app_id, value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
         Some(crate::scoping::SP_SITES_SELECTED)
+    } else if crate::scoping::is_files_orgwide_permission(resource_app_id, value) {
+        // Org-wide Files reach points at the item-level scoped model — the same
+        // answer the audit's Rule 12 advisory and the Scope wizard give. It is
+        // advisory only: nothing auto-converts `Files.*.All`, so unlike the
+        // `Sites.*` arm there is no one-click fix behind this pointer.
+        Some(crate::scoping::SP_FILES_SELECTED)
     } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
         // Mail/calendar/contacts can be confined to mailboxes via Exchange RBAC.
         Some("Scope to specific mailboxes (Exchange RBAC)")
@@ -583,6 +613,19 @@ mod tests {
             Some("Scope to specific mailboxes (Exchange RBAC)")
         );
         assert_eq!(graph("Mail.ReadWrite.Shared"), None);
+        // Org-wide Files -> the item-level scoped model. The picker hint, the
+        // audit's Rule 12 advisory and the wizard all name this one value, so
+        // the family is a list, not a `Files.` prefix.
+        assert_eq!(
+            graph("Files.Read.All"),
+            Some("Files.SelectedOperations.Selected")
+        );
+        assert_eq!(
+            graph("Files.ReadWrite.All"),
+            Some("Files.SelectedOperations.Selected")
+        );
+        assert_eq!(graph("Files.SelectedOperations.Selected"), None);
+        assert_eq!(graph("Files.ReadWrite.AppFolder"), None);
         // Already least-privilege / no narrower equivalent.
         assert_eq!(graph("Sites.Selected"), None);
         assert_eq!(graph("Directory.ReadWrite.All"), None);

@@ -182,3 +182,42 @@ async fn save_sends_one_entry_per_row_trimmed_with_blanks_dropped() {
     // A successful save round-trips the full-replace read.
     ts::wait_for(|| ts::call_count("get_application_authentication") == 2).await;
 }
+
+#[wasm_bindgen_test]
+async fn an_unchanged_form_disables_save_and_ignores_a_forced_click() {
+    ts::reset();
+    let _m = mount(&["https://a/cb"], &[]);
+    ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 1).await;
+
+    // A form still matching the loaded DTO is not dirty (F342): the write is
+    // a full replace, so an unchanged Save would re-PATCH byte-identical data
+    // and bust the list caches for nothing. Save waits for a real change.
+    assert!(!ts::button_labelled_enabled("Save"));
+    assert!(ts::has_button_labelled("Reset"));
+    // A disabled button is inert — even a forced click dispatches nothing.
+    ts::click_button_labelled("Save");
+    ts::tick().await;
+    assert_eq!(ts::call_count("set_application_authentication"), 0);
+}
+
+#[wasm_bindgen_test]
+async fn reset_restores_the_loaded_uris_and_re_disables_save() {
+    ts::reset();
+    let _m = mount(&["https://a/cb"], &[]);
+    ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 1).await;
+
+    ts::set_input_value(
+        ".uri-list--web .uri-list__row:nth-child(1) input",
+        "https://typo/cb",
+    );
+    ts::wait_for(|| ts::button_labelled_enabled("Save")).await;
+    // An added row counts against the loaded set too, so Reset must rebuild
+    // the rows, not just retype the first one.
+    ts::click_button_labelled("Add web redirect URI");
+    ts::wait_for(|| ts::query_all(WEB_ROWS).len() == 2).await;
+
+    ts::click_button_labelled("Reset");
+    ts::wait_for(|| values(WEB_INPUTS) == ["https://a/cb"]).await;
+    assert!(!ts::button_labelled_enabled("Save"));
+    assert_eq!(ts::call_count("set_application_authentication"), 0);
+}

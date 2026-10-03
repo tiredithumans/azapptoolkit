@@ -86,8 +86,8 @@ Some features need admin-consent/premium scopes beyond the sign-in bundle:
 | Scope | Feature |
 |---|---|
 | `Synchronization.Read.All` | SCIM provisioning |
-| `AuditLog.Read.All` | Directory activity / change log (the Activity tab) **and** the service-principal sign-in-activity report behind the audit's unused-app detection. The `reports/servicePrincipalSignInActivities` report's least-privileged scope is `AuditLog.Read.All`, **not** `Reports.Read.All`. |
-| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) |
+| `AuditLog.Read.All` | Directory activity / change log (the Activity tab), **and** the two sign-in reports: the service-principal sign-in-activity report behind the audit's unused-app detection, **and** the beta `reports/appCredentialSignInActivities` behind the unused-credential advisory and the Credentials tab's Last-used column (that one is **Global cloud only** — a sovereign cloud reads it as unavailable and the feature stays off). Both reports' least-privileged scope is `AuditLog.Read.All`, **not** `Reports.Read.All`. |
+| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token` — the CA tab's "Grant consent" covers the policy reads too (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
 | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. |
 | `Sites.FullControl.All` | SharePoint `Sites.Selected` — list/grant/revoke a site's per-app permissions in the Permissions tab's SharePoint site access section. The site-permission endpoints require it even for **reads**, since the verb-selected read token only holds `Directory.Read.All`. |
 | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` (one token) | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Learn's "Add members" table documents the pair for a `servicePrincipal` member (Graph must also write the SP); `Application.ReadWrite.All` is already in the write bundle, so this widens nothing. Deliberately the membership-only group scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
@@ -318,6 +318,54 @@ Three surfaces read it so the guidance never drifts:
    `check_readiness` is **never cached** (freshness after a PIM activation is the point); the Azure
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
    use the scoping action).
+
+## Signed-AuthnRequest visibility — read-only, never-flag-on-unknown
+
+`requestSignatureVerification` on the paired **application** (`isSignedRequestRequired` +
+`allowedWeakAlgorithms`) is the tenant-side gate for whether Entra verifies signed SAML
+authentication requests. `get_application_sso_fields` selects it (no new scope — it rides the
+already-consented default token on a round trip that already happens), and
+`extract_request_signature_verification` projects it onto `SsoConfigDto` as
+`signed_requests_required` + `allowed_weak_signature_algorithms`.
+
+**Two invariants.** (1) A missing or malformed block is **unknown** and renders *nothing* — the
+tab must never imply unsigned requests are acceptable just because Graph omitted a field
+(the never-flag-on-unknown contract, shared with the credential-lifetime advisory). A
+`"none"`/empty `allowedWeakAlgorithms` normalises to `None`: present means a real allowance.
+(2) **There is deliberately no write path.** The v1.0 `application-update` property list (checked
+2026-10-03) does not list the property as updatable, so the SSO tab shows the state and points to
+the Entra admin center instead of PATCHing an undocumented field on an auth-trust control; a
+toggle may only be added with evidence the PATCH lands. The tab also does not score it —
+adding a rule would need a per-app SSO read inside the audit fan-out and is CHANGELOG-gated as a
+ranking change.
+
+## Tenant consent posture — decidable-only, no new scope
+
+The portal's three consent modes ("allow user consent for Microsoft-verified apps" /
+"for any app" / "block") are not a single readable v1.0 property, so F274 ships only what is
+decidable on the existing `Policy.Read.All` token: `get_tenant_consent_posture`
+(`commands/consent.rs`) runs the `authorizationPolicy` + `adminConsentRequestPolicy` pair
+through `tokio::join!` and normalises it via `consent_posture_from` (table-tested).
+`defaultUserRolePermissions.permissionGrantPoliciesAssigned` IS the assignment list —
+`Some(vec![])` confirms users cannot self-consent, a non-empty list means they can under those
+policies (names shown verbatim: whether each still allows what its name implies is not knowable
+from this read). `allowUserConsentForRiskyApps: null` is **unknown** (the docs say default-false,
+real payloads emit `null`), and a 404 on the ACW policy really does read "not enabled" — enabling
+the workflow requires the policy object to exist.
+
+**Deliberately not read.** `permissionGrantPolicies` is a *catalog*, not the assignment; Learn
+also warns against treating the assignment principals as an exhaustive list, and reading the
+bodies needs `Policy.Read.PermissionGrant`, which the policy token does not carry — while the
+assignment list above already names what the default user role holds. Pending
+`appConsentRequests` are a deferred second step needing a dedicated consent-requests scope.
+Both deferrals are recorded in the `TenantConsentPostureDto` doc comment.
+
+**Rendering contract.** The pair is all-or-nothing — a partial policy picture is deliberately no
+picture (`available: false`) — and the command never `Err`s and never degrades a run. Both
+surfaces (the grants view's `AuditDashboard` `header_note` Callout and the Home posture card's
+independent Suspense island) render *nothing* on unknown, the same never-flag-on-unknown contract
+as signed-request visibility above. The reads are mount-time and uncached: one tiny pair per
+view mount, not fan-out scale, and freshness is the feature (portal edits show up on reopen).
 
 ## SAML signing-certificate rollover — staged, resumable, revertible
 

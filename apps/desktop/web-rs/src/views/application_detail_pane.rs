@@ -9,7 +9,9 @@ use thaw::Card;
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DetailLoadError, DetailSkeleton, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, DetailLoadError, DetailSkeleton, TabBar, TabBarItem,
+};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
 use crate::util::{keep_alive, no_tenant};
@@ -152,6 +154,25 @@ pub fn ApplicationDetailPane(
                                         on_delete=Callback::new(move |()| delete_open.set(true))
                                     >
                                         {move || {
+                                            // Microsoft's own "malicious" flag —
+                                            // shown before the pairing link so it
+                                            // is the first thing on a disabled app.
+                                            detail_signal
+                                                .with(|d| d.application.disabled_by_microsoft_status.clone())
+                                                .filter(|s| !s.is_empty())
+                                                .map(|status| {
+                                                    view! {
+                                                        <Badge
+                                                            label="Disabled by Microsoft"
+                                                            tone=BadgeTone::Critical
+                                                            title=format!(
+                                                                "Microsoft disabled this application for a Services Agreement violation ({status}); sign-ins and token issuance are blocked"
+                                                            )
+                                                        />
+                                                    }
+                                                })
+                                        }}
+                                        {move || {
                                             detail_signal
                                                 .with(|d| d.service_principal.clone())
                                                 .map(|sp| {
@@ -261,7 +282,7 @@ pub fn ApplicationDetailPane(
                                     <ConfirmDialog
                                         open=Signal::derive(move || delete_open.get())
                                         title="Delete this app registration?"
-                                        body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. Deletion can be undone from the Entra admin center within 30 days."
+                                        body="This removes the application. Permission grants on the service principal are revoked; any credentials become invalid immediately. The app stays recoverable for 30 days — restore it from \"Recently deleted…\" on the App Registrations view."
                                         // Several app windows can be open at once and the
                                         // modal covers all of them, so it names the app it
                                         // will delete instead of relying on the header it

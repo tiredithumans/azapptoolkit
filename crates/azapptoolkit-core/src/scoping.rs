@@ -530,6 +530,34 @@ pub fn is_scoped_sharepoint_resource_permission(
     resource_app_id == Some(MICROSOFT_GRAPH_APP_ID) && value == SP_SITES_SELECTED
 }
 
+/// The org-wide **Files** family: the two Microsoft Graph application
+/// permissions that read or write every file in every site collection and every
+/// user's OneDrive.
+///
+/// An explicit list, deliberately NOT a `Files.` name predicate the way
+/// [`is_sharepoint_orgwide`] treats `Sites.`: `Files.SelectedOperations.Selected`
+/// is the scoped end state, and the family's other members
+/// (`Files.ReadWrite.AppFolder`, the retired `Files.Read.Selected` pair) do not
+/// reach every file — a prefix sweep would call them org-wide and send operators
+/// after a reach the permission does not have. A future `Files.*.All` joins by
+/// being added here, next to its documentation.
+pub const FILES_ORGWIDE_PERMISSIONS: &[&str] = &["Files.Read.All", "Files.ReadWrite.All"];
+
+/// True when a grant reaches SharePoint/OneDrive **files** org-wide — the
+/// classification gate behind the `ORG_WIDE_FILES` advisory and the picker's
+/// least-privilege pointer. No fix hangs off it: there is no automatic
+/// conversion from `Files.*.All` (that would be a different, audit-driven flow),
+/// so unlike the `Sites.*` path this classification never offers a remediation.
+/// `None` falls back to the name, reporting reach like
+/// [`is_sharepoint_orgwide_permission`]; the family is Graph's, so a lookalike
+/// on any other resource is not file reach.
+pub fn is_files_orgwide_permission(resource_app_id: Option<&str>, value: &str) -> bool {
+    match resource_app_id {
+        Some(MICROSOFT_GRAPH_APP_ID) | None => FILES_ORGWIDE_PERMISSIONS.contains(&value),
+        Some(_) => false,
+    }
+}
+
 /// Which scoping *authority* can confine a Graph application permission. Each
 /// mechanism has its own target type and apply strategy, but the scope UX shell
 /// (pick permission → choose targets → review) is uniform across them — this enum
@@ -1512,6 +1540,54 @@ mod resource_aware_gate_tests {
             "telling an operator to scope an unscopable grant sends them after a fix that \
              cannot be applied, and implies the grant is containable when removal is the \
              only remedy"
+        );
+    }
+
+    #[test]
+    fn orgwide_files_is_classified_by_the_explicit_family() {
+        // Advisory classification (no fix keys off it): Graph, plus the
+        // unresolved resource which reports reach rather than dropping it.
+        assert!(is_files_orgwide_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Files.Read.All"
+        ));
+        assert!(is_files_orgwide_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Files.ReadWrite.All"
+        ));
+        assert!(
+            is_files_orgwide_permission(None, "Files.ReadWrite.All"),
+            "an unresolved resource must not hide known file reach"
+        );
+        // The scoped end state is not org-wide…
+        assert!(!is_files_orgwide_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            SP_FILES_SELECTED
+        ));
+        // …and neither is app-folder-only reach (the predicate is a list, not a
+        // `Files.` prefix, precisely so these stay out).
+        assert!(!is_files_orgwide_permission(
+            Some(MICROSOFT_GRAPH_APP_ID),
+            "Files.ReadWrite.AppFolder"
+        ));
+        // Resources that do not expose the family never classify as it.
+        assert!(!is_files_orgwide_permission(
+            Some(OFFICE365_SHAREPOINT_ONLINE_APP_ID),
+            "Files.Read.All"
+        ));
+        assert!(!is_files_orgwide_permission(
+            Some("custom-api"),
+            "Files.Read.All"
+        ));
+        // Files stays OUT of the `Sites.` predicates — the ScopeSharePoint fix
+        // gate must never fire on a Files grant (the advisory has no remediation).
+        assert!(!is_sharepoint_orgwide("Files.ReadWrite.All"));
+        assert!(
+            !is_scopable_sharepoint_resource_permission(
+                Some(MICROSOFT_GRAPH_APP_ID),
+                "Files.ReadWrite.All"
+            ),
+            "a Files grant must not earn the Sites.Selected fix"
         );
     }
 }

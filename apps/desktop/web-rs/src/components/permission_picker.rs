@@ -285,6 +285,8 @@ fn scope_hint_note(resource_app_id: &str, value: &str) -> Option<(bool, String)>
     // Worded off the helper's own answer, so the two can never disagree.
     let note = if alt == SP_SITES_SELECTED {
         format!("Org-wide — reaches every site. Prefer {alt}.")
+    } else if alt == SP_FILES_SELECTED {
+        format!("Org-wide — reaches every file. Prefer {alt}.")
     } else {
         // Exchange-scopable mail/calendar/contacts.
         format!("Org-wide — tenant-wide reach. {alt}.")
@@ -532,5 +534,28 @@ mod tests {
         let (scoped, _) = scope_hint_note(MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED)
             .expect("Sites.Selected gets the scoped note");
         assert!(scoped);
+    }
+
+    #[test]
+    fn scope_hint_points_org_wide_files_at_the_item_scope() {
+        assert_eq!(
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Files.ReadWrite.All"),
+            Some((
+                false,
+                "Org-wide — reaches every file. Prefer Files.SelectedOperations.Selected."
+                    .to_string()
+            ))
+        );
+        // Resource-aware like every sibling: `Files.`-named roles live on
+        // Microsoft Graph, so a lookalike elsewhere gets no advice it cannot
+        // follow, and an app-folder-only grant is not org-wide reach.
+        assert_eq!(
+            scope_hint_note(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Files.Read.All"),
+            None
+        );
+        assert_eq!(
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Files.ReadWrite.AppFolder"),
+            None
+        );
     }
 }

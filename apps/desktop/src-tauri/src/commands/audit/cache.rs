@@ -38,6 +38,13 @@ pub(crate) struct CachedAuditRun {
     /// under-reports), so a cache hit and its export must still carry the
     /// caveat.
     pub(crate) mailbox_scoping_resolved: bool,
+    /// The run's app-management policy state, mirrored into [`CachedAuditSummary`]
+    /// for the Home posture line. NOT reconstructable from the items (it is
+    /// tenant-wide, not per-row), so it rides the entry — a cache hit that
+    /// dropped it would silently answer "no cap known" an hour after a run
+    /// that knew the cap.
+    pub(crate) credential_policy_available: bool,
+    pub(crate) credential_policy_max_days: Option<i64>,
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -100,6 +107,8 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         cancelled: false,
         sign_in_report_available,
         sign_in_consent_required: false,
+        credential_policy_available: run.credential_policy_available,
+        credential_policy_max_days: run.credential_policy_max_days,
         // A truncated run is never cached (see `run_audit`), so anything read
         // back from here covered the whole tenant by construction.
         truncated: false,
@@ -135,5 +144,7 @@ pub fn get_cached_audit_summary(
     Some(CachedAuditSummary::from_items(
         &run.items,
         Some(run.completed_at.clone()),
+        run.credential_policy_available,
+        run.credential_policy_max_days,
     ))
 }

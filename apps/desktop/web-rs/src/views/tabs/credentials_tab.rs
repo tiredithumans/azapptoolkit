@@ -1,10 +1,12 @@
 //! Credentials tab. Lists secrets + certificates for an app, lets you add /
 //! remove / sweep expired.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARN_DAYS;
-use chrono::NaiveDate;
+use azapptoolkit_core::audit::{EXPIRY_WARNING_DAYS as WARN_DAYS, credential_over_cap, is_expired};
+use azapptoolkit_dto::credentials::CredentialUsageDto;
+use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{
     Body1, Button, ButtonAppearance, DatePicker, Field, Input, Select, Spinner, SpinnerSize,
@@ -14,6 +16,7 @@ use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
     GeneratedCertificateResult, RemoveExpiredResult,
 };
+use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable, FormError};
@@ -34,6 +37,50 @@ fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
     let end = end?;
     let now = chrono::Utc::now();
     Some((end - now).num_days())
+}
+
+/// Last-used lookup for the two credential tables: `(app_id, key_id)` → the
+/// newest recorded use; `Some(None)` = tracked-but-never-used; **no entry =
+/// unknown**. An unavailable report (or a failed read) yields an empty map —
+/// every cell then renders "—", which is the honest answer: absence from the
+/// beta `appCredentialSignInActivities` report is never evidence of no use,
+/// which is why an unknown credential is never flagged by the audit's
+/// unused-credential rule either. The newest-wins fold is re-applied here
+/// (rather than trusted across the wire) because one credential can appear
+/// under both the `application` and `servicePrincipal` origins.
+fn usage_lookup(
+    usage: Option<&CredentialUsageDto>,
+) -> HashMap<(String, String), Option<DateTime<Utc>>> {
+    let Some(dto) = usage.filter(|u| u.available) else {
+        return HashMap::new();
+    };
+    let mut map: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
+    for r in &dto.rows {
+        let entry = map
+            .entry((r.app_id.clone(), r.key_id.clone()))
+            .or_insert(None);
+        if let Some(dt) = r.last_used
+            && entry.is_none_or(|prev| dt > prev)
+        {
+            *entry = Some(dt);
+        }
+    }
+    map
+}
+
+/// The Last-used cell: dated → the day; tracked with no date → "No use
+/// recorded"; unknown → "—". Three states because "we don't know" and "never
+/// used" are different facts.
+fn last_used_text(
+    map: &HashMap<(String, String), Option<DateTime<Utc>>>,
+    app_id: &str,
+    key_id: &str,
+) -> String {
+    match map.get(&(app_id.to_string(), key_id.to_string())) {
+        Some(Some(d)) => fmt_date(Some(*d)),
+        Some(None) => "No use recorded".into(),
+        None => "—".into(),
+    }
 }
 
 fn status_label(days: Option<i64>) -> (&'static str, BadgeTone) {
@@ -243,6 +290,68 @@ pub fn CredentialsTab(
     let secrets =
         Signal::derive(move || detail.with(|d| d.application.password_credentials.clone()));
     let certs = Signal::derive(move || detail.with(|d| d.application.key_credentials.clone()));
+
+    // Tenant-wide per-credential last-used map (beta `appCredentialSignInActivities`,
+    // Global cloud only; read-through cached in the backend). Keyed on the
+    // active tenant — the data is tenant-wide; the tables below join it by
+    // `(app_id, key_id)` at render time, so a re-read or a different app can
+    // never paint a stale map's dates onto this app's rows. `Err` /
+    // `available: false` is not an error state here: the column's "—" is
+    // honest for unknown.
+    let usage = LocalResource::new(move || {
+        let tenant = session.active_tenant.get();
+        async move {
+            match tenant {
+                Some(t) => credentials::list_credential_usage(&t.tenant_id).await,
+                None => Ok(CredentialUsageDto {
+                    available: false,
+                    rows: Vec::new(),
+                }),
+            }
+        }
+    });
+
+    // This app's secret-lifetime policy context (tenant default + any override
+    // assigned to it), decided backend-side by the same precedence the audit
+    // scorer uses: an override REPLACES the default, ≥2 overrides means no
+    // verdict, and a grandfathered app gets no cap. `available: false` / a
+    // failed read is *unknown*, not "no cap" — the tab then renders nothing,
+    // the same never-flag-on-unknown contract as the Last-used column.
+    // Keyed on this app's object id; all three reads are read-through cached
+    // in the backend, so a detail reload costs no second policy round trip.
+    let policy = LocalResource::new(move || {
+        let tenant = session.active_tenant.get();
+        let object = object_id.get();
+        async move {
+            match tenant {
+                Some(t) => credentials::get_app_credential_policy(&t.tenant_id, &object).await,
+                None => Ok(azapptoolkit_dto::credentials::AppCredentialPolicyDto::default()),
+            }
+        }
+    });
+
+    // Resolved policy: `(effective cap, assigned override names, key ids of
+    // VALID secrets provably over it)` — `None` while loading or when the
+    // policy is unknown/enforces nothing. The over-cap set is folded with
+    // `credential_over_cap`, the one predicate the audit's lifetime advisory
+    // uses, so the tab's markers and the audit's advice can never name
+    // different secrets for one app.
+    let policy_ctx = Signal::derive(move || -> Option<(i64, Vec<String>, Vec<String>)> {
+        let pol = policy.get().and_then(|r| r.ok()).filter(|p| p.available)?;
+        let cap = pol.effective_cap_days.filter(|c| *c > 0)?;
+        let created = detail.with(|d| d.application.created_date_time);
+        let now = chrono::Utc::now();
+        let over = secrets.with(|list| {
+            list.iter()
+                .filter(|c| !is_expired(c.end_date_time, now))
+                .filter(|c| {
+                    credential_over_cap(c.end_date_time, c.start_date_time.or(created), cap)
+                })
+                .map(|c| c.key_id.clone())
+                .collect::<Vec<String>>()
+        });
+        Some((cap, pol.custom_policy_names.clone(), over))
+    });
 
     let add_open = RwSignal::new(false);
     let display_name = RwSignal::new("client-secret".to_string());
@@ -681,6 +790,25 @@ pub fn CredentialsTab(
 
     view! {
         <div class="credentials-tab">
+            {move || {
+                // One notice for the whole tab, not one per table: the column
+                // is degraded everywhere at once or nowhere. `None` (still
+                // loading) must NOT claim the report is unavailable.
+                let unavailable = match usage.get() {
+                    Some(Err(_)) => true,
+                    Some(Ok(u)) => !u.available,
+                    None => false,
+                };
+                unavailable.then(|| {
+                    view! {
+                        <Callout tone="info">
+                            "Last-used data is unavailable — the credential sign-in report needs \
+                             AuditLog.Read.All consent and is served in the Global cloud only. \
+                             A \u{2014} cell means unknown, not unused."
+                        </Callout>
+                    }
+                })
+            }}
             <section>
                 <header class="row-between">
                     <strong>{move || format!("Secrets ({})", secrets.with(Vec::len))}</strong>
@@ -728,17 +856,70 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
+                    // Only a KNOWN cap earns a notice. An unread policy and a
+                    // tenant that enforces no lifetime cap both render
+                    // NOTHING: "no cap enforced" on evidence that only shows
+                    // "couldn't read" is the flag-on-unknown trap this tab's
+                    // Last-used column already refuses, and a permanent notice
+                    // on every healthy tenant trains operators to ignore it.
+                    let (cap, names, over) = policy_ctx.get()?;
+                    let mut text =
+                        format!("App-management policy caps secret lifetimes at {cap} days");
+                    if !names.is_empty() {
+                        text = format!("{text} (assigned policy: {})", names.join(", "));
+                    }
+                    text.push('.');
+                    let warn = !over.is_empty();
+                    if warn {
+                        text = format!(
+                            "{text} Secrets over the cap are marked \u{201c}Over cap\u{201d} below \
+                             \u{2014} shorten or rotate them."
+                        );
+                    }
+                    Some(view! {
+                        <Callout tone={if warn { "warn" } else { "info" }}>{text}</Callout>
+                    })
+                }}
+                {move || {
+                    // Rebuilt when the last-used map resolves: the table paints
+                    // during the read with "—" cells, then repopulates.
+                    let map =
+                        usage_lookup(usage.get().as_ref().and_then(|r| r.as_ref().ok()));
+                    let app = app_id.get();
+                    let (cap, over) = match policy_ctx.get() {
+                        Some((cap, _, over)) => (Some(cap), over),
+                        None => (None, Vec::new()),
+                    };
                     view! {
                         <DataTable
-                            headers=vec!["Description", "Hint", "Secret ID", "Expires", "Status", ""]
+                            headers=vec![
+                                "Description",
+                                "Hint",
+                                "Secret ID",
+                                "Expires",
+                                "Last used",
+                                "Status",
+                                "",
+                            ]
                             rows=secrets.get()
                             empty_message="No secrets."
                             row=move |s| {
                                 let days = days_until(s.end_date_time);
+                                let last_used = last_used_text(&map, &app, &s.key_id);
                                 // Offer the rotate shortcut on secrets that are
                                 // expiring soon or already expired — where rotation
                                 // is the relevant action.
                                 let near_expiry = matches!(days, Some(d) if d <= WARN_DAYS);
+                                // The expiry badge answers "is it expiring?";
+                                // this one answers "is it even legal?" — a
+                                // 430-day secret on a 90-day-cap tenant reads
+                                // "OK" to the first and must not hide the
+                                // second. The over-cap set is folded once
+                                // (policy_ctx) with `credential_over_cap`, the
+                                // one predicate the audit's lifetime advisory
+                                // uses, and expired secrets are absent: they
+                                // already carry their own louder signal.
+                                let over_cap = over.contains(&s.key_id);
                                 view! {
                                     <tr>
                                         <td>{s.display_name.clone().unwrap_or_else(|| "—".into())}</td>
@@ -754,7 +935,22 @@ pub fn CredentialsTab(
                                         <td>
                                             {fmt_date(s.end_date_time)}
                                         </td>
-                                        <td>{status_badge(days)}</td>
+                                        <td>{last_used}</td>
+                                        <td>
+                                            {status_badge(days)}
+                                            {over_cap
+                                                .then(move || {
+                                                    view! {
+                                                        <Badge
+                                                            label="Over cap"
+                                                            tone=BadgeTone::Warning
+                                                            title=cap.map_or(String::new(), |cap| format!(
+                                                                "Longer than the {cap}-day secret-lifetime policy on this app"
+                                                            ))
+                                                        />
+                                                    }
+                                                })}
+                                        </td>
                                         <td class="cell-mid">
                                             <div class="cell-actions">
                                                 {near_expiry
@@ -806,6 +1002,9 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
+                    let map =
+                        usage_lookup(usage.get().as_ref().and_then(|r| r.as_ref().ok()));
+                    let app = app_id.get();
                     view! {
                         <DataTable
                             headers=vec![
@@ -815,6 +1014,7 @@ pub fn CredentialsTab(
                                 "Usage",
                                 "Type",
                                 "Expires",
+                                "Last used",
                                 "Status",
                                 "",
                             ]
@@ -822,6 +1022,7 @@ pub fn CredentialsTab(
                             empty_message="No certificates."
                             row=move |c| {
                                 let days = days_until(c.end_date_time);
+                                let last_used = last_used_text(&map, &app, &c.key_id);
                                 let thumbprint = c
                                     .custom_key_identifier
                                     .as_deref()
@@ -846,6 +1047,7 @@ pub fn CredentialsTab(
                                         <td>
                                             {fmt_date(c.end_date_time)}
                                         </td>
+                                        <td>{last_used}</td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">
                                             {remove_button(
@@ -910,6 +1112,34 @@ pub fn CredentialsTab(
                             .collect_view()}
                     </Select>
                 </Field>
+                {move || {
+                    // F260, the other half: say what the request will be
+                    // BEFORE it is sent, so a policy-driven rejection is not
+                    // an opaque 400 after the operator already chose a
+                    // lifetime. Warn, never clamp or block — the tenant
+                    // policy decides whether the add lands, and only Graph
+                    // gets the final answer.
+                    let cap = policy_ctx.get().map(|(cap, _, _)| cap)?;
+                    let chosen = match expires_preset.get().as_str() {
+                        CUSTOM_PRESET => {
+                            let end = custom_end.get()?;
+                            let start = custom_start.get().unwrap_or(today);
+                            (end - start).num_days()
+                        }
+                        p => p.parse::<i64>().ok()?,
+                    };
+                    (chosen > cap).then(|| {
+                        view! {
+                            <Callout tone="warn" role="alert">
+                                {format!(
+                                    "A {chosen}-day secret exceeds the {cap}-day secret-lifetime \
+                                     policy on this app; the add would be rejected. Pick a shorter \
+                                     expiry, or a certificate instead."
+                                )}
+                            </Callout>
+                        }
+                    })
+                }}
                 <Show
                     when=move || expires_preset.get() == CUSTOM_PRESET
                     fallback=|| view! { <></> }
@@ -1289,6 +1519,51 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// The Last-used column's three states must stay distinguishable, and the
+    /// fold must match the backend's: one credential can appear under both the
+    /// `application` and `servicePrincipal` origins and newest date wins; a
+    /// row with no date is "tracked, never used"; no row is UNKNOWN — never
+    /// rendered as if it meant unused. A row must also never be read against a
+    /// different app's credentials.
+    #[test]
+    fn last_used_cell_reads_three_states() {
+        use azapptoolkit_dto::credentials::CredentialUsageRow;
+        use chrono::{TimeZone, Utc};
+        let old = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let fresh = Utc.with_ymd_and_hms(2026, 9, 20, 8, 30, 0).unwrap();
+        let row = |app_id: &str, key_id: &str, last_used: Option<chrono::DateTime<Utc>>| {
+            CredentialUsageRow {
+                app_id: app_id.into(),
+                key_id: key_id.into(),
+                last_used,
+            }
+        };
+        let dto = CredentialUsageDto {
+            available: true,
+            rows: vec![
+                row("app-1", "k-used", Some(old)),
+                row("app-1", "k-used", Some(fresh)),
+                row("app-1", "k-never", None),
+            ],
+        };
+        let map = usage_lookup(Some(&dto));
+        assert_eq!(last_used_text(&map, "app-1", "k-used"), "2026-09-20");
+        assert_eq!(last_used_text(&map, "app-1", "k-never"), "No use recorded");
+        assert_eq!(last_used_text(&map, "app-1", "k-unknown"), "—");
+        assert_eq!(last_used_text(&map, "app-2", "k-used"), "—");
+        // Unavailable report (or none) → nothing is knowable, everything "—".
+        let off = CredentialUsageDto {
+            available: false,
+            rows: vec![row("app-1", "k-used", Some(fresh))],
+        };
+        assert!(usage_lookup(Some(&off)).is_empty());
+        assert_eq!(
+            last_used_text(&usage_lookup(Some(&off)), "app-1", "k-used"),
+            "—"
+        );
+        assert!(usage_lookup(None).is_empty());
     }
 
     const TODAY: &str = "2026-01-01";

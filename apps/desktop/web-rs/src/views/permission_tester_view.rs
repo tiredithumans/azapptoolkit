@@ -90,9 +90,11 @@ pub fn PermissionTesterView() -> impl IntoView {
         app_id.set(String::new());
         app_query.set(String::new());
         app_focused.set(false);
-        // Tenant A's mailbox / site URL mean nothing in tenant B.
+        // Tenant A's mailbox / site URL mean nothing in tenant B; neither does
+        // the resource tab left open under it (F436).
         mailbox.set(String::new());
         site_url.set(String::new());
+        resource_tab.set(String::from("exchange"));
         result.set(None);
         error.set(None);
         needs_consent.set(false);

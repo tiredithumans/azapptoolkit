@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use azapptoolkit_core::models::Application;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
@@ -27,6 +28,39 @@ pub(crate) const SIGN_IN_AUDIENCES: &[(&str, &str)] = &[
         "Personal Microsoft accounts only",
     ),
 ];
+
+/// Build the PATCH the Overview form *would* send: only fields whose (trimmed)
+/// edit differs from the live app are `Some`. Both the save dispatch and the
+/// Save-disabled gate go through this, so "nothing changed" has one definition
+/// (F342) and a clean form never round-trips an empty PATCH that busts the
+/// list caches. Notes keep the clear-on-empty rule (`Some("")` deletes;
+/// `None` leaves untouched); description follows the old None-if-empty shape.
+fn overview_patch(
+    app: &Application,
+    dn: &str,
+    aud: &str,
+    desc: &str,
+    notes: &str,
+) -> UpdateApplicationInput {
+    let mut patch = UpdateApplicationInput::default();
+    let dn_t = dn.trim();
+    if dn_t != app.display_name {
+        patch.display_name = Some(dn_t.to_string());
+    }
+    if aud != app.sign_in_audience.clone().unwrap_or_default() {
+        patch.sign_in_audience = Some(aud.to_string());
+    }
+    let desc_t = desc.trim();
+    let desc_opt = (!desc_t.is_empty()).then(|| desc_t.to_string());
+    if desc_opt != app.description {
+        patch.description = desc_opt;
+    }
+    let notes_t = notes.trim();
+    if notes_t != app.notes.clone().unwrap_or_default() {
+        patch.notes = Some(notes_t.to_string());
+    }
+    patch
+}
 
 fn audience_label(value: Option<&str>) -> String {
     match value {
@@ -58,8 +92,14 @@ pub fn OverviewTab(
     let description = RwSignal::new(initial_app.description.clone().unwrap_or_default());
     let notes = RwSignal::new(initial_app.notes.clone().unwrap_or_default());
 
-    // Reset form when underlying detail changes (mirrors React's useEffect).
+    // Re-seed the form whenever it OPENS (and while open, whenever the
+    // underlying detail changes). Cancel therefore discards edits instead of
+    // parking them in the fields for the next edit session, and a refetched
+    // app never shows stale form values (F342).
     Effect::new(move |_| {
+        if !editing.get() {
+            return;
+        }
         let app = detail.with(|d| d.application.clone());
         display_name.set(app.display_name);
         audience.set(
@@ -84,33 +124,26 @@ pub fn OverviewTab(
                 on_changed_cb.run(());
             },
             move |tenant_id| {
-                let mut patch = UpdateApplicationInput::default();
-                let dn_t = dn.trim();
-                if dn_t != app.display_name {
-                    patch.display_name = Some(dn_t.to_string());
-                }
-                if aud != app.sign_in_audience.clone().unwrap_or_default() {
-                    patch.sign_in_audience = Some(aud);
-                }
-                let desc_t = desc.trim();
-                let desc_opt = if desc_t.is_empty() {
-                    None
-                } else {
-                    Some(desc_t.to_string())
-                };
-                if desc_opt != app.description {
-                    patch.description = desc_opt;
-                }
-                // Notes: send the trimmed value (empty string included) whenever it
-                // changed, so clearing actually reaches Graph. Unlike `description`
-                // above, an empty edit sends `Some("")` rather than omitting.
-                let notes_t = notes_val.trim();
-                if notes_t != app.notes.clone().unwrap_or_default() {
-                    patch.notes = Some(notes_t.to_string());
-                }
+                let patch = overview_patch(&app, &dn, &aud, &desc, &notes_val);
                 async move { applications::update_application(&tenant_id, &app.id, &patch).await }
             },
         );
+    };
+
+    // One definition of "the form changed" (F342): the same patch the save
+    // builds, compared to an empty one. Tracked so the Save binding re-runs
+    // while editing; a clean form never dispatches the empty PATCH (which the
+    // backend now rejects as a no-op anyway — belt and braces, and the button
+    // doesn't invite the click in the first place).
+    let changed = move || {
+        let app = detail.with(|d| d.application.clone());
+        overview_patch(
+            &app,
+            display_name.get().trim(),
+            &audience.get(),
+            description.get().trim(),
+            notes.get().trim(),
+        ) != UpdateApplicationInput::default()
     };
 
     let cancel = move |_| {
@@ -158,7 +191,7 @@ pub fn OverviewTab(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(save)
-                                    disabled=Signal::derive(move || cmd.busy.get())
+                                    disabled=Signal::derive(move || cmd.busy.get() || !changed())
                                 >
                                     {move || {
                                         if cmd.busy.get() {

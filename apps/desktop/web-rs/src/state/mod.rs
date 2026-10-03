@@ -226,6 +226,10 @@ pub struct TenantScopedUi {
     // shell like the wizard so they survive view switches.
     pub new_app_chooser_open: RwSignal<bool>,
     pub gallery_open: RwSignal<bool>,
+    // "Recently deleted" (recycle bin) dialog open flag. Lifted to the shell
+    // like `create_open`; the tenant it shows is read at open time, so it
+    // resets on a tenant switch with everything else tenant-scoped.
+    pub deleted_open: RwSignal<bool>,
     // `object_id -> display name` for every app registration in the tenant,
     // published by the App Registrations list when it loads. The bulk commands
     // take object ids and their outcomes carry only ids, so without this a
@@ -272,6 +276,7 @@ impl TenantScopedUi {
             sso_wizard_open: RwSignal::new(false),
             new_app_chooser_open: RwSignal::new(false),
             gallery_open: RwSignal::new(false),
+            deleted_open: RwSignal::new(false),
             app_names: RwSignal::new(Arc::new(HashMap::new())),
             apps_scroll_top: RwSignal::new(0.0),
             enterprise_scroll_top: RwSignal::new(0.0),
@@ -311,6 +316,7 @@ impl TenantScopedUi {
         self.sso_wizard_open.set(false);
         self.new_app_chooser_open.set(false);
         self.gallery_open.set(false);
+        self.deleted_open.set(false);
         self.app_names.set(Arc::new(HashMap::new()));
         self.apps_scroll_top.set(0.0);
         self.enterprise_scroll_top.set(0.0);
@@ -523,6 +529,7 @@ mod tests {
             ui.sso_wizard_open.set(true);
             ui.new_app_chooser_open.set(true);
             ui.gallery_open.set(true);
+            ui.deleted_open.set(true);
             ui.app_names.set(Arc::new(HashMap::from([(
                 "app-1".to_string(),
                 "App One".to_string(),
@@ -561,6 +568,7 @@ mod tests {
             assert!(!ui.sso_wizard_open.get_untracked());
             assert!(!ui.new_app_chooser_open.get_untracked());
             assert!(!ui.gallery_open.get_untracked());
+            assert!(!ui.deleted_open.get_untracked());
             ui.app_names.with_untracked(|m| assert!(m.is_empty()));
             assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
             assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);

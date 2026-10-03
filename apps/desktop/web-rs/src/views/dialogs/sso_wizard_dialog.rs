@@ -33,6 +33,38 @@ fn lines_to_vec(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Lifetime bounds mirrored from the backend (`commands/sso/mod.rs`:
+/// `MAX_CERT_LIFETIME_DAYS`/`DEFAULT_CERT_LIFETIME_DAYS` and the secret pair).
+/// The frontend gate exists to stop the old silent fallback, where a mistyped
+/// "3650" or "abc" fell through `parse().ok()` to `None` and quietly created
+/// the app with the default lifetime the operator did not type.
+const CERT_MAX_DAYS: u32 = 1095;
+const CERT_DEFAULT_DAYS: u32 = 365;
+const SECRET_MAX_DAYS: u32 = 730;
+const SECRET_DEFAULT_DAYS: u32 = 180;
+
+/// `None` when the typed lifetime may be sent: blank (an explicit "use the
+/// default", which the field hint states) or a number inside `1..=max`.
+/// Pure so the ladder is table-testable; only consulted while the field is
+/// on screen (Step 2) and again in `run_create` for the retry path.
+fn lifetime_problem(days: &str, max: u32, default: u32) -> Option<String> {
+    let trimmed = days.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u32>() {
+        Ok(n) if (1..=max).contains(&n) => None,
+        Ok(n) => Some(format!(
+            "'{trimmed}' ({n} days) is out of range — use 1-{max} days (blank = the {default}-day \
+             default)."
+        )),
+        Err(_) => Some(format!(
+            "'{trimmed}' is not a number of days — use 1-{max} days (blank = the {default}-day \
+             default)."
+        )),
+    }
+}
+
 #[component]
 pub fn SsoWizardDialog(
     #[prop(into)] open: Signal<bool>,
@@ -103,6 +135,22 @@ pub fn SsoWizardDialog(
         error.set(None);
         needs_consent.set(false);
         let is_saml = protocol.get_untracked() == "saml";
+        // Belt and braces behind the Step 2 Next gate: also refuse at Create
+        // time so the retry-after-consent path can't resend a bad lifetime.
+        let lifetime = if is_saml {
+            lifetime_problem(&cert_days.get_untracked(), CERT_MAX_DAYS, CERT_DEFAULT_DAYS)
+        } else {
+            lifetime_problem(
+                &secret_days.get_untracked(),
+                SECRET_MAX_DAYS,
+                SECRET_DEFAULT_DAYS,
+            )
+        };
+        if let Some(problem) = lifetime {
+            error.set(Some(problem));
+            busy.set(false);
+            return;
+        }
         let tenant_id = t.tenant_id.clone();
 
         if is_saml {
@@ -226,12 +274,19 @@ pub fn SsoWizardDialog(
         close();
     };
 
-    // Step-1 "Next" is allowed when the protocol-specific required fields are set.
+    // Step-1 "Next" is allowed when the protocol-specific required fields are
+    // set AND the lifetime field is valid (or deliberately blank) — an invalid
+    // lifetime must never silently reach the create call as the default.
     let step1_ready = move || {
         if protocol.get() == "saml" {
-            !entity_id.with(|s| s.trim().is_empty()) && !reply_url.with(|s| s.trim().is_empty())
+            !entity_id.with(|s| s.trim().is_empty())
+                && !reply_url.with(|s| s.trim().is_empty())
+                && lifetime_problem(&cert_days.get(), CERT_MAX_DAYS, CERT_DEFAULT_DAYS).is_none()
         } else {
-            !redirect_uris.with(|s| s.trim().is_empty()) || !spa_uris.with(|s| s.trim().is_empty())
+            (!redirect_uris.with(|s| s.trim().is_empty())
+                || !spa_uris.with(|s| s.trim().is_empty()))
+                && lifetime_problem(&secret_days.get(), SECRET_MAX_DAYS, SECRET_DEFAULT_DAYS)
+                    .is_none()
         }
     };
 
@@ -285,6 +340,20 @@ pub fn SsoWizardDialog(
                         </Field>
                         <Field label="Certificate lifetime (days)">
                             <Input value=cert_days />
+                            {move || {
+                                let hint = lifetime_problem(
+                                    &cert_days.get(),
+                                    CERT_MAX_DAYS,
+                                    CERT_DEFAULT_DAYS,
+                                )
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "1-{CERT_MAX_DAYS} days; blank = the \
+                                         {CERT_DEFAULT_DAYS}-day default."
+                                    )
+                                });
+                                view! { <Body1 class="hint">{hint}</Body1> }
+                            }}
                         </Field>
                         <Field label="Notification emails (one per line, max 5 — optional)">
                             <Textarea value=notification_emails />
@@ -309,6 +378,20 @@ pub fn SsoWizardDialog(
                         </Field>
                         <Field label="Secret lifetime (days)">
                             <Input value=secret_days />
+                            {move || {
+                                let hint = lifetime_problem(
+                                    &secret_days.get(),
+                                    SECRET_MAX_DAYS,
+                                    SECRET_DEFAULT_DAYS,
+                                )
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "1-{SECRET_MAX_DAYS} days; blank = the \
+                                         {SECRET_DEFAULT_DAYS}-day default."
+                                    )
+                                });
+                                view! { <Body1 class="hint">{hint}</Body1> }
+                            }}
                         </Field>
                     </Show>
 
@@ -428,5 +511,42 @@ pub fn SsoWizardDialog(
                 </div>
             </div>
         </Show>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_and_blank_cert_lifetimes_pass_the_gate() {
+        // In-range numbers, surrounding whitespace, and the deliberate blank
+        // ("use the default") are all sendable.
+        for ok in ["365", "1", "1095", " 180 "] {
+            assert!(
+                lifetime_problem(ok, CERT_MAX_DAYS, CERT_DEFAULT_DAYS).is_none(),
+                "{ok}"
+            );
+        }
+        assert!(lifetime_problem("", CERT_MAX_DAYS, CERT_DEFAULT_DAYS).is_none());
+    }
+
+    #[test]
+    fn a_mistyped_lifetime_names_the_problem_instead_of_defaulting() {
+        // The pre-F382 code sent every one of these as the DEFAULT lifetime.
+        for bad in ["0", "1096", "abc", "365 days", "-5", "4294967296"] {
+            let problem = lifetime_problem(bad, CERT_MAX_DAYS, CERT_DEFAULT_DAYS)
+                .unwrap_or_else(|| panic!("`{bad}` must not pass the gate"));
+            assert!(
+                problem.contains(bad.trim()),
+                "message should quote `{bad}`: {problem}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secret_gate_uses_the_secret_bounds() {
+        assert!(lifetime_problem("730", SECRET_MAX_DAYS, SECRET_DEFAULT_DAYS).is_none());
+        assert!(lifetime_problem("731", SECRET_MAX_DAYS, SECRET_DEFAULT_DAYS).is_some());
     }
 }

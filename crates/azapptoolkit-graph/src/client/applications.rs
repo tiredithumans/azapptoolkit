@@ -190,6 +190,10 @@ fn default_application_select() -> &'static [&'static str] {
         "verifiedPublisher",
         "servicePrincipalLockConfiguration",
         "isFallbackPublicClient",
+        // Microsoft's own disable flag (audit Rule 21) — a policy-violation
+        // disable is invisible without it, and it is the audit's strongest
+        // single signal.
+        "disabledByMicrosoftStatus",
         "notes",
     ]
 }
@@ -211,6 +215,12 @@ pub(super) const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,sig
 /// 150-request-per-minute-per-tenant limit specifically to requests that `$select`
 /// `keyCredentials`, which the app list, the audit, and the credential dashboard all do.
 pub const DEFAULT_APP_PAGE_SIZE: u32 = 999;
+
+/// Safety caps on the two recycle-bin enumerations. Same role as the app-list
+/// and SP-index caps: bound memory in pathological tenants and bound the
+/// serial paging. Truncation is surfaced (never a silent short list).
+pub const DELETED_APPS_MAX: usize = 5_000;
+pub const DELETED_SPS_MAX: usize = 10_000;
 
 /// Whether an [`AppListQuery`] is an **advanced query** — i.e. one that must carry
 /// `ConsistencyLevel: eventual`.
@@ -404,6 +414,67 @@ impl GraphClient {
             .await
     }
 
+    /// Recycle bin: the tenant's deleted app registrations, paged to the cap.
+    ///
+    /// Returns `(items, truncated)` — a truncated read must never be presented
+    /// as the full recycle bin, so the flag crosses to the command layer.
+    /// Deliberately NOT cached: the recycle bin is a low-frequency recovery
+    /// surface, and a cached stale bin would offer Restore on entries that are
+    /// already gone.
+    pub async fn list_deleted_applications(
+        &self,
+        cap: usize,
+    ) -> Result<(Vec<DeletedApplication>, bool)> {
+        let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
+        let page: Paged<DeletedApplication> = self
+            .get_json(
+                "/directory/deletedItems/microsoft.graph.application",
+                &params,
+                false,
+            )
+            .await?;
+        self.collect_all_pages_capped(page, cap, false).await
+    }
+
+    /// Recycle bin: the tenant's deleted service principals. Only used to pair
+    /// the SP cascade onto an app restore (Graph does not cascade-restore the
+    /// paired SP), so it rides the same capped collector.
+    pub async fn list_deleted_service_principals(
+        &self,
+        cap: usize,
+    ) -> Result<(Vec<DeletedServicePrincipal>, bool)> {
+        let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
+        let page: Paged<DeletedServicePrincipal> = self
+            .get_json(
+                "/directory/deletedItems/microsoft.graph.servicePrincipal",
+                &params,
+                false,
+            )
+            .await?;
+        self.collect_all_pages_capped(page, cap, false).await
+    }
+
+    /// Restores one deleted directory object (`POST …/restore`, which answers
+    /// 200 with the restored object — discarded here; success is all the
+    /// callers need). The `{}` body is deliberate: it carries the
+    /// `application/json` Content-Type the documented bodyless-POST form
+    /// expects, and a POST is never replayed (`retry_class_for` →
+    /// `NonIdempotent`), so a restore can't double-fire.
+    pub async fn restore_deleted_item(&self, object_id: &str) -> Result<()> {
+        let path = format!("/directory/deletedItems/{object_id}/restore");
+        self.send_no_content(Method::POST, &path, Some(&serde_json::json!({})))
+            .await
+    }
+
+    /// Permanently removes a deleted app (the option the reworded bulk-delete
+    /// copy points at). Graph answers 204; the window closes on its own after
+    /// ~30 days either way.
+    pub async fn purge_deleted_application(&self, object_id: &str) -> Result<()> {
+        let path = format!("/directory/deletedItems/microsoft.graph.application/{object_id}");
+        self.send_no_content::<()>(Method::DELETE, &path, None)
+            .await
+    }
+
     pub async fn add_owner(&self, object_id: &str, principal_id: &str) -> Result<()> {
         let odata_id = format!(
             "{}/directoryObjects/{principal_id}",
@@ -468,14 +539,21 @@ impl GraphClient {
     }
 
     /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw JSON —
-    /// `identifierUris`/`web`/`spa` aren't on the typed [`Application`] (and aren't in the list
-    /// `$select`), so the SSO detail tab reads them directly. `Ok(None)` for 404.
+    /// `identifierUris`/`web`/`spa`/`requestSignatureVerification` aren't on the typed
+    /// [`Application`] (and aren't in the list `$select`), so the SSO detail tab reads them
+    /// directly. `requestSignatureVerification` is the signed-AuthnRequest gate
+    /// (`isSignedRequestRequired` + `allowedWeakAlgorithms`); selecting it costs nothing and
+    /// its absence is what lets the SSO tab tell "unknown" from "verification off".
+    /// `Ok(None)` for 404.
     pub async fn get_application_sso_fields(
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        self.get_application_fields_raw(object_id, "id,appId,identifierUris,web,spa")
-            .await
+        self.get_application_fields_raw(
+            object_id,
+            "id,appId,identifierUris,web,spa,requestSignatureVerification",
+        )
+        .await
     }
 
     /// GET `/applications/{id}` selecting only the Authentication-tab fields, as raw JSON:

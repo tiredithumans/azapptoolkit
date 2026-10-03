@@ -18,7 +18,9 @@ use thaw::{Button, ButtonAppearance, Field, Spinner, SpinnerSize};
 
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{Callout, CopyableId, DataTable, FormError, SectionHeader};
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, CopyableId, DataTable, FormError, SectionHeader,
+};
 use crate::components::vault_picker::VaultPicker;
 use crate::state::{ActiveView, use_session};
 
@@ -178,6 +180,10 @@ pub fn KeyVaultView() -> impl IntoView {
                             let name = item.name.clone();
                             let click_name = name.clone();
                             let row_name = name.clone();
+                            // Certificate-backed entries are vault certificate
+                            // material, not writable secrets (F196): badge them
+                            // so the list never reads as "more rotation targets".
+                            let managed = item.managed == Some(true);
                             // This row's reveal is the in-flight one.
                             let this_revealing =
                                 Signal::derive(move || revealing.get().as_deref() == Some(row_name.as_str()));
@@ -185,7 +191,19 @@ pub fn KeyVaultView() -> impl IntoView {
                             let any_revealing = Signal::derive(move || revealing.get().is_some());
                             view! {
                                 <tr>
-                                    <td class="mono">{name}</td>
+                                    <td class="mono">
+                                        {name}
+                                        {managed
+                                            .then(|| {
+                                                view! {
+                                                    <Badge
+                                                        label="certificate-backed"
+                                                        tone=BadgeTone::Warning
+                                                        title="Vault certificate material — not a writable secret"
+                                                    />
+                                                }
+                                            })}
+                                    </td>
                                     <td>{item.content_type.unwrap_or_else(|| "—".into())}</td>
                                     <td>{item.expires.unwrap_or_else(|| "—".into())}</td>
                                     <td class="cell-mid">

@@ -305,6 +305,11 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
   Registrations list, and on the Bulk Actions page. **No Grant consent on audit surfaces.**
   "Fix all N" only seeds `selected_audit_ids` with the group's *eligible* (Application-kind) ids —
   the bar's typed-confirm / target forms still gate execution.
+  **Footgun (App Registrations list):** the bar mounts in `ApplicationList` *above* the
+  `<Suspense>` body, not inside `LoadedApps`. The bar's own `on_done` bumps `apps_reload`, whose
+  refetch remounts the whole Suspense body — a bar mounted inside it wipes its run summary (and
+  the post-delete Undo state) on the very refetch the run triggers. Its app-name map therefore
+  reads `tenant_ui.app_names` (published per fetch by `LoadedApps`) instead of a local signal.
 
 ## Browser GUI tests: sharding and its constraints
 

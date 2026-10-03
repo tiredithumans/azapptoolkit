@@ -245,6 +245,40 @@ impl UriListState {
             .collect()
     }
 
+    /// True when what would be saved now equals `initial`, entry for entry
+    /// after trimming — the *tracked* counterpart of [`Self::to_uris`], for
+    /// callers deriving a dirty state (the Authentication tab disables Save on
+    /// it). Because its write is a full replace, even an unchanged payload is
+    /// still a write that busts caches, so "nothing changed" has to be
+    /// expressible.
+    pub fn same_as(&self, initial: &[String]) -> bool {
+        let current: Vec<String> = self.rows.with(|rows| {
+            rows.iter()
+                .map(|r| r.value.with(|v| v.trim().to_string()))
+                .filter(|v| !v.is_empty())
+                .collect()
+        });
+        current.len() == initial.len()
+            && current
+                .iter()
+                .map(String::as_str)
+                .zip(initial.iter().map(|s| s.trim()))
+                .all(|(a, b)| a == b)
+    }
+
+    /// Back to a freshly-loaded state (the Authentication tab's Reset):
+    /// rebuilds the rows with fresh keys so the keyed `<For>` re-renders, and
+    /// clears the focus/status channels along with them.
+    pub fn reset(&self, uris: &[String]) {
+        let mut rows: Vec<UriRow> = uris.iter().map(|u| new_row(self.seq, u)).collect();
+        if rows.is_empty() {
+            rows.push(new_row(self.seq, ""));
+        }
+        self.rows.set(rows);
+        self.focus_key.set(None);
+        self.status.set(String::new());
+    }
+
     /// Reactive count of non-blank rows (the header counter).
     fn filled(&self) -> usize {
         self.rows.with(|rows| {
@@ -645,6 +679,52 @@ mod tests {
         with_owner(|| {
             let s = UriListState::new(&uris(&["  https://b/cb  ", "", "https://a/cb?x=1,2;3"]));
             assert_eq!(s.to_uris(), ["https://b/cb", "https://a/cb?x=1,2;3"]);
+        });
+    }
+
+    #[test]
+    fn same_as_compares_what_would_be_sent_not_what_is_typed() {
+        with_owner(|| {
+            let loaded = uris(&["https://a/cb", "https://b/cb"]);
+            let s = UriListState::new(&loaded);
+            // A freshly-loaded list is never dirty, and whitespace or an extra
+            // blank row can't dirty it either — same contract as `to_uris`.
+            assert!(s.same_as(&loaded));
+            s.rows.get_untracked()[0]
+                .value
+                .set("  https://a/cb ".to_string());
+            assert!(s.same_as(&loaded));
+            s.add_row(None, "web redirect URI");
+            assert!(s.same_as(&loaded));
+            // A real edit reads dirty in either direction…
+            s.rows.get_untracked()[0]
+                .value
+                .set("https://typo/cb".to_string());
+            assert!(!s.same_as(&loaded));
+            // …including a deletion.
+            s.reset(&loaded);
+            let key = s.rows.get_untracked()[0].key;
+            s.remove_row(key, "web redirect URI");
+            assert!(!s.same_as(&loaded));
+        });
+    }
+
+    #[test]
+    fn reset_rebuilds_the_loaded_rows_and_blanks_the_status_channel() {
+        with_owner(|| {
+            let loaded = uris(&["https://a/cb", "https://b/cb"]);
+            let s = UriListState::new(&loaded);
+            s.rows.get_untracked()[0]
+                .value
+                .set("https://typo/cb".to_string());
+            s.add_row(None, "web redirect URI");
+            s.reset(&loaded);
+            assert_eq!(s.to_uris(), ["https://a/cb", "https://b/cb"]);
+            assert!(s.status.get_untracked().is_empty());
+            // Resetting to an empty load still leaves one blank row to type in.
+            s.reset(&[]);
+            assert!(s.to_uris().is_empty());
+            assert_eq!(s.rows.get_untracked().len(), 1);
         });
     }
 

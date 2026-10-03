@@ -538,19 +538,26 @@ mod tests {
             .and(query_param("api-version", KEYVAULT_API))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
-                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-1", "name": "kv-1"},
-                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-2"}
+                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-1", "name": "kv-1", "properties": {"enableRbacAuthorization": true}},
+                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-2", "properties": {"enableRbacAuthorization": false}},
+                    {"id": "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-3", "name": "kv-3"}
                 ]
             })))
             .mount(&server)
             .await;
 
         let vaults = client(&server.uri()).list_key_vaults(SUB).await.unwrap();
-        assert_eq!(vaults.len(), 2);
+        assert_eq!(vaults.len(), 3);
         assert_eq!(vaults[0].name.as_deref(), Some("kv-1"));
         // name is optional and absent on the second.
         assert_eq!(vaults[1].name, None);
         assert!(vaults[1].id.as_deref().unwrap().ends_with("kv-2"));
+        // The access model arrives in three shapes and only the middle one is
+        // the legacy mode the sweep must not report as "no access": RBAC,
+        // access-policy, and an absent flag (never asserted either way).
+        assert!(!vaults[0].access_policy_mode());
+        assert!(vaults[1].access_policy_mode());
+        assert!(!vaults[2].access_policy_mode());
     }
 
     #[tokio::test]

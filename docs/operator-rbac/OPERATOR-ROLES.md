@@ -12,7 +12,7 @@ Graph, the Exchange Online Admin API, Azure Key Vault, and Azure Resource Manage
 
 | Plane | What it governs here | Role | PIM flavor | File |
 |---|---|---|---|---|
-| **Entra ID directory roles** | App registrations, enterprise apps, credentials, owners, API-permission **admin consent**, sign-in/audit reports, Conditional Access (read) | Custom directory role (`microsoft.directory/*`) | **PIM for Microsoft Entra roles** | [`entra-custom-role.ps1`](./entra-custom-role.ps1) |
+| **Entra ID directory roles** | App registrations, enterprise apps, credentials, owners, API-permission **admin consent**, sign-in/audit reports, Conditional Access + app-management policies (read) | Custom directory role (`microsoft.directory/*`) | **PIM for Microsoft Entra roles** | [`entra-custom-role.ps1`](./entra-custom-role.ps1) |
 | **Azure RBAC** | ARM managed-identity role **reads** + **Key Vault secrets** list/read/write (rotation) | Custom Azure role (`Actions`/`DataActions`) | **PIM for Azure resources** | [`azure-custom-role.json`](./azure-custom-role.json) |
 | **Exchange Online RBAC** | RBAC-for-Applications: mailbox access grants, management scopes/role assignments | Built-in **Exchange Administrator** | **PIM for Microsoft Entra roles** | (built-in — no file) |
 
@@ -83,6 +83,8 @@ Administrator or Global Administrator), then make it PIM-eligible in **Entra PIM
 | Activity tab | `auditLogs/allProperties/read` |
 | Unused-app / sign-in activity | `signInReports/allProperties/read` |
 | Conditional Access tab | `conditionalAccessPolicies/standard/read` |
+| App-management policies (Credentials-tab lifetime markers + pre-add lifetime warning) | No custom-role permission expresses this read — it rides the `Policy.Read.All` scope (the same on-demand policy token as the CA tab) plus a member of **Security Reader** / **Security Administrator** / **Global Reader** / **Global Administrator**; unlike the CA tab it needs **no P1/P2 license** |
+| Risky-SP audit signal | No custom-role permission expresses this read — it rides the `IdentityRiskyServicePrincipal.Read.All` scope plus a member of **Security Reader** / **Security Administrator** / **Global Reader** / **Global Administrator**, and the tenant needs Entra ID **Workload Identities premium** (otherwise the audit skips the check) |
 
 Built-in equivalent: **Cloud Application Administrator** + **Reports Reader** + **Security Reader**.
 
@@ -163,7 +165,11 @@ then sign out and back in so a fresh token is issued.
 3. **Delegated OAuth scopes still required** (the second half above). The operator's consented
    scopes must include: `Directory.Read.All`, `Application.ReadWrite.All`,
    `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, and — optionally,
-   per feature — `Synchronization.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`,
+   per feature — `Synchronization.Read.All`, `AuditLog.Read.All` (the Activity tab, the
+   unused-app/unused-credential audit signals and the Credentials tab's Last-used column — the
+   sign-in reports are served in the **Global cloud only**), `Policy.Read.All`,
+   `IdentityRiskyServicePrincipal.Read.All` (the risky-service-principal audit signal; the tenant
+   also needs Entra ID **Workload Identities premium**, and the audit skips the check without it),
    `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,
    `GroupMember.ReadWrite.All`,
    `https://outlook.office365.com/Exchange.Manage`, `https://management.azure.com/.default`,

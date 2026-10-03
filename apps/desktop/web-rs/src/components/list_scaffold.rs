@@ -12,6 +12,8 @@
 
 use leptos::prelude::*;
 
+use chrono::NaiveDate;
+
 use crate::components::filter_toggle::FilterToggle;
 use crate::components::saved_views::SavedViews;
 use crate::components::ui::SearchInput;
@@ -35,6 +37,11 @@ pub fn ListScaffold(
     /// Extra filter controls inside the drawer (date range, …).
     #[prop(optional, into)]
     drawer: ViewFn,
+    /// The drawer's created-on window (F369), forwarded to `SavedViews` so a
+    /// saved view carries and restores it along with facet + search.
+    #[prop(optional_no_strip)]
+    after: Option<RwSignal<Option<NaiveDate>>>,
+    #[prop(optional_no_strip)] before: Option<RwSignal<Option<NaiveDate>>>,
     /// The loaded body — usually a `Suspense` wrapping the rows.
     children: Children,
 ) -> impl IntoView {
@@ -43,7 +50,13 @@ pub fn ListScaffold(
             <SearchInput value=search placeholder=search_placeholder />
             <FilterToggle open=filters_open active_count=active_filters />
             <Show when=move || filters_open.get()>
-                <SavedViews view_key=saved_view_key facet=facet search=search />
+                <SavedViews
+                    view_key=saved_view_key
+                    facet=facet
+                    search=search
+                    after=after
+                    before=before
+                />
                 {drawer.run()}
             </Show>
             {children()}

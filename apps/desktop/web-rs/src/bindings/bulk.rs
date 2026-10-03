@@ -57,6 +57,22 @@ pub async fn bulk_delete_applications(
     .await
 }
 
+/// Restores deleted apps from the recycle bin (the Undo path + the dialog's
+/// per-row Restore). Same argument shape as the delete.
+pub async fn bulk_restore_deleted(
+    tenant_id: &str,
+    object_ids: &[String],
+) -> Result<BulkRestoreResult, UiError> {
+    invoke_result(
+        "bulk_restore_deleted",
+        BulkDeleteArgs {
+            tenant_id,
+            object_ids,
+        },
+    )
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkGrantArgs<'a> {
