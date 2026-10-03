@@ -30,14 +30,22 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 104 entries by area (read the section for each item's Problem +
+Remaining 94 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
-- **Audit & remediation (9)** — F027 · F127 + F402 (same gap: give the three
-  unconfinable-reach markers a finding group + posture count) · F125 · F138 ·
-  F034 · F035 · F129 · F133
-- **Scoping (Exchange/SharePoint) & resource access (10)** — F058 · F069 ·
-  F060 · F174 · F263 · F406 · F407 · F436 · F439 · F197
+- **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
+  (+ its UI Callout) · F034 · F035 · F127 + F402 (+ F393) verified already
+  implemented on main (unconfinable-reach markers have their groups + posture
+  counts; preparatory progress and unconditional caveat strips exist). F133
+  shipped as the dedicated `AuditItem.app_owner_organization_id` column (SP rows
+  keep `publisher: None`), not a publisher rewrite. F138 implemented:
+  `issue::ORG_WIDE_FILES` advisory in Rule 12 (no remediation) + the
+  `least_privilege_alternative_for` Files arm, so picker hint, audit
+  recommendation and item wizard agree.
+- **Scoping (Exchange/SharePoint) & resource access (9)** — F069 · F060 · F174
+  · F263 · F406 · F407 · F436 · F439 · F197 (F058 verified already implemented:
+  tester pre-acquires `ensure_exchange_token` and reports `exchange_sp_store_read`
+  coverage)
 - **Credentials & SSO (13)** — F075 · F385 · F382 · F381 · F374 · F373 · F338 ·
   F085 · F392 · F190 · F079 · F196 · F200
 - **App-reg editing: auth / Expose an API / federation (5)** — F017 · F158 ·
@@ -59,11 +67,12 @@ Proposal; #### items are full entries, one-liners are bullets):
 - **Docs, demo, packaging & release tooling (7)** — F247 · F413 · F420 · F222 ·
   F250 · F298 · F311
 
-If picking items up, respect "Changes that must ship together": F027+F058 need
-the backend coverage flag and its UI Callout together; F127+F402+F393 need the
-core marker-stability test, `GROUP_CATALOG` and posture count agreed in one
-change; F075's `warnings` field is dead weight until `sso_summary.rs` renders
-it.
+If picking items up, respect "Changes that must ship together": F027+F058 and
+F127+F402+F393 shipped closed (see above — the paired flag/Callout and the
+marker/group/posture trio landed in one change each); F075's `warnings` field
+is dead weight until `sso_summary.rs` renders it. Before implementing a
+remaining item, confirm it against current main — several entries describe
+gaps that have since been closed.
 
 ## Wrap-up
 - `just verify-full` is **green end to end** on this branch's final head (incl.
