@@ -73,6 +73,17 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Files is its own finding, not a variant of the SharePoint one: the site
+    // path has a one-click Sites.Selected conversion, the file path has none —
+    // the wizard only scopes Files.SelectedOperations.Selected to chosen
+    // files/libraries, and removing the org-wide grant stays admin-judged.
+    GroupSpec {
+        key: "orgwide_files",
+        title: "Org-wide Files access",
+        blurb: "Files.* permissions (e.g. Files.ReadWrite.All) that reach every file across all site collections and OneDrive. Convert to Files.SelectedOperations.Selected and grant only the files or libraries the app actually uses — advisory, no bulk Fix.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "redundant_perms",
         title: "Redundant permissions",
@@ -567,6 +578,7 @@ mod tests {
             marker(issue::UNCONFINABLE_MAILBOX),
             marker(issue::UNCONFINABLE_SHAREPOINT),
             marker(issue::ORG_WIDE_SHAREPOINT),
+            marker(issue::ORG_WIDE_FILES),
             marker(issue::SCOPED_SHAREPOINT),
             marker(issue::NO_OWNERS),
             marker(issue::SINGLE_OWNER),
@@ -631,6 +643,10 @@ mod tests {
         // re-declaring the grant is the operator's call.
         assert!(group_bulk_actions("unscopable_legacy_mailbox").is_empty());
         assert!(group_bulk_actions("unconfinable_orgwide").is_empty());
+        // Org-wide Files is advisory: the wizard scopes the
+        // `Files.SelectedOperations.Selected` end state, nothing rewrites a
+        // held `Files.*.All`, so there is no uniform mutation to offer.
+        assert!(group_bulk_actions("orgwide_files").is_empty());
     }
 
     /// The scorer keeps unconfinable reach out of the fixable org-wide groups
@@ -667,6 +683,7 @@ mod tests {
         for key in [
             "orgwide_mailbox",
             "orgwide_sharepoint",
+            "orgwide_files",
             "legacy_mailbox_scope",
             "scoped_mailbox",
             "scoped_sites",
@@ -692,6 +709,7 @@ mod tests {
             issue::UNCONFINABLE_MAILBOX,
             issue::LEGACY_MAILBOX_POLICY,
             issue::ORG_WIDE_SHAREPOINT,
+            issue::ORG_WIDE_FILES,
             issue::UNCONFINABLE_SHAREPOINT,
             issue::SCOPED_SHAREPOINT,
             issue::HIGH_RISK_APP_PERMS,

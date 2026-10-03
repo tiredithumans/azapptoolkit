@@ -390,18 +390,23 @@ fn rule_mailbox_advisory(perms: &AppPermissions) -> MailboxAdvisory<'_> {
     (c, mailbox_unscoped, scoped_legacy)
 }
 
-/// Rule 12 (advisory, no score): organization-wide SharePoint access. Scoping
-/// is encoded by the permission itself (`Sites.Selected` scoped, other `Sites.*`
-/// org-wide) — no live lookup. Gates on each grant's resource: only Graph's
-/// org-wide `Sites.*` (`is_scopable_sharepoint_resource_permission`) carries the
+/// Rule 12 (advisory, no score): organization-wide SharePoint **and file**
+/// access. Scoping is encoded by the permission itself (`Sites.Selected`
+/// scoped, other `Sites.*` org-wide) — no live lookup. Gates on each grant's
+/// resource: only Graph's org-wide `Sites.*`
+/// (`is_scopable_sharepoint_resource_permission`) carries the
 /// `ScopeSharePointAccess` fix; Office 365 SharePoint Online's goes to
 /// `UNCONFINABLE_SHAREPOINT`; the healthy note needs
-/// `is_scoped_sharepoint_resource_permission`. Returns the Graph org-wide set.
+/// `is_scoped_sharepoint_resource_permission`. The org-wide Files family
+/// (`is_files_orgwide_permission`) gets the `ORG_WIDE_FILES` advisory only —
+/// there is no auto-conversion from `Files.*.All`, so it joins no fix and never
+/// enters the returned set. Returns the Graph org-wide *site* set.
 fn rule_sharepoint_advisory(
     perms: &AppPermissions,
 ) -> (RuleContribution, Vec<&ResourcePermission>) {
     use crate::scoping::{
-        is_scopable_sharepoint_resource_permission, is_sharepoint_orgwide_permission,
+        is_files_orgwide_permission, is_scopable_sharepoint_resource_permission,
+        is_sharepoint_orgwide_permission,
     };
     let mut c = RuleContribution::default();
 
@@ -437,6 +442,29 @@ fn rule_sharepoint_advisory(
         c.recommendations.push(
             "Remove the org-wide Sites.* grant on Office 365 SharePoint Online, or re-declare it \
              on Microsoft Graph where it can be confined to selected sites"
+                .to_string(),
+        );
+    }
+    // The Files family gets the same advisory treatment and deliberately NO
+    // remediation: the item wizard confines `Files.SelectedOperations.Selected`
+    // to chosen files/libraries, but nothing converts a held `Files.*.All`, so a
+    // Fix here would promise a mutation no handler performs. Kept out of the
+    // `scopable` partition above by construction — that filter is `Sites.`-only,
+    // which is why this reads reach, not reach-plus-fix.
+    let files: Vec<&ResourcePermission> = perms
+        .app_role_grants
+        .iter()
+        .filter(|g| is_files_orgwide_permission(g.resource_app_id.as_deref(), &g.value))
+        .collect();
+    if !files.is_empty() {
+        c.issues.push(format!(
+            "{}: {}",
+            issue::ORG_WIDE_FILES,
+            join_values(&files)
+        ));
+        c.recommendations.push(
+            "Restrict file access to individual files and libraries using \
+             Files.SelectedOperations.Selected"
                 .to_string(),
         );
     }

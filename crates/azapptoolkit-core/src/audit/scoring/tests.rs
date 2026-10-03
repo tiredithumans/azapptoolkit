@@ -789,6 +789,7 @@ fn emitted_issue_markers_are_stable() {
             ResourcePermission::graph("Mail.Read"),          // ORG_WIDE_MAILBOX
             ResourcePermission::graph("Sites.Read.All"),     // ORG_WIDE_SHAREPOINT
             ResourcePermission::graph("Sites.Selected"),     // SCOPED_SHAREPOINT
+            ResourcePermission::graph("Files.ReadWrite.All"), // ORG_WIDE_FILES
         ],
         scope_values: vec!["Directory.AccessAsUser.All".into()], // HIGH_RISK_DELEGATED_PERMS
         ..Default::default()
@@ -800,6 +801,7 @@ fn emitted_issue_markers_are_stable() {
         issue::HIGH_RISK_DELEGATED_PERMS,
         issue::ORG_WIDE_MAILBOX,
         issue::ORG_WIDE_SHAREPOINT,
+        issue::ORG_WIDE_FILES,
         issue::SCOPED_SHAREPOINT,
         issue::NO_OWNERS,
         issue::REDUNDANT_APP_PERMS,

@@ -277,7 +277,10 @@ pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
 /// removal). A `None` resource yields no Exchange advice for the same reason.
 /// SharePoint advice follows [`crate::scoping::is_sharepoint_orgwide_permission`]:
 /// both SharePoint resources expose `Sites.Selected`, but another API's
-/// `Sites.`-named role is not SharePoint site access.
+/// `Sites.`-named role is not SharePoint site access. The org-wide Files family
+/// ([`crate::scoping::is_files_orgwide_permission`]) points at
+/// `Files.SelectedOperations.Selected`, the item-level model the Scope wizard
+/// applies.
 pub fn least_privilege_alternative_for(
     resource_app_id: Option<&str>,
     value: &str,
@@ -285,6 +288,12 @@ pub fn least_privilege_alternative_for(
     if crate::scoping::is_sharepoint_orgwide_permission(resource_app_id, value) {
         // Every broad `Sites.*` has the scoped `Sites.Selected` model (Rule 12).
         Some(crate::scoping::SP_SITES_SELECTED)
+    } else if crate::scoping::is_files_orgwide_permission(resource_app_id, value) {
+        // Org-wide Files reach points at the item-level scoped model — the same
+        // answer the audit's Rule 12 advisory and the Scope wizard give. It is
+        // advisory only: nothing auto-converts `Files.*.All`, so unlike the
+        // `Sites.*` arm there is no one-click fix behind this pointer.
+        Some(crate::scoping::SP_FILES_SELECTED)
     } else if crate::scoping::is_scopable_exchange_resource_permission(resource_app_id, value) {
         // Mail/calendar/contacts can be confined to mailboxes via Exchange RBAC.
         Some("Scope to specific mailboxes (Exchange RBAC)")
@@ -583,6 +592,19 @@ mod tests {
             Some("Scope to specific mailboxes (Exchange RBAC)")
         );
         assert_eq!(graph("Mail.ReadWrite.Shared"), None);
+        // Org-wide Files -> the item-level scoped model. The picker hint, the
+        // audit's Rule 12 advisory and the wizard all name this one value, so
+        // the family is a list, not a `Files.` prefix.
+        assert_eq!(
+            graph("Files.Read.All"),
+            Some("Files.SelectedOperations.Selected")
+        );
+        assert_eq!(
+            graph("Files.ReadWrite.All"),
+            Some("Files.SelectedOperations.Selected")
+        );
+        assert_eq!(graph("Files.SelectedOperations.Selected"), None);
+        assert_eq!(graph("Files.ReadWrite.AppFolder"), None);
         // Already least-privilege / no narrower equivalent.
         assert_eq!(graph("Sites.Selected"), None);
         assert_eq!(graph("Directory.ReadWrite.All"), None);

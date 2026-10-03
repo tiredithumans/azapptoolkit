@@ -566,9 +566,10 @@ fn card_skeleton() -> impl IntoView {
 /// into (redundant / delegated / external exposure / no-local-app), so they're
 /// dropped from the ranked list. The two unconfinable-reach groups are listed:
 /// an app that reaches every mailbox or site must not leave the card reading
-/// "the tenant looks healthy". The counts themselves come from the summary's
-/// `PostureCounts`, the one shared source, so the card and the Security
-/// workbench can't disagree.
+/// "the tenant looks healthy" — and neither may the org-wide Files finding,
+/// which describes the same kind of blind tenant-wide reach. The counts
+/// themselves come from the summary's `PostureCounts`, the one shared source,
+/// so the card and the Security workbench can't disagree.
 fn card_lists(key: &str) -> bool {
     matches!(
         key,
@@ -578,6 +579,7 @@ fn card_lists(key: &str) -> bool {
             | "unscopable_legacy_mailbox"
             | "unconfinable_orgwide"
             | "orgwide_sharepoint"
+            | "orgwide_files"
             | "high_risk_perms"
             | "ownership"
             | "unused"

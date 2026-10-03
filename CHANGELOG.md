@@ -7,6 +7,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The Security audit and the permission picker now flag tenant-wide Files permissions.** An app
+  holding `Files.Read.All` or `Files.ReadWrite.All` — which reach every file across all site
+  collections and OneDrive — now gets an "Org-wide Files access" advisory finding, counted on the
+  posture strip and Home, with its rows drilling to the Permissions tab. It carries no one-click
+  Fix: only removal, or re-declaring as the item-scoped `Files.SelectedOperations.Selected`, is
+  possible. In the grant-time permission picker those two permissions now show "Org-wide — reaches
+  every file. Prefer Files.SelectedOperations.Selected.", and the Grant-access wizard's item
+  scoping accepts that scoped model, so the picker hint, the audit recommendation and the wizard
+  point at one answer. Audit scores are unchanged — this is visibility, not re-ranking.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL

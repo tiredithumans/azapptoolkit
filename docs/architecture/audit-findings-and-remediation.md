@@ -24,7 +24,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 8 / 9 | same | +3 all expiring / +2 mixed (only when none expired) | none | — | — | threshold `Constants.ps1:202` |
 | 10 | `rule_stale_app` | +2 (older than `STALE_APP_DAYS`) | none | — | — | `MaxAuditHistoryDays` in `Constants.ps1` |
 | 11 | `rule_mailbox_advisory` | advisory | `ORG_WIDE_MAILBOX`, `LEGACY_MAILBOX_POLICY`, `UNSCOPABLE_LEGACY_MAILBOX`, `UNCONFINABLE_MAILBOX`, `SCOPED_VIA_RBAC` (contains) | `orgwide_mailbox`, `legacy_mailbox_scope`, `unscopable_legacy_mailbox`, `unconfinable_orgwide`, `scoped_mailbox` | `ScopeMailboxAccess`, `MigrateApplicationAccessPolicy` | `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis` |
-| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `scoped_sites` | `ScopeSharePointAccess` | not cited |
+| 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `ORG_WIDE_FILES`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `orgwide_files`, `scoped_sites` | `ScopeSharePointAccess` (Sites only — the Files advisory has no fix) | not cited |
 | 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130` |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
@@ -177,7 +177,10 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
 
 Graph appRole id↔value resolution lives in `commands::graph_roles::graph_role_index` (shared by
 exchange + sharepoint); SharePoint org-wide detection is name-based (`is_sharepoint_orgwide`, defined
-once in `azapptoolkit-core::scoping`).
+once in `azapptoolkit-core::scoping`). Org-wide **Files** reach is the opposite shape — an explicit
+two-value list (`is_files_orgwide_permission` / `FILES_ORGWIDE_PERMISSIONS`, also in `scoping`) —
+because the `Files.` family contains scopes that are *not* tenant-wide file reach
+(`Files.SelectedOperations.Selected`, app-folder scopes), so a prefix rule would misclassify them.
 
 **To teach the app a new mechanism**, touch:
 
@@ -379,6 +382,14 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   because the recommendations differ. `every_reach_marker_has_a_group` pins that every reach/risk
   marker the scorer emits lands in some group; the three hygiene notes (instance lock, public
   client, secret-over-cert) are deliberately left to the All-apps issue column.
+- **Org-wide Files reach is advisory with its own group.** `orgwide_files` (`ORG_WIDE_FILES`)
+  fires for the two tenant-wide file grants on Microsoft Graph (`Files.Read.All`,
+  `Files.ReadWrite.All`). Actionable with **no bulk action and no row Fix**: the wizard scopes
+  `Files.SelectedOperations.Selected` to chosen files/libraries, but no handler converts a held
+  `Files.*.All`, so removal stays admin-judged — the same reason it is kept out of
+  `orgwide_sharepoint`, whose Sites.Selected bulk Fix cannot apply to a Files grant. The picker
+  hint, this rule's recommendation and the wizard all name the one scoped value; its single source
+  is `audit::least_privilege_alternative_for`, whose Files arm must stay worded off the helper.
 - **Load-bearing asymmetry:** `scoped_mailbox` matches with `.contains(SCOPED_VIA_RBAC)` while
   every sibling finding uses `.starts_with` — the marker sits mid-issue, not at the front. The
   core `audit/finding.rs` tests pin this; a "normalize everything to `starts_with`" sweep silently empties
@@ -391,7 +402,7 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   used to ship it over IPC on every audit reload. The buckets classify through `matches_finding`,
   so a count can't diverge from the group it summarizes (pinned by
   `posture_counts_agree_with_finding_groups`); `PostureCounts::finding(key)` is the one key→bucket
-  map. The Home card counts the two unconfinable-reach groups too. `groups::tone` is the one
+  map. The Home card counts the two unconfinable-reach groups and the org-wide Files finding too. `groups::tone` is the one
   `RiskLevel` → tone map (group dots, risk badges, the Home card). The Home card's ranked
   Top-findings list goes through `groups::ranked_actionable_findings`, which ranks the summary's
   tallies with the same `rank_key` as `group_findings`, so the finding *order* and tone can't

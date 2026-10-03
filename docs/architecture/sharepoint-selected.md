@@ -45,7 +45,10 @@ Four things about the sub-site three that the site path does not have to deal wi
 - **Nothing is stripped.** These scopes have no org-wide predecessor — an operator reaching for
   `Files.SelectedOperations.Selected` is granting least privilege from the start, so
   `remove_orgwide` has nothing to remove. Converting `Files.Read.All` would be a different,
-  audit-driven flow.
+  audit-driven flow — today the audit only *advises* it: `ORG_WIDE_FILES` names
+  `Files.SelectedOperations.Selected` as the least-privilege model (Rule 12, no remediation, no
+  bulk Fix) and `least_privilege_alternative_for` gives the picker the same pointer, but no
+  handler converts a held `Files.*.All`.
 - **Reach is not enumerable — worse than the site blind spot.** `sweep_site_permissions` can walk
   every site in the tenant; *nothing* walks every folder, and there is no reverse `appId → items`
   lookup either. So there is no sweep, no cached index, and

@@ -45,6 +45,13 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // both match.
         "legacy_mailbox_scope" => |x| x.starts_with(issue::LEGACY_MAILBOX_POLICY),
         "orgwide_sharepoint" => |x| x.starts_with(issue::ORG_WIDE_SHAREPOINT),
+        // Org-wide FILES reach is its own finding, not a variant of
+        // `orgwide_sharepoint`: the site path has a one-click `Sites.Selected`
+        // conversion and the file path has none (the wizard only scopes the
+        // Selected end state). Folding them would put Files rows under a group
+        // whose bulk Fix cannot apply — the same trap the unconfinable markers
+        // were split out to avoid.
+        "orgwide_files" => |x| x.starts_with(issue::ORG_WIDE_FILES),
         // Org-wide reach the toolkit cannot confine. Kept out of
         // `orgwide_mailbox` / `orgwide_sharepoint` so these rows never sit under
         // a group whose bulk Fix can't apply to them, and split in two because
@@ -182,6 +189,10 @@ mod tests {
                 "orgwide_sharepoint",
             ),
             (
+                format!("{} something", issue::ORG_WIDE_FILES),
+                "orgwide_files",
+            ),
+            (
                 format!("{} something", issue::SCOPED_SHAREPOINT),
                 "scoped_sites",
             ),
@@ -214,6 +225,7 @@ mod tests {
             "scoped_mailbox",
             "legacy_mailbox_scope",
             "orgwide_sharepoint",
+            "orgwide_files",
             "scoped_sites",
             "ownership",
             "redundant_perms",

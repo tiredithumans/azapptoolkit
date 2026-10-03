@@ -644,6 +644,14 @@ pub mod issue {
     pub const UNCONFINABLE_SHAREPOINT: &str =
         "Org-wide SharePoint access that Sites.Selected cannot confine";
     pub const SCOPED_SHAREPOINT: &str = "SharePoint access scoped to selected sites";
+    /// Org-wide reach over **file** content across every site collection and
+    /// every user's OneDrive (`Files.Read.All` / `Files.ReadWrite.All` on
+    /// Microsoft Graph). Files sibling of [`ORG_WIDE_SHAREPOINT`], with its own
+    /// finding: no auto-conversion exists (the item wizard scopes only the
+    /// `Files.SelectedOperations.Selected` end state), so this marker carries
+    /// **no** remediation — it points at the scoped model, removal stays
+    /// admin-judged.
+    pub const ORG_WIDE_FILES: &str = "Org-wide Files access";
     pub const NO_OWNERS: &str = "No owners assigned";
     pub const SINGLE_OWNER: &str = "Single owner";
     pub const INSTANCE_LOCK_DISABLED: &str = "App instance property lock is not fully enabled";

@@ -33,6 +33,7 @@ pub struct PostureCounts {
     pub unscopable_legacy_mailbox: usize,
     pub unconfinable_orgwide: usize,
     pub orgwide_sharepoint: usize,
+    pub orgwide_files: usize,
     pub scoped_sites: usize,
     pub unowned: usize,
     pub no_local_app: usize,
@@ -40,7 +41,7 @@ pub struct PostureCounts {
 
 /// The finding keys [`PostureCounts`] counts — each one a key
 /// [`PostureCounts::finding`] answers for.
-pub const POSTURE_FINDING_KEYS: [&str; 13] = [
+pub const POSTURE_FINDING_KEYS: [&str; 14] = [
     "expired",
     "unused",
     "high_risk_perms",
@@ -51,6 +52,7 @@ pub const POSTURE_FINDING_KEYS: [&str; 13] = [
     "unscopable_legacy_mailbox",
     "unconfinable_orgwide",
     "orgwide_sharepoint",
+    "orgwide_files",
     "scoped_sites",
     "ownership",
     "no_local_app",
@@ -72,6 +74,7 @@ impl PostureCounts {
             "unscopable_legacy_mailbox" => self.unscopable_legacy_mailbox,
             "unconfinable_orgwide" => self.unconfinable_orgwide,
             "orgwide_sharepoint" => self.orgwide_sharepoint,
+            "orgwide_files" => self.orgwide_files,
             "scoped_sites" => self.scoped_sites,
             "ownership" => self.unowned,
             "no_local_app" => self.no_local_app,
@@ -98,6 +101,7 @@ pub fn posture_counts(items: &[AuditItem]) -> PostureCounts {
         unscopable_legacy_mailbox: count_finding(items, "unscopable_legacy_mailbox"),
         unconfinable_orgwide: count_finding(items, "unconfinable_orgwide"),
         orgwide_sharepoint: count_finding(items, "orgwide_sharepoint"),
+        orgwide_files: count_finding(items, "orgwide_files"),
         scoped_sites: count_finding(items, "scoped_sites"),
         // NO_OWNERS or SINGLE_OWNER — the one `ownership` group.
         unowned: count_finding(items, "ownership"),
@@ -224,6 +228,7 @@ mod tests {
             issue::UNSCOPABLE_LEGACY_MAILBOX,
             issue::UNCONFINABLE_MAILBOX,
             issue::ORG_WIDE_SHAREPOINT,
+            issue::ORG_WIDE_FILES,
             issue::SCOPED_SHAREPOINT,
             issue::NO_OWNERS,
         ]
