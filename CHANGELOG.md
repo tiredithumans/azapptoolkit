@@ -33,6 +33,13 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   "nothing was minted". Untagged secrets remain rotatable (no ownership is claimed from absent
   tags), and a transient failure of the ownership check skips the check rather than blocking a
   legitimate rotation.
+- **The SSO wizard's lifetime fields now reject impossible values instead of
+  silently using the default.** A mistyped certificate or secret lifetime ("3650",
+  "abc") used to be dropped and the app created with the 365/180-day default the
+  operator never typed; Next now stays disabled while the value is outside 1–1095
+  (cert) or 1–730 (secret) days, with the reason shown under the field. Blank
+  remains a deliberate "use the default", and the create call re-checks the same
+  bounds behind the button.
 - **The claims editor now warns about edits that quietly strip claims from tokens.** While a
   claims policy is being edited (SSO tab and the New SSO application wizard alike), the editor
   flags: switching the basic claim set off with no claims defined, a claim with neither a SAML
