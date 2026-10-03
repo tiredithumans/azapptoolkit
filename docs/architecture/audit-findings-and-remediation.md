@@ -15,6 +15,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 
 | Rule | Helper | Score | Issue marker | Finding key | Fix | Provenance |
 |---|---|---|---|---|---|---|
+| 21 | `rule_disabled_by_microsoft` | +15 flat (folded **first**, despite the number: alone it reaches High) | `DISABLED_BY_MICROSOFT` | `disabled_by_microsoft` | — (delete/disable is admin-judged) | net-new |
 | 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
 | 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
 | 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
@@ -34,7 +35,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
 
 Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
-Rules 1–4 and 11–13 plus the sign-in post-pass (see
+Rules 1–4, 11–13 and 21 plus the sign-in post-pass (see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
 
 ## Scope-aware audit risk

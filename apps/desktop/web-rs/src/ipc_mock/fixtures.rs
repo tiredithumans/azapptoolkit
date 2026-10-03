@@ -159,6 +159,7 @@ pub fn enterprise_app(id: &str, display_name: &str) -> EnterpriseApplicationDto 
         oauth2_permission_scopes: Vec::new(),
         created_date_time: None,
         tags: Vec::new(),
+        disabled_by_microsoft_status: None,
         notes: None,
     }
 }

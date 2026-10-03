@@ -261,7 +261,7 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
         .and(path("/servicePrincipals"))
         .and(query_param(
             "$select",
-            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames",
+            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus",
         ))
         .and(query_param("$count", "true"))
         .and(header("consistencylevel", "eventual"))
@@ -272,7 +272,8 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
                     "appId": "app-1",
                     "displayName": "billing-api",
                     "servicePrincipalType": "Application",
-                    "appOwnerOrganizationId": "tenant-github"
+                    "appOwnerOrganizationId": "tenant-github",
+                    "disabledByMicrosoftStatus": "DisabledDueToViolationOfServicesAgreement"
                 },
                 {
                     "id": "msi-1",
@@ -305,6 +306,12 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
         ]
     );
     assert_eq!(sps[0].app_id, "app-1");
+    // The audit's Rule 21 flag round-trips on the index projection.
+    assert_eq!(
+        sps[0].disabled_by_microsoft_status.as_deref(),
+        Some("DisabledDueToViolationOfServicesAgreement")
+    );
+    assert_eq!(sps[1].disabled_by_microsoft_status, None);
     assert_eq!(
         sps[0].app_owner_organization_id.as_deref(),
         Some("tenant-github")

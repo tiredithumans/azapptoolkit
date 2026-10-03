@@ -52,6 +52,7 @@ fn sp_to_enterprise_dto(
         oauth2_permission_scopes: sp.oauth2_permission_scopes,
         created_date_time: sp.created_date_time,
         tags: sp.tags,
+        disabled_by_microsoft_status: sp.disabled_by_microsoft_status,
         notes: sp.notes,
     }
 }
@@ -730,6 +731,7 @@ mod tests {
             oauth2_permission_scopes: Vec::new(),
             created_date_time: None,
             tags: Vec::new(),
+            disabled_by_microsoft_status: None,
             notes: None,
         }
     }

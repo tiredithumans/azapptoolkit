@@ -123,6 +123,7 @@ pub(crate) fn score_sp_only(
         sp_object_id: sp.id.clone(),
         created_date_time: sp.created_date_time,
         account_enabled: sp.account_enabled,
+        disabled_by_microsoft_status: sp.disabled_by_microsoft_status.clone(),
         app_owner_organization_id: sp.app_owner_organization_id.clone(),
         service_principal_type: sp.service_principal_type.clone(),
     };

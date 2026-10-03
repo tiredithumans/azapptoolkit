@@ -659,6 +659,11 @@ pub mod issue {
         "Public client flows are enabled and credentials are present";
     pub const PREFER_CERT_OVER_SECRET: &str = "Uses client secret(s)";
     pub const REDUNDANT_APP_PERMS: &str = "Redundant application permissions:";
+    /// Microsoft disabled the principal for a Services Agreement violation
+    /// (`disabledByMicrosoftStatus`). The finding group keeps its rows
+    /// admin-judged (delete/disable is not a safe one-click fix), so this
+    /// marker carries **no** remediation.
+    pub const DISABLED_BY_MICROSOFT: &str = "Disabled by Microsoft";
     /// Sign-in audience reaches beyond this directory (multi-tenant, or
     /// multi-tenant + personal Microsoft accounts).
     pub const MULTITENANT_AUDIENCE: &str = "Sign-in audience reaches outside this tenant";

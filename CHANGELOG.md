@@ -7,6 +7,16 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **Apps Microsoft has disabled for a policy violation are now impossible to miss.** The audit
+  reads Graph's `disabledByMicrosoftStatus` — Microsoft's own flag for suspicious, abusive or
+  malicious activity, set on the application and its service principal — and scores it +15, so a
+  disabled principal is at least High on that signal alone (**this shifts audit ranking**: a
+  previously-invisible flag now leads the issue list and moves apps up). Disables appear as a
+  "Disabled by Microsoft" group in the Findings workbench, as a red badge on the App Registration
+  and Enterprise Application headers, and on SP-only rows (foreign enterprise apps, managed
+  identities) where the application object lives in another tenant. A no-credential, no-permission
+  disabled app now finally reads as what it is; there is deliberately no one-click fix — deleting
+  or re-enabling is admin-judged.
 - **The Security audit and the permission picker now flag tenant-wide Files permissions.** An app
   holding `Files.Read.All` or `Files.ReadWrite.All` — which reach every file across all site
   collections and OneDrive — now gets an "Org-wide Files access" advisory finding, counted on the

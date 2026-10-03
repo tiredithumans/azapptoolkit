@@ -72,6 +72,14 @@ pub struct Application {
     /// "fetched, no owners". Drives the audit's ownership rules.
     #[serde(default)]
     pub owners: Option<Vec<DirectoryObject>>,
+    /// Graph `disabledByMicrosoftStatus`. Microsoft sets this to
+    /// `DisabledDueToViolationOfServicesAgreement` when it disables an app for
+    /// suspicious, abusive or malicious activity — Microsoft's own "this app is
+    /// malicious" flag, and the explanation for "the integration silently
+    /// stopped working" tickets. `None`/`Some("Success")` = never disabled.
+    /// Read on both the application and its service principal.
+    #[serde(default)]
+    pub disabled_by_microsoft_status: Option<String>,
     /// Free-text internal notes (Graph `notes`, max 1024 chars) — the portal
     /// surfaces this as "Internal notes" under Branding & properties. Only
     /// fetched for the detail view; the Overview tab edits it.
@@ -138,6 +146,14 @@ pub struct ServicePrincipal {
     pub display_name: String,
     #[serde(default)]
     pub account_enabled: Option<bool>,
+    /// Graph `disabledByMicrosoftStatus` — see
+    /// [`Application::disabled_by_microsoft_status`]. Microsoft disables the
+    /// service principal alongside the application when it blocks an app for
+    /// policy violation, so SP-only rows (foreign apps, managed identities)
+    /// can carry the flag even where the application object lives in another
+    /// tenant.
+    #[serde(default)]
+    pub disabled_by_microsoft_status: Option<String>,
     #[serde(default)]
     pub app_role_assignment_required: Option<bool>,
     #[serde(default)]

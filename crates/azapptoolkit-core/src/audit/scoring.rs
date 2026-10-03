@@ -11,8 +11,8 @@ use super::*;
 use super::credentials::{is_long_lived, overall_credential_status};
 use super::permissions::{
     PTS_ADMIN_CONSENT_DELEGATED, PTS_ALL_CREDS_EXPIRED, PTS_ALL_EXPIRING_SOON,
-    PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM, PTS_MIXED_EXPIRED,
-    PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
+    PTS_DISABLED_BY_MICROSOFT, PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM,
+    PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_SCOPED_HIGH_RISK_MAIL,
     PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP, PTS_UNVERIFIED_PUBLISHER,
     RedundantPermission,
 };
@@ -34,6 +34,33 @@ impl RuleContribution {
         self.issues.extend(other.issues);
         self.recommendations.extend(other.recommendations);
     }
+}
+
+/// Rule 21: Microsoft disabled the principal for a Services Agreement
+/// violation (`disabledByMicrosoftStatus`). Folded FIRST in both entry points:
+/// it is the single strongest signal an item can carry — Microsoft's own
+/// "suspicious, abusive or malicious activity" verdict — so it leads the issue
+/// list and alone takes the item to High. Admin-judged like the other
+/// exposure findings: deleting or disabling is not a safe one-click fix, so no
+/// remediation rides it. Unrecognised statuses never inflate (same rule as
+/// `rule_external_exposure`'s audience arm).
+fn rule_disabled_by_microsoft(status: Option<&str>) -> RuleContribution {
+    let mut c = RuleContribution::default();
+    if status != Some("DisabledDueToViolationOfServicesAgreement") {
+        return c;
+    }
+    c.score += PTS_DISABLED_BY_MICROSOFT;
+    c.issues.push(format!(
+        "{} — Microsoft disabled this application for a Services Agreement violation \
+         (suspicious, abusive or malicious activity); sign-ins and token issuance are blocked",
+        issue::DISABLED_BY_MICROSOFT
+    ));
+    c.recommendations.push(
+        "Treat its credentials and grants as suspect: investigate why it was disabled before \
+         re-enabling anything; delete the app if it is not a mistaken block"
+            .to_string(),
+    );
+    c
 }
 
 /// Rules 1 & 2: high/medium-risk application permissions. A high/medium-risk
@@ -905,6 +932,9 @@ pub fn score_application(
     // in call order, so the issue / recommendation ordering is preserved by
     // construction (pinned by the characterization tests).
     let mut acc = RuleContribution::default();
+    acc.merge(rule_disabled_by_microsoft(
+        app.disabled_by_microsoft_status.as_deref(),
+    )); // Rule 21, folded first — see its doc
     acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
     acc.merge(rule_admin_consent(perms)); // Rule 3
     acc.merge(rule_sp_disabled(sp_enabled)); // Rule 4
@@ -1050,10 +1080,15 @@ pub struct SpAuditInput {
     /// Graph `servicePrincipalType`; `ManagedIdentity` selects
     /// [`AuditPrincipalKind::ManagedIdentity`] (drives Open/Fix routing).
     pub service_principal_type: Option<String>,
+    /// Graph `disabledByMicrosoftStatus` on the service principal — feeds
+    /// [`rule_disabled_by_microsoft`], which SP-only rows can carry even when
+    /// the application object lives in another tenant.
+    pub disabled_by_microsoft_status: Option<String>,
 }
 
 /// Builds an [`AuditItem`] for a service principal with no local application
-/// object. Only *granted*-state rules apply (1/2, 3, 4, 11, 12, 13); credential
+/// object. Only *granted*-state rules apply (1/2, 3, 4, 11, 12, 13, plus the
+/// Rule 21 disable flag, which Microsoft sets on the SP too); credential
 /// and manifest rules (5-9, 10, 14-18, downgrade pointers) are absent — those
 /// live on the home tenant's application, which this tenant can neither see nor
 /// fix. `app_role_grants` are the SP's *granted* app roles
@@ -1070,6 +1105,9 @@ pub fn score_service_principal(
     let perms = &deduped;
 
     let mut acc = RuleContribution::default();
+    acc.merge(rule_disabled_by_microsoft(
+        sp.disabled_by_microsoft_status.as_deref(),
+    )); // Rule 21, folded first — see its doc
     acc.merge(rule_app_permission_risk(perms)); // Rules 1 & 2
     acc.merge(rule_admin_consent(perms)); // Rule 3
     acc.merge(rule_sp_disabled(sp.account_enabled)); // Rule 4

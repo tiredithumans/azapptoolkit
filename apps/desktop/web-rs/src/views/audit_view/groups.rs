@@ -128,6 +128,18 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Rule 21 — Microsoft disabled the app/SP for a Services Agreement
+    // violation. Its own group, not folded into `expired` or
+    // `external_exposure`: the flag is about the principal's conduct and
+    // fires on SP-only rows too, where the credential and audience lenses
+    // don't apply. No group Fix — deleting or disabling is admin-judged.
+    GroupSpec {
+        key: "disabled_by_microsoft",
+        title: "Disabled by Microsoft",
+        blurb: "Microsoft blocked these apps for suspicious, abusive or malicious activity (disabledByMicrosoftStatus). Sign-ins are already blocked; the credentials and grants remain. Investigate why each was blocked before re-enabling anything — delete the ones that aren't mistaken blocks.",
+        tab: "overview",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "external_exposure",
         title: "Reachable outside this tenant",
@@ -302,7 +314,8 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// the others are one click away in the section that owns them.
 ///
 /// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
-/// `unconfinable_orgwide`, `external_exposure`, `high_risk_delegated`,
+/// `unconfinable_orgwide`, `disabled_by_microsoft`, `external_exposure`,
+/// `high_risk_delegated`,
 /// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
@@ -782,6 +795,7 @@ mod tests {
             "high_risk_perms",
             "high_risk_delegated",
             "external_exposure",
+            "disabled_by_microsoft",
             "no_local_app",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",

@@ -9,7 +9,9 @@ use thaw::Card;
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
 use crate::components::type_chip::{AppKind, TypeChip};
-use crate::components::ui::{DetailLoadError, DetailSkeleton, TabBar, TabBarItem};
+use crate::components::ui::{
+    Badge, BadgeTone, DetailLoadError, DetailSkeleton, TabBar, TabBarItem,
+};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
 use crate::util::{keep_alive, no_tenant};
@@ -151,6 +153,25 @@ pub fn ApplicationDetailPane(
                                         refreshing=Signal::derive(move || refreshing.get())
                                         on_delete=Callback::new(move |()| delete_open.set(true))
                                     >
+                                        {move || {
+                                            // Microsoft's own "malicious" flag —
+                                            // shown before the pairing link so it
+                                            // is the first thing on a disabled app.
+                                            detail_signal
+                                                .with(|d| d.application.disabled_by_microsoft_status.clone())
+                                                .filter(|s| !s.is_empty())
+                                                .map(|status| {
+                                                    view! {
+                                                        <Badge
+                                                            label="Disabled by Microsoft"
+                                                            tone=BadgeTone::Critical
+                                                            title=format!(
+                                                                "Microsoft disabled this application for a Services Agreement violation ({status}); sign-ins and token issuance are blocked"
+                                                            )
+                                                        />
+                                                    }
+                                                })
+                                        }}
                                         {move || {
                                             detail_signal
                                                 .with(|d| d.service_principal.clone())

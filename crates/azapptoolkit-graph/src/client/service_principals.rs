@@ -39,6 +39,10 @@ fn default_service_principal_select() -> &'static [&'static str] {
         "tags",
         "createdDateTime",
         "notes",
+        // Microsoft's disable flag — see the SP-index projection above; the
+        // detail pane's badge and the batched reads mirror the index here so a
+        // detail and a list never disagree about whether an app is disabled.
+        "disabledByMicrosoftStatus",
     ]
 }
 
@@ -175,8 +179,11 @@ impl GraphClient {
                 // `MiSubtype::from_alternative_names` reads to tell a
                 // system-assigned identity from a user-assigned one. It is empty
                 // for the non-MI service principals that dominate the index.
+                // `disabledByMicrosoftStatus` rides along so SP-only audit rows
+                // (foreign apps, MIs, orphaned SPs — no local application
+                // object) can carry Microsoft's own disable flag (Rule 21).
                 "$select",
-                "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames",
+                "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus",
             ),
             ("$count", "true"),
             ("$top", MAX_PAGE_SIZE),

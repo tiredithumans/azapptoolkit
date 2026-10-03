@@ -35,6 +35,12 @@ pub(super) const PTS_HIGH_RISK_APP_PERM: u32 = 10;
 pub(super) const PTS_MEDIUM_RISK_APP_PERM: u32 = 5;
 pub(super) const PTS_ADMIN_CONSENT_DELEGATED: u32 = 5;
 pub(super) const PTS_SP_DISABLED: u32 = 2;
+/// Microsoft has disabled the app/SP for a Services Agreement violation
+/// (`disabledByMicrosoftStatus`). Highest single-item weight: it is
+/// Microsoft's own "suspicious, abusive or malicious activity" verdict, so a
+/// flagged principal is at least High on this signal alone (+15 ≥ the 15-point
+/// High threshold). Ranking change over the legacy port — CHANGELOG-gated.
+pub(super) const PTS_DISABLED_BY_MICROSOFT: u32 = 15;
 pub(super) const PTS_ALL_CREDS_EXPIRED: u32 = 8;
 pub(super) const PTS_MIXED_EXPIRED: u32 = 4;
 pub(super) const PTS_ALL_EXPIRING_SOON: u32 = 3;

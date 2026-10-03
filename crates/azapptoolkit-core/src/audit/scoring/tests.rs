@@ -34,6 +34,7 @@ fn base_sp() -> SpAuditInput {
         account_enabled: Some(true),
         app_owner_organization_id: Some("11111111-2222-3333-4444-555555555555".into()),
         service_principal_type: Some("Application".into()),
+        disabled_by_microsoft_status: None,
     }
 }
 
@@ -2630,4 +2631,55 @@ fn the_same_value_on_two_resources_is_not_a_duplicate() {
             > score_application(&base_app(), Some(true), &one, now()).risk_score,
         "two resources means two grants, and must score higher than one"
     );
+}
+
+/// Rule 21 (`disabledByMicrosoftStatus`). Net-new signal (no PowerShell
+/// ancestor): Microsoft's own disable flag alone takes an item to High, leads
+/// the issue list, and never inflates on any other status value.
+#[test]
+fn disabled_by_microsoft_alone_reaches_high_and_leads_the_issues() {
+    let flagged = Application {
+        disabled_by_microsoft_status: Some("DisabledDueToViolationOfServicesAgreement".into()),
+        ..base_app()
+    };
+    let item = score_application(&flagged, Some(true), &AppPermissions::default(), now());
+    assert_eq!(item.risk_score, 15, "flag alone: High is 15");
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert_eq!(item.issues.len(), 1);
+    assert!(
+        item.issues[0].starts_with(issue::DISABLED_BY_MICROSOFT),
+        "issue must lead with the finding-group marker: {:?}",
+        item.issues[0]
+    );
+
+    // Unknown/absent statuses score nothing — an unrecognised value must never
+    // inflate, the same guard the audience rule keeps.
+    for status in [None, Some("Success"), Some(""), Some("SomethingNew")] {
+        let app = Application {
+            disabled_by_microsoft_status: status.map(str::to_string),
+            ..base_app()
+        };
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        assert_eq!(item.risk_score, 0, "status {status:?} must not inflate");
+    }
+}
+
+/// The flag rides the service principal too, so SP-only rows (foreign apps,
+/// managed identities — no local application object) surface it.
+#[test]
+fn disabled_by_microsoft_flags_sp_only_rows() {
+    let sp = SpAuditInput {
+        disabled_by_microsoft_status: Some("DisabledDueToViolationOfServicesAgreement".into()),
+        ..base_sp()
+    };
+    let item = score_service_principal(&sp, &sp_perms(&[]), now());
+    assert_eq!(item.risk_score, 15);
+    assert_eq!(item.risk_level, RiskLevel::High);
+    assert!(
+        item.issues
+            .iter()
+            .any(|x| x.starts_with(issue::DISABLED_BY_MICROSOFT))
+    );
+    // …and the flag alone trips no other finding group.
+    assert_eq!(item.issues.len(), 1);
 }

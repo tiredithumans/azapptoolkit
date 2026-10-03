@@ -71,6 +71,10 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // fixes.
         "redundant_perms" => |x| x.starts_with(issue::REDUNDANT_APP_PERMS),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
+        // Rule 21 — Microsoft's own disable flag. Its own group (not folded
+        // into the credential or exposure findings): the flag is about the
+        // principal's conduct, and fires on SP-only rows too.
+        "disabled_by_microsoft" => |x| x.starts_with(issue::DISABLED_BY_MICROSOFT),
         "ownership" => |x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER),
         _ => return None,
     };
@@ -217,6 +221,13 @@ mod tests {
                 format!("{}: Sites.Read.All", issue::UNCONFINABLE_SHAREPOINT),
                 "unconfinable_orgwide",
             ),
+            (
+                format!(
+                    "{} — Services Agreement violation",
+                    issue::DISABLED_BY_MICROSOFT
+                ),
+                "disabled_by_microsoft",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -232,6 +243,7 @@ mod tests {
             "external_exposure",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
+            "disabled_by_microsoft",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

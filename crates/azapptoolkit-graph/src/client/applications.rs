@@ -190,6 +190,10 @@ fn default_application_select() -> &'static [&'static str] {
         "verifiedPublisher",
         "servicePrincipalLockConfiguration",
         "isFallbackPublicClient",
+        // Microsoft's own disable flag (audit Rule 21) — a policy-violation
+        // disable is invisible without it, and it is the audit's strongest
+        // single signal.
+        "disabledByMicrosoftStatus",
         "notes",
     ]
 }

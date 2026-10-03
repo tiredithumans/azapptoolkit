@@ -228,6 +228,24 @@ fn EnterpriseAppPanel(
                 on_delete=Callback::new(move |()| delete_open.set(true))
             >
                 {move || {
+                    // Microsoft's own "malicious" flag, ahead of the foreign
+                    // badge: a disabled SP is already blocked at sign-in.
+                    ro_signal
+                        .with(|d| d.service_principal.disabled_by_microsoft_status.clone())
+                        .filter(|s| !s.is_empty())
+                        .map(|status| {
+                            view! {
+                                <Badge
+                                    label="Disabled by Microsoft"
+                                    tone=BadgeTone::Critical
+                                    title=format!(
+                                        "Microsoft disabled this service principal for a Services Agreement violation ({status}); sign-ins and token issuance are blocked"
+                                    )
+                                />
+                            }
+                        })
+                }}
+                {move || {
                     ro_signal
                         .with(|d| d.service_principal.is_foreign_tenant)
                         .then(|| view! { <Badge label="Foreign tenant" tone=BadgeTone::Warning /> })
