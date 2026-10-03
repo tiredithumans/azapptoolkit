@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 69 entries by area (read the section for each item's Problem +
+Remaining 64 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -100,8 +100,20 @@ Proposal; #### items are full entries, one-liners are bullets):
   no list-cache bust). Deviation from the proposal: a clean form disables Save
   rather than firing a toast, and Cancel on Overview now re-seeds instead of
   parking edits.
-- **Enterprise apps & managed identities (5)** — F377 · F378 · F391 · F389 ·
-  F206
+- **Enterprise apps & managed identities (5)** — **all closed 2026-10-02,
+  verified against current main.** F377 (`AppAssignmentDto.principal_id` exists
+  with its per-role doc; the Access tab derives `exclude` from assignments
+  holding the *selected* role and has a debounced filter `SearchInput`;
+  ShowMore deliberately not revisited — no stall evidence). F378
+  (`assignable_to_users_and_groups` gates the picker; Application-only roles
+  render disabled "(applications only)"). F391 (the `Synchronization.Read.All`
+  capability entry is in `core::capabilities` with its role list and
+  remediation, `AppState::ensure_sync_token` pre-acquires and
+  `get_enterprise_app_provisioning` calls it, and the Provisioning Callout has
+  "Grant consent & retry"). F389 (the MI Azure role form has the "Custom role
+  definition id…" GUID option and the "Grant consent to Azure" label). F206 (a
+  409 `RoleAssignmentExists` maps to `UiError` code `already_assigned` without
+  leaking the JSON blob, unit-tested in `managed_identity.rs`).
 - **Operator tooling: search, DR, settings, readiness (18)** — F040 ·
   F042+F428 · F258 · F009 · F012 · F049 · F053 · F271 · F024 · F163 · F262 ·
   F157 · F153 · F149 · F369 · F390 · F432 · F434
