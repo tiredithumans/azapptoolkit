@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 64 entries by area (read the section for each item's Problem +
+Remaining 48 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -114,9 +114,35 @@ Proposal; #### items are full entries, one-liners are bullets):
   definition id…" GUID option and the "Grant consent to Azure" label). F206 (a
   409 `RoleAssignmentExists` maps to `UiError` code `already_assigned` without
   leaking the JSON blob, unit-tested in `managed_identity.rs`).
-- **Operator tooling: search, DR, settings, readiness (18)** — F040 ·
-  F042+F428 · F258 · F009 · F012 · F049 · F053 · F271 · F024 · F163 · F262 ·
-  F157 · F153 · F149 · F369 · F390 · F432 · F434
+- **Operator tooling: search, DR, settings, readiness (18)** — 16 closed
+  2026-10-02 (verified against main unless noted): F009 (GUID probes set
+  `lookup_degraded`; an unanswered probe never reads as a miss) · F012
+  (`index_truncated` covers both caps, `APPS_MAX == SP_INDEX_MAX` asserted) ·
+  F040 (per-item `appRoleAssignedTo`/`memberOf` failures push
+  `enterpriseAppAssignments`/`enterpriseAppGroups` SkippedObjects) ·
+  F042+F428 (`schema_too_new` is a dry-run blocker behind `plan_blocked()`,
+  the four new RestorePlan counts render, and same-tenant restore warns about
+  duplicates) · F049 (one `csv_bytes` sink adds the UTF-8 BOM, tested) ·
+  F053 (`ConfigSource` + settings-view source note + build.rs warning for an
+  empty/mistyped `.env` value) · F024+F163 (`claims_policy_write` +
+  `provisioning_read` catalog rows, `ensure_sync_token`, the Grant-consent-&-
+  retry Callout, and `forbidden_remediation` spliced into both claims-save
+  paths — the readiness feature set now derives from CAPABILITIES) · F262
+  (admin_consent lists Application/Cloud Application Administrator, remediation
+  reworded) · F157 (placeholder scopes expanded per cloud in `scope_detail_text`
+  + a no-literal-host test) · F153 (`AZAPPTOOLKIT_BUILD_CLOUD` baked, runtime
+  var still wins) · F149 (`settings.lock` via `File::lock` inside the process
+  mutex, cross-instance test) · F390 (both created-on pairs live on
+  `TenantScopedUi` + the credential-facet clear-on-switch rule) · F432 (Clear
+  per kind + reactive Disable/Enable label) · F434 (Home's With-secrets/
+  With-certs metrics drill through `open_apps_with_facet` into the two new
+  chips) · F369 **implemented here**
+  (`16bc3df`: saved views carry + apply the date window, clear included).
+  **Open — F258:** custom-Entra-role detection (`required_actions` + a
+  roleAssignments/roleDefinitions read path) and **F271:** PIM eligibility
+  (`Verdict::Eligible` via `roleEligibilityScheduleInstances` needs a new
+  consent scope + a sovereign-aware `portal_root()`); both are design-level,
+  not drop-in.
 - **Auth, sign-in & network resilience (9)** — F110 · F112 · F181 · F183 ·
   F427 · F114 · F113 · F354 · F018
 - **Frontend consistency & polish (8)** — F341 · F357 · F355 · F322 · F321 ·
