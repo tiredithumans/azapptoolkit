@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 94 entries by area (read the section for each item's Problem +
+Remaining 87 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -42,10 +42,28 @@ Proposal; #### items are full entries, one-liners are bullets):
   `issue::ORG_WIDE_FILES` advisory in Rule 12 (no remediation) + the
   `least_privilege_alternative_for` Files arm, so picker hint, audit
   recommendation and item wizard agree.
-- **Scoping (Exchange/SharePoint) & resource access (9)** — F069 · F060 · F174
-  · F263 · F406 · F407 · F436 · F439 · F197 (F058 verified already implemented:
-  tester pre-acquires `ensure_exchange_token` and reports `exchange_sp_store_read`
-  coverage)
+- **Scoping (Exchange/SharePoint) & resource access (9)** — closed 2026-10-02
+  except **F174 · F263** (below). F060 · F406 · F407 · F439 verified already
+  implemented on main (consolidated "Scoping is NOT effective" warning through a
+  helper shared with `aap_migration`; `is_held_scopable` carries the resource,
+  comment fixed; Grant write is Secondary with read Primary last; `do_probe`
+  clears a stale result when the target changes). F069 step 1 (tester reads BOTH
+  SP resources, labels SPO grants) shipped with F094; step 2 (converter strips
+  the SPO copy + widened `is_scopable_sharepoint_resource_permission`) is
+  **declined after review** — the design now deliberately keeps per-row Scope
+  actions Graph-only because the conversion's grant and strip targets Microsoft
+  Graph (F406 documents it; the picker hint agrees by omission). F436's
+  display-name substitution verified implemented; its remaining tab reset landed
+  with F197. F197 implemented: `enableRbacAuthorization` reaches
+  `KeyVaultSweepResult.vaults_access_policy_mode`, so access-policy vaults are
+  named in the sweep summary + export instead of reading as all-clear.
+  **Open — F174:** the decommission teardown is a real gap (no
+  `Remove-ManagementScope`/`Remove-ServicePrincipal` anywhere); it needs
+  prove-zero-references + separately-confirmed design modelled on
+  `delete_exchange_scope_group`'s live re-checks. **Blocked — F263:** parsing
+  `RecipientAdministrativeUnitScope` requires the real wire key confirmed from a
+  live role-assignment envelope before code exists; guessing the key is the
+  failure mode the entry warns about.
 - **Credentials & SSO (13)** — F075 · F385 · F382 · F381 · F374 · F373 · F338 ·
   F085 · F392 · F190 · F079 · F196 · F200
 - **App-reg editing: auth / Expose an API / federation (5)** — F017 · F158 ·
