@@ -82,6 +82,9 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **The Permission tester's open resource tab now resets on tenant switch.** The mailbox and site
+  URL fields already cleared between tenants; the open tab (Exchange or SharePoint) survived the
+  switch. It now returns to Exchange like the rest.
 - **Screen readers now name every field and remove button in the SAML claims editor.** Its inputs
   were named only by placeholders, which vanish once a value is typed, and each input claim,
   parameter and output claim had an unnamed "✕" remove button; they now carry labels (the remove
