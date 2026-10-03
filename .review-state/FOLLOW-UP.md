@@ -203,7 +203,17 @@ Proposal; #### items are full entries, one-liners are bullets):
   both Credentials tables; Global-cloud-only noted in the `audit_reports`
   capability). Partial: shown in the Credentials tab only — no dashboard chip
   or facet; the SP-only phase skips the post-pass (a service principal carries
-  no local credentials). Remaining 7: F161 · F078 · F268 · F260 · F270 · F265 ·
+  no local credentials). **F260+F270 closed 2026-10-03** (read-only app-management-policy
+  trio on the shared `policy` / `Policy.Read.All` token, v1.0 endpoints, degrading to
+  `available:false` — never an `Err` nor a degraded run; `ScoreCtx::secret_cap_for` —
+  ≥2 overrides = no verdict, an assigned override REPLACES the default, grandfathered =
+  no cap — shared by the audit advisory and the new `credential_over_cap` predicate, so
+  the audit advice and the Credentials-tab "Over cap" markers fold one rule; advisory
+  beside (not replacing) the 365-day legacy floor, no ranking change; add-secret dialog
+  warns a policy-rejected lifetime, warn-only; Home posture line only for a knowable
+  cap; "no cap enforced" wording pinned out). Partial: the F260 "map the
+  policy-violation error code" half is not done — a rejected add still surfaces as the
+  Graph 400. Remaining 5: F161 · F078 · F268 · F265 ·
   F274
 - **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·

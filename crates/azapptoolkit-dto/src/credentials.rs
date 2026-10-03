@@ -36,6 +36,27 @@ pub struct CredentialUsageRow {
     pub last_used: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Per-app secret-lifetime policy context for the Credentials tab, decided
+/// from the tenant's DEFAULT app-management policy plus any per-app override
+/// assigned to this application (the same precedence the audit scorer applies:
+/// an override REPLACES the default; ≥2 overrides on one principal is a
+/// combination Graph does not document, so it reads as no cap).
+///
+/// `available = false` says the policy reads could not be completed (no
+/// `Policy.Read.All`, a failed read, or a failed app read) — the tab then shows
+/// nothing rather than claiming "no cap enforced", the same never-flag-on-
+/// unknown contract as [`CredentialUsageDto`]. `effective_cap_days = None` with
+/// `available = true` means the policy is known to enforce no lifetime cap on
+/// this app.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppCredentialPolicyDto {
+    pub available: bool,
+    pub effective_cap_days: Option<i64>,
+    /// Display names of the per-app override policies assigned to this
+    /// application — what to name the override in the tab's advisory.
+    pub custom_policy_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRowDto {
     /// The app registration's object id — used to deep-link into its detail.

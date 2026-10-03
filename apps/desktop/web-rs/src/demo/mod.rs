@@ -484,6 +484,12 @@ fn audit_run(apps: &[DemoApp]) -> AuditRunResult {
         item.app_id = app_id(&item.application_name);
     }
     run.total_apps = run.items.len();
+    // The demo tenant opts into a visible credential-policy posture: a 90-day
+    // cap is exactly the surface F260/F270 add (Home posture line, per-app
+    // Credentials-tab callout), and the shared fixture deliberately stays
+    // "unknown" so existing tests render without it.
+    run.credential_policy_available = true;
+    run.credential_policy_max_days = Some(90);
     run
 }
 
@@ -1307,6 +1313,14 @@ fn register_fixtures() {
     // ---- Security / health ----
     mock_ok("list_credential_expirations", &credential_rows(&apps, now));
     mock_ok("list_credential_usage", &credential_usage(&apps, now));
+    // One tenant-wide cap for every demo app, agreeing with the audit run's
+    // policy fields below. The catalog's long-lived demo secrets then render
+    // their "Over cap" markers and the add-secret dialog's pre-emptive
+    // warning — the showcase case for the feature, not an accident.
+    mock_ok(
+        "get_app_credential_policy",
+        &f::credential_policy_cap(90, &[]),
+    );
     let audit_run = audit_run(&apps);
     // Home's posture card reads the counts-only summary; derived from the same
     // run so the demo's Home card and Security strip agree.
@@ -1315,6 +1329,8 @@ fn register_fixtures() {
         &Some(CachedAuditSummary::from_items(
             &audit_run.items,
             audit_run.completed_at.clone(),
+            audit_run.credential_policy_available,
+            audit_run.credential_policy_max_days,
         )),
     );
     mock_ok("get_cached_audit", &Some(audit_run));

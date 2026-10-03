@@ -28,8 +28,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope};
+use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, enforced_secret_max_days};
 use azapptoolkit_core::cache::Cache;
+use azapptoolkit_core::models::{AppManagementPolicy, TenantAppManagementPolicy};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
 use chrono::{DateTime, Utc};
@@ -121,6 +122,23 @@ pub(crate) struct ScoreCtx {
     /// duplicate rows already folded to the newest date. Joined per credential
     /// in `score_one`'s post-pass via [`ScoreCtx::credential_activity_for`].
     pub(crate) credential_activity_map: Arc<HashMap<String, CredentialActivity>>,
+    /// Whether the tenant's app-management policies were readable this run
+    /// (`Policy.Read.All`; two tiny v1.0 reads, one tenant-wide pair). `false`
+    /// skips credential-lifetime comparisons entirely — a policy that could not
+    /// be read is unknown, never "no cap".
+    pub(crate) app_policy_available: bool,
+    /// The tenant default policy plus every per-target override, from the run's
+    /// one tenant-wide policy pair read. Empty when unavailable.
+    pub(crate) app_policy: Arc<AppPolicyData>,
+}
+
+/// The run's app-management policy state. Overrides are indexed by the
+/// `appliesTo` object id — application OR service principal, since a policy
+/// can be assigned to either and credential mirrors ride both.
+#[derive(Default)]
+pub(crate) struct AppPolicyData {
+    pub(crate) default: Option<TenantAppManagementPolicy>,
+    pub(crate) by_target: HashMap<String, Vec<AppManagementPolicy>>,
 }
 
 impl ScoreCtx {
@@ -159,6 +177,43 @@ impl ScoreCtx {
             .get(&format!("{app_id}|{key_id}"))
             .copied()
             .unwrap_or(CredentialActivity::Unknown)
+    }
+
+    /// The policy-enforced secret-lifetime cap (days) for one application, or
+    /// `None` when none is knowable — policy unreadable, no cap enforced, the
+    /// app predates a date-gated restriction, or its coverage is unknown.
+    /// Call sites must treat `None` as "no verdict", never as compliant
+    /// (`enforced_secret_max_days` carries the rule; the never-flag-on-unknown
+    /// contract is the credential-activity precedent).
+    ///
+    /// An assigned per-app override REPLACES the tenant default, so when one
+    /// exists the default is not consulted. More than one override on a single
+    /// principal is not a shape Graph documents ("only one policy is typically
+    /// assigned") — the combination is unknowable, so it reads as no verdict.
+    pub(crate) fn secret_cap_for(
+        &self,
+        app_object_id: &str,
+        sp_object_id: Option<&str>,
+        created: Option<DateTime<Utc>>,
+    ) -> Option<i64> {
+        if !self.app_policy_available {
+            return None;
+        }
+        let mut assigned: Vec<&AppManagementPolicy> = Vec::new();
+        for id in [Some(app_object_id), sp_object_id].into_iter().flatten() {
+            if let Some(policies) = self.app_policy.by_target.get(id) {
+                assigned.extend(policies.iter());
+            }
+        }
+        match assigned.len() {
+            0 => enforced_secret_max_days(None, self.app_policy.default.as_ref(), created),
+            1 => enforced_secret_max_days(
+                Some(assigned[0]),
+                self.app_policy.default.as_ref(),
+                created,
+            ),
+            _ => None,
+        }
     }
 }
 

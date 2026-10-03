@@ -812,6 +812,11 @@ pub fn audit_run_result() -> AuditRunResult {
         cancelled: false,
         sign_in_report_available: true,
         sign_in_consent_required: false,
+        // The shared fixture states "policy unknown" — the Pages demo opts
+        // into a visible 90-day cap (demo::audit_run), and tests opt into
+        // whatever their assertions need.
+        credential_policy_available: false,
+        credential_policy_max_days: None,
         truncated: false,
         // The demo tenant is a fully-covered run — the coverage-gap banner is a
         // real-failure surface, and showing it here would misrepresent the
@@ -893,6 +898,28 @@ pub fn credential_usage_empty() -> CredentialUsageDto {
     CredentialUsageDto {
         available: true,
         rows: Vec::new(),
+    }
+}
+
+/// The Credentials tab's secret-lifetime policy answer for tests that mount
+/// the tab to exercise something else: policy **unknown** (the honest default
+/// — no `Policy.Read.All`), which renders no Callout and no markers, exactly
+/// as the real tab degrades. Tests stay on the silent path instead of
+/// accidentally pinning the policy surface.
+pub fn credential_policy_unknown() -> azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+    azapptoolkit_dto::credentials::AppCredentialPolicyDto::default()
+}
+
+/// A readable policy capping this app's secrets at `cap_days`, optionally
+/// naming the assigned override(s) (what the Callout must name).
+pub fn credential_policy_cap(
+    cap_days: i64,
+    names: &[&str],
+) -> azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+    azapptoolkit_dto::credentials::AppCredentialPolicyDto {
+        available: true,
+        effective_cap_days: Some(cap_days),
+        custom_policy_names: names.iter().map(|n| n.to_string()).collect(),
     }
 }
 

@@ -28,8 +28,10 @@ mod scoring;
 mod types;
 
 pub use credentials::{
-    CredentialActivity, SignInStatus, expired_password_key_ids, is_expired, summarize_credentials,
-    unused_app_advisory, unused_credential_advisory,
+    CredentialActivity, CredentialLifetime, SignInStatus, credential_over_cap,
+    enforced_secret_max_days, expired_password_key_ids, is_expired, iso_duration_days,
+    secret_lifetime_advisory, summarize_credentials, tenant_secret_max_days, unused_app_advisory,
+    unused_credential_advisory,
 };
 pub use finding::{finding_issue_marker, matches_finding};
 pub use permissions::{

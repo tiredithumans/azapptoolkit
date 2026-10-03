@@ -46,6 +46,8 @@ fn cached_run() -> AuditRunResult {
         cancelled: false,
         sign_in_report_available: false,
         sign_in_consent_required: false,
+        credential_policy_available: false,
+        credential_policy_max_days: None,
         truncated: false,
         degraded: Vec::new(),
         completed_at: None,

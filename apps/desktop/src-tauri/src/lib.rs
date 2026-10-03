@@ -211,6 +211,7 @@ pub fn run() {
             commands::sso::set_oidc_redirect_uris,
             commands::credentials::list_credential_expirations,
             commands::credentials::list_credential_usage,
+            commands::credentials::get_app_credential_policy,
             commands::credentials::save_credentials_to_file,
             commands::consent::list_oauth2_grants_audit,
             commands::consent::save_oauth2_grants_to_file,

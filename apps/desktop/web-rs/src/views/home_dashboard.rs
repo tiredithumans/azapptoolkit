@@ -483,6 +483,31 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     </p>
                                                 }
                                             })}
+                                        {
+                                            // Tenant credential-lifetime posture (F260/F270),
+                                            // riding the cached run: this card and the audit's
+                                            // per-app advice read the SAME pair decided at run
+                                            // time, so they cannot disagree after an hour-old
+                                            // cache serves both. Rendered only when the policy
+                                            // is knowable — `credential_policy_available` is
+                                            // false when Policy.Read.All was absent, and
+                                            // available-but-capless renders nothing either:
+                                            // neither unknown nor "no cap enforced" belongs on
+                                            // the posture strip, which qualifies findings.
+                                            r
+                                                .credential_policy_available
+                                                .then_some(r.credential_policy_max_days)
+                                                .flatten()
+                                                .map(|cap| {
+                                                    view! {
+                                                        <p class="muted">
+                                                            {format!(
+                                                                "Tenant policy caps secret lifetimes at {cap} days."
+                                                            )}
+                                                        </p>
+                                                    }
+                                                })
+                                        }
                                         // Ranked "Top findings" list below.
                                         {clean
                                             .then(|| {

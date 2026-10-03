@@ -122,4 +122,109 @@ impl GraphClient {
             .await?;
         Ok(subjects.into_iter().map(|o| o.id).collect())
     }
+
+    /// The tenant-wide default app-management policy
+    /// (`GET /policies/defaultAppManagementPolicy`, v1.0). `Ok(None)` means the
+    /// tenant never configured the feature — `isEnabled` defaults to false, so a
+    /// present-but-disabled policy and an absent one both mean "no enforced
+    /// credential lifetime". Requires the `Policy.Read.All` token
+    /// ([`Self::with_policy_token`]).
+    ///
+    /// Read-through cache like the optional reports: this is slow-changing
+    /// tenant config, one tiny read per TTL window is plenty, and the sign-out
+    /// sweep bounds staleness. A 404 (endpoint not provisioned for the tenant)
+    /// reads as "no policy" exactly like the CA collection's first-404 rule;
+    /// any other error propagates so the caller degrades explicitly.
+    pub async fn get_default_app_management_policy(
+        &self,
+    ) -> Result<Option<TenantAppManagementPolicy>> {
+        let cache_key = format!("{}|app_management_policy", self.tenant_id);
+        if let Some(cached) = self
+            .cache
+            .get::<Option<TenantAppManagementPolicy>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let token = self.policy_token()?;
+        let url = format!("{}/policies/defaultAppManagementPolicy", self.base_url);
+        let policy = match self.scoped_get(token, &url).await {
+            Ok(policy) => Some(policy),
+            Err(GraphError::NotFound(_)) => None,
+            Err(e) => return Err(e),
+        };
+        self.cache.put(CacheKind::Permissions, cache_key, &policy);
+        Ok(policy)
+    }
+
+    /// Every custom `appManagementPolicy` with its assigned targets
+    /// (`GET /policies/appManagementPolicies?$expand=appliesTo`). One tenant-wide
+    /// read backs both the audit (apps adopt an override INSTEAD of the tenant
+    /// default — without the target map, a default-policy cap could mis-flag an
+    /// overridden app) and the Credentials tab's per-app policy panel.
+    /// Requires the `Policy.Read.All` token.
+    ///
+    /// The audit keys off the `appliesTo` object ids, so the expand is the
+    /// payload: a policy assigned to an application or to a service principal
+    /// both matter (credential mirrors ride both objects), and callers match by
+    /// object id without needing the discriminator. A 404 means no custom
+    /// policies exist; paging follows via `collect_pages_from` (origin-checked).
+    /// Read-through cache, as [`Self::get_default_app_management_policy`].
+    pub async fn list_app_management_policies(&self) -> Result<Vec<AppManagementPolicy>> {
+        let cache_key = format!("{}|app_management_policies", self.tenant_id);
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<AppManagementPolicy>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let token = self.policy_token()?;
+        let url = format!(
+            "{}/policies/appManagementPolicies?$expand=appliesTo&$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
+        let policies = match self.scoped_get(token, &url).await {
+            Ok(page) => {
+                self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
+                    .await?
+            }
+            Err(GraphError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        self.cache.put(CacheKind::Permissions, cache_key, &policies);
+        Ok(policies)
+    }
+
+    /// The app-management policies assigned to ONE application
+    /// (`GET /applications/{id}/appManagementPolicies`) — the per-app override
+    /// lookup behind the Credentials tab. "Only one policy is typically assigned
+    /// to an application", so no target expand is needed; paging still follows in
+    /// the rare multi-assignment case. Requires the `Policy.Read.All` token.
+    /// 404 → empty; read-through cache keyed per app.
+    pub async fn list_app_management_policies_for_app(
+        &self,
+        object_id: &str,
+    ) -> Result<Vec<AppManagementPolicy>> {
+        let cache_key = format!("{}|app_management_policies:{object_id}", self.tenant_id);
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<AppManagementPolicy>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let token = self.policy_token()?;
+        let url = format!(
+            "{}/applications/{object_id}/appManagementPolicies?$top={MAX_PAGE_SIZE}",
+            self.base_url
+        );
+        let policies = match self.scoped_get(token, &url).await {
+            Ok(page) => {
+                self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
+                    .await?
+            }
+            Err(GraphError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        self.cache.put(CacheKind::Permissions, cache_key, &policies);
+        Ok(policies)
+    }
 }

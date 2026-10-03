@@ -4,8 +4,10 @@ use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use crate::bindings::TenantArg;
-pub use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
+use crate::bindings::{ObjectIdArgs, TenantArg};
+pub use azapptoolkit_dto::credentials::{
+    AppCredentialPolicyDto, CredentialRowDto, CredentialUsageDto,
+};
 
 /// Lists every app-registration credential in the tenant, soonest-to-expire
 /// first. The backend reads it through its `{tenant}|credential_expirations`
@@ -27,6 +29,25 @@ pub async fn list_credential_expirations(
 /// failed read) — the command never fails on those, it degrades.
 pub async fn list_credential_usage(tenant_id: &str) -> Result<CredentialUsageDto, UiError> {
     invoke_result("list_credential_usage", TenantArg { tenant_id }).await
+}
+
+/// This app's secret-lifetime policy context: the effective cap decided from
+/// the tenant default policy or the per-app override assigned to it, plus the
+/// override's display names. `available = false` means the policy is UNKNOWN
+/// (no `Policy.Read.All`, a failed read) — show nothing, never "no cap
+/// enforced". Read-through cached in the backend, like the Last-used column.
+pub async fn get_app_credential_policy(
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<AppCredentialPolicyDto, UiError> {
+    invoke_result(
+        "get_app_credential_policy",
+        ObjectIdArgs {
+            tenant_id,
+            object_id,
+        },
+    )
+    .await
 }
 
 #[derive(Serialize)]

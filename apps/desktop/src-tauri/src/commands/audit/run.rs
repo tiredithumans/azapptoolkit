@@ -21,9 +21,10 @@ use crate::state::AppState;
 
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
-    audit_exchange_client, prefetch_admin_consent_grants, prefetch_credential_activity,
-    prefetch_ews_full_access_grants, prefetch_graph_app_roles, prefetch_legacy_access_policies,
-    prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
+    audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
+    prefetch_credential_activity, prefetch_ews_full_access_grants, prefetch_graph_app_roles,
+    prefetch_legacy_access_policies, prefetch_risky_service_principals, prefetch_sign_in_activity,
+    prefetch_sp_index,
 };
 use super::score::{derive_orgwide_mail_scopes, score_one, score_sp_only, sp_audit_candidates};
 use super::{AuditFailure, ResourceResolver, ScoreCtx, classify_audit_failure};
@@ -58,7 +59,7 @@ pub async fn run_audit(
 
     // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
     // generation and `cancel()` stamps whatever generation is current at the
-    // moment it runs, so a token claimed *after* the nine-way join carries a
+    // moment it runs, so a token claimed *after* the ten-way join carries a
     // HIGHER generation than the cancel the operator issued during it — and
     // `is_cancelled()` compares `cancelled >= generation`, so that cancel was
     // silently discarded. The prefetch is the longest phase of a large run, so
@@ -85,18 +86,18 @@ pub async fn run_audit(
         },
     );
 
-    // These nine tenant-wide reads are INDEPENDENT — every join between them
+    // These ten tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
-    // `sp_audit_candidates`) is synchronous and runs below, after all nine land.
+    // `sp_audit_candidates`) is synchronous and runs below, after all ten land.
     // Awaiting them serially made a large tenant wait out eight full page-walks
     // before the progress bar left 0/N; overlapped, that is one wait instead of
-    // the sum. Eight of the nine are best-effort (they swallow errors and
+    // the sum. Nine of the ten are best-effort (they swallow errors and
     // return empty), so overlapping changes no failure semantics, and the
     // `ThrottleGuard` attached above plus the transport's Retry-After handling
     // already absorb the extra concurrent 429 pressure.
     //
     // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
-    // and short-circuiting it would abandon the other eight mid-flight.
+    // and short-circuiting it would abandon the other nine mid-flight.
     let (
         apps,
         sp_index,
@@ -105,6 +106,7 @@ pub async fn run_audit(
         ews_full_access_sps,
         sign_in,
         credential_usage,
+        app_policy,
         risky_sps,
         legacy_policies,
     ) = futures::join!(
@@ -162,6 +164,11 @@ pub async fn run_audit(
         // unused-credential advisory — a credential without a report row is
         // `Unknown`, never flagged, so a partial report cannot mis-flag one.
         prefetch_credential_activity(&state, &client, &tenant_id),
+        // The app-management policy pair (Policy.Read.All, v1.0): the tenant
+        // default plus per-app overrides with their targets. Only disables the
+        // credential-lifetime advisory when unreadable; a disabled or partial
+        // policy picture is unknown, never "no cap".
+        prefetch_app_management_policy(&client),
         // ONE tenant-wide Identity Protection risky-service-principal read
         // (needs IdentityRiskyServicePrincipal.Read.All + a Workload Identities
         // premium license). Feeds Rule 22 for BOTH phases: risky grantless SPs
@@ -182,6 +189,7 @@ pub async fn run_audit(
     let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
     let (credential_usage_available, credential_activity_map) = credential_usage;
+    let (app_policy_available, app_policy) = app_policy;
     let (risky_available, risky_by_sp, risky_gap) = risky_sps;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
@@ -262,6 +270,8 @@ pub async fn run_audit(
         sign_in_map,
         credential_usage_available,
         credential_activity_map,
+        app_policy_available,
+        app_policy: app_policy.clone(),
         risky_available,
         risky_by_sp,
     });
@@ -425,6 +435,11 @@ pub async fn run_audit(
     // read (`get_cached_audit`, the Home summary, export) a refcount clone
     // instead of a full deserialize.
     let completed_at = Utc::now().to_rfc3339();
+    // Computed once: the same tenant posture number goes to the cache entry
+    // and to the run result, so the fresh view and its later cache reads can
+    // never disagree about what the tenant caps secrets at.
+    let credential_policy_max_days =
+        azapptoolkit_core::audit::tenant_secret_max_days(app_policy.default.as_ref());
     if run_is_cacheable(cancelled, truncated, &degraded) {
         state.cache.put_typed(
             CacheKind::Audit,
@@ -433,6 +448,8 @@ pub async fn run_audit(
                 completed_at: completed_at.clone(),
                 items: items.clone(),
                 mailbox_scoping_resolved,
+                credential_policy_available: app_policy_available,
+                credential_policy_max_days,
             }),
         );
     }
@@ -449,6 +466,8 @@ pub async fn run_audit(
         cancelled,
         sign_in_report_available: sign_in_available,
         sign_in_consent_required,
+        credential_policy_available: app_policy_available,
+        credential_policy_max_days,
         truncated,
         degraded,
         completed_at: Some(completed_at),

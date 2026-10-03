@@ -151,6 +151,8 @@ fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
             completed_at: "2026-01-01T00:00:00Z".into(),
             items: vec![sample("A"), sample("B")],
             mailbox_scoping_resolved: true,
+            credential_policy_available: true,
+            credential_policy_max_days: Some(90),
         }),
     );
     let run = cache
@@ -165,12 +167,20 @@ fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
             .is_none(),
         "an untyped read of the typed run entry must miss"
     );
-    let summary = CachedAuditSummary::from_items(&run.items, Some(run.completed_at.clone()));
+    let summary = CachedAuditSummary::from_items(
+        &run.items,
+        Some(run.completed_at.clone()),
+        run.credential_policy_available,
+        run.credential_policy_max_days,
+    );
     assert_eq!(
         summary.completed_at.as_deref(),
         Some("2026-01-01T00:00:00Z")
     );
     assert_eq!(summary.posture.medium, 2);
+    // The policy state survives the round trip into the Home summary.
+    assert_eq!(summary.credential_policy_max_days, Some(90));
+    assert!(summary.credential_policy_available);
 }
 
 fn sp(id: &str, app_id: &str, sp_type: Option<&str>) -> ServicePrincipal {
@@ -558,6 +568,8 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         credential_activity_map: Arc::default(),
         risky_available: false,
         risky_by_sp: Arc::default(),
+        app_policy_available: false,
+        app_policy: Arc::default(),
     }
 }
 
@@ -955,4 +967,212 @@ async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
     )]);
     let item = score_one(&ctx, &expired, None).await.expect("scores");
     assert!(!item.issues.iter().any(|i| i.starts_with(MARKER)));
+}
+
+/// F260+F270 at the scorer layer: the run's tenant-wide policy pair joins onto
+/// the app per principal (an override assigned to the APP or its SP replaces
+/// the default), and the result reaches the row as a *recommendation* only —
+/// recommendation-only is the whole contract, so every no-verdict form is
+/// checked end to end: policy unread, override without a cap, date-gate
+/// grandfathering, and an unknowable multi-override combination.
+#[tokio::test]
+async fn secret_lifetime_advisory_is_recommendation_only_and_never_guesses() {
+    use azapptoolkit_core::models::{
+        AppManagementConfiguration, AppManagementPolicy, CredentialRestrictionConfiguration,
+        PasswordCredential, TenantAppManagementPolicy,
+    };
+
+    let lifetime = |max: &str, gate: Option<DateTime<Utc>>| CredentialRestrictionConfiguration {
+        restriction_type: Some("passwordLifetime".into()),
+        state: Some("enabled".into()),
+        max_lifetime: Some(max.into()),
+        restrict_for_apps_created_after_date_time: gate,
+    };
+    let restrict = |caps: Vec<CredentialRestrictionConfiguration>| AppManagementConfiguration {
+        password_credentials: caps,
+        ..Default::default()
+    };
+    let now = Utc::now();
+    let long_secret = || PasswordCredential {
+        key_id: "k-long".into(),
+        display_name: Some("long".into()),
+        start_date_time: Some(now - chrono::Duration::days(200)),
+        // Still valid — a past end date is the expiry finding's job, not this
+        // advisory's.
+        end_date_time: Some(now + chrono::Duration::days(20)),
+        ..Default::default()
+    };
+    let app = |id: &str| Application {
+        id: id.into(),
+        created_date_time: Some(now - chrono::Duration::days(400)),
+        password_credentials: vec![long_secret()],
+        ..bare_app()
+    };
+    let marker = "Policy caps secret lifetimes";
+    let no_sp =
+        || wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []}));
+
+    // Control: the policy read failed ⇒ no advisory at all. An unread policy
+    // is unknown, never "no cap".
+    let server = wiremock::MockServer::start().await;
+    mock_sp_lookup(&server, no_sp()).await;
+    let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    assert!(
+        item.recommendations.iter().all(|r| !r.contains(marker)),
+        "an unread policy is unknown, never \"no cap\": {:?}",
+        item.recommendations
+    );
+
+    // Tenant default cap 90 days, retroactive ⇒ the over-long secret advises…
+    let default_90 = TenantAppManagementPolicy {
+        id: "default".into(),
+        display_name: None,
+        is_enabled: true,
+        application_restrictions: Some(restrict(vec![lifetime("P90D", None)])),
+    };
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.app_policy_available = true;
+    ctx.app_policy = Arc::new(AppPolicyData {
+        default: Some(default_90.clone()),
+        by_target: HashMap::new(),
+    });
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    let rec = item
+        .recommendations
+        .iter()
+        .find(|r| r.starts_with(marker))
+        .expect("the over-long secret is over the 90-day default cap");
+    assert!(
+        rec.contains("90 days") && rec.contains("secret \"long\" (220-day lifetime)"),
+        "{rec}"
+    );
+    assert!(
+        item.issues.iter().all(|i| !i.contains(marker)),
+        "the advisory is recommendation-only: {:?}",
+        item.issues
+    );
+
+    // …while an app predating a date gate is grandfathered out of the same
+    // cap (gate 100 days ago, app created 400 days ago) ⇒ no verdict.
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.app_policy_available = true;
+    ctx.app_policy = Arc::new(AppPolicyData {
+        default: Some(TenantAppManagementPolicy {
+            application_restrictions: Some(restrict(vec![lifetime(
+                "P90D",
+                Some(now - chrono::Duration::days(100)),
+            )])),
+            ..default_90.clone()
+        }),
+        by_target: HashMap::new(),
+    });
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    assert!(
+        item.recommendations.iter().all(|r| !r.contains(marker)),
+        "an app predating the gate is grandfathered: {:?}",
+        item.recommendations
+    );
+
+    // A per-app override REPLACES the default — even one carrying no lifetime
+    // rule of its own.
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.app_policy_available = true;
+    ctx.app_policy = Arc::new(AppPolicyData {
+        default: Some(default_90.clone()),
+        by_target: HashMap::from([(
+            "app-obj-1".to_string(),
+            vec![AppManagementPolicy {
+                id: "custom-bare".into(),
+                display_name: "Bare".into(),
+                is_enabled: true,
+                restrictions: Some(restrict(Vec::new())),
+                applies_to: vec![],
+            }],
+        )]),
+    });
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    assert!(
+        item.recommendations.iter().all(|r| !r.contains(marker)),
+        "an assigned override silences the default: {:?}",
+        item.recommendations
+    );
+
+    // The override join also runs on the SP object id, and an enabled
+    // override's own cap is the effective one (30 < 90).
+    let server = wiremock::MockServer::start().await;
+    mock_sp_lookup(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"id": "sp-1", "appId": "app-1", "accountEnabled": true}]
+        })),
+    )
+    .await;
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.app_policy_available = true;
+    ctx.app_policy = Arc::new(AppPolicyData {
+        default: Some(default_90.clone()),
+        by_target: HashMap::from([(
+            "sp-1".to_string(),
+            vec![AppManagementPolicy {
+                id: "custom-strict".into(),
+                display_name: "Strict".into(),
+                is_enabled: true,
+                restrictions: Some(restrict(vec![lifetime("P30D", None)])),
+                applies_to: vec![],
+            }],
+        )]),
+    });
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    let rec = item
+        .recommendations
+        .iter()
+        .find(|r| r.starts_with(marker))
+        .expect("the SP-assigned override caps this app at 30 days");
+    assert!(rec.contains("30 days"), "{rec}");
+
+    // Two overrides on one principal: the combination is unknowable, so the
+    // whole advisory declines — never a guess at the stricter cap.
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.app_policy_available = true;
+    ctx.app_policy = Arc::new(AppPolicyData {
+        default: Some(default_90),
+        by_target: HashMap::from([(
+            "sp-1".to_string(),
+            vec![
+                AppManagementPolicy {
+                    id: "custom-a".into(),
+                    display_name: "A".into(),
+                    is_enabled: true,
+                    restrictions: Some(restrict(Vec::new())),
+                    applies_to: vec![],
+                },
+                AppManagementPolicy {
+                    id: "custom-b".into(),
+                    display_name: "B".into(),
+                    is_enabled: true,
+                    restrictions: Some(restrict(vec![lifetime("P30D", None)])),
+                    applies_to: vec![],
+                },
+            ],
+        )]),
+    });
+    let item = score_one(&ctx, &app("app-obj-1"), None)
+        .await
+        .expect("scores");
+    assert!(
+        item.recommendations.iter().all(|r| !r.contains(marker)),
+        "≥2 overrides read as no verdict: {:?}",
+        item.recommendations
+    );
 }

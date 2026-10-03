@@ -52,6 +52,13 @@ fn mount_with_toasts(secrets: Vec<PasswordCredential>) -> ts::Mounted {
     // "report unavailable" notice — these tests are about the sweep, not the
     // degraded path.
     ts::mock_ok("list_credential_usage", &fixtures::credential_usage_empty());
+    // Same reason for the per-app policy read: keep it on the degraded-but-
+    // quiet path (policy unknown → no Callout, no markers) so these tests stay
+    // about the sweep, not the policy surface (see credential_policy.rs).
+    ts::mock_ok(
+        "get_app_credential_policy",
+        &fixtures::credential_policy_unknown(),
+    );
     let detail = Arc::new(d);
     ts::mount_view(move || {
         let detail = detail.clone();

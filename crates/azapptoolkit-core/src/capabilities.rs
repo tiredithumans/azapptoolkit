@@ -265,6 +265,33 @@ pub static CAPABILITIES: &[Capability] = &[
                       P1/P2 license.",
     },
     Capability {
+        key: "app_management_policies",
+        plane: Plane::EntraDirectory,
+        label: "App-management policies (credential lifetime, read)",
+        description: "Read the tenant default app-management policy and the per-app overrides \
+                      so the Credentials tab and the audit's lifetime advisory can explain a \
+                      policy-capped secret lifetime or a policy-rejected secret add. Read-only \
+                      v1.0 reads on the same on-demand Policy.Read.All token as Conditional \
+                      Access; without it the lifetime advisory degrades to silent, never to a \
+                      wrong \u{201c}no cap\u{201d}.",
+        // Same policy-read roles as Conditional Access — the token is shared
+        // (`policy`), so the role half must not claim a role the read does not
+        // actually honor.
+        directory_roles_any: &[
+            ("Security Reader", Some(TID_SECURITY_READER)),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Reader", Some(TID_GLOBAL_READER)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["Policy.Read.All"],
+        scope_feature: Some("policy"),
+        remediation: "Credential-lifetime policy visibility needs the Policy.Read.All scope and \
+                      a policy-read role (Security Reader or Global Reader). It shares \
+                      Conditional Access's on-demand policy token, so consenting for one \
+                      covers both.",
+    },
+    Capability {
         key: "identity_protection_risk",
         plane: Plane::EntraDirectory,
         label: "Identity Protection risky-service-principal report (read)",

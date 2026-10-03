@@ -22,13 +22,15 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, State};
 
-use azapptoolkit_core::audit::summarize_credentials;
-use azapptoolkit_core::models::Application;
+use azapptoolkit_core::audit::{enforced_secret_max_days, summarize_credentials};
+use azapptoolkit_core::models::{AppManagementPolicy, Application, TenantAppManagementPolicy};
 use chrono::{DateTime, Utc};
 
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
-use crate::dto::credentials::{CredentialRowDto, CredentialUsageDto, CredentialUsageRow};
+use crate::dto::credentials::{
+    AppCredentialPolicyDto, CredentialRowDto, CredentialUsageDto, CredentialUsageRow,
+};
 use crate::state::AppState;
 
 /// Lists every app-registration credential (client secret + certificate) in the
@@ -122,6 +124,72 @@ pub async fn list_credential_usage(
     Ok(CredentialUsageDto {
         available: true,
         rows: out,
+    })
+}
+
+/// The effective secret-lifetime cap for one application, from its policy pair.
+/// Kept out of the command so the precedence table is testable without a
+/// client. ≥2 overrides on one principal is a combination Graph does not
+/// document ("only one policy is typically assigned") — the combination is
+/// unknowable, so it reads as NO cap, matching `ScoreCtx::secret_cap_for`:
+/// the tab and the audit can never disagree about one app's cap.
+fn effective_cap_days(
+    default: Option<&TenantAppManagementPolicy>,
+    assigned: &[AppManagementPolicy],
+    created: Option<DateTime<Utc>>,
+) -> Option<i64> {
+    if assigned.len() >= 2 {
+        return None;
+    }
+    enforced_secret_max_days(assigned.first(), default, created)
+}
+
+/// Per-app credential-policy context for the Credentials tab (the per-app
+/// sibling of the audit's lifetime advisory). Three reads — the application
+/// (for its creation date, the policy date gate's input), the tenant default
+/// policy, and the per-app override nav — all read-through cached in the
+/// client; any failure degrades the whole DTO to `available: false` rather
+/// than erroring, because the tab's contract is "show nothing when the policy
+/// is unknown", never "claim no cap".
+#[tauri::command]
+pub async fn get_app_credential_policy(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    object_id: String,
+) -> Result<AppCredentialPolicyDto, UiError> {
+    // Mount-time read like the Last-used column: prove the session before the
+    // (possibly cache-hit) reads.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let client = state.graph_for(&tenant_id);
+    let (app, default_policy, assigned) = tokio::join!(
+        client.get_application(&object_id),
+        client.get_default_app_management_policy(),
+        client.list_app_management_policies_for_app(&object_id),
+    );
+    let (Ok(app), Ok(default_policy), Ok(assigned)) = (app, default_policy, assigned) else {
+        tracing::info!(
+            tenant_id,
+            object_id,
+            "credential policy: app or policy reads failed; tab shows no cap"
+        );
+        return Ok(AppCredentialPolicyDto::default());
+    };
+    let effective_cap_days =
+        effective_cap_days(default_policy.as_ref(), &assigned, app.created_date_time);
+    let custom_policy_names = assigned
+        .iter()
+        .map(|p| {
+            if p.display_name.is_empty() {
+                p.id.clone()
+            } else {
+                p.display_name.clone()
+            }
+        })
+        .collect();
+    Ok(AppCredentialPolicyDto {
+        available: true,
+        effective_cap_days,
+        custom_policy_names,
     })
 }
 
@@ -272,6 +340,70 @@ mod tests {
         assert_eq!(rows[2].app_display_name, "App A");
         assert_eq!(rows[2].kind, CredentialKind::Certificate);
         assert_eq!(rows[2].days_to_expiry, None);
+    }
+
+    #[test]
+    fn effective_cap_days_follows_the_audit_precedence_table() {
+        use azapptoolkit_core::models::{
+            AppManagementConfiguration, CredentialRestrictionConfiguration,
+        };
+        let life = |max: &str| CredentialRestrictionConfiguration {
+            restriction_type: Some("passwordLifetime".into()),
+            state: Some("enabled".into()),
+            max_lifetime: Some(max.into()),
+            restrict_for_apps_created_after_date_time: None,
+        };
+        let policy = |caps: Vec<&str>| AppManagementConfiguration {
+            password_credentials: caps.iter().map(|c| life(c)).collect(),
+            ..Default::default()
+        };
+        let tenant = |caps: Vec<&str>| TenantAppManagementPolicy {
+            is_enabled: true,
+            application_restrictions: Some(policy(caps)),
+            ..Default::default()
+        };
+        let custom = |name: &str, caps: Vec<&str>| AppManagementPolicy {
+            id: name.into(),
+            display_name: name.into(),
+            is_enabled: true,
+            restrictions: Some(policy(caps)),
+            applies_to: vec![],
+        };
+        let old = Some(Utc::now() - chrono::Duration::days(400));
+
+        // No policy at all ⇒ no cap — and, crucially, an UNREAD policy never
+        // reaches here: the command degrades before this runs.
+        assert_eq!(effective_cap_days(None, &[], old), None);
+        // Tenant default applies to an un-overridden app…
+        assert_eq!(
+            effective_cap_days(Some(&tenant(vec!["P90D"])), &[], old),
+            Some(90)
+        );
+        // …but an assigned override REPLACES it, even one with no lifetime
+        // rule of its own.
+        assert_eq!(
+            effective_cap_days(Some(&tenant(vec!["P90D"])), &[custom("bare", vec![])], old),
+            None
+        );
+        // An enabled override's own cap is the effective one…
+        assert_eq!(
+            effective_cap_days(
+                Some(&tenant(vec!["P90D"])),
+                &[custom("strict", vec!["P30D"])],
+                old
+            ),
+            Some(30)
+        );
+        // …and ≥2 overrides is an unknowable combination ⇒ no verdict, never
+        // a guessed minimum.
+        assert_eq!(
+            effective_cap_days(
+                Some(&tenant(vec!["P90D"])),
+                &[custom("a", vec![]), custom("b", vec!["P30D"])],
+                old
+            ),
+            None
+        );
     }
 
     #[test]

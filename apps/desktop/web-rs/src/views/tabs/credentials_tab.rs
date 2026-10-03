@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARN_DAYS;
+use azapptoolkit_core::audit::{EXPIRY_WARNING_DAYS as WARN_DAYS, credential_over_cap, is_expired};
 use azapptoolkit_dto::credentials::CredentialUsageDto;
 use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
@@ -309,6 +309,48 @@ pub fn CredentialsTab(
                 }),
             }
         }
+    });
+
+    // This app's secret-lifetime policy context (tenant default + any override
+    // assigned to it), decided backend-side by the same precedence the audit
+    // scorer uses: an override REPLACES the default, ≥2 overrides means no
+    // verdict, and a grandfathered app gets no cap. `available: false` / a
+    // failed read is *unknown*, not "no cap" — the tab then renders nothing,
+    // the same never-flag-on-unknown contract as the Last-used column.
+    // Keyed on this app's object id; all three reads are read-through cached
+    // in the backend, so a detail reload costs no second policy round trip.
+    let policy = LocalResource::new(move || {
+        let tenant = session.active_tenant.get();
+        let object = object_id.get();
+        async move {
+            match tenant {
+                Some(t) => credentials::get_app_credential_policy(&t.tenant_id, &object).await,
+                None => Ok(azapptoolkit_dto::credentials::AppCredentialPolicyDto::default()),
+            }
+        }
+    });
+
+    // Resolved policy: `(effective cap, assigned override names, key ids of
+    // VALID secrets provably over it)` — `None` while loading or when the
+    // policy is unknown/enforces nothing. The over-cap set is folded with
+    // `credential_over_cap`, the one predicate the audit's lifetime advisory
+    // uses, so the tab's markers and the audit's advice can never name
+    // different secrets for one app.
+    let policy_ctx = Signal::derive(move || -> Option<(i64, Vec<String>, Vec<String>)> {
+        let pol = policy.get().and_then(|r| r.ok()).filter(|p| p.available)?;
+        let cap = pol.effective_cap_days.filter(|c| *c > 0)?;
+        let created = detail.with(|d| d.application.created_date_time);
+        let now = chrono::Utc::now();
+        let over = secrets.with(|list| {
+            list.iter()
+                .filter(|c| !is_expired(c.end_date_time, now))
+                .filter(|c| {
+                    credential_over_cap(c.end_date_time, c.start_date_time.or(created), cap)
+                })
+                .map(|c| c.key_id.clone())
+                .collect::<Vec<String>>()
+        });
+        Some((cap, pol.custom_policy_names.clone(), over))
     });
 
     let add_open = RwSignal::new(false);
@@ -814,11 +856,40 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
+                    // Only a KNOWN cap earns a notice. An unread policy and a
+                    // tenant that enforces no lifetime cap both render
+                    // NOTHING: "no cap enforced" on evidence that only shows
+                    // "couldn't read" is the flag-on-unknown trap this tab's
+                    // Last-used column already refuses, and a permanent notice
+                    // on every healthy tenant trains operators to ignore it.
+                    let (cap, names, over) = policy_ctx.get()?;
+                    let mut text =
+                        format!("App-management policy caps secret lifetimes at {cap} days");
+                    if !names.is_empty() {
+                        text = format!("{text} (assigned policy: {})", names.join(", "));
+                    }
+                    text.push('.');
+                    let warn = !over.is_empty();
+                    if warn {
+                        text = format!(
+                            "{text} Secrets over the cap are marked \u{201c}Over cap\u{201d} below \
+                             \u{2014} shorten or rotate them."
+                        );
+                    }
+                    Some(view! {
+                        <Callout tone={if warn { "warn" } else { "info" }}>{text}</Callout>
+                    })
+                }}
+                {move || {
                     // Rebuilt when the last-used map resolves: the table paints
                     // during the read with "—" cells, then repopulates.
                     let map =
                         usage_lookup(usage.get().as_ref().and_then(|r| r.as_ref().ok()));
                     let app = app_id.get();
+                    let (cap, over) = match policy_ctx.get() {
+                        Some((cap, _, over)) => (Some(cap), over),
+                        None => (None, Vec::new()),
+                    };
                     view! {
                         <DataTable
                             headers=vec![
@@ -839,6 +910,16 @@ pub fn CredentialsTab(
                                 // expiring soon or already expired — where rotation
                                 // is the relevant action.
                                 let near_expiry = matches!(days, Some(d) if d <= WARN_DAYS);
+                                // The expiry badge answers "is it expiring?";
+                                // this one answers "is it even legal?" — a
+                                // 430-day secret on a 90-day-cap tenant reads
+                                // "OK" to the first and must not hide the
+                                // second. The over-cap set is folded once
+                                // (policy_ctx) with `credential_over_cap`, the
+                                // one predicate the audit's lifetime advisory
+                                // uses, and expired secrets are absent: they
+                                // already carry their own louder signal.
+                                let over_cap = over.contains(&s.key_id);
                                 view! {
                                     <tr>
                                         <td>{s.display_name.clone().unwrap_or_else(|| "—".into())}</td>
@@ -855,7 +936,21 @@ pub fn CredentialsTab(
                                             {fmt_date(s.end_date_time)}
                                         </td>
                                         <td>{last_used}</td>
-                                        <td>{status_badge(days)}</td>
+                                        <td>
+                                            {status_badge(days)}
+                                            {over_cap
+                                                .then(move || {
+                                                    view! {
+                                                        <Badge
+                                                            label="Over cap"
+                                                            tone=BadgeTone::Warning
+                                                            title=cap.map_or(String::new(), |cap| format!(
+                                                                "Longer than the {cap}-day secret-lifetime policy on this app"
+                                                            ))
+                                                        />
+                                                    }
+                                                })}
+                                        </td>
                                         <td class="cell-mid">
                                             <div class="cell-actions">
                                                 {near_expiry
@@ -1017,6 +1112,34 @@ pub fn CredentialsTab(
                             .collect_view()}
                     </Select>
                 </Field>
+                {move || {
+                    // F260, the other half: say what the request will be
+                    // BEFORE it is sent, so a policy-driven rejection is not
+                    // an opaque 400 after the operator already chose a
+                    // lifetime. Warn, never clamp or block — the tenant
+                    // policy decides whether the add lands, and only Graph
+                    // gets the final answer.
+                    let cap = policy_ctx.get().map(|(cap, _, _)| cap)?;
+                    let chosen = match expires_preset.get().as_str() {
+                        CUSTOM_PRESET => {
+                            let end = custom_end.get()?;
+                            let start = custom_start.get().unwrap_or(today);
+                            (end - start).num_days()
+                        }
+                        p => p.parse::<i64>().ok()?,
+                    };
+                    (chosen > cap).then(|| {
+                        view! {
+                            <Callout tone="warn" role="alert">
+                                {format!(
+                                    "A {chosen}-day secret exceeds the {cap}-day secret-lifetime \
+                                     policy on this app; the add would be rejected. Pick a shorter \
+                                     expiry, or a certificate instead."
+                                )}
+                            </Callout>
+                        }
+                    })
+                }}
                 <Show
                     when=move || expires_preset.get() == CUSTOM_PRESET
                     fallback=|| view! { <></> }

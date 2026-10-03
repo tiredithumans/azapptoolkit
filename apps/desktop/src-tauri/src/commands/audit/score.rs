@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, CredentialActivity, RemediationKind, ResourcePermission,
-    SpAuditInput, apply_service_principal_risk, is_expired, score_application,
-    score_service_principal, unused_app_advisory, unused_credential_advisory,
+    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, RemediationKind,
+    ResourcePermission, SpAuditInput, apply_service_principal_risk, is_expired, score_application,
+    score_service_principal, secret_lifetime_advisory, unused_app_advisory,
+    unused_credential_advisory,
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
@@ -456,6 +457,39 @@ pub(crate) async fn score_one(
             usage.iter().map(|(l, a, s)| (l.as_str(), *a, *s)).collect();
         if let Some((issue, rec)) = unused_credential_advisory(&usage_refs, now) {
             item.issues.push(issue);
+            item.recommendations.push(rec);
+        }
+    }
+    // Per-app secret-lifetime advisory: judge still-valid secrets against the
+    // app-management policy cap enforced ON THIS PRINCIPAL (assigned override
+    // first, tenant default only without one). Recommendation-only — the cap
+    // is operator context, so there is no issue marker, no finding key and no
+    // score. `secret_cap_for` yielding `None` means NO verdict (policy
+    // unreadable, unenforced, grandfathered by a date gate, or an unknowable
+    // multi-policy combination), never "compliant".
+    if let Some(cap) = ctx.secret_cap_for(
+        &app.id,
+        sp.as_ref().map(|s| s.id.as_str()),
+        app.created_date_time,
+    ) {
+        type OwnedLifetime = (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+        let lifetimes: Vec<OwnedLifetime> = app
+            .password_credentials
+            .iter()
+            .filter(|c| !is_expired(c.end_date_time, now))
+            .map(|c| {
+                (
+                    format!("secret \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                    c.end_date_time,
+                    c.start_date_time.or(app.created_date_time),
+                )
+            })
+            .collect();
+        let lifetime_refs: Vec<CredentialLifetime> = lifetimes
+            .iter()
+            .map(|(l, e, s)| (l.as_str(), *e, *s))
+            .collect();
+        if let Some(rec) = secret_lifetime_advisory(&lifetime_refs, cap) {
             item.recommendations.push(rec);
         }
     }

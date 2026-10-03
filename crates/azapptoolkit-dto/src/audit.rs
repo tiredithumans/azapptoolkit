@@ -33,6 +33,20 @@ pub struct AuditRunResult {
     /// enable unused-app detection and re-run. Distinct from a license/P1-P2 gap.
     #[serde(default)]
     pub sign_in_consent_required: bool,
+    /// Whether the tenant's app-management policies were readable this run
+    /// (`Policy.Read.All`, the default policy + per-app override pair). When
+    /// `false`, no credential-lifetime advisory could be made. Deliberately
+    /// NOT a [`Self::degraded`] gap like the sign-in report: the advisory adds
+    /// operator context, it never hides a finding, and a tenant without the
+    /// policy feature (or its consent) must not read as permanently degraded.
+    #[serde(default)]
+    pub credential_policy_available: bool,
+    /// The tenant's DEFAULT app-management policy secret cap in days, when one
+    /// is enforced (date gates ignored — this is the tenant posture number;
+    /// per-app coverage is decided per audit row). `None` = policy unavailable,
+    /// disabled, or enforcing no lifetime limit.
+    #[serde(default)]
+    pub credential_policy_max_days: Option<i64>,
     /// `true` when the tenant holds more app registrations than one run scores
     /// (`MAX_APPS_PER_RUN`), so this scan covered an arbitrary prefix of them.
     ///
@@ -165,10 +179,24 @@ pub struct CachedAuditSummary {
     /// finding key ([`POSTURE_FINDING_KEYS`]) — what ranks the card's "Top
     /// findings" and colours their tone dots, as the Findings pane does.
     pub worst: BTreeMap<String, RiskLevel>,
+    /// The cached run's app-management policy availability, mirrored from
+    /// [`AuditRunResult::credential_policy_available`] so the Home posture
+    /// line survives a cache read instead of quietly disappearing on it.
+    #[serde(default)]
+    pub credential_policy_available: bool,
+    /// Mirrors [`AuditRunResult::credential_policy_max_days`] — the tenant's
+    /// default-policy secret cap in days, when one is enforced.
+    #[serde(default)]
+    pub credential_policy_max_days: Option<i64>,
 }
 
 impl CachedAuditSummary {
-    pub fn from_items(items: &[AuditItem], completed_at: Option<String>) -> Self {
+    pub fn from_items(
+        items: &[AuditItem],
+        completed_at: Option<String>,
+        credential_policy_available: bool,
+        credential_policy_max_days: Option<i64>,
+    ) -> Self {
         let worst = POSTURE_FINDING_KEYS
             .iter()
             .filter_map(|&key| finding_worst(items, key).map(|w| (key.to_string(), w)))
@@ -177,6 +205,8 @@ impl CachedAuditSummary {
             completed_at,
             posture: posture_counts(items),
             worst,
+            credential_policy_available,
+            credential_policy_max_days,
         }
     }
 
@@ -368,7 +398,12 @@ mod tests {
             item(RiskLevel::Low, CredentialStatus::Expired, false),
             item(RiskLevel::Medium, CredentialStatus::Active, false),
         ];
-        let s = CachedAuditSummary::from_items(&items, Some("2026-01-01T00:00:00Z".into()));
+        let s = CachedAuditSummary::from_items(
+            &items,
+            Some("2026-01-01T00:00:00Z".into()),
+            true,
+            Some(90),
+        );
         assert_eq!(s.completed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
         assert_eq!(s.posture, posture_counts(&items));
         assert_eq!(s.finding_tally("expired"), Some((2, RiskLevel::High)));
@@ -436,6 +471,8 @@ mod tests {
             cancelled: false,
             sign_in_report_available: true,
             sign_in_consent_required: false,
+            credential_policy_available: false,
+            credential_policy_max_days: None,
             truncated: false,
             degraded: Vec::new(),
             completed_at: Some("2026-09-02T10:00:00+00:00".into()),

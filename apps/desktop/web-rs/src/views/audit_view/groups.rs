@@ -580,7 +580,7 @@ mod tests {
                 RiskLevel::High,
             ),
         ];
-        let summary = CachedAuditSummary::from_items(&items, None);
+        let summary = CachedAuditSummary::from_items(&items, None, false, None);
         let from_summary: Vec<(&str, BadgeTone, usize)> =
             ranked_actionable_findings(|k| summary.finding_tally(k))
                 .into_iter()

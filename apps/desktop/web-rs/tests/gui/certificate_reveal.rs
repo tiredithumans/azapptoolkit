@@ -47,6 +47,13 @@ fn mount_tab_counting() -> (ts::Mounted, RwSignal<u32>) {
     // See credential_sweep.rs: keep the tab's Last-used fetch on the healthy
     // (available, empty) path so it never renders the degraded notice.
     ts::mock_ok("list_credential_usage", &fixtures::credential_usage_empty());
+    // Keep the tab's per-app policy read on the quiet unknown path (no mock
+    // would reject loudly and the tab would render no Callout anyway — the
+    // mock keeps the "every read fixtured" discipline; see credential_policy.rs).
+    ts::mock_ok(
+        "get_app_credential_policy",
+        &fixtures::credential_policy_unknown(),
+    );
     let detail = Arc::new(fixtures::application_detail(
         "obj-1",
         "app-1",

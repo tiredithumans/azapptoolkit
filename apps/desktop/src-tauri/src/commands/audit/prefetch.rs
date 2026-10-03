@@ -21,6 +21,8 @@ use crate::dto::UiError;
 use crate::dto::audit::AuditCoverageGap;
 use crate::state::AppState;
 
+use super::AppPolicyData;
+
 /// Best-effort Exchange client for mailbox-scoping resolution. `None` (with an
 /// info log) when the Exchange client can't be built — the signed-in user isn't
 /// an Exchange admin, or there's no UPN for the anchor mailbox — so mail
@@ -480,4 +482,59 @@ pub(crate) async fn prefetch_credential_activity(
             unavailable()
         }
     }
+}
+
+/// ONE tenant-wide app-management policy pair (default policy + custom
+/// policies with their `appliesTo` targets, both v1.0 on the `Policy.Read.All`
+/// token) → `(available, policy data)`. Either read failing makes the pair
+/// unavailable: without the target map, a default-policy cap could mis-flag an
+/// app that adopted an override, so partial policy data is no data.
+///
+/// Like the credential reports, a failure here is an unavailable advisory, not
+/// a coverage gap: the lifetime signal is operator context on top of the
+/// expiry findings, its absence never hides a finding, and a tenant that never
+/// consented `Policy.Read.All` would otherwise carry a permanent "degraded"
+/// banner that trains operators to ignore it. The token rides the client's
+/// policy bearer (acquired on demand, like Conditional Access) — no
+/// consent-state UI is needed because no audit finding depends on this pair.
+pub(crate) async fn prefetch_app_management_policy(
+    client: &GraphClient,
+) -> (bool, Arc<AppPolicyData>) {
+    let unavailable = || (false, Arc::new(AppPolicyData::default()));
+    let (default_read, custom_read) = tokio::join!(
+        client.get_default_app_management_policy(),
+        client.list_app_management_policies()
+    );
+    let (default_policy, policies) = match (default_read, custom_read) {
+        (Ok(default_policy), Ok(policies)) => (default_policy, policies),
+        (Err(err), _) | (_, Err(err)) => {
+            tracing::info!(
+                ?err,
+                "audit: app-management policy pair unavailable; skipping credential-lifetime checks"
+            );
+            return unavailable();
+        }
+    };
+    let mut by_target: HashMap<String, Vec<_>> = HashMap::new();
+    for policy in policies {
+        // A policy with no listed targets is assigned to nobody; a disabled
+        // override still lands in the map, because "assigned but disabled"
+        // still replaces the default in a way the audit cannot resolve —
+        // `secret_cap_for` then returns no verdict for that app.
+        for target in &policy.applies_to {
+            if !target.id.is_empty() {
+                by_target
+                    .entry(target.id.clone())
+                    .or_default()
+                    .push(policy.clone());
+            }
+        }
+    }
+    (
+        true,
+        Arc::new(AppPolicyData {
+            default: default_policy,
+            by_target,
+        }),
+    )
 }

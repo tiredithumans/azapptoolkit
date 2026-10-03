@@ -7,6 +7,22 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **Tenant app-management policies are now visible, and explain policy-driven secret adds before they fail.**
+  Each audit run and each Credentials-tab open read Microsoft's v1.0 app-management policy endpoints
+  (tenant default + the overrides assigned to the app) on the on-demand `Policy.Read.All` token —
+  no new consent surface, and a tenant without the permission or a failed read simply shows nothing,
+  never a degraded run. The add-secret dialog now warns when the chosen lifetime exceeds the
+  effective cap ("… the add would be rejected. Pick a shorter expiry, or a certificate instead.") —
+  warn only, never clamp or block; valid secrets provably over the cap carry an **"Over cap"** badge
+  beside their expiry status (expired ones keep their single, louder signal). The Home Security
+  Posture card gains a one-line "Tenant policy caps secret lifetimes at N days." — shown only when
+  a cap is actually knowable, never "no cap enforced" (unknown and known-capless both stay silent).
+  The audit's lifetime advisory compares against the same effective cap instead of the fixed
+  365-day floor where a policy exists: ≥2 assigned overrides mean no verdict, an assigned override
+  *replaces* the tenant default, a grandfathered app gets no cap. One shared predicate
+  (`credential_over_cap`) drives the audit advice and the tab markers, so they can never name
+  different secrets for one app. **No ranking change** — the 365-day legacy rule is untouched;
+  this only adds advice.
 - **The security audit and Credentials tab now show whether a credential is actually used.** Each
   audit run makes one tenant-wide read of the beta `appCredentialSignInActivities` report (same
   on-demand `AuditLog.Read.All` token as the sign-in reports; **Global cloud only** — a sovereign

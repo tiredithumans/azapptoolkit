@@ -35,6 +35,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | — | `rule_downgrade_pointers` | recommendation only | none | — | — (Downgrade… is admin-judged) | not cited |
 | runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
 | runner | `unused_credential_advisory` (credential-usage post-pass, **Application rows only**) | advisory | `UNUSED_CREDENTIAL` | `unused_credential` | — (removing a credential is admin-judged) | net-new |
+| per-app | `secret_lifetime_advisory` (against the app-management policy cap, **Application rows only**) | recommendation only (no marker, key or score) | none | — | — | net-new (rides beside the Rule 7 floor; no ranking change) |
 
 Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
 Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (not the credential-usage
@@ -416,6 +417,42 @@ happens there too. Application rows only — `score_sp_only` never runs it.
   dated → the day, tracked-with-no-use → "No use recorded", unknown → "—". "—" is a real answer
   ("we don't know"), never rendered as "unused"; when the report is unavailable the whole column
   reads "—" under one info `Callout`.
+
+## The credential-lifetime policy (app-management policies, v1.0)
+
+Two v1.0 reads per audit (`prefetch_app_management_policy`): `policies/defaultAppManagementPolicy` and
+`policies/appManagementPolicies?$expand=appliesTo`, joined in one pair on the shared `policy` bearer
+(`Policy.Read.All`, acquired on demand like Conditional Access — these are v1.0, not beta, so there is no
+preview/sovereign caveat to carry). Either read failing makes the WHOLE pair unavailable: without the
+`appliesTo` target map a default-policy cap could mis-flag an app that adopted an override, so partial
+policy data is no data. That is an unavailable advisory, not a coverage gap — the lifetime signal is
+operator context on top of the expiry findings, its absence hides no finding, and a tenant that never
+consented `Policy.Read.All` must not carry a permanent degraded banner (the sign-in-report precedent).
+The Credentials tab's per-app `get_app_credential_policy` (three reads joined, same token) degrades the
+same way: `available: false`, `Ok` never `Err`.
+
+- **One cap rule, two surfaces.** `ScoreCtx::secret_cap_for` + `enforced_secret_max_days` (core) resolve
+  the cap enforced ON one principal: an assigned per-app override REPLACES the tenant default — even
+  disabled or holding no lifetime rule, so the default must not leak onto an app that adopted an override
+  either; ≥2 assigned overrides is a shape Graph does not document → no verdict; a disabled policy enforces
+  no cap; an app predating a date-gated restriction is grandfathered → no cap. `credential_over_cap(end,
+  start, cap)` is the ONE over-cap predicate, shared by the audit advisory and the Credentials-tab markers
+  (expiry-state filtering stays with the caller: expired secrets keep their single Expired signal), so the
+  two surfaces can never name different secrets for one app. `None` is "no verdict", never "compliant".
+  Application rows only — a service principal carries no local secrets, and the join starts from
+  `app.password_credentials`.
+- **Recommendation-only.** The audit emits one per-app recommendation line when a cap is knowable — no
+  issue marker, no finding key, no score, no `groups.rs` entry; the 365-day Rule 7 floor is untouched and
+  this compares ALONGSIDE it (replacing the floor would be a CHANGELOG-gated ranking change). The tab
+  shows a section `Callout` only for a known cap (info tone, warn while violations exist), an "Over cap"
+  `Badge` on valid provably-over secrets only, and the add-secret dialog warns — never clamps or blocks,
+  for a chosen lifetime over the cap ("the add would be rejected"); only Graph decides.
+- **Never "no cap enforced."** Unknown (pair unavailable) and known-capless both render NOTHING on every
+  surface — the same never-flag-on-unknown contract as the Last-used column, and a permanent notice on
+  every healthy tenant trains operators to ignore it. Home's one-line
+  "Tenant policy caps secret lifetimes at N days." comes from `tenant_secret_max_days` (the gate-ignoring
+  tenant lens, paired with `credential_policy_available` on `CachedAuditSummary`), not from any per-app
+  verdict.
 
 ## Structured audit signals over issue-text parsing
 

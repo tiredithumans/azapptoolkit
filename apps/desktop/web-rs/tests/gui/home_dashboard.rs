@@ -39,8 +39,12 @@ async fn posture_card_renders_the_summary_with_its_age_stamp() {
     ts::reset();
     mock_inventory();
     let five_minutes_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
-    let summary =
-        CachedAuditSummary::from_items(&fixtures::audit_run_result().items, Some(five_minutes_ago));
+    let summary = CachedAuditSummary::from_items(
+        &fixtures::audit_run_result().items,
+        Some(five_minutes_ago),
+        false,
+        None,
+    );
     assert!(summary.posture.critical > 0, "fixture needs a Critical app");
     ts::mock_ok("get_cached_audit_summary", &Some(summary.clone()));
 
@@ -57,10 +61,35 @@ async fn posture_card_renders_the_summary_with_its_age_stamp() {
         critical.text_content().unwrap_or_default().trim(),
         summary.posture.critical.to_string()
     );
+    // Unknown policy (the fixture's `false`/`None`): the card must not claim
+    // anything about lifetime caps it could not read — Home has no per-app
+    // evidence to mark, so a wrong "no cap" here is unfalsifiable on screen.
+    assert!(
+        !ts::body_contains("Tenant policy"),
+        "an unknown/capless policy renders no posture line"
+    );
     // The perf fix: Home asks for the summary, never the whole run.
     assert_eq!(ts::call_count("get_cached_audit"), 0);
     let call = ts::last_call("get_cached_audit_summary").expect("summary read");
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
+}
+
+/// The mirror case: a tenant that DOES enforce a cap says so, once, quietly.
+#[wasm_bindgen_test]
+async fn posture_card_states_a_known_tenant_cap() {
+    ts::reset();
+    mock_inventory();
+    let five_minutes_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let summary = CachedAuditSummary::from_items(
+        &fixtures::audit_run_result().items,
+        Some(five_minutes_ago),
+        true,
+        Some(90),
+    );
+    ts::mock_ok("get_cached_audit_summary", &Some(summary));
+
+    let _m = ts::mount_view(|| view! { <HomeDashboard /> });
+    ts::wait_for(|| ts::body_contains("Tenant policy caps secret lifetimes at 90 days.")).await;
 }
 
 #[wasm_bindgen_test]

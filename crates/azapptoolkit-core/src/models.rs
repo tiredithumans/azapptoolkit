@@ -527,6 +527,115 @@ pub struct AppCredentialSignInActivity {
     pub sign_in_activity: Option<SignInActivity>,
 }
 
+// ---------- App management policies (tenant credential-lifetime caps) ----------
+
+/// One `passwordCredentials`/`keyCredentials` restriction entry inside an
+/// app-management policy. The secret and certificate planes share this shape;
+/// only `*Lifetime` entries carry `max_lifetime` (an ISO 8601 duration string,
+/// e.g. `P90D` or `P4DT12H30M5S`).
+///
+/// `restrict_for_apps_created_after_date_time` gates the restriction: `null`
+/// is **retroactive** (applies to every app, whenever created); a date means
+/// it applies only to apps created *after* it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRestrictionConfiguration {
+    /// `passwordAddition` | `passwordLifetime` | `symmetricKeyAddition` |
+    /// `symmetricKeyLifetime` | `customPasswordAddition` — each appears at
+    /// most once per policy, and only `passwordLifetime` caps secrets.
+    #[serde(default)]
+    pub restriction_type: Option<String>,
+    /// `enabled` | `disabled` — only `enabled` is enforced.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub max_lifetime: Option<String>,
+    #[serde(default)]
+    pub restrict_for_apps_created_after_date_time: Option<DateTime<Utc>>,
+}
+
+/// The restriction container shared by the policy shapes: the tenant default's
+/// `applicationRestrictions` (`appManagementApplicationConfiguration`), the
+/// per-app `restrictions` (`customAppManagementConfiguration`, which repeats
+/// the same fields *and* nests one under `applicationRestrictions`), and
+/// `servicePrincipalRestrictions`. Tolerating the doubled shape is the read
+/// side's job — see [`AppManagementConfiguration::password_entries`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppManagementConfiguration {
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub key_credentials: Vec<CredentialRestrictionConfiguration>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub password_credentials: Vec<CredentialRestrictionConfiguration>,
+    #[serde(default)]
+    pub application_restrictions: Option<Box<AppManagementConfiguration>>,
+}
+
+impl AppManagementConfiguration {
+    /// Every secret-restriction entry this container carries — top level and
+    /// the nested `applicationRestrictions` copy alike. The per-app
+    /// `customAppManagementConfiguration` has been seen storing the array in
+    /// either place, so resolution must read both.
+    pub fn password_entries(&self) -> impl Iterator<Item = &CredentialRestrictionConfiguration> {
+        self.password_credentials.iter().chain(
+            self.application_restrictions
+                .as_deref()
+                .into_iter()
+                .flat_map(|nested| nested.password_credentials.iter()),
+        )
+    }
+}
+
+/// The tenant-wide default app-management policy
+/// (`GET /policies/defaultAppManagementPolicy`). `is_enabled` defaults to
+/// **false**: a tenant that never touched the feature has either no policy
+/// object or a disabled one — both mean "no enforced credential lifetime".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantAppManagementPolicy {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub application_restrictions: Option<AppManagementConfiguration>,
+}
+
+/// A per-application (or per-service-principal) policy override
+/// (`appManagementPolicy`, read via the `applications/{id}/appManagementPolicies`
+/// nav or the `/policies/appManagementPolicies` collection with
+/// `$expand=appliesTo`). When one is assigned, the app adopts it **over** the
+/// tenant-wide default — and only one policy is typically assigned per app.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppManagementPolicy {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub restrictions: Option<AppManagementConfiguration>,
+    /// Filled only when the read used `$expand=appliesTo`; empty otherwise
+    /// (including on the per-app nav read, which needs no targets).
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub applies_to: Vec<PolicySubjectRef>,
+}
+
+/// One `appliesTo` subject — a heterogeneous `directoryObject` collection, so
+/// the `@odata.type` discriminator may or may not ride along. Kept for the
+/// app↔SP matching only; the value itself is never shown.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicySubjectRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, rename = "@odata.type")]
+    pub odata_type: Option<String>,
+}
+
 /// A SCIM provisioning (synchronization) job on a service principal.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
