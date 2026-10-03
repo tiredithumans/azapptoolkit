@@ -16,6 +16,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   every file. Prefer Files.SelectedOperations.Selected.", and the Grant-access wizard's item
   scoping accepts that scoped model, so the picker hint, the audit recommendation and the wizard
   point at one answer. Audit scores are unchanged — this is visibility, not re-ranking.
+- **Key Vault access scans flag vaults whose access the scan cannot see.** A vault set to the
+  legacy Access Policy permission model grants data access through a mechanism the Azure RBAC
+  listing does not enumerate, so an empty result from such a vault previously looked the same as a
+  vault with no access. The scan's summary line — and its CSV/JSON export — now names how many
+  vaults are in access-policy mode and that their grants are invisible to the scan. A vault whose
+  model Azure did not report is never guessed either way.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL

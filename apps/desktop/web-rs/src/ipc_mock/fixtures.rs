@@ -1310,6 +1310,7 @@ pub fn key_vault_access(
         total_vaults: vaults,
         vaults_scanned: vaults,
         vaults_failed: 0,
+        vaults_access_policy_mode: 0,
         rows,
         cancelled: false,
     }

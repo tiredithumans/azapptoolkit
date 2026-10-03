@@ -110,9 +110,9 @@ pub struct RoleAssignmentProperties {
 }
 
 /// A Key Vault (ARM control plane), from
-/// `/subscriptions/{sub}/providers/Microsoft.KeyVault/vaults`. Only the id +
-/// name the reverse-lookup needs; the id doubles as the ARM scope for a
-/// role-assignment query.
+/// `/subscriptions/{sub}/providers/Microsoft.KeyVault/vaults`. The id doubles as
+/// the ARM scope for a role-assignment query; `properties` carries the access
+/// model so a sweep can tell *why* a vault answered with no role assignments.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyVaultResource {
@@ -120,6 +120,30 @@ pub struct KeyVaultResource {
     pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub properties: Option<VaultProperties>,
+}
+
+impl KeyVaultResource {
+    /// True only when ARM explicitly reports `enableRbacAuthorization: false` —
+    /// an absent flag is never asserted either way.
+    pub fn access_policy_mode(&self) -> bool {
+        self.properties
+            .as_ref()
+            .and_then(|p| p.enable_rbac_authorization)
+            == Some(false)
+    }
+}
+
+/// The part of ARM's vault `properties` the reverse lookup reads. A vault in
+/// legacy access-policy mode grants data access through access policies, which
+/// the RBAC role-assignment listing never returns — without this flag an empty
+/// listing reads as "no access" for exactly those vaults.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultProperties {
+    #[serde(default)]
+    pub enable_rbac_authorization: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
