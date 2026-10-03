@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cache::CacheKind;
-use azapptoolkit_core::models::{Application, Organization};
+use azapptoolkit_core::models::{Application, Organization, RequiredResourceAccess};
 use azapptoolkit_graph::GraphError;
 use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationRequest, SP_INDEX_MAX};
 
@@ -392,22 +392,33 @@ pub(crate) async fn create_application_core(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
 ) -> Result<(CreateApplicationResult, Option<UiError>), UiError> {
-    create_application_core_tagged(client, input, Vec::new()).await
+    create_application_core_with(client, input, CreateExtras::default()).await
 }
 
-/// [`create_application_core`] with `tags` written in the create POST itself.
-/// The DR restore uses it to stamp its restore marker, so no app it creates can
-/// exist untagged (a follow-up PATCH would leave that window open).
-pub(crate) async fn create_application_core_tagged(
+/// Fields written in the create POST itself, beside [`CreateApplicationInput`]
+/// (which crosses IPC and so stays the single-app dialog's shape).
+#[derive(Default)]
+pub(crate) struct CreateExtras {
+    /// The DR restore stamps its restore marker here, so no app it creates can
+    /// exist untagged (a follow-up PATCH would leave that window open).
+    pub tags: Vec<String>,
+    /// Bulk create's declared permissions, for the same reason: the app never
+    /// exists with half its manifest. Declaration only — no runtime grant.
+    pub required_resource_access: Vec<RequiredResourceAccess>,
+}
+
+/// [`create_application_core`] with [`CreateExtras`] written in the POST.
+pub(crate) async fn create_application_core_with(
     client: &azapptoolkit_graph::GraphClient,
     input: CreateApplicationInput,
-    tags: Vec<String>,
+    extras: CreateExtras,
 ) -> Result<(CreateApplicationResult, Option<UiError>), UiError> {
     let body = CreateApplicationRequest {
         display_name: input.display_name,
         sign_in_audience: input.sign_in_audience,
         description: input.description,
-        tags,
+        tags: extras.tags,
+        required_resource_access: extras.required_resource_access,
     };
     let application = client.create_application(&body).await?;
     // The registration exists from here on: a later failure is collected, not

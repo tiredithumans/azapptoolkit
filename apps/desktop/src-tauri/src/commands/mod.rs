@@ -6,6 +6,7 @@ pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod bulk;
+pub mod bulk_import;
 pub mod conditional_access;
 pub mod config;
 pub mod consent;

@@ -97,6 +97,46 @@ async fn search_users_applies_startswith_filter() {
 }
 
 #[tokio::test]
+async fn find_user_by_upn_filters_exactly_and_reads_a_miss_as_none() {
+    let server = MockServer::start().await;
+    // A guest UPN: the `#EXT#` rides the query string, and the quote is doubled.
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .and(query_param(
+            "$filter",
+            "userPrincipalName eq 'o''brien_fabrikam.com#EXT#@contoso.com'",
+        ))
+        .and(query_param("$top", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "u-9", "userPrincipalName": "o'brien_fabrikam.com#EXT#@contoso.com" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .and(query_param(
+            "$filter",
+            "userPrincipalName eq 'nobody@contoso.com'",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let hit = client
+        .find_user_by_upn("o'brien_fabrikam.com#EXT#@contoso.com")
+        .await
+        .unwrap();
+    assert_eq!(hit.map(|u| u.id).as_deref(), Some("u-9"));
+    assert!(
+        client
+            .find_user_by_upn("nobody@contoso.com")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn directory_audits_for_app_filters_by_target_resources() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

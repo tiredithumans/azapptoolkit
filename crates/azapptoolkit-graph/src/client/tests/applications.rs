@@ -218,7 +218,7 @@ async fn create_application_posts_body_and_returns_app() {
         display_name: "my-new-app".into(),
         sign_in_audience: Some("AzureADMyOrg".into()),
         description: None,
-        tags: Vec::new(),
+        ..Default::default()
     };
     let app = client.create_application(&req).await.unwrap();
     assert_eq!(app.id, "obj-99");
@@ -251,6 +251,43 @@ async fn create_application_sends_tags_in_the_create_body() {
     };
     let app = client.create_application(&req).await.unwrap();
     assert_eq!(app.id, "obj-1");
+}
+
+#[tokio::test]
+async fn create_application_declares_required_resource_access_in_the_create_body() {
+    // Bulk create from an inventory file: the manifest rides the POST, so the
+    // app never exists with half its declared permissions.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/applications"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "displayName": "imported-app",
+            "requiredResourceAccess": [{
+                "resourceAppId": "00000003-0000-0000-c000-000000000000",
+                "resourceAccess": [{ "id": "role-1", "type": "Role" }]
+            }]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "obj-2",
+            "appId": "app-2",
+            "displayName": "imported-app"
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let req = CreateApplicationRequest {
+        display_name: "imported-app".into(),
+        required_resource_access: vec![RequiredResourceAccess {
+            resource_app_id: "00000003-0000-0000-c000-000000000000".into(),
+            resource_access: vec![azapptoolkit_core::models::ResourceAccess {
+                id: "role-1".into(),
+                r#type: "Role".into(),
+            }],
+        }],
+        ..Default::default()
+    };
+    let app = client.create_application(&req).await.unwrap();
+    assert_eq!(app.id, "obj-2");
 }
 
 #[tokio::test]

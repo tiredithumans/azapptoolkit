@@ -144,6 +144,21 @@ impl GraphClient {
         Ok(page.items)
     }
 
+    /// Exact lookup of one user by `userPrincipalName` (bulk create's Owners
+    /// column). A `$filter` rather than `/users/{upn}`: a guest UPN carries
+    /// `#EXT#`, which would need path-escaping, and a miss reads as `Ok(None)`
+    /// rather than a 404 the caller would have to tell apart from a dead route.
+    pub async fn find_user_by_upn(&self, upn: &str) -> Result<Option<DirectoryObject>> {
+        let filter = format!("userPrincipalName eq '{}'", escape_odata(upn));
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$top", "1"),
+            ("$select", "id,displayName,userPrincipalName"),
+        ];
+        let page: Paged<DirectoryObject> = self.get_json("/users", &params, false).await?;
+        Ok(page.items.into_iter().next())
+    }
+
     /// The security/M365 groups a service principal is a direct member of
     /// (`/servicePrincipals/{id}/memberOf/microsoft.graph.group`). The OData cast is an advanced
     /// query, so — like [`Self::me_active_directory_roles`] — it needs **both**

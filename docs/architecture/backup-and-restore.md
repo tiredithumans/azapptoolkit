@@ -159,7 +159,7 @@ The frontend shows it before the operator confirms.
 `restore_tenant` replays the manifest in five passes so inter-app dependencies
 resolve:
 
-1. **Create shells** — `create_application_core_tagged` per app (+ paired SP),
+1. **Create shells** — `create_application_core_with` per app (+ paired SP),
    or adoption of the app an earlier run created (below); build the
    `source_app_id → new_app_id` remap.
 2. **Wire references** — declared permissions (`remap_required_resource_access`:

@@ -100,6 +100,40 @@ resolves as env var → baked-in value → commercial
 (`CloudEnvironment::from_env_or`); an unrecognized value logs a warning
 and falls through to the next layer.
 
+## Bulk create from a file
+
+**Bulk Actions → Create apps → Load from file…** reads a `.csv` or `.json` file (5 MiB
+max) and fills the page's textarea with the parsed apps. Nothing is created until you
+click **Validate** / **Create apps**, so you can review or edit every row first.
+
+CSV: a header row, then one app per row. Columns match case-insensitively and may come
+in any order; an unknown or repeated column is an error (a misspelt `Owner` would
+otherwise drop every owner silently). A UTF-8 BOM and CRLF line endings are fine;
+quote a cell that contains a comma, quote or line break (`""` escapes a quote).
+
+| Column | Required | Value |
+|---|---|---|
+| `DisplayName` | yes | The app's display name. |
+| `SignInAudience` | no | `AzureADMyOrg`, `AzureADMultipleOrgs`, `AzureADandPersonalMicrosoftAccount` or `PersonalMicrosoftAccount`. |
+| `Description` | no | Free text. |
+| `Owners` | no | User principal names, `;`-separated. |
+| `Permissions` | no | `Kind:Resource/Value` entries, `;`-separated. `Kind` is `Application` (or `Role`) or `Delegated` (or `Scope`); `Resource` is the API's appId or its name in the permission picker (e.g. `Microsoft Graph`); `Value` is the permission (e.g. `User.Read.All`). |
+
+```csv
+DisplayName,SignInAudience,Owners,Permissions
+Payroll Sync,AzureADMyOrg,alice@contoso.com;bob@contoso.com,Application:Microsoft Graph/User.Read.All;Delegated:Microsoft Graph/openid
+```
+
+JSON: the same array the textarea takes, with the optional `ownerUpns` and
+`permissions` (`{"resource", "value", "kind": "application" | "delegated"}`) keys.
+
+Each owner and permission is resolved against the tenant **before** its app is created,
+and that check runs in **Validate** as well, so a dry run proves the names exist. A row
+that names an unknown user, resource or permission is rejected whole, so nothing is
+created for it. Permissions are **declared** in the new app's `requiredResourceAccess`,
+not consented: grant consent afterwards by selecting the apps in App Registrations and
+using **Grant consent**. An owner that could not be added is listed on its row.
+
 ## Testing
 
 Run every CI gate, in CI order, with one command:

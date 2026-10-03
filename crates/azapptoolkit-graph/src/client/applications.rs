@@ -49,6 +49,11 @@ pub struct CreateApplicationRequest {
     /// created ([`GraphClient::find_applications_by_tag`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Permissions declared in the create POST itself (bulk create from an
+    /// inventory file), so a new app never exists with half its manifest.
+    /// Declaration only — no runtime grant is made here.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_resource_access: Vec<RequiredResourceAccess>,
 }
 
 /// Partial update for `PATCH /applications/{id}`. Only fields set on the

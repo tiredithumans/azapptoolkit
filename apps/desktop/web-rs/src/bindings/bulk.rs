@@ -102,6 +102,12 @@ struct BulkCreateArgs<'a> {
     validate_only: bool,
 }
 
+/// Opens a CSV or JSON inventory via the OS dialog and parses it into
+/// bulk-create specs (nothing is created). `None` if the user cancelled.
+pub async fn load_bulk_create_specs_from_file() -> Result<Option<Vec<BulkCreateSpec>>, UiError> {
+    invoke_result("load_bulk_create_specs_from_file", ()).await
+}
+
 pub async fn bulk_create_applications(
     tenant_id: &str,
     specs: &[BulkCreateSpec],

@@ -6,9 +6,9 @@
 //!
 //! The permission tester and Resource Access behaviour modules
 //! (`permission_tester.rs`, `resource_access.rs`) mock their reads, so this is
-//! the one place the reject-everything path runs for them. Bulk actions has no
-//! behaviour module of its own; its `BulkActionBar` is exercised through
-//! `security_findings.rs`. The Disaster-recovery smoke was retired in favour of
+//! the one place the reject-everything path runs for them. Bulk actions' Create
+//! apps tab has its behaviour module in `bulk_create.rs`; its `BulkActionBar`
+//! is exercised through `security_findings.rs`. The Disaster-recovery smoke was retired in favour of
 //! `dr.rs` (shard 4), whose real tests supersede it.
 #![cfg(target_arch = "wasm32")]
 

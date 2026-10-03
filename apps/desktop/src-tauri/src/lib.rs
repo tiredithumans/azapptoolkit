@@ -135,6 +135,7 @@ pub fn run() {
             commands::bulk::bulk_restore_deleted,
             commands::bulk::bulk_grant_permissions,
             commands::bulk::bulk_create_applications,
+            commands::bulk_import::load_bulk_create_specs_from_file,
             commands::bulk::bulk_remove_redundant_permissions,
             commands::bulk::bulk_scope_mailbox_access,
             commands::bulk::bulk_scope_sharepoint_access,

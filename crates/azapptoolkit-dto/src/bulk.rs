@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::UiError;
+use crate::permissions::PermissionKind;
 
 /// A per-item failure inside a bulk run.
 ///
@@ -129,13 +130,40 @@ pub struct BulkGrantResult {
 
 // ---------------- Bulk create applications ----------------
 
-/// One app to create in a bulk run. Parsed from the user's JSON import.
+/// One app to create in a bulk run. Parsed from the user's JSON import, or
+/// loaded from a CSV/JSON file by `load_bulk_create_specs_from_file`.
+///
+/// `owner_upns` and `permissions` are additive (F283): absent in older JSON,
+/// and omitted on the wire when empty so a plain spec round-trips unchanged.
+/// Both are resolved live **before** the app is created — an unknown UPN or
+/// permission rejects the row without writing anything.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkCreateSpec {
     pub display_name: String,
     pub sign_in_audience: Option<String>,
     pub description: Option<String>,
+    /// Users to add as owners, by `userPrincipalName`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_upns: Vec<String>,
+    /// Permissions to **declare** in `requiredResourceAccess` at creation.
+    /// Declaring is not consenting: the operator grants consent afterwards with
+    /// the existing bulk Grant consent action, so an inventory import can never
+    /// silently hand out tenant-wide access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<BulkCreatePermission>,
+}
+
+/// One permission to declare on a bulk-created app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkCreatePermission {
+    /// The resource API: its `appId`, or the display name of a resource in the
+    /// bundled directory (e.g. `Microsoft Graph`), matched case-insensitively.
+    pub resource: String,
+    /// The permission's `value`, e.g. `User.Read.All`.
+    pub value: String,
+    pub kind: PermissionKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
