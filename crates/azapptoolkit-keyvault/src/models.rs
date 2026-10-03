@@ -13,6 +13,13 @@ pub struct SecretItem {
     pub tags: Option<std::collections::HashMap<String, String>>,
     #[serde(default, rename = "contentType")]
     pub content_type: Option<String>,
+    /// True for certificate-backed secrets (every vault certificate
+    /// materialises a managed secret entry). Those are not writable secrets —
+    /// the browser labels them so an operator doesn't aim rotation at one.
+    /// `#[serde(default)]`: a listing without the field deserializes as
+    /// `None`, which is never asserted as "not managed".
+    #[serde(default)]
+    pub managed: Option<bool>,
 }
 
 impl SecretItem {
@@ -213,6 +220,21 @@ mod tests {
         let item: SecretItem =
             serde_json::from_str(r#"{"id":"https://v.vault.azure.net/secrets/foo"}"#).unwrap();
         assert_eq!(item.name(), Some("foo"));
+    }
+
+    /// The browser distinguishes certificate-backed secrets from real ones, so
+    /// the wire's `managed` flag must survive deserialization — and an absent
+    /// flag must not be coerced into "not managed".
+    #[test]
+    fn secret_item_reads_the_managed_flag() {
+        let managed: SecretItem = serde_json::from_str(
+            r#"{"id":"https://v.vault.azure.net/secrets/cert","managed":true}"#,
+        )
+        .unwrap();
+        assert_eq!(managed.managed, Some(true));
+        let plain: SecretItem =
+            serde_json::from_str(r#"{"id":"https://v.vault.azure.net/secrets/foo"}"#).unwrap();
+        assert_eq!(plain.managed, None);
     }
 
     #[test]

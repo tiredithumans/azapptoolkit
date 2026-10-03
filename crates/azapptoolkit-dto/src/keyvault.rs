@@ -69,6 +69,11 @@ pub struct KvSecretItemDto {
     pub enabled: Option<bool>,
     pub expires: Option<String>,
     pub content_type: Option<String>,
+    /// Key Vault's `managed` flag: `Some(true)` marks a certificate-backed
+    /// secret (not a writable secret — rotation into it must fail). `None` =
+    /// the listing carried no flag, which is never shown as "plain secret".
+    #[serde(default)]
+    pub managed: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

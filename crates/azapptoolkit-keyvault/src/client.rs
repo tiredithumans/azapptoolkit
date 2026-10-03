@@ -278,7 +278,8 @@ mod tests {
             .and(header("authorization", "Bearer tok"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{
-                    "id": "https://v.vault.azure.net/secrets/one"
+                    "id": "https://v.vault.azure.net/secrets/one",
+                    "managed": true
                 }, {
                     "id": "https://v.vault.azure.net/secrets/two"
                 }]
@@ -289,6 +290,9 @@ mod tests {
         let items = c.list_secrets().await.unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name(), Some("one"));
+        // The certificate-backed marker must survive the wire read.
+        assert_eq!(items[0].managed, Some(true));
+        assert_eq!(items[1].managed, None);
     }
 
     #[tokio::test]

@@ -22,6 +22,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   vault with no access. The scan's summary line — and its CSV/JSON export — now names how many
   vaults are in access-policy mode and that their grants are invisible to the scan. A vault whose
   model Azure did not report is never guessed either way.
+- **The Key Vault secret browser now distinguishes certificate-backed entries from real secrets.**
+  Every vault certificate appears in the secret listing as a *managed* entry, previously
+  indistinguishable from a rotatable app secret; those rows now carry a "certificate-backed" badge
+  and a hint that they are not writable secrets.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL

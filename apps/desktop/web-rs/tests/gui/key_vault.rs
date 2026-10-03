@@ -53,6 +53,37 @@ async fn empty_vault_renders_empty_state() {
 }
 
 #[wasm_bindgen_test]
+async fn certificate_backed_secrets_are_badged() {
+    // A vault certificate appears in the secret listing as a `managed` entry.
+    // It is not a writable secret — the row must not read like a rotation
+    // target (F196), so it carries a badge and a real secret next to it
+    // doesn't.
+    ts::reset();
+    ts::mock_ok(
+        "kv_list_secrets",
+        &vec![
+            fixtures::kv_secret_item("db-password"),
+            fixtures::kv_managed_secret_item("prod-cert"),
+        ],
+    );
+
+    let _m = ts::mount_view(|| view! { <KeyVaultView /> });
+    ts::tick().await;
+
+    ts::set_input_value(VAULT_INPUT, "myvault");
+    ts::click(LIST_BTN);
+
+    ts::wait_for(|| ts::body_contains("db-password")).await;
+    assert!(ts::body_contains("certificate-backed"));
+    // The badge sits on the managed row only — the plain secret stays bare.
+    assert_eq!(
+        ts::query_all(".badge--warning").len(),
+        1,
+        "exactly one managed badge expected"
+    );
+}
+
+#[wasm_bindgen_test]
 async fn list_error_renders_message() {
     ts::reset();
     ts::mock_err(

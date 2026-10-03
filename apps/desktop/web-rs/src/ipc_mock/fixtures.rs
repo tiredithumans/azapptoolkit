@@ -889,6 +889,16 @@ pub fn kv_secret_item(name: &str) -> KvSecretItemDto {
         enabled: Some(true),
         expires: None,
         content_type: None,
+        managed: None,
+    }
+}
+
+/// A certificate-backed secret entry (Key Vault's `managed: true`) — listed
+/// like a secret but not a writable one; the browser badges it.
+pub fn kv_managed_secret_item(name: &str) -> KvSecretItemDto {
+    KvSecretItemDto {
+        managed: Some(true),
+        ..kv_secret_item(name)
     }
 }
 

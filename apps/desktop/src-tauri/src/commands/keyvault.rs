@@ -44,6 +44,7 @@ pub async fn kv_list_secrets(
                 .and_then(|a| a.expires)
                 .map(|d| d.to_rfc3339()),
             content_type: item.content_type,
+            managed: item.managed,
         })
         .collect())
 }
