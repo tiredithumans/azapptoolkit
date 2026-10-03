@@ -27,11 +27,92 @@ buckets (Idempotent DR restore pulls from Bugs; Run identity from gap slices),
 so it is not the per-item enhancement set.
 
 Already done from this bucket: **F094** → `3103bc4` (permission tester
-lists/revokes Selected entries; its ship-together partner F073 — the dead
-"(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
+lists/revokes Selected entries) and its ship-together partner **F073** (the
+dead `scanned`/"(capped)" branch is gone — `AzureRolesResult` is now
+`{ roles, total, skipped }` with no dead UI branch). **F309** → `bbaf469`
+(`just bump`).
 
-Remaining 31 entries by area (read the section for each item's Problem +
-Proposal; #### items are full entries, one-liners are bullets):
+## Reconciled against main — 2026-10-03 (verify-before-implement)
+
+The per-area "Remaining N" counts below were written 2026-10-02 and are
+**stale**: the Oct-2/Oct-3 commit batch landed a large swath without the
+summary lines being reconciled, so several entries that *read* as open are
+already implemented. Each was re-checked against current code this pass so
+nobody re-implements shipped work. Status of every entry that read as open:
+
+**Already implemented — do NOT reimplement:**
+- **F073** dead `scanned`/"(capped)" → `AzureRolesResult` is `{ roles, total,
+  skipped }`; no dead field, no dead UI branch.
+- **F161** disabledByMicrosoft → `issue::DISABLED_BY_MICROSOFT` (Rule 21) +
+  the `disabled_by_microsoft` finding group + surfacing (`feb5e26`).
+- **F078 / F268** workload-identity CA → `CaClientApplications` +
+  `client_axis`/`client_includes_sp`/exclude-wins + table tests (`49988ed`).
+- **F222** system-proxy → `Cargo.toml` declares `"system-proxy"` on the
+  workspace `reqwest` on purpose (commented), not only via updater defaults.
+- **F413** aged demo dates → `f::days_from_now(n)` + relative
+  `days_to_expiry`; the SSO board's day-count is derived from the date and
+  pinned by `demo/mod.rs` tests.
+- **F420** static per-SP demo → the per-object commands are `mock_each` keyed
+  on the id (via `variant_index` / per-SP fixture maps like `sso_by_sp`);
+  `get_sso_config` pulls a per-`servicePrincipalId` config and thumbprints
+  derive from the row, not one shared `sp-demo` blob.
+- **F247** proxy/TLS guidance → README has the proxy
+  (`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`, PAC not evaluated), TLS-inspection
+  and updater-host/sovereign-equivalent notes.
+- **F250 / F298 / F311** → bug template has the Install-format dropdown +
+  `0.30.2` placeholder; `release.yml` installs `cargo-deny@0.20.2` and runs
+  `just deny`/`just web-deny`; the `verify` summary names `web-itest-size`.
+
+**Genuinely open — needs a design/architecture/scope decision first:**
+- **F174** decommission teardown: prove-zero-references + a confirmed model
+  (no `Remove-ManagementScope`/`Remove-ServicePrincipal` anywhere).
+- **F269** SP-row ownership rule: `score_service_principal` deliberately omits
+  the ownership rule because owners are a home-tenant *application* property,
+  not a tenant-visible SP property — decide whether `owner_count` is even
+  resolvable for SP-only rows before adding it (Rule-14 finding-group, no
+  ranking change; first-party/foreign SPs would read `None`).
+- **F272** tenant-switch ergonomics: in-process switching collides with the
+  single-tenant-per-process invariant the DR shape + cross-tenant-cache defence
+  rest on → architecture decision, not a feature.
+- **F278** FIC audit signal: decide the trusted-issuer allowlist default first
+  (an empty default flags every FIC). NOTE the proposal's "Rule 19" is taken —
+  21 = disabledByMicrosoft, 22 = risky-SP — so the new rule is 23+.
+- **F280** owner data on the credential-expiry dashboard: the roll-up has no
+  scan of its own (it derives from the shared, pinned `scan_app_list`); decide
+  widen-shared-scan vs a dedicated owners read (reintroducing the second
+  full-tenant scan that module deliberately removed).
+- **F392** operator-supplied SAML PFX import: a WRITE to Sign+Verify
+  `keyCredentials` on an auth-trust control — design phase/thumbprint + zeroize
+  handling + trust-invariant tests before code.
+
+**Genuinely open — not verifiable without a live tenant** (code + fixtures can
+land, but prove the real backend read via `just dev`):
+- **F273** SP-held credential scan (needs a live `/servicePrincipals` read;
+  the shared-credential-index concern in its own note applies).
+- **F275** SCIM start/pause/restart (adds a WRITE scope
+  `Synchronization.ReadWrite.All` → new consent surface; write path needs a
+  live tenant).
+- **F279** observed-activity method roll-up: the honest fix is a server-side
+  `summarize by RequestMethod` — rolling up the capped 200-row set can print a
+  false "no write methods" and violates the never-all-clear-on-truncation rule;
+  needs a live Log Analytics instance.
+
+**Blocked:** **F263** — parsing `RecipientAdministrativeUnitScope` needs the
+real wire key confirmed from a live role-assignment envelope first.
+
+**Large / product-owned (defer):** **F267** (#109 posture snapshot + drift,
+effort L, product-owned) · **F277** headless/CLI (XL — needs device-code auth
++ headless keyring; keep out of the release matrix) · **F258** custom-Entra-role
+detection (effort L, design-level) · **F271** PIM eligibility (needs a new
+scope + sovereign-aware `portal_root()`).
+
+Honest remaining work is **14 entries**, not 31: 6 need a design/scope
+decision, 3 need a live tenant to verify correctly, 1 is blocked, 4 are
+large/product-owned. Everything else the per-area list flagged as open is
+already implemented (mostly in the `chore/review-follow-up` → this-branch
+batch). Per-area details follow; where a bucket says "Remaining N", defer to
+this section. (read each item's Problem + Proposal below; #### items are full
+entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
   (+ its UI Callout) · F034 · F035 · F127 + F402 (+ F393) verified already
@@ -238,7 +319,10 @@ Proposal; #### items are full entries, one-liners are bullets):
   names the policies) and needs `Policy.Read.PermissionGrant`, which the
   `Policy.Read.All` token does not carry; pending `appConsentRequests` deferred to the
   second step — its read needs a dedicated consent-requests scope and its own feature.
-  Remaining 3: F161 · F078 · F268
+  **Only F278 (FIC audit signal) remains in this bucket** — F161 · F078 · F268
+  are already implemented (see the reconciliation pass; landed in `feb5e26` /
+  `49988ed`). F278 needs the trusted-issuer-allowlist design decision and its
+  "Rule 19" is already taken (21/22 used).
 - **Product-gap proposals (11)** — **F266 closed 2026-10-03** (recycle bin:
   `list_recently_deleted` / `bulk_restore_deleted` / `purge_deleted_application` over
   `/directory/deletedItems`, the "Recently deleted…" dialog, post-delete Undo on the bulk bar,
@@ -248,8 +332,10 @@ Proposal; #### items are full entries, one-liners are bullets):
   Undo. Pinned by `gui/deleted_apps.rs`.) · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·
   F283
-- **Docs, demo, packaging & release tooling (7)** — F247 · F413 · F420 · F222 ·
-  F250 · F298 · F311
+- **Docs, demo, packaging & release tooling (7)** — **all done, verified this
+  pass** (F247 · F413 · F420 · F222 · F250 · F298 · F311 — see the reconciliation
+  pass; each was checked against current README/Cargo.toml/`release.yml`/the bug
+  template and the code/tests back the fix). No item in this bucket is open.
 
 If picking items up, respect "Changes that must ship together": F027+F058 and
 F127+F402+F393 shipped closed (see above — the paired flag/Callout and the
