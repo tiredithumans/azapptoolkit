@@ -102,7 +102,9 @@ toolkit-owned service principal storing tokens you cannot audit.
   security-group memberships (the access model for group-gated APIs such as
   Power BI / Fabric admin settings).
 - **SAML single sign-on** — a guided wizard to configure SAML-based SSO and
-  customize the attribute & claim mapping (claims-mapping policies).
+  customize the attribute & claim mapping (claims-mapping policies). The SSO tab
+  also shows each SAML app's signed-request enforcement state, flagging apps that
+  accept unsigned (or SHA-1-signed) authentication requests.
 - **Managed identities** — discover system- and user-assigned identities, grant
   Graph application permissions, see over-privilege at a glance, and view their
   **Azure RBAC** role assignments across subscriptions (via Azure Resource

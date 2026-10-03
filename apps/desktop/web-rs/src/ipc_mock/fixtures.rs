@@ -325,6 +325,12 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         claims_policy: None,
         claims_policy_id: None,
         claims_read_failed: false,
+        // The demo app's posture is the healthy one: verification on, no weak
+        // algorithms. The alert shapes are exercised by the gui tests, which
+        // mutate this fixture — the demo shows what a live tenant typically
+        // looks like, not its worst case.
+        signed_requests_required: Some(true),
+        allowed_weak_signature_algorithms: None,
         summary: Some(SsoSummary::Saml(saml_sso_summary(object_id, app_id))),
         rollover: Some(signing_cert_rollover(object_id, app_id)),
     }

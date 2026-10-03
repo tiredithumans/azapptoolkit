@@ -319,6 +319,26 @@ Three surfaces read it so the guidance never drifts:
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
    use the scoping action).
 
+## Signed-AuthnRequest visibility — read-only, never-flag-on-unknown
+
+`requestSignatureVerification` on the paired **application** (`isSignedRequestRequired` +
+`allowedWeakAlgorithms`) is the tenant-side gate for whether Entra verifies signed SAML
+authentication requests. `get_application_sso_fields` selects it (no new scope — it rides the
+already-consented default token on a round trip that already happens), and
+`extract_request_signature_verification` projects it onto `SsoConfigDto` as
+`signed_requests_required` + `allowed_weak_signature_algorithms`.
+
+**Two invariants.** (1) A missing or malformed block is **unknown** and renders *nothing* — the
+tab must never imply unsigned requests are acceptable just because Graph omitted a field
+(the never-flag-on-unknown contract, shared with the credential-lifetime advisory). A
+`"none"`/empty `allowedWeakAlgorithms` normalises to `None`: present means a real allowance.
+(2) **There is deliberately no write path.** The v1.0 `application-update` property list (checked
+2026-10-03) does not list the property as updatable, so the SSO tab shows the state and points to
+the Entra admin center instead of PATCHing an undocumented field on an auth-trust control; a
+toggle may only be added with evidence the PATCH lands. The tab also does not score it —
+adding a rule would need a per-app SSO read inside the audit fan-out and is CHANGELOG-gated as a
+ranking change.
+
 ## SAML signing-certificate rollover — staged, resumable, revertible
 
 A SAML signing certificate is the trust the *application* validates assertions against, so replacing

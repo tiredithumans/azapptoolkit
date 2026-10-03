@@ -213,7 +213,17 @@ Proposal; #### items are full entries, one-liners are bullets):
   warns a policy-rejected lifetime, warn-only; Home posture line only for a knowable
   cap; "no cap enforced" wording pinned out). Partial: the F260 "map the
   policy-violation error code" half is not done — a rejected add still surfaces as the
-  Graph 400. Remaining 5: F161 · F078 · F268 · F265 ·
+  Graph 400. **F265 closed 2026-10-03** (`requestSignatureVerification` added to the
+  SSO-fields `$select` and projected onto `SsoConfigDto` — the SAML SSO section now shows
+  Required / Required-but-weak / Not-verified with a warn Callout naming `rsaSha1`, and a
+  missing block renders nothing (never-flag-on-unknown, pinned by `gui/sso_signed_requests.rs`).
+  Partial by evidence, not by choice: the "patch struct" half was NOT implemented — the v1.0
+  `application-update` property list (checked 2026-10-03) does not list
+  `requestSignatureVerification` as updatable, so a toggle would ship an undocumented write
+  on an auth-trust control; reopen only with proof a PATCH lands. The optional low-weight
+  `rsaSha1` audit rule is also deferred: scoring would need a per-app SSO-field read added to
+  the audit fan-out for every app, and any ranking change needs its own CHANGELOG-gated
+  justification. Remaining 4: F161 · F078 · F268 ·
   F274
 - **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·

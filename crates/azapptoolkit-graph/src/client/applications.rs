@@ -472,14 +472,21 @@ impl GraphClient {
     }
 
     /// GET `/applications/{id}` selecting only the SSO-relevant fields, as raw JSON —
-    /// `identifierUris`/`web`/`spa` aren't on the typed [`Application`] (and aren't in the list
-    /// `$select`), so the SSO detail tab reads them directly. `Ok(None)` for 404.
+    /// `identifierUris`/`web`/`spa`/`requestSignatureVerification` aren't on the typed
+    /// [`Application`] (and aren't in the list `$select`), so the SSO detail tab reads them
+    /// directly. `requestSignatureVerification` is the signed-AuthnRequest gate
+    /// (`isSignedRequestRequired` + `allowedWeakAlgorithms`); selecting it costs nothing and
+    /// its absence is what lets the SSO tab tell "unknown" from "verification off".
+    /// `Ok(None)` for 404.
     pub async fn get_application_sso_fields(
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
-        self.get_application_fields_raw(object_id, "id,appId,identifierUris,web,spa")
-            .await
+        self.get_application_fields_raw(
+            object_id,
+            "id,appId,identifierUris,web,spa,requestSignatureVerification",
+        )
+        .await
     }
 
     /// GET `/applications/{id}` selecting only the Authentication-tab fields, as raw JSON:

@@ -7,6 +7,17 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The SSO tab now shows SAML signed-request enforcement.** The enterprise-app SSO tab's SAML
+  section reads Microsoft's v1.0 `requestSignatureVerification` property on the paired application
+  (one more field on the SSO read that already happens — no new scope, no new consent) and shows
+  its state: **"Required"**, **"Required, but allows rsaSha1"**, or **"Not verified"** — the last
+  with a warning that unsigned SAML authentication requests are accepted, and a warning naming
+  `rsaSha1` when verification is on but the weak algorithm is still allowed (a SHA-1-signed
+  request is spoofable anyway). A missing property means **unknown**: the tab shows nothing at all
+  rather than implying unsigned requests are fine. Read-only by design — the v1.0
+  `application-update` property list does not document `requestSignatureVerification` as
+  patchable, so the tab shows the state instead of offering an unverifiable toggle; change it in
+  the Entra admin center. **No ranking change** — the audit is untouched.
 - **Tenant app-management policies are now visible, and explain policy-driven secret adds before they fail.**
   Each audit run and each Credentials-tab open read Microsoft's v1.0 app-management policy endpoints
   (tenant default + the overrides assigned to the app) on the on-demand `Policy.Read.All` token —

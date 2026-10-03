@@ -340,6 +340,18 @@ pub struct SsoConfigDto {
     /// not offer Save, or it would replace claims the operator never saw.
     #[serde(default)]
     pub claims_read_failed: bool,
+    /// `requestSignatureVerification.isSignedRequestRequired` on the paired
+    /// application — Entra's "require signed authentication requests" gate.
+    /// `None` means UNKNOWN (the app read returned no `requestSignatureVerification`
+    /// block): the tab shows nothing, never "verification off" — same
+    /// never-flag-on-unknown contract as the credential-lifetime advisory.
+    #[serde(default)]
+    pub signed_requests_required: Option<bool>,
+    /// `requestSignatureVerification.allowedWeakAlgorithms` verbatim (today only
+    /// `"rsaSha1"` is documented as weak). `"none"`/unset means no weak algorithm
+    /// is allowed and reads `None`, so a present value is always a real allowance.
+    #[serde(default)]
+    pub allowed_weak_signature_algorithms: Option<String>,
     /// App-owner summary ("Details for the application owner"), `Some` only
     /// when the saved mode is SAML or OIDC. Built from this same read plus the
     /// cloud's static URL formulas, so the tab needs no second round trip.

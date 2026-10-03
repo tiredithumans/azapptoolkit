@@ -1,7 +1,10 @@
 //! Unit tests for the SSO command layer (`super`).
 
 use super::board::{sso_cert_status, sso_certificates_to_csv};
-use super::config::{build_sso_summary, extract_app_sso_fields, extract_sp_sso_fields};
+use super::config::{
+    build_sso_summary, extract_app_sso_fields, extract_request_signature_verification,
+    extract_sp_sso_fields,
+};
 use super::metadata::parse_signing_certs;
 use super::rollover::{activation_target, build_rollover, is_preferred_key, retire_target};
 
@@ -245,6 +248,52 @@ fn extract_app_sso_fields_reads_uris() {
     );
     assert_eq!(logout.as_deref(), Some("https://app/logout"));
     assert_eq!(spa, vec!["https://app/spa".to_string()]);
+}
+
+#[test]
+fn extract_request_signature_verification_never_flags_unknown() {
+    // Full block: the SAML app requires signed requests but still accepts the
+    // weak SHA-1 family — both halves must arrive so the tab can warn.
+    let full = serde_json::json!({
+        "requestSignatureVerification": {
+            "@odata.type": "#microsoft.graph.requestSignatureVerification",
+            "isSignedRequestRequired": true,
+            "allowedWeakAlgorithms": "rsaSha1"
+        }
+    });
+    assert_eq!(
+        extract_request_signature_verification(&full),
+        (Some(true), Some("rsaSha1".to_string()))
+    );
+    // A non-SAML app returns no block at all: (None, None) = unknown, which the
+    // tab renders as silence — never as "verification off".
+    let bare = serde_json::json!({ "id": "app-1", "web": {} });
+    assert_eq!(extract_request_signature_verification(&bare), (None, None));
+    // "none" means no weak algorithm is allowed, not an allowance: it
+    // normalises to None so the UI can't flag a healthy app. A non-bool
+    // `isSignedRequestRequired` (a mis-shaped open type) is likewise unknown.
+    let healthy = serde_json::json!({
+        "requestSignatureVerification": {
+            "isSignedRequestRequired": "yes",
+            "allowedWeakAlgorithms": "none"
+        }
+    });
+    assert_eq!(
+        extract_request_signature_verification(&healthy),
+        (None, None)
+    );
+    // Verification explicitly off is KNOWN off — the tab must show that, and an
+    // empty algorithm string is not an allowance.
+    let off = serde_json::json!({
+        "requestSignatureVerification": {
+            "isSignedRequestRequired": false,
+            "allowedWeakAlgorithms": ""
+        }
+    });
+    assert_eq!(
+        extract_request_signature_verification(&off),
+        (Some(false), None)
+    );
 }
 
 #[test]
