@@ -52,6 +52,18 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "credentials",
         section: GroupSection::Actionable,
     },
+    // The credential twin of `unused`: the report *tracks* these credentials
+    // and says they went unused for over 90 days — an absent credential is
+    // unknown, never flagged. Advisory (removing a credential is admin-judged,
+    // and only `expired` carries the sweep Fix), with a Credentials-tab
+    // deep-link where the Last-used column shows the evidence.
+    GroupSpec {
+        key: "unused_credential",
+        title: "Unused credentials",
+        blurb: "Client secrets and certificates the sign-in report tracked with no use for over 90 days (or none recorded at all). Credentials whose usage the report couldn't see are never listed — open the app's Credentials tab to read each one's Last used.",
+        tab: "credentials",
+        section: GroupSection::Actionable,
+    },
     GroupSpec {
         key: "orgwide_mailbox",
         title: "Org-wide mailbox access",
@@ -330,7 +342,7 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 ///
 /// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
 /// `unconfinable_orgwide`, `disabled_by_microsoft`, `risky_service_principal`,
-/// `external_exposure`, `high_risk_delegated`,
+/// `external_exposure`, `high_risk_delegated`, `unused_credential`,
 /// `no_local_app`) and the Healthy positives own none —
 /// their rows keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
@@ -750,6 +762,7 @@ mod tests {
             issue::MULTITENANT_AUDIENCE,
             issue::UNVERIFIED_PUBLISHER,
             issue::RISKY_SERVICE_PRINCIPAL,
+            issue::UNUSED_CREDENTIAL,
         ] {
             let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
             assert!(
@@ -818,6 +831,7 @@ mod tests {
             "no_local_app",
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
+            "unused_credential",
         ] {
             assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
         }

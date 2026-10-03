@@ -21,7 +21,7 @@ use azapptoolkit_dto::audit::AuditRunResult;
 use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertResult};
 use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
 use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto};
-use azapptoolkit_dto::credentials::CredentialRowDto;
+use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
     AppAssignmentDto, AppRolesView, ApplicationTemplateDto, EnterpriseApplicationDetail,
@@ -881,6 +881,19 @@ pub fn credential_expirations() -> Vec<CredentialRowDto> {
             CredentialStatus::Active,
         ),
     ]
+}
+
+/// A tenant-wide last-used answer where the report read fine but holds no
+/// rows: the Credentials tab renders every Last-used cell as the unknown "—".
+/// Tests that mount the tab to exercise something else pin the healthy path
+/// (report available) so the column must not read as degraded — an unmocked
+/// command would reject instead, and the tab would show its "unavailable"
+/// notice instead.
+pub fn credential_usage_empty() -> CredentialUsageDto {
+    CredentialUsageDto {
+        available: true,
+        rows: Vec::new(),
+    }
 }
 
 // ---------------- Key Vault ----------------

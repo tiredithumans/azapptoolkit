@@ -18,6 +18,8 @@
 //! just-rotated/removed credential is never shown as still-expiring — the same
 //! freshness contract `apps_pairing` accepts.
 
+use std::collections::HashMap;
+
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::summarize_credentials;
@@ -26,7 +28,7 @@ use chrono::{DateTime, Utc};
 
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
-use crate::dto::credentials::CredentialRowDto;
+use crate::dto::credentials::{CredentialRowDto, CredentialUsageDto, CredentialUsageRow};
 use crate::state::AppState;
 
 /// Lists every app-registration credential (client secret + certificate) in the
@@ -41,6 +43,86 @@ pub async fn list_credential_expirations(
     // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     Ok(crate::commands::applications::credential_expirations_cached(&state, &tenant_id).await?)
+}
+
+/// Tenant-wide per-credential last-used map for the Credentials tab, read from
+/// the beta `appCredentialSignInActivities` report. Same fold as the audit's
+/// prefetch (per credential: newest date wins; a present row with no date is
+/// "tracked but never used"), so the tab's column and the audit's
+/// unused-credential advisory can never disagree — but this degrades to
+/// `available: false` instead of failing, because the tab renders "—" for
+/// unknown, it must not error.
+///
+/// **Global cloud only**: on a sovereign cloud the host rejects the beta path
+/// and this always answers "not available" — the same graceful-degradation
+/// contract the unused-app report's sovereign limit follows.
+#[tauri::command]
+pub async fn list_credential_usage(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<CredentialUsageDto, UiError> {
+    // The tab calls this on every mount; prove the session before the
+    // (possibly cache-hit) report read, matching `list_credential_expirations`.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let client = state.graph_for(&tenant_id);
+    // Read-through cached in the Graph client (60-min Permissions TTL): a
+    // re-opened tab or a fresh app detail costs no second walk of a slow,
+    // rate-limited beta report.
+    let report = match state.ensure_audit_log_token(&tenant_id).await {
+        Ok(()) => client.list_app_credential_sign_in_activities().await.ok(),
+        Err(err) => {
+            tracing::info!(
+                code = %UiError::from(err).code,
+                "credential usage: AuditLog.Read.All token unavailable; Last-used column degrades to unknown"
+            );
+            None
+        }
+    };
+    let Some(rows) = report else {
+        return Ok(CredentialUsageDto {
+            available: false,
+            rows: Vec::new(),
+        });
+    };
+    let mut merged: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
+    for r in &rows {
+        let (Some(app_id), Some(key_id)) = (r.app_id.as_deref(), r.key_id.as_deref()) else {
+            continue;
+        };
+        if app_id.is_empty() || key_id.is_empty() {
+            continue;
+        }
+        // Any dated row makes the credential "used as of" that date; absence
+        // of a row entirely is handled client-side as Unknown (no key here).
+        let entry = merged
+            .entry((app_id.to_string(), key_id.to_string()))
+            .or_insert(None);
+        if let Some(dt) = r
+            .sign_in_activity
+            .as_ref()
+            .and_then(|s| s.last_sign_in_date_time)
+        {
+            *entry = Some(match *entry {
+                Some(prev) if prev >= dt => prev,
+                _ => dt,
+            });
+        }
+    }
+    let mut out: Vec<CredentialUsageRow> = merged
+        .into_iter()
+        .map(|((app_id, key_id), last_used)| CredentialUsageRow {
+            app_id,
+            key_id,
+            last_used,
+        })
+        .collect();
+    // Deterministic order — the map iteration order would otherwise make two
+    // identical reports serialize differently.
+    out.sort_by(|a, b| (&a.app_id, &a.key_id).cmp(&(&b.app_id, &b.key_id)));
+    Ok(CredentialUsageDto {
+        available: true,
+        rows: out,
+    })
 }
 
 /// Flattens every app's client secrets + certificates into one expiry-sorted

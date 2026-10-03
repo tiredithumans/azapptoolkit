@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, RemediationKind, ResourcePermission, SpAuditInput,
-    apply_service_principal_risk, score_application, score_service_principal, unused_app_advisory,
+    AppPermissions, AuditItem, CredentialActivity, RemediationKind, ResourcePermission,
+    SpAuditInput, apply_service_principal_risk, is_expired, score_application,
+    score_service_principal, unused_app_advisory, unused_credential_advisory,
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
@@ -415,6 +416,47 @@ pub(crate) async fn score_one(
         {
             item.remediations
                 .push(azapptoolkit_core::audit::disable_sign_in_remediation());
+        }
+    }
+    // Per-credential last-used advisory (SP-only rows are skipped: a
+    // service principal carries no local credentials to judge). Only
+    // still-valid credentials are considered — an expired one is the
+    // expired-credential finding's job — and only ones the report actually
+    // tracks can flag: everything without a report row resolves to `Unknown`
+    // inside `unused_credential_advisory`, so a missing or partial report
+    // never mis-flags a credential. Credential age falls back to the app's
+    // creation date; a secret with no start date is as old as its app.
+    if ctx.credential_usage_available {
+        let activity = |key_id: &str| ctx.credential_activity_for(&app.app_id, key_id);
+        let usage: Vec<(String, CredentialActivity, Option<DateTime<Utc>>)> = app
+            .password_credentials
+            .iter()
+            .filter(|c| !is_expired(c.end_date_time, now))
+            .map(|c| {
+                (
+                    format!("secret \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                    activity(&c.key_id),
+                    c.start_date_time.or(app.created_date_time),
+                )
+            })
+            .chain(
+                app.key_credentials
+                    .iter()
+                    .filter(|c| !is_expired(c.end_date_time, now))
+                    .map(|c| {
+                        (
+                            format!("cert \"{}\"", c.display_name.as_deref().unwrap_or("—")),
+                            activity(&c.key_id),
+                            c.start_date_time.or(app.created_date_time),
+                        )
+                    }),
+            )
+            .collect();
+        let usage_refs: Vec<(&str, CredentialActivity, Option<DateTime<Utc>>)> =
+            usage.iter().map(|(l, a, s)| (l.as_str(), *a, *s)).collect();
+        if let Some((issue, rec)) = unused_credential_advisory(&usage_refs, now) {
+            item.issues.push(issue);
+            item.recommendations.push(rec);
         }
     }
     Ok(item)

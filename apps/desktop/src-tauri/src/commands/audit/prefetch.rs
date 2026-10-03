@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::ServicePrincipal;
 use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
@@ -402,6 +402,82 @@ pub(crate) async fn prefetch_risky_service_principals(
                 Arc::new(HashMap::new()),
                 Some(AuditCoverageGap::RiskyServicePrincipals),
             )
+        }
+    }
+}
+
+/// ONE tenant-wide per-credential last-used read (beta
+/// `appCredentialSignInActivities`, **global cloud only**) → `(available,
+/// "appId|keyId" -> CredentialActivity)`. Rides the same `AuditLog.Read.All`
+/// token as [`prefetch_sign_in_activity`]; a missing-consent failure there
+/// already surfaces the "Grant consent" button, so this report has no consent
+/// state of its own — either way `available = false` just disables the
+/// unused-credential advisory, and on a sovereign build the 404 lands here as
+/// the same graceful degradation.
+///
+/// An app's own credential can appear twice (once per `credentialOrigin`);
+/// the fold keeps the NEWEST date per credential, and a credential with any
+/// dated row never collapses to `Never`. A credential absent from the report
+/// has no key at all and scores `Unknown` — never "unused": the preview
+/// report's coverage of never-used credentials is not contractual, so
+/// inferring non-use from absence would flag live credentials whose use it
+/// simply does not surface.
+pub(crate) async fn prefetch_credential_activity(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> (bool, Arc<HashMap<String, CredentialActivity>>) {
+    let unavailable = || (false, Arc::new(HashMap::new()));
+    match state.ensure_audit_log_token(tenant_id).await {
+        Ok(()) => match client.list_app_credential_sign_in_activities().await {
+            Ok(rows) => {
+                let mut map: HashMap<String, CredentialActivity> = HashMap::new();
+                for row in rows {
+                    let (Some(app_id), Some(key_id)) =
+                        (row.app_id.as_deref(), row.key_id.as_deref())
+                    else {
+                        continue;
+                    };
+                    if app_id.is_empty() || key_id.is_empty() {
+                        continue;
+                    }
+                    // A present row says the credential IS tracked: no dated
+                    // activity reads as `Never` (the one case the advisory may
+                    // flag alongside stale-but-used). Any dated row upgrades —
+                    // and refreshes — that, newest date winning across origins.
+                    let entry = map
+                        .entry(format!("{app_id}|{key_id}"))
+                        .or_insert(CredentialActivity::Never);
+                    if let Some(dt) = row
+                        .sign_in_activity
+                        .as_ref()
+                        .and_then(|s| s.last_sign_in_date_time)
+                    {
+                        let fresher = match *entry {
+                            CredentialActivity::LastSeen(prev) => dt > prev,
+                            _ => true,
+                        };
+                        if fresher {
+                            *entry = CredentialActivity::LastSeen(dt);
+                        }
+                    }
+                }
+                (true, Arc::new(map))
+            }
+            Err(err) => {
+                tracing::info!(
+                    ?err,
+                    "audit: credential sign-in report unavailable; skipping unused-credential checks"
+                );
+                unavailable()
+            }
+        },
+        Err(err) => {
+            tracing::info!(
+                code = %UiError::from(err).code,
+                "audit: AuditLog.Read.All token unavailable; skipping unused-credential checks"
+            );
+            unavailable()
         }
     }
 }

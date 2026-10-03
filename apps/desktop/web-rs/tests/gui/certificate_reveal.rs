@@ -44,6 +44,9 @@ fn mount_tab_counting() -> (ts::Mounted, RwSignal<u32>) {
         "save_generated_certificate_pfx",
         &Some("/tmp/contoso.pfx".to_string()),
     );
+    // See credential_sweep.rs: keep the tab's Last-used fetch on the healthy
+    // (available, empty) path so it never renders the degraded notice.
+    ts::mock_ok("list_credential_usage", &fixtures::credential_usage_empty());
     let detail = Arc::new(fixtures::application_detail(
         "obj-1",
         "app-1",

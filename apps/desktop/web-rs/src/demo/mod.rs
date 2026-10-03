@@ -42,7 +42,7 @@ use azapptoolkit_dto::applications::{
     ApplicationDetail, ApplicationListRowDto, DirectoryIndexStatus,
 };
 use azapptoolkit_dto::audit::{AuditRunResult, CachedAuditSummary};
-use azapptoolkit_dto::credentials::CredentialRowDto;
+use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto, CredentialUsageRow};
 use azapptoolkit_dto::enterprise_application::{
     EnterpriseApplicationDetail, EnterpriseApplicationDto,
 };
@@ -571,6 +571,40 @@ fn credential_rows(apps: &[DemoApp], now: DateTime<Utc>) -> Vec<CredentialRowDto
         None => (1, 0),
     });
     rows
+}
+
+/// The per-credential Last-used board, one row per credential in the catalog —
+/// the demo's answer to `list_credential_usage`. Dates are offsets from
+/// `now`, cycling recent → stale → never-used, so the Credentials tab shows
+/// all three states on any load day and the stale ones sit past the 90-day
+/// audit threshold (Contoso CRM's legacy secret reads "no use recorded"-adjacent
+/// to a genuinely-used one, which is the story the column tells).
+fn credential_usage(apps: &[DemoApp], now: DateTime<Utc>) -> CredentialUsageDto {
+    let mut rows = Vec::new();
+    for (i, a) in apps.iter().enumerate() {
+        let app = app_detail(a).application;
+        let key_ids = app
+            .password_credentials
+            .iter()
+            .map(|c| &c.key_id)
+            .chain(app.key_credentials.iter().map(|c| &c.key_id));
+        for (j, key_id) in key_ids.enumerate() {
+            let last_used = match (i + j) % 3 {
+                0 => Some(now - chrono::Duration::days(4 + ((i * 7 + j * 3) % 9) as i64)),
+                1 => Some(now - chrono::Duration::days(95 + ((i * 11 + j * 5) % 45) as i64)),
+                _ => None,
+            };
+            rows.push(CredentialUsageRow {
+                app_id: app.app_id.clone(),
+                key_id: key_id.clone(),
+                last_used,
+            });
+        }
+    }
+    CredentialUsageDto {
+        available: true,
+        rows,
+    }
 }
 
 /// One SAML app on the SSO certificate board, with the two payloads its SSO
@@ -1272,6 +1306,7 @@ fn register_fixtures() {
 
     // ---- Security / health ----
     mock_ok("list_credential_expirations", &credential_rows(&apps, now));
+    mock_ok("list_credential_usage", &credential_usage(&apps, now));
     let audit_run = audit_run(&apps);
     // Home's posture card reads the counts-only summary; derived from the same
     // run so the demo's Home card and Security strip agree.
@@ -1427,6 +1462,44 @@ mod tests {
     /// Every row another surface offers to "Open" names an object the detail
     /// commands actually hold — the finding → open journey, the credential
     /// board, the SSO board, the mailbox lookup and the top-bar search.
+    /// Every Last-used row must name a credential some app actually holds
+    /// (a dangling key id renders as a dead "—" with no row behind it), and
+    /// all three cell states — dated, stale past the 90-day audit threshold,
+    /// never-used — must appear, so the demo Credentials tab shows the column's
+    /// whole vocabulary rather than one flat answer.
+    #[test]
+    fn usage_rows_name_real_credentials_and_cover_all_three_states() {
+        let apps = catalog();
+        let usage = credential_usage(&apps, Utc::now());
+        assert!(usage.available, "the demo always shows the report as read");
+        let (mut recent, mut stale, mut never) = (0, 0, 0);
+        for r in &usage.rows {
+            let app = apps
+                .iter()
+                .find(|a| app_id(a.name) == r.app_id)
+                .unwrap_or_else(|| panic!("usage row for unknown app {}", r.app_id));
+            assert!(
+                app.secrets
+                    .iter()
+                    .map(|c| &c.key_id)
+                    .chain(app.certs.iter().map(|c| &c.key_id))
+                    .any(|k| k == &r.key_id),
+                "usage row {}/{} names no credential",
+                r.app_id,
+                r.key_id
+            );
+            match r.last_used {
+                Some(d) if (Utc::now() - d).num_days() > 90 => stale += 1,
+                Some(_) => recent += 1,
+                None => never += 1,
+            }
+        }
+        assert!(
+            recent > 0 && stale > 0 && never > 0,
+            "last-used story degenerated: {recent} recent / {stale} stale / {never} never"
+        );
+    }
+
     #[test]
     fn every_open_target_resolves() {
         let apps = catalog();

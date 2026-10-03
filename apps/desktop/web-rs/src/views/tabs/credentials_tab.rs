@@ -1,10 +1,12 @@
 //! Credentials tab. Lists secrets + certificates for an app, lets you add /
 //! remove / sweep expired.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARN_DAYS;
-use chrono::NaiveDate;
+use azapptoolkit_dto::credentials::CredentialUsageDto;
+use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{
     Body1, Button, ButtonAppearance, DatePicker, Field, Input, Select, Spinner, SpinnerSize,
@@ -14,6 +16,7 @@ use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
     GeneratedCertificateResult, RemoveExpiredResult,
 };
+use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable, FormError};
@@ -34,6 +37,50 @@ fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
     let end = end?;
     let now = chrono::Utc::now();
     Some((end - now).num_days())
+}
+
+/// Last-used lookup for the two credential tables: `(app_id, key_id)` → the
+/// newest recorded use; `Some(None)` = tracked-but-never-used; **no entry =
+/// unknown**. An unavailable report (or a failed read) yields an empty map —
+/// every cell then renders "—", which is the honest answer: absence from the
+/// beta `appCredentialSignInActivities` report is never evidence of no use,
+/// which is why an unknown credential is never flagged by the audit's
+/// unused-credential rule either. The newest-wins fold is re-applied here
+/// (rather than trusted across the wire) because one credential can appear
+/// under both the `application` and `servicePrincipal` origins.
+fn usage_lookup(
+    usage: Option<&CredentialUsageDto>,
+) -> HashMap<(String, String), Option<DateTime<Utc>>> {
+    let Some(dto) = usage.filter(|u| u.available) else {
+        return HashMap::new();
+    };
+    let mut map: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
+    for r in &dto.rows {
+        let entry = map
+            .entry((r.app_id.clone(), r.key_id.clone()))
+            .or_insert(None);
+        if let Some(dt) = r.last_used
+            && entry.is_none_or(|prev| dt > prev)
+        {
+            *entry = Some(dt);
+        }
+    }
+    map
+}
+
+/// The Last-used cell: dated → the day; tracked with no date → "No use
+/// recorded"; unknown → "—". Three states because "we don't know" and "never
+/// used" are different facts.
+fn last_used_text(
+    map: &HashMap<(String, String), Option<DateTime<Utc>>>,
+    app_id: &str,
+    key_id: &str,
+) -> String {
+    match map.get(&(app_id.to_string(), key_id.to_string())) {
+        Some(Some(d)) => fmt_date(Some(*d)),
+        Some(None) => "No use recorded".into(),
+        None => "—".into(),
+    }
 }
 
 fn status_label(days: Option<i64>) -> (&'static str, BadgeTone) {
@@ -243,6 +290,26 @@ pub fn CredentialsTab(
     let secrets =
         Signal::derive(move || detail.with(|d| d.application.password_credentials.clone()));
     let certs = Signal::derive(move || detail.with(|d| d.application.key_credentials.clone()));
+
+    // Tenant-wide per-credential last-used map (beta `appCredentialSignInActivities`,
+    // Global cloud only; read-through cached in the backend). Keyed on the
+    // active tenant — the data is tenant-wide; the tables below join it by
+    // `(app_id, key_id)` at render time, so a re-read or a different app can
+    // never paint a stale map's dates onto this app's rows. `Err` /
+    // `available: false` is not an error state here: the column's "—" is
+    // honest for unknown.
+    let usage = LocalResource::new(move || {
+        let tenant = session.active_tenant.get();
+        async move {
+            match tenant {
+                Some(t) => credentials::list_credential_usage(&t.tenant_id).await,
+                None => Ok(CredentialUsageDto {
+                    available: false,
+                    rows: Vec::new(),
+                }),
+            }
+        }
+    });
 
     let add_open = RwSignal::new(false);
     let display_name = RwSignal::new("client-secret".to_string());
@@ -681,6 +748,25 @@ pub fn CredentialsTab(
 
     view! {
         <div class="credentials-tab">
+            {move || {
+                // One notice for the whole tab, not one per table: the column
+                // is degraded everywhere at once or nowhere. `None` (still
+                // loading) must NOT claim the report is unavailable.
+                let unavailable = match usage.get() {
+                    Some(Err(_)) => true,
+                    Some(Ok(u)) => !u.available,
+                    None => false,
+                };
+                unavailable.then(|| {
+                    view! {
+                        <Callout tone="info">
+                            "Last-used data is unavailable — the credential sign-in report needs \
+                             AuditLog.Read.All consent and is served in the Global cloud only. \
+                             A \u{2014} cell means unknown, not unused."
+                        </Callout>
+                    }
+                })
+            }}
             <section>
                 <header class="row-between">
                     <strong>{move || format!("Secrets ({})", secrets.with(Vec::len))}</strong>
@@ -728,13 +814,27 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
+                    // Rebuilt when the last-used map resolves: the table paints
+                    // during the read with "—" cells, then repopulates.
+                    let map =
+                        usage_lookup(usage.get().as_ref().and_then(|r| r.as_ref().ok()));
+                    let app = app_id.get();
                     view! {
                         <DataTable
-                            headers=vec!["Description", "Hint", "Secret ID", "Expires", "Status", ""]
+                            headers=vec![
+                                "Description",
+                                "Hint",
+                                "Secret ID",
+                                "Expires",
+                                "Last used",
+                                "Status",
+                                "",
+                            ]
                             rows=secrets.get()
                             empty_message="No secrets."
                             row=move |s| {
                                 let days = days_until(s.end_date_time);
+                                let last_used = last_used_text(&map, &app, &s.key_id);
                                 // Offer the rotate shortcut on secrets that are
                                 // expiring soon or already expired — where rotation
                                 // is the relevant action.
@@ -754,6 +854,7 @@ pub fn CredentialsTab(
                                         <td>
                                             {fmt_date(s.end_date_time)}
                                         </td>
+                                        <td>{last_used}</td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">
                                             <div class="cell-actions">
@@ -806,6 +907,9 @@ pub fn CredentialsTab(
                     </div>
                 </header>
                 {move || {
+                    let map =
+                        usage_lookup(usage.get().as_ref().and_then(|r| r.as_ref().ok()));
+                    let app = app_id.get();
                     view! {
                         <DataTable
                             headers=vec![
@@ -815,6 +919,7 @@ pub fn CredentialsTab(
                                 "Usage",
                                 "Type",
                                 "Expires",
+                                "Last used",
                                 "Status",
                                 "",
                             ]
@@ -822,6 +927,7 @@ pub fn CredentialsTab(
                             empty_message="No certificates."
                             row=move |c| {
                                 let days = days_until(c.end_date_time);
+                                let last_used = last_used_text(&map, &app, &c.key_id);
                                 let thumbprint = c
                                     .custom_key_identifier
                                     .as_deref()
@@ -846,6 +952,7 @@ pub fn CredentialsTab(
                                         <td>
                                             {fmt_date(c.end_date_time)}
                                         </td>
+                                        <td>{last_used}</td>
                                         <td>{status_badge(days)}</td>
                                         <td class="cell-mid">
                                             {remove_button(
@@ -1289,6 +1396,51 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// The Last-used column's three states must stay distinguishable, and the
+    /// fold must match the backend's: one credential can appear under both the
+    /// `application` and `servicePrincipal` origins and newest date wins; a
+    /// row with no date is "tracked, never used"; no row is UNKNOWN — never
+    /// rendered as if it meant unused. A row must also never be read against a
+    /// different app's credentials.
+    #[test]
+    fn last_used_cell_reads_three_states() {
+        use azapptoolkit_dto::credentials::CredentialUsageRow;
+        use chrono::{TimeZone, Utc};
+        let old = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let fresh = Utc.with_ymd_and_hms(2026, 9, 20, 8, 30, 0).unwrap();
+        let row = |app_id: &str, key_id: &str, last_used: Option<chrono::DateTime<Utc>>| {
+            CredentialUsageRow {
+                app_id: app_id.into(),
+                key_id: key_id.into(),
+                last_used,
+            }
+        };
+        let dto = CredentialUsageDto {
+            available: true,
+            rows: vec![
+                row("app-1", "k-used", Some(old)),
+                row("app-1", "k-used", Some(fresh)),
+                row("app-1", "k-never", None),
+            ],
+        };
+        let map = usage_lookup(Some(&dto));
+        assert_eq!(last_used_text(&map, "app-1", "k-used"), "2026-09-20");
+        assert_eq!(last_used_text(&map, "app-1", "k-never"), "No use recorded");
+        assert_eq!(last_used_text(&map, "app-1", "k-unknown"), "—");
+        assert_eq!(last_used_text(&map, "app-2", "k-used"), "—");
+        // Unavailable report (or none) → nothing is knowable, everything "—".
+        let off = CredentialUsageDto {
+            available: false,
+            rows: vec![row("app-1", "k-used", Some(fresh))],
+        };
+        assert!(usage_lookup(Some(&off)).is_empty());
+        assert_eq!(
+            last_used_text(&usage_lookup(Some(&off)), "app-1", "k-used"),
+            "—"
+        );
+        assert!(usage_lookup(None).is_empty());
     }
 
     const TODAY: &str = "2026-01-01";

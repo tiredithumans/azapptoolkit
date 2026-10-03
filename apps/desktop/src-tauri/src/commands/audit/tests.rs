@@ -554,6 +554,8 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available: false,
         sign_in_map: Arc::default(),
+        credential_usage_available: false,
+        credential_activity_map: Arc::default(),
         risky_available: false,
         risky_by_sp: Arc::default(),
     }
@@ -859,4 +861,98 @@ async fn risk_for_is_silent_while_the_report_is_unavailable() {
     ctx.risky_available = true;
     assert_eq!(ctx.risk_for("sp-1"), Some(("confirmedCompromised", "high")));
     assert!(ctx.risk_for("sp-absent").is_none());
+}
+
+/// F259 end-to-end at the command layer: the run's tenant-wide credential
+/// report joins onto the app row per credential (`appId|keyId`), and only
+/// positive evidence flags. Pins the three never-false-positive guards:
+/// report unavailable ⇒ rule off; no report row ⇒ `Unknown`; expired ⇒ the
+/// credential-expiry finding's job.
+#[tokio::test]
+async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
+    use azapptoolkit_core::audit::CredentialActivity;
+    use azapptoolkit_core::models::PasswordCredential;
+
+    const MARKER: &str = azapptoolkit_core::audit::issue::UNUSED_CREDENTIAL;
+    let server = wiremock::MockServer::start().await;
+    mock_sp_lookup(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+    )
+    .await;
+    let now = Utc::now();
+    let secret = |key: &str, end: Option<DateTime<Utc>>| PasswordCredential {
+        key_id: key.into(),
+        display_name: Some("ci".into()),
+        // Older than the 90-day window, so this exercises the staleness rule,
+        // not the "avoid flagging brand-new" age gate.
+        start_date_time: Some(now - chrono::Duration::days(200)),
+        end_date_time: end,
+        ..Default::default()
+    };
+    let app_with = |creds: Vec<PasswordCredential>| Application {
+        password_credentials: creds,
+        ..bare_app()
+    };
+    let stale_secret = || {
+        app_with(vec![secret(
+            "k-stale",
+            Some(now + chrono::Duration::days(30)),
+        )])
+    };
+
+    // Control: the report was never read ⇒ rule off, evidence notwithstanding.
+    let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    let item = score_one(&ctx, &stale_secret(), None)
+        .await
+        .expect("scores");
+    assert!(!item.issues.iter().any(|i| i.starts_with(MARKER)));
+
+    // Tracked + last used 150 days ago ⇒ flagged, day count named.
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.credential_usage_available = true;
+    ctx.credential_activity_map = Arc::new(HashMap::from([(
+        "app-1|k-stale".to_string(),
+        CredentialActivity::LastSeen(now - chrono::Duration::days(150)),
+    )]));
+    let item = score_one(&ctx, &stale_secret(), None)
+        .await
+        .expect("scores");
+    let issue = item
+        .issues
+        .iter()
+        .find(|i| i.starts_with(MARKER))
+        .expect("a stale tracked credential flags");
+    assert!(
+        issue.contains("secret \"ci\" (last used 150 days ago)"),
+        "{issue}"
+    );
+
+    // Absent from the report ⇒ `Unknown`. A live credential the preview
+    // report simply doesn't surface must never be flagged "unused".
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.credential_usage_available = true;
+    ctx.credential_activity_map = Arc::new(HashMap::from([(
+        "app-1|other-key".to_string(),
+        CredentialActivity::Never,
+    )]));
+    let item = score_one(&ctx, &stale_secret(), None)
+        .await
+        .expect("scores");
+    assert!(!item.issues.iter().any(|i| i.starts_with(MARKER)));
+
+    // Already expired ⇒ the credential-expiry finding covers it; no second
+    // advisory line for the same credential.
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.credential_usage_available = true;
+    ctx.credential_activity_map = Arc::new(HashMap::from([(
+        "app-1|k-stale".to_string(),
+        CredentialActivity::Never,
+    )]));
+    let expired = app_with(vec![secret(
+        "k-stale",
+        Some(now - chrono::Duration::days(5)),
+    )]);
+    let item = score_one(&ctx, &expired, None).await.expect("scores");
+    assert!(!item.issues.iter().any(|i| i.starts_with(MARKER)));
 }

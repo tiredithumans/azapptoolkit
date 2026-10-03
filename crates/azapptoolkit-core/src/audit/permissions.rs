@@ -25,6 +25,14 @@ pub const STALE_APP_DAYS: i64 = 90;
 /// (no PowerShell origin) — drives [`unused_app_advisory`].
 pub const UNUSED_APP_DAYS: i64 = 90;
 
+/// Days without ANY credential sign-in activity before a still-valid
+/// credential is flagged "unused" — drives
+/// [`unused_credential_advisory`](super::unused_credential_advisory). Set
+/// equal to [`UNUSED_APP_DAYS`] deliberately: both answers come from the same
+/// beta sign-in-activity reports and a credential unused as long as its app
+/// is exactly the case the two advisories are meant to surface together.
+pub const UNUSED_CREDENTIAL_DAYS: i64 = 90;
+
 /// Long-lived secret threshold. `Credential-Analysis.ps1:169`. Applies to
 /// certificates too: Rule 7 checks every credential kind against it and names
 /// the two kinds on separate lines. Ported spelling kept (public, re-exported).

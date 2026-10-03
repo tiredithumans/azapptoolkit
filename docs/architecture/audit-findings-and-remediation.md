@@ -34,9 +34,11 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 19 / 20 | `rule_external_exposure` | +3 audience / +2 unverified publisher | `MULTITENANT_AUDIENCE`, `UNVERIFIED_PUBLISHER` | `external_exposure` | — | not cited |
 | — | `rule_downgrade_pointers` | recommendation only | none | — | — (Downgrade… is admin-judged) | not cited |
 | runner | `unused_app_advisory` (sign-in post-pass) | advisory | none (structured `unused`) | `unused` | `DisableSignIn` | net-new |
+| runner | `unused_credential_advisory` (credential-usage post-pass, **Application rows only**) | advisory | `UNUSED_CREDENTIAL` | `unused_credential` | — (removing a credential is admin-judged) | net-new |
 
 Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
-Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (see
+Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (not the credential-usage
+one: a service principal carries no local credentials to judge; see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
 
 ## Scope-aware audit risk
@@ -376,6 +378,44 @@ compromise flag must be re-read by every run, and the payload is one row per fla
   `group_remediation_kinds` entry — `DisableSignIn` stays solely owned by the `unused` group, which
   the exactly-one-owner test pins); risky rows still render their Fix in the All-apps pane, where
   no per-group kinds filter narrows the row buttons.
+
+## The per-credential last-used signal (credential-usage post-pass)
+
+One tenant-wide read per audit — `GET /beta/reports/appCredentialSignInActivities` (beta preview,
+**Global cloud only**, `AuditLog.Read.All`) — returns the last observed sign-in use of every
+credential, per origin. Same transport shape as the sign-in report (`$top = MAX_PAGE_SIZE`,
+origin-checked paging), but unlike the risky read it IS read-through cached
+(`{tenant}|app_credential_sign_in_activities` under `CacheKind::Permissions`): last-used moves on
+a days-scale, and the identical read backs the Credentials tab's `list_credential_usage`, so a
+fresh audit warms the tab and vice versa. Rows fold into one `"appId|keyId" → CredentialActivity`
+map with the newest date winning (one credential can appear under both the `application` and the
+`servicePrincipal` origin); the Credentials tab re-applies the fold client-side because the join
+happens there too. Application rows only — `score_sp_only` never runs it.
+
+- **Unknown is never unused.** A credential with no report row resolves to `Unknown` and is never
+  flagged — absence from the report is not evidence of no use (the report covers only some sign-in
+  flows). Only a `Never` credential older than the window, or a `LastSeen` one whose last use is
+  past 90 days (`UNUSED_CREDENTIAL_DAYS`), becomes the advisory. The never-false-positive contract;
+  pinned by `unused_credential_advisory_never_flags_unknown`.
+- **Scope of the judgment:** only still-valid credentials are considered (an expired one is the
+  `expired` finding's job, which keeps the sole `RemoveExpiredCredentials` Fix), age counts from
+  each credential's `start_date_time` (falling back to the app's creation date — the unused-app
+  rule's brand-new guard, per credential), and one issue line names up to three stale credentials
+  ("and N more") per the mixed-credential-status line precedent. Advisory only: no score —
+  last-used is operator context on top of the expiry signals, not a new severity — and no Fix;
+  removal stays admin-judged.
+- **Unavailable disables, never degrades:** a failed read, a missing `AuditLog.Read.All` consent or
+  a non-global cloud sets `ScoreCtx.credential_usage_available = false` and the advisory is simply
+  off — no coverage gap, no degraded banner (the sign-in-report precedent: most tenants can never
+  see this report, and it only feeds an advisory). `list_credential_usage` degrades the same way
+  (`available: false` + empty rows) rather than failing the command.
+- **UI:** the `unused_credential` finding group sits in the Actionable section with a
+  Credentials-tab deep link, and deliberately has no `group_bulk_actions` /
+  `group_remediation_kinds` entry (pinned by `advisory_and_healthy_groups_offer_no_row_fix`). The
+  Credentials tab shows a **Last used** column on both tables, three-state by construction:
+  dated → the day, tracked-with-no-use → "No use recorded", unknown → "—". "—" is a real answer
+  ("we don't know"), never rendered as "unused"; when the report is unavailable the whole column
+  reads "—" under one info `Callout`.
 
 ## Structured audit signals over issue-text parsing
 

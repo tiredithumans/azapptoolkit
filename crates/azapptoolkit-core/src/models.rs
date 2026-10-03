@@ -495,6 +495,38 @@ pub struct SignInActivity {
     pub last_sign_in_date_time: Option<DateTime<Utc>>,
 }
 
+/// One row of the Entra beta `reports/appCredentialSignInActivities` report
+/// (preview, **global cloud only**): a credential's last-seen sign-in plus
+/// context. The audit joins these onto credential rows by `(appId, keyId)`.
+/// Rows appear for credentials the preview report tracks; a null
+/// `signInActivity.lastSignInDateTime` means tracked but no use observed,
+/// while a credential **absent** from the report is unknown, not unused —
+/// see the audit deep-dive before inferring anything from absence.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCredentialSignInActivity {
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// The credential's keyId — matches `PasswordCredential::key_id` /
+    /// `KeyCredential::key_id` on the application (and its mirrored SP copy).
+    #[serde(default)]
+    pub key_id: Option<String>,
+    /// `clientSecret` | `certificate` | `unknownFutureValue`.
+    #[serde(default)]
+    pub key_type: Option<String>,
+    /// `application` | `servicePrincipal` — the same credential can report
+    /// from either side; both rows carry the same `keyId` and dates.
+    #[serde(default)]
+    pub credential_origin: Option<String>,
+    #[serde(default)]
+    pub service_principal_object_id: Option<String>,
+    /// The resource the credential last presented to.
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub sign_in_activity: Option<SignInActivity>,
+}
+
 /// A SCIM provisioning (synchronization) job on a service principal.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

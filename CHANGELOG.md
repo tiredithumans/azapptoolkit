@@ -7,6 +7,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Added
 
+- **The security audit and Credentials tab now show whether a credential is actually used.** Each
+  audit run makes one tenant-wide read of the beta `appCredentialSignInActivities` report (same
+  on-demand `AuditLog.Read.All` token as the sign-in reports; **Global cloud only** — a sovereign
+  cloud or a failed read simply leaves the feature off, never a degraded run). Credentials the
+  report tracked but hadn't seen used for over 90 days raise an advisory **"Unused
+  credential(s)"** finding — no score added (ranking is unchanged) and no Fix, removing a
+  credential stays admin-judged — naming up to three per app and deep-linking to the Credentials
+  tab, which gained a **Last used** column on both tables. Three-state honesty: a dated
+  credential shows the day, a tracked-never-used one reads "No use recorded", and anything the
+  report couldn't observe reads "—" — absence from the report is never treated as "unused", so
+  the rule never mis-flags an unobserved credential. The same read backs the Credentials tab
+  live (per-tenant read-through cache), and the `audit_reports` capability description now names
+  the Global-cloud-only limit.
 - **The security audit now reads Microsoft's own risky-service-principal report.** Each audit run
   makes one tenant-wide Identity Protection call (`atRisk` / `confirmedCompromised` service
   principals, delegated `IdentityRiskyServicePrincipal.Read.All`, consented on demand) and joins it

@@ -164,7 +164,9 @@ then sign out and back in so a fresh token is issued.
 3. **Delegated OAuth scopes still required** (the second half above). The operator's consented
    scopes must include: `Directory.Read.All`, `Application.ReadWrite.All`,
    `AppRoleAssignment.ReadWrite.All`, `DelegatedPermissionGrant.ReadWrite.All`, and — optionally,
-   per feature — `Synchronization.Read.All`, `AuditLog.Read.All`, `Policy.Read.All`,
+   per feature — `Synchronization.Read.All`, `AuditLog.Read.All` (the Activity tab, the
+   unused-app/unused-credential audit signals and the Credentials tab's Last-used column — the
+   sign-in reports are served in the **Global cloud only**), `Policy.Read.All`,
    `IdentityRiskyServicePrincipal.Read.All` (the risky-service-principal audit signal; the tenant
    also needs Entra ID **Workload Identities premium**, and the audit skips the check without it),
    `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,

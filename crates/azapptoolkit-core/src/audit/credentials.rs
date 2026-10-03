@@ -148,6 +148,75 @@ pub fn unused_app_advisory(
     }
 }
 
+/// Tri-state per-credential last-used signal for the beta
+/// `appCredentialSignInActivities` report. Mirrors [`SignInStatus`] but is
+/// stricter on the third state: the report is preview data and its coverage
+/// of never-used credentials is not contractual, so a credential ABSENT from
+/// the report is `Unknown` — never evidence of non-use. Only a present row
+/// (with or without a date) says something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialActivity {
+    /// The report was unavailable, or this credential has no row in it.
+    /// Never a finding (a live credential could simply be uncovered).
+    Unknown,
+    /// The report tracks this credential but observed no use.
+    Never,
+    /// Last observed use of the credential (across all flows).
+    LastSeen(DateTime<Utc>),
+}
+
+/// Aggregated "credential unused for over {n} days" advisory for one app —
+/// one issue line naming up to three stale credentials, never one per
+/// credential (the mixed-credential-status line set that precedent). Net-new
+/// (no PowerShell origin); fires only on positive report evidence: a `Never`
+/// credential older than the window, or a still-valid one last used beyond
+/// it. Already-expired credentials are the caller's to filter out (the
+/// expired-credential finding covers them). Adds no risk score: last-used is
+/// operator context on top of the expiry signals, not a new severity, and
+/// removal stays an admin-judged act, so the finding carries no Fix.
+pub fn unused_credential_advisory(
+    creds: &[(&str, CredentialActivity, Option<DateTime<Utc>>)],
+    now: DateTime<Utc>,
+) -> Option<(String, String)> {
+    let mut stale: Vec<String> = Vec::new();
+    for (label, activity, start) in creds {
+        // The unused-app rule's "avoid flagging brand-new" guard, per
+        // credential: no-use evidence only reads as stale once the credential
+        // is older than the window itself.
+        let old_enough = start
+            .map(|s| (now - s).num_days() > UNUSED_CREDENTIAL_DAYS)
+            .unwrap_or(false);
+        if !old_enough {
+            continue;
+        }
+        match activity {
+            CredentialActivity::Unknown => {}
+            CredentialActivity::Never => stale.push(format!("{label} (no use recorded)")),
+            CredentialActivity::LastSeen(dt) => {
+                let days = (now - dt).num_days();
+                if days > UNUSED_CREDENTIAL_DAYS {
+                    stale.push(format!("{label} (last used {days} days ago)"));
+                }
+            }
+        }
+    }
+    if stale.is_empty() {
+        return None;
+    }
+    let shown = if stale.len() > 3 {
+        format!("{} and {} more", stale[..3].join(", "), stale.len() - 3)
+    } else {
+        stale.join(", ")
+    };
+    Some((
+        format!(
+            "{} {shown} — no sign-in activity for over {UNUSED_CREDENTIAL_DAYS} days",
+            issue::UNUSED_CREDENTIAL
+        ),
+        "Confirm each is still needed; remove or rotate the unused ones".to_string(),
+    ))
+}
+
 /// Convert `Option<Option<DateTime<Utc>>>` into [`SignInStatus`] for callers
 /// that still receive the double-Option from DTOs.
 impl From<Option<Option<DateTime<Utc>>>> for SignInStatus {
@@ -243,6 +312,66 @@ mod tests {
         );
         // No sign-in recorded + new app → not flagged (avoid flagging brand-new).
         assert!(unused_app_advisory(SignInStatus::NoneRecorded, created_new, now()).is_none());
+    }
+
+    #[test]
+    fn unused_credential_advisory_never_flags_unknown() {
+        // Absence from the report is `Unknown`, not "unused" — flagging on it
+        // would strip live credentials whose use the preview report simply
+        // doesn't surface. This is the never-false-positive contract.
+        let old = Some(now() - Duration::days(200));
+        let creds = [("secret \"a\"", CredentialActivity::Unknown, old)];
+        assert!(unused_credential_advisory(&creds, now()).is_none());
+    }
+
+    #[test]
+    fn unused_credential_advisory_flags_only_stale_evidence() {
+        let old = Some(now() - Duration::days(200));
+        let young = Some(now() - Duration::days(10));
+        // Recent use → not flagged, even for an old credential.
+        let recent = [(
+            "secret \"a\"",
+            CredentialActivity::LastSeen(now() - Duration::days(10)),
+            old,
+        )];
+        assert!(unused_credential_advisory(&recent, now()).is_none());
+        // Stale use → flagged, with the day count named.
+        let stale = [(
+            "cert \"b\"",
+            CredentialActivity::LastSeen(now() - Duration::days(150)),
+            old,
+        )];
+        let (issue_text, rec) = unused_credential_advisory(&stale, now()).expect("stale flags");
+        assert!(issue_text.starts_with(issue::UNUSED_CREDENTIAL));
+        assert!(issue_text.contains("cert \"b\" (last used 150 days ago)"));
+        assert!(!rec.is_empty());
+        // Never-used + old → flagged; young → not (brand-new guard).
+        let never_old = [("secret \"c\"", CredentialActivity::Never, old)];
+        assert!(
+            unused_credential_advisory(&never_old, now())
+                .is_some_and(|(i, _)| i.contains("secret \"c\" (no use recorded)"))
+        );
+        let never_young = [("secret \"c\"", CredentialActivity::Never, young)];
+        assert!(unused_credential_advisory(&never_young, now()).is_none());
+        // No age info at all → conservative, no flag.
+        let unknown_age = [("secret \"d\"", CredentialActivity::Never, None)];
+        assert!(unused_credential_advisory(&unknown_age, now()).is_none());
+    }
+
+    #[test]
+    fn unused_credential_advisory_is_aggregated_and_capped() {
+        // One line, first three named — never one issue per credential.
+        let old = Some(now() - Duration::days(200));
+        let labels = ["s1", "s2", "s3", "s4", "s5"];
+        let creds: Vec<(&str, CredentialActivity, Option<DateTime<Utc>>)> =
+            labels.map(|l| (l, CredentialActivity::Never, old)).to_vec();
+        let (issue_text, _) = unused_credential_advisory(&creds, now()).expect("flags");
+        assert!(
+            issue_text.contains(
+                "s1 (no use recorded), s2 (no use recorded), s3 (no use recorded) and 2 more"
+            ) && !issue_text.contains("s4"),
+            "{issue_text}"
+        );
     }
 
     #[test]

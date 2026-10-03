@@ -223,8 +223,10 @@ pub static CAPABILITIES: &[Capability] = &[
         key: "audit_reports",
         plane: Plane::EntraDirectory,
         label: "Activity & sign-in reports",
-        description: "Directory audit log (Activity tab) and service-principal sign-in activity \
-                      (unused-app detection).",
+        description: "Directory audit log (Activity tab), service-principal sign-in activity \
+                      (unused-app detection), and per-credential last-used data. The credential \
+                      report is beta and served in the Global cloud only — elsewhere the \
+                      Last-used signals degrade to unknown.",
         directory_roles_any: &[
             ("Reports Reader", Some(TID_REPORTS_READER)),
             ("Security Reader", Some(TID_SECURITY_READER)),

@@ -8,14 +8,14 @@ use serde::de::DeserializeOwned;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{
-    ActiveDirectoryRole, AppRoleAssignment, Application, ApplicationExposeApi,
-    ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy, ConditionalAccessPolicy,
-    DirectoryAuditLog, DirectoryObject, Drive, DriveItem, FederatedIdentityCredential,
-    GroupSummary, NewKeyCredential, OAuth2PermissionGrant, OAuth2PermissionScope, Organization,
-    Paged, PasswordCredential, PreAuthorizedApplication, RequiredResourceAccess,
-    ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission, SelfSignedCertificate,
-    ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList, SitePermission,
-    SynchronizationJob,
+    ActiveDirectoryRole, AppCredentialSignInActivity, AppRoleAssignment, Application,
+    ApplicationExposeApi, ApplicationServicePrincipal, ApplicationTemplate, ClaimsMappingPolicy,
+    ConditionalAccessPolicy, DirectoryAuditLog, DirectoryObject, Drive, DriveItem,
+    FederatedIdentityCredential, GroupSummary, NewKeyCredential, OAuth2PermissionGrant,
+    OAuth2PermissionScope, Organization, Paged, PasswordCredential, PreAuthorizedApplication,
+    RequiredResourceAccess, ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission,
+    SelfSignedCertificate, ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList,
+    SitePermission, SynchronizationJob,
 };
 use azapptoolkit_core::scoping::SelectedScopeLevel;
 use url::Url;

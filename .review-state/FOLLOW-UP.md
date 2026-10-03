@@ -186,15 +186,25 @@ Proposal; #### items are full entries, one-liners are bullets):
   to `DetailSkeleton`; the three plain-"Loading…" text sites are gone).
   F326 (table-level empties route through DataTable's `empty_message`, e.g.
   credentials_tab's secrets/certs tables; section empties use `EmptyState`).
-- **Graph API capabilities not yet adopted (9)** — **F264+F276 closed
+- **Graph API capabilities not yet adopted (8)** — **F264+F276 closed
   2026-10-03** (Identity Protection `riskyServicePrincipals` read once per audit
   run: on-demand `IdentityRiskyServicePrincipal.Read.All` CAE token + capability
   catalog row, tenant-wide prefetch joined onto both scoring phases by SP object
   id, Rule 22 +20 with the shared DisableSignIn fix, risky grantless principals
   admitted to the SP-only phase, unavailable-vs-gap split with the
   `RiskyServicePrincipals` coverage gap). Partial: it ships as a Findings group
-  only — no Enterprise-overview chip, no facet filter. Remaining 8: F161 ·
-  F078 · F268 · F259 · F260 · F270 · F265 · F274
+  only — no Enterprise-overview chip, no facet filter. **F259 closed 2026-10-03**
+  (per-credential last-used signal: one tenant-wide beta
+  `appCredentialSignInActivities` read per audit, shared with the Credentials
+  tab's `list_credential_usage`; `{tenant}|app_credential_sign_in_activities`
+  cache bucket under `CacheKind::Permissions`, `$top` cap + origin-checked
+  paging, per-origin newest-wins fold; `unused_credential` advisory gated on
+  report availability with Unknown≠never-flagged pinned; Last-used column on
+  both Credentials tables; Global-cloud-only noted in the `audit_reports`
+  capability). Partial: shown in the Credentials tab only — no dashboard chip
+  or facet; the SP-only phase skips the post-pass (a service principal carries
+  no local credentials). Remaining 7: F161 · F078 · F268 · F260 · F270 · F265 ·
+  F274
 - **Product-gap proposals (11)** — F266 · F267 (#109 posture snapshot + drift
   report, effort L) · F278 · F269 · F272 · F273 · F275 · F277 · F279 · F280 ·
   F283

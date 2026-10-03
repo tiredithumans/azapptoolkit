@@ -669,6 +669,12 @@ pub mod issue {
     pub const PUBLIC_CLIENT_CREDENTIALS: &str =
         "Public client flows are enabled and credentials are present";
     pub const PREFER_CERT_OVER_SECRET: &str = "Uses client secret(s)";
+    /// Still-valid credential(s) with no sign-in activity for over
+    /// `UNUSED_CREDENTIAL_DAYS`. Advisory marker emitted by the audit
+    /// runner's credential-usage post-pass, not by the scorer itself —
+    /// credentials absent from the beta report stay unflagged (`Unknown`).
+    /// Carries **no** remediation: removal stays admin-judged.
+    pub const UNUSED_CREDENTIAL: &str = "Unused credential(s):";
     pub const REDUNDANT_APP_PERMS: &str = "Redundant application permissions:";
     /// Microsoft disabled the principal for a Services Agreement violation
     /// (`disabledByMicrosoftStatus`). The finding group keeps its rows

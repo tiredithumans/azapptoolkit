@@ -47,6 +47,11 @@ fn active_secret(key_id: &str) -> PasswordCredential {
 fn mount_with_toasts(secrets: Vec<PasswordCredential>) -> ts::Mounted {
     let mut d = fixtures::application_detail("obj-1", "app-1", "Contoso CRM");
     d.application.password_credentials = secrets;
+    // The tab fetches the tenant-wide Last-used map on mount; mock it (empty,
+    // but AVAILABLE) so the test renders the healthy column rather than the
+    // "report unavailable" notice — these tests are about the sweep, not the
+    // degraded path.
+    ts::mock_ok("list_credential_usage", &fixtures::credential_usage_empty());
     let detail = Arc::new(d);
     ts::mount_view(move || {
         let detail = detail.clone();

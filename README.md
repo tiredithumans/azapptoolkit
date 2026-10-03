@@ -113,7 +113,9 @@ toolkit-owned service principal storing tokens you cannot audit.
 - **Security audit** — risk-scored dashboard of every app
   registration with per-rule findings (high-risk app/delegated permissions,
   ownerless/single-owner apps, unused apps via sign-in activity, expiring
-  credentials, and more), one-click **fixes** for safely remediable findings
+  credentials, long-unused credentials — each with per-credential
+  **Last used** evidence in the Credentials tab — and more), one-click
+  **fixes** for safely remediable findings
   (remove expired credentials, scope mailbox/SharePoint access, remove
   redundant permissions), **scope-aware risk** (a mail permission confined via
   Exchange RBAC scores below an org-wide one), facet filters, CSV/JSON/HTML
@@ -396,7 +398,7 @@ one-click **Grant consent** prompt.
 | Graph | `Application.ReadWrite.All` | Create / edit / delete app registrations & service principals; manage credentials and owners | **Required for edits** — on first write |
 | Graph | `AppRoleAssignment.ReadWrite.All` | Grant / revoke application permissions and user/group access assignments | **Required for edits** — on first write |
 | Graph | `DelegatedPermissionGrant.ReadWrite.All` | Grant / revoke delegated (OAuth2) permission grants | **Required for edits** — on first write |
-| Graph | `AuditLog.Read.All` | **Activity** tab (directory change log) and **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**) | Optional |
+| Graph | `AuditLog.Read.All` | **Activity** tab (directory change log), **unused-app** detection in the security audit (the sign-in report also needs Entra ID **P1/P2**), and the per-credential **Last used** column + unused-credential advisory (the beta `appCredentialSignInActivities` report is served in the **Global cloud only**; elsewhere the feature quietly stays off) | Optional |
 | Graph | `Policy.Read.All` | **Conditional Access** tab — which CA policies target an app (an Entra ID **P1/P2** feature) | Optional |
 | Graph | `IdentityRiskyServicePrincipal.Read.All` | **Risky-service-principal** signal in the security audit (Identity Protection `atRisk`/`confirmedCompromised`; also needs Entra ID **Workload Identities premium**, and the audit skips the check without it) | Optional |
 | Graph | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | **Claims-mapping** policies — SAML attribute & claim customization in the SSO wizard and the enterprise-app SSO tab (assigning and listing a policy on a service principal needs both) | Optional |

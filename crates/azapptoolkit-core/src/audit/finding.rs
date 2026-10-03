@@ -80,6 +80,12 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // disabled flag): a risky SP is *still enabled* most of the time, and
         // the two findings call for opposite urgency — investigate/disable now.
         "risky_service_principal" => |x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL),
+        // Advisory post-pass (per-credential last-used). Its own group, kept
+        // out of the expired-credential finding: an unused-but-valid secret
+        // has no expiry problem, and the two call for different actions
+        // (rotate/renew vs confirm-then-remove). No remediation, so no bulk
+        // action pairs with it.
+        "unused_credential" => |x| x.starts_with(issue::UNUSED_CREDENTIAL),
         "ownership" => |x| x.starts_with(issue::NO_OWNERS) || x.starts_with(issue::SINGLE_OWNER),
         _ => return None,
     };
@@ -242,6 +248,13 @@ mod tests {
                 ),
                 "risky_service_principal",
             ),
+            (
+                format!(
+                    "{} secret \"x\" — no sign-in activity",
+                    issue::UNUSED_CREDENTIAL
+                ),
+                "unused_credential",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -259,6 +272,7 @@ mod tests {
             "unconfinable_orgwide",
             "disabled_by_microsoft",
             "risky_service_principal",
+            "unused_credential",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

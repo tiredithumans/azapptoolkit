@@ -306,6 +306,46 @@ impl GraphClient {
         Ok(out)
     }
 
+    /// Tenant-wide **per-credential last-used** report (Entra beta
+    /// `reports/appCredentialSignInActivities`, preview, **global cloud only** —
+    /// on a sovereign build the host rejects the path and callers degrade, which
+    /// is why the capability catalog records the cloud limit). Rides the same
+    /// `AuditLog.Read.All` token ([`Self::with_audit_log_token`]) and the same
+    /// read-through cache pattern as [`Self::list_service_principal_sign_in_activities`]:
+    /// read-only telemetry, one fetch per tenant per TTL window, sign-out sweep
+    /// is sufficient staleness handling.
+    ///
+    /// A credential with no row here is **unknown**, not unused — the preview
+    /// report's coverage (does it list never-used credentials?) is not
+    /// contractual, and inferring "unused" from absence would flag live
+    /// credentials. Callers must only use rows that exist (a present row with a
+    /// null date is "no use recorded").
+    pub async fn list_app_credential_sign_in_activities(
+        &self,
+    ) -> Result<Vec<AppCredentialSignInActivity>> {
+        let cache_key = format!("{}|app_credential_sign_in_activities", self.tenant_id);
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<AppCredentialSignInActivity>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let token = self.audit_log_token()?;
+        // Same `$top` reasoning as the SP report: without it the slow beta
+        // endpoint pages at 100/request, and the nextLink cap effectively bounds
+        // how much of the report a cold run can read.
+        let url = format!(
+            "{}/reports/appCredentialSignInActivities?$top={MAX_PAGE_SIZE}",
+            self.beta_base()
+        );
+        let first: Paged<AppCredentialSignInActivity> = self.scoped_get(token, &url).await?;
+        let out = self
+            .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
+            .await?;
+        self.cache.put(CacheKind::Permissions, cache_key, &out);
+        Ok(out)
+    }
+
     /// Tenant-wide **Identity Protection** risky-service-principal report
     /// (Entra v1.0 `identityProtection/riskyServicePrincipals`). Requires the
     /// `IdentityRiskyServicePrincipal.Read.All` token (see

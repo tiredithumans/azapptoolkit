@@ -21,9 +21,9 @@ use crate::state::AppState;
 
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
-    audit_exchange_client, prefetch_admin_consent_grants, prefetch_ews_full_access_grants,
-    prefetch_graph_app_roles, prefetch_legacy_access_policies, prefetch_risky_service_principals,
-    prefetch_sign_in_activity, prefetch_sp_index,
+    audit_exchange_client, prefetch_admin_consent_grants, prefetch_credential_activity,
+    prefetch_ews_full_access_grants, prefetch_graph_app_roles, prefetch_legacy_access_policies,
+    prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{derive_orgwide_mail_scopes, score_one, score_sp_only, sp_audit_candidates};
 use super::{AuditFailure, ResourceResolver, ScoreCtx, classify_audit_failure};
@@ -58,7 +58,7 @@ pub async fn run_audit(
 
     // Claimed BEFORE the prefetch below, not after it. `claim()` takes a fresh
     // generation and `cancel()` stamps whatever generation is current at the
-    // moment it runs, so a token claimed *after* the seven-way join carries a
+    // moment it runs, so a token claimed *after* the nine-way join carries a
     // HIGHER generation than the cancel the operator issued during it — and
     // `is_cancelled()` compares `cancelled >= generation`, so that cancel was
     // silently discarded. The prefetch is the longest phase of a large run, so
@@ -85,18 +85,18 @@ pub async fn run_audit(
         },
     );
 
-    // These seven tenant-wide reads are INDEPENDENT — every join between them
+    // These nine tenant-wide reads are INDEPENDENT — every join between them
     // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
-    // `sp_audit_candidates`) is synchronous and runs below, after all seven land.
-    // Awaiting them serially made a large tenant wait out six full page-walks
+    // `sp_audit_candidates`) is synchronous and runs below, after all nine land.
+    // Awaiting them serially made a large tenant wait out eight full page-walks
     // before the progress bar left 0/N; overlapped, that is one wait instead of
-    // the sum. Six of the seven are best-effort (they swallow errors and return
-    // empty), so overlapping changes no failure semantics, and the
+    // the sum. Eight of the nine are best-effort (they swallow errors and
+    // return empty), so overlapping changes no failure semantics, and the
     // `ThrottleGuard` attached above plus the transport's Retry-After handling
     // already absorb the extra concurrent 429 pressure.
     //
     // Keep this a `join!`, not a `try_join!`: only the app listing is fallible,
-    // and short-circuiting it would abandon the other six mid-flight.
+    // and short-circuiting it would abandon the other eight mid-flight.
     let (
         apps,
         sp_index,
@@ -104,6 +104,7 @@ pub async fn run_audit(
         graph_roles_by_sp,
         ews_full_access_sps,
         sign_in,
+        credential_usage,
         risky_sps,
         legacy_policies,
     ) = futures::join!(
@@ -156,6 +157,11 @@ pub async fn run_audit(
         // surfacing a "Grant consent" button; either failure disables unused-app
         // detection.
         prefetch_sign_in_activity(&state, &client, &tenant_id),
+        // ONE tenant-wide per-credential last-used read (same AuditLog.Read.All
+        // token; beta, global cloud only). Failure or absence only disables the
+        // unused-credential advisory — a credential without a report row is
+        // `Unknown`, never flagged, so a partial report cannot mis-flag one.
+        prefetch_credential_activity(&state, &client, &tenant_id),
         // ONE tenant-wide Identity Protection risky-service-principal read
         // (needs IdentityRiskyServicePrincipal.Read.All + a Workload Identities
         // premium license). Feeds Rule 22 for BOTH phases: risky grantless SPs
@@ -175,6 +181,7 @@ pub async fn run_audit(
     let (apps, truncated) = apps?;
     let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    let (credential_usage_available, credential_activity_map) = credential_usage;
     let (risky_available, risky_by_sp, risky_gap) = risky_sps;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
@@ -253,6 +260,8 @@ pub async fn run_audit(
         mail_scoping_unresolved: AtomicBool::new(false),
         sign_in_available,
         sign_in_map,
+        credential_usage_available,
+        credential_activity_map,
         risky_available,
         risky_by_sp,
     });

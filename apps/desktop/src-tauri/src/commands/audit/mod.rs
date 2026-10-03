@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use azapptoolkit_core::audit::MailPermissionScope;
+use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
@@ -112,6 +112,15 @@ pub(crate) struct ScoreCtx {
     /// `confirmedCompromised`/`atRisk`. Joined onto audit rows by the SP's
     /// **object** id — the same join key the grant matrices use.
     pub(crate) risky_by_sp: Arc<HashMap<String, (String, String)>>,
+    /// Whether the beta `appCredentialSignInActivities` report was readable
+    /// for this run (`AuditLog.Read.All` + the **global** cloud only). `false`
+    /// skips the unused-credential advisory entirely — and even when `true`,
+    /// a credential without a report row stays `Unknown`, never flagged.
+    pub(crate) credential_usage_available: bool,
+    /// `"appId|keyId" -> the credential's tracked activity`, with per-origin
+    /// duplicate rows already folded to the newest date. Joined per credential
+    /// in `score_one`'s post-pass via [`ScoreCtx::credential_activity_for`].
+    pub(crate) credential_activity_map: Arc<HashMap<String, CredentialActivity>>,
 }
 
 impl ScoreCtx {
@@ -136,6 +145,20 @@ impl ScoreCtx {
         self.risky_by_sp
             .get(sp_object_id)
             .map(|(state, level)| (state.as_str(), level.as_str()))
+    }
+
+    /// Per-credential last-used activity for one of an app's credentials.
+    /// Report unavailable, or no row for this credential ⇒ [`CredentialActivity::Unknown`]
+    /// — absence is never evidence of non-use (the report is preview data whose
+    /// coverage of never-used credentials is not contractual).
+    pub(crate) fn credential_activity_for(&self, app_id: &str, key_id: &str) -> CredentialActivity {
+        if !self.credential_usage_available {
+            return CredentialActivity::Unknown;
+        }
+        self.credential_activity_map
+            .get(&format!("{app_id}|{key_id}"))
+            .copied()
+            .unwrap_or(CredentialActivity::Unknown)
     }
 }
 

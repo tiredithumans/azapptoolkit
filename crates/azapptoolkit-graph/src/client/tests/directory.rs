@@ -233,6 +233,122 @@ async fn sign_in_activities_follow_next_link_on_the_audit_token() {
 }
 
 #[tokio::test]
+async fn credential_activities_parse_and_follow_paging_on_the_audit_token() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .and(query_param_is_missing("page"))
+        .and(query_param("$top", "999"))
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "appId": "app-1",
+                "keyId": "key-1",
+                "keyType": "certificate",
+                "credentialOrigin": "application",
+                "resourceId": "res-1",
+                "signInActivity": { "lastSignInDateTime": "2026-04-01T00:00:00Z" }
+            }, {
+                // A tracked credential with no observed use: null date must
+                // deserialize, and a missing signInActivity object too.
+                "appId": "app-1",
+                "keyId": "key-2",
+                "keyType": "clientSecret",
+                "credentialOrigin": "servicePrincipal"
+            }],
+            "@odata.nextLink": format!("{uri}/reports/appCredentialSignInActivities?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .and(query_param("page", "2"))
+        // The continuation rides the same scoped `AuditLog.Read.All` bearer.
+        .and(header("authorization", "Bearer a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "appId": "app-2",
+                "keyId": "key-3",
+                "signInActivity": { "lastSignInDateTime": null }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&uri).with_audit_log_token(StaticTokenProvider::new("a"));
+    let rows = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].app_id.as_deref(), Some("app-1"));
+    assert_eq!(rows[0].key_id.as_deref(), Some("key-1"));
+    assert_eq!(
+        rows[0]
+            .sign_in_activity
+            .as_ref()
+            .and_then(|a| a.last_sign_in_date_time),
+        Some(
+            chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
+    );
+    // Absent signInActivity and an explicit null date both read as
+    // "no use recorded", NOT as a parsed timestamp — callers must not
+    // infer "unused" for credentials that are simply absent from the report.
+    assert!(rows[1].sign_in_activity.is_none());
+    assert_eq!(
+        rows[2]
+            .sign_in_activity
+            .as_ref()
+            .and_then(|a| a.last_sign_in_date_time),
+        None
+    );
+}
+
+#[tokio::test]
+async fn credential_activities_are_cached_per_tenant() {
+    let server = MockServer::start().await;
+    // Same read-through cache as the SP sign-in report: the slow beta endpoint
+    // is hit exactly ONCE per client per TTL window (audit run + Credentials
+    // tab share the entry). `.expect(1)` fails if caching is dropped.
+    Mock::given(method("GET"))
+        .and(path("/reports/appCredentialSignInActivities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "appId": "app-1", "keyId": "key-1" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_audit_log_token(StaticTokenProvider::new("a"));
+    let first = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    let second = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].key_id.as_deref(), Some("key-1"));
+}
+
+#[tokio::test]
+async fn credential_activities_without_audit_token_is_forbidden() {
+    // No with_audit_log_token → graceful degradation path: Forbidden, not panic.
+    let client = make_client("http://127.0.0.1:0");
+    let err = client
+        .list_app_credential_sign_in_activities()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn conditional_access_policies_parse_and_follow_paging() {
     let server = MockServer::start().await;
     let uri = server.uri();
