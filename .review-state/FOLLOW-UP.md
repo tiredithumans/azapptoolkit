@@ -30,7 +30,7 @@ Already done from this bucket: **F094** → `3103bc4` (permission tester
 lists/revokes Selected entries; its ship-together partner F073 — the dead
 "(capped)" branch — remains open). **F309** → `bbaf469` (`just bump`).
 
-Remaining 87 entries by area (read the section for each item's Problem +
+Remaining 74 entries by area (read the section for each item's Problem +
 Proposal; #### items are full entries, one-liners are bullets):
 
 - **Audit & remediation (9)** — **all closed 2026-10-02.** F125 · F129 · F027
@@ -64,8 +64,25 @@ Proposal; #### items are full entries, one-liners are bullets):
   `RecipientAdministrativeUnitScope` requires the real wire key confirmed from a
   live role-assignment envelope before code exists; guessing the key is the
   failure mode the entry warns about.
-- **Credentials & SSO (13)** — F075 · F385 · F382 · F381 · F374 · F373 · F338 ·
-  F085 · F392 · F190 · F079 · F196 · F200
+- **Credentials & SSO (13)** — **all closed 2026-10-02.** Verified already
+  implemented on main: F075 (create.rs pushes `warnings` for the best-effort
+  claims/email steps) · F085 (every create step runs through
+  `with_replication_retry`) · F190 (removers return `NotFound` without a PATCH
+  and remediation treats `NotFound` as removed; the aggregators propagate the
+  error) · F200 (the stale `SetArgs`/`delete_secret` residues are gone) · F338
+  ("Rotate & remove {n} existing" behind a ConfirmDialog) · F373
+  (pending-retire removal behind a ConfirmDialog) · F374 (CopyBlock is shared
+  and the reveal paths use the warn Callout; only the optional "Save as .cer"
+  button remains) · F381 (gallery dialog and wizard both offer "Open
+  application"). Implemented on this branch: F196 (certificate-backed
+  `managed` secrets are badged in the browser) · F079 (rotation stamps
+  provenance tags and refuses to overwrite a secret tagged to another app —
+  built on `get_secret`'s documented per-secret tags rather than the proposed
+  new `list_secret_versions` endpoint, the check needs no new wire surface) ·
+  F385 (claims-editor `problems()` advisory panel, in the SSO tab and the
+  wizard alike) · F382 (wizard lifetime fields gate Next on the real
+  1..=1095/1..=730 bounds instead of `parse().ok()` defaulting). **F392 stays
+  open as a product-gap idea** (same spirit as the Product-gap bucket below).
 - **App-reg editing: auth / Expose an API / federation (5)** — F017 · F158 ·
   F162 · F342 · F350
 - **Enterprise apps & managed identities (5)** — F377 · F378 · F391 · F389 ·
@@ -87,8 +104,9 @@ Proposal; #### items are full entries, one-liners are bullets):
 
 If picking items up, respect "Changes that must ship together": F027+F058 and
 F127+F402+F393 shipped closed (see above — the paired flag/Callout and the
-marker/group/posture trio landed in one change each); F075's `warnings` field
-is dead weight until `sso_summary.rs` renders it. Before implementing a
+marker/group/posture trio landed in one change each); F075 is closed —
+`sso_summary.rs` already renders the `warnings` field (pinned by the
+`a_partial_saml_create_says_what_was_not_applied` GUI test). Before implementing a
 remaining item, confirm it against current main — several entries describe
 gaps that have since been closed.
 
