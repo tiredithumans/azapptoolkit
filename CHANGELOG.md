@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-03
+
 ### Added
 
 - **Bulk create can load a CSV or JSON inventory, owners and permissions included.** Bulk
