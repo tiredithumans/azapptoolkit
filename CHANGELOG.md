@@ -26,6 +26,13 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   Every vault certificate appears in the secret listing as a *managed* entry, previously
   indistinguishable from a rotatable app secret; those rows now carry a "certificate-backed" badge
   and a hint that they are not writable secrets.
+- **A rotated Key Vault secret records what it belongs to, and refuses to overwrite another
+  app's secret.** Every secret version written by credential rotation is tagged with the owning
+  app and its key id, so a vault reader can tell which app minted it. Before rotation mints
+  anything it checks the target secret's tags: a secret tagged to a different app is refused with
+  "nothing was minted". Untagged secrets remain rotatable (no ownership is claimed from absent
+  tags), and a transient failure of the ownership check skips the check rather than blocking a
+  legitimate rotation.
 - **The Permission tester's SharePoint check now lists — and can undo — the permission entries on
   the tested resource.** After a SharePoint probe, a section under the verdict lists every app
   grant on the resource the URL resolves to, each with a confirm-gated Revoke, so a per-URL
