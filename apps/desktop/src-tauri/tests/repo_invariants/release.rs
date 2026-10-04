@@ -114,14 +114,15 @@ fn changelog_headers_match_what_both_parsers_require() {
 }
 
 /// AGENTS.md is the index every agent loads on session start, and it documents
-/// its own 20 000-byte budget. It had grown past an earlier 28 000-byte one,
+/// its own 18 000-byte budget. It had grown past an earlier 28 000-byte one,
 /// which is precisely when the file stops being an index and starts being the
 /// manual it tells you not to write — so the budget is enforced rather than
 /// advertised, and it was lowered once the per-subsystem elaborations moved to
-/// `docs/architecture/` and the path-scoped `.claude/rules/`.
+/// `docs/architecture/` and the path-scoped `.claude/rules/`, and again once its
+/// per-bullet doc links, repo-map tree and duplicated command lists were folded.
 #[test]
 fn agents_md_stays_within_its_own_budget() {
-    const BUDGET: usize = 20_000;
+    const BUDGET: usize = 18_000;
     // Measured with `\r` stripped: git checks this file out CRLF on Windows, so
     // a raw byte count would charge the file one extra byte per line and make
     // the budget platform-dependent (it failed on windows-latest alone).
