@@ -7,7 +7,7 @@
 #   * user-facing surfaces (commands, packaging, auth, frontend, updater/demo)
 #     → the matching prose doc (README.md, docs/DEVELOPMENT.md,
 #     docs/architecture/…)
-#   * AGENTS.md itself → its 20 000-byte size budget (the file is an
+#   * AGENTS.md itself → its 18 000-byte size budget (the file is an
 #     invariant-plus-pointer index; deep detail belongs in docs/architecture/)
 #
 # Merged from agents-md-staleness-check.sh + docs-staleness-check.sh so the
@@ -65,8 +65,8 @@ esac
 # invariant + pointer diet applies — move deep detail to docs/architecture/.
 if [ "$rel" = "AGENTS.md" ]; then
   size=$(wc -c < "$project/AGENTS.md" 2>/dev/null | tr -d ' ')
-  if [ "${size:-0}" -gt 20000 ] 2>/dev/null; then
-    printf '[staleness-check] AGENTS.md is %s bytes — over its 20000-byte budget. Keep the invariant + pointer here; move deep detail to docs/architecture/ or a path-scoped .claude/rules/ file.\n' "$size" >&2
+  if [ "${size:-0}" -gt 18000 ] 2>/dev/null; then
+    printf '[staleness-check] AGENTS.md is %s bytes — over its 18000-byte budget. Keep the invariant + pointer here; move deep detail to docs/architecture/ or a path-scoped .claude/rules/ file.\n' "$size" >&2
   fi
   exit 0
 fi
