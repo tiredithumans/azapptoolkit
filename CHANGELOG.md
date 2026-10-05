@@ -25,6 +25,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   A backup in which a managed identity's id is empty, not a GUID, or repeated is now refused
   (shown in the plan, before Confirm). An **Approve all listed** button after the list ticks
   every item at once. Nothing starts ticked.
+- **Lists, the Security tab and the Resource Access sweeps open faster on a revisit, and the window
+  no longer stalls while they load.** A cached list or scan result is now handed back as is
+  instead of being rebuilt on every visit, and reading the last security audit or site/Key Vault
+  sweep no longer blocks the window. Moving a mailbox scope to its managed group, deleting a
+  retired group, and opening an app's mailbox-scope details also wait on fewer back-to-back
+  Exchange calls.
 
 ### Fixed
 
@@ -52,6 +58,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   the older result is discarded, and the next view fetches fresh data. An audit that started
   before an org-wide mail grant was removed no longer leaves that app's mailbox verdict cached
   for the next audit. Signing out also stops any running audit, sweep, mailbox probe or backup.
+- **Signing out or switching tenants mid-action no longer crashes the window.** A bulk action or
+  a save that finished after you signed out or switched tenants could crash the window, and its
+  notifications carried over into the next sign-in. It now reports nothing. Leaving a view while
+  its save or bulk action is still running no longer crashes the window either: its notifications
+  still appear, a failure is reported instead of lost, and apps a bulk delete removed leave the
+  selection.
 - **Exchange mailbox scoping no longer widens access or reports a partial result as done.** "Move
   to managed group" and the legacy-policy migration now refuse to point a scope at the
   toolkit-managed group when that group already holds mailboxes the source group doesn't. The

@@ -219,7 +219,7 @@ pub fn ExchangeScopingSection(
                             "org-wide grants"
                         ),
                     ));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 } else {
                     // Hold the reload so the notes survive to be read; refresh
                     // the assignments list in place (a local signal, unaffected).
@@ -291,7 +291,7 @@ pub fn ExchangeScopingSection(
             move |r: exchange::ExchangeScopeConsolidationResult| {
                 if r.repointed && r.warnings.is_empty() {
                     session.toast_success(format!("Scope now points at “{}”.", r.group_name));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 } else {
                     // A plan, a fail-closed no-op, or a repoint with notes: all
                     // three have to be readable, so they stay inline (the same
@@ -337,7 +337,7 @@ pub fn ExchangeScopingSection(
                         count_noun(r.items.len(), "app", "apps"),
                         count_noun(policies, "legacy policy", "legacy policies"),
                     ));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 }
             },
             move |tenant_id| async move {
@@ -671,7 +671,7 @@ pub fn ExchangeScopingSection(
                                                     }
                                                 }
                                                 reload.update(|v| *v += 1);
-                                                on_changed.run(());
+                                                on_changed.try_run(());
                                             },
                                             move |tenant_id: String| async move {
                                                 exchange::remove_exchange_mailbox_access(&tenant_id, &aid)

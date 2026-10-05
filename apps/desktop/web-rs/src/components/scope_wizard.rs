@@ -714,7 +714,7 @@ pub fn ScopeWizard(
             match res {
                 Ok(summary) => {
                     session.toast_success(summary);
-                    on_changed.run(());
+                    on_changed.try_run(());
                     close();
                 }
                 Err(e) => {

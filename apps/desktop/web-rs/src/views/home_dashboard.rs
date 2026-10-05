@@ -94,7 +94,19 @@ pub fn HomeDashboard() -> impl IntoView {
         let _ = session.audit_reload.get();
         async move {
             match tenant {
-                Some(t) => audit::get_cached_audit_summary(&t.tenant_id).await,
+                // A failed read renders as "no audit yet", as before the
+                // command became fallible, but says so in the console.
+                Some(t) => match audit::get_cached_audit_summary(&t.tenant_id).await {
+                    Ok(summary) => summary,
+                    Err(err) => {
+                        leptos::logging::warn!(
+                            "get_cached_audit_summary failed ({}): {}",
+                            err.code,
+                            err.message
+                        );
+                        None
+                    }
+                },
                 None => None,
             }
         }

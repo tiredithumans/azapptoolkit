@@ -130,7 +130,7 @@ pub fn AddOwnerButton(
                     session.toast_success(
                         "Owner added — re-run the audit to refresh the ownership finding.",
                     );
-                    on_done.run(object_id);
+                    on_done.try_run(object_id);
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -181,7 +181,7 @@ pub fn AddOwnerButton(
                     "Default owners are already present — re-run the audit to refresh.",
                 );
             }
-            on_done.run(object_id);
+            on_done.try_run(object_id);
         });
     });
 

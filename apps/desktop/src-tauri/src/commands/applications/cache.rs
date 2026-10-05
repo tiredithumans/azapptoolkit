@@ -369,29 +369,49 @@ pub(crate) fn app_scan_gate(state: &AppState, tenant_id: &str) -> Arc<tokio::syn
     state.single_flight(&apps_pairing_key(tenant_id))
 }
 
+/// The cached App Registrations list rows, if present — a refcount clone of
+/// the typed, pinned entry [`super::scan_app_list`] stores.
+///
+/// Typed for the same reason as the two indexes: a warm visit used to walk the
+/// whole JSON tree back into rows on every read. Read only through this (or
+/// `get_typed`): an untyped `get` on a typed entry misses, silently costing a
+/// full `/applications` rescan (pinned by
+/// `repo_invariants::cache::pinned_keys_are_read_only_through_get_typed`).
+pub(crate) fn apps_pairing_hit(
+    cache: &Cache,
+    tenant_id: &str,
+) -> Option<Arc<Vec<ApplicationListRowDto>>> {
+    cache.get_typed::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &apps_pairing_key(tenant_id))
+}
+
+/// The cached credential-expiry roll-up, if present. Typed + pinned; see
+/// [`apps_pairing_hit`].
+pub(crate) fn credential_expirations_hit(
+    cache: &Cache,
+    tenant_id: &str,
+) -> Option<Arc<Vec<CredentialRowDto>>> {
+    cache.get_typed::<Vec<CredentialRowDto>>(
+        CacheKind::Lists,
+        &credential_expirations_key(tenant_id),
+    )
+}
+
 /// The App Registrations list rows, read through [`apps_pairing_key`] and, on a
 /// miss, produced by the shared scan behind [`app_scan_gate`] — which also
 /// seeds the credential-expiry roll-up and the app-name index.
 pub(crate) async fn apps_pairing_cached(
     state: &AppState,
     tenant_id: &str,
-) -> Result<Vec<ApplicationListRowDto>, GraphError> {
-    let key = apps_pairing_key(tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &key)
-    {
-        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "hit");
+) -> Result<Arc<Vec<ApplicationListRowDto>>, GraphError> {
+    if let Some(cached) = apps_pairing_hit(&state.cache, tenant_id) {
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "apps_pairing", "hit");
         return Ok(cached);
     }
-    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "apps_pairing", "miss");
     let gate = app_scan_gate(state, tenant_id);
     let _held = gate.lock().await;
     // Re-check: the scan we queued behind has already populated the cache.
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &key)
-    {
+    if let Some(cached) = apps_pairing_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
     Ok(super::scan_app_list(state, tenant_id).await?.rows)
@@ -403,23 +423,16 @@ pub(crate) async fn apps_pairing_cached(
 pub(crate) async fn credential_expirations_cached(
     state: &AppState,
     tenant_id: &str,
-) -> Result<Vec<CredentialRowDto>, GraphError> {
-    let key = credential_expirations_key(tenant_id);
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &key)
-    {
-        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "hit");
+) -> Result<Arc<Vec<CredentialRowDto>>, GraphError> {
+    if let Some(cached) = credential_expirations_hit(&state.cache, tenant_id) {
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "credential_expirations", "hit");
         return Ok(cached);
     }
-    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = key, "miss");
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "credential_expirations", "miss");
     let gate = app_scan_gate(state, tenant_id);
     let _held = gate.lock().await;
     // Re-check: the scan we queued behind has already populated the cache.
-    if let Some(cached) = state
-        .cache
-        .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &key)
-    {
+    if let Some(cached) = credential_expirations_hit(&state.cache, tenant_id) {
         return Ok(cached);
     }
     Ok(super::scan_app_list(state, tenant_id).await?.credentials)

@@ -107,12 +107,12 @@ pub fn GalleryDialog(
         let display_name = name.get().trim().to_string();
         cmd.run(
             move |s: GalleryAppSummary| {
-                on_created.run(());
+                on_created.try_run(());
                 session.toast_success(format!("{} created.", s.display_name));
                 // Straight to where the hint below says the work continues.
                 // Before `on_close`: closing unmounts this dialog.
                 session.open_enterprise_on_tab(s.service_principal_id, "sso");
-                on_close.run(());
+                on_close.try_run(());
             },
             move |tenant_id| {
                 let template_id = template_id.clone();

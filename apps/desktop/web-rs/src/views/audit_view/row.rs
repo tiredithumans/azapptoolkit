@@ -314,7 +314,7 @@ fn DisableSignInAction(
                     session.toast_success(
                         "Sign-in disabled — re-enable anytime from the enterprise app's Overview. Re-run the audit to refresh scores.",
                     );
-                    on_done.run(object_id);
+                    on_done.try_run(object_id);
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -414,7 +414,7 @@ fn RedundantPermsAction(
                     let (msg, fixed) = redundant_outcome_report(&outcome);
                     if fixed {
                         session.toast_success(msg);
-                        on_done.run(object_id);
+                        on_done.try_run(object_id);
                     } else {
                         // Something the Fix offered is still in place, so the
                         // finding stands and the Fix stays on the row. An error
@@ -503,7 +503,7 @@ fn ExpiredCredsAction(
                     );
                     // Parent drops this item's remediations → button replaced by
                     // "—", and the state can't be lost by a re-render.
-                    on_done.run(object_id);
+                    on_done.try_run(object_id);
                 }
                 Err(e) => error.set(Some(e.message)),
             }

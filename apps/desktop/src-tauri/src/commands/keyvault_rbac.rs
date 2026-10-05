@@ -90,7 +90,7 @@ pub async fn sweep_key_vault_access(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<KeyVaultSweepResult, UiError> {
+) -> Result<Arc<KeyVaultSweepResult>, UiError> {
     // Names resolved below can come from cache; the rule counts only an
     // explicit proof ahead of every read (a client factory only builds token
     // adapters). Sync, so the claim still precedes every await.
@@ -301,7 +301,7 @@ pub async fn sweep_key_vault_access(
         "key vault rbac sweep complete"
     );
 
-    let result = KeyVaultSweepResult {
+    let result = Arc::new(KeyVaultSweepResult {
         tenant_id: tenant_id.clone(),
         total_vaults: total,
         vaults_scanned,
@@ -309,11 +309,15 @@ pub async fn sweep_key_vault_access(
         vaults_access_policy_mode: vaults_ap_mode,
         rows,
         cancelled,
-    };
+    });
     // Cache only a COMPLETE sweep — serving a cancelled/partial result for the
-    // next hour would overstate coverage.
+    // next hour would overstate coverage. Typed, so `get_cached_key_vault_access`
+    // answers with the same `Arc` rather than a JSON decode; read it only with
+    // `get_typed`.
     if !cancelled && vaults_failed == 0 {
-        state.cache.put_if_current(sweep_watch, &result);
+        state
+            .cache
+            .put_typed_if_current(sweep_watch, Arc::clone(&result));
     }
     Ok(result)
 }
@@ -356,19 +360,23 @@ async fn resolve_principal_names(
 }
 
 /// Returns the cached sweep for this tenant, if one completed within the cache
-/// TTL — so the view renders instantly without re-scanning.
+/// TTL — so the view renders instantly without re-scanning. `async` (off the
+/// main thread) and answering with the cached `Arc`; pinned by
+/// `repo_invariants::cache::cached_scan_reads_are_async_commands`.
 #[tauri::command]
-pub fn get_cached_key_vault_access(
+pub async fn get_cached_key_vault_access(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Option<KeyVaultSweepResult> {
+) -> Result<Option<Arc<KeyVaultSweepResult>>, UiError> {
     // A cache-only answer makes the `tenant_id` argument the only thing deciding
     // whose directory data is returned, so prove the session first (AGENTS.md's
     // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
-    state.auth.tenant_context(&tenant_id)?;
-    state
+    let Some(_) = state.auth.tenant_context(&tenant_id) else {
+        return Ok(None);
+    };
+    Ok(state
         .cache
-        .get(CacheKind::Audit, &kv_sweep_cache_key(&tenant_id))
+        .get_typed::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key(&tenant_id)))
 }
 
 /// Exports the (frontend-filtered) vault-access rows to CSV/JSON via the OS save
@@ -546,19 +554,26 @@ mod tests {
             rows: Vec::new(),
             cancelled: false,
         };
-        cache.put(CacheKind::Audit, kv_sweep_cache_key("t1"), &sweep);
-        cache.put(CacheKind::Audit, kv_sweep_cache_key("t2"), &sweep);
+        // Typed, as the sweep stores it: an untyped `get` would miss either way
+        // and make the survival assertion meaningless.
+        let sweep = std::sync::Arc::new(sweep);
+        cache.put_typed(
+            CacheKind::Audit,
+            kv_sweep_cache_key("t1"),
+            std::sync::Arc::clone(&sweep),
+        );
+        cache.put_typed(CacheKind::Audit, kv_sweep_cache_key("t2"), sweep);
 
         invalidate_kv_sweep(&cache, "t1");
 
         assert!(
             cache
-                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t1"))
+                .get_typed::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t1"))
                 .is_none()
         );
         assert!(
             cache
-                .get::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t2"))
+                .get_typed::<KeyVaultSweepResult>(CacheKind::Audit, &kv_sweep_cache_key("t2"))
                 .is_some(),
             "other tenant must survive"
         );
