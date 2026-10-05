@@ -5,7 +5,7 @@
 //! AGENTS.md calls cross-tenant leakage "the #1 footgun"; these are the rules
 //! that keep it mechanical rather than remembered.
 
-use super::sources::{code_lines, is_fn_header};
+use super::sources::{code_lines, code_mask, is_fn_header};
 
 // No `include_str!` table here on purpose: every rule below derives its subject
 // from `sources::command_modules()`, the same source-tree walk `sources.rs` was
@@ -78,7 +78,303 @@ fn back_walk_names_a_pinnable_key(lines: &[&str], line_no: usize) -> bool {
         .rev()
         .take_while(|l| !is_fn_header(l))
         .filter(|l| !l.starts_with("//"))
-        .any(|l| PINNABLE_KEYS.iter().any(|k| l.contains(k)))
+        // Whole identifiers, so a future `foo_mi_key(` is not read as `mi_key(`.
+        .any(|l| {
+            key_calls_in(l)
+                .iter()
+                .any(|k| PINNABLE_KEYS.contains(&k.as_str()))
+        })
+}
+
+/// Where a watch used at `line_no` came from.
+#[derive(Debug, PartialEq)]
+enum WatchSource {
+    /// The key builders named at its `generation_for` capture — inline
+    /// (`&sp_index_key(t)`) or through the `let key = …_key(…)` it reads.
+    Keys(Vec<String>),
+    /// A parameter of the enclosing fn, at this argument `index`: a store
+    /// helper, so the key is whatever its callers captured the watch on.
+    Param {
+        helper: String,
+        index: usize,
+    },
+    Unresolved,
+}
+
+/// Resolves the watch named `watch`, used at `line_no`, within its function.
+///
+/// In order: a parameter of the function (a store helper, `Param`); else the
+/// `let [mut] watch = …` binding, which is either the `generation_for(kind,
+/// key)` capture — whose key is then read inline (`&sp_index_key(t)`) or off
+/// the `let key = …_key(…)` it names — or an alias (`let w = other;`)
+/// resolved through `other`. Only when no identifier could be read at the use
+/// site does the nearest preceding capture stand in. Anything else (an unbound
+/// watch, a key that is a parameter or a field) is `Unresolved` and reported:
+/// a bare back-walk would let a pinnable key mentioned anywhere earlier in the
+/// function excuse a per-object capture.
+fn resolve_watch(lines: &[&str], line_no: usize, watch: &str) -> WatchSource {
+    resolve_watch_from(lines, line_no, watch, 0)
+}
+
+fn resolve_watch_from(lines: &[&str], line_no: usize, watch: &str, hops: usize) -> WatchSource {
+    let header = (0..=line_no)
+        .rev()
+        .find(|&i| is_fn_header(lines[i].trim_start()));
+    // The function's code lines before `line_no`, nearest first.
+    let code: Vec<(usize, &str)> = (header.map_or(0, |h| h + 1)..line_no)
+        .rev()
+        .map(|i| (i, lines[i].trim_start()))
+        .filter(|(_, l)| !l.starts_with("//"))
+        .collect();
+    // The statement starting at line `i`, up to its `;`.
+    let statement = |i: usize| -> String {
+        let mut text = String::new();
+        for l in &lines[i..=line_no] {
+            text.push_str(l.trim());
+            if l.contains(';') {
+                break;
+            }
+        }
+        text
+    };
+    // `let var …` / `let mut var …`, a whole identifier.
+    let bound = |l: &str, var: &str| {
+        let rest = l
+            .strip_prefix("let ")
+            .map(|r| r.strip_prefix("mut ").unwrap_or(r));
+        !var.is_empty()
+            && rest.is_some_and(|r| {
+                r.strip_prefix(var)
+                    .is_some_and(|after| after.starts_with([' ', ':', '=']))
+            })
+    };
+
+    // 1. A parameter: checked first, so a helper that also captures some other
+    //    watch is still recognised as a helper.
+    if let Some(h) = header
+        && !watch.is_empty()
+    {
+        let signature: String = lines[h..=line_no]
+            .iter()
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let helper: String = ident_after(&signature, "fn ");
+        if let Some((_, params)) = signature.split_once(&format!("fn {helper}(")) {
+            let params = top_level_args(params);
+            if let Some(index) = params.iter().position(|p| {
+                let p = p.strip_prefix("mut ").unwrap_or(p);
+                p.strip_prefix(watch)
+                    .is_some_and(|t| t.trim_start().starts_with(':'))
+            }) {
+                return if params[index].contains("IndexWatch") {
+                    WatchSource::Param { helper, index }
+                } else {
+                    WatchSource::Unresolved
+                };
+            }
+        }
+    }
+
+    // 2. The binding, or — only when no identifier was read — the nearest capture.
+    let capture_line = if watch.is_empty() {
+        code.iter()
+            .find(|(_, l)| l.contains("generation_for("))
+            .map(|&(i, _)| i)
+    } else {
+        let Some(&(b, _)) = code.iter().find(|(_, l)| bound(l, watch)) else {
+            return WatchSource::Unresolved;
+        };
+        let stmt = statement(b);
+        if !stmt.contains("generation_for(") {
+            // An alias, `let w = other;`: resolve through `other`.
+            let rhs = stmt.split_once('=').map_or("", |(_, r)| r.trim());
+            let other = ident_after(rhs, "");
+            let is_alias = !other.is_empty()
+                && rhs
+                    .trim_start_matches(['&', ' '])
+                    .strip_prefix(other.as_str())
+                    == Some(";");
+            return if is_alias && hops < 4 {
+                resolve_watch_from(lines, b, &other, hops + 1)
+            } else {
+                WatchSource::Unresolved
+            };
+        }
+        Some(b)
+    };
+    let Some(capture_line) = capture_line else {
+        return WatchSource::Unresolved;
+    };
+    let capture_stmt = statement(capture_line);
+    let Some((_, key_arg)) = capture_stmt.split_once("generation_for(") else {
+        return WatchSource::Unresolved;
+    };
+    let named = key_calls_in(key_arg);
+    if !named.is_empty() {
+        return WatchSource::Keys(named);
+    }
+    // 3. `generation_for(kind, &key)`: the key is a binding further up. A key
+    //    that is a parameter or a field is not resolved: reported, not guessed.
+    let args = top_level_args(key_arg);
+    let var = ident_after(args.last().map_or("", String::as_str), "");
+    match code
+        .iter()
+        .filter(|(i, _)| *i < capture_line)
+        .find(|(_, l)| bound(l, &var))
+    {
+        Some(&(b, _)) => WatchSource::Keys(key_calls_in(&statement(b))),
+        None => WatchSource::Unresolved,
+    }
+}
+
+/// The identifier after the first `open` in `text`, past any `&`/spaces.
+fn ident_after(text: &str, open: &str) -> String {
+    text.split_once(open)
+        .map(|(_, rest)| rest.trim_start_matches(['&', ' ']))
+        .unwrap_or_default()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// The comma-separated arguments of a call or signature, given the text just
+/// after its `(`, up to the matching `)`. Trimmed; nested brackets respected.
+fn top_level_args(text: &str) -> Vec<String> {
+    let (mut depth, mut args, mut cur) = (0i32, Vec::new(), String::new());
+    for c in text.chars() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' if depth == 0 => break,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(std::mem::take(&mut cur).trim().to_string());
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        args.push(cur.trim().to_string());
+    }
+    args
+}
+
+/// The watch argument of the guarded pinned store at `line_no`, which rustfmt
+/// may wrap onto the next line.
+fn watch_at_store(lines: &[&str], line_no: usize) -> String {
+    let store: String = lines[line_no..lines.len().min(line_no + 3)]
+        .iter()
+        .map(|l| l.trim())
+        .collect();
+    ident_after(&store, "_index_if_current(")
+}
+
+/// Whether the GUARDED pinned store at `line_no` (`put_index_if_current(watch,
+/// …)` / `put_typed_index_if_current(watch, …)`) pins a watch captured, in the
+/// same function, on [`PINNABLE_KEYS`] keys only.
+fn guarded_pin_watches_a_pinnable_key(lines: &[&str], line_no: usize) -> bool {
+    matches!(
+        resolve_watch(lines, line_no, &watch_at_store(lines, line_no)),
+        WatchSource::Keys(k) if all_pinnable(&k)
+    )
+}
+
+fn all_pinnable(keys: &[String]) -> bool {
+    !keys.is_empty() && keys.iter().all(|k| PINNABLE_KEYS.contains(&k.as_str()))
+}
+
+/// The offenders among store helpers' callers. `helpers` holds each helper
+/// store as `(module:line, helper fn, watch argument index)`.
+fn store_helper_offenders(
+    modules: &[(String, String)],
+    helpers: &[(String, String, usize)],
+) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for (store, helper, index) in helpers {
+        let calls = helper_call_sites(modules, helper, *index);
+        if calls.is_empty() {
+            offenders.push(format!(
+                "{store} — `{helper}` pins a parameter watch but has no caller to resolve it"
+            ));
+        }
+        let mut keys: Vec<&String> = Vec::new();
+        for (site, source) in &calls {
+            match source {
+                WatchSource::Keys(k) if all_pinnable(k) => keys.extend(k),
+                other => offenders.push(format!(
+                    "{site} — `{helper}` called with a watch on {other:?}"
+                )),
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        if keys.len() > 1 {
+            offenders.push(format!(
+                "{store} — `{helper}` is called with watches on different keys: {keys:?}"
+            ));
+        }
+    }
+    offenders
+}
+
+/// The call sites of the store helper `helper` (a fn pinning a watch it takes
+/// as argument `index`), each as `(module:line, what its watch resolves to)`.
+fn helper_call_sites(
+    modules: &[(String, String)],
+    helper: &str,
+    index: usize,
+) -> Vec<(String, WatchSource)> {
+    let call = format!("{helper}(");
+    let mut out = Vec::new();
+    for (name, src) in modules {
+        let lines: Vec<&str> = src.lines().collect();
+        for (line_no, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || is_fn_header(trimmed) {
+                continue;
+            }
+            let Some(at) = line.match_indices(&call).map(|(at, _)| at).find(|&at| {
+                !line[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            }) else {
+                continue;
+            };
+            let text: String = std::iter::once(&line[at + call.len()..])
+                .chain(
+                    lines[line_no + 1..lines.len().min(line_no + 6)]
+                        .iter()
+                        .copied(),
+                )
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let watch = top_level_args(&text)
+                .get(index)
+                .map(|a| ident_after(a, ""))
+                .unwrap_or_default();
+            out.push((
+                format!("{name}:{}", line_no + 1),
+                resolve_watch(&lines, line_no, &watch),
+            ));
+        }
+    }
+    out
+}
+
+/// The `…_key(` builder calls in `text` (whole identifiers, `(` included).
+fn key_calls_in(text: &str) -> Vec<String> {
+    text.match_indices("_key(")
+        .map(|(at, _)| {
+            let start = text[..at]
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            format!("{}(", &text[start..at + "_key".len()])
+        })
+        .collect()
 }
 
 const INVALIDATORS: &[&str] = &[
@@ -254,8 +550,10 @@ fn an_azure_role_assignment_busts_the_key_vault_sweep() {
 fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
     let mut offenders: Vec<String> = Vec::new();
     let mut found = 0usize;
+    let mut helpers: Vec<(String, String, usize)> = Vec::new();
+    let modules = super::sources::command_modules();
 
-    for (name, src) in super::sources::command_modules() {
+    for (name, src) in &modules {
         let lines: Vec<&str> = src.lines().collect();
         for (line_no, line) in lines.iter().enumerate() {
             if !PINNED_WRITES.iter().any(|w| line.contains(w)) {
@@ -268,10 +566,23 @@ fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
             }
             found += 1;
             // The guarded forms take an `IndexWatch`, which was itself minted by
-            // `generation_for(kind, key)` — the key never appears here, so the
-            // watch-capture rule below is what covers those. Only the direct
-            // forms name a key at the call site.
-            if line.contains("_if_current(") {
+            // `generation_for(kind, key)` — the key never appears at the store,
+            // so it is read off the capture instead. This used to `continue`
+            // on the theory that the watch-capture rule covered these lines,
+            // but that rule only checks an `.await` sits between capture and
+            // store: `generation_for(Lists, &app_detail_key(..))` followed by
+            // `put_index_if_current(watch, ..)` pinned a per-object key and
+            // passed both.
+            if line.contains("_index_if_current(") {
+                match resolve_watch(&lines, line_no, &watch_at_store(&lines, line_no)) {
+                    WatchSource::Keys(keys) if all_pinnable(&keys) => {}
+                    // A store helper: the key is fixed by the watch each
+                    // caller hands it, so the callers are checked below.
+                    WatchSource::Param { helper, index } => {
+                        helpers.push((format!("{name}:{}", line_no + 1), helper, index));
+                    }
+                    _ => offenders.push(format!("{name}:{} — {trimmed}", line_no + 1)),
+                }
                 continue;
             }
             // The key may be bound a few statements up (`let key = …_key(…)`),
@@ -300,10 +611,25 @@ fn pinned_cache_writes_stay_on_the_tenant_wide_indexes() {
         }
     }
 
+    // A store helper pins whatever key its watch was captured on, and that
+    // capture lives in the caller — where the line scan above never looks,
+    // because the call names neither a pinned write nor a key. So each helper
+    // is checked through its callers: every one must pass a watch captured on
+    // a pinnable key, and all on the SAME key, since the helper stores one
+    // typed value (an SP-index watch handed to the app-name helper would pin
+    // the wrong type under the wrong key). Derived from the store, not a list
+    // of helper names.
+    offenders.extend(store_helper_offenders(&modules, &helpers));
     assert!(
         found >= 5,
         "found only {found} pinned cache write(s) across the command tree — the source walk or \
          the call detector is broken, and a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        helpers.len() >= 2,
+        "found {} pinned store helper(s), expected the SP-index and app-name-index ones — the \
+         helper resolution is broken: {helpers:?}",
+        helpers.len()
     );
     assert!(
         offenders.is_empty(),
@@ -331,6 +657,12 @@ const PINNABLE_KEYS: &[&str] = &[
     "sp_index_key(",
     "app_name_index_key(",
     "search_corpus_key(",
+    // The list caches and the credential roll-up: each one entry per tenant,
+    // built from a whole-tenant scan.
+    "apps_pairing_key(",
+    "enterprise_key(",
+    "mi_key(",
+    "credential_expirations_key(",
     // The application gallery: a static, tenant-independent catalog.
     "gallery_corpus_key(",
 ];
@@ -910,6 +1242,153 @@ fn the_pinnable_key_back_walk_stops_at_the_function_it_is_in() {
     );
 }
 
+/// The guarded pinned forms name no key at the store, so the rule reads it off
+/// the watch's capture. These used to be skipped outright, which let a pinned
+/// per-object key through as long as an `.await` sat between capture and store.
+#[test]
+fn a_guarded_pinned_store_is_checked_against_its_watchs_key() {
+    let inline = vec![
+        "pub async fn offender() {",
+        "    let watch = cache.generation_for(CacheKind::Lists, &app_detail_key(t, id));",
+        "    let v = fetch().await?;",
+        "    cache.put_index_if_current(watch, &v);",
+    ];
+    assert!(
+        !guarded_pin_watches_a_pinnable_key(&inline, 3),
+        "a guarded pinned store whose watch is on a PER-OBJECT key must be reported"
+    );
+
+    // A pinnable key elsewhere in the function must not excuse it: a bare
+    // back-walk from the capture would find `sp_index_key` and pass.
+    let bound = vec![
+        "async fn offender() {",
+        "    let index = sp_index_key(t);",
+        "    let key = app_detail_key(t, id);",
+        "    let watch = state",
+        "        .cache",
+        "        .generation_for(CacheKind::Lists, &key);",
+        "    let v = fetch().await?;",
+        "    state",
+        "        .cache",
+        "        .put_typed_index_if_current(watch, Arc::clone(&v));",
+    ];
+    assert!(
+        !guarded_pin_watches_a_pinnable_key(&bound, 9),
+        "a per-object key bound to a variable must be resolved, not excused by a nearby index key"
+    );
+
+    // The production shapes: a bound key, and several watches in one function,
+    // each store resolved to its OWN capture.
+    let genuine = vec![
+        "pub async fn list() {",
+        "    let key = mi_key(&tenant_id);",
+        "    let watch = state.cache.generation_for(CacheKind::Lists, &key);",
+        "    let rows = scan().await?;",
+        "    state.cache.put_index_if_current(watch, &rows);",
+    ];
+    assert!(
+        guarded_pin_watches_a_pinnable_key(&genuine, 4),
+        "a guarded store on a tenant-wide index key must pass"
+    );
+    let several = vec![
+        "async fn scan() {",
+        "    let rows_watch = state",
+        "        .cache",
+        "        .generation_for(CacheKind::Lists, &apps_pairing_key(tenant_id));",
+        "    let detail_watch = state",
+        "        .cache",
+        "        .generation_for(CacheKind::Lists, &app_detail_key(tenant_id, id));",
+        "    let rows = fetch().await?;",
+        "    state.cache.put_index_if_current(rows_watch, &rows);",
+        "    state.cache.put_index_if_current(detail_watch, &rows);",
+    ];
+    assert!(
+        guarded_pin_watches_a_pinnable_key(&several, 8),
+        "the store must resolve its own watch, not the nearest capture"
+    );
+    assert!(
+        !guarded_pin_watches_a_pinnable_key(&several, 9),
+        "the per-object watch's store must be reported even beside a pinnable capture"
+    );
+}
+
+/// A store helper takes its watch as a parameter, so its key is decided by its
+/// callers — which the line scan never sees, as the call names neither a pinned
+/// write nor a key.
+#[test]
+fn a_pinned_store_helper_is_checked_through_its_callers() {
+    let helper = "\
+pub(crate) fn sp_index_store_if_current(
+    cache: &Cache,
+    sps: Vec<ServicePrincipal>,
+    watch: IndexWatch<'_>,
+) -> Arc<Vec<ServicePrincipal>> {
+    let shared = Arc::new(sps);
+    cache.put_typed_index_if_current(watch, Arc::clone(&shared));
+    shared
+}
+";
+    let lines: Vec<&str> = helper.lines().collect();
+    assert_eq!(
+        resolve_watch(&lines, 6, &watch_at_store(&lines, 6)),
+        WatchSource::Param {
+            helper: "sp_index_store_if_current".into(),
+            index: 2
+        },
+        "a watch taken as a parameter must resolve to the helper and its argument position"
+    );
+    let helpers = [(
+        "commands/a.rs:7".to_string(),
+        "sp_index_store_if_current".to_string(),
+        2,
+    )];
+    let caller = |key: &str| {
+        format!(
+            "pub async fn reader() {{\n    let watch = state\n        .cache\n        \
+             .generation_for(CacheKind::Lists, &{key});\n    let sps = scan().await?;\n    \
+             Ok(sp_index_store_if_current(&state.cache, sps, watch))\n}}\n"
+        )
+    };
+    let module = |name: &str, src: String| (name.to_string(), src);
+
+    let good = [
+        module("commands/a.rs", helper.to_string()),
+        module("commands/b.rs", caller("sp_index_key(t)")),
+    ];
+    assert_eq!(
+        store_helper_offenders(&good, &helpers),
+        Vec::<String>::new()
+    );
+
+    let per_object = [
+        module("commands/a.rs", helper.to_string()),
+        module("commands/b.rs", caller("app_detail_key(t, id)")),
+    ];
+    assert_eq!(
+        store_helper_offenders(&per_object, &helpers).len(),
+        1,
+        "a caller handing the helper a per-object watch must be reported"
+    );
+
+    let mixed = [
+        module("commands/a.rs", helper.to_string()),
+        module("commands/b.rs", caller("sp_index_key(t)")),
+        module("commands/c.rs", caller("app_name_index_key(t)")),
+    ];
+    assert_eq!(
+        store_helper_offenders(&mixed, &helpers).len(),
+        1,
+        "callers handing one helper watches on different keys must be reported"
+    );
+
+    let uncalled = [module("commands/a.rs", helper.to_string())];
+    assert_eq!(
+        store_helper_offenders(&uncalled, &helpers).len(),
+        1,
+        "a helper with no caller cannot be resolved and must be reported"
+    );
+}
+
 #[test]
 fn a_function_header_is_recognised_at_any_depth_or_visibility() {
     for header in [
@@ -962,14 +1441,11 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     let mut checked: Vec<String> = Vec::new();
 
     for cmd in super::sources::commands() {
-        let (flat, map) = flatten_out_whitespace(&cmd.body);
-        let Some(read_at) = first_cache_read(&flat) else {
+        let Some((line, proven_before)) = first_cache_read_and_proof(&cmd.body) else {
             continue;
         };
         checked.push(format!("{}::{}", cmd.module, cmd.name));
-        let proven_before = first_session_proof(&flat).is_some_and(|p| p < read_at);
         if !proven_before {
-            let line = cmd.body[..map[read_at]].matches('\n').count() + 1;
             offenders.push(format!(
                 "{}::{} (cache read at body line {line})",
                 cmd.module, cmd.name
@@ -1003,6 +1479,28 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
          so the `tenant_id` argument alone decides whose data is returned:\n  {}",
         offenders.join("\n  ")
     );
+}
+
+/// The body line of the first cache read in `body`, and whether a session
+/// proof dominates it — `None` when the body reads no cache.
+///
+/// Comments and string literals are blanked first ([`code_mask`], newlines
+/// kept so the line number still points at the body): a `// …
+/// tenant_context(…)` in the prose explaining the proof used to count as the
+/// proof itself — trailing `//` and `/* */` comments included.
+fn first_cache_read_and_proof(body: &str) -> Option<(usize, bool)> {
+    let mask = code_mask(body);
+    let code: String = body
+        .char_indices()
+        .map(|(i, c)| if mask[i] || c == '\n' { c } else { ' ' })
+        .collect();
+    let (flat, map) = flatten_out_whitespace(&code);
+    let read_at = first_cache_read(&flat)?;
+    let line = code[..map[read_at]].matches('\n').count() + 1;
+    Some((
+        line,
+        first_session_proof(&flat).is_some_and(|p| p < read_at),
+    ))
 }
 
 /// Strips every whitespace character, returning the stripped text plus a map
@@ -1079,14 +1577,75 @@ fn first_cache_read(flat: &str) -> Option<usize> {
 /// from cache: `global_search` called `graph_for` first, and this rule counted
 /// it. Neither is `ensure_*_token(` a proof: a caller may swallow its non-fatal
 /// error, and text position cannot tell a real proof from a swallowed one.
+///
+/// The same goes for the proofs themselves: a call counts only in a shape that
+/// returns on a missing session — `prove_tenant_session(…)?`,
+/// `tenant_context(…)?` (Option-returning commands use the raw lookup), or
+/// `let Some(…) = ….tenant_context(…) else`. A bare mention used to count, so
+/// `let _ = state.auth.tenant_context(&t);` or `….is_some();` — which discard
+/// the answer and fall through to the read — "proved" the session.
 fn first_session_proof(flat: &str) -> Option<usize> {
-    const SESSION_PROOFS: [&str; 2] = [
-        // The shared helper, and the raw lookup it wraps (Option-returning
-        // commands use `tenant_context(&tenant_id)?` directly).
-        "prove_tenant_session(",
-        "tenant_context(",
-    ];
-    SESSION_PROOFS.iter().filter_map(|p| flat.find(p)).min()
+    const SESSION_PROOFS: [&str; 2] = ["prove_tenant_session(", "tenant_context("];
+    SESSION_PROOFS
+        .iter()
+        .flat_map(|p| flat.match_indices(p).map(|(at, _)| (at, p.len())))
+        .filter(|&(at, len)| {
+            // A whole identifier: not `foo_tenant_context(`.
+            if flat[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                return false;
+            }
+            let Some(close) = matching_paren(flat, at + len - 1) else {
+                return false;
+            };
+            let after = &flat[close + 1..];
+            if after.starts_with('?') {
+                return true;
+            }
+            after.starts_with("else{") && let_some_binds(flat, at)
+        })
+        .map(|(at, _)| at)
+        .min()
+}
+
+/// Whether the call at `at` is the right-hand side of a `let Some(pattern) =`
+/// — any pattern, including a struct one (`let Some(Ctx { oid, .. }) =`),
+/// whose braces a "statement starts after the last `;`/`{`/`}`" search would
+/// stop inside. Between the `=` and the call only a receiver path may sit
+/// (`state.auth.`, `crate::x::`), so this `let` is the call's own.
+fn let_some_binds(flat: &str, at: usize) -> bool {
+    let Some(let_at) = flat[..at].rfind("letSome(") else {
+        return false;
+    };
+    let Some(close) = matching_paren(flat, let_at + "letSome".len()) else {
+        return false;
+    };
+    close + 2 <= at
+        && flat[close + 1..].starts_with('=')
+        && flat[close + 2..at]
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '&' | '*'))
+}
+
+/// The index of the `)` closing the `(` at `open`.
+fn matching_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[test]
@@ -1114,6 +1673,62 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
         first_session_proof("letclient=state.graph_for(&t);").is_none(),
         "a client factory is not a session proof"
     );
+
+    // Only a proof that RETURNS on a missing session counts. Each of these
+    // passed the old bare-mention detector.
+    let read = "\nstate.cache.get(CacheKind::Audit, &k)";
+    for (body, why) in [
+        (
+            "// First: state.auth.tenant_context(&tenant_id)?;",
+            "a comment mentioning the proof",
+        ),
+        (
+            "let _ = state.auth.tenant_context(&tenant_id);",
+            "`let _ =` discards the answer",
+        ),
+        (
+            "state.auth.tenant_context(&tenant_id).is_some();",
+            "`.is_some();` discards the answer",
+        ),
+        (
+            "let _ = crate::commands::session::prove_tenant_session(&state, &tenant_id);",
+            "an unpropagated `prove_tenant_session` result",
+        ),
+        (
+            "let x = 1; // state.auth.tenant_context(&tenant_id)?;",
+            "a trailing comment",
+        ),
+        (
+            "/* state.auth.tenant_context(&tenant_id)?; */",
+            "a block comment",
+        ),
+        (
+            "let msg = \"state.auth.tenant_context(&tenant_id)?;\";",
+            "a string literal",
+        ),
+        (
+            "let Some(a) = x else { return; }; let b = state.auth.tenant_context(&t) else { return; };",
+            "a `let Some` that binds a different call",
+        ),
+    ] {
+        assert_eq!(
+            first_cache_read_and_proof(&format!("{body}{read}")),
+            Some((2, false)),
+            "not a session proof: {why}"
+        );
+    }
+    for body in [
+        "crate::commands::session::prove_tenant_session(&state, &tenant_id)?;",
+        "crate::commands::session::prove_tenant_session(\n    &state,\n    &tenant_id,\n)?;",
+        "state.auth.tenant_context(&tenant_id)?;",
+        "let Some(ctx) = state.auth.tenant_context(&tenant_id) else {\n    return Ok(None);\n};",
+        "if x {\n}\nlet Some(TenantCtx { account_oid, .. }) = state\n    .auth\n    .tenant_context(&tenant_id)\nelse {\n    return Ok(None);\n};",
+    ] {
+        assert!(
+            first_cache_read_and_proof(&format!("{body}{read}")).is_some_and(|(_, ok)| ok),
+            "a real session proof must still count: {body}"
+        );
+    }
 
     // And the flattener must survive the wrapping rustfmt applies.
     let (flat, map) = flatten_out_whitespace("state\n    .cache\n    .get(CacheKind::Audit)");

@@ -667,30 +667,6 @@ fn http_client_budget_violations(src: &str) -> Vec<&'static str> {
     out
 }
 
-/// `src` without its test code, for the connect-budget rule.
-///
-/// `sources::strip_tests` cuts at the first `#[cfg(test)]`, which is right for
-/// a trailing `mod tests { … }` but wrong for the out-of-line declaration
-/// `#[cfg(test)] mod tests;` near the top of a file (the Graph and Exchange
-/// `client.rs`): cutting there drops the very builder this rule checks. A
-/// `#[cfg(test)]` on a `;`-terminated item removes just that item; any other
-/// starts the test code, which runs to the end of the file.
-fn strip_test_code(src: &str) -> String {
-    const MARK: &str = "#[cfg(test)]";
-    let mut out = String::new();
-    let mut rest = src;
-    while let Some(at) = rest.find(MARK) {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + MARK.len()..];
-        match (after.find(';'), after.find('{')) {
-            (Some(semi), brace) if brace.is_none_or(|b| semi < b) => rest = &after[semi + 1..],
-            _ => return out,
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Every HTTP client the app builds has a connect budget.
 ///
 /// Only the Graph client set one, so on a network that silently drops traffic
@@ -711,7 +687,7 @@ fn every_http_client_has_a_connect_budget() {
             continue;
         }
         let text = std::fs::read_to_string(&src).expect("read source");
-        let code = strip_test_code(&text);
+        let code = super::sources::strip_tests(&text);
         builders += code
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
@@ -776,7 +752,7 @@ fn the_connect_budget_rule_fires_on_an_unbudgeted_client() {
     let file = "#[cfg(test)]\nmod tests;\nlet c = reqwest::Client::builder().build();\n\
                 #[cfg(test)]\nmod t { let c = reqwest::Client::new(); }";
     assert_eq!(
-        http_client_budget_violations(&strip_test_code(file)),
+        http_client_budget_violations(&super::sources::strip_tests(file)),
         vec!["a `Client::builder()` without `.connect_timeout(CONNECT_TIMEOUT)`"]
     );
 }

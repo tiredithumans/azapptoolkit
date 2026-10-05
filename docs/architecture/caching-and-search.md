@@ -26,8 +26,10 @@ without a sign-out in between — while `reauthenticate` (same account, oid-chec
 Two rules ride alongside the key prefix:
 
 - **A command that can answer from cache must prove the session** with
-  `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)`)
-  as its first statement, ahead of any cache read. Every other read proves it implicitly by needing
+  `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)?`,
+  or a `let Some(…) = ….tenant_context(…) else` guard) as its first statement, ahead of any cache
+  read. Only a shape that returns on a missing session counts: a comment, `let _ = …` or
+  `.is_some();` mention discards the answer and is not a proof. Every other read proves it implicitly by needing
   a token; a command answering from cache has no such gate, so without this an operator whose
   session died (or a window that never signed in) could still read a populated tenant's data. **A
   client factory call is not a proof**: `graph_for` / `exchange_for` / `arm_for` / `keyvault_for`
@@ -37,9 +39,14 @@ Two rules ride alongside the key prefix:
   `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session` (and
   `every_index_accessor_counts_as_a_cache_read`).
 - **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
-  scan to rebuild (the two indexes, the search corpus). A pinned per-app entry can never be evicted,
-  so a large tenant's thousands of `app_detail|…` writes would grow the bucket without bound. Pinned
-  by `repo_invariants.rs`.
+  scan to rebuild (the two indexes, the search corpus, the App Registrations / Enterprise Apps /
+  Managed Identities lists and the credential-expiry roll-up). A pinned per-app entry can never be
+  evicted, so a large tenant's thousands of `app_detail|…` writes would grow the bucket without
+  bound. Pinned by `repo_invariants::cache::pinned_cache_writes_stay_on_the_tenant_wide_indexes`
+  against its `PINNABLE_KEYS` list; a guarded `put_*index_if_current(watch, …)` names no key, so
+  the rule reads the key off that watch's `generation_for` capture — or, for a store helper that
+  takes the watch as a parameter (`sp_index_store_if_current`), off every caller's capture, which
+  must all be on one pinnable key.
 - **Bound bulk seeding by `capacity_for`.** Seeding a whole scan into a bucket must respect its
   capacity, or the seed evicts everything else the bucket holds — including entries the same run is
   about to read back.
