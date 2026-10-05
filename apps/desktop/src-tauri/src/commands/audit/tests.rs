@@ -2,17 +2,26 @@
 
 use super::*;
 
-use super::prefetch::prefetch_admin_consent_grants;
-use super::score::{derive_orgwide_mail_scopes, score_one, sp_audit_candidates};
+use super::prefetch::{prefetch_admin_consent_grants, prefetch_office365_role_grants};
+use super::score::{
+    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
+    merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, CredentialStatus, RiskLevel};
+use azapptoolkit_core::audit::{
+    AppPermissions, AuditItem, AuditPrincipalKind, CredentialStatus, ResourcePermission, RiskLevel,
+    issue,
+};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
-use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID};
+use azapptoolkit_core::scoping::{
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+};
 use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider, TokenError};
 use azapptoolkit_graph::GraphClient;
 
@@ -236,20 +245,28 @@ fn orgwide_mail_scopes_drop_principals_with_no_mailbox_grant() {
     assert!(derive_orgwide_mail_scopes(&graph_roles, &HashSet::new()).is_empty());
 }
 
+/// The combined granted-role map from bare Graph values (+ Office 365 grants).
+fn granted(graph: &[(&str, &[&str])]) -> HashMap<String, Vec<ResourcePermission>> {
+    let graph: HashMap<String, Vec<String>> = graph
+        .iter()
+        .map(|(sp, vs)| (sp.to_string(), vs.iter().map(|v| v.to_string()).collect()))
+        .collect();
+    combine_granted_roles(&graph, &HashMap::new())
+}
+
 // The SP-only candidate filter: no local application AND (≥1 application
-// grant on either mailbox-bearing resource OR a risky flag from Identity
+// grant on any resource the run reads OR a risky flag from Identity
 // Protection). Managed identities and disabled SPs are candidates; paired and
 // grantless-unflagged SPs are not.
 #[test]
 fn sp_audit_candidates_filters_paired_and_grantless() {
     let local_app_ids: HashSet<String> = ["paired-app".to_string()].into();
-    let roles: HashMap<String, Vec<String>> = [
-        ("sp-foreign".to_string(), vec!["Mail.Read".to_string()]),
-        ("sp-paired".to_string(), vec!["Mail.Read".to_string()]),
-        ("sp-mi".to_string(), vec!["User.Read.All".to_string()]),
-        ("sp-empty".to_string(), Vec::new()),
-    ]
-    .into();
+    let roles = granted(&[
+        ("sp-foreign", &["Mail.Read"]),
+        ("sp-paired", &["Mail.Read"]),
+        ("sp-mi", &["User.Read.All"]),
+        ("sp-empty", &[]),
+    ]);
     let index = vec![
         sp("sp-foreign", "foreign-app", Some("Application")),
         sp("sp-paired", "paired-app", Some("Application")),
@@ -257,40 +274,122 @@ fn sp_audit_candidates_filters_paired_and_grantless() {
         sp("sp-grantless", "gallery-app", Some("Application")),
         sp("sp-empty", "empty-app", Some("Application")),
     ];
-    let got: Vec<String> = sp_audit_candidates(
-        &index,
-        &local_app_ids,
-        &roles,
-        &HashSet::new(),
-        &HashMap::new(),
-    )
-    .into_iter()
-    .map(|s| s.id)
-    .collect();
+    let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles, &HashMap::new())
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
     // Paired (has a local app), grantless (not in the matrix), and
     // empty-role-list SPs are all excluded; the foreign SP and the MI stay.
     assert_eq!(got, vec!["sp-foreign".to_string(), "sp-mi".to_string()]);
 }
 
 #[test]
-fn sp_holding_only_the_ews_blanket_scope_is_still_a_candidate() {
-    // `full_access_as_app` lives on Office 365 Exchange Online, so such a
-    // principal has NO Graph role and was filtered out of the SP-only phase
-    // entirely — despite holding full access to every mailbox in the tenant,
-    // which is the single most audit-worthy grant there is.
-    let index = vec![sp("sp-ews", "ews-app", Some("Application"))];
-    let ews: HashSet<String> = ["sp-ews".to_string()].into();
-    let got: Vec<String> = sp_audit_candidates(
-        &index,
-        &HashSet::new(),
-        &HashMap::new(), // no Graph grants at all
-        &ews,
-        &HashMap::new(),
-    )
-    .into_iter()
-    .map(|s| s.id)
-    .collect();
-    assert_eq!(got, vec!["sp-ews".to_string()]);
+fn sp_holding_only_office365_roles_is_a_candidate_and_is_scored() {
+    // `full_access_as_app` and `Exchange.ManageAsApp` live on Office 365
+    // Exchange Online, `Sites.FullControl.All` here on Office 365 SharePoint
+    // Online — no Graph role at all, so the Graph-only filter dropped these
+    // principals entirely despite tenant-wide mailbox / site reach.
+    let office: HashMap<String, Vec<ResourcePermission>> = [
+        (
+            "sp-ews".to_string(),
+            vec![ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)],
+        ),
+        (
+            "sp-exo-admin".to_string(),
+            vec![ResourcePermission::exchange_online("Exchange.ManageAsApp")],
+        ),
+        (
+            "sp-spo".to_string(),
+            vec![ResourcePermission::on(
+                OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+                "Sites.FullControl.All",
+            )],
+        ),
+    ]
+    .into();
+    let roles = combine_granted_roles(&HashMap::new(), &office);
+    let index = vec![
+        sp("sp-ews", "ews-app", Some("Application")),
+        sp("sp-exo-admin", "exo-app", Some("ManagedIdentity")),
+        sp("sp-spo", "spo-app", Some("Application")),
+    ];
+    let candidates = sp_audit_candidates(&index, &HashSet::new(), &roles, &HashMap::new());
+    assert_eq!(
+        candidates.len(),
+        3,
+        "every Office 365 holder is a candidate"
+    );
+
+    let server_less_ctx = |granted_roles_by_sp| {
+        let cache = Cache::new();
+        let token = StaticTokenProvider::new("tok");
+        let client = Arc::new(GraphClient::with_base_url(
+            "tenant-test",
+            token.clone(),
+            token,
+            cache.clone(),
+            "http://127.0.0.1:9".to_string(),
+        ));
+        ScoreCtx {
+            granted_roles_by_sp,
+            ..score_ctx(client, cache)
+        }
+    };
+    let ctx = server_less_ctx(Arc::new(roles));
+    let now = Utc::now();
+    let by_id = |id: &str| {
+        let sp = candidates.iter().find(|s| s.id == id).unwrap();
+        score_sp_only(sp, &ctx, &HashMap::new(), now)
+    };
+    let high_risk = |item: &AuditItem| {
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(issue::HIGH_RISK_APP_PERMS))
+    };
+    let ews = by_id("sp-ews");
+    assert!(high_risk(&ews) && ews.risk_score > 0, "{:?}", ews.issues);
+    let exo_admin = by_id("sp-exo-admin");
+    assert!(
+        high_risk(&exo_admin) && exo_admin.risk_score > 0,
+        "Exchange.ManageAsApp alone scores high: {:?}",
+        exo_admin.issues
+    );
+    let spo = by_id("sp-spo");
+    assert!(
+        spo.issues
+            .iter()
+            .any(|i| i.starts_with(issue::UNCONFINABLE_SHAREPOINT)),
+        "{:?}",
+        spo.issues
+    );
+    assert!(high_risk(&spo) && spo.risk_score > 0, "{:?}", spo.issues);
+}
+
+#[test]
+fn ews_holders_are_read_off_the_resource_carrying_map() {
+    let office: HashMap<String, Vec<ResourcePermission>> = [
+        (
+            "sp-ews".to_string(),
+            vec![
+                ResourcePermission::exchange_online("Exchange.ManageAsApp"),
+                ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP),
+            ],
+        ),
+        (
+            "sp-other".to_string(),
+            vec![ResourcePermission::exchange_online("Mail.Read")],
+        ),
+        // Same value on another resource is not the EWS scope.
+        (
+            "sp-lookalike".to_string(),
+            vec![ResourcePermission::graph(EWS_FULL_ACCESS_AS_APP)],
+        ),
+    ]
+    .into();
+    assert_eq!(
+        ews_full_access_holders(&office),
+        HashSet::from(["sp-ews".to_string()])
+    );
 }
 
 #[test]
@@ -308,17 +407,74 @@ fn a_risky_grantless_sp_is_a_candidate_without_any_grant() {
         ("confirmedCompromised".to_string(), "high".to_string()),
     )]
     .into();
-    let got: Vec<String> = sp_audit_candidates(
-        &index,
-        &HashSet::new(),
-        &HashMap::new(),
-        &HashSet::new(),
-        &risky,
-    )
-    .into_iter()
-    .map(|s| s.id)
-    .collect();
+    let got: Vec<String> = sp_audit_candidates(&index, &HashSet::new(), &HashMap::new(), &risky)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
     assert_eq!(got, vec!["sp-risky-mi".to_string()]);
+}
+
+#[test]
+fn merge_granted_roles_adds_only_undeclared_grants_with_their_resource() {
+    let mut perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::on(
+            // Upper-cased on purpose: casing is not identity.
+            MICROSOFT_GRAPH_APP_ID.to_ascii_uppercase(),
+            "User.Read.All",
+        )],
+        ..Default::default()
+    };
+    let granted = vec![
+        ResourcePermission::graph("User.Read.All"), // declared
+        ResourcePermission::graph("RoleManagement.ReadWrite.Directory"),
+        // Same value, different resource: a separate grant.
+        ResourcePermission::exchange_online("Mail.Read"),
+        ResourcePermission::graph("Mail.Read"),
+        ResourcePermission::graph("Mail.Read"), // repeated grant row
+    ];
+    merge_granted_roles(&mut perms, &granted, &HashSet::new());
+    assert_eq!(
+        perms.undeclared_grants,
+        vec![
+            ResourcePermission::graph("RoleManagement.ReadWrite.Directory"),
+            ResourcePermission::exchange_online("Mail.Read"),
+            ResourcePermission::graph("Mail.Read"),
+        ]
+    );
+    assert_eq!(
+        perms.app_role_grants.len(),
+        4,
+        "{:?}",
+        perms.app_role_grants
+    );
+    assert!(
+        perms
+            .app_role_grants
+            .iter()
+            .any(|g| g.resource_app_id.as_deref() == Some(OFFICE365_EXCHANGE_ONLINE_APP_ID)),
+        "the resource rides along"
+    );
+}
+
+/// A declared resource whose permission index failed to resolve had its
+/// declarations dropped, so "not in the manifest" is unknowable for grants on
+/// it: they still score, but Rule 23 must not tell the operator to revoke what
+/// may well be a declared permission.
+#[test]
+fn merge_granted_roles_never_calls_an_unresolved_resource_undeclared() {
+    let mut perms = AppPermissions::default();
+    let unresolved = HashSet::from([MICROSOFT_GRAPH_APP_ID.to_string()]);
+    let granted = vec![
+        ResourcePermission::graph("Mail.Read"),
+        ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP),
+    ];
+    merge_granted_roles(&mut perms, &granted, &unresolved);
+    assert_eq!(perms.app_role_grants, granted, "both still score");
+    assert_eq!(
+        perms.undeclared_grants,
+        vec![ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)],
+        "only the resolved resource's grant is provably undeclared"
+    );
 }
 
 /// A run that covered everything — the shape every export took before the
@@ -559,6 +715,7 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         admin_consent_clients: Arc::default(),
         admin_consented_scopes_by_client: None,
         orgwide_mail_by_sp: Arc::default(),
+        granted_roles_by_sp: Arc::default(),
         legacy_policies: Arc::default(),
         exo_tripped: Arc::new(AtomicBool::new(false)),
         mail_scoping_unresolved: AtomicBool::new(false),
@@ -710,14 +867,19 @@ async fn a_failed_grants_read_reports_consent_as_unknown() {
     mock_grants(&server, wiremock::ResponseTemplate::new(403)).await;
     let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
 
-    let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
-    // Empty maps alone read as "nothing admin-consented"; the flag is what
-    // lets Rule 13 fall back to the declared scopes instead of hiding them.
-    assert!(
-        !read,
+    let (clients, scopes, gap) = prefetch_admin_consent_grants(&ctx.client).await;
+    // Empty maps alone read as "nothing admin-consented"; the gap is what
+    // lets Rule 13 fall back to the declared scopes instead of hiding them …
+    assert_eq!(
+        gap,
+        Some(AuditCoverageGap::DelegatedConsentGrants),
         "a failed read must not claim the consent state is known"
     );
     assert!(clients.is_empty() && scopes.is_empty());
+    // … and what keeps the run out of the cache: admin-consent flags and
+    // delegated scoring silently vanished, so it is not an all-clear.
+    let degraded: Vec<AuditCoverageGap> = gap.into_iter().collect();
+    assert!(!run_is_cacheable(false, false, &degraded));
 }
 
 #[tokio::test]
@@ -742,8 +904,8 @@ async fn the_grants_read_keeps_only_all_principals_scopes() {
     .await;
     let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
 
-    let (clients, scopes, read) = prefetch_admin_consent_grants(&ctx.client).await;
-    assert!(read);
+    let (clients, scopes, gap) = prefetch_admin_consent_grants(&ctx.client).await;
+    assert_eq!(gap, None);
     assert_eq!(clients, HashSet::from(["sp-1".to_string()]));
     assert_eq!(
         scopes.len(),
@@ -781,6 +943,49 @@ async fn score_one_hands_rule_13_the_apps_admin_consented_scopes() {
                 "{} Mail.ReadWrite",
                 azapptoolkit_core::audit::issue::HIGH_RISK_DELEGATED_PERMS
             )),
+        "{:?}",
+        item.issues
+    );
+}
+
+/// Rule 23 end-to-end: an app whose manifest declares NOTHING but whose SP was
+/// granted `RoleManagement.ReadWrite.Directory` directly — the classic way to
+/// hide privilege on an innocuous app. It used to score zero (only
+/// `requiredResourceAccess` was read); now the grant is scored (tier-0 ⇒
+/// Critical alone) and named as granted-but-undeclared.
+#[tokio::test]
+async fn an_undeclared_granted_role_is_scored_and_named() {
+    let server = wiremock::MockServer::start().await;
+    mock_sp_lookup(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"id": "sp-1", "appId": "app-1", "accountEnabled": true}]
+        })),
+    )
+    .await;
+    let mut ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    ctx.granted_roles_by_sp = Arc::new(HashMap::from([(
+        "sp-1".to_string(),
+        vec![ResourcePermission::graph(
+            "RoleManagement.ReadWrite.Directory",
+        )],
+    )]));
+
+    let item = score_one(&ctx, &bare_app(), None).await.expect("scores");
+    assert_eq!(item.risk_level, RiskLevel::Critical, "{:?}", item.issues);
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(issue::HIGH_RISK_APP_PERMS)
+                && i.contains("RoleManagement.ReadWrite.Directory")),
+        "the grant carries the high-risk marker: {:?}",
+        item.issues
+    );
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(issue::GRANTED_NOT_DECLARED)
+                && i.contains("RoleManagement.ReadWrite.Directory on Microsoft Graph")),
         "{:?}",
         item.issues
     );
@@ -1175,4 +1380,180 @@ async fn secret_lifetime_advisory_is_recommendation_only_and_never_guesses() {
         "≥2 overrides read as no verdict: {:?}",
         item.recommendations
     );
+}
+
+/// Mounts one Office 365 resource: its SP lookup and (unless `assigned` is
+/// `None`) its `appRoleAssignedTo` read.
+async fn mock_office365_resource(
+    server: &wiremock::MockServer,
+    resource_app_id: &str,
+    lookup: wiremock::ResponseTemplate,
+    assigned: Option<wiremock::ResponseTemplate>,
+    sp_id: &str,
+) {
+    use wiremock::matchers::{method, path, query_param};
+    wiremock::Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param(
+            "$filter",
+            format!("appId eq '{resource_app_id}'"),
+        ))
+        .respond_with(lookup)
+        .mount(server)
+        .await;
+    if let Some(assigned) = assigned {
+        wiremock::Mock::given(method("GET"))
+            .and(path(format!(
+                "/servicePrincipals/{sp_id}/appRoleAssignedTo"
+            )))
+            .respond_with(assigned)
+            .mount(server)
+            .await;
+    }
+}
+
+fn resource_sp(sp_id: &str, app_id: &str, roles: &[(&str, &str)]) -> wiremock::ResponseTemplate {
+    let roles: Vec<serde_json::Value> = roles
+        .iter()
+        .map(|(id, value)| serde_json::json!({"id": id, "value": value}))
+        .collect();
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "value": [{"id": sp_id, "appId": app_id, "appRoles": roles}]
+    }))
+}
+
+fn assigned_to(rows: &[(&str, &str, &str)]) -> wiremock::ResponseTemplate {
+    let rows: Vec<serde_json::Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (principal, role, kind))| {
+            serde_json::json!({
+                "id": format!("a{i}"), "principalId": principal, "resourceId": "r",
+                "appRoleId": role, "principalType": kind,
+            })
+        })
+        .collect();
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": rows }))
+}
+
+/// Every Exchange Online role (not just `full_access_as_app`) and every
+/// SharePoint Online role is captured with its resource; user rows are not.
+#[tokio::test]
+async fn office365_grants_capture_every_role_on_both_resources() {
+    let server = wiremock::MockServer::start().await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_EXCHANGE_ONLINE_APP_ID,
+        resource_sp(
+            "exo-sp",
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            &[
+                ("r-ews", EWS_FULL_ACCESS_AS_APP),
+                ("r-manage", "Exchange.ManageAsApp"),
+            ],
+        ),
+        Some(assigned_to(&[
+            ("sp-a", "r-ews", "ServicePrincipal"),
+            ("sp-b", "r-manage", "ServicePrincipal"),
+            ("user-1", "r-manage", "User"),
+        ])),
+        "exo-sp",
+    )
+    .await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+        resource_sp(
+            "spo-sp",
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+            &[("r-full", "Sites.FullControl.All")],
+        ),
+        Some(assigned_to(&[("sp-c", "r-full", "ServicePrincipal")])),
+        "spo-sp",
+    )
+    .await;
+    let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+
+    let (grants, gaps) = prefetch_office365_role_grants(&ctx.client).await;
+    assert!(gaps.is_empty(), "{gaps:?}");
+    assert_eq!(
+        grants["sp-a"],
+        vec![ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)]
+    );
+    assert_eq!(
+        grants["sp-b"],
+        vec![ResourcePermission::exchange_online("Exchange.ManageAsApp")]
+    );
+    assert_eq!(
+        grants["sp-c"],
+        vec![ResourcePermission::on(
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+            "Sites.FullControl.All"
+        )]
+    );
+    assert!(!grants.contains_key("user-1"));
+}
+
+/// A failed SharePoint Online read is its own gap and does not take the
+/// Exchange Online grants down with it; a failed resource LOOKUP is a gap too,
+/// while a resource with no SP in the tenant is an ordinary empty answer.
+#[tokio::test]
+async fn office365_grant_failures_are_gaps_but_an_absent_resource_is_not() {
+    // SPO assignment read fails; EXO is fine.
+    let server = wiremock::MockServer::start().await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_EXCHANGE_ONLINE_APP_ID,
+        resource_sp(
+            "exo-sp",
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            &[("r-ews", EWS_FULL_ACCESS_AS_APP)],
+        ),
+        Some(assigned_to(&[("sp-a", "r-ews", "ServicePrincipal")])),
+        "exo-sp",
+    )
+    .await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+        resource_sp(
+            "spo-sp",
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+            &[("r-full", "Sites.FullControl.All")],
+        ),
+        Some(wiremock::ResponseTemplate::new(403)),
+        "spo-sp",
+    )
+    .await;
+    let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    let (grants, gaps) = prefetch_office365_role_grants(&ctx.client).await;
+    assert_eq!(gaps, vec![AuditCoverageGap::SharePointOnlineGrants]);
+    assert!(
+        grants.contains_key("sp-a"),
+        "EXO grants survive the SPO failure"
+    );
+    assert!(!run_is_cacheable(false, false, &gaps));
+
+    // EXO lookup fails (a gap); SPO has no SP in this tenant (not a gap).
+    let server = wiremock::MockServer::start().await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_EXCHANGE_ONLINE_APP_ID,
+        wiremock::ResponseTemplate::new(403),
+        None,
+        "exo-sp",
+    )
+    .await;
+    mock_office365_resource(
+        &server,
+        OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
+        None,
+        "spo-sp",
+    )
+    .await;
+    let ctx = graph_over(&server, StaticTokenProvider::new("tok"));
+    let (grants, gaps) = prefetch_office365_role_grants(&ctx.client).await;
+    assert_eq!(gaps, vec![AuditCoverageGap::EwsFullAccessGrants]);
+    assert!(grants.is_empty());
 }

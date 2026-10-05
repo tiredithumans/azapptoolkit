@@ -4,10 +4,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope};
+use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, ResourcePermission};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::ServicePrincipal;
-use azapptoolkit_core::scoping::{EWS_FULL_ACCESS_AS_APP, OFFICE365_EXCHANGE_ONLINE_APP_ID};
+use azapptoolkit_core::scoping::{
+    OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::verdict::aap_verdict_for;
 use azapptoolkit_graph::GraphClient;
@@ -41,15 +43,31 @@ pub(crate) fn audit_exchange_client(
 }
 
 /// ONE tenant-wide `oauth2PermissionGrants` read → (AllPrincipals client ids,
-/// per-client delegated scope values, whether the read succeeded). The scope
-/// strings are kept per client so the SP-only phase can score high-risk
-/// delegated permissions (an SP has no manifest to resolve them from), and so
-/// phase 1 can tell an admin-consented scope from a merely declared one.
-/// Best-effort: on failure no principal gets the admin-consent flag, the flag
-/// is `false` (consent unknown, not "none") and the audit proceeds.
+/// per-client delegated scope values, the coverage gap when the read failed).
+/// The scope strings are kept per client so the SP-only phase can score
+/// high-risk delegated permissions (an SP has no manifest to resolve them
+/// from), and so phase 1 can tell an admin-consented scope from a merely
+/// declared one.
+///
+/// Best-effort — a failure must not abort the run — but it is REPORTED as
+/// [`AuditCoverageGap::DelegatedConsentGrants`]. Empty maps read exactly like
+/// "nothing admin-consented", so swallowing the error (it used to log at
+/// `info!`) dropped every admin-consent flag and the SP-only delegated
+/// scoring while the run cached itself as a complete scan.
+///
+/// Every failure is a gap, a 403 included: the sign-in scope
+/// `Directory.Read.All` (`GRAPH_READ_SCOPES`) is exactly the scope that reads
+/// `/oauth2PermissionGrants`, so no legitimately signed-in operator lacks it —
+/// unlike the premium reports, there is no "not entitled here" state to spare
+/// from the banner. The Graph `appRoleAssignedTo` read on the same token is
+/// always-gap for the same reason.
 pub(crate) async fn prefetch_admin_consent_grants(
     client: &GraphClient,
-) -> (HashSet<String>, HashMap<String, Vec<String>>, bool) {
+) -> (
+    HashSet<String>,
+    HashMap<String, Vec<String>>,
+    Option<AuditCoverageGap>,
+) {
     match client.list_all_oauth2_grants().await {
         Ok(grants) => {
             let mut clients: HashSet<String> = HashSet::new();
@@ -64,22 +82,26 @@ pub(crate) async fn prefetch_admin_consent_grants(
                     .extend(g.scope.split_whitespace().map(str::to_string));
                 clients.insert(g.client_id);
             }
-            (clients, scopes, true)
+            (clients, scopes, None)
         }
         Err(err) => {
-            tracing::info!(
+            tracing::warn!(
                 ?err,
                 "audit: tenant-wide grants read failed; admin-consent flags unavailable"
             );
-            (HashSet::new(), HashMap::new(), false)
+            (
+                HashSet::new(),
+                HashMap::new(),
+                Some(AuditCoverageGap::DelegatedConsentGrants),
+            )
         }
     }
 }
 
 /// ONE tenant-wide `appRoleAssignedTo` read on the Microsoft Graph SP →
-/// `spObjectId -> granted Graph permission values`. Feeds both the SP-only
-/// scoring phase and (via [`derive_orgwide_mail_scopes`]) score_one's scoped-mail
-/// reconciliation.
+/// `spObjectId -> granted Graph permission values`. Feeds the SP-only scoring
+/// phase, `score_one`'s granted-but-undeclared merge, and (via
+/// [`derive_orgwide_mail_scopes`]) its scoped-mail reconciliation.
 ///
 /// Still best-effort — a failure must not abort the whole audit — but it now
 /// REPORTS the failure alongside the empty map. An empty map is
@@ -127,65 +149,118 @@ pub(crate) async fn prefetch_graph_app_roles(
     (graph_roles_by_sp, None)
 }
 
-/// Service principals holding the EWS `full_access_as_app` scope as an org-wide
-/// grant, from ONE tenant-wide `appRoleAssignedTo` read on the legacy Office 365
-/// Exchange Online resource.
+/// Every app role granted on the two legacy Office 365 resources — Exchange
+/// Online and SharePoint Online — per service principal, each carrying its
+/// resource: ONE tenant-wide `appRoleAssignedTo` read per resource, the two
+/// overlapped.
 ///
-/// That resource is not Microsoft Graph, so [`prefetch_graph_app_roles`] can't see
-/// these grants — and a surviving one reaches **every** mailbox with full access,
-/// which defeats any RBAC mailbox scope on the same principal. Without it the
-/// audit reported a scoped verdict (and the reduced scoped-mail weight) for a
-/// principal that still had org-wide reach.
+/// Neither resource is Microsoft Graph, so [`prefetch_graph_app_roles`] can't
+/// see these grants. Exchange Online holds the EWS `full_access_as_app` scope
+/// (reaches every mailbox, defeating any RBAC scope on the same principal) and
+/// `Exchange.ManageAsApp`; SharePoint Online holds its own org-wide `Sites.*`.
+/// The read used to keep only `full_access_as_app` and skip SharePoint Online
+/// entirely, so a foreign app or managed identity holding only those roles was
+/// never scored.
 ///
-/// Best-effort: a tenant with no EWS-consenting app has no service principal for
-/// the resource at all, which is normal — an empty set simply means no blanket
-/// grant to reconcile against.
-pub(crate) async fn prefetch_ews_full_access_grants(
+/// Best-effort per resource: a tenant where nothing consented to a resource
+/// has no service principal for it at all, which is normal — an empty answer,
+/// not a gap. A failed read on a resource that DOES exist is a gap
+/// (`EwsFullAccessGrants` / `SharePointOnlineGrants`).
+pub(crate) async fn prefetch_office365_role_grants(
     client: &GraphClient,
-) -> (HashSet<String>, Option<AuditCoverageGap>) {
-    let mut out = HashSet::new();
-    // A tenant with no EWS-consenting app has no service principal for the
-    // resource at all. That is an ordinary empty answer, NOT a gap — reporting
-    // it as one would flag most tenants as degraded and teach operators to
-    // ignore the banner.
-    let Ok(Some(sp)) = client
-        .resolve_resource_sp(OFFICE365_EXCHANGE_ONLINE_APP_ID)
-        .await
-    else {
-        return (out, None);
+) -> (
+    HashMap<String, Vec<ResourcePermission>>,
+    Vec<AuditCoverageGap>,
+) {
+    let (exo, spo) = futures::join!(
+        prefetch_resource_role_grants(
+            client,
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            AuditCoverageGap::EwsFullAccessGrants,
+        ),
+        prefetch_resource_role_grants(
+            client,
+            OFFICE365_SHAREPOINT_ONLINE_APP_ID,
+            AuditCoverageGap::SharePointOnlineGrants,
+        ),
+    );
+    let mut out: HashMap<String, Vec<ResourcePermission>> = HashMap::new();
+    let mut gaps = Vec::new();
+    for (grants, gap) in [exo, spo] {
+        for (sp_id, perms) in grants {
+            out.entry(sp_id).or_default().extend(perms);
+        }
+        gaps.extend(gap);
+    }
+    (out, gaps)
+}
+
+/// One resource's half of [`prefetch_office365_role_grants`]: every app role
+/// on `resource_app_id` held by a service principal, keyed by the holder's
+/// object id. `gap` is reported only when the resource exists and its read
+/// failed.
+async fn prefetch_resource_role_grants(
+    client: &GraphClient,
+    resource_app_id: &str,
+    gap: AuditCoverageGap,
+) -> (
+    HashMap<String, Vec<ResourcePermission>>,
+    Option<AuditCoverageGap>,
+) {
+    let mut out: HashMap<String, Vec<ResourcePermission>> = HashMap::new();
+    let sp = match client.resolve_resource_sp(resource_app_id).await {
+        Ok(Some(sp)) => sp,
+        // No service principal for the resource ⇒ nothing in this tenant
+        // consented to it. An ordinary empty answer, NOT a gap — reporting it
+        // as one would flag most tenants as degraded and teach operators to
+        // ignore the banner.
+        Ok(None) => return (out, None),
+        // A failed LOOKUP is not that answer: whether the resource exists is
+        // unknown, so its grants may be missing. It used to share the
+        // `Ok(None)` arm and vanish without a gap.
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                resource_app_id,
+                "audit: Office 365 resource lookup failed; its grants are missing from this run"
+            );
+            return (out, Some(gap));
+        }
     };
-    let full_access_role_ids: HashSet<&str> = sp
+    let value_by_role_id: HashMap<&str, &str> = sp
         .app_roles
         .iter()
-        .filter(|r| r.value == EWS_FULL_ACCESS_AS_APP)
-        .map(|r| r.id.as_str())
+        .map(|r| (r.id.as_str(), r.value.as_str()))
         .collect();
-    if full_access_role_ids.is_empty() {
+    if value_by_role_id.is_empty() {
         return (out, None);
     }
     match client.list_app_role_assigned_to(&sp.id).await {
         Ok(assigned) => {
             for a in assigned {
-                if a.principal_type.as_deref() == Some("ServicePrincipal")
-                    && full_access_role_ids.contains(a.app_role_id.as_str())
-                {
-                    out.insert(a.principal_id);
+                if a.principal_type.as_deref() != Some("ServicePrincipal") {
+                    continue;
+                }
+                if let Some(value) = value_by_role_id.get(a.app_role_id.as_str()) {
+                    out.entry(a.principal_id)
+                        .or_default()
+                        .push(ResourcePermission::on(resource_app_id, *value));
                 }
             }
+            (out, None)
         }
         Err(err) => {
-            tracing::info!(
+            tracing::warn!(
                 ?err,
-                "audit: Office 365 Exchange Online app-role assignments read failed; \
-                 org-wide EWS reconciliation unavailable"
+                resource_app_id,
+                "audit: Office 365 resource app-role assignments read failed; \
+                 its grants are missing from this run"
             );
             // The SP exists, so this tenant DOES use the resource — the read
-            // genuinely failed, and a principal that looks scoped may hold
-            // blanket mailbox access.
-            return (out, Some(AuditCoverageGap::EwsFullAccessGrants));
+            // genuinely failed.
+            (out, Some(gap))
         }
     }
-    (out, None)
 }
 
 /// ONE tenant-wide `Get-ApplicationAccessPolicy` read → the legacy scoping

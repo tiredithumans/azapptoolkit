@@ -110,8 +110,10 @@ impl ListCredentialStatus {
 
     /// Classifies a principal's secret + certificate expiries at `now`
     /// (injectable so the time-based classification is unit-testable).
-    /// Credentials without an end date are ignored — an app holding only
-    /// those classifies as `None`.
+    /// A credential without an end date never expires, so it counts as
+    /// `Active` — it used to be skipped, and an app holding only
+    /// never-expiring secrets then read `None` ("no credentials"), hiding
+    /// exactly the credential an operator most needs to find.
     pub fn classify(
         passwords: &[PasswordCredential],
         certs: &[KeyCredential],
@@ -121,13 +123,18 @@ impl ListCredentialStatus {
         let mut any_active = false;
         let mut any_expiring = false;
 
-        for cred in passwords
+        for end in passwords
             .iter()
-            .filter_map(|c| c.end_date_time)
-            .chain(certs.iter().filter_map(|c| c.end_date_time))
+            .map(|c| c.end_date_time)
+            .chain(certs.iter().map(|c| c.end_date_time))
         {
             has_any = true;
-            let days = (cred - now).num_days();
+            let Some(end) = end else {
+                // Valid indefinitely.
+                any_active = true;
+                continue;
+            };
+            let days = (end - now).num_days();
             if days > EXPIRY_WARNING_DAYS {
                 any_active = true;
             } else if (0..=EXPIRY_WARNING_DAYS).contains(&days) {
@@ -312,6 +319,16 @@ pub struct AppPermissions {
     /// gone.
     #[serde(default)]
     pub mail_scopes: HashMap<String, MailPermissionScope>,
+    /// App roles GRANTED to an application's service principal (live
+    /// `appRoleAssignments`) that its `requiredResourceAccess` does not
+    /// declare, each with its resource. The caller merges them into
+    /// [`Self::app_role_grants`] too, so the risk rules score real reach rather
+    /// than the manifest's claim; this list only drives the advisory naming
+    /// them (an undeclared grant is invisible on the portal's API-permissions
+    /// blade — a classic persistence trick). Empty on SP-only rows, whose
+    /// grants ARE their only permission source.
+    #[serde(default)]
+    pub undeclared_grants: Vec<ResourcePermission>,
 }
 
 impl AppPermissions {
@@ -362,6 +379,42 @@ impl AppPermissions {
             has_admin_consent: self.has_admin_consent,
             admin_consented_scopes: self.admin_consented_scopes.clone(),
             mail_scopes: self.mail_scopes.clone(),
+            undeclared_grants: self.undeclared_grants.clone(),
+        }
+    }
+
+    /// The same permissions with [`Self::undeclared_grants`] taken back out of
+    /// `app_role_grants` — what the MANIFEST declares. The rules whose Fix or
+    /// advice acts on the manifest (Rules 11/12 and their Scope Fixes, Rule 18's
+    /// Remove-redundant, the downgrade pointers) read this view: every one of
+    /// those handlers re-plans from `requiredResourceAccess`, so a finding built
+    /// on an undeclared grant offered a Fix that could only no-op ("Removed 0")
+    /// or refuse (`no_scopable_permission`) — or, scoping the declared half,
+    /// report success while the undeclared org-wide grant kept its reach. The
+    /// undeclared grants still score (Rules 1/2 read the full set) and Rule 23
+    /// names them with revoke-or-declare advice. Keys compare the resource
+    /// case-insensitively, as `merge_granted_roles` does.
+    #[must_use]
+    pub(super) fn declared_view(&self) -> Self {
+        if self.undeclared_grants.is_empty() {
+            return self.clone();
+        }
+        let key = |g: &ResourcePermission| {
+            (
+                g.resource_app_id.as_deref().map(str::to_ascii_lowercase),
+                g.value.clone(),
+            )
+        };
+        let undeclared: HashSet<(Option<String>, String)> =
+            self.undeclared_grants.iter().map(key).collect();
+        Self {
+            app_role_grants: self
+                .app_role_grants
+                .iter()
+                .filter(|g| !undeclared.contains(&key(g)))
+                .cloned()
+                .collect(),
+            ..self.clone()
         }
     }
 
@@ -676,6 +729,12 @@ pub mod issue {
     /// Carries **no** remediation: removal stays admin-judged.
     pub const UNUSED_CREDENTIAL: &str = "Unused credential(s):";
     pub const REDUNDANT_APP_PERMS: &str = "Redundant application permissions:";
+    /// App roles granted to the application's service principal that its
+    /// manifest does not declare. Advisory (the grants themselves are scored
+    /// by Rules 1/2): an undeclared grant never shows on the API-permissions
+    /// blade, so it is how privilege is hidden. No remediation — revoking a
+    /// grant someone made deliberately is admin-judged.
+    pub const GRANTED_NOT_DECLARED: &str = "Granted application permissions not in the manifest:";
     /// Microsoft disabled the principal for a Services Agreement violation
     /// (`disabledByMicrosoftStatus`). The finding group keeps its rows
     /// admin-judged (delete/disable is not a safe one-click fix), so this
@@ -732,6 +791,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(&[], &[cert]), ListCredentialStatus::Expiring);
+        // No end date = valid indefinitely: never the 'none' facet, and it
+        // outranks an expired sibling like any long-valid credential.
+        let never = PasswordCredential {
+            end_date_time: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(std::slice::from_ref(&never), &[]),
+            ListCredentialStatus::Active
+        );
+        assert_eq!(
+            classify(&[never, secret(-1)], &[]),
+            ListCredentialStatus::Active
+        );
+        let never_cert = KeyCredential {
+            end_date_time: None,
+            ..Default::default()
+        };
+        assert_eq!(classify(&[], &[never_cert]), ListCredentialStatus::Active);
         // Lowercase serde + facet strings line up with the filter chips.
         assert_eq!(
             serde_json::to_string(&ListCredentialStatus::Expiring).unwrap(),

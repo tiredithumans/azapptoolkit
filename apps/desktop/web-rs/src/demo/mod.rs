@@ -1680,14 +1680,20 @@ mod tests {
         let board = credential_rows(&apps, now);
         for a in &apps {
             let id = obj_id(a.name);
+            // Every credential counts. One with no end date is `Unknown` on
+            // the board (rendered "No expiry") and `Active` on the list —
+            // valid indefinitely, never the list's "none" bucket.
             let statuses: Vec<CredentialStatus> = board
                 .iter()
-                .filter(|r| r.app_object_id == id && r.days_to_expiry.is_some())
+                .filter(|r| r.app_object_id == id)
                 .map(|r| r.status)
                 .collect();
             let expected = if statuses.is_empty() {
                 ListCredentialStatus::None
-            } else if statuses.contains(&CredentialStatus::Active) {
+            } else if statuses
+                .iter()
+                .any(|s| matches!(s, CredentialStatus::Active | CredentialStatus::Unknown))
+            {
                 ListCredentialStatus::Active
             } else if statuses.contains(&CredentialStatus::ExpiringSoon) {
                 ListCredentialStatus::Expiring

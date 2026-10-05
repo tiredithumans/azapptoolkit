@@ -893,6 +893,71 @@ fn emitted_issue_markers_are_stable() {
             "scorer no longer emits {marker:?}: {unconfinable_issues:?}"
         );
     }
+
+    // Rule 23: a grant the manifest does not declare. Its own app, so the
+    // undeclared list can't ride along on any marker above.
+    let undeclared_perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::graph("User.Read.All")],
+        undeclared_grants: vec![ResourcePermission::graph("User.Read.All")],
+        ..Default::default()
+    };
+    let undeclared_issues =
+        score_application(&base_app(), Some(true), &undeclared_perms, now()).issues;
+    assert!(
+        undeclared_issues
+            .iter()
+            .any(|i| i.starts_with(issue::GRANTED_NOT_DECLARED)),
+        "scorer no longer emits {:?}: {undeclared_issues:?}",
+        issue::GRANTED_NOT_DECLARED
+    );
+}
+
+/// Net-new tier (no `Constants.ps1` line): each tier-0 value ALONE takes an app
+/// to Critical, scoring the tier-0 weight only — never tier-0 + high — and the
+/// line carries the `high_risk_perms` marker. Table-driven over the whole list
+/// so a new entry is covered by construction.
+#[test]
+fn each_tier0_permission_alone_is_critical() {
+    for value in TIER0_APP_PERMISSIONS {
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph(*value)],
+            ..Default::default()
+        };
+        let app = score_application(&base_app(), Some(true), &perms, now());
+        assert_eq!(
+            app.risk_score, PTS_TIER0_APP_PERM,
+            "{value}: {:?}",
+            app.issues
+        );
+        assert_eq!(app.risk_level, RiskLevel::Critical, "{value}");
+        let tier0_lines: Vec<&String> = app
+            .issues
+            .iter()
+            .filter(|i| i.starts_with(issue::HIGH_RISK_APP_PERMS))
+            .collect();
+        assert_eq!(tier0_lines.len(), 1, "{value}: {:?}", app.issues);
+        assert!(
+            tier0_lines[0].contains("tier-0") && tier0_lines[0].contains(*value),
+            "{value}: {tier0_lines:?}"
+        );
+        // SP-only rows run the same rule.
+        let sp = score_service_principal(&base_sp(), &perms, now());
+        assert_eq!(sp.risk_level, RiskLevel::Critical, "{value} (SP-only)");
+    }
+    // High-list values stay at the ported weight — below Critical alone.
+    for value in ["Directory.ReadWrite.All", "Application.ReadWrite.OwnedBy"] {
+        let perms = AppPermissions {
+            app_role_grants: vec![ResourcePermission::graph(value)],
+            ..Default::default()
+        };
+        let item = score_application(&base_app(), Some(true), &perms, now());
+        assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM, "{value}");
+        assert!(
+            item.issues.iter().all(|i| !i.contains("tier-0")),
+            "{value}: {:?}",
+            item.issues
+        );
+    }
 }
 
 #[test]
@@ -2410,7 +2475,8 @@ fn long_lived_credentials_are_named_by_kind() {
             Some("c"),
             PTS_LONG_LIVED,
         ),
-        // The threshold is strict `>`: exactly a year is not long-lived.
+        // Exactly a year is not long-lived (boundary detail in
+        // `long_lived_boundary_uses_whole_days_with_grace`).
         ("365-day secret", vec![secret(365)], vec![], None, None, 0),
         (
             "long-lived secret and certificate",
@@ -2446,6 +2512,59 @@ fn long_lived_credentials_are_named_by_kind() {
         );
         // Rules 15/17 add advisories here but no points.
         assert_eq!(item.risk_score, score, "{name}: {:?}", item.issues);
+    }
+}
+
+/// Rule 7's boundary is whole days with one day of grace (net-new over the
+/// strict `Credential-Analysis.ps1:169` comparison, which flagged one-year
+/// credentials). Each row is (name, start, end, long-lived?).
+#[test]
+fn long_lived_boundary_uses_whole_days_with_grace() {
+    use chrono::TimeZone;
+    let leap_start = Utc.with_ymd_and_hms(2027, 6, 1, 0, 0, 0).unwrap();
+    let base = now() - Duration::days(10);
+    // (name, start, end, long-lived?)
+    type Row = (&'static str, DateTime<Utc>, Option<DateTime<Utc>>, bool);
+    let rows: [Row; 5] = [
+        // The toolkit's own default certificate: one year, `not_before`
+        // backdated an hour for clock skew.
+        (
+            "365 d + 1 h (toolkit default cert)",
+            base,
+            Some(base + Duration::days(365) + Duration::hours(1)),
+            false,
+        ),
+        // A 12-month secret whose year contains 29 February 2028.
+        (
+            "366 d over a leap day",
+            leap_start,
+            Some(Utc.with_ymd_and_hms(2028, 6, 1, 0, 0, 0).unwrap()),
+            false,
+        ),
+        ("367 d", base, Some(base + Duration::days(367)), true),
+        ("400 d", base, Some(base + Duration::days(400)), true),
+        // No end date: the longest lifetime there is (as `credential_over_cap`
+        // reads it).
+        ("no end date", base, None, true),
+    ];
+    for (name, start, end, long) in rows {
+        let mut app = base_app();
+        app.key_credentials = vec![KeyCredential {
+            key_id: "c1".into(),
+            display_name: Some("c".into()),
+            start_date_time: Some(start),
+            end_date_time: end,
+            ..Default::default()
+        }];
+        let item = score_application(&app, Some(true), &AppPermissions::default(), now());
+        let flagged = item
+            .issues
+            .iter()
+            .any(|i| i.starts_with("Long-lived certificates (>1 year): "));
+        assert_eq!(flagged, long, "{name}: {:?}", item.issues);
+        // Rule 7's +3 is the only point source for a cert-only app this young.
+        let expected = if long { PTS_LONG_LIVED } else { 0 };
+        assert_eq!(item.risk_score, expected, "{name}: {:?}", item.issues);
     }
 }
 
@@ -2808,4 +2927,89 @@ fn risky_flag_applies_to_sp_only_rows_too() {
             .iter()
             .any(|x| x.starts_with(issue::RISKY_SERVICE_PRINCIPAL))
     );
+}
+
+/// Rule 23's grants are scored (Rules 1/2) but never seed a manifest-acting
+/// finding or Fix: Rule 18's Remove-redundant and Rule 11's Scope-mailbox both
+/// re-plan from `requiredResourceAccess`, so an undeclared grant there gave a
+/// phantom "Removed 0" or a `no_scopable_permission` refusal — or scoped the
+/// declared half while the undeclared org-wide grant kept every mailbox.
+#[test]
+fn undeclared_grants_score_but_never_seed_a_manifest_fix() {
+    let undeclared = |grants: &[&str], hidden: &[&str]| AppPermissions {
+        app_role_grants: grants
+            .iter()
+            .chain(hidden)
+            .map(|v| ResourcePermission::graph(*v))
+            .collect(),
+        undeclared_grants: hidden
+            .iter()
+            .map(|v| ResourcePermission::graph(*v))
+            .collect(),
+        ..Default::default()
+    };
+
+    // Declared broader + undeclared narrower: no redundancy finding, no Fix.
+    let item = score_application(
+        &base_app(),
+        Some(true),
+        &undeclared(&["Mail.ReadWrite"], &["Mail.Read"]),
+        now(),
+    );
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|i| i.starts_with(issue::REDUNDANT_APP_PERMS)),
+        "{:?}",
+        item.issues
+    );
+    assert!(
+        !item
+            .remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::RemoveRedundantPermissions)
+    );
+    // …but both grants still weigh in (high 10 + medium 5).
+    assert_eq!(
+        item.risk_score,
+        PTS_HIGH_RISK_APP_PERM + PTS_MEDIUM_RISK_APP_PERM
+    );
+
+    // Undeclared-only mailbox grant: scored and named, no org-wide finding/Fix.
+    let item = score_application(
+        &base_app(),
+        Some(true),
+        &undeclared(&[], &["Mail.ReadWrite"]),
+        now(),
+    );
+    assert_eq!(item.risk_score, PTS_HIGH_RISK_APP_PERM);
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(issue::GRANTED_NOT_DECLARED))
+    );
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|i| i.starts_with(issue::ORG_WIDE_MAILBOX)),
+        "{:?}",
+        item.issues
+    );
+    assert!(item.remediations.is_empty(), "{:?}", item.remediations);
+
+    // Mixed: the Scope Fix targets the declared permission only.
+    let item = score_application(
+        &base_app(),
+        Some(true),
+        &undeclared(&["Mail.Send"], &["Mail.ReadWrite"]),
+        now(),
+    );
+    let fix = item
+        .remediations
+        .iter()
+        .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
+        .expect("the declared mail permission keeps its Scope Fix");
+    assert_eq!(fix.targets, vec!["Mail.Send".to_string()]);
 }

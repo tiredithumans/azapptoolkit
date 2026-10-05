@@ -39,6 +39,13 @@ pub const UNUSED_CREDENTIAL_DAYS: i64 = 90;
 pub const LONG_LIVED_SECRET_DAYS: i64 = 365;
 
 /// Score increments.
+/// One [`TIER0_APP_PERMISSIONS`] grant. Net-new tier (no PowerShell origin):
+/// equal to [`RISK_CRITICAL`] on purpose, so a single tier-0 grant ALONE ranks
+/// the principal Critical — a direct path to Global Administrator is the worst
+/// thing an app can hold, and at the ported +10 it read Medium. Scored INSTEAD
+/// of [`PTS_HIGH_RISK_APP_PERM`], never on top (the two lists are disjoint).
+/// Ranking change over the legacy port — CHANGELOG-gated.
+pub(super) const PTS_TIER0_APP_PERM: u32 = 25;
 pub(super) const PTS_HIGH_RISK_APP_PERM: u32 = 10;
 pub(super) const PTS_MEDIUM_RISK_APP_PERM: u32 = 5;
 pub(super) const PTS_ADMIN_CONSENT_DELEGATED: u32 = 5;
@@ -80,13 +87,75 @@ pub(super) const PTS_UNVERIFIED_PUBLISHER: u32 = 2;
 pub(super) const PTS_SCOPED_HIGH_RISK_MAIL: u32 = 3;
 pub(super) const PTS_SCOPED_MEDIUM_RISK_MAIL: u32 = 2;
 
-/// High-risk application permissions (by `value` string). Mirrors
-/// `Constants.ps1:104-115`.
-pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
-    "Directory.ReadWrite.All",
+/// Tier-0 application permissions (by `value` string): each is, on its own, a
+/// path to Global Administrator or to taking over the tenant, with no other
+/// grant and no unusual tenant configuration needed. Net-new tier (scored
+/// `PTS_TIER0_APP_PERM` = 25, so one grant alone is Critical).
+///
+/// The first three are `Constants.ps1:104-115` entries PROMOTED out of
+/// [`HIGH_RISK_APP_PERMISSIONS`] (where they scored +10, so an app holding
+/// only `RoleManagement.ReadWrite.Directory` read Medium); the rest are
+/// net-new. Disjoint from the high and medium lists, pinned by
+/// `tests::tier0_high_and_medium_lists_are_disjoint`: a tier-0 grant scores the
+/// tier-0 weight ONLY.
+///
+/// The bar is "self-sufficient": the grant is the whole attack. Borderline
+/// values deliberately kept in the HIGH list instead, with the reason:
+/// - `Directory.ReadWrite.All`, `Group.ReadWrite.All`,
+///   `GroupMember.ReadWrite.All`, `User.ReadWrite.All`,
+///   `User-PasswordProfile.ReadWrite.All` — none can touch Entra role
+///   membership or role-assignable groups (Microsoft fenced both off from
+///   `Directory.ReadWrite.All` in 2022), nor reset a privileged admin's
+///   password. Their remaining path to Global Administrator detours through an
+///   ordinary group that holds Azure RBAC rights — real, but tenant-specific.
+/// - `Application.ReadWrite.OwnedBy` — the same credential-injection primitive
+///   as `Application.ReadWrite.All`, limited to the apps it owns.
+/// - `EntitlementManagement.ReadWrite.All` — needs an access package that
+///   already provisions a privileged role.
+/// - `Organization.ReadWrite.All` — the trusted-root-CA path needs
+///   certificate-based authentication enabled first.
+/// - `Policy.ReadWrite.AuthenticationMethod` / `RoleManagementPolicy.ReadWrite.Directory`
+///   — they loosen the guards on another grant's path; alone they assign
+///   nothing.
+/// - `DelegatedPermissionGrant.ReadWrite.All` — grants DELEGATED permissions,
+///   which still need a privileged user to sign in to the client.
+pub const TIER0_APP_PERMISSIONS: &[&str] = &[
+    // Ported (`Constants.ps1:104-115`), promoted from high.
+    // Assigns any directory role, Global Administrator included.
     "RoleManagement.ReadWrite.Directory",
-    "Application.ReadWrite.All",
+    // Grants itself any app role (e.g. the one above) without admin consent.
     "AppRoleAssignment.ReadWrite.All",
+    // Adds a credential to any application or service principal, then signs
+    // in as whichever holds more privilege.
+    "Application.ReadWrite.All",
+    // Net-new: PIM writes — an active or eligible Global Administrator
+    // assignment, or membership of a role-assignable group, for a principal the
+    // app controls.
+    "RoleAssignmentSchedule.ReadWrite.Directory",
+    "RoleEligibilitySchedule.ReadWrite.Directory",
+    "PrivilegedAccess.ReadWrite.AzureADGroup",
+    "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+    "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup",
+    // Net-new: a permission grant policy that lets the app consent itself to
+    // `RoleManagement.ReadWrite.Directory`.
+    "Policy.ReadWrite.PermissionGrant",
+    // Net-new: a Conditional Access policy can lock every account out of the
+    // tenant (break-glass included) or strip MFA from privileged sign-ins.
+    "Policy.ReadWrite.ConditionalAccess",
+    // Net-new: adds a federated domain and signs in as an existing Global
+    // Administrator with no password or MFA.
+    "Domain.ReadWrite.All",
+    // Net-new: issues a Temporary Access Pass (or another sign-in method) for
+    // any user, administrators included.
+    "UserAuthenticationMethod.ReadWrite.All",
+];
+
+/// High-risk application permissions (by `value` string). Mirrors
+/// `Constants.ps1:104-115`, less the three entries promoted to
+/// [`TIER0_APP_PERMISSIONS`] (scored there instead, never in both).
+pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
+    // Stays high, not tier-0 — see the borderline list on TIER0_APP_PERMISSIONS.
+    "Directory.ReadWrite.All",
     "Mail.ReadWrite",
     "Mail.Send",
     "Files.ReadWrite.All",
@@ -147,6 +216,26 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     // names. Unambiguous as a bare value — no other resource exposes it (see
     // `scoping::EWS_FULL_ACCESS_AS_APP`).
     crate::scoping::EWS_FULL_ACCESS_AS_APP,
+    // Net-new: the borderline tier-0 candidates kept at high (reasons on
+    // `TIER0_APP_PERMISSIONS`). Each scored ZERO before.
+    "User-PasswordProfile.ReadWrite.All",
+    "Organization.ReadWrite.All",
+    "Policy.ReadWrite.AuthenticationMethod",
+    "RoleManagementPolicy.ReadWrite.Directory",
+    "DelegatedPermissionGrant.ReadWrite.All",
+    // Net-new: tenant-wide policy writes one step short of tier-0 —
+    // cross-tenant trust (inbound B2B, MFA trust), the authorization policy
+    // (default user permissions, user consent), and app-management/claims
+    // policies (credential restrictions, token contents).
+    "Policy.ReadWrite.CrossTenantAccess",
+    "Policy.ReadWrite.Authorization",
+    "Policy.ReadWrite.ApplicationConfiguration",
+    // Net-new: Office 365 Exchange Online's app-only Exchange administration
+    // role (Exchange PowerShell as the app). With an Exchange admin role it
+    // manages every mailbox, transport rule and RBAC scope; it scored zero
+    // because only Graph names were listed. Unambiguous as a bare value — no
+    // other resource exposes it.
+    "Exchange.ManageAsApp",
 ];
 
 /// Medium-risk application permissions (by `value` string). Mirrors
@@ -221,15 +310,53 @@ const RISKY_DELEGATED_SCOPE_PREFIXES: &[&str] = &[
     "Mail.",
     "MailboxSettings.",
     "Files.",
+    "Sites.",
     "Directory.",
     "Group.",
     "AppRoleAssignment.",
     "RoleManagement.",
 ];
 
-/// Splits held application permissions into `(high, medium)` hits by value.
-/// Reusable for permissions *held* by managed identities and enterprise-app SPs,
-/// not just app registrations.
+/// Delegated scope prefixes added later, deliberately narrower than the
+/// families above: each names only the WRITE half of its family, because these
+/// families' reads are routine (`Policy.Read.All`, `Application.Read.All`,
+/// `Calendars.ReadBasic`, `Chat.ReadBasic`, `UserAuthenticationMethod.Read`) and
+/// flagging them would bury the writes that matter. Net-new: each writes
+/// identities, sign-in methods, policy, consent or membership as the signed-in
+/// user, or writes every consenting user's calendar/chat the way `Mail.`
+/// reaches mail.
+const RISKY_DELEGATED_WRITE_PREFIXES: &[&str] = &[
+    "Application.ReadWrite.",
+    "Policy.ReadWrite.",
+    "UserAuthenticationMethod.ReadWrite",
+    "GroupMember.ReadWrite.",
+    "DelegatedPermissionGrant.ReadWrite.",
+    "Calendars.ReadWrite",
+    "Chat.ReadWrite",
+];
+
+/// Delegated scopes matched exactly rather than by family prefix, because
+/// their family also holds harmless scopes (`User.Read` is every app's
+/// sign-in basic).
+const RISKY_DELEGATED_SCOPES_EXACT: &[&str] = &["User.ReadWrite.All"];
+
+/// True for a **Selected** scope — `Sites.Selected` and the
+/// `*.SelectedOperations.Selected` sub-site family. These grant nothing until
+/// an owner grants a specific site, list or file, so they are the
+/// least-privilege end state, never broad reach. The one definition the
+/// delegated risk classifier excludes on; a value-only test is sound here
+/// because every Selected scope on every resource is confined by construction
+/// (contrast the resource-aware `crate::scoping` gates, which decide whether
+/// the toolkit can ACT on a grant, not whether it is broad).
+fn is_selected_scope(scope: &str) -> bool {
+    scope == crate::scoping::SP_SITES_SELECTED || scope.ends_with(".SelectedOperations.Selected")
+}
+
+/// Splits held application permissions into `(high, medium)` hits by value —
+/// "high" includes [`TIER0_APP_PERMISSIONS`] (a surface that wants the tier-0
+/// distinction asks [`risk_level_for_app_permission`]). Reusable for
+/// permissions *held* by managed identities and enterprise-app SPs, not just
+/// app registrations.
 ///
 /// Takes whole [`ResourcePermission`]s, not bare values (AGENTS.md: carry the
 /// resource): `Mail.ReadWrite` on Graph and on Office 365 Exchange Online are
@@ -244,7 +371,10 @@ pub fn classify_app_permission_risk(
 ) -> (Vec<ResourcePermission>, Vec<ResourcePermission>) {
     let high = grants
         .iter()
-        .filter(|g| HIGH_RISK_APP_PERMISSIONS.contains(&g.value.as_str()))
+        .filter(|g| {
+            TIER0_APP_PERMISSIONS.contains(&g.value.as_str())
+                || HIGH_RISK_APP_PERMISSIONS.contains(&g.value.as_str())
+        })
         .cloned()
         .collect();
     let medium = grants
@@ -257,27 +387,33 @@ pub fn classify_app_permission_risk(
 
 /// Whether a single delegated scope `value` is high-risk for consent review.
 /// Combines the ported [`HIGH_RISK_DELEGATED_PERMISSIONS`] with broad
-/// read/write categories (mail, files, directory, …). `Sites.Selected` is
-/// explicitly excluded as it is the *least*-privilege SharePoint scope.
+/// read/write categories (mail, files, directory, policy, …). Every Selected
+/// scope (`is_selected_scope`: `Sites.Selected`,
+/// `Files.SelectedOperations.Selected`, …) is excluded — those are the
+/// *least*-privilege models, and the bare `Files.` prefix used to flag them.
 pub fn is_risky_delegated_scope(scope: &str) -> bool {
     if HIGH_RISK_DELEGATED_PERMISSIONS.contains(&scope) {
         return true;
     }
-    if scope == crate::scoping::SP_SITES_SELECTED {
+    if is_selected_scope(scope) {
         return false;
     }
-    scope.starts_with("Sites.")
+    RISKY_DELEGATED_SCOPES_EXACT.contains(&scope)
         || RISKY_DELEGATED_SCOPE_PREFIXES
             .iter()
+            .chain(RISKY_DELEGATED_WRITE_PREFIXES)
             .any(|p| scope.starts_with(p))
 }
 
 /// Risk level of a single application-permission `value`, or `None` when it is
-/// not on the high/medium-risk lists. The single source the grant-time picker
-/// and the managed-identity detail badge both read, so a permission's risk is
-/// classified in exactly one place.
+/// not on a risk list: [`TIER0_APP_PERMISSIONS`] answer
+/// [`RiskLevel::Critical`] (one grant alone scores Critical), then high and
+/// medium. The single source the grant-time picker and the held-permission
+/// badges read, so a permission's risk is classified in exactly one place.
 pub fn risk_level_for_app_permission(value: &str) -> Option<RiskLevel> {
-    if HIGH_RISK_APP_PERMISSIONS.contains(&value) {
+    if TIER0_APP_PERMISSIONS.contains(&value) {
+        Some(RiskLevel::Critical)
+    } else if HIGH_RISK_APP_PERMISSIONS.contains(&value) {
         Some(RiskLevel::High)
     } else if MEDIUM_RISK_APP_PERMISSIONS.contains(&value) {
         Some(RiskLevel::Medium)
@@ -589,6 +725,11 @@ mod tests {
                 "{read_half}"
             );
         }
+        // Tier-0 answers Critical, so the per-permission badge can say so.
+        assert_eq!(
+            risk_level_for_app_permission("RoleManagement.ReadWrite.Directory"),
+            Some(RiskLevel::Critical)
+        );
         // Metadata-only mail read: deliberately unscored (INTENTIONALLY_UNSCORED).
         assert_eq!(risk_level_for_app_permission("Mail.ReadBasic.All"), None);
         // Sites.Selected is the least-privilege model — not on any risk list.
@@ -757,9 +898,7 @@ mod tests {
     /// decision visible.
     #[test]
     fn every_broader_subsuming_permission_carries_a_risk_weight() {
-        let scored = |v: &str| {
-            HIGH_RISK_APP_PERMISSIONS.contains(&v) || MEDIUM_RISK_APP_PERMISSIONS.contains(&v)
-        };
+        let scored = |v: &str| risk_level_for_app_permission(v).is_some();
         let mut unscored: Vec<&str> = Vec::new();
         let mut checked = 0usize;
         for (_, broaders) in SUBSUMED_APP_PERMISSIONS {
@@ -796,9 +935,7 @@ mod tests {
     /// reason.
     #[test]
     fn every_narrower_subsumed_permission_carries_a_risk_weight() {
-        let scored = |v: &str| {
-            HIGH_RISK_APP_PERMISSIONS.contains(&v) || MEDIUM_RISK_APP_PERMISSIONS.contains(&v)
-        };
+        let scored = |v: &str| risk_level_for_app_permission(v).is_some();
         let mut unscored: Vec<&str> = Vec::new();
         let mut checked = 0usize;
         for (narrower, _) in SUBSUMED_APP_PERMISSIONS {
@@ -949,11 +1086,136 @@ mod tests {
             "Sites.FullControl.All",
             "user_impersonation",
             "RoleManagement.ReadWrite.Directory",
+            // Net-new widening: identity, consent, policy and membership
+            // writers, plus the calendar/chat families that reach users' data
+            // the way Mail.* does.
+            "User.ReadWrite.All",
+            "Application.ReadWrite.All",
+            "Policy.ReadWrite.ConditionalAccess",
+            "UserAuthenticationMethod.ReadWrite.All",
+            "GroupMember.ReadWrite.All",
+            "DelegatedPermissionGrant.ReadWrite.All",
+            "Calendars.ReadWrite",
+            "Calendars.ReadWrite.Shared",
+            "Chat.ReadWrite",
+            "Chat.ReadWrite.All",
+            "UserAuthenticationMethod.ReadWrite",
+            "Policy.ReadWrite.Authorization",
         ] {
             assert!(is_risky_delegated_scope(s), "{s} should be risky");
         }
-        for s in ["User.Read", "openid", "profile", "email", "Sites.Selected"] {
+        for s in [
+            "User.Read",
+            "User.ReadBasic.All",
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            // Every Selected scope is the least-privilege end state — the bare
+            // `Files.` prefix used to flag the sub-site one.
+            "Sites.Selected",
+            "Files.SelectedOperations.Selected",
+            "Lists.SelectedOperations.Selected",
+            "ListItems.SelectedOperations.Selected",
+            // The newer families flag their WRITE half only.
+            "Policy.Read.All",
+            "Application.Read.All",
+            "Calendars.Read",
+            "Calendars.ReadBasic",
+            "Chat.Read",
+            "Chat.ReadBasic",
+            "UserAuthenticationMethod.Read",
+            "UserAuthenticationMethod.Read.All",
+            "GroupMember.Read.All",
+            "DelegatedPermissionGrant.Read.All",
+        ] {
             assert!(!is_risky_delegated_scope(s), "{s} should not be risky");
+        }
+    }
+
+    /// A tier-0 grant scores the tier-0 weight ONLY — never tier-0 plus high —
+    /// which holds by construction only while the lists share no value.
+    #[test]
+    fn tier0_high_and_medium_lists_are_disjoint() {
+        for v in TIER0_APP_PERMISSIONS {
+            assert!(
+                !HIGH_RISK_APP_PERMISSIONS.contains(v) && !MEDIUM_RISK_APP_PERMISSIONS.contains(v),
+                "{v} is tier-0 AND on another risk list — it would score twice"
+            );
+        }
+        for v in HIGH_RISK_APP_PERMISSIONS {
+            assert!(
+                !MEDIUM_RISK_APP_PERMISSIONS.contains(v),
+                "{v} is high AND medium"
+            );
+        }
+        // The weight is what makes one grant Critical alone (the user-chosen
+        // contract), not an accident of the current thresholds.
+        const {
+            assert!(PTS_TIER0_APP_PERM >= RISK_CRITICAL);
+            assert!(PTS_HIGH_RISK_APP_PERM < RISK_CRITICAL);
+        }
+    }
+
+    /// Table-driven tier placement. `net_new` marks rows with no
+    /// `Constants.ps1` origin; the three ported rows were `Constants.ps1:104-115`
+    /// high entries promoted to tier-0, and `Directory.ReadWrite.All` is the
+    /// ported high entry deliberately NOT promoted.
+    #[test]
+    fn tier_placement_table() {
+        use RiskLevel::{Critical, High};
+        // (value, expected level, net_new)
+        let rows: &[(&str, RiskLevel, bool)] = &[
+            ("RoleManagement.ReadWrite.Directory", Critical, false),
+            ("AppRoleAssignment.ReadWrite.All", Critical, false),
+            ("Application.ReadWrite.All", Critical, false),
+            ("RoleAssignmentSchedule.ReadWrite.Directory", Critical, true),
+            (
+                "RoleEligibilitySchedule.ReadWrite.Directory",
+                Critical,
+                true,
+            ),
+            ("PrivilegedAccess.ReadWrite.AzureADGroup", Critical, true),
+            (
+                "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+                Critical,
+                true,
+            ),
+            (
+                "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup",
+                Critical,
+                true,
+            ),
+            ("Policy.ReadWrite.PermissionGrant", Critical, true),
+            ("Policy.ReadWrite.ConditionalAccess", Critical, true),
+            ("Domain.ReadWrite.All", Critical, true),
+            ("UserAuthenticationMethod.ReadWrite.All", Critical, true),
+            ("Directory.ReadWrite.All", High, false),
+            ("Application.ReadWrite.OwnedBy", High, true),
+            ("EntitlementManagement.ReadWrite.All", High, true),
+            ("User-PasswordProfile.ReadWrite.All", High, true),
+            ("Organization.ReadWrite.All", High, true),
+            ("Policy.ReadWrite.AuthenticationMethod", High, true),
+            ("RoleManagementPolicy.ReadWrite.Directory", High, true),
+            ("DelegatedPermissionGrant.ReadWrite.All", High, true),
+            ("Policy.ReadWrite.CrossTenantAccess", High, true),
+            ("Policy.ReadWrite.Authorization", High, true),
+            ("Policy.ReadWrite.ApplicationConfiguration", High, true),
+            ("Exchange.ManageAsApp", High, true),
+        ];
+        for (value, level, _net_new) in rows {
+            assert_eq!(
+                risk_level_for_app_permission(value),
+                Some(*level),
+                "{value}"
+            );
+        }
+        // Every tier-0 entry is in the table, so adding one forces a row.
+        for v in TIER0_APP_PERMISSIONS {
+            assert!(
+                rows.iter().any(|(r, l, _)| r == v && *l == Critical),
+                "{v} has no tier_placement_table row"
+            );
         }
     }
 

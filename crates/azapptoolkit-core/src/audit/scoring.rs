@@ -14,7 +14,7 @@ use super::permissions::{
     PTS_DISABLED_BY_MICROSOFT, PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM,
     PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_RISKY_SERVICE_PRINCIPAL,
     PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP,
-    PTS_UNVERIFIED_PUBLISHER, RedundantPermission,
+    PTS_TIER0_APP_PERM, PTS_UNVERIFIED_PUBLISHER, RedundantPermission,
 };
 
 /// One rule's contribution: score delta plus the issues/recommendations it
@@ -69,6 +69,30 @@ fn rule_disabled_by_microsoft(status: Option<&str>) -> RuleContribution {
 /// byte-for-byte the original.
 fn rule_app_permission_risk(perms: &AppPermissions) -> RuleContribution {
     let mut c = RuleContribution::default();
+
+    // Tier-0 first (net-new): one grant alone reaches Critical. Its own issue
+    // line, but carrying the HIGH_RISK_APP_PERMS prefix so it lands in the same
+    // finding group and the plain high-risk line below stays byte-identical.
+    // No scoped partition: no tier-0 value is mailbox-scopable.
+    let tier0: Vec<&ResourcePermission> = perms
+        .app_role_grants
+        .iter()
+        .filter(|g| TIER0_APP_PERMISSIONS.contains(&g.value.as_str()))
+        .collect();
+    if !tier0.is_empty() {
+        c.score += PTS_TIER0_APP_PERM * tier0.len() as u32;
+        c.issues.push(format!(
+            "{} tier-0 (a direct path to Global Administrator): {}",
+            issue::HIGH_RISK_APP_PERMS,
+            join_values(&tier0)
+        ));
+        c.recommendations.push(
+            "Treat tier-0 permissions like a Global Administrator credential: remove any the app \
+             does not strictly need, and protect the ones it keeps (certificate credentials, the \
+             app instance property lock, owners who are themselves administrators)"
+                .to_string(),
+        );
+    }
 
     // Partitioned on the *grant*, not the value: `is_scoped` gates on the
     // grant's resource, so an unscopable legacy Exchange Online namesake keeps
@@ -559,6 +583,40 @@ fn rule_high_risk_delegated(
     c
 }
 
+/// Rule 23 (advisory, no score; net-new): app roles granted to the app's
+/// service principal that its manifest does not declare. The grants are
+/// already in `app_role_grants` (merged by the caller), so Rules 1/2 weight
+/// them like any other; this names them, because an undeclared grant is
+/// invisible on the portal's API-permissions blade — the classic way to park
+/// privilege on an innocuous-looking app. Names each grant's resource
+/// (`Mail.Read` on Graph and on Office 365 Exchange Online are two grants).
+fn rule_granted_undeclared(perms: &AppPermissions) -> RuleContribution {
+    let mut c = RuleContribution::default();
+    if perms.undeclared_grants.is_empty() {
+        return c;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let listing = perms
+        .undeclared_grants
+        .iter()
+        .filter(|g| seen.insert((g.resource_app_id.as_deref(), g.value.as_str())))
+        .map(|g| match g.resource_app_id.as_deref() {
+            Some(r) => format!("{} on {}", g.value, crate::scoping::resource_label(r)),
+            None => g.value.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    c.issues
+        .push(format!("{} {listing}", issue::GRANTED_NOT_DECLARED));
+    c.recommendations.push(
+        "These roles were granted to the service principal directly rather than requested in \
+         the app's manifest, so the portal's API permissions blade does not show them. Confirm \
+         who granted each and why; revoke any the app does not need, or declare the ones it does"
+            .to_string(),
+    );
+    c
+}
+
 /// Rules 14-17 (advisory, no score), in emit order: ownership hygiene, the
 /// app-instance property lock, public-client flows with credentials, and the
 /// prefer-cert guidance. The booleans are precomputed in `score_application`
@@ -759,10 +817,7 @@ fn rule_downgrade_pointers(
             // Already confined ⇒ not org-wide; the advice names a solved problem.
             .filter(|g| !is_confined(g))
             .map(|g| g.value.as_str())
-            .filter(|v| {
-                (HIGH_RISK_APP_PERMISSIONS.contains(v) || MEDIUM_RISK_APP_PERMISSIONS.contains(v))
-                    && seen.insert(*v)
-            })
+            .filter(|v| risk_level_for_app_permission(v).is_some() && seen.insert(*v))
             .filter_map(|v| {
                 let alts = downgrade_alternatives(v);
                 match alts.len() {
@@ -1040,14 +1095,20 @@ pub fn score_application(
     // is available at every decision (the resource-stripped value list is gone).
 
     // Rules 11, 12, 18 also return the sets the remediation block keys off.
-    let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(perms);
+    // They (and the downgrade pointers) read the MANIFEST view: their Fixes
+    // re-plan from `requiredResourceAccess`, so a grant the manifest does not
+    // declare must not seed one — Rule 23 names those, and Rules 1/2 above
+    // already scored them. See `AppPermissions::declared_view`.
+    let declared = perms.declared_view();
+    let (mail_contrib, mailbox_unscoped, mailbox_legacy) = rule_mailbox_advisory(&declared);
     acc.merge(mail_contrib);
-    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(perms);
+    let (sharepoint_contrib, sharepoint_orgwide) = rule_sharepoint_advisory(&declared);
     acc.merge(sharepoint_contrib);
     acc.merge(rule_high_risk_delegated(
         &perms.scope_values,
         perms.admin_consented_scopes.as_deref(),
     )); // Rule 13
+    acc.merge(rule_granted_undeclared(perms)); // Rule 23
 
     let has_app_permissions = !perms.app_role_grants.is_empty();
     let has_credentials = !all_creds.is_empty();
@@ -1058,7 +1119,7 @@ pub fn score_application(
         !secrets.is_empty(),
     )); // Rules 14-17
 
-    let (redundant_contrib, redundant) = rule_redundant_permissions(perms); // Rule 18
+    let (redundant_contrib, redundant) = rule_redundant_permissions(&declared); // Rule 18
     acc.merge(redundant_contrib);
     acc.merge(rule_external_exposure(
         app,
@@ -1067,8 +1128,8 @@ pub fn score_application(
     )); // Rules 19 & 20
     // The grants, not `values`: the alternatives are Graph-only, and an
     // already-confined grant needs no downgrade advice. See the rule's doc.
-    acc.merge(rule_downgrade_pointers(&perms.app_role_grants, |g| {
-        perms.is_scoped(g)
+    acc.merge(rule_downgrade_pointers(&declared.app_role_grants, |g| {
+        declared.is_scoped(g)
     })); // least-privilege downgrade pointers
 
     let permission_count = (perms.app_role_grants.len() + perms.scope_values.len()) as u32;

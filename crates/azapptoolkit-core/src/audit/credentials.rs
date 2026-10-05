@@ -2,7 +2,7 @@
 //! the audit scorer, the credential-expiry dashboard, and the removal
 //! sweeps.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::models::{
     AppManagementPolicy, Application, CredentialRestrictionConfiguration, TenantAppManagementPolicy,
@@ -94,9 +94,25 @@ pub(super) fn overall_credential_status(all: &[&CredentialSummary]) -> Credentia
     }
 }
 
+/// Rule 7's long-lived test (`Credential-Analysis.ps1:169`): a lifetime past
+/// [`LONG_LIVED_SECRET_DAYS`] — compared in WHOLE days with one day of grace.
+///
+/// The strict `(end - start) > 365 days` it replaced flagged two lifetimes
+/// that are "one year" by any reading: the toolkit's own default certificate
+/// (`not_before` backdated 1 h for clock skew, so 365 d + 1 h) and a 12-month
+/// secret whose year spans 29 February (366 d). `num_days()` truncates the
+/// hour away; the `+ 1` absorbs the leap day. Anything past 366 whole days is
+/// genuinely longer than a year.
+///
+/// No end date at all is the longest lifetime there is, so `(Some, None)` is
+/// long-lived — the same reading [`credential_over_cap`] gives a no-expiry
+/// secret against a policy cap. `(None, None)` stays unflagged: with neither
+/// date there is no credential lifetime to judge (pinned by
+/// `certificates_do_not_trip_long_lived_when_no_dates`).
 pub(super) fn is_long_lived(c: &CredentialSummary) -> bool {
     match (c.start_date_time, c.end_date_time) {
-        (Some(start), Some(end)) => (end - start) > Duration::days(LONG_LIVED_SECRET_DAYS),
+        (Some(start), Some(end)) => (end - start).num_days() > LONG_LIVED_SECRET_DAYS + 1,
+        (Some(_), None) => true,
         _ => false,
     }
 }
@@ -439,7 +455,7 @@ impl From<Option<Option<DateTime<Utc>>>> for SignInStatus {
 mod tests {
     use super::*;
     use crate::models::AppManagementConfiguration;
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0).unwrap()

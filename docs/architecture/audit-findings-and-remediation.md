@@ -17,17 +17,18 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 |---|---|---|---|---|---|---|
 | 21 | `rule_disabled_by_microsoft` | +15 flat (folded **first**, despite the number: alone it reaches High) | `DISABLED_BY_MICROSOFT` | `disabled_by_microsoft` | — (delete/disable is admin-judged) | net-new |
 | 22 | `apply_service_principal_risk` (runner post-pass, **before** the unused post-pass) | +20 flat (alone it reaches High; stacks any other finding to Critical) | `RISKY_SERVICE_PRINCIPAL` | `risky_service_principal` | `DisableSignIn` (shared with the unused post-pass — deduped to one per row) | net-new |
-| 1 | `rule_app_permission_risk` | +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` | `high_risk_perms` | — | `Constants.ps1:104-115`; net-new entries marked in `permissions.rs` |
+| 1 | `rule_app_permission_risk` | +25 per tier-0 grant (`TIER0_APP_PERMISSIONS`: one alone is Critical, scored INSTEAD of high — the lists are disjoint); +10 per org-wide high-risk grant (+3 if mailbox-confined) | `HIGH_RISK_APP_PERMS` (the tier-0 line carries it too, worded "tier-0 (a direct path to Global Administrator)") | `high_risk_perms` | — | `Constants.ps1:104-115`; the tier-0 tier is net-new (three of its entries are promoted ported high entries); net-new entries marked in `permissions.rs` |
 | 2 | same | +5 per org-wide medium-risk grant (+2 if confined) | none | — | — | `Constants.ps1:123-130`; net-new entries marked |
 | 3 | `rule_admin_consent` | +5 flat | none | — | — | not cited |
 | 4 | `rule_sp_disabled` | +2 | none | — | — | not cited |
 | 5 / 6 | `rule_credentials` | +8 all expired / +4 mixed | none (structured `credential_status`) | `expired` | `RemoveExpiredCredentials` | not cited |
-| 7 | same | +3 flat (secrets and certificates) | none | — | — | `Credential-Analysis.ps1:169` |
+| 7 | same | +3 flat (secrets and certificates) — lifetime past 365 days in WHOLE days with one day of grace (`> 366`), so a one-year credential backdated an hour or spanning 29 February is not long-lived; a credential with a start but no end date is | none | — | — | `Credential-Analysis.ps1:169` (whole-day grace and no-end-date are net-new) |
 | 8 / 9 | same | +3 all expiring / +2 mixed (only when none expired) | none | — | — | threshold `Constants.ps1:202` |
 | 10 | `rule_stale_app` | +2 (older than `STALE_APP_DAYS`) | none | — | — | `MaxAuditHistoryDays` in `Constants.ps1` |
 | 11 | `rule_mailbox_advisory` | advisory | `ORG_WIDE_MAILBOX`, `LEGACY_MAILBOX_POLICY`, `UNSCOPABLE_LEGACY_MAILBOX`, `UNCONFINABLE_MAILBOX`, `SCOPED_VIA_RBAC` (contains) | `orgwide_mailbox`, `legacy_mailbox_scope`, `unscopable_legacy_mailbox`, `unconfinable_orgwide`, `scoped_mailbox` | `ScopeMailboxAccess`, `MigrateApplicationAccessPolicy` | `Resource-Analysis.ps1::Add-ExchangePermissionAnalysis` |
 | 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `ORG_WIDE_FILES`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `orgwide_files`, `scoped_sites` | `ScopeSharePointAccess` (Sites only — the Files advisory has no fix) | not cited |
-| 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130` |
+| 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130`; the broad-prefix half (`is_risky_delegated_scope`, every Selected scope excluded) is net-new |
+| 23 | `rule_granted_undeclared` | advisory (the grants themselves are weighted by Rules 1/2 — the runner merges them into `app_role_grants`) | `GRANTED_NOT_DECLARED` | `granted_undeclared` | — (revoking a deliberate grant is admin-judged) | net-new |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
 | 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
@@ -37,7 +38,35 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | runner | `unused_credential_advisory` (credential-usage post-pass, **Application rows only**) | advisory | `UNUSED_CREDENTIAL` | `unused_credential` | — (removing a credential is admin-judged) | net-new |
 | per-app | `secret_lifetime_advisory` (against the app-management policy cap, **Application rows only**) | recommendation only (no marker, key or score) | none | — | — | net-new (rides beside the Rule 7 floor; no ranking change) |
 
-Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`). SP-only rows run
+Risk levels: Critical ≥ 25, High ≥ 15, Medium ≥ 8 (`Constants.ps1:207-213`).
+
+**Tier-0 vs high.** `TIER0_APP_PERMISSIONS` holds the grants that are, alone, a path to Global
+Administrator or tenant takeover (PIM and role writes, `AppRoleAssignment.ReadWrite.All`,
+`Application.ReadWrite.All`, `Policy.ReadWrite.PermissionGrant` / `.ConditionalAccess`,
+`Domain.ReadWrite.All`, `UserAuthenticationMethod.ReadWrite.All`). Borderline values stay in the
+high list with the reason written on the constant — `Directory.ReadWrite.All` and the
+user/group writers can't touch role membership (their remaining path detours through Azure RBAC
+on an ordinary group), `Application.ReadWrite.OwnedBy` is limited to owned apps, and the rest
+need a precondition or another grant. `risk_level_for_app_permission` answers `Critical` for
+tier-0, so the per-permission badge reads "Tier-0"; the consent-grants view folds it into its
+`high` facet.
+
+**Granted, not just declared (Rule 23).** An app registration is scored on what its SP *holds*:
+`score_one` merges the SP's granted roles from the run's tenant-wide matrices
+(`ScoreCtx::granted_roles_by_sp` — Graph plus Office 365 Exchange Online and SharePoint Online,
+each carrying its resource) into `app_role_grants` via the pure `merge_granted_roles`, before the
+mailbox-scope probe and every rule. The undeclared ones also land in
+`AppPermissions::undeclared_grants`, which drives the Rule 23 advisory naming each with its
+resource. Undeclared grants are **scored only**: Rules 11/12/18 and the downgrade pointers read
+`AppPermissions::declared_view()` (undeclared grants taken back out), because their Fixes
+re-plan from the live manifest — an undeclared grant there offered a Remove-redundant Fix that
+removed nothing, or a Scope Fix that refused (`no_scopable_permission`) or scoped the declared half
+while the undeclared org-wide grant kept its reach. Rule 23's revoke-or-declare advice is their
+one home. A grant on a declared resource whose permission index failed to resolve is merged for
+scoring but never labelled undeclared (its declarations were what failed — the run already
+carries `PermissionResolution`).
+
+SP-only rows run
 Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (not the credential-usage
 one: a service principal carries no local credentials to judge; see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
@@ -549,19 +578,27 @@ foreign-tenant (OIDC/multi-tenant) enterprise apps, managed identities, orphaned
 `score_service_principal`, from their *granted* state instead of a manifest.
 
 - **Candidates** (`sp_audit_candidates`, pure + unit-tested): shared `{tenant}|sp_index` rows whose
-  `appId` joins to no scanned application AND that hold ≥1 **Microsoft Graph** application grant in
-  the tenant-wide `appRoleAssignedTo` matrix, OR hold the EWS `full_access_as_app` scope (the
-  second mailbox resource, read separately), OR are flagged risky by the run's Identity Protection
-  map. The grant/risk requirement is the noise filter (grantless first-party Microsoft SPs vanish);
-  disabled SPs stay in (Rule 4). The risky admission path is deliberate: a compromised managed
-  identity or foreign SP often holds no *enumerable* grant, and "no grants ⇒ skip it" is exactly
-  the wrong inference when Identity Protection says the principal is compromised. Known limitation:
-  roles held only on other non-Graph resources still aren't in any matrix, so an *unflagged* SP
-  holding only those isn't scored.
+  `appId` joins to no scanned application AND that hold ≥1 application grant in the run's
+  combined matrix (`combine_granted_roles`: the Microsoft Graph `appRoleAssignedTo` read plus one
+  read each on Office 365 Exchange Online and SharePoint Online — `prefetch_office365_role_grants`
+  keeps EVERY role value with its resource, not just EWS `full_access_as_app`), OR are flagged
+  risky by the run's Identity Protection map. So an SP holding only `Exchange.ManageAsApp`, the EWS
+  scope or SharePoint Online `Sites.*` is scored (high-risk weight, plus `UNCONFINABLE_SHAREPOINT`
+  for the SharePoint ones). A failed Exchange Online read is `AuditCoverageGap::EwsFullAccessGrants`,
+  a failed SharePoint Online read `SharePointOnlineGrants`; a resource with no SP in the tenant is
+  an empty answer, not a gap. The grant/risk requirement is the noise filter (grantless first-party
+  Microsoft SPs vanish); disabled SPs stay in (Rule 4). The risky admission path is deliberate: a
+  compromised managed identity or foreign SP often holds no *enumerable* grant, and "no grants ⇒
+  skip it" is exactly the wrong inference when Identity Protection says the principal is
+  compromised. Known limitation: roles held only on resources other than these three (a
+  third-party or custom API) aren't in any matrix, so an *unflagged* SP holding only those isn't
+  scored.
 - **Zero extra per-item Graph traffic.** Phase 2 reuses the run's tenant-wide reads — the Graph
   `appRoleAssignedTo` matrix (now fetched regardless of Exchange availability; its mail-scopable
   subset still feeds `score_one`'s reconciliation) and the `oauth2PermissionGrants` read (which now
-  also keeps AllPrincipals scope strings per client for Rule 13). Phase 1 uses the same map: an app
+  also keeps AllPrincipals scope strings per client for Rule 13). A failed grants read is
+  `AuditCoverageGap::DelegatedConsentGrants`: it drops every admin-consent flag (Rule 3) and the
+  SP rows' delegated scopes, so the run is degraded — never cached, never an all-clear. Phase 1 uses the same map: an app
   row's broad-prefix delegated scopes (`Mail.`, `Files.`, `Sites.`, …) are reported by Rule 13 only
   when they are in its SP's AllPrincipals set (`AppPermissions::admin_consented_scopes`), falling
   back to the declared scopes when the grants read failed; the ported pair

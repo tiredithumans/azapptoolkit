@@ -262,7 +262,8 @@ pub enum AuditCoverageGap {
     /// is empty, so a `Scoped` verdict is never defeated and an un-stripped
     /// org-wide grant scores at the reduced scoped weight — AND the SP-only
     /// scoring phase, which then finds no enterprise apps, managed identities
-    /// or orphaned service principals at all.
+    /// or orphaned service principals at all — AND the granted-but-undeclared
+    /// merge, so an app's Graph roles granted outside its manifest go unscored.
     GraphAppRoleAssignments,
     /// The tenant-wide `appRoleAssignedTo` read on the legacy Office 365
     /// Exchange Online SP, which finds org-wide EWS `full_access_as_app`
@@ -291,7 +292,9 @@ pub enum AuditCoverageGap {
     /// as unexamined. A failed resolve is memoized for the run, so one
     /// transient failure on the Microsoft Graph resource silently emptied the
     /// permissions of every app in the tenant while the run reported itself
-    /// complete and cached itself as authoritative.
+    /// complete and cached itself as authoritative. Grants on such a resource
+    /// are still scored, but never labelled "not in the manifest" (the
+    /// declarations were what failed to resolve).
     PermissionResolution,
     /// The tenant-wide service-principal index read that supplies the candidate
     /// pool for the SP-only scoring phase.
@@ -314,6 +317,18 @@ pub enum AuditCoverageGap {
     /// service principal Identity Protection flags `confirmedCompromised` is
     /// scored and shown as if no vendor flagged it.
     RiskyServicePrincipals,
+    /// The tenant-wide `appRoleAssignedTo` read on the legacy Office 365
+    /// SharePoint Online SP. That resource is not Microsoft Graph, so its
+    /// `Sites.*` / `User.*` roles are in no other matrix: without this read a
+    /// service principal holding only SharePoint Online roles is not scored at
+    /// all, and an app holding them undeclared is scored below its reach.
+    SharePointOnlineGrants,
+    /// The tenant-wide `oauth2PermissionGrants` read. Without it no principal
+    /// carries the admin-consent flag (Rule 3), SP-only rows lose their
+    /// delegated scopes, and Rule 13 falls back to declared scopes — the run
+    /// under-reports delegated risk while looking complete. It used to log at
+    /// `info!` and return empty, so the run was cached as authoritative.
+    DelegatedConsentGrants,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -327,8 +342,9 @@ impl AuditCoverageGap {
             AuditCoverageGap::GraphAppRoleAssignments => {
                 "Tenant-wide Microsoft Graph app-role assignments could not be read, so \
                  enterprise applications, managed identities and orphaned service principals \
-                 were not scored, and mailbox permissions could not be checked for an \
-                 un-stripped org-wide grant."
+                 were not scored, Microsoft Graph permissions granted to an application but \
+                 missing from its manifest were not found, and mailbox permissions could not be \
+                 checked for an un-stripped org-wide grant."
             }
             AuditCoverageGap::ServicePrincipalIndex => {
                 "The tenant's service-principal list could not be read, so enterprise \
@@ -336,8 +352,18 @@ impl AuditCoverageGap {
                  scored. App registrations were still covered."
             }
             AuditCoverageGap::EwsFullAccessGrants => {
-                "Org-wide EWS full-mailbox-access grants could not be read, so an application \
-                 shown as scoped to specific mailboxes may still reach every mailbox."
+                "Office 365 Exchange Online permission grants could not be read, so an \
+                 application shown as scoped to specific mailboxes may still reach every mailbox, \
+                 and service principals holding only Exchange Online roles were not scored."
+            }
+            AuditCoverageGap::SharePointOnlineGrants => {
+                "Office 365 SharePoint Online permission grants could not be read, so service \
+                 principals holding only SharePoint Online roles were not scored, and \
+                 applications may hold SharePoint access this run does not show."
+            }
+            AuditCoverageGap::DelegatedConsentGrants => {
+                "The tenant's delegated permission grants could not be read, so admin-consented \
+                 delegated permissions were not flagged and delegated risk may be under-reported."
             }
             AuditCoverageGap::PerPrincipalScoring => {
                 "Some applications could not be scored and are missing from these results, \
@@ -346,7 +372,9 @@ impl AuditCoverageGap {
             AuditCoverageGap::PermissionResolution => {
                 "The permissions an application programming interface defines could not be \
                  read, so applications holding those permissions were scored as though they \
-                 held none — they may look clean here while holding high-risk access."
+                 held none — they may look clean here while holding high-risk access — and \
+                 whether their granted permissions are missing from the manifest could not be \
+                 checked."
             }
             AuditCoverageGap::RiskyServicePrincipals => {
                 "The Identity Protection risky-service-principal report could not be read, so \
@@ -433,6 +461,8 @@ mod tests {
             AuditCoverageGap::PerPrincipalScoring,
             AuditCoverageGap::PermissionResolution,
             AuditCoverageGap::RiskyServicePrincipals,
+            AuditCoverageGap::SharePointOnlineGrants,
+            AuditCoverageGap::DelegatedConsentGrants,
             AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");

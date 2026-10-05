@@ -70,6 +70,11 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // RemoveRedundant group/bulk action pairs with the rule it actually
         // fixes.
         "redundant_perms" => |x| x.starts_with(issue::REDUNDANT_APP_PERMS),
+        // Rule 23 — roles granted to the app's SP that its manifest does not
+        // declare. Its own finding, not folded into `high_risk_perms`: the
+        // grants are scored there by value, while this names the hiding place
+        // (and fires for an undeclared grant of ANY risk).
+        "granted_undeclared" => |x| x.starts_with(issue::GRANTED_NOT_DECLARED),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
         // Rule 21 — Microsoft's own disable flag. Its own group (not folded
         // into the credential or exposure findings): the flag is about the
@@ -255,6 +260,13 @@ mod tests {
                 ),
                 "unused_credential",
             ),
+            (
+                format!(
+                    "{} RoleManagement.ReadWrite.Directory on Microsoft Graph",
+                    issue::GRANTED_NOT_DECLARED
+                ),
+                "granted_undeclared",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -273,6 +285,7 @@ mod tests {
             "disabled_by_microsoft",
             "risky_service_principal",
             "unused_credential",
+            "granted_undeclared",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

@@ -44,9 +44,10 @@ a separate gate, `is_aap_confinable_permission` (see below). Consequences to pre
 - **`full_access_as_app` is a blanket grant.** `is_blanket_mailbox_grant` marks it, and
   `reconcile_orgwide_grant` lets a surviving one force `OrgWide` for **every** permission on that
   principal — it reaches all mailboxes with full access, so a `Mail.Read` confined to one group is
-  still org-wide in effect. The audit picks these up from one extra tenant-wide read
-  (`prefetch_ews_full_access_grants`), kept **separate** from the Graph `appRoleAssignedTo` matrix so
-  the SP-only phase's candidate rule ("holds a Graph application grant") is unchanged.
+  still org-wide in effect. The audit picks these up from its tenant-wide Office 365 grant read
+  (`prefetch_office365_role_grants`, every Exchange Online and SharePoint Online role with its
+  resource), kept **separate** from the Graph `appRoleAssignedTo` matrix; `ews_full_access_holders`
+  derives the blanket-grant set from it, resource-checked.
 - **Composite roles confer permissions without carrying their names.** `Application Mail Full Access`
   and `Application Exchange Full Access` bundle several permissions, so `verdict_from_rows` matches
   rows via `row_grants_permission`, which reads `GrantedPermissions` as well as `RoleName`. Matching
