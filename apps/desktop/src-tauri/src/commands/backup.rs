@@ -53,6 +53,13 @@ const BATCH_CHUNK: usize = 20;
 /// and halves it toward a floor of 1 on a throttling one.
 const INITIAL_DR_CONCURRENCY: usize = 4;
 
+/// Largest backup file `load_backup_from_file` reads. A manifest is
+/// configuration only, but a large tenant's runs to tens of MiB (every app's
+/// permissions, scopes, owners and credential metadata), so the bound sits well
+/// above any real one — it exists to refuse the wrong file, or a hostile one,
+/// before it is held in memory and parsed.
+const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
+
 // The estate's enumeration cap is no longer restated here: both indexes now come
 // from the shared cached accessors (`indexes_cached`), which bound themselves by
 // the lists' `APPS_MAX` / `SP_INDEX_MAX`. A local copy could only drift from them.
@@ -314,13 +321,19 @@ pub async fn load_backup_from_file(app_handle: AppHandle) -> Result<Option<Tenan
         let path_buf = path
             .into_path()
             .map_err(|e| UiError::validation("invalid_path", e.to_string()))?;
-        let content = std::fs::read_to_string(&path_buf).map_err(|e| UiError::io(e.to_string()))?;
-        let backup: TenantBackup = serde_json::from_str(&content)
-            .map_err(|e| UiError::serde(format!("not a valid backup file: {e}")))?;
-        Ok(Some(backup))
+        read_backup_file(&path_buf, MAX_BACKUP_BYTES).map(Some)
     })
     .await
     .map_err(|e| UiError::io(e.to_string()))?
+}
+
+/// Reads and parses the backup file at `path`, refusing one over `cap` bytes
+/// (`MAX_BACKUP_BYTES` in production; a parameter so the bound is testable
+/// without a 256 MiB fixture).
+fn read_backup_file(path: &std::path::Path, cap: u64) -> Result<TenantBackup, UiError> {
+    let content = super::export::read_capped_utf8(path, cap, "invalid_backup_file")?;
+    serde_json::from_str(&content)
+        .map_err(|e| UiError::serde(format!("not a valid backup file: {e}")))
 }
 
 /// Signals an in-progress backup to stop at the next dispatch boundary.
@@ -1012,9 +1025,37 @@ fn emit(
 mod tests {
     use super::*;
     use crate::commands::test_support::{
-        Recorder, dead_token, mock_graph, mock_graph_with, sample_app_json,
+        Recorder, dead_token, mock_graph, mock_graph_with, sample_app_json, temp_file,
     };
     use azapptoolkit_core::cache::Cache;
+
+    /// The loader reads through the shared bound: one byte over the cap is
+    /// refused before parsing, a file at the cap loads, and a UTF-16 file is
+    /// named as such.
+    #[test]
+    fn a_backup_file_over_the_cap_is_refused() {
+        let json = serde_json::to_vec(&TenantBackup {
+            schema_version: BACKUP_SCHEMA_VERSION,
+            created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+            source_tenant_id: "src-tenant".into(),
+            cloud: azapptoolkit_core::cloud::CloudEnvironment::Commercial,
+            app_registrations: Vec::new(),
+            enterprise_apps: Vec::new(),
+            managed_identities: Vec::new(),
+            skipped: Vec::new(),
+        })
+        .unwrap();
+        let file = temp_file(&json);
+        let cap = json.len() as u64;
+        assert!(read_backup_file(&file.0, cap).is_ok());
+        let err = read_backup_file(&file.0, cap - 1).unwrap_err();
+        assert_eq!(err.code, "invalid_backup_file");
+
+        let utf16 = temp_file(&[0xFF, 0xFE, b'{', 0, b'}', 0]);
+        let err = read_backup_file(&utf16.0, cap).unwrap_err();
+        assert_eq!(err.code, "invalid_backup_file");
+        assert!(err.message.contains("UTF-16"), "{}", err.message);
+    }
 
     /// A ticker that records into `rec`; the events carry `throttle`'s cap, so
     /// a test can assert it.

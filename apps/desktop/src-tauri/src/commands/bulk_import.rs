@@ -48,25 +48,23 @@ pub async fn load_bulk_create_specs_from_file(
         let path_buf = path
             .into_path()
             .map_err(|e| UiError::validation("invalid_path", e.to_string()))?;
-        let size = std::fs::metadata(&path_buf)
-            .map_err(|e| UiError::io(e.to_string()))?
-            .len();
-        if size > MAX_FILE_BYTES {
-            return Err(UiError::validation(
-                "invalid_bulk_file",
-                format!("the file is {size} bytes; the limit is {MAX_FILE_BYTES}"),
-            ));
-        }
-        let content = std::fs::read_to_string(&path_buf).map_err(|e| UiError::io(e.to_string()))?;
-        let is_json = path_buf
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
-        parse_bulk_create_file(&content, is_json)
-            .map(Some)
-            .map_err(|msg| UiError::validation("invalid_bulk_file", msg))
+        read_bulk_create_file(&path_buf, MAX_FILE_BYTES).map(Some)
     })
     .await
     .map_err(|e| UiError::io(e.to_string()))?
+}
+
+/// Reads and parses the bulk-create file at `path`, refusing one over `cap`
+/// bytes (`MAX_FILE_BYTES` in production; a parameter so the bound is testable
+/// without a 5 MiB fixture). The bound is enforced by the read, not by a size
+/// check the file could outgrow before it is read.
+fn read_bulk_create_file(path: &std::path::Path, cap: u64) -> Result<Vec<BulkCreateSpec>, UiError> {
+    let content = super::export::read_capped_utf8(path, cap, "invalid_bulk_file")?;
+    let is_json = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    parse_bulk_create_file(&content, is_json)
+        .map_err(|msg| UiError::validation("invalid_bulk_file", msg))
 }
 
 /// Parses a bulk-create file. `is_json` comes from the extension; a file
@@ -236,6 +234,40 @@ fn parse_csv(content: &str) -> Result<Vec<Vec<String>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_support::temp_file;
+
+    /// The loader end to end: the cap is enforced by the read (exactly the
+    /// cap loads, one byte more is refused), a BOM-prefixed CSV still parses,
+    /// and Excel's UTF-16 "Unicode Text" save is named rather than garbled.
+    #[test]
+    fn the_file_loader_bounds_the_read_and_names_the_encoding() {
+        let csv = "\u{feff}DisplayName\r\nApp A\r\n";
+        let file = temp_file(csv.as_bytes());
+        let cap = csv.len() as u64;
+        let specs = read_bulk_create_file(&file.0, cap).expect("a file at the cap loads");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0].display_name, "App A",
+            "the BOM is not part of the header"
+        );
+
+        let err = read_bulk_create_file(&file.0, cap - 1).unwrap_err();
+        assert_eq!(err.code, "invalid_bulk_file");
+        assert!(err.message.contains("limit"), "{}", err.message);
+
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(
+                "DisplayName\r\nApp A\r\n"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes),
+            )
+            .collect();
+        let file = temp_file(&utf16);
+        let err = read_bulk_create_file(&file.0, MAX_FILE_BYTES).unwrap_err();
+        assert_eq!(err.code, "invalid_bulk_file");
+        assert!(err.message.contains("UTF-16"), "{}", err.message);
+    }
 
     fn perm(resource: &str, value: &str, kind: PermissionKind) -> BulkCreatePermission {
         BulkCreatePermission {

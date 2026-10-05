@@ -20,8 +20,8 @@ use super::claims::{build_claims_definition, parse_claims_definition};
 use super::rollover::{build_rollover, is_preferred_key, preferred_thumbprint};
 use super::{
     ClaimsWrite, apply_claims_policy, claims_policy_err, discard_unassigned_claims_policy,
-    invalid_redirect_uri, oidc_summary_urls, plan_claims_write, saml_summary_urls,
-    sanitize_notification_emails,
+    invalid_logout_url, invalid_redirect_uri, oidc_summary_urls, plan_claims_write,
+    saml_summary_urls, sanitize_notification_emails,
 };
 
 /// Reads the current SSO configuration of an existing enterprise app to drive
@@ -366,13 +366,35 @@ pub async fn set_sso_mode(
 /// Updates the SAML identifiers (Entity IDs), reply URLs (ACS), and logout URL on
 /// an existing app. Supports multiple identifiers and reply URLs (the portal's
 /// "Basic SAML Configuration" allows several of each). Every reply URL is
-/// validated (no wildcards / insecure schemes); at least one identifier and one
-/// reply URL are required.
+/// validated (no wildcards / insecure schemes), and so is a non-empty logout
+/// URL (the same rules, https or loopback http only); at least one identifier
+/// and one reply URL are required.
 #[tauri::command]
 pub async fn set_saml_urls(
     state: State<'_, AppState>,
     tenant_id: String,
     object_id: String,
+    identifier_uris: Vec<String>,
+    reply_urls: Vec<String>,
+    logout_url: Option<String>,
+) -> Result<(), UiError> {
+    set_saml_urls_core(
+        &state,
+        &tenant_id,
+        &object_id,
+        identifier_uris,
+        reply_urls,
+        logout_url,
+    )
+    .await
+}
+
+/// The handler body, taking `&AppState` so a test can drive it against a mock
+/// Graph — the seam [`set_oidc_redirect_uris_core`] uses.
+pub(crate) async fn set_saml_urls_core(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
     identifier_uris: Vec<String>,
     reply_urls: Vec<String>,
     logout_url: Option<String>,
@@ -400,23 +422,31 @@ pub async fn set_saml_urls(
         ));
     }
     azapptoolkit_core::redirect::validate_redirect_uris(&replies).map_err(invalid_redirect_uri)?;
-    let client = state.graph_for(&tenant_id);
+    // Entra loads the logout URL in a hidden iframe at sign-out, so it is held
+    // to the logout rules (https only), not just the reply-URL ones.
+    let logout_url = logout_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(url) = logout_url.as_deref() {
+        azapptoolkit_core::redirect::validate_logout_url(url).map_err(invalid_logout_url)?;
+    }
+    let client = state.graph_for(tenant_id);
     let body = ApplicationSsoPatch {
         identifier_uris: Some(identifiers),
         web: Some(ApplicationWebPatch {
             redirect_uris: Some(replies),
-            logout_url: logout_url.filter(|s| !s.is_empty()),
+            logout_url,
             implicit_grant_settings: None,
         }),
         spa: None,
     };
-    client.patch_application_web(&object_id, &body).await?;
+    client.patch_application_web(object_id, &body).await?;
     // An in-place PATCH of one app's identifier/reply URLs adds, removes or
     // renames nothing, so nothing in the list tier (`sp_index`,
     // `app_name_index`, the enterprise list, the search corpus) changes; the SSO
     // tab reads live. The detail sweep is the can't-miss cheap tier (same as
     // the Expose-an-API and App roles PATCHes of this resource).
-    invalidate_app_details(&state.cache, &tenant_id);
+    invalidate_app_details(&state.cache, tenant_id);
     Ok(())
 }
 

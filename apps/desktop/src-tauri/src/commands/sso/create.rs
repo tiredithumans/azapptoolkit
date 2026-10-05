@@ -18,8 +18,8 @@ use crate::dto::sso::{OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput, Sa
 use crate::state::AppState;
 
 use super::{
-    apply_claims_policy, claims_policy_err, invalid_redirect_uri, oidc_summary_urls,
-    resolve_cert_lifetime_days, resolve_secret_lifetime_days, saml_summary_urls,
+    apply_claims_policy, claims_policy_err, invalid_logout_url, invalid_redirect_uri,
+    oidc_summary_urls, resolve_cert_lifetime_days, resolve_secret_lifetime_days, saml_summary_urls,
     sanitize_notification_emails, validate_cert_subject, with_replication_retry,
 };
 
@@ -34,10 +34,30 @@ pub async fn create_saml_sso_application(
     tenant_id: String,
     input: SamlSsoConfigInput,
 ) -> Result<SamlSsoSummary, UiError> {
+    create_saml_sso_application_core(&state, &tenant_id, input).await
+}
+
+/// Body of [`create_saml_sso_application`], taking `&AppState` so the
+/// before-instantiate gates are testable against a mock Graph.
+pub(crate) async fn create_saml_sso_application_core(
+    state: &AppState,
+    tenant_id: &str,
+    mut input: SamlSsoConfigInput,
+) -> Result<SamlSsoSummary, UiError> {
     // Reject wildcard / insecure reply URLs before creating anything (MS
     // app-registration security best practices).
     azapptoolkit_core::redirect::validate_redirect_uri(&input.reply_url)
         .map_err(invalid_redirect_uri)?;
+    // The logout URL too, and by the stricter logout rules (https only — Entra
+    // loads it in a hidden iframe at sign-out). Trimmed here so `configure_saml`
+    // writes exactly the value that was checked.
+    input.logout_url = input
+        .logout_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(url) = input.logout_url.as_deref() {
+        azapptoolkit_core::redirect::validate_logout_url(url).map_err(invalid_logout_url)?;
+    }
 
     // Likewise reject a certificate subject Graph would refuse at step 4 —
     // by then the app + SP already exist, so the failure would leave a
@@ -56,12 +76,12 @@ pub async fn create_saml_sso_application(
     // offer a "Grant consent" button — before we create anything.
     if input.claims_policy.as_ref().is_some_and(|p| !p.is_empty()) {
         state
-            .ensure_policy_write_token(&tenant_id)
+            .ensure_policy_write_token(tenant_id)
             .await
             .map_err(UiError::from)?;
     }
 
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     let cloud = state.auth.cloud();
 
     // 1. Instantiate the cloud's generic custom template → app + SP.
@@ -76,10 +96,10 @@ pub async fn create_saml_sso_application(
     // the SSO tab; we never auto-delete. Bust caches on any early return that
     // got past instantiate so the new (paired) SP shows up in the lists.
     let result = configure_saml(
-        &client, cloud, &object_id, &sp_id, &tenant_id, &app_id, &input,
+        &client, cloud, &object_id, &sp_id, tenant_id, &app_id, &input,
     )
     .await;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    invalidate_app_lists(&state.cache, tenant_id);
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 

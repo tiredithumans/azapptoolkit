@@ -4,8 +4,13 @@
 
 use crate::state::AppState;
 
-use super::config::{get_sso_config_core, set_claims_mapping_core, set_oidc_redirect_uris_core};
-use super::create::{configure_oidc, configure_saml, create_oidc_sso_application_core};
+use super::config::{
+    get_sso_config_core, set_claims_mapping_core, set_oidc_redirect_uris_core, set_saml_urls_core,
+};
+use super::create::{
+    configure_oidc, configure_saml, create_oidc_sso_application_core,
+    create_saml_sso_application_core,
+};
 
 use crate::dto::sso::{
     ClaimsPolicyDto, OidcSsoConfigInput, SamlSsoConfigInput, SamlSsoSummary, SsoSummary,
@@ -209,6 +214,143 @@ async fn an_invalid_redirect_uri_never_reaches_graph() {
             .unwrap_or_default()
             .is_empty()
     );
+}
+
+/// The SAML URL editor validated its reply URLs and then wrote the logout URL
+/// as typed. A plaintext or custom-scheme logout URL is refused before any
+/// request, by the logout rules rather than the reply-URL ones.
+#[tokio::test]
+async fn an_invalid_saml_logout_url_never_reaches_graph() {
+    // No mock mounted: any request would be recorded (and 404).
+    let server = MockServer::start().await;
+    let state = AppState::for_test(TENANT, &server.uri());
+    seed(&state);
+
+    for logout in ["http://evil.example/logout", "myapp://logout"] {
+        let err = set_saml_urls_core(
+            &state,
+            TENANT,
+            OBJECT,
+            vec!["https://sp.example".into()],
+            vec!["https://sp.example/acs".into()],
+            Some(format!("  {logout}  ")),
+        )
+        .await
+        .expect_err("an unsafe logout URL is rejected locally");
+        assert_eq!(err.code, "invalid_redirect_uri", "{logout}");
+        // The editor re-sends the stored logout URL on every save, so the
+        // error names the field.
+        assert!(err.message.starts_with("Logout URL: "), "{}", err.message);
+    }
+    assert!(
+        detail_cached(&state),
+        "a rejected input invalidates nothing"
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert!(
+        requests.is_empty(),
+        "{} request(s) reached Graph",
+        requests.len()
+    );
+}
+
+/// A valid logout URL is written trimmed — the value that was checked.
+#[tokio::test]
+async fn a_saml_logout_url_is_written_trimmed() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("/v1.0/applications/{OBJECT}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    set_saml_urls_core(
+        &state,
+        TENANT,
+        OBJECT,
+        vec!["https://sp.example".into()],
+        vec!["https://sp.example/acs".into()],
+        Some(" https://sp.example/logout ".into()),
+    )
+    .await
+    .expect("a valid logout URL is saved");
+    let requests = server.received_requests().await.expect("recording is on");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("JSON body");
+    assert_eq!(body["web"]["logoutUrl"], "https://sp.example/logout");
+}
+
+/// The SAML create wizard: same gate, before instantiate, so no app or service
+/// principal is left half-configured.
+#[tokio::test]
+async fn an_invalid_saml_create_logout_url_never_reaches_graph() {
+    let server = MockServer::start().await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    for logout in ["http://evil.example/logout", "myapp://logout"] {
+        let input = SamlSsoConfigInput {
+            logout_url: Some(logout.into()),
+            ..saml_input()
+        };
+        let err = create_saml_sso_application_core(&state, TENANT, input)
+            .await
+            .expect_err("an unsafe logout URL is rejected before instantiate");
+        assert_eq!(err.code, "invalid_redirect_uri", "{logout}");
+        assert!(err.message.starts_with("Logout URL: "), "{}", err.message);
+    }
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert!(
+        requests.is_empty(),
+        "{} request(s) reached Graph",
+        requests.len()
+    );
+}
+
+/// The create wizard writes the logout URL it checked: trimmed.
+#[tokio::test]
+async fn a_saml_create_logout_url_is_written_trimmed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1.0/applicationTemplates/{}/instantiate",
+            CloudEnvironment::Commercial.custom_app_template_id()
+        )))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "application": { "id": OBJECT, "appId": "app-1" },
+            "servicePrincipal": { "id": SP, "appId": "app-1" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_saml_create(&server).await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    // No claims or notification steps: only the URL write matters here.
+    let input = SamlSsoConfigInput {
+        logout_url: Some(" https://sp.example/logout ".into()),
+        claims_policy: None,
+        notification_emails: Vec::new(),
+        ..saml_input()
+    };
+    create_saml_sso_application_core(&state, TENANT, input)
+        .await
+        .expect("a valid logout URL is saved");
+    let requests = server.received_requests().await.expect("recording is on");
+    let app_patch = requests
+        .iter()
+        .find(|r| {
+            r.method.as_str() == "PATCH" && r.url.path() == format!("/v1.0/applications/{OBJECT}")
+        })
+        .expect("the app's SSO URLs are written");
+    let body: serde_json::Value = serde_json::from_slice(&app_patch.body).expect("JSON body");
+    assert_eq!(body["web"]["logoutUrl"], "https://sp.example/logout");
 }
 
 // ---- claims-mapping policy saves ----

@@ -439,13 +439,15 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     }
 }
 
-/// The dry-run plan: the work of all five passes, both blockers (cloud
-/// mismatch, too-new manifest), the tenant-change note, and a duplicate
-/// warning when the backup is being restored into the tenant it came from.
+/// The dry-run plan: the work of all five passes, the blockers (cloud
+/// mismatch, too-new manifest, malformed manifest), the tenant-change note, and
+/// a duplicate warning when the backup is being restored into the tenant it
+/// came from.
 #[component]
 fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
     let cloud = plan.cloud_mismatch.clone();
     let schema = plan.schema_too_new.clone();
+    let invalid = (!plan.invalid_manifest.is_empty()).then(|| plan.invalid_manifest.clone());
     let same_tenant = (!plan.tenant_changed).then(|| plan.source_tenant_id.clone());
     view! {
         <div class="dr-view__plan">
@@ -465,6 +467,15 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                          schema {}; this version reads up to {}). Restore is blocked — update \
                          azapptoolkit first.",
                         s.manifest_version, s.supported_version,
+                    )}
+                </Callout>
+            })}
+            {invalid.map(|problems| view! {
+                <Callout tone="danger" role="alert">
+                    {format!(
+                        "This backup file is not a valid manifest: {}. Restore is blocked — \
+                         restore from an unmodified backup file.",
+                        problems.join("; "),
                     )}
                 </Callout>
             })}

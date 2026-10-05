@@ -221,6 +221,13 @@ fn invalid_redirect_uri(message: String) -> UiError {
     UiError::validation("invalid_redirect_uri", message)
 }
 
+/// [`invalid_redirect_uri`] for the logout URL, naming the field: the SSO
+/// editor re-sends the stored logout URL on every save, so a rejection that
+/// read like a reply-URL error would send the operator to the wrong field.
+fn invalid_logout_url(message: String) -> UiError {
+    invalid_redirect_uri(format!("Logout URL: {message}"))
+}
+
 /// Rejects a certificate subject Graph's `addTokenSigningCertificate` would
 /// refuse (its `displayName` must start with `CN=`) — validated *before* any
 /// mutation so a bad value can't leave a half-configured app.

@@ -50,7 +50,7 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::federation::validate_federated_credential;
 use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
-use azapptoolkit_core::redirect::validate_redirect_uri;
+use azapptoolkit_core::redirect::{validate_logout_url, validate_redirect_uri};
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
 };
@@ -98,6 +98,20 @@ fn checked_uris(uris: &[String], label: &str, warnings: &mut Vec<String>) -> Vec
         })
         .cloned()
         .collect()
+}
+
+/// The manifest's logout URL if it passes `core::redirect::validate_logout_url`
+/// — the reply-URL rules plus https (or loopback http) only, as in the editor —
+/// trimmed; otherwise `None`, with the rejection recorded in the report.
+fn checked_logout_url(url: Option<&str>, warnings: &mut Vec<String>) -> Option<String> {
+    let url = url.map(str::trim).filter(|u| !u.is_empty())?;
+    match validate_logout_url(url) {
+        Ok(()) => Some(url.to_string()),
+        Err(reason) => {
+            warnings.push(format!("logout URL '{url}' was NOT restored — {reason}"));
+            None
+        }
+    }
 }
 
 /// Lifetime for regenerated secrets — matches the app-creation default (180d).
@@ -308,9 +322,10 @@ async fn decide_adoption(
 
 /// Dry-run analysis of restoring `backup` into the current tenant — counts and
 /// warnings only, no writes. The frontend shows this before the operator
-/// confirms the (irreversible) restore: the work of all five passes, both hard
-/// blockers (a cross-cloud manifest and a too-new `schema_version`, which
-/// [`restore_tenant`] still enforces on its own), and whether the destination
+/// confirms the (irreversible) restore: the work of all five passes, the hard
+/// blockers (a cross-cloud manifest, a too-new `schema_version` and a malformed
+/// or repeated source appId, which [`restore_tenant`] still enforces on its
+/// own), and whether the destination
 /// is the tenant the backup was taken from. A blocked manifest still returns
 /// a plan — carrying the blocker — so the operator sees why before Confirm.
 #[tauri::command]
@@ -355,6 +370,84 @@ fn schema_too_new(schema_version: u32) -> Option<SchemaTooNew> {
     })
 }
 
+/// How many manifest problems are named individually; the rest are counted.
+/// A hostile file can repeat one id thousands of times, and the plan has to
+/// stay readable.
+const MAX_MANIFEST_PROBLEMS: usize = 10;
+
+/// Refuses a manifest whose app registrations are not individually addressable.
+///
+/// `source_app_id` is the key every pass hangs off: the restore tag
+/// (`azapptoolkit:restoredFrom:<id>`), the adoption lookup and the
+/// `source → new` remap. A repeated id makes Pass 1 adopt the app it has just
+/// created for the first copy and wire it twice (two sets of fresh secrets); an
+/// empty one tags the app with a bare prefix every other empty-id app shares.
+/// Neither is a shape a real backup produces, so the file is refused whole
+/// rather than partially restored.
+fn validate_manifest(backup: &TenantBackup) -> Result<(), UiError> {
+    let problems = manifest_problems(backup);
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(UiError::validation(
+        "invalid_manifest",
+        format!(
+            "backup file is not a valid manifest: {}. Nothing was restored.",
+            problems.join("; ")
+        ),
+    ))
+}
+
+/// The one manifest-shape rule, shared by the dry-run blocker and the
+/// restore's own refusal: every app registration's `source_app_id` is a GUID
+/// and no two share one (compared case-insensitively, as Entra does).
+fn manifest_problems(backup: &TenantBackup) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for app in &backup.app_registrations {
+        // Checked as-is, never trimmed: the tag, the adoption lookup and the
+        // remap all use the raw value, so a padded GUID is not a GUID here.
+        let id = app.source_app_id.as_str();
+        let name = excerpt(&app.display_name);
+        if id.is_empty() {
+            problems.push(format!("app registration '{name}' has no source appId"));
+        } else if !azapptoolkit_core::guid::is_guid(id) {
+            problems.push(format!(
+                "app registration '{name}' has a source appId that is not a GUID ('{}')",
+                excerpt(id)
+            ));
+        } else {
+            *seen.entry(id.to_ascii_lowercase()).or_default() += 1;
+        }
+    }
+    let mut repeated: Vec<(String, usize)> = seen.into_iter().filter(|(_, n)| *n > 1).collect();
+    repeated.sort();
+    problems.extend(
+        repeated
+            .into_iter()
+            .map(|(id, n)| format!("source appId {id} appears {n} times")),
+    );
+    if problems.len() > MAX_MANIFEST_PROBLEMS {
+        let more = problems.len() - MAX_MANIFEST_PROBLEMS;
+        problems.truncate(MAX_MANIFEST_PROBLEMS);
+        problems.push(format!("and {more} more"));
+    }
+    problems
+}
+
+/// Longest value from the file echoed into a manifest problem, in characters.
+const MAX_ECHOED_CHARS: usize = 80;
+
+/// `value` cut to [`MAX_ECHOED_CHARS`] characters (never mid-character), with
+/// an ellipsis when cut: a hostile file's multi-megabyte display name must not
+/// become the plan's text.
+fn excerpt(value: &str) -> String {
+    match value.char_indices().nth(MAX_ECHOED_CHARS) {
+        Some((at, _)) => format!("{}…", &value[..at]),
+        None => value.to_string(),
+    }
+}
+
 /// Pure dry-run analysis (no I/O): the counts plus the cloud/schema/tenant
 /// checks derived from the backup. Split out from [`plan_restore`] so it is unit-testable
 /// without an `AppState`. `dest_cloud` is the destination build's cloud.
@@ -395,6 +488,7 @@ fn build_restore_plan(
     RestorePlan {
         cloud_mismatch,
         schema_too_new: schema_too_new(backup.schema_version),
+        invalid_manifest: manifest_problems(backup),
         tenant_changed: backup.source_tenant_id != tenant_id,
         source_tenant_id: backup.source_tenant_id.clone(),
         destination_tenant_id: tenant_id,
@@ -430,6 +524,7 @@ pub async fn restore_tenant(
     backup: TenantBackup,
 ) -> Result<RestoreReport, UiError> {
     check_manifest_schema(backup.schema_version)?;
+    validate_manifest(&backup)?;
 
     // A cross-cloud restore is never valid: endpoints and well-known appIds
     // differ, so the remapped permissions would point at the wrong resources.
@@ -891,18 +986,9 @@ async fn wire_application(
         "public-client redirect URIs",
         &mut out.warnings,
     );
-    // A logout URL is a single value, not a list — same rule, one entry.
-    let logout_url = match app.logout_url.as_deref() {
-        Some(u) => match validate_redirect_uri(u) {
-            Ok(()) => app.logout_url.clone(),
-            Err(reason) => {
-                out.warnings
-                    .push(format!("logout URL was NOT restored — {reason}"));
-                None
-            }
-        },
-        None => None,
-    };
+    // A logout URL is a single value, not a list, and held to the stricter
+    // logout rules: a custom scheme is a legal reply URL but not a logout URL.
+    let logout_url = checked_logout_url(app.logout_url.as_deref(), &mut out.warnings);
 
     let has_auth = !web_redirect_uris.is_empty()
         || !spa_redirect_uris.is_empty()
@@ -1676,20 +1762,22 @@ mod tests {
             is_foreign_tenant: foreign,
             ..Default::default()
         };
+        const PAIRED: &str = "11111111-1111-1111-1111-111111111111";
+        const NO_SP: &str = "22222222-2222-2222-2222-222222222222";
         let mut backup = TenantBackup {
             schema_version: BACKUP_SCHEMA_VERSION,
             created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
             source_tenant_id: "src-tenant".into(),
             cloud: CloudEnvironment::Commercial,
-            app_registrations: vec![app("paired", true), app("no-sp", false)],
+            app_registrations: vec![app(PAIRED, true), app(NO_SP, false)],
             enterprise_apps: vec![
                 // Replayed: paired, not foreign, its app reg carries an SP.
-                ent("paired", false),
+                ent(PAIRED, false),
                 // Runbook items: foreign/gallery, no app reg in the backup,
                 // and an app reg Pass 1 creates without an SP.
-                ent("paired", true),
+                ent(PAIRED, true),
                 ent("absent", false),
-                ent("no-sp", false),
+                ent(NO_SP, false),
             ],
             managed_identities: vec![ManagedIdentityBackup::default(); 2],
             skipped: vec![SkippedObject::new("application", "obj-x", None, "403")],
@@ -1719,6 +1807,121 @@ mod tests {
         assert_eq!(too_new.manifest_version, BACKUP_SCHEMA_VERSION + 1);
         assert_eq!(too_new.supported_version, BACKUP_SCHEMA_VERSION);
         assert!(plan.is_blocked());
+    }
+
+    fn manifest_with_ids(ids: &[&str]) -> TenantBackup {
+        TenantBackup {
+            schema_version: BACKUP_SCHEMA_VERSION,
+            created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+            source_tenant_id: "src-tenant".into(),
+            cloud: CloudEnvironment::Commercial,
+            app_registrations: ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| AppRegistrationBackup {
+                    source_app_id: (*id).into(),
+                    display_name: format!("app-{i}"),
+                    ..Default::default()
+                })
+                .collect(),
+            enterprise_apps: Vec::new(),
+            managed_identities: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// A repeated source appId would be adopted against the app Pass 1 just
+    /// created for its first copy and wired twice — two sets of secrets. The
+    /// plan shows the blocker before Confirm and the restore refuses on its own.
+    #[test]
+    fn a_duplicate_source_app_id_blocks_the_plan_and_the_restore() {
+        const ID: &str = "11111111-1111-1111-1111-111111111111";
+        let backup = manifest_with_ids(&[ID, "22222222-2222-2222-2222-222222222222", ID]);
+        let plan = build_restore_plan(&backup, "dest".into(), CloudEnvironment::Commercial);
+        assert!(plan.is_blocked());
+        assert_eq!(
+            plan.invalid_manifest,
+            vec![format!("source appId {ID} appears 2 times")]
+        );
+        let err = validate_manifest(&backup).unwrap_err();
+        assert_eq!(err.code, "invalid_manifest");
+
+        // GUIDs compare case-insensitively.
+        assert!(
+            validate_manifest(&manifest_with_ids(&[
+                "aaaaaaaa-0000-0000-0000-000000000000",
+                "AAAAAAAA-0000-0000-0000-000000000000",
+            ]))
+            .is_err()
+        );
+    }
+
+    /// An empty source appId would tag the app with the bare
+    /// `azapptoolkit:restoredFrom:` prefix; a non-GUID one cannot have come
+    /// from Graph. Both block the plan and the restore.
+    #[test]
+    fn an_empty_or_malformed_source_app_id_blocks_the_plan_and_the_restore() {
+        for bad in [
+            "",
+            "  ",
+            "not-a-guid",
+            "{11111111-1111-1111-1111-111111111111}",
+            // Padded: the tag and the remap would carry the whitespace.
+            " 22222222-2222-2222-2222-222222222222",
+            "22222222-2222-2222-2222-222222222222\n",
+        ] {
+            let backup = manifest_with_ids(&["11111111-1111-1111-1111-111111111111", bad]);
+            let plan = build_restore_plan(&backup, "dest".into(), CloudEnvironment::Commercial);
+            assert!(plan.is_blocked(), "{bad:?}");
+            assert_eq!(plan.invalid_manifest.len(), 1, "{bad:?}");
+            assert!(plan.invalid_manifest[0].contains("'app-1'"), "{bad:?}");
+            assert_eq!(
+                validate_manifest(&backup).unwrap_err().code,
+                "invalid_manifest"
+            );
+        }
+
+        // A sound manifest, and an empty one, pass.
+        assert!(
+            validate_manifest(&manifest_with_ids(&[
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+            ]))
+            .is_ok()
+        );
+        assert!(validate_manifest(&manifest_with_ids(&[])).is_ok());
+    }
+
+    /// Values from the file are echoed bounded: a hostile display name or id
+    /// cannot become the plan's text, and the cut never splits a character.
+    #[test]
+    fn manifest_problems_echo_file_values_bounded() {
+        let mut backup = manifest_with_ids(&[&"x".repeat(10_000)]);
+        backup.app_registrations[0].display_name = "é".repeat(10_000);
+        let problems = manifest_problems(&backup);
+        assert_eq!(problems.len(), 1);
+        let expected = format!(
+            "app registration '{}…' has a source appId that is not a GUID ('{}…')",
+            "é".repeat(MAX_ECHOED_CHARS),
+            "x".repeat(MAX_ECHOED_CHARS)
+        );
+        assert_eq!(problems[0], expected);
+        // Short values are echoed whole.
+        assert_eq!(excerpt("Payroll"), "Payroll");
+        assert_eq!(
+            excerpt(&"a".repeat(MAX_ECHOED_CHARS)),
+            "a".repeat(MAX_ECHOED_CHARS)
+        );
+    }
+
+    /// A file that repeats the problem thousands of times still yields a
+    /// readable plan.
+    #[test]
+    fn manifest_problems_are_capped() {
+        let ids = vec![""; MAX_MANIFEST_PROBLEMS + 5];
+        let problems = manifest_problems(&manifest_with_ids(&ids));
+        assert_eq!(problems.len(), MAX_MANIFEST_PROBLEMS + 1);
+        assert_eq!(problems.last().map(String::as_str), Some("and 5 more"));
     }
 
     #[test]
@@ -2183,6 +2386,32 @@ mod tests {
                 .iter()
                 .all(|w| w.starts_with("web redirect URIs: "))
         );
+    }
+
+    /// The logout URL is checked by the logout rules, not the reply-URL ones: a
+    /// custom scheme passes `validate_redirect_uri` but must not be restored as
+    /// a sign-out page.
+    #[test]
+    fn a_restored_logout_url_is_validated_like_editor_input() {
+        let mut warnings = Vec::new();
+        assert_eq!(
+            checked_logout_url(Some(" https://app.contoso.com/logout "), &mut warnings),
+            Some("https://app.contoso.com/logout".to_string())
+        );
+        assert_eq!(checked_logout_url(Some("  "), &mut warnings), None);
+        assert_eq!(checked_logout_url(None, &mut warnings), None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        assert!(validate_redirect_uri("myapp://logout").is_ok());
+        for bad in ["myapp://logout", "http://attacker.example/logout"] {
+            assert_eq!(checked_logout_url(Some(bad), &mut warnings), None, "{bad}");
+        }
+        assert_eq!(
+            warnings.len(),
+            2,
+            "each rejection is reported: {warnings:?}"
+        );
+        assert!(warnings[0].contains("'myapp://logout' was NOT restored"));
     }
 
     /// An empty list restores nothing and warns about nothing — the common case

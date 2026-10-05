@@ -1,10 +1,14 @@
-//! Shared file-export plumbing for every inventory/report export command:
-//! CSV field encoding (with the formula-injection guard) and the save-dialog +
-//! write pipeline. Extracted from `commands::audit`, which seven other domains
-//! were importing it from — the per-domain `*_to_csv` serializers stay with
-//! their domains; only the generic pieces live here.
+//! Shared file plumbing for every inventory/report export command: CSV field
+//! encoding (with the formula-injection guard) and the save-dialog + write
+//! pipeline — plus its one inverse, the bounded text read the two file
+//! *loaders* (backup manifest, bulk-create inventory) share. Extracted from
+//! `commands::audit`, which seven other domains were importing it from — the
+//! per-domain `*_to_csv` serializers stay with their domains; only the generic
+//! pieces live here.
 
 use std::fmt::Write;
+use std::io::Read;
+use std::path::Path;
 
 use tauri::AppHandle;
 
@@ -235,6 +239,47 @@ pub(crate) fn coverage_json<T: serde::Serialize>(summary: &str, rows: &[T]) -> S
     })
 }
 
+/// Reads the operator-chosen file at `path` as UTF-8 text, refusing one larger
+/// than `cap` bytes.
+///
+/// The bound is enforced by the read itself (`take(cap + 1)`), not by a
+/// `metadata` size check first: the file can grow between the two, and a
+/// pipe or device reports no size at all, so only counting the bytes actually
+/// read holds. A too-large or non-UTF-8 file is a `validation` error with
+/// `code` and a message the operator can act on — a UTF-16 file (Excel's
+/// "Unicode Text" save) is named as such; an unreadable one is `io`.
+pub(crate) fn read_capped_utf8(path: &Path, cap: u64, code: &str) -> Result<String, UiError> {
+    let file = std::fs::File::open(path).map_err(|e| UiError::io(e.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| UiError::io(e.to_string()))?;
+    if bytes.len() as u64 > cap {
+        return Err(UiError::validation(
+            code,
+            format!("the file is larger than the limit of {cap} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| UiError::validation(code, not_utf8_message(&e)))
+}
+
+/// Why a file is not UTF-8, naming the encoding when its byte-order mark
+/// gives it away.
+fn not_utf8_message(e: &std::string::FromUtf8Error) -> String {
+    let bytes = e.as_bytes();
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        "the file is UTF-16 text (Excel's \"Unicode Text\" format); save it as UTF-8 \
+         (Excel: \"CSV UTF-8\") and load it again"
+            .into()
+    } else {
+        format!(
+            "the file is not UTF-8 text (invalid byte at offset {}); save it as UTF-8 and \
+             load it again",
+            e.utf8_error().valid_up_to()
+        )
+    }
+}
+
 /// Column count of one CSV line — commas **outside** quotes only.
 ///
 /// A test helper, shared so the per-domain export tests all prove alignment the
@@ -258,6 +303,7 @@ pub(crate) fn csv_columns(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_support::temp_file;
 
     #[test]
     fn csv_exports_start_with_a_utf8_bom_and_json_does_not() {
@@ -333,5 +379,45 @@ mod tests {
         assert_eq!(csv_field("=a,b"), "\"'=a,b\"");
         // A leading quote-needing char inside an ordinary name is untouched.
         assert_eq!(csv_field("a=b"), "a=b");
+    }
+
+    #[test]
+    fn a_capped_read_accepts_exactly_the_cap_and_refuses_one_byte_more() {
+        let at_cap = temp_file(&[b'a'; 64]);
+        assert_eq!(
+            read_capped_utf8(&at_cap.0, 64, "invalid_x").unwrap().len(),
+            64
+        );
+        let over = temp_file(&[b'a'; 65]);
+        let err = read_capped_utf8(&over.0, 64, "invalid_x").unwrap_err();
+        assert_eq!(err.code, "invalid_x");
+        assert!(err.message.contains("64 bytes"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_capped_read_names_the_encoding_of_a_non_utf8_file() {
+        // Excel's "Unicode Text": UTF-16LE with a BOM.
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("Name\r\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let file = temp_file(&utf16);
+        let err = read_capped_utf8(&file.0, 1024, "invalid_x").unwrap_err();
+        assert_eq!(err.code, "invalid_x");
+        assert!(err.message.contains("UTF-16"), "{}", err.message);
+
+        // Latin-1 has no BOM to go by: "not UTF-8", with where it broke.
+        let file = temp_file(b"Z\xfcrich");
+        let err = read_capped_utf8(&file.0, 1024, "invalid_x").unwrap_err();
+        assert!(err.message.contains("not UTF-8"), "{}", err.message);
+        assert!(err.message.contains("offset 1"), "{}", err.message);
+
+        // A missing file is an I/O failure, not a validation one (the guard
+        // is a temporary, so the file is removed before the read).
+        let gone = temp_file(b"").0.clone();
+        assert_eq!(
+            read_capped_utf8(&gone, 1024, "invalid_x").unwrap_err().code,
+            "io"
+        );
     }
 }

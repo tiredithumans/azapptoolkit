@@ -80,6 +80,19 @@ manifest restores correctly, which is the DR case the version field exists for.
 The same rule (`schema_too_new`) also feeds the dry-run, so a too-new manifest
 is shown as blocked in the plan, before Confirm, rather than refused only after.
 
+It refuses a manifest whose app registrations are not individually addressable,
+too (`validate_manifest`): every `source_app_id` must be a GUID, and no two may
+match (case-insensitively). That id is the restore tag, the adoption key and the
+remap key, so a repeated one would be adopted against the app Pass 1 had just
+created for its first copy and wired twice (two sets of fresh secrets), and an
+empty one would tag the app with a bare prefix. One rule (`manifest_problems`)
+feeds both the plan's `invalid_manifest` blocker and the refusal.
+
+The file itself is read through the shared `export::read_capped_utf8`, capped at
+`MAX_BACKUP_BYTES` (256 MiB — far above a large tenant's manifest) by the read,
+not by a size check the file could outgrow; a non-UTF-8 file is refused with an
+error naming its encoding.
+
 Three object classes:
 
 - `AppRegistrationBackup` — full config: manifest (`required_resource_access`),
@@ -149,9 +162,10 @@ restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
 pattern). It computes the counts for all five passes — including the Pass 4
 split into enterprise apps to re-apply vs. runbook items (foreign, or no paired
 app registration with an SP in this backup), the MIs to re-bind, and the
-backup's own `skipped` gaps — and surfaces both hard blockers, a cross-cloud
-manifest and a too-new `schema_version` (`RestorePlan::is_blocked`, the one
-definition the view reads; `restore_tenant` still enforces both itself), plus
+backup's own `skipped` gaps — and surfaces the hard blockers, a cross-cloud
+manifest, a too-new `schema_version` and a malformed or repeated source appId
+(`RestorePlan::is_blocked`, the one definition the view reads; `restore_tenant`
+still enforces each itself), plus
 the tenant-change note and, when the destination is the source tenant, a
 warning that restoring duplicates every app rather than rolling anything back.
 The frontend shows it before the operator confirms.
@@ -169,7 +183,9 @@ resolve:
    Microsoft rejects a GUID segment matching neither, and the URIs share one
    PATCH with the scopes and pre-authorized apps),
    Expose-an-API scopes (ids preserved) + pre-authorized apps (remapped),
-   authentication, federated credentials (validated + reported, below), owners (`resolve_principal`
+   authentication (each redirect URI through `core::redirect`, the logout URL
+   through its stricter `validate_logout_url`, a rejected one dropped with a
+   warning), federated credentials (validated + reported, below), owners (`resolve_principal`
    by UPN / display name — unresolved are reported), and secret regeneration
    (`add_password`, show-once values into the report). Every step is
    best-effort: a failure is a per-app warning, not a run failure.

@@ -120,6 +120,21 @@ fn validate_issuer(issuer: &str) -> Result<(), String> {
             "issuer must be an https URL (the external provider's OpenID Connect issuer): {issuer}"
         ));
     };
+    // A backslash is a path separator to WHATWG URL parsers and .NET's `Uri`
+    // for http(s), so `https://evil.example\.token.actions.githubusercontent.com`
+    // is fetched from **evil.example** while reading as GitHub. Whitespace has
+    // no place in an issuer URL at all, and an interior space hides the host
+    // the same way. Neither appears in a real issuer, so both are refused
+    // anywhere in the value rather than only in the authority.
+    if issuer.contains('\\') {
+        return Err(format!(
+            "issuer URL contains a backslash, which some parsers read as '/' and so \
+             hides the host the keys are actually fetched from: {issuer}"
+        ));
+    }
+    if issuer.chars().any(char::is_whitespace) {
+        return Err(format!("issuer URL contains whitespace: {issuer:?}"));
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     // `https://` with nothing after it names no provider.
     if authority.is_empty() {
@@ -138,7 +153,57 @@ fn validate_issuer(issuer: &str) -> Result<(), String> {
              actually fetched from: {issuer}"
         ));
     }
+    // What remains must read as exactly one host: so the host every parser
+    // fetches from is the host the operator sees, nothing but host characters
+    // (an internationalised name in its punycode form) and an optional port.
+    if !is_host_and_port(authority) {
+        return Err(format!(
+            "issuer URL host must be a plain host name (letters, digits, '.', '-'; \
+             punycode for an internationalised name) with an optional port: {issuer}"
+        ));
+    }
     Ok(())
+}
+
+/// Whether `authority` is `host[:port]`: a host of `[A-Za-z0-9.-]+` or a
+/// bracketed IPv6 literal, and a port of 1–5 digits that fits in a `u16`.
+fn is_host_and_port(authority: &str) -> bool {
+    let (host_ok, port) = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((addr, after)) => (
+                !addr.is_empty()
+                    && addr
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.'),
+                if after.is_empty() {
+                    None
+                } else {
+                    after.strip_prefix(':').or(Some(""))
+                },
+            ),
+            None => return false,
+        },
+        None => {
+            let (host, port) = match authority.split_once(':') {
+                Some((host, port)) => (host, Some(port)),
+                None => (authority, None),
+            };
+            (
+                !host.is_empty()
+                    && host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+                port,
+            )
+        }
+    };
+    host_ok
+        && port.is_none_or(|p| {
+            !p.is_empty()
+                && p.len() <= 5
+                && p.chars().all(|c| c.is_ascii_digit())
+                && p.parse::<u16>().is_ok()
+        })
 }
 
 /// The checks every value shares: present, within the length ceiling, no
@@ -258,6 +323,50 @@ mod tests {
             .is_ok()
         );
         assert!(check("ok-name", "https://accounts.google.com", "sub").is_ok());
+    }
+
+    /// WHATWG URL parsers and .NET's `Uri` read `\` as `/` in an http(s) URL,
+    /// so a backslash ends the host early: the keys come from the host before
+    /// it while the value reads as the provider after it. Interior whitespace
+    /// and any other non-host character in the authority hide it the same way.
+    #[test]
+    fn rejects_a_host_hidden_by_a_backslash_whitespace_or_stray_characters() {
+        for issuer in [
+            "https://attacker.example\\.token.actions.githubusercontent.com",
+            "https://attacker.example\\token.actions.githubusercontent.com/",
+            "https://token.actions.githubusercontent.com/\\evil",
+            "https://attacker.example .token.actions.githubusercontent.com",
+            "https://token.actions.githubusercontent.com/ path",
+            "https://token.actions.githubusercontent.com\u{a0}",
+            "https://attacker.example%2etoken.actions.githubusercontent.com",
+            "https://attacker.example;.token.actions.githubusercontent.com",
+            "https://tökén.example",
+            "https://issuer.example:",
+            "https://issuer.example:443:443",
+            "https://issuer.example:99999",
+            "https://issuer.example:44a",
+            "https://:443",
+            "https://[::1",
+            "https://[]",
+            "https://[::1]evil.example",
+            "https://[::1]:x",
+        ] {
+            assert!(
+                check("ok-name", issuer, "sub").is_err(),
+                "{issuer:?} hides or malforms the host"
+            );
+        }
+        // Ports, IPv6 literals, punycode and paths/queries still pass.
+        for issuer in [
+            "https://issuer.example:8443/tenant/v2.0",
+            "https://[2001:db8::1]:8443/",
+            "https://[2001:db8::1]",
+            "https://xn--tkn-qlaa.example/",
+            "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0",
+            "https://issuer.example?x=1#frag",
+        ] {
+            assert!(check("ok-name", issuer, "sub").is_ok(), "{issuer}");
+        }
     }
 
     #[test]

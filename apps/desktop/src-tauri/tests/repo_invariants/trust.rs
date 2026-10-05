@@ -21,7 +21,7 @@
 //! write and the check to the same function, or to every in-module caller of
 //! the helper the write sits in.
 
-use super::sources::{command_modules, functions_in};
+use super::sources::{balanced_block, command_modules, functions_in};
 
 /// The two ways a trust reaches Graph. `Patch` is the update path — it rewrites
 /// issuer/subject on an existing credential, which repoints the trust just as
@@ -44,6 +44,11 @@ const REDIRECT_WRITES: [&str; 3] = [
 /// (`validate_redirect_uri` / `validate_redirect_uris`), directly or through a
 /// thin local wrapper (`checked_uris`), so the rule matches the stem.
 const REDIRECT_VALIDATOR: &str = "validate_redirect_uri";
+
+/// `core::redirect::validate_logout_url` — the reply-URL rules plus https (or
+/// loopback http) only. A function that checks only its reply URLs with
+/// [`REDIRECT_VALIDATOR`] does not satisfy it: the stems differ on purpose.
+const LOGOUT_VALIDATOR: &str = "validate_logout_url";
 
 /// The one call that mints a SAML signing certificate.
 const CERT_MINTS: [&str; 1] = [".add_token_signing_certificate("];
@@ -76,11 +81,25 @@ fn unvalidated_writes(
     writes: &[&str],
     validator: &str,
 ) -> (usize, Vec<String>) {
+    unvalidated_writes_by(
+        modules,
+        |body| writes.iter().any(|w| body.contains(w)),
+        validator,
+    )
+}
+
+/// [`unvalidated_writes`] with the write detected by a predicate over a
+/// function body rather than a list of needles — for a write that is one
+/// *field* of a patch (the logout URL), not the patch itself.
+fn unvalidated_writes_by(
+    modules: &[(String, String)],
+    writes_in: impl Fn(&str) -> bool,
+    validator: &str,
+) -> (usize, Vec<String>) {
     let mut found = 0usize;
     let mut offenders = Vec::new();
     for (module, src) in modules {
         let fns = functions_in(src);
-        let writes_in = |body: &str| writes.iter().any(|w| body.contains(w));
         let wrappers: Vec<&str> = fns
             .iter()
             .filter(|f| names(&f.body, validator) && !writes_in(&f.body))
@@ -166,6 +185,172 @@ fn every_command_that_writes_a_redirect_uri_validates_it_first() {
          `core::redirect::validate_redirect_uri(s)` over every list before the patch and report \
          each rejection, the way `restore.rs::checked_uris` does."
     );
+}
+
+/// Whether `body` writes a front-channel logout URL: an `ApplicationWebPatch`
+/// literal whose `logout_url` field is set from anything but `None` — written
+/// out (`logout_url: value`) or in shorthand (`logout_url,` from a local of
+/// that name).
+fn writes_a_logout_url(body: &str) -> bool {
+    body.match_indices("ApplicationWebPatch {").any(|(at, _)| {
+        balanced_block(body, at).is_some_and(|block| {
+            block.match_indices("logout_url").any(|(f, m)| {
+                // A field position: first in the literal, or after a `,` — not
+                // `input.logout_url` or `Some(logout_url)` in a value.
+                let before = block[..f].trim_end();
+                if !(before.ends_with('{') || before.ends_with(',')) {
+                    return false;
+                }
+                let after = block[f + m.len()..].trim_start();
+                match after.strip_prefix(':') {
+                    Some(value) => !value.trim_start().starts_with("None"),
+                    None => after.starts_with(',') || after.starts_with('}'),
+                }
+            })
+        })
+    })
+}
+
+/// Every function that writes a logout URL validates it as one first (per
+/// function, one helper level — see the module doc).
+///
+/// The reply-URL rule above could not see this: it is satisfied by any
+/// `validate_redirect_uri*` call in the function, and the SAML URL editor, the
+/// SAML create wizard and the DR restore all validated their *reply* URLs and
+/// then wrote the logout URL unchecked (the restore through the reply-URL rule,
+/// which lets a custom scheme through). Entra loads the logout URL in a hidden
+/// iframe at sign-out, so it is held to `core::redirect::validate_logout_url`.
+///
+/// Blind spots: only `ApplicationWebPatch` literals are seen, so a logout URL
+/// sent through raw JSON or another patch type escapes the rule; and any
+/// non-`None` value counts as a write, so a function that only ever clears the
+/// field (`Some(String::new())`) still has to name the validator.
+#[test]
+fn every_command_that_writes_a_logout_url_validates_it_first() {
+    let (found, offenders) =
+        unvalidated_writes_by(&command_modules(), writes_a_logout_url, LOGOUT_VALIDATOR);
+
+    // The Authentication tab, the SAML URL editor, the SAML create wizard and
+    // the restore.
+    assert!(
+        found >= 4,
+        "only {found} logout-URL write(s) found — the source walk or the detector is broken, \
+         and a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "function(s) writing a logout URL without calling `{LOGOUT_VALIDATOR}` (in their own \
+         body, or in every in-module caller): {offenders:#?}\n\
+         A reply-URL check is not enough: `validate_redirect_uri` accepts a custom scheme, and \
+         the logout URL must be https. Trim it and run \
+         `core::redirect::validate_logout_url` before the patch."
+    );
+}
+
+/// The logout rule must fire on a function that checks only its reply URLs —
+/// the shape it was written for — and on a shorthand field, and must not count
+/// `logout_url: None`.
+#[test]
+fn the_logout_rule_is_not_satisfied_by_a_reply_url_check() {
+    let module = r#"
+#[tauri::command]
+pub async fn set_urls(input: Input) -> Result<(), UiError> {
+    validate_redirect_uris(&input.replies).map_err(invalid)?;
+    let web = ApplicationWebPatch {
+        redirect_uris: Some(input.replies),
+        logout_url: input.logout_url.filter(|s| !s.is_empty()),
+    };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_checked(input: Input) -> Result<(), UiError> {
+    if let Some(u) = input.logout_url.as_deref() {
+        validate_logout_url(u).map_err(invalid)?;
+    }
+    let web = ApplicationWebPatch { redirect_uris: None, logout_url: input.logout_url };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_oidc(input: Input) -> Result<(), UiError> {
+    let web = ApplicationWebPatch {
+        redirect_uris: Some(input.replies),
+        logout_url: None,
+    };
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_shorthand(input: Input) -> Result<(), UiError> {
+    let logout_url = input.logout_url.map(|s| s.trim().to_string());
+    let web = ApplicationWebPatch { redirect_uris: None, logout_url };
+    Ok(())
+}
+"#;
+    let modules = vec![("commands/fixture.rs".to_string(), module.to_string())];
+    let (found, offenders) = unvalidated_writes_by(&modules, writes_a_logout_url, LOGOUT_VALIDATOR);
+    assert_eq!(
+        found, 3,
+        "set_urls, set_checked and set_shorthand write; set_oidc clears"
+    );
+    assert_eq!(
+        offenders,
+        vec![
+            "commands/fixture.rs::set_urls".to_string(),
+            "commands/fixture.rs::set_shorthand".to_string(),
+        ]
+    );
+    // The reply-URL rule passes `set_urls`: that is the gap.
+    let (_, offenders) = unvalidated_writes(&modules, &REDIRECT_WRITES, REDIRECT_VALIDATOR);
+    assert!(!offenders.contains(&"commands/fixture.rs::set_urls".to_string()));
+}
+
+/// The manifest checks `restore_tenant` must run before it touches the tenant.
+const RESTORE_REFUSALS: [&str; 2] = ["check_manifest_schema(", "validate_manifest("];
+
+/// Where `body` first names `needle` as a call (identifier boundary before it):
+/// `validate_manifest(` is not a call to `manifest(`.
+fn first_call(body: &str, needle: &str) -> Option<usize> {
+    body.match_indices(needle).map(|(at, _)| at).find(|&at| {
+        body[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// `restore_tenant` refuses a too-new or malformed manifest before its first
+/// Graph client exists.
+///
+/// The plan shows both as blockers, but the plan is advisory: the frontend
+/// could skip it, and the restore's own refusal is what stops a repeated or
+/// empty source appId from being adopted, tagged and wired twice. Deleting
+/// either call, or moving it below `graph_for(`, fails here rather than in a
+/// tenant.
+#[test]
+fn restore_refuses_a_bad_manifest_before_its_first_write() {
+    let modules = command_modules();
+    let (_, src) = modules
+        .iter()
+        .find(|(m, _)| m == "commands/restore.rs")
+        .expect("commands/restore.rs is in the source walk");
+    let fns = functions_in(src);
+    let body = &fns
+        .iter()
+        .find(|f| f.name == "restore_tenant")
+        .expect("restore_tenant is defined in restore.rs")
+        .body;
+    let client = first_call(body, "graph_for(").expect("restore_tenant builds a Graph client");
+    for refusal in RESTORE_REFUSALS {
+        let at = first_call(body, refusal)
+            .unwrap_or_else(|| panic!("restore_tenant no longer calls `{refusal}..)`"));
+        assert!(
+            at < client,
+            "restore_tenant calls `{refusal}..)` only after `graph_for(` — a refused manifest \
+             must be refused before the restore can write anything"
+        );
+    }
 }
 
 /// Every function that mints a SAML signing certificate bounds its lifetime
