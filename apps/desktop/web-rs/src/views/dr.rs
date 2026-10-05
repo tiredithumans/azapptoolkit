@@ -290,7 +290,11 @@ pub fn DisasterRecoveryView() -> impl IntoView {
 
                 <Show when=move || captured.get().is_some()>
                     {move || {
-                        let b = captured.get().unwrap();
+                        // The `Show` gate makes `None` unreachable today, but a
+                        // render closure must never be the thing that panics.
+                        let Some(b) = captured.get() else {
+                            return ().into_any();
+                        };
                         let secrets: usize = b.app_registrations.iter().map(|a| a.secrets.len()).sum();
                         let (apps, ent, mis) = (
                             b.app_registrations.len(),
@@ -353,6 +357,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                                 </Button>
                             </div>
                         }
+                            .into_any()
                     }}
                 </Show>
             </Card>

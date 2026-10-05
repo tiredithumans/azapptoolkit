@@ -121,7 +121,7 @@ pub fn OverviewTab(
         cmd.run(
             move |()| {
                 editing.set(false);
-                on_changed_cb.run(());
+                on_changed_cb.try_run(());
             },
             move |tenant_id| {
                 let patch = overview_patch(&app, &dn, &aud, &desc, &notes_val);

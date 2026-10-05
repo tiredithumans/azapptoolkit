@@ -136,6 +136,7 @@ Deep-dive: audit-findings-and-remediation.md
 Deep-dive: frontend-workspace.md
 
 - **Reactivity is closure-based** (`{move || sig.get()}`); state is `RwSignal<T>` on a context-provided `Session`; CSS is global BEM-ish; a bare-key shortcut must no-op in a text field.
+- **A result can land after its component is gone:** post-await, gate on `Session::is_active_tenant` (land nothing on a switch/sign-out), keep session-level effects when only the view closed, and `try_run` callbacks (`CommandState::land`; pinned by `tests/post_await_callbacks.rs`).
 - **One primitive per UI pattern** (`SectionHeader`, skeletons, `DetailLoadError`, `Callout`, `ShowMore`) — reuse, never re-implement.
 - **Open-items workspace:** `session.open_item(...)` fills ONE shared `Session.open_items`; dock + workspace mount once in `shell.rs`; `open_items` + `shown_items` reset in `set_active_tenant`; no `selected_*_id` signals.
 - **Per-list filter state lives on `Session.tenant_ui`** and resets by structure — a new field goes in the substruct with a `reset()` line + the pinning test.

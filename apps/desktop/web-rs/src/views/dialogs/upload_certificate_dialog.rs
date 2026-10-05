@@ -84,8 +84,8 @@ pub fn UploadCertificateDialog(
                     uploaded.thumbprint,
                     fmt_day(uploaded.not_after)
                 ));
-                on_uploaded.run(());
-                on_close.run(());
+                on_uploaded.try_run(());
+                on_close.try_run(());
             },
             move |tenant_id| {
                 let input = AddCertificateInput {

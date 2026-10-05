@@ -193,7 +193,7 @@ pub fn SsoWizardDialog(
                     Ok(summary) => {
                         saml_result.set(Some(summary));
                         step.set(3);
-                        on_created.run(());
+                        on_created.try_run(());
                     }
                     Err(e) => {
                         if e.is_consent_required() {
@@ -220,7 +220,7 @@ pub fn SsoWizardDialog(
                     Ok(summary) => {
                         oidc_result.set(Some(summary));
                         step.set(3);
-                        on_created.run(());
+                        on_created.try_run(());
                     }
                     Err(e) => error.set(Some(e.message)),
                 }
