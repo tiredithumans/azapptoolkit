@@ -16,7 +16,10 @@ reads the previous session's audit/sweep/SP data. The audit-run entry is stored 
 it misses. `sign_out` calls `AppState::forget_tenant`, the one sign-out sweep: every per-tenant
 client map (graph/exchange/kv/arm/la), the tenant's idle single-flight gates, and
 `invalidate_tenant`. A new `Mutex<HashMap<…>>` field on `AppState` must be named there (pinned by
-`repo_invariants/cache.rs::sign_out_forgets_every_per_tenant_map_on_app_state`).
+`repo_invariants/cache.rs::sign_out_forgets_every_per_tenant_map_on_app_state`). The `sign_in`
+command calls it too — the account picker can return a different operator on the same tenant
+without a sign-out in between — while `reauthenticate` (same account, oid-checked) never does
+(`sign_in_forgets_the_tenant_but_reauthenticate_keeps_its_caches`).
 
 ### Proving the session, and what may be pinned
 

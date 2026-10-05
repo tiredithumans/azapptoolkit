@@ -5,6 +5,16 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sign-in is sturdier.** A momentary credential-store error while renewing a token no longer
+  sends you back to sign in. A malformed token lifetime from the sign-in service no longer crashes
+  the app. If your username changes in Entra ID, the app picks up the new one the next time it
+  starts. If a saved session can't be restored and you sign in as a different account, the
+  earlier account's saved sign-in is now removed instead of left on this computer. A saved
+  session that turns out to belong to a different account is discarded, and the app shows the
+  sign-in screen.
+
 ## [0.31.0] - 2026-10-03
 
 ### Added
