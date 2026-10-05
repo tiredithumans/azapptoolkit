@@ -335,6 +335,11 @@ pub struct RestorePlan {
     /// build than this one. When set, restore refuses to run.
     #[serde(default)]
     pub schema_too_new: Option<SchemaTooNew>,
+    /// Hard blocker: the manifest's app registrations are not individually
+    /// addressable — a `source_app_id` that is empty, not a GUID, or repeated.
+    /// Each entry names one problem. When non-empty, restore refuses to run.
+    #[serde(default)]
+    pub invalid_manifest: Vec<String>,
     /// The source tenant differs from the destination — the expected DR case,
     /// surfaced so the operator confirms intent. `false` means a restore into
     /// the tenant the backup was taken from, which duplicates the estate
@@ -379,10 +384,13 @@ pub struct RestorePlan {
 }
 
 impl RestorePlan {
-    /// The single definition of "restore cannot run": a cloud mismatch or a
-    /// too-new manifest. `restore_tenant` enforces both independently.
+    /// The single definition of "restore cannot run": a cloud mismatch, a
+    /// too-new manifest, or a malformed one. `restore_tenant` enforces all
+    /// three independently.
     pub fn is_blocked(&self) -> bool {
-        self.cloud_mismatch.is_some() || self.schema_too_new.is_some()
+        self.cloud_mismatch.is_some()
+            || self.schema_too_new.is_some()
+            || !self.invalid_manifest.is_empty()
     }
 }
 
@@ -676,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_plan_is_blocked_by_either_blocker_only() {
+    fn restore_plan_is_blocked_by_any_blocker_only() {
         assert!(!RestorePlan::default().is_blocked());
         let cloud = RestorePlan {
             cloud_mismatch: Some(CloudMismatch::default()),
@@ -691,6 +699,11 @@ mod tests {
             ..Default::default()
         };
         assert!(schema.is_blocked());
+        let invalid = RestorePlan {
+            invalid_manifest: vec!["duplicate".into()],
+            ..Default::default()
+        };
+        assert!(invalid.is_blocked());
     }
 
     /// A plan serialized before the blocker/count fields existed still loads,
@@ -715,6 +728,7 @@ mod tests {
         assert_eq!(plan.enterprise_apps_manual, 0);
         assert_eq!(plan.managed_identities_to_rebind, 0);
         assert_eq!(plan.skipped_in_backup, 0);
+        assert!(plan.invalid_manifest.is_empty());
         assert!(!plan.is_blocked());
     }
 

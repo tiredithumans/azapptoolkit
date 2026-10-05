@@ -14,6 +14,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   earlier account's saved sign-in is now removed instead of left on this computer. A saved
   session that turns out to belong to a different account is discarded, and the app shows the
   sign-in screen.
+- **SAML sign-out URLs are now validated like reply URLs, and untrusted files are checked more
+  strictly.** The SAML URL editor and the New SSO application wizard checked their reply URLs but
+  saved the sign-out URL as typed; a plaintext or custom-scheme one is now refused before anything
+  is written. A restore now drops a custom-scheme sign-out URL from a backup (with a warning),
+  blocks a backup whose app ids are missing, malformed or repeated (shown in the plan, before
+  Confirm), and refuses a backup file over 256 MiB. A federated credential whose issuer hides its
+  real host behind a backslash, a space or other stray characters is refused. A bulk-create or
+  backup file saved as UTF-16 (Excel's "Unicode Text") is now named as such, rather than failing
+  with a generic "not valid UTF-8" read error.
 
 ## [0.31.0] - 2026-10-03
 

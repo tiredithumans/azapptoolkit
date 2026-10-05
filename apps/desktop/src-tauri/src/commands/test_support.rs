@@ -234,3 +234,22 @@ pub(crate) fn indexes_intact(state: &AppState, tenant: &str) -> bool {
     sp_index_hit(&state.cache, tenant).is_some()
         && app_name_index_hit(&state.cache, tenant).is_some()
 }
+
+/// A unique scratch file, removed on drop. Hand-rolled like
+/// `core::private_file`'s tests: no `tempfile` dependency.
+pub(crate) struct TempFile(pub(crate) std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `contents` to a fresh [`TempFile`] (unique per process and call).
+pub(crate) fn temp_file(contents: &[u8]) -> TempFile {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("azapptoolkit-file-test-{}-{n}", std::process::id()));
+    std::fs::write(&p, contents).expect("write the scratch file");
+    TempFile(p)
+}

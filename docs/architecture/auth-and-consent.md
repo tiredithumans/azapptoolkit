@@ -345,6 +345,19 @@ Three surfaces read it so the guidance never drifts:
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
    use the scoping action).
 
+## Reply and logout URLs — validated on every write path
+
+A reply URL decides where auth codes are delivered, and a front-channel logout URL is loaded by
+Entra in a hidden iframe at sign-out, so both are validated locally before any PATCH, on every
+path (the Authentication tab, the SAML URL editor and create wizard, the OIDC flows, the DR
+restore). Reply URLs go through `core::redirect::validate_redirect_uri(s)`; a **logout URL goes
+through `validate_logout_url`** — the same rules plus https (or loopback http) only, never a custom
+scheme — trimmed first, so the value written is the value checked. A reply-URL check alone does not
+cover it. Interactive paths reject with `invalid_redirect_uri` (the SAML paths prefix
+`Logout URL:` so the operator finds the field); the restore drops the value with a warning.
+Pinned per function by `repo_invariants/trust.rs` (`every_command_that_writes_a_redirect_uri_…` and
+`every_command_that_writes_a_logout_url_validates_it_first`).
+
 ## Signed-AuthnRequest visibility — read-only, never-flag-on-unknown
 
 `requestSignatureVerification` on the paired **application** (`isSignedRequestRequired` +
