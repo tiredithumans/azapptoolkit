@@ -136,9 +136,20 @@ impl ExchangeClient {
 
     /// Lists the direct members of `group`. Returns an empty list when the group
     /// doesn't exist (via `invoke_optional`).
+    ///
+    /// `ResultSize: Unlimited` is load-bearing. The cmdlet's default cap is 1000
+    /// and it truncates *silently*, so a large source group read as complete:
+    /// the consolidation then copied 1000 members, verified those 1000 present,
+    /// and repointed the scope — narrowing the app's reach with no error
+    /// anywhere. No other list cmdlet this client sends takes `-ResultSize`
+    /// (the management-scope, role-assignment, service-principal and policy
+    /// reads have no such cap), and the `-Identity` lookups return one object.
     pub async fn list_group_members(&self, group: &str) -> Result<Vec<ExoGroupMember>> {
         let values = self
-            .invoke_optional("Get-DistributionGroupMember", json!({ "Identity": group }))
+            .invoke_optional(
+                "Get-DistributionGroupMember",
+                json!({ "Identity": group, "ResultSize": "Unlimited" }),
+            )
             .await?;
         all_as(values)
     }

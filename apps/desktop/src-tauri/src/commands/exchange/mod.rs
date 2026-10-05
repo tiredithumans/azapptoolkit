@@ -26,20 +26,21 @@ use azapptoolkit_exchange::models::{
 use azapptoolkit_exchange::references::{GroupIdentity, references_to_group};
 use azapptoolkit_exchange::targets::{
     ExchangeTarget, Refusal, RoleStep, ScopeGroups, UnrewritableFilter, count_member_of_group,
-    exchange_target, filter_targets_by_value, fold_dn, mailbox_resources_complete,
-    plan_consolidation, plan_role_assignments, policies_safe_to_remove, require_scopable_targets,
-    rewritable_scope_dns, same_dn, scope_groups_in_filter, targets_from_declared,
-    targets_from_grants, targets_safe_to_strip,
+    exchange_target, filter_names_only_group, filter_targets_by_value, fold_dn,
+    mailbox_resources_complete, orgwide_role_assignments, plan_consolidation,
+    plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
+    same_dn, scope_groups_in_filter, targets_from_declared, targets_from_grants,
+    targets_safe_to_strip,
 };
 // The pure mailbox-scope decisions now live in the crate, where they are
 // unit-testable without a Tauri `State`. This file keeps the I/O around them.
 use azapptoolkit_exchange::aap::{
-    SourceGroupRead, group_policies_for_migration, plan_source_membership, source_member,
-    unverified_members,
+    SourceGroupRead, SourceMember, extra_members, group_policies_for_migration,
+    plan_source_membership, source_member, unverified_members,
 };
 use azapptoolkit_exchange::verdict::{
-    aap_verdict_for, reconcile_orgwide_grant, row_grants_permission, scope_from_rbac_error,
-    verdict_from_rows,
+    aap_verdict_for, distinct_scope_names, reconcile_orgwide_grant, row_grants_permission,
+    scope_from_rbac_error, verdict_from_rows,
 };
 use azapptoolkit_exchange::{ExchangeClient, ExchangeError, member_of_group_filter};
 use azapptoolkit_graph::GraphClient;
@@ -53,11 +54,11 @@ use crate::dto::UiError;
 use crate::dto::exchange::PrincipalPermission;
 use crate::dto::exchange::{
     AapMigrationItem, AapMigrationReport, ExchangeAccessRemovalResult, ExchangeAccessResult,
-    ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure, ExchangeMemberMutationResult,
-    ExchangeRoleAssignmentDto, ExchangeScopeConsolidationResult, ExchangeScopeGroupDto,
-    MailScopeEntry, RetiredScopeGroupDto,
+    ExchangeAssignmentFailure, ExchangeGroupMemberDto, ExchangeGroupRef, ExchangeMemberFailure,
+    ExchangeMemberMutationResult, ExchangeRoleAssignmentDto, ExchangeScopeConsolidationResult,
+    ExchangeScopeGroupDto, MailScopeEntry, RetiredScopeGroupDto,
 };
-use crate::state::AppState;
+use crate::state::{AppState, CancelToken};
 use azapptoolkit_core::defaults::TenantDefaults;
 use azapptoolkit_core::settings::UserSettings;
 

@@ -276,14 +276,76 @@ pub fn targets_safe_to_strip(scoped: Vec<(ExchangeTarget, bool)>) -> Vec<Exchang
 /// not count: the whole point of the scoped grant is that the role is confined,
 /// and treating an org-wide assignment as "already in place" would skip creating
 /// the confined one.
+///
+/// The scope name compares **case-insensitively** (Exchange object names are).
+/// The AAP migration names its scope from the policy's AppId in whatever case
+/// Exchange stored it, so an upper-case GUID scope read back in another case
+/// missed `AlreadyScoped`; the duplicate `New-ManagementRoleAssignment` then
+/// failed, the target never counted as in place, and every re-run reported the
+/// app "partial" forever.
 pub fn roles_already_scoped<'a>(
     existing: &'a [ExoRoleAssignment],
     scope_name: &str,
 ) -> HashSet<&'a str> {
     existing
         .iter()
-        .filter(|a| a.custom_resource_scope.as_deref() == Some(scope_name))
+        .filter(|a| {
+            a.custom_resource_scope
+                .as_deref()
+                .is_some_and(|s| s.trim().eq_ignore_ascii_case(scope_name.trim()))
+        })
         .filter_map(|a| a.role.as_deref())
+        .collect()
+}
+
+/// Whether an Exchange role assignment confines nothing: no management scope,
+/// no administrative unit, no custom recipient write scope. Blank strings count
+/// as absent, and an unfamiliar `RecipientWriteScope` type alone (e.g.
+/// `Organization`) is not a confinement — the same reading as the frontend's
+/// "(org-wide)" label for the role-assignment list.
+pub fn is_org_wide_role_assignment(a: &ExoRoleAssignment) -> bool {
+    let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let is_au = a
+        .recipient_write_scope
+        .as_deref()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("AdministrativeUnit"));
+    !present(&a.custom_resource_scope)
+        && !present(&a.recipient_administrative_unit_scope)
+        && !present(&a.custom_recipient_write_scope)
+        && !is_au
+}
+
+/// The **org-wide** Exchange role assignments this app already holds for a role
+/// some target is being scoped to: `(role, assignment identity)`, in snapshot
+/// order.
+///
+/// RBAC grants union. Adding a scoped `Application Mail.Read` beside an
+/// unscoped one and then stripping the Entra grant confines nothing — the
+/// org-wide RBAC assignment still reaches every mailbox — while the run used to
+/// report success. The caller states it as a "Scoping is NOT effective" warning;
+/// it does **not** remove the assignment, because the operator may have made it
+/// on purpose and removing access is a decision, not a side effect.
+pub fn orgwide_role_assignments(
+    existing: &[ExoRoleAssignment],
+    targets: &[ExchangeTarget],
+) -> Vec<(String, String)> {
+    existing
+        .iter()
+        .filter(|a| is_org_wide_role_assignment(a))
+        .filter_map(|a| {
+            let role = a.role.as_deref()?;
+            targets
+                .iter()
+                .any(|t| t.exchange_role.eq_ignore_ascii_case(role))
+                .then(|| {
+                    let identity = a
+                        .identity
+                        .clone()
+                        .or_else(|| a.name.clone())
+                        .unwrap_or_else(|| "(unnamed)".to_string());
+                    (role.to_string(), identity)
+                })
+        })
         .collect()
 }
 
@@ -687,6 +749,14 @@ pub enum Refusal {
     /// — an add that failed, or one that reported success but didn't land
     /// (EXO silently ignores some recipient types).
     UnverifiedMembers(usize),
+    /// Mailboxes the toolkit-managed group ALREADY holds that no source group
+    /// does, named. The consolidation is "the managed group now equals the
+    /// source"; a group that is a strict superset of the source is not that, and
+    /// repointing at it **widens** reach. The path is ordinary: an AAP run copies
+    /// G1 and refuses, the policy is changed to G2, and the re-run copies G2,
+    /// verifies every G2 member present and repoints — the app then reaches
+    /// G1 ∪ G2. Reusing an existing group as-is was the bug.
+    ExtraManagedMembers(Vec<String>),
 }
 
 impl std::fmt::Display for Refusal {
@@ -708,24 +778,69 @@ impl std::fmt::Display for Refusal {
                 f,
                 "{n} mailbox(es) couldn't be verified present in the toolkit-managed group",
             ),
+            Self::ExtraManagedMembers(extra) => write!(
+                f,
+                "the toolkit-managed group already holds {} mailbox(es) the source group(s) don't \
+                 ({}), so pointing the scope at it would widen what the app can reach — remove \
+                 them from the managed group (or add them to the source) and run it again",
+                extra.len(),
+                capped_list(extra),
+            ),
         }
     }
+}
+
+/// How many names a refusal lists before "and N more" — the same cap restore
+/// applies to a backup manifest's problems. A managed group left over from an
+/// earlier attempt can hold thousands of mailboxes; listing every one buried
+/// the reason under the names.
+pub const MAX_LISTED_MEMBERS: usize = 10;
+
+/// `a, b, c` — or the first [`MAX_LISTED_MEMBERS`] then `and N more`.
+fn capped_list(items: &[String]) -> String {
+    let shown = items
+        .iter()
+        .take(MAX_LISTED_MEMBERS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match items.len().checked_sub(MAX_LISTED_MEMBERS) {
+        Some(more) if more > 0 => format!("{shown}, and {more} more"),
+        _ => shown,
+    }
+}
+
+/// Whether `filter` confines access to the group `dn` and nothing else — fully
+/// read, at least one clause, every clause that group (case-folded).
+///
+/// A consolidation whose scope ALREADY points at the managed group alone cannot
+/// widen anything by "repointing" at it: the app's reach is already exactly
+/// that group's membership, extras included (an operator adding mailboxes to the
+/// managed group after the move is the intended way to edit reach). The
+/// extra-members refusal therefore does not apply, and applying it refused
+/// every re-run of such an app.
+pub fn filter_names_only_group(filter: &str, dn: &str) -> bool {
+    let groups = scope_groups_in_filter(filter);
+    groups.complete && !groups.dns.is_empty() && groups.dns.iter().all(|d| same_dn(d, dn))
 }
 
 /// Decides — fail closed — whether a management scope may be repointed at the
 /// toolkit-managed group, and what its filter should then name.
 ///
-/// The scope only moves once **all four** hold: the current filter is a shape a
+/// The scope only moves once **all five** hold: the current filter is a shape a
 /// rewrite preserves exactly, every source group's membership was readable, the
-/// managed group's DN resolved, and every source member is *verified present*
-/// in it. Otherwise the scope keeps its current filter.
+/// managed group's DN resolved, every source member is *verified present* in
+/// it, and it holds *nothing else* (`extra_members` is empty — see
+/// [`Refusal::ExtraManagedMembers`]). Otherwise the scope keeps its current
+/// filter.
 ///
 /// The asymmetry is deliberate in both directions. Repointing at a
 /// partially-populated group silently drops mailboxes out of the app's reach,
 /// and a mailbox an integration can no longer read fails as "not found" rather
 /// than "denied" — the hardest kind of outage to trace back to a permission
-/// change. Rewriting a filter whose other clauses we cannot reproduce widens
-/// reach instead. Both are refusals, not fallbacks.
+/// change. Rewriting a filter whose other clauses we cannot reproduce, or
+/// repointing at a managed group that already holds mailboxes the source does
+/// not, widens reach instead. All are refusals, not fallbacks.
 ///
 /// `current_filter` is re-parsed here rather than taken as a DN list, so the
 /// plan can never disagree with the filter that is about to be overwritten.
@@ -734,6 +849,7 @@ pub fn plan_consolidation(
     managed_dn: Option<&str>,
     unreadable_source_groups: &[String],
     unverified_members: usize,
+    extra_members: &[String],
 ) -> Result<ConsolidationPlan, Refusal> {
     let source_dns = rewritable_scope_dns(current_filter).map_err(Refusal::Filter)?;
     if !unreadable_source_groups.is_empty() {
@@ -746,6 +862,9 @@ pub fn plan_consolidation(
     };
     if unverified_members > 0 {
         return Err(Refusal::UnverifiedMembers(unverified_members));
+    }
+    if !extra_members.is_empty() {
+        return Err(Refusal::ExtraManagedMembers(extra_members.to_vec()));
     }
     Ok(ConsolidationPlan {
         // Case-folded: the source DNs are parsed from the filter Exchange
@@ -1207,6 +1326,54 @@ mod tests {
     }
 
     #[test]
+    fn the_scope_name_matches_case_insensitively() {
+        // The AAP migration's scope is named from the AppId in Exchange's stored
+        // case; a case-sensitive compare missed it and issued a duplicate
+        // `New-ManagementRoleAssignment` that failed on every re-run.
+        let existing = [assignment(
+            "Application Mail.Read",
+            Some("app_scope_71487ACD-EC93-476D-BD0E-6C8B31831053"),
+        )];
+        let steps = plan_role_assignments(
+            &existing,
+            "app_scope_71487acd-ec93-476d-bd0e-6c8b31831053",
+            &[target_on("Mail.Read", "Application Mail.Read")],
+        );
+        assert_eq!(steps, vec![RoleStep::AlreadyScoped]);
+    }
+
+    #[test]
+    fn an_org_wide_assignment_of_a_scoped_role_is_reported() {
+        let mut orgwide = assignment("Application Mail.Read", None);
+        orgwide.identity = Some("Mail.Read-orgwide".into());
+        let targets = [target_on("Mail.Read", "Application Mail.Read")];
+        assert_eq!(
+            orgwide_role_assignments(&[orgwide], &targets),
+            vec![(
+                "Application Mail.Read".to_string(),
+                "Mail.Read-orgwide".to_string()
+            )],
+            "an unscoped assignment of the same role still reaches every mailbox"
+        );
+
+        // Confined assignments are not org-wide: a management scope, an AU
+        // (either wire shape), or a custom recipient write scope.
+        let scoped = assignment("Application Mail.Read", Some("app_scope_a"));
+        let mut au = assignment("Application Mail.Read", None);
+        au.recipient_administrative_unit_scope = Some("au-1".into());
+        let mut au_typed = assignment("Application Mail.Read", None);
+        au_typed.recipient_write_scope = Some("AdministrativeUnit".into());
+        let mut custom = assignment("Application Mail.Read", None);
+        custom.custom_recipient_write_scope = Some("Sales".into());
+        assert!(orgwide_role_assignments(&[scoped, au, au_typed, custom], &targets).is_empty());
+
+        // An org-wide assignment of a role nobody is scoping is not this run's
+        // business.
+        let other = assignment("Application Calendars.Read", None);
+        assert!(orgwide_role_assignments(&[other], &targets).is_empty());
+    }
+
+    #[test]
     fn two_values_mapping_to_one_role_assign_once_and_share_the_outcome() {
         // `Mail.ReadBasic` and `Mail.ReadBasic.All` both map to
         // `Application Mail.ReadBasic`. The second used to issue its own
@@ -1424,7 +1591,7 @@ mod tests {
     fn consolidation_repoints_only_on_a_fully_verified_copy() {
         let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
         assert_eq!(
-            plan_consolidation(&legacy, Some(managed()), &[], 0).unwrap(),
+            plan_consolidation(&legacy, Some(managed()), &[], 0, &[]).unwrap(),
             ConsolidationPlan {
                 scope_dns: vec!["CN=Managed,DC=x".to_string()],
                 repoint: true,
@@ -1438,17 +1605,23 @@ mod tests {
         // means repointing would cut it out of the app's reach.
         let legacy = crate::client::member_of_group_filter(&["CN=Legacy,DC=x".to_string()]);
         assert_eq!(
-            plan_consolidation(&legacy, Some(managed()), &[], 1),
+            plan_consolidation(&legacy, Some(managed()), &[], 1, &[]),
             Err(Refusal::UnverifiedMembers(1)),
             "an unverified member must leave the scope alone"
         );
         assert_eq!(
-            plan_consolidation(&legacy, None, &[], 0),
+            plan_consolidation(&legacy, None, &[], 0, &[]),
             Err(Refusal::ManagedGroupUnresolved),
             "an unresolved managed-group DN must leave the scope alone"
         );
         assert_eq!(
-            plan_consolidation(&legacy, Some(managed()), &["CN=Legacy,DC=x".to_string()], 0),
+            plan_consolidation(
+                &legacy,
+                Some(managed()),
+                &["CN=Legacy,DC=x".to_string()],
+                0,
+                &[]
+            ),
             Err(Refusal::UnreadableSourceGroups(vec![
                 "CN=Legacy,DC=x".to_string()
             ])),
@@ -1461,11 +1634,68 @@ mod tests {
                     Some(managed()),
                     &[],
                     0,
+                    &[],
                 ),
                 Err(Refusal::Filter(_))
             ),
             "a filter the rewrite would not preserve must leave the scope alone"
         );
+    }
+
+    #[test]
+    fn a_managed_group_holding_mailboxes_outside_the_source_is_refused() {
+        // AAP run 1 copied G1 and refused; the policy moved to G2; run 2 copied
+        // G2 and verified every G2 member. Repointing now would reach G1 ∪ G2,
+        // so a managed group that is a strict SUPERSET of the source is refused
+        // and named, even with every source member verified.
+        let g2 = crate::client::member_of_group_filter(&["CN=G2,DC=x".to_string()]);
+        assert_eq!(
+            plan_consolidation(
+                &g2,
+                Some(managed()),
+                &[],
+                0,
+                &["g1@contoso.com".to_string()]
+            ),
+            Err(Refusal::ExtraManagedMembers(vec![
+                "g1@contoso.com".to_string()
+            ])),
+        );
+        let why = Refusal::ExtraManagedMembers(vec!["g1@contoso.com".to_string()]).to_string();
+        assert!(
+            why.contains("g1@contoso.com") && why.contains("widen"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn an_extra_members_refusal_lists_at_most_ten() {
+        let many: Vec<String> = (0..13).map(|i| format!("m{i}@contoso.com")).collect();
+        let why = Refusal::ExtraManagedMembers(many).to_string();
+        assert!(why.contains("13 mailbox(es)"), "{why}");
+        assert!(why.contains("m9@contoso.com, and 3 more"), "{why}");
+        assert!(!why.contains("m10@contoso.com"), "{why}");
+        let few = Refusal::ExtraManagedMembers(vec!["a@contoso.com".into()]).to_string();
+        assert!(!few.contains("more"), "{few}");
+    }
+
+    #[test]
+    fn a_filter_already_on_the_managed_group_alone_is_recognised() {
+        let on = crate::client::member_of_group_filter(&["cn=managed,dc=X".to_string()]);
+        assert!(filter_names_only_group(&on, managed()), "case-folded");
+        let both = crate::client::member_of_group_filter(&[
+            "CN=Managed,DC=x".to_string(),
+            "CN=G1,DC=x".to_string(),
+        ]);
+        assert!(
+            !filter_names_only_group(&both, managed()),
+            "another group still in reach"
+        );
+        assert!(!filter_names_only_group(
+            "MemberOfGroup -like 'CN=Managed*'",
+            managed()
+        ));
+        assert!(!filter_names_only_group("", managed()));
     }
 
     #[test]
@@ -1476,7 +1706,7 @@ mod tests {
             "CN=A,DC=x".to_string(),
             "CN=B,DC=x".to_string(),
         ]);
-        let plan = plan_consolidation(&legacy, Some(managed()), &[], 0).unwrap();
+        let plan = plan_consolidation(&legacy, Some(managed()), &[], 0, &[]).unwrap();
         assert_eq!(plan.scope_dns.len(), 1);
         assert_eq!(
             count_member_of_group(&crate::client::member_of_group_filter(&plan.scope_dns)),
@@ -1487,12 +1717,12 @@ mod tests {
     #[test]
     fn consolidation_is_a_no_op_when_the_scope_is_already_managed() {
         let already = crate::client::member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
-        let plan = plan_consolidation(&already, Some(managed()), &[], 0).unwrap();
+        let plan = plan_consolidation(&already, Some(managed()), &[], 0, &[]).unwrap();
         assert!(!plan.repoint, "no rewrite when the scope already names it");
 
         // Exchange echoes DNs in its own casing: still the managed group.
         let echoed = crate::client::member_of_group_filter(&["cn=managed,dc=X".to_string()]);
-        let plan = plan_consolidation(&echoed, Some(managed()), &[], 0).unwrap();
+        let plan = plan_consolidation(&echoed, Some(managed()), &[], 0, &[]).unwrap();
         assert!(!plan.repoint, "a case-only difference is not a repoint");
 
         // The same group named twice in two casings is still only that group.
@@ -1500,7 +1730,7 @@ mod tests {
             "CN=Managed,DC=x".to_string(),
             "CN=MANAGED,DC=X".to_string(),
         ]);
-        let plan = plan_consolidation(&twice, Some(managed()), &[], 0).unwrap();
+        let plan = plan_consolidation(&twice, Some(managed()), &[], 0, &[]).unwrap();
         assert!(
             !plan.repoint,
             "case variants of the managed group are one group"
@@ -1511,7 +1741,7 @@ mod tests {
             "CN=Managed,DC=x".to_string(),
             "CN=Other,DC=x".to_string(),
         ]);
-        let plan = plan_consolidation(&extra, Some(managed()), &[], 0).unwrap();
+        let plan = plan_consolidation(&extra, Some(managed()), &[], 0, &[]).unwrap();
         assert!(
             plan.repoint,
             "another group in the filter still needs a rewrite"

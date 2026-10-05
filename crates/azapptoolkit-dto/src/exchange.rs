@@ -141,11 +141,25 @@ pub struct ExchangeAccessResult {
     pub warnings: Vec<String>,
 }
 
+/// One Exchange role assignment `remove_exchange_mailbox_access` could not
+/// remove: the role (or identity) it names, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExchangeAssignmentFailure {
+    pub assignment: String,
+    pub reason: String,
+}
+
 /// Outcome of `remove_exchange_mailbox_access`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeAccessRemovalResult {
     pub app_id: String,
     pub removed_assignments: Vec<String>,
+    /// Assignments that are still in place — a removal Exchange rejected, or a
+    /// row Exchange returned without an identity to remove it by. Non-empty
+    /// means the removal was partial; the command fails outright when nothing
+    /// was removed and something is in here.
+    #[serde(default)]
+    pub failed: Vec<ExchangeAssignmentFailure>,
     pub warnings: Vec<String>,
 }
 
@@ -242,6 +256,16 @@ pub struct ExchangeScopeConsolidationResult {
     #[serde(default)]
     pub retired_groups: Vec<RetiredScopeGroupDto>,
     pub dry_run: bool,
+    /// `true` when Cancel (or a dead session) stopped the member copy. The scope
+    /// kept its previous filter; `members_unverified` names what wasn't copied.
+    #[serde(default)]
+    pub incomplete: bool,
+    /// Why the move is refused, when reads alone already show it (an unreadable
+    /// source group, or a managed group holding mailboxes the source doesn't).
+    /// On a dry run this means the plan cannot succeed: show the reason, not a
+    /// "Move now" offer.
+    #[serde(default)]
+    pub refused: Option<String>,
     pub warnings: Vec<String>,
 }
 
