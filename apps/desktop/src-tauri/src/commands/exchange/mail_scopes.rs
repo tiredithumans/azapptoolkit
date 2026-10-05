@@ -217,7 +217,7 @@ pub(crate) async fn resolve_mail_scopes(
 
 /// Cached, lean (audit-path) mailbox-scope resolution: the same probe as
 /// `resolve_mail_scopes(..., enrich=false)` but memoized under a distinct
-/// `audit|{app_id}|{perms}` discriminator, so a security-audit **re-run**
+/// `audit|…` discriminator ([`audit_mail_scopes_key`]), so a security-audit **re-run**
 /// within the cache TTL skips the per-app `Test-ServicePrincipalAuthorization`
 /// round trip (1–5s each — minutes across a mail-heavy tenant).
 ///
@@ -241,26 +241,63 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
     // Nothing scopable ⇒ no probe and no cache entry (matches
     // `resolve_mail_scopes` and the Permissions-tab commands). `scopable` is
     // pre-vetted by the audit's resource-aware gate over `app_role_grants`
-    // (see `resolve_mail_scopes`); the key is built from the values alone,
+    // (see `resolve_mail_scopes`); the key names the values alone,
     // which is unambiguous for the same disjointness reason the output is.
     if scopable.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut values: Vec<&str> = scopable.iter().map(|(v, _)| v.as_str()).collect();
-    values.sort_unstable();
-    let key = mail_scopes_key(tenant_id, &format!("audit|{app_id}|{}", values.join(",")));
+    let key = audit_mail_scopes_key(tenant_id, app_id, scopable, orgwide_granted);
     if let Some(hit) = cache.get::<HashMap<String, MailPermissionScope>>(CacheKind::Lists, &key) {
         return Ok(hit);
     }
+    // Before the probe: a scope change that lands during its 1-5 s round trip
+    // busts this key, and the stale verdict must not be re-cached over it.
+    let watch = cache.generation_for(CacheKind::Lists, &key);
     let scopes = resolve_mail_scopes(exo, app_id, scopable, orgwide_granted, false).await?;
-    cache.put(CacheKind::Lists, key, &scopes);
+    cache.put_if_current(watch, &scopes);
     Ok(scopes)
+}
+
+/// The audit verdict's key: `audit|{app_id}|{perms}|orgwide:{held}`, both lists
+/// sorted.
+///
+/// `held` is the part of the org-wide Entra grant set the verdict was
+/// reconciled against (`scopable` ∩ `orgwide_granted`). The audit reads that
+/// set ONCE at run start, so a grant strip or consent landing before this
+/// app's probe is invisible to the probe's watch — the invalidation came first
+/// — and the verdict is reconciled against the stale snapshot. Keyed on the
+/// snapshot, such a verdict lands where a fresh run (reading the live set)
+/// never looks. Values outside `scopable` cannot change the verdict, so they
+/// are left out rather than splitting the key needlessly.
+pub(crate) fn audit_mail_scopes_key(
+    tenant_id: &str,
+    app_id: &str,
+    scopable: &[(String, &'static str)],
+    orgwide_granted: &HashSet<String>,
+) -> String {
+    let mut values: Vec<&str> = scopable.iter().map(|(v, _)| v.as_str()).collect();
+    values.sort_unstable();
+    values.dedup();
+    let held: Vec<&str> = values
+        .iter()
+        .copied()
+        .filter(|v| orgwide_granted.contains(*v))
+        .collect();
+    mail_scopes_key(
+        tenant_id,
+        &format!(
+            "audit|{app_id}|{}|orgwide:{}",
+            values.join(","),
+            held.join(",")
+        ),
+    )
 }
 
 /// Cache key for a principal's resolved per-permission mailbox scopes:
 /// `{tenant}|mail_scopes|{discriminator}`. The discriminator carries
 /// `declared|{object_id}` (Permissions tab, manifest), `held|{app_id}|{perms}`
-/// (Permissions tab, bare principal), and `audit|{app_id}|{perms}` (the lean
+/// (Permissions tab, bare principal), and `audit|{app_id}|{perms}|orgwide:…`
+/// ([`audit_mail_scopes_key`], the lean
 /// security-audit verdict) so the three surfaces never collide. The whole
 /// `{tenant}|mail_scopes|` prefix is dropped by
 /// `applications::invalidate_app_details`.
@@ -295,6 +332,10 @@ pub async fn get_mail_permission_scopes(
     {
         return Ok(cached);
     }
+    // Watched before the first await: a grant, scope or remediation landing
+    // during the Exchange round trips busts this key, and the verdict below
+    // must not re-cache the pre-mutation scoping over it.
+    let watch = state.cache.generation_for(CacheKind::Lists, &cache_key);
     let graph = state.graph_for(&tenant_id);
     // The app manifest read and the resource role indexes are independent —
     // overlap them instead of paying serial round trips on a cold Permissions tab.
@@ -321,7 +362,7 @@ pub async fn get_mail_permission_scopes(
     if scopable.is_empty() {
         state
             .cache
-            .put(CacheKind::Lists, cache_key, &Vec::<MailScopeEntry>::new());
+            .put_if_current(watch, &Vec::<MailScopeEntry>::new());
         return Ok(Vec::new());
     }
 
@@ -355,7 +396,7 @@ pub async fn get_mail_permission_scopes(
             }
         })
         .collect();
-    state.cache.put(CacheKind::Lists, cache_key, &entries);
+    state.cache.put_if_current(watch, &entries);
     Ok(entries)
 }
 
@@ -414,6 +455,8 @@ pub async fn get_mail_scopes_for_principal(
     {
         return Ok(cached);
     }
+    // Watched before the first await, as in `get_mail_permission_scopes`.
+    let watch = state.cache.generation_for(CacheKind::Lists, &cache_key);
 
     // Reconcile a scoped RBAC verdict against the principal's un-stripped
     // org-wide Entra grants (best-effort; empty set ⇒ no reconciliation).
@@ -445,6 +488,6 @@ pub async fn get_mail_scopes_for_principal(
             }
         })
         .collect();
-    state.cache.put(CacheKind::Lists, cache_key, &entries);
+    state.cache.put_if_current(watch, &entries);
     Ok(entries)
 }

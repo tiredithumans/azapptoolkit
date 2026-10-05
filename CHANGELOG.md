@@ -23,6 +23,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   real host behind a backslash, a space or other stray characters is refused. A bulk-create or
   backup file saved as UTF-16 (Excel's "Unicode Text") is now named as such, rather than failing
   with a generic "not valid UTF-8" read error.
+- **A change made during a scan is no longer undone by the scan.** You might fix a finding, grant
+  or remove access, or change a mailbox scope while the app is still loading something. That
+  could be a security audit, a site or Key Vault sweep, the SSO certificate board, an app's
+  details, the Grant-access list of tenant apps, or a mailbox-scope check. The load used to save
+  its older result over your change, and the app showed that older result for up to an hour. Now
+  the older result is discarded, and the next view fetches fresh data. An audit that started
+  before an org-wide mail grant was removed no longer leaves that app's mailbox verdict cached
+  for the next audit. Signing out also stops any running audit, sweep, mailbox probe or backup.
 
 ## [0.31.0] - 2026-10-03
 

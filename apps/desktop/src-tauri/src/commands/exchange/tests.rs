@@ -70,7 +70,7 @@ async fn audit_cached_scopes_skip_probe_and_cache_for_nonmail_perms() {
             .unwrap();
     assert!(out.is_empty());
     // The whole audit discriminator for this app is absent (empty perm set).
-    let key = mail_scopes_key("tenant-1", "audit|app-1|");
+    let key = audit_mail_scopes_key("tenant-1", "app-1", &[], &HashSet::new());
     assert!(
         cache
             .get::<HashMap<String, MailPermissionScope>>(CacheKind::Lists, &key)
@@ -173,6 +173,86 @@ async fn a_graph_mail_row_resolves_through_the_same_path() {
         })
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[test]
+fn the_audit_verdict_key_carries_the_orgwide_snapshot_it_was_reconciled_against() {
+    let scopable = |vals: &[&str]| -> Vec<(String, &'static str)> {
+        vals.iter()
+            .map(|v| (v.to_string(), "Application Mail.Read"))
+            .collect()
+    };
+    let set = |vals: &[&str]| -> HashSet<String> { vals.iter().map(|v| v.to_string()).collect() };
+    let key = |s: &[&str], o: &[&str]| audit_mail_scopes_key("t1", "app-1", &scopable(s), &set(o));
+
+    // Order-insensitive, and an org-wide grant the app's scopable set does not
+    // name cannot change the verdict, so it does not split the key.
+    assert_eq!(
+        key(&["Mail.Send", "Mail.Read"], &[]),
+        key(&["Mail.Read", "Mail.Send"], &["Calendars.Read"])
+    );
+    // A stripped (or newly consented) org-wide grant the verdict reconciles
+    // against is a different key: a verdict built from the run-start snapshot
+    // is never read by a run that sees the live set.
+    assert_ne!(
+        key(&["Mail.Read"], &["Mail.Read"]),
+        key(&["Mail.Read"], &[])
+    );
+    // Still under the one prefix `invalidate_app_details` drops.
+    assert!(key(&["Mail.Read"], &[]).starts_with("t1|mail_scopes|audit|app-1|"));
+}
+
+#[tokio::test]
+async fn a_verdict_cached_against_a_stale_orgwide_snapshot_is_not_served_to_a_fresh_one() {
+    // Run 1 read the org-wide set at its start, before a strip removed
+    // `Mail.Read`; its verdict is cached. Run 2 reads the live (stripped) set
+    // and must probe again rather than serve run 1's reconciliation.
+    let (server, exo) = exo_answering_one_scoped_row("Application Mail.Read", "Mail.Read").await;
+    let cache = Cache::new();
+    let scopable = [("Mail.Read".to_string(), "Application Mail.Read")];
+    let stale: HashSet<String> = ["Mail.Read".to_string()].into();
+
+    let first =
+        resolve_mail_scopes_audit_cached(&cache, "tenant-1", &exo, "app-1", &scopable, &stale)
+            .await
+            .unwrap();
+    let fresh = resolve_mail_scopes_audit_cached(
+        &cache,
+        "tenant-1",
+        &exo,
+        "app-1",
+        &scopable,
+        &HashSet::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "the fresh snapshot must miss the stale verdict and probe"
+    );
+    assert!(matches!(
+        fresh.get("Mail.Read"),
+        Some(MailPermissionScope::Scoped { .. })
+    ));
+    assert_ne!(
+        format!("{first:?}"),
+        format!("{fresh:?}"),
+        "the stale snapshot reconciled to a different verdict, which is why it must not be served"
+    );
+
+    // The same snapshot again is a hit: no further probe.
+    resolve_mail_scopes_audit_cached(
+        &cache,
+        "tenant-1",
+        &exo,
+        "app-1",
+        &scopable,
+        &HashSet::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 /// A Graph target on its own appRole, keyed `role-<value>`.

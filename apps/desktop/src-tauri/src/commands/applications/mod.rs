@@ -256,6 +256,10 @@ pub async fn get_application_detail(
     {
         return Ok(cached);
     }
+    // Before the fan-out: a grant, owner or remediation landing during its
+    // waves busts this key, and the store below must not re-cache the
+    // pre-mutation detail over it.
+    let watch = state.cache.generation_for(CacheKind::Lists, &detail_key);
 
     let client = state.graph_for(&tenant_id);
 
@@ -310,7 +314,7 @@ pub async fn get_application_detail(
     // "Not granted", and caching that would pin the wrong answer for the whole
     // Lists TTL. The flag rides the payload so the tab can say so instead.
     if !detail.resolution_degraded {
-        state.cache.put(CacheKind::Lists, detail_key, &detail);
+        state.cache.put_if_current(watch, &detail);
     }
     Ok(detail)
 }

@@ -55,6 +55,10 @@ pub async fn list_app_role_resources(
         return Ok(cached);
     }
     tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
+    // Before the tenant SP scan: an app create/delete or an App roles write
+    // that lands while it pages busts this key, and the store below must not
+    // re-cache the pre-mutation directory over it.
+    let watch = state.cache.generation_for(CacheKind::Lists, &key);
 
     let client = state.graph_for(&tenant_id);
     let mut rows: Vec<CatalogResourceSummary> = client
@@ -64,7 +68,7 @@ pub async fn list_app_role_resources(
         .filter_map(app_role_resource_summary)
         .collect();
     rows.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-    state.cache.put(CacheKind::Lists, key, &rows);
+    state.cache.put_if_current(watch, &rows);
     Ok(rows)
 }
 

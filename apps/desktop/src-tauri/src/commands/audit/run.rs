@@ -39,7 +39,7 @@ const PAGE_SIZE: u32 = azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE;
 const MAX_APPS_PER_RUN: usize = crate::commands::applications::APPS_MAX;
 
 /// Runs a full audit scan. Blocks until every app has been scored (or the
-/// user calls [`cancel_audit`]). Emits a `audit-progress` event after each
+/// user calls [`cancel_audit`], or signs out — `AppState::forget_tenant`). Emits a `audit-progress` event after each
 /// completed app. Caches the full result under `CacheKind::Audit` with the
 /// default 60-minute TTL.
 #[tauri::command]
@@ -66,6 +66,13 @@ pub async fn run_audit(
     // this was the most likely moment for an operator to press Cancel and the
     // one window where it did nothing.
     let cancel = state.audit_cancel.claim();
+    // Watched from the same moment, for the same reason: any mutation that
+    // busts the audit run while this scan is awaiting (a remediation, a grant,
+    // sign-out's tenant sweep) must stop the result below from re-caching the
+    // pre-mutation posture for the TTL.
+    let audit_watch = state
+        .cache
+        .generation_for(CacheKind::Audit, &audit_cache_key(&tenant_id));
 
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
@@ -441,9 +448,8 @@ pub async fn run_audit(
     let credential_policy_max_days =
         azapptoolkit_core::audit::tenant_secret_max_days(app_policy.default.as_ref());
     if run_is_cacheable(cancelled, truncated, &degraded) {
-        state.cache.put_typed(
-            CacheKind::Audit,
-            audit_cache_key(&tenant_id),
+        state.cache.put_typed_if_current(
+            audit_watch,
             Arc::new(CachedAuditRun {
                 completed_at: completed_at.clone(),
                 items: items.clone(),

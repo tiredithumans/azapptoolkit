@@ -461,7 +461,8 @@ const PROBE_CONCURRENCY: usize = 4;
 ///
 /// Long-running: emits `mailbox-probe-progress` and polls its own
 /// `AppState.mailbox_probe_cancel` token, stopped only by
-/// [`cancel_mailbox_probe`]. The probe has its own flag because the Resource
+/// [`cancel_mailbox_probe`] and by sign-out (`AppState::forget_tenant`). The
+/// probe has its own flag because the Resource
 /// Access panels stay mounted and can run at the same time as the site and
 /// Key Vault sweeps: a shared flag let one panel's Cancel abort the others.
 #[tauri::command]

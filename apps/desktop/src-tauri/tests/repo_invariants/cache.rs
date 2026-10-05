@@ -451,6 +451,268 @@ fn a_watch_is_captured_before_the_fetch_it_guards_not_after() {
     );
 }
 
+/// A long scan's result is stored through the guard too — unpinned.
+///
+/// The pinned rules above cover the tenant-wide indexes; these keys hold what
+/// a scan of minutes produces (the audit run, the site and Key Vault sweeps,
+/// the SSO certificate board, the per-app mailbox-scope verdicts). Each was
+/// stored with a plain `put`/`put_typed` after the last await, so a mutation's
+/// invalidation that landed mid-scan — a remediation, a grant, a scope change,
+/// sign-out's tenant sweep — was undone by the pre-mutation result, which then
+/// served (say) a stale "all clear" or org-wide verdict for the TTL.
+///
+/// Rule: a function that builds one of these keys writes no cache entry except
+/// through the unpinned `put_if_current` / `put_typed_if_current` — no plain
+/// write, and no pinned one (a per-object key is never pinned). The key set is
+/// [`GUARDED_SCAN_KEYS`] plus every key builder a command already watches for
+/// an unpinned guarded store, so a new guarded scan joins on its own; the
+/// listed keys must each still have such a store, so the list cannot rot.
+#[test]
+fn long_scan_results_store_through_the_guard() {
+    use std::collections::BTreeSet;
+
+    let modules = super::sources::command_modules();
+    let fns: Vec<_> = modules
+        .iter()
+        .flat_map(|(name, src)| {
+            super::sources::functions_in(src)
+                .into_iter()
+                .map(move |f| (name.as_str(), f))
+        })
+        .collect();
+    let builders: BTreeSet<&str> = fns
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .filter(|n| n.ends_with("_key"))
+        .collect();
+
+    // Derived: the key builders behind the watches of unpinned guarded stores.
+    let mut watched: BTreeSet<String> = BTreeSet::new();
+    for (_, f) in &fns {
+        if !UNPINNED_GUARDED_WRITES.iter().any(|w| f.body.contains(w)) {
+            continue;
+        }
+        for (at, _) in f.body.match_indices("generation_for(") {
+            let arg = &f.body[at..];
+            let arg = &arg[..arg.find(';').unwrap_or(arg.len())];
+            let named = key_builders_in(arg, &builders);
+            if !named.is_empty() {
+                watched.extend(named);
+                continue;
+            }
+            // `generation_for(kind, &key)`: resolve `let key = …_key(…)`.
+            let var: String = arg
+                .rsplit('&')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some(bind) = f.body[..at].rfind(&format!("let {var} ="))
+                && let Some(first) = key_builders_in(&f.body[bind..at], &builders).first()
+            {
+                watched.insert(first.clone());
+            }
+        }
+    }
+    for key in GUARDED_SCAN_KEYS {
+        assert!(
+            watched.contains(*key),
+            "`{key}` is a long-scan key, but no command stores it through an unpinned \
+             `put_if_current` / `put_typed_if_current` behind a `generation_for` watch \
+             (derived: {watched:?})"
+        );
+    }
+
+    assert!(
+        mounted_test_only("commands/test_support.rs")
+            && mounted_test_only("commands/sso/handler_tests.rs")
+            && !mounted_test_only("commands/sharepoint.rs"),
+        "the test-only module detector no longer recognises the fixtures (or flags production)"
+    );
+
+    // Ordering, stricter than the general watch rule: the watch is captured
+    // before the FIRST await of the function, not merely before some await
+    // ahead of the store. A scan's result depends on everything it awaited, so
+    // a capture after a leading await leaves that read outside the window.
+    let mut late: Vec<String> = Vec::new();
+    for (module, f) in &fns {
+        if !UNPINNED_GUARDED_WRITES.iter().any(|w| f.body.contains(w)) {
+            continue;
+        }
+        let capture = f.body.find("generation_for(");
+        let first_await = f.body.find(".await");
+        match (capture, first_await) {
+            (Some(c), Some(a)) if c < a => {}
+            (Some(_), None) => {}
+            _ => late.push(format!("{module}::{}", f.name)),
+        }
+    }
+    assert!(
+        late.is_empty(),
+        "an unpinned guarded store whose watch is not captured before the function's first \
+         `.await`: {late:#?}\nMove `let watch = ….generation_for(kind, &key);` above the first \
+         await (right after `claim()` / the cache miss)."
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (module, f) in &fns {
+        // Fixtures seed these keys directly; they are production code to the
+        // walk only because their test cfg sits on the parent's `mod` line.
+        if mounted_test_only(module) {
+            continue;
+        }
+        let keys: Vec<&String> = watched
+            .iter()
+            .filter(|k| f.body.contains(&format!("{k}(")))
+            .collect();
+        if keys.is_empty() {
+            continue;
+        }
+        for write in PLAIN_OR_PINNED_WRITES {
+            if f.body.contains(write) {
+                offenders.push(format!("{module}::{} — `{write}` beside {keys:?}", f.name));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a long scan's result is cached without the generation guard: {offenders:#?}\n\
+         Capture `cache.generation_for(kind, &key)` BEFORE the scan's first await (right after \
+         its `claim()`) and store through `put_if_current` / `put_typed_if_current`, so a \
+         mutation's invalidation during the scan is not undone by the pre-mutation result."
+    );
+}
+
+/// The key builders that name a long scan's (unpinned) result. Adding one
+/// claims its writes must ride the guard; see
+/// `long_scan_results_store_through_the_guard`.
+const GUARDED_SCAN_KEYS: &[&str] = &[
+    "audit_cache_key",
+    "sweep_cache_key",
+    "kv_sweep_cache_key",
+    "mail_scopes_key",
+    "sso_certificate_expirations_key",
+    "app_role_resources_key",
+    "app_detail_key",
+];
+
+/// The unpinned guarded store forms.
+const UNPINNED_GUARDED_WRITES: &[&str] = &["put_if_current(", "put_typed_if_current("];
+
+/// Every other write form: unguarded, or pinned (a guarded scan key is never an
+/// index).
+const PLAIN_OR_PINNED_WRITES: &[&str] = &[
+    ".put(",
+    ".put_typed(",
+    ".put_index(",
+    ".put_typed_index(",
+    "put_index_if_current(",
+    "put_typed_index_if_current(",
+];
+
+/// Whether the command module `name` (`commands/…/x.rs`) is mounted by a
+/// `#[cfg(test)] mod x;` in its parent. `strip_tests` cannot see that — the
+/// cfg is in another file — so `test_support.rs` and the `tests.rs` /
+/// `handler_tests.rs` siblings reach the walk whole.
+fn mounted_test_only(name: &str) -> bool {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let file = std::path::Path::new(name);
+    let (Some(dir), Some(stem)) = (file.parent(), file.file_stem().and_then(|s| s.to_str())) else {
+        return false;
+    };
+    if stem == "mod" {
+        return false;
+    }
+    let decl = [format!("mod {stem};"), format!("pub(crate) mod {stem};")];
+    [
+        src.join(dir).join("mod.rs"),
+        src.join(dir.with_extension("rs")),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::read_to_string(p).ok())
+    .any(|parent| {
+        let lines: Vec<&str> = parent.lines().map(str::trim).collect();
+        lines
+            .windows(2)
+            .any(|w| w[0] == "#[cfg(test)]" && decl.iter().any(|d| w[1] == d))
+    })
+}
+
+/// The known key builders called in `text`, in order of appearance.
+fn key_builders_in(text: &str, builders: &std::collections::BTreeSet<&str>) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = builders
+        .iter()
+        .flat_map(|b| {
+            let call = format!("{b}(");
+            text.match_indices(&call)
+                // A whole identifier: `sweep_cache_key(` inside
+                // `kv_sweep_cache_key(` is not a call of it.
+                .filter(|(at, _)| {
+                    !text[..*at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+                .map(|(at, _)| (at, (*b).to_string()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, b)| b).collect()
+}
+
+/// Sign-out stops every in-flight **read** sweep, through the one sweep.
+///
+/// A sweep running when the operator signs out belongs to the forgotten
+/// session: its guarded store will refuse (the tenant sweep bumps its watch),
+/// but left running it keeps issuing requests for minutes. Derived from the
+/// `CancelFlag` fields on `AppState`, so a new run kind fails here until it is
+/// either cancelled in `forget_tenant` or listed as a write run.
+#[test]
+fn sign_out_stops_every_read_sweep() {
+    // Write runs, deliberately NOT cancelled on sign-out: stopping a
+    // multi-step write between steps is the operator's call, and with the
+    // tokens purged each stops on its own at the dead-session latch.
+    const WRITE_RUNS: [&str; 3] = ["bulk_cancel", "migration_cancel", "restore_cancel"];
+
+    let state = include_str!("../../src/state.rs").replace("\r\n", "\n");
+    let (_, after) = state
+        .split_once("pub struct AppState {")
+        .expect("AppState struct in state.rs");
+    let (body, _) = after.split_once("\n}\n").expect("end of AppState struct");
+    let flags: Vec<&str> = code_lines(body)
+        .filter(|l| l.contains(": CancelFlag,"))
+        .filter_map(|l| l.split_once(':'))
+        .filter_map(|(before, _)| before.split_whitespace().last())
+        .collect();
+    assert!(
+        flags.len() >= 8,
+        "expected the eight run-kind cancel flags on AppState, found {flags:?} — the field scan \
+         has gone vacuous"
+    );
+    for write in WRITE_RUNS {
+        assert!(
+            flags.contains(&write),
+            "WRITE_RUNS names `{write}`, which is not a CancelFlag on AppState: {flags:?}"
+        );
+    }
+
+    let (_, after) = state
+        .split_once("pub fn forget_tenant(")
+        .expect("AppState::forget_tenant in state.rs");
+    let (forget, _) = after.split_once("\n    }\n").expect("end of forget_tenant");
+    let forget = code_lines(forget).collect::<Vec<_>>().join("\n");
+    for flag in flags.iter().filter(|f| !WRITE_RUNS.contains(f)) {
+        assert!(
+            forget.contains(&format!("self.{flag}.cancel()")),
+            "`AppState::{flag}` is a read sweep sign-out does not stop — call \
+             `self.{flag}.cancel()` in `AppState::forget_tenant` (or, for a write run, add it to \
+             WRITE_RUNS with the reason)"
+        );
+    }
+}
+
 /// Every watch must be released, so it must reach a store or be dropped.
 ///
 /// `IndexWatch` is `#[must_use]` and releases on `Drop`, which is what makes an
@@ -967,42 +1229,67 @@ fn the_full_application_list_scan_has_one_home() {
 ///
 /// Keyed on the audit-run KEY rather than on `CacheKind::Audit`: that kind is
 /// shared with the site and Key Vault sweeps, which carry their own guards. The
-/// key is passed by value only on a write (reads and invalidations borrow it as
-/// `&audit_cache_key(…)`), so the match below sees exactly the writes.
+/// key is passed by value only on a direct write (reads and invalidations
+/// borrow it as `&audit_cache_key(…)`), so the match below sees exactly those
+/// writes; the guarded write names no key, so it is found through the watch
+/// minted for the audit-run key (`let <w> = ….generation_for(CacheKind::Audit,
+/// &audit_cache_key(…))` → `…_if_current(<w>,`).
 #[test]
 fn the_audit_run_is_cached_only_behind_run_is_cacheable() {
     const WRITES: [&str; 3] = [".put(", ".put_typed(", ".put_index("];
     const KEY_ARG: &str = "CacheKind::Audit,audit_cache_key(";
+    const WATCH: &str = "generation_for(CacheKind::Audit,&audit_cache_key(";
     let mut sites = 0usize;
     let mut offenders: Vec<String> = Vec::new();
     for (name, src) in super::sources::command_modules() {
-        let code: String = src
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let code: String = code_lines(&src).collect::<Vec<_>>().join("\n");
         let (flat, _) = flatten_out_whitespace(&code);
+        let mut writes: Vec<(usize, usize)> = Vec::new();
         let mut from = 0usize;
         while let Some(hit) = flat[from..].find(KEY_ARG) {
             let at = from + hit;
             from = at + KEY_ARG.len();
-            if !WRITES.iter().any(|w| flat[..at].ends_with(w)) {
-                continue;
+            if WRITES.iter().any(|w| flat[..at].ends_with(w)) {
+                writes.push((at, from));
             }
+        }
+        let mut from = 0usize;
+        while let Some(hit) = flat[from..].find(WATCH) {
+            let at = from + hit;
+            from = at + WATCH.len();
+            // `let<ident>=…generation_for(` — the binding the store will name.
+            let Some(watch) = flat[..at]
+                .rfind("let")
+                .and_then(|l| flat[l + 3..at].split_once('='))
+                .map(|(ident, _)| ident.to_string())
+                .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            else {
+                continue;
+            };
+            let store = format!("_if_current({watch},");
+            let mut s = from;
+            while let Some(hit) = flat[s..].find(&store) {
+                let at = s + hit;
+                s = at + store.len();
+                writes.push((at, s));
+            }
+        }
+        for (at, end) in writes {
             sites += 1;
             if !guarded_by_run_is_cacheable(&flat, at) {
                 let start = at.saturating_sub(80);
                 let start = (start..at)
                     .find(|&i| flat.is_char_boundary(i))
                     .unwrap_or(at);
-                offenders.push(format!("{name}: …{}", &flat[start..from]));
+                offenders.push(format!("{name}: …{}", &flat[start..end]));
             }
         }
     }
     assert!(
         sites >= 1,
-        "no audit-run cache write (`.put(CacheKind::Audit, audit_cache_key(…)`) found in any \
-         command module — the walk or the matcher is broken, and this rule is checking nothing"
+        "no audit-run cache write (a guarded store through the audit-run watch, or \
+         `.put(CacheKind::Audit, audit_cache_key(…)`) found in any command module — the walk or \
+         the matcher is broken, and this rule is checking nothing"
     );
     assert!(
         offenders.is_empty(),
