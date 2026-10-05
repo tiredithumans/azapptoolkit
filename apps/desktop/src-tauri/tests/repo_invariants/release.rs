@@ -823,3 +823,79 @@ fn tauri_cli_pin_agrees_across_files_and_tracks_the_locked_runtime() {
          the runtime in Cargo.lock or lower the pin in release.yml + both setup scripts"
     );
 }
+
+/// The build matrix compiles every dependency's build script and proc-macro,
+/// so it must hold neither a write token nor a persisted checkout credential:
+/// with either, third-party code could replace release assets or `latest.json`.
+/// Only the `release` job (which only downloads artifacts and uploads) writes,
+/// and the signing secrets are readable only by jobs bound to the `release`
+/// environment (whose deployment rule admits `v*` tags only).
+#[test]
+fn release_workflow_grants_write_and_secrets_only_where_needed() {
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    let lines: Vec<&str> = release.lines().collect();
+
+    // Top-level permissions block is read-only.
+    let top = lines
+        .iter()
+        .position(|l| *l == "permissions:")
+        .expect("release.yml lost its top-level `permissions:` block");
+    assert_eq!(
+        lines.get(top + 1).map(|l| l.trim()),
+        Some("contents: read"),
+        "release.yml's top-level permissions must be `contents: read`; grant write per job"
+    );
+
+    // Split into jobs: two-space-indented `name:` keys under `jobs:`.
+    let jobs_at = lines
+        .iter()
+        .position(|l| *l == "jobs:")
+        .expect("release.yml lost `jobs:`");
+    let mut jobs: Vec<(String, Vec<&str>)> = Vec::new();
+    for l in &lines[jobs_at + 1..] {
+        let is_job_key = l.starts_with("  ")
+            && !l.starts_with("   ")
+            && l.trim_end().ends_with(':')
+            && !l.trim_start().starts_with('#');
+        if is_job_key {
+            jobs.push((l.trim().trim_end_matches(':').to_string(), Vec::new()));
+        } else if let Some((_, body)) = jobs.last_mut() {
+            body.push(l);
+        }
+    }
+    assert!(
+        jobs.iter().any(|(n, _)| n == "release"),
+        "no `release` job found"
+    );
+
+    for (name, body) in &jobs {
+        let writes = body.iter().any(|l| l.trim() == "contents: write");
+        assert_eq!(
+            writes,
+            name == "release",
+            "job `{name}`: only the `release` job may hold `contents: write`"
+        );
+        for (i, l) in body.iter().enumerate() {
+            if l.contains("uses: actions/checkout@") {
+                let next = body[i + 1..]
+                    .iter()
+                    .take(3)
+                    .any(|n| n.trim() == "persist-credentials: false");
+                assert!(
+                    next,
+                    "job `{name}`: actions/checkout must set `persist-credentials: false`"
+                );
+            }
+        }
+        let reads_signing_key = body
+            .iter()
+            .any(|l| l.contains("secrets.TAURI_UPDATER_PRIVATE_KEY"));
+        if reads_signing_key {
+            assert!(
+                body.iter().any(|l| l.trim() == "environment: release"),
+                "job `{name}` reads the updater signing key but is not bound to the `release` \
+                 environment"
+            );
+        }
+    }
+}

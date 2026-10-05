@@ -386,7 +386,11 @@ re-set the secrets:
    generated notes (paste the matching `CHANGELOG.md` entry), then
    publish — nothing reaches the updater endpoint until you do.
 
-Required GitHub Actions secrets for `release.yml`:
+Required secrets for `release.yml`, stored on the **`release` environment**
+(Settings → Environments → `release`, deployment rule: tags matching `v*`),
+not as repository secrets — so only a `v*` tag run can read them. The
+workflow is read-only by default; only the `release` job holds
+`contents: write`, and no checkout persists its token:
 
 | Secret                                 | Purpose                                            |
 |----------------------------------------|----------------------------------------------------|
