@@ -178,13 +178,20 @@ pub(crate) async fn resolve_mail_scopes(
         verdict = reconcile_orgwide_grant(verdict, perm, orgwide_granted);
         // Enrich an RBAC management scope with its recipient filter + group
         // count (display only). Legacy-AAP scopes carry no management scope, so
-        // they are matched out here.
+        // they are matched out here. Only a SINGLE scope is looked up: with
+        // several, the verdict's name is a joined display string ("A, B") that
+        // names no scope, and one filter/group count can't describe a union.
+        let single_scope = match distinct_scope_names(&matching).as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        };
         if enrich
             && let MailPermissionScope::Scoped {
                 scope_name: Some(name),
                 mechanism: ScopeMechanism::Rbac,
                 ..
             } = &verdict
+            && single_scope.as_deref() == Some(name.as_str())
         {
             let name = name.clone();
             let resolved = match scope_cache.get(&name) {

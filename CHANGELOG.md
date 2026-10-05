@@ -37,6 +37,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   its save or bulk action is still running no longer crashes the window either: its notifications
   still appear, a failure is reported instead of lost, and apps a bulk delete removed leave the
   selection.
+- **Exchange mailbox scoping no longer widens access or reports a partial result as done.** "Move
+  to managed group" and the legacy-policy migration now refuse to point a scope at the
+  toolkit-managed group when that group already holds mailboxes the source group doesn't. The
+  preview now says the move would be refused and names those mailboxes, instead of offering "Move
+  now". Before, a group left over from an earlier attempt was reused as
+  it was, so the app could end up reaching both the old and the new mailboxes. Scoped access now
+  warns when an org-wide Exchange role assignment for the same role still gives the app every
+  mailbox. Groups with more than 1000 members are now read in full instead of being cut off at
+  1000. "Remove all…" now reports assignments it couldn't remove instead of only counting the ones
+  it did, and fails when none came off. A move to the managed group can be stopped while it copies
+  members, and a stopped move leaves the scope where it was. Stopping a migration while it copies
+  members now leaves that app on its legacy policy, unchanged, and reports the run as incomplete. A migration re-run for a policy
+  stored with an upper-case app ID no longer reports the app as "partial" every time.
 
 ## [0.31.0] - 2026-10-03
 

@@ -444,6 +444,9 @@ async fn remove_group_member_swallows_not_a_member() {
         .unwrap();
 }
 
+/// The body carries `ResultSize: Unlimited` (exact `body_json` match): without
+/// it the cmdlet stops at 1000 members silently, and a truncated source group
+/// read as complete let a consolidation repoint a scope onto a partial copy.
 #[tokio::test]
 async fn list_group_members_projects_recipients() {
     let server = MockServer::start().await;
@@ -452,7 +455,7 @@ async fn list_group_members_projects_recipients() {
         .and(body_json(json!({
             "CmdletInput": {
                 "CmdletName": "Get-DistributionGroupMember",
-                "Parameters": { "Identity": "azapptoolkit_app-1" }
+                "Parameters": { "Identity": "azapptoolkit_app-1", "ResultSize": "Unlimited" }
             }
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

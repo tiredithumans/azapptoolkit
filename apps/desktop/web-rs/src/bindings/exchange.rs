@@ -303,3 +303,10 @@ pub async fn migrate_application_access_policies(
 pub async fn cancel_aap_migration() -> Result<(), UiError> {
     invoke_result("cancel_aap_migration", ()).await
 }
+
+/// Stops an in-progress "Move to managed group" member copy. Adds already in
+/// flight finish; the scope keeps its current filter and the result comes back
+/// `incomplete`.
+pub async fn cancel_scope_move() -> Result<(), UiError> {
+    invoke_result("cancel_scope_move", ()).await
+}

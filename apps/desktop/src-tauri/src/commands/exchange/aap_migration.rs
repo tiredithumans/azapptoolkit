@@ -52,7 +52,6 @@ pub async fn migrate_application_access_policies(
     // likely and, until this moved, silently discarded.
     let cancel = state.migration_cancel.claim();
     let session = SessionDead::new();
-    let mut cancelled = false;
 
     let graph = state.graph_for(&tenant_id);
     let exo = exchange_client_checked(&state, &tenant_id).await?;
@@ -85,13 +84,6 @@ pub async fn migrate_application_access_policies(
 
     let (batches, mut failures) = group_policies_for_migration(policies);
 
-    let mut items = Vec::new();
-    // Drained rather than consumed by `for`, so a stop can name the apps it
-    // never reached. A cancelled run previously reported only `incomplete: true`
-    // and dropped the remaining batches, leaving the operator to diff the report
-    // against the tenant to find out which apps are still on legacy policies —
-    // the same "a partial run is never presented as a complete one" rule the
-    // flag exists for, applied to the apps rather than to the run.
     let ctx = MigrationContext {
         graph: &graph,
         exo: &exo,
@@ -99,57 +91,144 @@ pub async fn migrate_application_access_policies(
         scope_override: scope_override.as_deref(),
         tenant_defaults: &tenant_defaults,
         dry_run,
+        cancel: &cancel,
     };
-    let mut remaining = batches.into_iter();
-    let mut unattempted: Vec<String> = Vec::new();
-    while let Some((policy_app_id, batch)) = remaining.next() {
-        if cancel.is_cancelled() || session.is_dead() {
-            // A dead session makes every remaining app fail identically. Stop
-            // and report what was already migrated rather than manufacturing N
-            // failures.
-            cancelled = true;
-            unattempted.push(policy_app_id);
-            unattempted.extend(remaining.map(|(id, _)| id));
-            break;
-        }
-        match migrate_one(ctx, &policy_app_id, &batch).await {
-            Ok(item) => items.push(item),
-            Err(err) => {
-                // `note_code` keeps `UiError::is_reauth_fatal` the single
-                // definition of which codes end the run.
-                session.note_code(&err.code);
-                failures.push(format!("{policy_app_id}: {}", err.message));
-            }
-        }
-    }
+    let run = run_migration_batches(
+        batches,
+        &cancel,
+        &session,
+        |policy_app_id, batch| async move { migrate_one(ctx, &policy_app_id, &batch).await },
+    )
+    .await;
 
     // A real run assigns Exchange roles and removes org-wide Entra grants, which
     // changes the app/SP lists, every detail payload, the mailbox-scope verdicts
     // AND the audit's scoping findings — `invalidate_app_lists` reaches all four.
     // A dry run mutated nothing, so it must not bust anything. Same exception the
     // credential remediation makes: a **partial** migration is still a real write,
-    // so invalidate whenever any app produced an item rather than only on a clean
-    // sweep (`migrate_one` reports its own failures inside the item's warnings).
-    if !dry_run && !items.is_empty() {
+    // so invalidate whenever any app was ATTEMPTED rather than only on a clean
+    // sweep. Keying it on `items` missed the `Err` returns that follow a landed
+    // write — a role-snapshot read, a scope re-read or the service-principal
+    // pointer can fail after the management scope and member copy went in — and
+    // left a single-app run's caches stale after Exchange really changed.
+    if run.should_invalidate(dry_run) {
         invalidate_app_lists(&state.cache, &tenant_id);
     }
 
+    failures.extend(run.failures);
     Ok(AapMigrationReport {
         dry_run,
-        items,
+        items: run.items,
         failures,
-        incomplete: cancelled,
-        unattempted,
+        incomplete: run.cancelled,
+        unattempted: run.unattempted,
     })
 }
 
-/// Signals an in-progress [`migrate_application_access_policies`] run to stop
-/// before the next application. The run checks only at application boundaries:
-/// an application already mid-migration finishes, because [`migrate_one`]'s
-/// steps are ordered never to leave it half-scoped. So a single-app run stops
-/// only if the Cancel lands during the tenant-wide reads, before its one
-/// application starts; a stopped run reports `incomplete` and names the
-/// applications it never reached in `unattempted`.
+/// One application's migration outcome: the report item, and whether Cancel or
+/// a dead session stopped it partway (its member copy) — which makes the whole
+/// run `incomplete` even when it was the only or last application.
+pub(super) struct MigratedApp {
+    pub(super) item: AapMigrationItem,
+    pub(super) stopped: bool,
+}
+
+/// What [`run_migration_batches`] did across the run.
+pub(super) struct MigrationRun {
+    pub(super) items: Vec<AapMigrationItem>,
+    pub(super) failures: Vec<String>,
+    /// Stopped by Cancel or a dead session — between apps, or inside one.
+    pub(super) cancelled: bool,
+    /// Apps the run never reached.
+    pub(super) unattempted: Vec<String>,
+    /// Any app reached `migrate`, success or not.
+    pub(super) attempted: bool,
+}
+
+impl MigrationRun {
+    /// See [`migration_should_invalidate`].
+    pub(super) fn should_invalidate(&self, dry_run: bool) -> bool {
+        migration_should_invalidate(dry_run, self.attempted)
+    }
+}
+
+/// The per-application loop of [`migrate_application_access_policies`], with
+/// the per-app step passed in so the stop rules are testable without a live
+/// tenant.
+///
+/// Checks Cancel and the dead-session latch BEFORE each app; an app already
+/// started runs to its own stopping point (`migrate_one` stops before any
+/// scope/role/grant/policy write when its member copy was cancelled, and says
+/// so through [`MigratedApp::stopped`]). Drained rather than consumed by `for`,
+/// so a stop can name the apps it never reached. A cancelled run previously
+/// reported only `incomplete: true` and dropped the remaining batches, leaving
+/// the operator to diff the report against the tenant to find out which apps
+/// are still on legacy policies.
+pub(super) async fn run_migration_batches<F, Fut>(
+    batches: Vec<(String, Vec<ExoApplicationAccessPolicy>)>,
+    cancel: &CancelToken,
+    session: &SessionDead,
+    mut migrate: F,
+) -> MigrationRun
+where
+    F: FnMut(String, Vec<ExoApplicationAccessPolicy>) -> Fut,
+    Fut: std::future::Future<Output = Result<MigratedApp, UiError>>,
+{
+    let mut run = MigrationRun {
+        items: Vec::new(),
+        failures: Vec::new(),
+        cancelled: false,
+        unattempted: Vec::new(),
+        attempted: false,
+    };
+    let mut remaining = batches.into_iter();
+    while let Some((policy_app_id, batch)) = remaining.next() {
+        if cancel.is_cancelled() || session.is_dead() {
+            // A dead session makes every remaining app fail identically. Stop
+            // and report what was already migrated rather than manufacturing N
+            // failures.
+            run.cancelled = true;
+            run.unattempted.push(policy_app_id);
+            run.unattempted.extend(remaining.map(|(id, _)| id));
+            break;
+        }
+        run.attempted = true;
+        match migrate(policy_app_id.clone(), batch).await {
+            Ok(MigratedApp { item, stopped }) => {
+                run.cancelled |= stopped;
+                run.items.push(item);
+            }
+            Err(err) => {
+                // `note_code` keeps `UiError::is_reauth_fatal` the single
+                // definition of which codes end the run.
+                session.note_code(&err.code);
+                run.failures
+                    .push(format!("{policy_app_id}: {}", err.message));
+            }
+        }
+    }
+    run
+}
+
+/// Whether a migration run must bust the app caches: any real (non-dry) run that
+/// reached [`migrate_one`] for at least one app. `migrate_one` can return `Err`
+/// after its first write landed, so "some app produced an item" under-counts —
+/// over-invalidating after a refusal that wrote nothing costs one re-read, while
+/// under-invalidating shows a stale verdict for the cache TTL. The same
+/// landed-write rule as `create_application_core` / `GrantRun`.
+pub(super) fn migration_should_invalidate(dry_run: bool, attempted: bool) -> bool {
+    !dry_run && attempted
+}
+
+/// Signals an in-progress [`migrate_application_access_policies`] run to stop.
+/// The run checks before each application, and inside one at the member copy
+/// into the toolkit-managed group: a Cancel that lands during that copy stops
+/// the application before any management-scope, role, Entra-grant or policy
+/// write — the app stays on its legacy policy, reported `partial`. Once the
+/// copy is done the application finishes, because [`migrate_one`]'s later
+/// steps are ordered never to leave it half-scoped. A stopped run reports
+/// `incomplete` (even for a single-app run) and names the applications it
+/// never reached in `unattempted`.
 #[tauri::command]
 pub fn cancel_aap_migration(state: State<'_, AppState>) {
     state.migration_cancel.cancel();
@@ -160,19 +239,22 @@ pub fn cancel_aap_migration(state: State<'_, AppState>) {
 /// policies) — the same reasoning as `ApplyExchangeMailboxScopeParams`.
 #[derive(Clone, Copy)]
 pub(super) struct MigrationContext<'a> {
-    graph: &'a GraphClient,
-    exo: &'a ExchangeClient,
-    resources: &'a [ResourceRoles],
-    scope_override: Option<&'a str>,
-    tenant_defaults: &'a TenantDefaults,
-    dry_run: bool,
+    pub(super) graph: &'a GraphClient,
+    pub(super) exo: &'a ExchangeClient,
+    pub(super) resources: &'a [ResourceRoles],
+    pub(super) scope_override: Option<&'a str>,
+    pub(super) tenant_defaults: &'a TenantDefaults,
+    pub(super) dry_run: bool,
+    /// The run's one token, so the member copy inside an app's consolidation
+    /// stops on the same Cancel as the per-app loop.
+    pub(super) cancel: &'a CancelToken,
 }
 
 pub(super) async fn migrate_one(
     ctx: MigrationContext<'_>,
     app_id: &str,
     policies: &[ExoApplicationAccessPolicy],
-) -> Result<AapMigrationItem, UiError> {
+) -> Result<MigratedApp, UiError> {
     let MigrationContext {
         graph,
         exo,
@@ -180,7 +262,15 @@ pub(super) async fn migrate_one(
         scope_override,
         tenant_defaults,
         dry_run,
+        cancel,
     } = ctx;
+    // The AppId as Exchange stored it on the policy may be upper-case, while
+    // every other path (fresh grants, "Move to managed group", the Settings
+    // preview) names the scope and group from Entra's lower-case appId. Fold it
+    // once here so `scope_name_for` / `group_name_for` produce the same names
+    // for the same app, and the role snapshot recognises the scope it already
+    // holds (see `targets::roles_already_scoped`).
+    let app_id = &app_id.to_ascii_lowercase();
     let identities: Vec<String> = policies.iter().filter_map(|p| p.identity.clone()).collect();
     let mut warnings = Vec::new();
 
@@ -260,9 +350,54 @@ pub(super) async fn migrate_one(
     // place. Fail-closed — a copy that can't be verified leaves the filter on
     // the legacy groups (see `consolidate_scope_group`), which is exactly the
     // pre-consolidation behavior, never a narrower one.
-    let consolidation =
-        consolidate_scope_group(exo, app_id, &dns, tenant_defaults, dry_run, &mut warnings).await;
+    let consolidation = consolidate_scope_group(
+        ConsolidateParams {
+            exo,
+            app_id,
+            source_dns: &dns,
+            tenant_defaults,
+            dry_run,
+            live_filter: existing_filter.as_deref(),
+            cancel,
+        },
+        &mut warnings,
+    )
+    .await;
     let scope_filter = member_of_group_filter(&consolidation.scope_dns);
+
+    // Cancel (or a dead session) stopped the member copy. Stop THIS app here,
+    // before its first scope/role/grant/policy write: carrying on would build
+    // the scope over the legacy groups and strip grants after the operator
+    // asked the run to stop. The app stays exactly as it was — on its legacy
+    // policy — and the run is reported incomplete.
+    if consolidation.incomplete {
+        warnings.push(
+            "STOPPED before this app's management scope, role assignments, Entra grants or \
+             legacy policy were changed: the run was cancelled (or the session ended) while \
+             copying mailboxes into the toolkit-managed group. The app is still confined by \
+             its legacy policy. Run the migration again to finish it."
+                .into(),
+        );
+        return Ok(MigratedApp {
+            item: AapMigrationItem {
+                app_id: app_id.to_string(),
+                source_policy_identities: identities,
+                scope_name: Some(scope_name),
+                // Nothing was written to the scope: report what is live.
+                scope_filter: existing_filter,
+                managed_group_name: Some(consolidation.group_name),
+                members_copied: consolidation.copied,
+                members_unverified: consolidation.unverified,
+                roles_assigned: Vec::new(),
+                removed_entra_grants: Vec::new(),
+                removed_policies: Vec::new(),
+                retired_groups: Vec::new(),
+                status: "partial".into(),
+                warnings,
+            },
+            stopped: true,
+        });
+    }
 
     // Roles come from what the app actually holds today — across Microsoft Graph
     // AND Office 365 Exchange Online, so a policy confining the EWS
@@ -325,25 +460,28 @@ pub(super) async fn migrate_one(
                 ));
             }
         }
-        return Ok(AapMigrationItem {
-            app_id: app_id.to_string(),
-            source_policy_identities: identities.clone(),
-            scope_name: Some(scope_name),
-            // A plan mutates nothing, so this is the filter as it stands today.
-            scope_filter: Some(scope_filter),
-            managed_group_name: Some(consolidation.group_name),
-            members_copied: consolidation.copied,
-            members_unverified: consolidation.unverified,
-            roles_assigned: targets
-                .iter()
-                .map(|t| t.exchange_role.to_string())
-                .collect(),
-            removed_entra_grants: targets.iter().map(|t| t.graph_value.clone()).collect(),
-            removed_policies: if removable { identities } else { Vec::new() },
-            // A plan repoints nothing, so no group is retired yet.
-            retired_groups: Vec::new(),
-            status: "planned".into(),
-            warnings,
+        return Ok(MigratedApp {
+            stopped: false,
+            item: AapMigrationItem {
+                app_id: app_id.to_string(),
+                source_policy_identities: identities.clone(),
+                scope_name: Some(scope_name),
+                // A plan mutates nothing, so this is the filter as it stands today.
+                scope_filter: Some(scope_filter),
+                managed_group_name: Some(consolidation.group_name),
+                members_copied: consolidation.copied,
+                members_unverified: consolidation.unverified,
+                roles_assigned: targets
+                    .iter()
+                    .map(|t| t.exchange_role.to_string())
+                    .collect(),
+                removed_entra_grants: targets.iter().map(|t| t.graph_value.clone()).collect(),
+                removed_policies: if removable { identities } else { Vec::new() },
+                // A plan repoints nothing, so no group is retired yet.
+                retired_groups: Vec::new(),
+                status: "planned".into(),
+                warnings,
+            },
         });
     }
 
@@ -441,25 +579,28 @@ pub(super) async fn migrate_one(
         ));
     }
 
-    Ok(AapMigrationItem {
-        app_id: app_id.to_string(),
-        source_policy_identities: identities,
-        scope_name: Some(scope_name),
-        // The filter Exchange ACTUALLY has, not the one this run computed.
-        // `ensure_management_scope` is create-only, so the two can differ — and
-        // reporting the computed one told the operator the app was confined to
-        // groups it was not. `reconcile_scope_filter` has already refused the
-        // app outright if the divergence could not be corrected, so by here this
-        // is both live and correct.
-        scope_filter: Some(live_filter),
-        managed_group_name: Some(consolidation.group_name),
-        members_copied: consolidation.copied,
-        members_unverified: consolidation.unverified,
-        roles_assigned,
-        removed_entra_grants,
-        removed_policies,
-        retired_groups,
-        status: status.into(),
-        warnings,
+    Ok(MigratedApp {
+        stopped: false,
+        item: AapMigrationItem {
+            app_id: app_id.to_string(),
+            source_policy_identities: identities,
+            scope_name: Some(scope_name),
+            // The filter Exchange ACTUALLY has, not the one this run computed.
+            // `ensure_management_scope` is create-only, so the two can differ — and
+            // reporting the computed one told the operator the app was confined to
+            // groups it was not. `reconcile_scope_filter` has already refused the
+            // app outright if the divergence could not be corrected, so by here this
+            // is both live and correct.
+            scope_filter: Some(live_filter),
+            managed_group_name: Some(consolidation.group_name),
+            members_copied: consolidation.copied,
+            members_unverified: consolidation.unverified,
+            roles_assigned,
+            removed_entra_grants,
+            removed_policies,
+            retired_groups,
+            status: status.into(),
+            warnings,
+        },
     })
 }

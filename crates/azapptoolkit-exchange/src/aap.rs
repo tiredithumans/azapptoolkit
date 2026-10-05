@@ -200,6 +200,38 @@ pub fn unverified_members(intended: &[SourceMember], present_keys: &[String]) ->
         .collect()
 }
 
+/// The managed group's members that are NOT in the source membership, by
+/// identity — what a repoint onto that group would ADD to the app's reach.
+///
+/// The mirror of [`unverified_members`], and just as fail-closed: a managed
+/// member with neither an address nor a GUID cannot be shown to be in the
+/// source, so it is reported (counted) rather than assumed harmless. Compared
+/// on [`SourceMember::key`], which is case-folded, so a casing echo is never an
+/// extra. Any non-empty result makes `plan_consolidation` refuse with
+/// `Refusal::ExtraManagedMembers`.
+pub fn extra_members(intended: &[SourceMember], managed: &[ExoGroupMember]) -> Vec<String> {
+    let source: std::collections::HashSet<&str> = intended.iter().map(|m| m.key.as_str()).collect();
+    let mut extra: Vec<String> = Vec::new();
+    let mut unidentifiable = 0_usize;
+    for m in managed {
+        match source_member(m) {
+            Some(sm) if !source.contains(sm.key.as_str()) => {
+                if !extra.iter().any(|e| e.eq_ignore_ascii_case(&sm.identity)) {
+                    extra.push(sm.identity);
+                }
+            }
+            Some(_) => {}
+            None => unidentifiable += 1,
+        }
+    }
+    if unidentifiable > 0 {
+        extra.push(format!(
+            "{unidentifiable} member(s) with no address or GUID"
+        ));
+    }
+    extra
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +431,39 @@ mod tests {
             unverified_members(&intended, &["a@contoso.com".to_string()]).is_empty(),
             "EXO echoes addresses in its own casing; a case-sensitive check would \
              report every member unverified and refuse every consolidation"
+        );
+    }
+
+    #[test]
+    fn a_managed_member_outside_the_source_is_an_extra() {
+        let intended = vec![SourceMember {
+            identity: "a@contoso.com".into(),
+            key: "a@contoso.com".into(),
+        }];
+        let managed = vec![
+            member(Some("a@contoso.com"), None),
+            member(Some("g1@contoso.com"), None),
+            member(None, None),
+        ];
+        assert_eq!(
+            extra_members(&intended, &managed),
+            vec![
+                "g1@contoso.com".to_string(),
+                "1 member(s) with no address or GUID".to_string(),
+            ],
+            "a leftover member widens the repoint; an unidentifiable one can't be cleared"
+        );
+    }
+
+    #[test]
+    fn extras_compare_case_insensitively() {
+        let intended = vec![SourceMember {
+            identity: "A@Contoso.com".into(),
+            key: "a@contoso.com".into(),
+        }];
+        assert!(
+            extra_members(&intended, &[member(Some("a@CONTOSO.COM"), None)]).is_empty(),
+            "EXO echoes addresses in its own casing; that is the same mailbox, not an extra"
         );
     }
 }

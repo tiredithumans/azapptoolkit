@@ -163,6 +163,7 @@ pub fn run() {
             commands::exchange::remove_exchange_scope_group_members,
             commands::exchange::migrate_application_access_policies,
             commands::exchange::cancel_aap_migration,
+            commands::exchange::cancel_scope_move,
             commands::exchange::move_exchange_scope_to_managed_group,
             commands::exchange::delete_exchange_scope_group,
             commands::managed_identity::list_managed_identities,

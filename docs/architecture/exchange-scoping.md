@@ -112,6 +112,10 @@ may be shared with other apps whose reach must not change as a side effect.
   targets at all (the policy then governs nothing). A partial strip **keeps** every policy and reports
   `partial` naming the blockers — the policy is the only thing still confining them.
 
+A real run busts `invalidate_app_lists` once it has **attempted** any app
+(`migration_should_invalidate`), not only when an app produced an item: `migrate_one` can return
+`Err` after the scope, the member copy or the SP pointer landed.
+
 ## Surfaces and resource-aware rendering
 
 The verdict resolver itself (`resolve_mail_scopes`, bulk vs. detail resolution, org-wide-grant
@@ -123,7 +127,10 @@ reconciliation and the legacy-AAP fold) is described in
 service principals too, so the same verdict applies — but they have no app registration manifest,
 so the MI detail view uses `get_mail_scopes_for_principal(tenant_id, app_id, permissions)` (keyed
 on the SP's app id + its *granted* app-role values) instead of `get_mail_permission_scopes` (which
-reads a manifest). The badge rendering for all three surfaces lives in one place —
+reads a manifest). A detail-path verdict is enriched with the scope's filter and group
+count only when the matching rows name exactly **one** scope (`verdict::distinct_scope_names`):
+several scopes produce the joined display name "A, B", which names no scope, so it is never looked
+up as one. The badge rendering for all three surfaces lives in one place —
 `web-rs/components/scope_badge.rs` (`permission_scope_cell` / `mailbox_scope_badge` /
 `is_exchange_scopable`).
 
@@ -195,6 +202,18 @@ org-wide as before.
 assignments**, never from the targets (the wizard declares a permission before scoping it, so a
 target is routinely declared but not held); the core names those permissions in one "Scoping is NOT
 effective" warning, phrased by the same `still_granted_orgwide` the AAP migration's KEPT note uses.
+RBAC grants union in Exchange too: `assign_scoped_roles` (both callers) reads the role snapshot and,
+via the pure `targets::orgwide_role_assignments`, adds one "Scoping is NOT effective for <role>"
+warning per **org-wide Exchange assignment** of a role being scoped (no management scope, AU or
+custom write scope). It never removes that assignment — it may be deliberate. `roles_already_scoped`
+compares the scope name case-insensitively, and `migrate_one` lower-cases the policy's AppId
+before naming the scope and group, so a policy stored with an upper-case GUID recognises the scope
+it already holds instead of re-assigning (and failing) on every re-run.
+
+`remove_exchange_mailbox_access` reports what it could not remove in `failed` (a rejected removal,
+or a row with no `Identity`, which is never skipped silently), and returns `Err` when nothing came
+off and something is still assigned — the UI shows a partial removal as an error toast naming the
+leftovers, never as "Removed N".
 `grant_exchange_mailbox_access` validates its targets before `ensure_service_principal`, and a
 newly created SP busts the list tier even when the scope step then fails.
 
@@ -230,11 +249,35 @@ already migrated, whose policy is gone, or one scoped to a hand-made group). Bot
 scope's `MemberOfGroup` filter naming the managed group alone, so reach is edited in one place.
 Invariants, each of which exists because its absence *narrows* access silently:
 
-- **Fail closed on anything unproved.** The pure `scope_dns_after_consolidation`
-  (`azapptoolkit-exchange::targets`) returns the managed group's DN only when its DN resolved AND
-  zero source members are unverified; otherwise it returns the source DNs unchanged. Narrowing is
-  the risk here, not widening — the managed group is built from the source membership — and a
-  mailbox an integration can no longer read fails as "not found", not "denied".
+- **Fail closed on anything unproved.** The pure `plan_consolidation`
+  (`azapptoolkit-exchange::targets`) returns the managed group's DN only when its DN resolved,
+  zero source members are unverified AND the managed group holds nothing the source does not;
+  otherwise the scope keeps the source DNs unchanged. A mailbox an integration can no longer read
+  fails as "not found", not "denied", so narrowing is the quiet risk — but widening is a risk too.
+- **The managed group must equal the source, not merely contain it.** An existing managed group is
+  NOT reused as-is: `aap::extra_members` (case-folded keys, an unidentifiable member counts) names
+  every member the source lacks, and `Refusal::ExtraManagedMembers` refuses the repoint. The path
+  that made this real: an AAP run copies G1 and refuses, the policy is changed to G2, the re-run
+  copies G2, verifies every G2 member present and repoints — reach G1 ∪ G2. The dry run reads the
+  managed group and names the extras (capped at `MAX_LISTED_MEMBERS`, then "and N more"), and
+  `ExchangeScopeConsolidationResult.refused` makes the plan say it would be refused instead of
+  offering "Move now"; a real run refuses before copying anything, and the post-copy re-read checks
+  again. **Exception:** when the app's live scope already names the managed group alone
+  (`targets::filter_names_only_group`), its members ARE the app's current reach, so nothing can
+  widen and the check is skipped — otherwise every re-run after an operator edited the managed
+  group was refused.
+- **Member reads are complete.** `list_group_members` sends `ResultSize: Unlimited`;
+  `Get-DistributionGroupMember` otherwise stops at 1000 *silently*, which made a truncated source
+  read look complete and the repoint narrow. No other list cmdlet the client sends takes
+  `-ResultSize`.
+- **The copy is cancellable and bounded.** Adds run `MEMBER_COPY_CONCURRENCY` (4) at a time, each
+  gated on the caller's `CancelToken` and a `SessionDead` latch — the migration passes its
+  `migration_cancel` token, `move_exchange_scope_to_managed_group` claims `scope_move_cancel`
+  (stopped by `cancel_scope_move`). A failed add is retried once, serially, under the same gates
+  (concurrent adds to one group can hit Exchange's "object modified" conflict). A stopped copy
+  keeps the source and reports `incomplete`; in the migration, `migrate_one` then stops that app
+  **before** any scope, role, Entra-grant or policy write (status `partial`, policy kept) and the
+  run is reported `incomplete` even when it was the only app.
 - **Verification re-reads the group; it does not trust the adds.** EXO accepts some recipient types
   and then doesn't list them. Comparison is on `source_member`'s case-folded key (primary SMTP,
   else GUID); a member with neither is unidentifiable, so its source group counts as unreadable.

@@ -321,6 +321,9 @@ pub struct AppState {
     pub bulk_cancel: CancelFlag,
     /// `migrate_application_access_policies`; cancelled by `cancel_aap_migration`.
     pub migration_cancel: CancelFlag,
+    /// `move_exchange_scope_to_managed_group`'s member copy; cancelled by
+    /// `cancel_scope_move`.
+    pub scope_move_cancel: CancelFlag,
     /// `sweep_site_permissions` (Resource Access Sites tab and the per-app site
     /// panel); cancelled by `cancel_site_sweep` and by sign-out (`forget_tenant`).
     pub site_sweep_cancel: CancelFlag,
@@ -399,6 +402,7 @@ impl AppState {
             audit_cancel: CancelFlag::new(),
             bulk_cancel: CancelFlag::new(),
             migration_cancel: CancelFlag::new(),
+            scope_move_cancel: CancelFlag::new(),
             site_sweep_cancel: CancelFlag::new(),
             key_vault_sweep_cancel: CancelFlag::new(),
             mailbox_probe_cancel: CancelFlag::new(),
@@ -462,6 +466,7 @@ impl AppState {
             audit_cancel: CancelFlag::new(),
             bulk_cancel: CancelFlag::new(),
             migration_cancel: CancelFlag::new(),
+            scope_move_cancel: CancelFlag::new(),
             site_sweep_cancel: CancelFlag::new(),
             key_vault_sweep_cancel: CancelFlag::new(),
             mailbox_probe_cancel: CancelFlag::new(),
@@ -563,7 +568,7 @@ impl AppState {
     /// `sign_in` (a different operator on the same tenant) stops the previous
     /// account's scans too; `reauthenticate` never calls this, so a re-auth in
     /// place keeps its runs. The write runs (`bulk_cancel`, `migration_cancel`,
-    /// `restore_cancel`) are left alone: stopping one between writes is the
+    /// `scope_move_cancel`, `restore_cancel`) are left alone: stopping one between writes is the
     /// operator's call, and with the tokens gone each stops on its own at the
     /// dead-session latch. Pinned by `repo_invariants/cache.rs`.
     pub fn forget_tenant(&self, tenant_id: &str) {
