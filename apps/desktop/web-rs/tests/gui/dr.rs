@@ -15,10 +15,13 @@
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::backup::{
-    RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, SkippedObject, TenantBackup,
+    PermissionRisk, PlannedFederatedCredential, PrivilegedKind, PrivilegedPermission,
+    PrivilegedRestoreItem, RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, SkippedObject,
+    TenantBackup,
 };
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
@@ -350,5 +353,215 @@ async fn an_expired_session_during_restore_asks_for_re_authentication() {
     assert!(
         body.contains("Re-authenticate and run the restore again"),
         "the operator needs the remedy, not only the diagnosis: {body}"
+    );
+}
+
+/// An app whose admin consent covers one Graph application permission.
+fn consenting(
+    src: &str,
+    name: &str,
+    value: Option<&str>,
+    risk: PermissionRisk,
+) -> PrivilegedRestoreItem {
+    PrivilegedRestoreItem {
+        kind: PrivilegedKind::App,
+        source_app_id: src.into(),
+        display_name: name.into(),
+        admin_consent: true,
+        app_roles: vec![PrivilegedPermission {
+            resource_app_id: "00000003-0000-0000-c000-000000000000".into(),
+            resource_display_name: Some("Microsoft Graph".into()),
+            permission_id: "role-id-1".into(),
+            value: value.map(Into::into),
+            risk,
+            restored_api: false,
+        }],
+        // Consent to any application permission needs approval.
+        requires_approval: true,
+        ..Default::default()
+    }
+}
+
+/// What the file would grant renders in the plan, before Confirm: each
+/// consented permission with its risk, and each federated credential's issuer
+/// and subject. The restore still runs without approvals (the clearer UX: a
+/// DR restore is never blocked on ticking boxes), but only the apps ticked
+/// are sent as approved — the backend withholds the rest's standing access.
+#[wasm_bindgen_test]
+async fn privileged_grants_render_before_confirm_and_only_ticked_apps_are_approved() {
+    ts::reset();
+    ts::mock_ok("restore_tenant", &RestoreReport::default());
+    let fic_only = PrivilegedRestoreItem {
+        source_app_id: "src-c".into(),
+        display_name: "Deployer".into(),
+        federated_credentials: vec![PlannedFederatedCredential {
+            name: "gh-main".into(),
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: "repo:contoso/app:ref:refs/heads/main".into(),
+            // Refused by validation, so it is shown but never created.
+            rejected: Some("issuer must be an https URL".into()),
+        }],
+        app_role_assignees: vec!["Ops (Reader)".into()],
+        ..Default::default()
+    };
+    let hr_sync = PrivilegedRestoreItem {
+        group_memberships: vec!["Global Admins".into()],
+        owners: vec!["alice@contoso.com".into()],
+        ..consenting("src-b", "HR Sync", None, PermissionRisk::Unknown)
+    };
+    let _m = load_plan(RestorePlan {
+        privileged: vec![
+            consenting(
+                "src-a",
+                "Payroll API",
+                Some("Application.ReadWrite.All"),
+                PermissionRisk::High,
+            ),
+            hr_sync,
+            fic_only,
+        ],
+        ..plan()
+    })
+    .await;
+
+    // Shown before Confirm, by value — and by id when unresolvable.
+    assert!(
+        ts::body_contains("Access this restore grants"),
+        "{}",
+        ts::body_text()
+    );
+    assert!(ts::body_contains("Application.ReadWrite.All"));
+    assert!(ts::body_contains("High risk"));
+    assert!(
+        ts::body_contains("role-id-1"),
+        "an unresolved permission shows its id"
+    );
+    assert!(ts::body_contains("Unknown"));
+    assert!(ts::body_contains(
+        "issuer https://token.actions.githubusercontent.com"
+    ));
+    assert!(ts::body_contains(
+        "subject repo:contoso/app:ref:refs/heads/main"
+    ));
+    // Owners and group memberships (withheld unless approved) and role
+    // assignees (shown only) are named too.
+    assert!(ts::body_contains("Joins group: Global Admins"));
+    assert!(ts::body_contains("Owners: alice@contoso.com"));
+    assert!(ts::body_contains(
+        "Assigned to the app's roles: Ops (Reader)"
+    ));
+    // One approval box per item that needs it; none for the item whose only
+    // credential validation refuses.
+    assert_eq!(ts::query_all(".dr-view__approve input").len(), 2);
+    assert!(
+        ts::has_button_labelled("Restore into this tenant…"),
+        "approvals gate the grants, not the restore"
+    );
+
+    // Approve Payroll API only.
+    ts::click(".dr-view__privileged-item .dr-view__approve input");
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    assert!(
+        ts::body_contains("1 item needing approval is not approved"),
+        "the confirm dialog names what will be skipped: {}",
+        ts::body_text()
+    );
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
+
+    let call = ts::last_call("restore_tenant").expect("restore_tenant called");
+    assert_eq!(
+        call.args["approvals"],
+        serde_json::json!([{ "kind": "app", "sourceAppId": "src-a" }])
+    );
+}
+
+/// Nothing ticked: the restore sends no approvals at all.
+#[wasm_bindgen_test]
+async fn an_unticked_plan_restores_with_no_approvals() {
+    ts::reset();
+    ts::mock_ok("restore_tenant", &RestoreReport::default());
+    let _m = load_plan(RestorePlan {
+        privileged: vec![consenting(
+            "src-a",
+            "Payroll API",
+            Some("Application.ReadWrite.All"),
+            PermissionRisk::High,
+        )],
+        ..plan()
+    })
+    .await;
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
+    let call = ts::last_call("restore_tenant").expect("restore_tenant called");
+    assert_eq!(call.args["approvals"], serde_json::json!([]));
+}
+
+/// "Approve all listed" ticks every item that needs approval in one click —
+/// offered after the list, with nothing ticked until it is pressed.
+#[wasm_bindgen_test]
+async fn approve_all_listed_ticks_every_item_needing_approval() {
+    ts::reset();
+    ts::mock_ok("restore_tenant", &RestoreReport::default());
+    let mi = PrivilegedRestoreItem {
+        kind: PrivilegedKind::ManagedIdentity,
+        ..consenting("src-a", "mi-one", Some("Mail.Send"), PermissionRisk::High)
+    };
+    let _m = load_plan(RestorePlan {
+        privileged: vec![
+            consenting(
+                "src-a",
+                "Payroll API",
+                Some("Application.ReadWrite.All"),
+                PermissionRisk::High,
+            ),
+            mi,
+        ],
+        ..plan()
+    })
+    .await;
+
+    // Default unticked.
+    assert!(
+        ts::query_all(".dr-view__approve input").iter().all(|el| !el
+            .clone()
+            .unchecked_into::<web_sys::HtmlInputElement>()
+            .checked()),
+        "nothing starts approved"
+    );
+    // The bulk control comes after the list it approves.
+    let list = ts::query(".dr-view__privileged .dr-view__report-list").expect("privileged list");
+    let all = ts::button_labelled("Approve all listed").expect("Approve all listed");
+    assert_ne!(
+        list.compare_document_position(&all) & web_sys::Node::DOCUMENT_POSITION_FOLLOWING,
+        0,
+        "Approve all listed must follow the list"
+    );
+
+    ts::click_button_labelled("Approve all listed");
+    ts::wait_for(|| {
+        ts::query_all(".dr-view__approve input").iter().all(|el| {
+            el.clone()
+                .unchecked_into::<web_sys::HtmlInputElement>()
+                .checked()
+        })
+    })
+    .await;
+
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
+    let call = ts::last_call("restore_tenant").expect("restore_tenant called");
+    // Kind-keyed: the app and the identity sharing "src-a" are two approvals.
+    assert_eq!(
+        call.args["approvals"],
+        serde_json::json!([
+            { "kind": "app", "sourceAppId": "src-a" },
+            { "kind": "managedIdentity", "sourceAppId": "src-a" }
+        ])
     );
 }

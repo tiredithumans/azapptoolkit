@@ -16,11 +16,14 @@
 //!    reported), owners (remapped by UPN / display name), and bulk-regenerate
 //!    secrets.
 //! 3. **Re-consent** — re-grant admin consent for apps that had it, *after* all
-//!    apps are wired so a custom resource's SP + scopes already exist.
+//!    apps are wired so a custom resource's SP + scopes already exist. Consent
+//!    covering a high-risk or unidentifiable application permission is granted
+//!    only to apps the operator approved in the plan.
 //! 4. **Enterprise applications** — re-apply settings, app-role assignments and
 //!    group memberships to the SPs recreated in pass 1.
 //! 5. **Managed identities** — re-bind Graph app-roles to MIs already recreated
-//!    in the destination; everything else becomes a runbook item.
+//!    in the destination (high-risk ones only when approved); everything else
+//!    becomes a runbook item.
 //!
 //! **Re-running is safe for the apps a run created.** Every app is created with
 //! the tag `azapptoolkit:restoredFrom:<source appId>` in its create POST, so a
@@ -47,9 +50,14 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use tauri::{AppHandle, State};
 
+use azapptoolkit_core::audit::{
+    RiskLevel, is_risky_delegated_scope, risk_level_for_app_permission,
+};
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::federation::validate_federated_credential;
-use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
+use azapptoolkit_core::models::{
+    Application, DirectoryObject, FederatedIdentityCredential, ServicePrincipal,
+};
 use azapptoolkit_core::redirect::{validate_logout_url, validate_redirect_uri};
 use azapptoolkit_core::restore_plan::{
     remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
@@ -66,18 +74,20 @@ use crate::commands::applications::{
 };
 use crate::commands::dispatch::SessionDead;
 use crate::commands::managed_identity::{grant_managed_identity_roles_core, mi_subtype_label};
-use crate::commands::permissions::grant_admin_consent_core;
+use crate::commands::permissions::grant_admin_consent_to_app_core;
 use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::backup::{
     AppRegistrationBackup, BACKUP_SCHEMA_VERSION, CloudMismatch, CredentialMeta,
-    EnterpriseAppBackup, ManagedIdentityBackup, ManualItem, PrincipalRef, RegeneratedSecret,
-    RestoreFailure, RestorePlan, RestoreReport, RestoredApp, RestoredEnterpriseApp,
-    RestoredManagedIdentity, SchemaTooNew, TenantBackup,
+    EnterpriseAppBackup, ManagedIdentityBackup, ManualItem, PermissionRisk,
+    PlannedFederatedCredential, PrincipalRef, PrivilegedKind, PrivilegedPermission,
+    PrivilegedRestoreItem, RegeneratedSecret, RestoreApproval, RestoreFailure, RestorePlan,
+    RestoreReport, RestoredApp, RestoredEnterpriseApp, RestoredManagedIdentity, SchemaTooNew,
+    TenantBackup,
 };
 use crate::dto::bulk::BulkProgress;
-use crate::state::AppState;
+use crate::state::{AppState, CancelToken};
 
 /// Keeps only the redirect URIs that pass `core::redirect`, recording each
 /// rejection in the restore report.
@@ -254,7 +264,7 @@ async fn decide_adoption(
     app: &AppRegistrationBackup,
     taken_at: DateTime<Utc>,
     operator_oid: Option<&str>,
-    principals: &mut HashMap<String, Option<String>>,
+    principals: &mut PrincipalMemo,
     session: &SessionDead,
 ) -> Adoption {
     // Looked up by the restore tag, the only key that survives the tenant move
@@ -300,7 +310,7 @@ async fn decide_adoption(
     // Resolve the manifest's owners only when someone besides the operator owns it.
     if owners.iter().any(|o| !allowed.contains(&o.id)) {
         for owner in &app.owners {
-            if let Some(id) = resolve_principal(client, principals, owner).await {
+            if let Ok(id) = resolve_principal(client, principals, owner).await {
                 allowed.insert(id);
             }
         }
@@ -320,21 +330,34 @@ async fn decide_adoption(
     ))
 }
 
-/// Dry-run analysis of restoring `backup` into the current tenant — counts and
-/// warnings only, no writes. The frontend shows this before the operator
-/// confirms the (irreversible) restore: the work of all five passes, the hard
-/// blockers (a cross-cloud manifest, a too-new `schema_version` and a malformed
-/// or repeated source appId, which [`restore_tenant`] still enforces on its
-/// own), and whether the destination
-/// is the tenant the backup was taken from. A blocked manifest still returns
-/// a plan — carrying the blocker — so the operator sees why before Confirm.
+/// Dry-run analysis of restoring `backup` into the current tenant — counts,
+/// warnings and the privileged grants, no writes. The frontend shows this
+/// before the operator confirms the (irreversible) restore: the work of all
+/// five passes, the hard blockers (a cross-cloud manifest, a too-new
+/// `schema_version` and a malformed or repeated source appId, which
+/// [`restore_tenant`] still enforces on its own), whether the destination is
+/// the tenant the backup was taken from, and — read-only, against the
+/// destination — what the file would grant ([`privileged_restore_items`]). A
+/// blocked manifest still returns a plan — carrying the blocker — so the
+/// operator sees why before Confirm.
 #[tauri::command]
 pub async fn plan_restore(
     state: State<'_, AppState>,
     tenant_id: String,
     backup: TenantBackup,
 ) -> Result<RestorePlan, UiError> {
-    Ok(build_restore_plan(&backup, tenant_id, state.auth.cloud()))
+    let mut plan = build_restore_plan(&backup, tenant_id.clone(), state.auth.cloud());
+    if plan.is_blocked() {
+        return Ok(plan);
+    }
+    let client = state.graph_for(&tenant_id);
+    let session = SessionDead::new();
+    plan.privileged = privileged_restore_items(&client, &backup, &session).await;
+    // Every permission would read "unknown" — a plan that says so is no plan.
+    if session.is_dead() {
+        return Err(session.err("the restore plan"));
+    }
+    Ok(plan)
 }
 
 /// Refuses a manifest written by a *newer* build.
@@ -383,7 +406,8 @@ const MAX_MANIFEST_PROBLEMS: usize = 10;
 /// created for the first copy and wire it twice (two sets of fresh secrets); an
 /// empty one tags the app with a bare prefix every other empty-id app shares.
 /// Neither is a shape a real backup produces, so the file is refused whole
-/// rather than partially restored.
+/// rather than partially restored. A managed identity's `source_app_id` is
+/// held to the same rule: with its kind, it is the plan's approval key.
 fn validate_manifest(backup: &TenantBackup) -> Result<(), UiError> {
     let problems = manifest_problems(backup);
     if problems.is_empty() {
@@ -399,21 +423,52 @@ fn validate_manifest(backup: &TenantBackup) -> Result<(), UiError> {
 }
 
 /// The one manifest-shape rule, shared by the dry-run blocker and the
-/// restore's own refusal: every app registration's `source_app_id` is a GUID
-/// and no two share one (compared case-insensitively, as Entra does).
+/// restore's own refusal: every app registration's and every managed
+/// identity's `source_app_id` is a GUID, and no two of a kind share one
+/// (compared case-insensitively, as Entra does). A managed identity's id is
+/// its approval key, so a repeated one would let one opt-in cover two.
 fn manifest_problems(backup: &TenantBackup) -> Vec<String> {
     let mut problems = Vec::new();
+    let apps = backup
+        .app_registrations
+        .iter()
+        .map(|a| (a.source_app_id.as_str(), a.display_name.as_str()));
+    id_problems("app registration", "source appId", apps, &mut problems);
+    let mis = backup
+        .managed_identities
+        .iter()
+        .map(|m| (m.source_app_id.as_str(), m.display_name.as_str()));
+    id_problems(
+        "managed identity",
+        "managed identity source appId",
+        mis,
+        &mut problems,
+    );
+    if problems.len() > MAX_MANIFEST_PROBLEMS {
+        let more = problems.len() - MAX_MANIFEST_PROBLEMS;
+        problems.truncate(MAX_MANIFEST_PROBLEMS);
+        problems.push(format!("and {more} more"));
+    }
+    problems
+}
+
+/// [`manifest_problems`] for one kind of object: `(source_app_id, name)` pairs.
+fn id_problems<'a>(
+    kind: &str,
+    repeated_label: &str,
+    ids: impl Iterator<Item = (&'a str, &'a str)>,
+    problems: &mut Vec<String>,
+) {
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for app in &backup.app_registrations {
+    for (id, name) in ids {
         // Checked as-is, never trimmed: the tag, the adoption lookup and the
         // remap all use the raw value, so a padded GUID is not a GUID here.
-        let id = app.source_app_id.as_str();
-        let name = excerpt(&app.display_name);
+        let name = excerpt(name);
         if id.is_empty() {
-            problems.push(format!("app registration '{name}' has no source appId"));
+            problems.push(format!("{kind} '{name}' has no source appId"));
         } else if !azapptoolkit_core::guid::is_guid(id) {
             problems.push(format!(
-                "app registration '{name}' has a source appId that is not a GUID ('{}')",
+                "{kind} '{name}' has a source appId that is not a GUID ('{}')",
                 excerpt(id)
             ));
         } else {
@@ -425,14 +480,8 @@ fn manifest_problems(backup: &TenantBackup) -> Vec<String> {
     problems.extend(
         repeated
             .into_iter()
-            .map(|(id, n)| format!("source appId {id} appears {n} times")),
+            .map(|(id, n)| format!("{repeated_label} {id} appears {n} times")),
     );
-    if problems.len() > MAX_MANIFEST_PROBLEMS {
-        let more = problems.len() - MAX_MANIFEST_PROBLEMS;
-        problems.truncate(MAX_MANIFEST_PROBLEMS);
-        problems.push(format!("and {more} more"));
-    }
-    problems
 }
 
 /// Longest value from the file echoed into a manifest problem, in characters.
@@ -509,19 +558,407 @@ fn build_restore_plan(
         enterprise_apps_manual: backup.enterprise_apps.len() - enterprise_apps_to_reapply,
         managed_identities_to_rebind: backup.managed_identities.len(),
         skipped_in_backup: backup.skipped.len(),
+        // Needs the destination; `plan_restore` fills it.
+        privileged: Vec::new(),
     }
+}
+
+/// How Pass 3 and the plan treat a manifest permission's resource.
+enum ResourceLookup {
+    Found(Box<ServicePrincipal>),
+    /// No service principal with that appId in the destination.
+    Absent,
+    /// The read failed.
+    Failed,
+}
+
+/// The appIds of every resource an admin-consenting app declares, deduplicated
+/// and sorted — the resources a plan has to resolve.
+fn consent_resources(backup: &TenantBackup) -> Vec<String> {
+    let ids: std::collections::BTreeSet<&str> = backup
+        .app_registrations
+        .iter()
+        .filter(|a| a.admin_consent_granted)
+        .flat_map(|a| &a.required_resource_access)
+        .map(|r| r.resource_app_id.as_str())
+        .collect();
+    ids.into_iter().map(str::to_owned).collect()
+}
+
+/// Resolves each resource live (`resolve_resource_sp`, after one batched
+/// prewarm), noting failures through `session`. Stops at a dead session: every
+/// later read would fail the same way.
+async fn resolve_resources(
+    client: &GraphClient,
+    ids: &[String],
+    session: &SessionDead,
+) -> HashMap<String, ResourceLookup> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    client.prewarm_resource_sps(ids).await;
+    for id in ids {
+        if session.is_dead() {
+            break;
+        }
+        let lookup = match client.resolve_resource_sp(id).await {
+            Ok(Some(sp)) => ResourceLookup::Found(Box::new(sp)),
+            Ok(None) => ResourceLookup::Absent,
+            Err(e) => {
+                session.note_code(e.ui_code());
+                ResourceLookup::Failed
+            }
+        };
+        out.insert(id.clone(), lookup);
+    }
+    out
+}
+
+/// The risk of an application permission `value`, from `core::audit`.
+fn app_role_risk(value: &str) -> PermissionRisk {
+    match risk_level_for_app_permission(value) {
+        Some(RiskLevel::High | RiskLevel::Critical) => PermissionRisk::High,
+        Some(RiskLevel::Medium) => PermissionRisk::Medium,
+        _ => PermissionRisk::Low,
+    }
+}
+
+/// The permissions admin consent would grant `app`, resolved against the
+/// destination: `(application, delegated)`.
+///
+/// A value that cannot be resolved is shown by id with [`PermissionRisk::Unknown`]
+/// — a permission nobody can name is treated as high-risk for approval —
+/// except on an API this backup itself recreates (`restored_api`): its values
+/// are not knowable until it exists, and its roles grant access only to that
+/// fresh, empty app.
+fn consent_permissions(
+    app: &AppRegistrationBackup,
+    resources: &HashMap<String, ResourceLookup>,
+    in_backup: &HashSet<&str>,
+) -> (Vec<PrivilegedPermission>, Vec<PrivilegedPermission>) {
+    let mut roles = Vec::new();
+    let mut scopes = Vec::new();
+    for rra in &app.required_resource_access {
+        let lookup = resources.get(&rra.resource_app_id);
+        let sp = match lookup {
+            Some(ResourceLookup::Found(sp)) => Some(sp.as_ref()),
+            _ => None,
+        };
+        let restored_api = matches!(lookup, Some(ResourceLookup::Absent))
+            && in_backup.contains(rra.resource_app_id.as_str());
+        for access in &rra.resource_access {
+            let is_role = access.r#type == "Role";
+            let value = sp
+                .and_then(|sp| {
+                    if is_role {
+                        sp.app_roles
+                            .iter()
+                            .find(|r| r.id == access.id)
+                            .map(|r| r.value.clone())
+                    } else {
+                        sp.oauth2_permission_scopes
+                            .iter()
+                            .find(|s| s.id == access.id)
+                            .map(|s| s.value.clone())
+                    }
+                })
+                .filter(|v| !v.is_empty());
+            let risk = match (&value, is_role) {
+                (Some(v), true) => app_role_risk(v),
+                (Some(v), false) if is_risky_delegated_scope(v) => PermissionRisk::High,
+                (Some(_), false) => PermissionRisk::Low,
+                (None, _) if restored_api => PermissionRisk::Low,
+                (None, _) => PermissionRisk::Unknown,
+            };
+            let perm = PrivilegedPermission {
+                resource_app_id: rra.resource_app_id.clone(),
+                resource_display_name: sp.map(|sp| sp.display_name.clone()),
+                permission_id: access.id.clone(),
+                value,
+                risk,
+                restored_api,
+            };
+            if is_role {
+                roles.push(perm);
+            } else {
+                scopes.push(perm);
+            }
+        }
+    }
+    (roles, scopes)
+}
+
+/// Whether an app's admin consent needs the operator's approval: it covers any
+/// application permission (app-only access; the risk lists are a short
+/// denylist, not proof a permission is harmless), or a delegated one that is
+/// broad or that nobody can name.
+fn consent_needs_approval(
+    app_roles: &[PrivilegedPermission],
+    delegated: &[PrivilegedPermission],
+) -> bool {
+    !app_roles.is_empty()
+        || delegated
+            .iter()
+            .any(|p| matches!(p.risk, PermissionRisk::High | PermissionRisk::Unknown))
+}
+
+/// The enterprise apps Pass 4 may replay onto `app`'s service principal:
+/// every non-foreign one for the app, exactly what [`restore_enterprise_app`]
+/// accepts. Deliberately NOT conditioned on `has_service_principal`: the SP
+/// can exist anyway (Pass 3's consent creates one; an adopted app may already
+/// have one), and Pass 4 replays onto whatever SP it finds.
+fn replayed_enterprise_apps<'a>(
+    backup: &'a TenantBackup,
+    app: &'a AppRegistrationBackup,
+) -> impl Iterator<Item = &'a EnterpriseAppBackup> {
+    backup
+        .enterprise_apps
+        .iter()
+        .filter(move |e| !e.is_foreign_tenant && e.source_app_id == app.source_app_id)
+}
+
+/// What restoring `backup` grants from the file, per app registration and
+/// managed identity: the admin consent Pass 3 re-grants (values resolved live,
+/// risk-ranked by `core::audit`), federated credentials (issuer + subject, and
+/// whether validation will refuse them), owners, the groups Pass 4 adds the
+/// service principal to, and the Graph app roles Pass 5 re-binds — plus, shown
+/// only, pre-authorized clients this backup does not recreate and the users
+/// and groups assigned to the app's roles. Read-only.
+///
+/// Shared by the plan and by [`run_restore`], which recomputes it rather than
+/// trusting the front end, so the approval gate holds for any caller.
+async fn privileged_restore_items(
+    client: &GraphClient,
+    backup: &TenantBackup,
+    session: &SessionDead,
+) -> Vec<PrivilegedRestoreItem> {
+    let in_backup: HashSet<&str> = backup
+        .app_registrations
+        .iter()
+        .map(|a| a.source_app_id.as_str())
+        .collect();
+    let resources = resolve_resources(client, &consent_resources(backup), session).await;
+    let mut items = Vec::new();
+    for app in &backup.app_registrations {
+        let (app_roles, delegated_scopes) = if app.admin_consent_granted {
+            consent_permissions(app, &resources, &in_backup)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut external: Vec<String> = app
+            .pre_authorized_applications
+            .iter()
+            .filter(|p| !in_backup.contains(p.app_id.as_str()))
+            .map(|p| excerpt(&p.app_id))
+            .collect();
+        external.sort();
+        external.dedup();
+        let federated_credentials: Vec<PlannedFederatedCredential> = app
+            .federated_credentials
+            .iter()
+            .filter_map(|fic| {
+                let subject = restorable_fic_subject(fic).ok()?;
+                let audiences = if fic.audiences.is_empty() {
+                    vec![backup.cloud.token_exchange_audience().to_string()]
+                } else {
+                    fic.audiences.clone()
+                };
+                let rejected = validate_federated_credential(
+                    Some(&fic.name),
+                    &fic.issuer,
+                    subject,
+                    &audiences,
+                    fic.description.as_deref(),
+                )
+                .err();
+                Some(PlannedFederatedCredential {
+                    name: excerpt(&fic.name),
+                    issuer: excerpt(&fic.issuer),
+                    subject: excerpt(subject),
+                    rejected,
+                })
+            })
+            .collect();
+        let group_memberships: Vec<String> = replayed_enterprise_apps(backup, app)
+            .flat_map(|e| &e.group_memberships)
+            .map(|g| excerpt(&owner_label(g)))
+            .collect();
+        let app_role_assignees: Vec<String> = replayed_enterprise_apps(backup, app)
+            .flat_map(|e| &e.app_role_assignees)
+            .map(|a| {
+                let who = excerpt(&owner_label(&a.principal));
+                match a.app_role_value.as_deref().filter(|v| !v.is_empty()) {
+                    Some(role) => format!("{who} ({})", excerpt(role)),
+                    None => who,
+                }
+            })
+            .collect();
+        let owners: Vec<String> = app
+            .owners
+            .iter()
+            .map(|o| excerpt(&owner_label(o)))
+            .collect();
+        let grants_consent = !app_roles.is_empty() || !delegated_scopes.is_empty();
+        let adds_trust = federated_credentials.iter().any(|f| f.rejected.is_none());
+        let requires_approval = (grants_consent
+            && consent_needs_approval(&app_roles, &delegated_scopes))
+            || adds_trust
+            || !group_memberships.is_empty();
+        let shown = grants_consent
+            || !external.is_empty()
+            || !federated_credentials.is_empty()
+            || !group_memberships.is_empty()
+            || !app_role_assignees.is_empty();
+        if !shown {
+            continue;
+        }
+        items.push(PrivilegedRestoreItem {
+            kind: PrivilegedKind::App,
+            source_app_id: app.source_app_id.clone(),
+            display_name: excerpt(&app.display_name),
+            admin_consent: grants_consent,
+            requires_approval,
+            app_roles,
+            delegated_scopes,
+            external_pre_authorized_clients: external,
+            federated_credentials,
+            owners,
+            group_memberships,
+            app_role_assignees,
+        });
+    }
+    for mi in &backup.managed_identities {
+        let app_roles: Vec<PrivilegedPermission> = mi
+            .held_app_roles
+            .iter()
+            .map(|r| {
+                let value = r.app_role_value.clone().filter(|v| !v.is_empty());
+                PrivilegedPermission {
+                    resource_app_id: r.resource_app_id.clone(),
+                    resource_display_name: r.resource_display_name.clone(),
+                    permission_id: r.app_role_id.clone(),
+                    // No value: Pass 5 cannot re-bind it at all (a warning).
+                    risk: value
+                        .as_deref()
+                        .map_or(PermissionRisk::Unknown, app_role_risk),
+                    value,
+                    restored_api: false,
+                }
+            })
+            .collect();
+        if app_roles.is_empty() {
+            continue;
+        }
+        items.push(PrivilegedRestoreItem {
+            kind: PrivilegedKind::ManagedIdentity,
+            source_app_id: mi.source_app_id.clone(),
+            display_name: excerpt(&mi.display_name),
+            // Every app role is app-only access to the resource.
+            requires_approval: true,
+            app_roles,
+            ..Default::default()
+        });
+    }
+    items
+}
+
+/// The label a permission gets in a report line: its value, else its id.
+fn permission_label(p: &PrivilegedPermission) -> String {
+    match &p.value {
+        Some(v) => v.clone(),
+        None => format!(
+            "unidentified permission {} on {}",
+            p.permission_id, p.resource_app_id
+        ),
+    }
+}
+
+/// The approval key for an app registration.
+fn app_approval(source_app_id: &str) -> RestoreApproval {
+    RestoreApproval {
+        kind: PrivilegedKind::App,
+        source_app_id: source_app_id.to_string(),
+    }
+}
+
+/// The app registrations whose standing access the run withholds: approval
+/// required ([`PrivilegedRestoreItem::requires_approval`]) and not given. Maps
+/// source appId → the permissions its admin consent would have granted, for the
+/// report. Skips the reads entirely when every app is approved.
+async fn unapproved_apps(
+    client: &GraphClient,
+    backup: &TenantBackup,
+    approved: &HashSet<RestoreApproval>,
+    session: &SessionDead,
+) -> HashMap<String, Vec<String>> {
+    let any_unapproved = backup
+        .app_registrations
+        .iter()
+        .any(|a| !approved.contains(&app_approval(&a.source_app_id)));
+    if !any_unapproved {
+        return HashMap::new();
+    }
+    privileged_restore_items(client, backup, session)
+        .await
+        .into_iter()
+        .filter(|i| {
+            i.kind == PrivilegedKind::App
+                && i.requires_approval
+                && !approved.contains(&app_approval(&i.source_app_id))
+        })
+        .map(|i| {
+            let consent = i
+                .app_roles
+                .iter()
+                .chain(&i.delegated_scopes)
+                .map(permission_label)
+                .collect();
+            (i.source_app_id, consent)
+        })
+        .collect()
+}
+
+/// Sorted, case-folded form of a declared-permissions list, for comparing the
+/// live app against the remapped backup.
+fn rra_fingerprint(
+    rra: &[azapptoolkit_core::models::RequiredResourceAccess],
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out: Vec<(String, Vec<(String, String)>)> = rra
+        .iter()
+        .map(|r| {
+            let mut access: Vec<(String, String)> = r
+                .resource_access
+                .iter()
+                .map(|a| (a.id.to_ascii_lowercase(), a.r#type.clone()))
+                .collect();
+            access.sort();
+            (r.resource_app_id.to_ascii_lowercase(), access)
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Replays the backup (app registrations, enterprise apps, managed-identity
 /// permissions) into the current tenant. See the module docs for the pass
 /// structure. Busts the destination list caches on a
 /// run that created anything.
+///
+/// `approvals` are the `RestorePlan.privileged` items the operator approved,
+/// by kind and source appId. An item that
+/// [requires approval](crate::dto::backup::PrivilegedRestoreItem::requires_approval)
+/// and is not named here is still created and wired, but gets no standing
+/// access from the file: an app's admin consent, federated credentials,
+/// owners and group memberships, a managed identity's app roles — each
+/// withheld one a runbook item.
 #[tauri::command]
 pub async fn restore_tenant(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     tenant_id: String,
     backup: TenantBackup,
+    approvals: Vec<RestoreApproval>,
 ) -> Result<RestoreReport, UiError> {
     check_manifest_schema(backup.schema_version)?;
     validate_manifest(&backup)?;
@@ -541,11 +978,68 @@ pub async fn restore_tenant(
     }
 
     let client = state.graph_for(&tenant_id);
+    // One cancel token for the whole restore, claimed before the first await.
+    // Claiming per pass would take a new generation each time and lose a cancel
+    // the operator issued during an earlier pass.
+    let cancel = state.restore_cancel.claim();
     // The signed-in account's object id in the destination: the one owner an
     // app this restore created may have besides the manifest's own.
     let operator_oid = state.auth.tenant_context(&tenant_id).map(|t| t.account_oid);
+    let approved: HashSet<RestoreApproval> = approvals.into_iter().collect();
+    let (report, created_any) = run_restore(
+        &client,
+        &app_handle,
+        cancel,
+        RestoreRun {
+            backup: &backup,
+            tenant_id: &tenant_id,
+            cloud,
+            operator_oid: operator_oid.as_deref(),
+            approved: &approved,
+        },
+    )
+    .await;
+    // Anything created means the destination's lists/details/audit are stale.
+    // Only on the success path (we're returning Ok).
+    if created_any {
+        invalidate_app_lists(&state.cache, &tenant_id);
+    }
+    Ok(report)
+}
+
+/// What one restore run replays, and into where.
+struct RestoreRun<'a> {
+    backup: &'a TenantBackup,
+    /// The destination tenant.
+    tenant_id: &'a str,
+    cloud: CloudEnvironment,
+    operator_oid: Option<&'a str>,
+    /// Items approved in the plan (see [`restore_tenant`]).
+    approved: &'a HashSet<RestoreApproval>,
+}
+
+/// The five passes of [`restore_tenant`], split from the command the way
+/// [`restore_managed_identities`] is, so the pass loop runs in a test against a
+/// mock Graph. Returns the report and whether any app was created or adopted
+/// (the caller busts the list caches on that).
+///
+/// Stops at the next item on `cancel` and on a dead session; both flag the
+/// report.
+async fn run_restore(
+    client: &GraphClient,
+    progress: &impl ProgressSink,
+    cancel: CancelToken,
+    run: RestoreRun<'_>,
+) -> (RestoreReport, bool) {
+    let RestoreRun {
+        backup,
+        tenant_id,
+        cloud,
+        operator_oid,
+        approved,
+    } = run;
     let total = backup.app_registrations.len();
-    emit(&app_handle, 0, total, None);
+    emit(progress, 0, total, None);
 
     let mut report = RestoreReport::default();
     // source_app_id → new app id, for remapping cross-app references.
@@ -553,17 +1047,17 @@ pub async fn restore_tenant(
     // Per-run principal-resolution memo (UPN/group display name → destination
     // object id), shared across passes so a principal reused across owners,
     // assignees, and group memberships is searched once, not per occurrence.
-    let mut principals: HashMap<String, Option<String>> = HashMap::new();
+    let mut principals = PrincipalMemo::new();
     // The apps we actually created, paired with their backup + new ids, so
     // passes 2–3 wire exactly those.
     let mut created: Vec<CreatedApp> = Vec::new();
     // One latch across all five passes: the first re-auth-fatal error stops the
     // rest instead of letting each remaining item fail the same way.
     let session = SessionDead::new();
-    // One cancel token for the whole restore, claimed before the first write.
-    // Claiming per pass would take a new generation each time and lose a cancel
-    // the operator issued during an earlier pass.
-    let cancel = state.restore_cancel.claim();
+    // The apps whose standing access passes 2-4 withhold — recomputed here,
+    // before anything is created, from the same classification the plan
+    // showed, rather than taken from the front end.
+    let withheld = unapproved_apps(client, backup, approved, &session).await;
 
     // ---- Pass 1: create shells ----
     let mut done = 0;
@@ -584,10 +1078,10 @@ pub async fn restore_tenant(
         // creating blind is how a re-run duplicates apps, and adopting blind
         // would hand someone else's app this one's permissions and consent.
         match decide_adoption(
-            &client,
+            client,
             app,
             backup.created_at,
-            operator_oid.as_deref(),
+            operator_oid,
             &mut principals,
             &session,
         )
@@ -599,7 +1093,7 @@ pub async fn restore_tenant(
                     reason,
                 });
                 done += 1;
-                emit(&app_handle, done, total, Some(app.display_name.clone()));
+                emit(progress, done, total, Some(app.display_name.clone()));
                 continue;
             }
             Adoption::Adopt {
@@ -626,7 +1120,7 @@ pub async fn restore_tenant(
                     warnings,
                 });
                 done += 1;
-                emit(&app_handle, done, total, Some(app.display_name.clone()));
+                emit(progress, done, total, Some(app.display_name.clone()));
                 continue;
             }
             Adoption::Create => {}
@@ -644,7 +1138,7 @@ pub async fn restore_tenant(
         // can exist without it — not even one whose SP create then failed.
         let marker = restore_marker(&app.source_app_id);
         match create_application_core_with(
-            &client,
+            client,
             input,
             CreateExtras {
                 tags: vec![marker],
@@ -684,7 +1178,7 @@ pub async fn restore_tenant(
             }
         }
         done += 1;
-        emit(&app_handle, done, total, Some(app.display_name.clone()));
+        emit(progress, done, total, Some(app.display_name.clone()));
     }
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
@@ -701,7 +1195,7 @@ pub async fn restore_tenant(
             break;
         }
         let (restored, trusts) = wire_application(
-            &client,
+            client,
             c,
             &app_id_remap,
             &mut principals,
@@ -709,7 +1203,8 @@ pub async fn restore_tenant(
             cloud,
             backup.created_at,
             &backup.source_tenant_id,
-            &tenant_id,
+            tenant_id,
+            withheld.contains_key(&c.backup.source_app_id),
         )
         .await;
         report.apps.push(restored);
@@ -728,31 +1223,37 @@ pub async fn restore_tenant(
         if !c.backup.admin_consent_granted {
             continue;
         }
-        // The freshly-restored app reg usually has its SP already (Pass 1),
-        // and a run that created one still busts the list tier below, since
-        // `created` is non-empty — so `sp_created` is moot here.
-        match grant_admin_consent_core(&client, &c.new_object_id).await {
-            Ok(run) => {
-                report.apps[idx].consent_granted = run.error.is_none();
-                for f in run.result.failures {
-                    report.apps[idx]
-                        .warnings
-                        .push(format!("consent: {} ({})", f.message, f.resource_app_id));
-                }
-                if let Some(e) = run.error {
-                    session.note_code(&e.code);
-                    report.apps[idx]
-                        .warnings
-                        .push(format!("admin consent failed: {}", e.message));
-                }
-            }
-            Err(e) => {
-                session.note_code(&e.code);
-                report.apps[idx]
-                    .warnings
-                    .push(format!("admin consent failed: {}", e.message));
-            }
+        // Not approved in the plan: the file asks for tenant-wide consent the
+        // operator has not agreed to grant. The app is still restored; the
+        // consent becomes a runbook item.
+        if let Some(held) = withheld.get(&c.backup.source_app_id) {
+            report.apps[idx]
+                .warnings
+                .push("admin consent skipped: not approved in the plan".into());
+            report.manual_items.push(ManualItem {
+                display_name: c.backup.display_name.clone(),
+                reason: format!(
+                    "Admin consent skipped: not approved in the plan. The backup asks for \
+                     tenant-wide consent to {}. Review them, then grant consent from the app's \
+                     Permissions tab if they are intended.",
+                    if held.is_empty() {
+                        "its declared permissions".to_string()
+                    } else {
+                        held.join(", ")
+                    }
+                ),
+            });
+            continue;
         }
+        reconsent(
+            client,
+            c,
+            &app_id_remap,
+            &session,
+            &mut report.apps[idx],
+            &mut report.manual_items,
+        )
+        .await;
     }
 
     // ---- Pass 4: enterprise applications ----
@@ -767,10 +1268,14 @@ pub async fn restore_tenant(
         if session.is_dead() {
             break;
         }
+        // Group memberships always need approval, so they apply only to an app
+        // the operator approved — decided from the approvals themselves, never
+        // from a classification that could miss an enterprise app.
         restore_enterprise_app(
-            &client,
+            client,
             ent,
             &app_id_remap,
+            !approved.contains(&app_approval(&ent.source_app_id)),
             &mut report,
             &mut principals,
             &session,
@@ -785,23 +1290,96 @@ pub async fn restore_tenant(
     if cancel.is_cancelled() {
         report.cancelled = true;
     } else if !backup.managed_identities.is_empty() && !session.is_dead() {
-        restore_managed_identities(&client, &backup.managed_identities, &mut report, &session)
-            .await;
+        restore_managed_identities(
+            client,
+            &backup.managed_identities,
+            approved,
+            &mut report,
+            &session,
+        )
+        .await;
     }
 
-    // Anything created means the destination's lists/details/audit are stale.
-    // Only on the success path (we're returning Ok).
-    if !created.is_empty() {
-        invalidate_app_lists(&state.cache, &tenant_id);
-    }
     // Unlike the read-only fan-outs, which return `session.err(..)` rather than
     // a partial result, a restore has already created objects in the tenant —
     // discarding the report would leave the operator with no record of what
     // exists. So the report comes back, flagged, and the front end pairs the
     // flag with the re-auth prompt.
     report.session_expired = session.is_dead();
-    emit(&app_handle, total, total, None);
-    Ok(report)
+    emit(progress, total, total, None);
+    (report, !created.is_empty())
+}
+
+/// Pass-3 work for one app: re-grant admin consent — but only for exactly the
+/// declared permissions the plan classified.
+///
+/// Consent grants whatever the app *in the tenant* declares, and the plan
+/// classified the backup's list. Those differ whenever Pass 2's PATCH failed or
+/// was skipped (an empty manifest list sends none), and an adopted app may
+/// carry permissions someone else declared — so the live list is re-read and
+/// consent proceeds only when it equals the remapped backup list, using that
+/// same read (never a second one that could change in between). Anything else
+/// is a runbook item, never a consent.
+async fn reconsent(
+    client: &GraphClient,
+    c: &CreatedApp,
+    app_id_remap: &HashMap<String, String>,
+    session: &SessionDead,
+    out: &mut RestoredApp,
+    manual: &mut Vec<ManualItem>,
+) {
+    let expected = remap_required_resource_access(&c.backup.required_resource_access, app_id_remap);
+    let live = match client.get_application(&c.new_object_id).await {
+        Ok(live) => live,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            out.warnings.push(format!(
+                "admin consent skipped: couldn't re-read the app's declared permissions ({e})"
+            ));
+            return;
+        }
+    };
+    if rra_fingerprint(&live.required_resource_access) != rra_fingerprint(&expected) {
+        out.warnings.push(
+            "admin consent skipped: the app's declared permissions don't match the backup".into(),
+        );
+        manual.push(ManualItem {
+            display_name: c.backup.display_name.clone(),
+            reason: "Admin consent skipped: the app's declared API permissions in this tenant \
+                     don't match the backup the plan showed (the permissions update failed, or \
+                     the app already declared others). Consent would have granted what the app \
+                     declares now, which nobody approved. Review its API permissions, then grant \
+                     consent from its Permissions tab if they are intended."
+                .into(),
+        });
+        return;
+    }
+    if expected.is_empty() {
+        // Nothing declared, nothing to consent.
+        return;
+    }
+    // The freshly-restored app reg usually has its SP already (Pass 1),
+    // and a run that created one still busts the list tier, since
+    // `created` is non-empty — so `sp_created` is moot here.
+    match grant_admin_consent_to_app_core(client, &live).await {
+        Ok(run) => {
+            out.consent_granted = run.error.is_none();
+            for f in run.result.failures {
+                out.warnings
+                    .push(format!("consent: {} ({})", f.message, f.resource_app_id));
+            }
+            if let Some(e) = run.error {
+                session.note_code(&e.code);
+                out.warnings
+                    .push(format!("admin consent failed: {}", e.message));
+            }
+        }
+        Err(e) => {
+            session.note_code(&e.code);
+            out.warnings
+                .push(format!("admin consent failed: {}", e.message));
+        }
+    }
 }
 
 /// Writes the restore report to a JSON file via the OS save dialog. **The
@@ -892,17 +1470,22 @@ fn restorable_fic_subject(fic: &FederatedIdentityCredential) -> Result<&str, Str
 /// earlier run already put there. `taken_at` is the backup's timestamp, the
 /// cutoff for [`expired_at_backup`]; the two tenant ids are what the
 /// identifier-URI rewrite maps (source → destination).
+///
+/// `withhold` marks an app that needed approval in the plan and did not get
+/// it: it is wired as usual, but gains no federated credential and no owner
+/// from the file — each withheld set is one runbook item.
 #[allow(clippy::too_many_arguments)]
 async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
     app_id_remap: &HashMap<String, String>,
-    principals: &mut HashMap<String, Option<String>>,
+    principals: &mut PrincipalMemo,
     session: &SessionDead,
     cloud: CloudEnvironment,
     taken_at: DateTime<Utc>,
     source_tenant_id: &str,
     dest_tenant_id: &str,
+    withhold: bool,
 ) -> (RestoredApp, Vec<ManualItem>) {
     let app = &c.backup;
     // Sign-in trusts this app gained from the manifest. Reported separately
@@ -1044,7 +1627,32 @@ async fn wire_application(
     //
     // An adopted app may already hold the ones an earlier run created; a failed
     // read falls through to creating, where a duplicate is a 409 warning.
-    let existing_fics: HashSet<String> = if c.adopted && !app.federated_credentials.is_empty() {
+    let fics: &[FederatedIdentityCredential] = if withhold {
+        if !app.federated_credentials.is_empty() {
+            trusts.push(ManualItem {
+                display_name: app.display_name.clone(),
+                reason: format!(
+                    "Federated credentials not restored: not approved in the plan ({}). Each \
+                     lets an external issuer sign in as this app with no secret; add them from \
+                     the app's Certificates & secrets tab if they are intended.",
+                    app.federated_credentials
+                        .iter()
+                        .map(|f| format!(
+                            "'{}': issuer {}, subject {}",
+                            f.name,
+                            f.issuer,
+                            f.subject.as_deref().unwrap_or("(none)")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            });
+        }
+        &[]
+    } else {
+        &app.federated_credentials
+    };
+    let existing_fics: HashSet<String> = if c.adopted && !fics.is_empty() {
         match client.list_federated_credentials(&c.new_object_id).await {
             Ok(list) => list.into_iter().map(|f| f.name).collect(),
             Err(e) => {
@@ -1055,7 +1663,7 @@ async fn wire_application(
     } else {
         HashSet::new()
     };
-    for fic in &app.federated_credentials {
+    for fic in fics {
         let subject = match restorable_fic_subject(fic) {
             Ok(subject) => subject,
             Err(warning) => {
@@ -1119,8 +1727,28 @@ async fn wire_application(
 
     // Owners — remap each principal by UPN / display name in the destination.
     // An adopted app skips the owners it already has (a failed read falls
-    // through to adding, where a duplicate is only a warning).
-    let existing_owners: HashSet<String> = if c.adopted && !app.owners.is_empty() {
+    // through to adding, where a duplicate is only a warning). An owner can add
+    // credentials to the app, so a withheld app gets none from the file.
+    let owners: &[PrincipalRef] = if withhold {
+        if !app.owners.is_empty() {
+            trusts.push(ManualItem {
+                display_name: app.display_name.clone(),
+                reason: format!(
+                    "Owners not added: not approved in the plan ({}). Add them from the app's \
+                     Owners tab if they are intended.",
+                    app.owners
+                        .iter()
+                        .map(owner_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        &[]
+    } else {
+        &app.owners
+    };
+    let existing_owners: HashSet<String> = if c.adopted && !owners.is_empty() {
         match client.list_owners(&c.new_object_id).await {
             Ok(list) => list.into_iter().map(|o| o.id).collect(),
             Err(e) => {
@@ -1131,16 +1759,16 @@ async fn wire_application(
     } else {
         HashSet::new()
     };
-    for owner in &app.owners {
+    for owner in owners {
         match resolve_principal(client, principals, owner).await {
-            Some(new_id) if existing_owners.contains(&new_id) => {}
-            Some(new_id) => {
+            Ok(new_id) if existing_owners.contains(&new_id) => {}
+            Ok(new_id) => {
                 if let Err(e) = client.add_owner(&c.new_object_id, &new_id).await {
                     session.note_code(e.ui_code());
                     out.warnings.push(format!("owner: {e}"));
                 }
             }
-            None => out.unresolved_owners.push(owner_label(owner)),
+            Err(why) => out.unresolved_owners.push(why.label(owner)),
         }
     }
 
@@ -1209,13 +1837,15 @@ const DEFAULT_ACCESS_ROLE: &str = "00000000-0000-0000-0000-000000000000";
 ///
 /// Every failure is noted through `session`, as in Pass 2, so a session that
 /// dies here stops the restore instead of producing one wrong runbook item per
-/// remaining app.
+/// remaining app. `withhold` (its app was not approved in the plan) skips the
+/// group memberships into one runbook item; role assignments still apply.
 async fn restore_enterprise_app(
     client: &GraphClient,
     ent: &EnterpriseAppBackup,
     app_id_remap: &HashMap<String, String>,
+    withhold: bool,
     report: &mut RestoreReport,
-    principals: &mut HashMap<String, Option<String>>,
+    principals: &mut PrincipalMemo,
     session: &SessionDead,
 ) {
     // Restorable only when its app registration was recreated here.
@@ -1285,11 +1915,13 @@ async fn restore_enterprise_app(
 
     // App-role assignments — principal remapped by name, role by value.
     for assignee in &ent.app_role_assignees {
-        let Some(principal_id) = resolve_principal(client, principals, &assignee.principal).await
-        else {
-            out.unresolved_principals
-                .push(owner_label(&assignee.principal));
-            continue;
+        let principal_id = match resolve_principal(client, principals, &assignee.principal).await {
+            Ok(id) => id,
+            Err(why) => {
+                out.unresolved_principals
+                    .push(why.label(&assignee.principal));
+                continue;
+            }
         };
         let Some(role_id) = map_assignee_role_id(assignee, &sp.app_roles) else {
             out.warnings.push(format!(
@@ -1311,17 +1943,38 @@ async fn restore_enterprise_app(
         }
     }
 
-    // Group memberships — resolve each group by display name.
-    for group in &ent.group_memberships {
+    // Group memberships — resolve each group by display name. The file chooses
+    // the group, and a role-assignable group carries a directory role, so an
+    // app not approved in the plan joins none of them.
+    let groups: &[PrincipalRef] = if withhold {
+        if !ent.group_memberships.is_empty() {
+            report.manual_items.push(ManualItem {
+                display_name: ent.display_name.clone(),
+                reason: format!(
+                    "Group memberships not added: not approved in the plan ({}). Add the \
+                     service principal to them manually if they are intended.",
+                    ent.group_memberships
+                        .iter()
+                        .map(owner_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        &[]
+    } else {
+        &ent.group_memberships
+    };
+    for group in groups {
         match resolve_principal(client, principals, group).await {
-            Some(group_id) => match client.add_group_member(&group_id, &sp.id).await {
+            Ok(group_id) => match client.add_group_member(&group_id, &sp.id).await {
                 Ok(()) => out.group_memberships_applied += 1,
                 Err(e) => {
                     session.note_code(e.ui_code());
                     out.warnings.push(format!("group membership: {e}"));
                 }
             },
-            None => out.unresolved_principals.push(owner_label(group)),
+            Err(why) => out.unresolved_principals.push(why.label(group)),
         }
     }
 
@@ -1337,10 +1990,17 @@ async fn restore_enterprise_app(
 ///
 /// A failed destination listing is ONE runbook item saying so — never a "not
 /// found" item per MI, which would send the infra team to recreate identities
-/// that already exist — and is noted through `session`.
+/// that already exist — and is noted through `session`. A name that matches
+/// several destination identities re-binds none of them: the backup cannot say
+/// which one is this identity.
+///
+/// Every app role is app-only access, so an MI's roles are re-bound only when
+/// `approved` names it (the plan's opt-in); otherwise they are withheld as one
+/// runbook item.
 async fn restore_managed_identities(
     client: &GraphClient,
     mis: &[ManagedIdentityBackup],
+    approved: &HashSet<RestoreApproval>,
     report: &mut RestoreReport,
     session: &SessionDead,
 ) {
@@ -1359,13 +2019,36 @@ async fn restore_managed_identities(
             return;
         }
     };
-    let by_name: HashMap<String, String> = dest
-        .into_iter()
-        .map(|sp| (sp.display_name.to_ascii_lowercase(), sp.id))
-        .collect();
+    // Every destination MI under each name — never a map that keeps only the
+    // last, which would re-bind the roles to whichever identity came last.
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    for sp in dest {
+        by_name
+            .entry(sp.display_name.to_ascii_lowercase())
+            .or_default()
+            .push(sp.id);
+    }
 
     for mi in mis {
-        let Some(principal_id) = by_name.get(&mi.display_name.to_ascii_lowercase()).cloned() else {
+        let matches = by_name
+            .get(&mi.display_name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if matches.len() > 1 {
+            report.manual_items.push(ManualItem {
+                display_name: mi.display_name.clone(),
+                reason: format!(
+                    "{} managed identities in the destination are named '{}' ({}), so none was \
+                     re-bound — the backup cannot say which one is this identity. Rename or \
+                     remove the duplicates, then run the restore again with this backup.",
+                    matches.len(),
+                    mi.display_name,
+                    matches.join(", ")
+                ),
+            });
+            continue;
+        }
+        let Some(principal_id) = matches.first().cloned() else {
             let arm = mi
                 .arm_resource_id
                 .as_deref()
@@ -1396,8 +2079,16 @@ async fn restore_managed_identities(
         // (no value, or the resource couldn't be resolved at backup) can't be
         // re-bound by value.
         let mut by_resource: HashMap<String, Vec<String>> = HashMap::new();
+        let mi_approved = approved.contains(&RestoreApproval {
+            kind: PrivilegedKind::ManagedIdentity,
+            source_app_id: mi.source_app_id.clone(),
+        });
+        let mut withheld: Vec<String> = Vec::new();
         for r in &mi.held_app_roles {
             match r.app_role_value.as_deref() {
+                Some(v) if !v.is_empty() && !r.resource_app_id.is_empty() && !mi_approved => {
+                    withheld.push(v.to_string());
+                }
                 Some(v) if !v.is_empty() && !r.resource_app_id.is_empty() => {
                     by_resource
                         .entry(r.resource_app_id.clone())
@@ -1408,6 +2099,16 @@ async fn restore_managed_identities(
                     "a held app-role couldn't be re-bound (resource or value unresolved)".into(),
                 ),
             }
+        }
+        if !withheld.is_empty() {
+            report.manual_items.push(ManualItem {
+                display_name: mi.display_name.clone(),
+                reason: format!(
+                    "App roles not re-bound: not approved in the plan ({}). Grant them from the \
+                     managed identity's detail view if they are intended.",
+                    withheld.join(", ")
+                ),
+            });
         }
         for (resource_app_id, roles) in by_resource {
             match grant_managed_identity_roles_core(client, &principal_id, &resource_app_id, &roles)
@@ -1461,9 +2162,76 @@ fn map_assignee_role_id(
         .map(|r| r.id.clone())
 }
 
-/// Cache key for a principal: its UPN (lowercased) when present, else its display
-/// name. `None` when neither is set (nothing to resolve). Mirrors the lookup
-/// branch order in [`resolve_principal_uncached`].
+/// Which directory collection a backed-up principal is looked up in by display
+/// name, from its recorded `principal_type` — an owner's `@odata.type`
+/// (`#microsoft.graph.user`) or an assignment's `principalType` (`User`).
+#[derive(Debug, Clone, PartialEq)]
+enum PrincipalKind {
+    User,
+    Group,
+    /// No type recorded (an older backup): both collections are searched and
+    /// exactly one match across them is required.
+    Either,
+    /// A type the restore cannot look up by name (a service principal, …).
+    Other(String),
+}
+
+fn principal_kind(principal: &PrincipalRef) -> PrincipalKind {
+    let Some(raw) = principal
+        .principal_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return PrincipalKind::Either;
+    };
+    let bare = raw.strip_prefix("#microsoft.graph.").unwrap_or(raw);
+    match bare.to_ascii_lowercase().as_str() {
+        "user" => PrincipalKind::User,
+        "group" => PrincipalKind::Group,
+        _ => PrincipalKind::Other(bare.to_string()),
+    }
+}
+
+/// Why a backed-up principal did not resolve in the destination.
+#[derive(Debug, Clone, PartialEq)]
+enum Unresolved {
+    /// No exact match.
+    NotFound,
+    /// More than one exact match, so none is taken: binding an owner or a role
+    /// to the wrong one of two same-named principals grants it to someone the
+    /// backup never named.
+    Ambiguous(usize),
+    /// A lookup failed. Never a reason to try another collection: a group
+    /// search that errored is not a group that does not exist.
+    LookupFailed,
+    /// Its type cannot be looked up by name.
+    UnsupportedType(String),
+}
+
+impl Unresolved {
+    /// The principal's report label, with the reason when it is not plain
+    /// "not found".
+    fn label(&self, principal: &PrincipalRef) -> String {
+        let name = owner_label(principal);
+        match self {
+            Self::NotFound => name,
+            Self::Ambiguous(n) => format!("{name} (ambiguous: {n} matches)"),
+            Self::LookupFailed => format!("{name} (lookup failed)"),
+            Self::UnsupportedType(t) => format!("{name} (a {t}, not a user or group)"),
+        }
+    }
+}
+
+/// A resolution: the destination object id, or why there is none.
+type Resolution = Result<String, Unresolved>;
+
+/// The per-run principal memo ([`resolve_principal`]).
+type PrincipalMemo = HashMap<String, Resolution>;
+
+/// Cache key for a principal: its UPN (lowercased) when present, else its
+/// [`PrincipalKind`] and display name. `None` when neither is set (nothing to
+/// resolve). Mirrors the lookup branch order in [`resolve_principal_uncached`].
 fn principal_cache_key(principal: &PrincipalRef) -> Option<String> {
     if let Some(upn) = principal
         .user_principal_name
@@ -1472,11 +2240,17 @@ fn principal_cache_key(principal: &PrincipalRef) -> Option<String> {
     {
         return Some(format!("upn:{}", upn.to_ascii_lowercase()));
     }
+    let kind = match principal_kind(principal) {
+        PrincipalKind::User => "user".to_string(),
+        PrincipalKind::Group => "group".to_string(),
+        PrincipalKind::Either => "any".to_string(),
+        PrincipalKind::Other(t) => t,
+    };
     principal
         .display_name
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|name| format!("name:{name}"))
+        .map(|name| format!("name:{kind}:{name}"))
 }
 
 /// Resolves a backed-up principal to its destination object id, memoizing the
@@ -1487,10 +2261,12 @@ fn principal_cache_key(principal: &PrincipalRef) -> Option<String> {
 /// results are cached too (a principal absent now stays absent for the run).
 async fn resolve_principal(
     client: &GraphClient,
-    cache: &mut HashMap<String, Option<String>>,
+    cache: &mut PrincipalMemo,
     principal: &PrincipalRef,
-) -> Option<String> {
-    let key = principal_cache_key(principal)?;
+) -> Resolution {
+    let Some(key) = principal_cache_key(principal) else {
+        return Err(Unresolved::NotFound);
+    };
     if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
@@ -1499,47 +2275,69 @@ async fn resolve_principal(
     resolved
 }
 
-/// Resolves a backed-up principal to its object id in the destination tenant by
-/// UPN (users) or display name (groups), returning `None` when no exact match
-/// exists yet. Best-effort: a lookup error resolves to `None` (the owner is then
-/// reported as unresolved rather than failing the whole restore).
-async fn resolve_principal_uncached(
-    client: &GraphClient,
-    principal: &PrincipalRef,
-) -> Option<String> {
+/// Exactly one id, or why not.
+fn exactly_one(ids: Vec<String>) -> Resolution {
+    match <[String; 1]>::try_from(ids) {
+        Ok([id]) => Ok(id),
+        Err(ids) if ids.is_empty() => Err(Unresolved::NotFound),
+        Err(ids) => Err(Unresolved::Ambiguous(ids.len())),
+    }
+}
+
+/// The ids of every hit whose display name equals `name` ignoring case — as
+/// Graph's `eq` does, so "Ops" and "OPS" are two matches (ambiguous), never one
+/// resolved by a stricter client-side comparison.
+fn exact_name_matches(hits: Vec<DirectoryObject>, name: &str) -> Vec<String> {
+    let want = name.to_lowercase();
+    hits.into_iter()
+        .filter(|h| h.display_name.as_deref().map(str::to_lowercase) == Some(want.clone()))
+        .map(|h| h.id)
+        .collect()
+}
+
+/// Resolves a backed-up principal to its object id in the destination tenant:
+/// by UPN when it has one (`find_user_by_upn`, an exact `eq`), else by exact
+/// display name (`displayName eq`, every page) in the collection its recorded
+/// type names ([`PrincipalKind`]) — no cross-kind fallback, and every match
+/// counted, so it resolves only when exactly one principal fits.
+/// Best-effort: an unresolved principal is reported, never a run failure.
+async fn resolve_principal_uncached(client: &GraphClient, principal: &PrincipalRef) -> Resolution {
     if let Some(upn) = principal
         .user_principal_name
         .as_deref()
         .filter(|s| !s.is_empty())
     {
-        if let Ok(hits) = client.search_users(upn).await {
-            return hits.into_iter().find_map(|u| {
-                let matches = u
-                    .user_principal_name
-                    .as_deref()
-                    .is_some_and(|v| v.eq_ignore_ascii_case(upn));
-                matches.then_some(u.id)
-            });
-        }
-        return None;
+        return match client.find_user_by_upn(upn).await {
+            Ok(Some(user)) => Ok(user.id),
+            Ok(None) => Err(Unresolved::NotFound),
+            Err(_) => Err(Unresolved::LookupFailed),
+        };
     }
-    if let Some(name) = principal.display_name.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(hits) = client.search_groups(name).await
-            && let Some(id) = hits.into_iter().find_map(|g| {
-                let matches = g.display_name.as_deref().is_some_and(|v| v == name);
-                matches.then_some(g.id)
-            })
-        {
-            return Some(id);
-        }
-        if let Ok(hits) = client.search_users(name).await {
-            return hits.into_iter().find_map(|u| {
-                let matches = u.display_name.as_deref().is_some_and(|v| v == name);
-                matches.then_some(u.id)
-            });
-        }
+    let Some(name) = principal.display_name.as_deref().filter(|s| !s.is_empty()) else {
+        return Err(Unresolved::NotFound);
+    };
+    let (users, groups) = match principal_kind(principal) {
+        PrincipalKind::User => (true, false),
+        PrincipalKind::Group => (false, true),
+        PrincipalKind::Either => (true, true),
+        PrincipalKind::Other(t) => return Err(Unresolved::UnsupportedType(t)),
+    };
+    let mut ids = Vec::new();
+    if groups {
+        let hits = client
+            .find_groups_by_display_name(name)
+            .await
+            .map_err(|_| Unresolved::LookupFailed)?;
+        ids.extend(exact_name_matches(hits, name));
     }
-    None
+    if users {
+        let hits = client
+            .find_users_by_display_name(name)
+            .await
+            .map_err(|_| Unresolved::LookupFailed)?;
+        ids.extend(exact_name_matches(hits, name));
+    }
+    exactly_one(ids)
 }
 
 fn owner_label(p: &PrincipalRef) -> String {
@@ -1649,7 +2447,8 @@ mod tests {
             Some("upn:alice@contoso.com")
         );
 
-        // No UPN → keyed by display name (the group path).
+        // No UPN → keyed by kind + display name: a user and a group may share
+        // a name, and are different lookups.
         let by_name = PrincipalRef {
             source_id: "id".into(),
             display_name: Some("Group X".into()),
@@ -1657,7 +2456,15 @@ mod tests {
         };
         assert_eq!(
             principal_cache_key(&by_name).as_deref(),
-            Some("name:Group X")
+            Some("name:any:Group X")
+        );
+        let typed = PrincipalRef {
+            principal_type: Some("#microsoft.graph.group".into()),
+            ..by_name.clone()
+        };
+        assert_eq!(
+            principal_cache_key(&typed).as_deref(),
+            Some("name:group:Group X")
         );
 
         // An empty UPN is ignored, falling through to the display name.
@@ -1669,7 +2476,7 @@ mod tests {
         };
         assert_eq!(
             principal_cache_key(&empty_upn).as_deref(),
-            Some("name:Group Y")
+            Some("name:any:Group Y")
         );
 
         // Neither set → no key (nothing to resolve or memoize).
@@ -1779,7 +2586,15 @@ mod tests {
                 ent("absent", false),
                 ent(NO_SP, false),
             ],
-            managed_identities: vec![ManagedIdentityBackup::default(); 2],
+            managed_identities: [
+                "33333333-3333-3333-3333-333333333333",
+                "44444444-4444-4444-4444-444444444444",
+            ]
+            .map(|id| ManagedIdentityBackup {
+                source_app_id: id.into(),
+                ..Default::default()
+            })
+            .to_vec(),
             skipped: vec![SkippedObject::new("application", "obj-x", None, "403")],
         };
 
@@ -2111,7 +2926,8 @@ mod tests {
         let session = SessionDead::new();
         let mut report = RestoreReport::default();
 
-        restore_managed_identities(&client, &two_mis(), &mut report, &session).await;
+        restore_managed_identities(&client, &two_mis(), &HashSet::new(), &mut report, &session)
+            .await;
 
         assert_eq!(report.manual_items.len(), 1, "{:?}", report.manual_items);
         assert!(report.manual_items[0].reason.contains("Couldn't list"));
@@ -2134,7 +2950,8 @@ mod tests {
         let session = SessionDead::new();
         let mut report = RestoreReport::default();
 
-        restore_managed_identities(&client, &two_mis(), &mut report, &session).await;
+        restore_managed_identities(&client, &two_mis(), &HashSet::new(), &mut report, &session)
+            .await;
 
         assert!(session.is_dead(), "a dead refresh token must latch");
         assert_eq!(report.manual_items.len(), 1);
@@ -2167,6 +2984,7 @@ mod tests {
             &client,
             &ent,
             &remap,
+            false,
             &mut report,
             &mut HashMap::new(),
             &session,
@@ -2425,5 +3243,1130 @@ mod tests {
             1
         );
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn principal_kind_reads_odata_and_assignment_types() {
+        let with = |t: Option<&str>| PrincipalRef {
+            principal_type: t.map(Into::into),
+            ..Default::default()
+        };
+        assert_eq!(principal_kind(&with(None)), PrincipalKind::Either);
+        assert_eq!(principal_kind(&with(Some(" "))), PrincipalKind::Either);
+        assert_eq!(
+            principal_kind(&with(Some("#microsoft.graph.user"))),
+            PrincipalKind::User
+        );
+        // An app-role assignment records `principalType` bare.
+        assert_eq!(principal_kind(&with(Some("Group"))), PrincipalKind::Group);
+        assert_eq!(
+            principal_kind(&with(Some("ServicePrincipal"))),
+            PrincipalKind::Other("ServicePrincipal".into())
+        );
+    }
+
+    #[test]
+    fn an_unresolved_label_names_the_reason() {
+        let p = PrincipalRef {
+            display_name: Some("Ops".into()),
+            ..Default::default()
+        };
+        assert_eq!(Unresolved::NotFound.label(&p), "Ops");
+        assert_eq!(
+            Unresolved::Ambiguous(2).label(&p),
+            "Ops (ambiguous: 2 matches)"
+        );
+        assert_eq!(Unresolved::LookupFailed.label(&p), "Ops (lookup failed)");
+    }
+
+    // ---- behavioural tests of the pass loop, against a mock Graph ----
+
+    use wiremock::matchers::{method, path, path_regex, query_param};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    const GRAPH: &str = "00000003-0000-0000-c000-000000000000";
+    const APP_RW_ROLE: &str = "1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9";
+    const MAIL_SEND_ROLE: &str = "b633e1c5-b582-4048-a93e-9f11b44c7e96";
+    const USER_READ_SCOPE: &str = "e1fe6dd8-ba31-4d61-89e7-88639da4683d";
+    const SRC_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const SRC_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+
+    /// Answers whatever a test did not mount: 204 for a PATCH, an empty page
+    /// for anything else. A test mounts only what it asserts on and reads the
+    /// rest off [`requests`].
+    async fn mount_fallback(server: &MockServer) {
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(204))
+            .with_priority(10)
+            .mount(server)
+            .await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .with_priority(11)
+            .mount(server)
+            .await;
+    }
+
+    /// The requests `server` received with `verb` on exactly `url_path`.
+    async fn requests(server: &MockServer, verb: &str, url_path: &str) -> Vec<Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == verb && r.url.path() == url_path)
+            .collect()
+    }
+
+    fn created(app: AppRegistrationBackup) -> CreatedApp {
+        CreatedApp {
+            backup: app,
+            new_object_id: "new-obj".into(),
+            new_app_id: "new-app".into(),
+            adopted: false,
+            live_secret_names: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    async fn wire(client: &GraphClient, c: &CreatedApp) -> (RestoredApp, Vec<ManualItem>) {
+        wire_with(client, c, false).await
+    }
+
+    async fn wire_with(
+        client: &GraphClient,
+        c: &CreatedApp,
+        withhold: bool,
+    ) -> (RestoredApp, Vec<ManualItem>) {
+        wire_application(
+            client,
+            c,
+            &HashMap::new(),
+            &mut PrincipalMemo::new(),
+            &SessionDead::new(),
+            CloudEnvironment::Commercial,
+            "2026-01-01T00:00:00Z".parse().unwrap(),
+            "src-tenant",
+            "dst-tenant",
+            withhold,
+        )
+        .await
+    }
+
+    /// The authentication PATCH carries only the reply URLs that passed
+    /// validation — the wildcard one never reaches the tenant.
+    #[tokio::test]
+    async fn the_auth_patch_omits_a_rejected_redirect_uri() {
+        let server = MockServer::start().await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let c = created(AppRegistrationBackup {
+            display_name: "App A".into(),
+            web_redirect_uris: vec![
+                "https://good.contoso.com/cb".into(),
+                "https://*.evil.example/cb".into(),
+            ],
+            ..Default::default()
+        });
+
+        let (out, _) = wire(&client, &c).await;
+
+        let patches = requests(&server, "PATCH", "/applications/new-obj").await;
+        let auth: Vec<serde_json::Value> = patches
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .filter(|b: &serde_json::Value| b.get("web").is_some())
+            .collect();
+        assert_eq!(auth.len(), 1, "one authentication PATCH");
+        assert_eq!(
+            auth[0]["web"]["redirectUris"],
+            serde_json::json!(["https://good.contoso.com/cb"])
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("*.evil.example") && w.contains("NOT restored")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// A federated credential with an issuer validation refuses is never
+    /// POSTed — and is not reported as a restored trust.
+    #[tokio::test]
+    async fn a_federated_credential_with_a_bad_issuer_is_never_posted() {
+        let server = MockServer::start().await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let c = created(AppRegistrationBackup {
+            display_name: "App A".into(),
+            federated_credentials: vec![FederatedIdentityCredential {
+                name: "planted".into(),
+                issuer: "http://attacker.example".into(),
+                subject: Some("repo:x/y:ref:refs/heads/main".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let (out, trusts) = wire(&client, &c).await;
+
+        assert!(
+            requests(
+                &server,
+                "POST",
+                "/applications/new-obj/federatedIdentityCredentials"
+            )
+            .await
+            .is_empty(),
+            "a refused credential must not be created"
+        );
+        assert!(trusts.is_empty());
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("'planted' was NOT restored")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// An adopted app keeps the owners and secrets an earlier run gave it: no
+    /// owner is added twice, no secret issued twice.
+    #[tokio::test]
+    async fn an_adopted_app_skips_existing_owners_and_secrets() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/applications/new-obj/owners"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "value": [{ "id": "alice-oid" }] })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "alice-oid", "userPrincipalName": "alice@contoso.com" }]
+            })))
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let mut c = created(AppRegistrationBackup {
+            display_name: "App A".into(),
+            owners: vec![PrincipalRef {
+                user_principal_name: Some("alice@contoso.com".into()),
+                ..Default::default()
+            }],
+            secrets: vec![CredentialMeta {
+                display_name: Some("ci".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        c.adopted = true;
+        c.live_secret_names = vec!["ci".into()];
+
+        let (out, _) = wire(&client, &c).await;
+
+        assert!(
+            requests(&server, "POST", "/applications/new-obj/owners/$ref")
+                .await
+                .is_empty(),
+            "an existing owner must not be added again"
+        );
+        assert!(
+            requests(&server, "POST", "/applications/new-obj/addPassword")
+                .await
+                .is_empty(),
+            "an already-issued secret must not be issued again"
+        );
+        assert!(out.regenerated_secrets.is_empty());
+        assert!(
+            out.unresolved_owners.is_empty(),
+            "{:?}",
+            out.unresolved_owners
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("secret 'ci' already exists")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// An app whose admin consent covers a Graph application permission; the
+    /// backup's own `Application.ReadWrite.All` (high risk).
+    fn consenting_app(src: &str, name: &str) -> AppRegistrationBackup {
+        AppRegistrationBackup {
+            source_app_id: src.into(),
+            display_name: name.into(),
+            admin_consent_granted: true,
+            required_resource_access: vec![azapptoolkit_core::models::RequiredResourceAccess {
+                resource_app_id: GRAPH.into(),
+                resource_access: vec![azapptoolkit_core::models::ResourceAccess {
+                    id: APP_RW_ROLE.into(),
+                    r#type: "Role".into(),
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn manifest(apps: Vec<AppRegistrationBackup>) -> TenantBackup {
+        TenantBackup {
+            schema_version: BACKUP_SCHEMA_VERSION,
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            source_tenant_id: "src-tenant".into(),
+            cloud: CloudEnvironment::Commercial,
+            app_registrations: apps,
+            enterprise_apps: Vec::new(),
+            managed_identities: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// Pass 1's create answers with an object id derived from the display
+    /// name ("App A" → `obj-a`), so each app's later requests are tellable.
+    async fn mount_create(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/applications"))
+            .respond_with(|req: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let name = body["displayName"].as_str().unwrap_or_default().to_string();
+                let tag = name
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": format!("obj-{tag}"),
+                    "appId": format!("app-{tag}"),
+                    "displayName": name,
+                    "passwordCredentials": [],
+                    "keyCredentials": [],
+                    "requiredResourceAccess": []
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// Microsoft Graph's service principal, exposing the high-risk role.
+    async fn mount_graph_sp(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{GRAPH}'")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "graph-sp",
+                    "appId": GRAPH,
+                    "displayName": "Microsoft Graph",
+                    "appRoles": [{
+                        "id": APP_RW_ROLE,
+                        "value": "Application.ReadWrite.All",
+                        "allowedMemberTypes": ["Application"],
+                        "isEnabled": true
+                    }, {
+                        "id": MAIL_SEND_ROLE,
+                        "value": "Mail.Send",
+                        "allowedMemberTypes": ["Application"],
+                        "isEnabled": true
+                    }],
+                    "oauth2PermissionScopes": [{
+                        "id": USER_READ_SCOPE,
+                        "value": "User.Read",
+                        "isEnabled": true
+                    }]
+                }]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Pass 3's re-read: each restored app (`obj-…`) declares what
+    /// [`consenting_app`] does — what Pass 2 PATCHed.
+    async fn mount_live_apps(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/applications/obj-[a-z0-9]+$"))
+            .respond_with(|req: &Request| {
+                let id = req
+                    .url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let tag = id.trim_start_matches("obj-").to_string();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": id,
+                    "appId": format!("app-{tag}"),
+                    "displayName": format!("App {tag}"),
+                    "requiredResourceAccess": [{
+                        "resourceAppId": GRAPH,
+                        "resourceAccess": [{ "id": APP_RW_ROLE, "type": "Role" }]
+                    }]
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    /// Whether Pass 3 got as far as ensuring `app_id`'s service principal —
+    /// the first step of an actual consent.
+    async fn consent_attempted(server: &MockServer, app_id: &str) -> bool {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                r.method.as_str() == "GET"
+                    && r.url.path() == "/servicePrincipals"
+                    && r.url.query().unwrap_or_default().contains(app_id)
+            })
+    }
+
+    async fn restore(
+        client: &GraphClient,
+        backup: &TenantBackup,
+        cancel: CancelToken,
+        approved: &[&str],
+    ) -> (RestoreReport, bool) {
+        let approved: HashSet<RestoreApproval> = approved.iter().map(|s| app_approval(s)).collect();
+        run_restore(
+            client,
+            &crate::commands::test_support::Recorder::default(),
+            cancel,
+            RestoreRun {
+                backup,
+                tenant_id: "dst-tenant",
+                cloud: CloudEnvironment::Commercial,
+                operator_oid: Some("operator-oid"),
+                approved: &approved,
+            },
+        )
+        .await
+    }
+
+    /// The backend enforces the plan's opt-in: an app whose consent grants a
+    /// high-risk permission gets no consent call unless approved, whatever the
+    /// front end sent — and the skip is a runbook item, not a failure.
+    #[tokio::test]
+    async fn high_risk_consent_is_granted_only_to_approved_apps() {
+        let server = MockServer::start().await;
+        mount_create(&server).await;
+        mount_graph_sp(&server).await;
+        mount_live_apps(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let backup = manifest(vec![
+            consenting_app(SRC_A, "App A"),
+            consenting_app(SRC_B, "App B"),
+        ]);
+
+        let (report, created_any) = restore(
+            &client,
+            &backup,
+            crate::state::CancelFlag::new().claim(),
+            &[SRC_A],
+        )
+        .await;
+
+        assert!(created_any);
+        assert_eq!(report.apps.len(), 2, "both apps restore: {report:?}");
+        // Pass 3's first read is the app itself.
+        assert_eq!(
+            requests(&server, "GET", "/applications/obj-a").await.len(),
+            1
+        );
+        assert!(
+            requests(&server, "GET", "/applications/obj-b")
+                .await
+                .is_empty(),
+            "an unapproved app must get no consent call"
+        );
+        // Re-read, matched what the plan showed, consented.
+        assert!(consent_attempted(&server, "app-a").await);
+        assert!(!consent_attempted(&server, "app-b").await);
+        let skipped = report
+            .manual_items
+            .iter()
+            .find(|m| m.display_name == "App B")
+            .expect("the withheld consent is a runbook item");
+        assert!(
+            skipped.reason.contains("not approved in the plan")
+                && skipped.reason.contains("Application.ReadWrite.All"),
+            "{}",
+            skipped.reason
+        );
+        assert!(!report.apps[1].consent_granted);
+        assert!(!report.cancelled);
+    }
+
+    /// A cancel pressed during Pass 2 stops the run before Pass 3: no consent
+    /// is granted, and the report says it stopped.
+    #[tokio::test]
+    async fn a_cancel_between_passes_is_reported_and_skips_consent() {
+        let server = MockServer::start().await;
+        mount_create(&server).await;
+        let flag = crate::state::CancelFlag::new();
+        let cancel = flag.claim();
+        // The app's only Pass-2 write: the operator cancels while it lands.
+        Mock::given(method("PATCH"))
+            .and(path("/applications/obj-a"))
+            .respond_with(move |_: &Request| {
+                flag.cancel();
+                ResponseTemplate::new(204)
+            })
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let backup = manifest(vec![consenting_app(SRC_A, "App A")]);
+
+        let (report, _) = restore(&client, &backup, cancel, &[SRC_A]).await;
+
+        assert!(report.cancelled);
+        assert!(!report.session_expired, "a cancel is not a dead session");
+        assert_eq!(report.apps.len(), 1, "Pass 2 finished the app");
+        assert!(
+            requests(&server, "GET", "/applications/obj-a")
+                .await
+                .is_empty(),
+            "Pass 3 must not run after a cancel"
+        );
+        assert!(!report.apps[0].consent_granted);
+    }
+
+    /// The plan names what the file grants and which items need approval:
+    /// consent covering any application permission (even an unrisky one, or
+    /// one on an API the backup recreates), a broad or unidentified delegated
+    /// one, an accepted federated credential, a group membership, and any
+    /// managed-identity role. Low-risk delegated consent, a refused credential,
+    /// foreign pre-authorized clients and role assignees are shown only.
+    #[tokio::test]
+    async fn the_plan_lists_privileged_grants_and_what_needs_approval() {
+        let server = MockServer::start().await;
+        mount_graph_sp(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let consent_to = |src: &str, name: &str, resource: &str, id: &str, kind: &str| {
+            let mut app = consenting_app(src, name);
+            app.required_resource_access[0].resource_app_id = resource.into();
+            app.required_resource_access[0].resource_access[0].id = id.into();
+            app.required_resource_access[0].resource_access[0].r#type = kind.into();
+            app
+        };
+        const SRC_C: &str = "cccccccc-0000-0000-0000-000000000003";
+        const SRC_D: &str = "dddddddd-0000-0000-0000-000000000004";
+        const SRC_E: &str = "eeeeeeee-0000-0000-0000-000000000005";
+
+        // Delegated User.Read only, a refused credential, a foreign client.
+        let mut low = consent_to(SRC_A, "App A", GRAPH, USER_READ_SCOPE, "Scope");
+        low.pre_authorized_applications = vec![
+            azapptoolkit_core::models::PreAuthorizedApplication {
+                app_id: "foreign-client".into(),
+                ..Default::default()
+            },
+            azapptoolkit_core::models::PreAuthorizedApplication {
+                app_id: SRC_B.into(),
+                ..Default::default()
+            },
+        ];
+        low.federated_credentials = vec![FederatedIdentityCredential {
+            name: "planted".into(),
+            issuer: "http://attacker.example".into(),
+            subject: Some("sub".into()),
+            ..Default::default()
+        }];
+        low.owners = vec![PrincipalRef {
+            user_principal_name: Some("alice@contoso.com".into()),
+            ..Default::default()
+        }];
+        let unknown = consent_to(SRC_B, "App B", "nowhere", APP_RW_ROLE, "Role");
+        let high = consenting_app(SRC_C, "App C");
+        let restored_api = consent_to(SRC_D, "App D", SRC_A, "custom-role", "Role");
+        // No SP in the backup: Pass 3 or an adopted app can still supply one,
+        // so its group memberships are shown and gated all the same.
+        let grouped = AppRegistrationBackup {
+            source_app_id: SRC_E.into(),
+            display_name: "App E".into(),
+            has_service_principal: false,
+            ..Default::default()
+        };
+        let mut backup = manifest(vec![low, unknown, high, restored_api, grouped]);
+        backup.enterprise_apps = vec![EnterpriseAppBackup {
+            source_app_id: SRC_E.into(),
+            display_name: "App E".into(),
+            group_memberships: vec![named("Global Admins", Some("#microsoft.graph.group"))],
+            app_role_assignees: vec![crate::dto::backup::AppRoleAssigneeRef {
+                principal: named("Ops", Some("Group")),
+                app_role_id: "x".into(),
+                app_role_value: Some("Reader".into()),
+            }],
+            ..Default::default()
+        }];
+        backup.managed_identities = vec![ManagedIdentityBackup {
+            source_app_id: "mi-app".into(),
+            display_name: "mi-one".into(),
+            held_app_roles: vec![crate::dto::backup::AppRoleGrantRef {
+                resource_app_id: GRAPH.into(),
+                app_role_id: "r".into(),
+                app_role_value: Some("User.Read.All".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let session = SessionDead::new();
+
+        let items = privileged_restore_items(&client, &backup, &session).await;
+
+        assert_eq!(items.len(), 6, "{items:#?}");
+        let [low, unknown, high, restored_api, grouped, mi] = &items[..] else {
+            unreachable!()
+        };
+        // Shown, but nothing in it needs approval.
+        assert_eq!(low.delegated_scopes[0].value.as_deref(), Some("User.Read"));
+        assert_eq!(low.delegated_scopes[0].risk, PermissionRisk::Low);
+        assert_eq!(low.external_pre_authorized_clients, ["foreign-client"]);
+        assert!(low.federated_credentials[0].rejected.is_some());
+        assert_eq!(low.owners, ["alice@contoso.com"]);
+        assert!(!low.requires_approval, "{low:#?}");
+        // Nobody can name it.
+        assert_eq!(unknown.app_roles[0].risk, PermissionRisk::Unknown);
+        assert!(unknown.requires_approval);
+        // Resolved live and ranked by `core::audit`.
+        assert_eq!(
+            high.app_roles[0].value.as_deref(),
+            Some("Application.ReadWrite.All")
+        );
+        assert_eq!(high.app_roles[0].risk, PermissionRisk::High);
+        assert!(high.requires_approval);
+        // Any application permission needs approval, even on an API the backup
+        // recreates (not knowable yet, so not "unknown").
+        assert!(restored_api.app_roles[0].restored_api);
+        assert_eq!(restored_api.app_roles[0].risk, PermissionRisk::Low);
+        assert!(restored_api.requires_approval);
+        // The file chooses the group: approval. Assignees are shown only.
+        assert_eq!(grouped.group_memberships, ["Global Admins"]);
+        assert_eq!(grouped.app_role_assignees, ["Ops (Reader)"]);
+        assert!(grouped.requires_approval);
+        // Every managed-identity role needs approval, whatever its risk.
+        assert_eq!(mi.kind, PrivilegedKind::ManagedIdentity);
+        assert!(mi.requires_approval);
+        assert!(!session.is_dead());
+    }
+
+    /// The bypass this gate exists for: an adopted app — pre-planted with the
+    /// restore tag, a name and owners the file vouches for — already declares
+    /// a high-risk permission, and the manifest declares none, so the plan
+    /// shows no consent and asks for no approval. Consent must not grant what
+    /// the live app declares.
+    #[tokio::test]
+    async fn consent_never_grants_permissions_the_plan_did_not_show() {
+        let server = MockServer::start().await;
+        mount_tagged_hit(
+            &server,
+            serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "obj-1",
+                "appId": "app-1",
+                "displayName": "App A",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [{ "id": APP_RW_ROLE, "type": "Role" }]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        mount_graph_sp(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let backup = manifest(vec![AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "App A".into(),
+            admin_consent_granted: true,
+            ..Default::default()
+        }]);
+        assert!(
+            privileged_restore_items(&client, &backup, &SessionDead::new())
+                .await
+                .is_empty(),
+            "the plan shows nothing to approve"
+        );
+
+        let (report, _) = restore(
+            &client,
+            &backup,
+            crate::state::CancelFlag::new().claim(),
+            &[],
+        )
+        .await;
+
+        assert!(report.apps[0].adopted, "{report:?}");
+        assert!(
+            !consent_attempted(&server, "app-1").await,
+            "no consent for a live permission list the plan never showed"
+        );
+        assert!(!report.apps[0].consent_granted);
+        assert!(
+            report
+                .manual_items
+                .iter()
+                .any(|m| m.reason.contains("don't match the backup")),
+            "{:?}",
+            report.manual_items
+        );
+    }
+
+    /// An app not approved in the plan is created and wired, but gets no
+    /// federated credential and no owner from the file.
+    #[tokio::test]
+    async fn a_withheld_app_gets_no_federated_credential_or_owner() {
+        let server = MockServer::start().await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let c = created(AppRegistrationBackup {
+            display_name: "App A".into(),
+            federated_credentials: vec![FederatedIdentityCredential {
+                name: "gh-main".into(),
+                issuer: "https://token.actions.githubusercontent.com".into(),
+                subject: Some("repo:contoso/app:ref:refs/heads/main".into()),
+                ..Default::default()
+            }],
+            owners: vec![PrincipalRef {
+                user_principal_name: Some("alice@contoso.com".into()),
+                ..Default::default()
+            }],
+            secrets: vec![CredentialMeta::default()],
+            ..Default::default()
+        });
+
+        let (_, manual) = wire_with(&client, &c, true).await;
+
+        const FICS: &str = "/applications/new-obj/federatedIdentityCredentials";
+        assert!(requests(&server, "POST", FICS).await.is_empty());
+        assert!(
+            requests(&server, "POST", "/applications/new-obj/owners/$ref")
+                .await
+                .is_empty()
+        );
+        assert!(
+            requests(&server, "GET", "/users").await.is_empty(),
+            "a withheld owner is not even looked up"
+        );
+        // Structure still restores: the secret is regenerated.
+        assert_eq!(
+            requests(&server, "POST", "/applications/new-obj/addPassword")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(manual.len(), 2, "{manual:?}");
+        assert!(
+            manual
+                .iter()
+                .all(|m| m.reason.contains("not approved in the plan"))
+        );
+        assert!(
+            manual[0]
+                .reason
+                .contains("token.actions.githubusercontent.com")
+        );
+        assert!(manual[1].reason.contains("alice@contoso.com"));
+
+        // Approved, the credential is created.
+        wire_with(&client, &c, false).await;
+        assert_eq!(requests(&server, "POST", FICS).await.len(), 1);
+    }
+
+    /// A withheld app's service principal joins no group the file names.
+    #[tokio::test]
+    async fn a_withheld_app_joins_no_group() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-new", "appId": "new-a", "displayName": "Ent A" }]
+            })))
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false)
+            .with_group_member_token(azapptoolkit_core::token::StaticTokenProvider::new("tok"));
+        let mut report = RestoreReport::default();
+        let ent = EnterpriseAppBackup {
+            display_name: "Ent A".into(),
+            source_app_id: "src-a".into(),
+            group_memberships: vec![named("Global Admins", Some("#microsoft.graph.group"))],
+            ..Default::default()
+        };
+        let remap = HashMap::from([("src-a".to_string(), "new-a".to_string())]);
+
+        restore_enterprise_app(
+            &client,
+            &ent,
+            &remap,
+            true,
+            &mut report,
+            &mut PrincipalMemo::new(),
+            &SessionDead::new(),
+        )
+        .await;
+
+        assert!(requests(&server, "GET", "/groups").await.is_empty());
+        let posts = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .count();
+        assert_eq!(posts, 0, "no membership is added");
+        assert_eq!(report.manual_items.len(), 1, "{:?}", report.manual_items);
+        assert!(report.manual_items[0].reason.contains("Global Admins"));
+        assert_eq!(report.enterprise_apps.len(), 1, "the rest still applies");
+    }
+
+    /// The run, not just the plan: an unapproved app's service principal joins
+    /// no group even when the backup says it had no SP — whether its SP came
+    /// from somewhere else at restore time (created, or already on an adopted
+    /// app). Approved, it joins.
+    #[tokio::test]
+    async fn pass_4_adds_no_group_membership_without_approval() {
+        for adopted in [false, true] {
+            let server = MockServer::start().await;
+            if adopted {
+                mount_tagged_hit(&server, serde_json::json!([{ "id": "operator-oid" }])).await;
+            } else {
+                mount_create(&server).await;
+            }
+            // Whichever way, a service principal exists when Pass 4 looks.
+            Mock::given(method("GET"))
+                .and(path("/servicePrincipals"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "sp-x", "appId": "whatever", "displayName": "App A" }]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/groups"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "g-admins", "displayName": "Global Admins" }]
+                })))
+                .mount(&server)
+                .await;
+            mount_fallback(&server).await;
+            // Group writes ride their own token; without one nothing is sent and
+            // the approved run below could not tell "withheld" from "failed".
+            let client = graph_over(&server, false)
+                .with_group_member_token(azapptoolkit_core::token::StaticTokenProvider::new("tok"));
+            let mut backup = manifest(vec![AppRegistrationBackup {
+                source_app_id: SRC_A.into(),
+                display_name: "App A".into(),
+                has_service_principal: false,
+                ..Default::default()
+            }]);
+            backup.enterprise_apps = vec![EnterpriseAppBackup {
+                source_app_id: SRC_A.into(),
+                display_name: "App A".into(),
+                group_memberships: vec![named("Global Admins", Some("#microsoft.graph.group"))],
+                ..Default::default()
+            }];
+            let items = privileged_restore_items(&client, &backup, &SessionDead::new()).await;
+            assert!(items[0].requires_approval, "the plan shows and gates it");
+
+            let (report, _) = restore(
+                &client,
+                &backup,
+                crate::state::CancelFlag::new().claim(),
+                &[],
+            )
+            .await;
+            assert_eq!(report.apps.len(), 1, "adopted={adopted}: {report:?}");
+            assert!(
+                requests(&server, "POST", "/groups/g-admins/members/$ref")
+                    .await
+                    .is_empty(),
+                "adopted={adopted}: an unapproved app joins no group"
+            );
+            assert!(
+                report
+                    .manual_items
+                    .iter()
+                    .any(|m| m.reason.contains("Group memberships not added")),
+                "adopted={adopted}: {:?}",
+                report.manual_items
+            );
+
+            restore(
+                &client,
+                &backup,
+                crate::state::CancelFlag::new().claim(),
+                &[SRC_A],
+            )
+            .await;
+            assert_eq!(
+                requests(&server, "POST", "/groups/g-admins/members/$ref")
+                    .await
+                    .len(),
+                1,
+                "adopted={adopted}: approved, it joins"
+            );
+        }
+    }
+
+    /// Graph's `eq` ignores case, so "Ops" and "OPS" are two principals —
+    /// ambiguous, not one resolved by a stricter client-side comparison.
+    #[tokio::test]
+    async fn names_differing_only_in_case_are_ambiguous() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "g1", "displayName": "Ops" },
+                    { "id": "g2", "displayName": "OPS" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = graph_over(&server, false);
+        assert_eq!(
+            resolve_principal_uncached(&client, &named("Ops", Some("Group"))).await,
+            Err(Unresolved::Ambiguous(2))
+        );
+    }
+
+    /// Managed-identity source ids are approval keys, so they are held to the
+    /// app-registration rule: GUIDs, unrepeated.
+    #[test]
+    fn managed_identity_source_ids_must_be_unique_guids() {
+        const ID: &str = "33333333-3333-3333-3333-333333333333";
+        let mut backup = manifest_with_ids(&[]);
+        backup.managed_identities = [ID, ID, ""]
+            .map(|id| ManagedIdentityBackup {
+                source_app_id: id.into(),
+                display_name: "mi".into(),
+                ..Default::default()
+            })
+            .to_vec();
+        let problems = manifest_problems(&backup);
+        assert_eq!(
+            problems,
+            [
+                "managed identity 'mi' has no source appId".to_string(),
+                format!("managed identity source appId {ID} appears 2 times"),
+            ]
+        );
+        assert!(validate_manifest(&backup).is_err());
+    }
+    fn named(name: &str, kind: Option<&str>) -> PrincipalRef {
+        PrincipalRef {
+            display_name: Some(name.into()),
+            principal_type: kind.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    /// With no recorded type, a name matching a group AND a user is ambiguous,
+    /// never the first one found.
+    #[tokio::test]
+    async fn an_ambiguous_principal_is_left_unresolved() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "value": [{ "id": "g1", "displayName": "Ops" }] }),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "u1", "displayName": "Ops" },
+                    { "id": "u2", "displayName": "Ops team" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = graph_over(&server, false);
+
+        assert_eq!(
+            resolve_principal_uncached(&client, &named("Ops", None)).await,
+            Err(Unresolved::Ambiguous(2))
+        );
+        // A recorded type searches only its own collection.
+        assert_eq!(
+            resolve_principal_uncached(&client, &named("Ops", Some("#microsoft.graph.group")))
+                .await,
+            Ok("g1".to_string())
+        );
+        assert_eq!(
+            resolve_principal_uncached(&client, &named("Ops", Some("User"))).await,
+            Ok("u1".to_string())
+        );
+        // A service principal is never matched to a same-named user or group.
+        assert_eq!(
+            resolve_principal_uncached(&client, &named("Ops", Some("ServicePrincipal"))).await,
+            Err(Unresolved::UnsupportedType("ServicePrincipal".into()))
+        );
+    }
+
+    /// A failed group search is not an absent group: the principal stays
+    /// unresolved, and no user search runs in its place.
+    #[tokio::test]
+    async fn a_failed_group_search_never_falls_back_to_users() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+
+        for kind in [Some("#microsoft.graph.group"), None] {
+            assert_eq!(
+                resolve_principal_uncached(&client, &named("Ops", kind)).await,
+                Err(Unresolved::LookupFailed),
+                "{kind:?}"
+            );
+        }
+        assert!(
+            requests(&server, "GET", "/users").await.is_empty(),
+            "a group-search error must not fall back to a user search"
+        );
+    }
+
+    /// Two destination identities under one name: neither is re-bound, and
+    /// the operator is told why.
+    #[tokio::test]
+    async fn duplicate_destination_mi_names_become_a_manual_item() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "sp-1", "appId": "a1", "displayName": "mi-one" },
+                    { "id": "sp-2", "appId": "a2", "displayName": "MI-One" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let mut report = RestoreReport::default();
+        let mis = vec![ManagedIdentityBackup {
+            display_name: "mi-one".into(),
+            held_app_roles: vec![crate::dto::backup::AppRoleGrantRef {
+                resource_app_id: GRAPH.into(),
+                app_role_id: "r".into(),
+                app_role_value: Some("User.Read.All".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+
+        restore_managed_identities(
+            &client,
+            &mis,
+            &HashSet::new(),
+            &mut report,
+            &SessionDead::new(),
+        )
+        .await;
+
+        assert!(report.managed_identities.is_empty(), "nothing re-bound");
+        assert_eq!(report.manual_items.len(), 1, "{:?}", report.manual_items);
+        assert!(
+            report.manual_items[0]
+                .reason
+                .contains("2 managed identities")
+                && report.manual_items[0].reason.contains("sp-1, sp-2"),
+            "{}",
+            report.manual_items[0].reason
+        );
+        let posts = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .count();
+        assert_eq!(posts, 0, "no role is granted to either identity");
+    }
+
+    /// Every managed-identity app role needs approval: unapproved, none is
+    /// POSTed and they are one runbook item; approved, they re-bind.
+    #[tokio::test]
+    async fn an_unapproved_mi_gets_no_app_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param(
+                "$filter",
+                "servicePrincipalType eq 'ManagedIdentity'",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-1", "appId": "a1", "displayName": "mi-one" }]
+            })))
+            .mount(&server)
+            .await;
+        mount_graph_sp(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let mis = vec![ManagedIdentityBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "mi-one".into(),
+            held_app_roles: vec![crate::dto::backup::AppRoleGrantRef {
+                resource_app_id: GRAPH.into(),
+                app_role_id: "r".into(),
+                app_role_value: Some("Mail.Send".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        const GRANTS: &str = "/servicePrincipals/sp-1/appRoleAssignments";
+
+        // An APP approval with the same id does not approve the identity.
+        let app_only = HashSet::from([app_approval(SRC_A)]);
+        let mut report = RestoreReport::default();
+        restore_managed_identities(&client, &mis, &app_only, &mut report, &SessionDead::new())
+            .await;
+        assert!(
+            requests(&server, "POST", GRANTS).await.is_empty(),
+            "Mail.Send must never be POSTed"
+        );
+        let withheld = report
+            .manual_items
+            .iter()
+            .find(|m| m.reason.contains("not approved in the plan"))
+            .expect("the withheld roles are a runbook item");
+        assert!(withheld.reason.contains("Mail.Send"), "{}", withheld.reason);
+
+        let approved = HashSet::from([RestoreApproval {
+            kind: PrivilegedKind::ManagedIdentity,
+            source_app_id: SRC_A.into(),
+        }]);
+        let mut report = RestoreReport::default();
+        restore_managed_identities(&client, &mis, &approved, &mut report, &SessionDead::new())
+            .await;
+        let posted = requests(&server, "POST", GRANTS).await;
+        assert_eq!(posted.len(), 1);
+        assert!(
+            String::from_utf8_lossy(&posted[0].body).contains(MAIL_SEND_ROLE),
+            "approved, the role re-binds"
+        );
     }
 }

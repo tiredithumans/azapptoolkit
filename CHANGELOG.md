@@ -7,6 +7,24 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Changed
 
+- **A restore shows the access a backup file grants, and grants it only when you approve.**
+  Before you confirm, the restore plan lists, for each app, the admin consent it re-grants
+  (every permission named and risk-rated), its federated credentials (issuer and subject),
+  owners and group memberships, plus pre-authorized client apps from outside the backup and
+  the users and groups assigned to its roles. Managed identities list the app roles they get
+  back. An app gets its admin consent, federated credentials, owners and group memberships
+  only if you tick it, when it has any of these: consent to any application permission,
+  consent to a broad or unidentified delegated one, a federated credential, or a group
+  membership. A managed identity gets its app roles back only if you tick it. Anything you
+  leave unticked is still created and set up without that access, and the report lists what
+  was left out as manual steps. Consent is also skipped, and reported, if the app's API
+  permissions in this tenant don't match the backup. Pre-authorized clients and role
+  assignments are shown but not gated. Owners, assignees and groups are now matched only when
+  exactly one user or group of the recorded type has that exact name.
+  If two managed identities here share a name, the restore reports them instead of guessing.
+  A backup in which a managed identity's id is empty, not a GUID, or repeated is now refused
+  (shown in the plan, before Confirm). An **Approve all listed** button after the list ticks
+  every item at once. Nothing starts ticked.
 - **Lists, the Security tab and the Resource Access sweeps open faster on a revisit, and the window
   no longer stalls while they load.** A cached list or scan result is now handed back as is
   instead of being rebuilt on every visit, and reading the last security audit or site/Key Vault
