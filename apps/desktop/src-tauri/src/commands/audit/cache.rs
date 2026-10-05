@@ -6,6 +6,7 @@ use tauri::State;
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_core::cache::CacheKind;
 
+use crate::dto::UiError;
 use crate::dto::audit::{AuditCoverageGap, AuditRunResult, CachedAuditSummary};
 use crate::state::AppState;
 
@@ -85,22 +86,41 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 /// tenant's directory data came back — a stale or wrong id from the webview
 /// (a tenant switch mid-flight is the realistic one) served the *other*
 /// tenant's audit, which is the cross-tenant leak this codebase treats as its
-/// first footgun. No session for that tenant ⇒ no cached answer.
+/// first footgun. No session for that tenant ⇒ no cached answer (`Ok(None)`,
+/// the same "no run cached" the view already handles).
+///
+/// `async` on purpose, like every other command (AGENTS.md's command shape): a
+/// sync command runs on the main thread, and copying and serializing up to
+/// 10 000 scored items there froze the window on every Security-tab hydrate.
+/// Pinned by `repo_invariants::cache::cached_scan_reads_are_async_commands`.
 #[tauri::command]
-pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option<AuditRunResult> {
-    state.auth.tenant_context(&tenant_id)?;
+pub async fn get_cached_audit(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Option<AuditRunResult>, UiError> {
+    let Some(_) = state.auth.tenant_context(&tenant_id) else {
+        return Ok(None);
+    };
     let key = audit_cache_key(&tenant_id);
-    let run = state
+    let Some(run) = state
         .cache
-        .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)?;
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(cached_run_result(tenant_id, &run)))
+}
+
+/// The [`AuditRunResult`] a cache hit answers with. The one deep copy left on
+/// this path is `items`: [`AuditRunResult`] is a wire type the frontend
+/// decodes, so it owns its items rather than sharing the cache's `Arc`.
+fn cached_run_result(tenant_id: String, run: &CachedAuditRun) -> AuditRunResult {
     let items = run.items.clone();
-    let completed_at = run.completed_at.clone();
-    let mailbox_scoping_resolved = run.mailbox_scoping_resolved;
     // Report availability is reconstructed from the cached items (every item
     // carries the run's `sign_in_report_available`); a cached run never re-prompts
     // for consent, so `sign_in_consent_required` is false on a cache hit.
     let sign_in_report_available = items.iter().any(|i| i.sign_in_report_available);
-    Some(AuditRunResult {
+    AuditRunResult {
         tenant_id,
         total_apps: items.len(),
         items,
@@ -117,34 +137,40 @@ pub fn get_cached_audit(state: State<'_, AppState>, tenant_id: String) -> Option
         // The stamp the RUN wrote, not this read: a cache hit is what the
         // dashboard shows after a relaunch-free hour, and "scanned just now"
         // about an hour-old scan is the false claim this field exists to stop.
-        completed_at: Some(completed_at),
+        completed_at: Some(run.completed_at.clone()),
         // Cached WITH the items: an unresolved run is cacheable, and its
         // caveat must survive the round trip.
-        mailbox_scoping_resolved,
-    })
+        mailbox_scoping_resolved: run.mailbox_scoping_resolved,
+    }
 }
 
 /// The Home dashboard's view of the cached audit: the posture counts and each
 /// finding's worst severity, never the items (see [`CachedAuditSummary`]).
 /// `None` when no run is cached — or when `tenant_id` has no session, exactly
 /// like [`get_cached_audit`], since this too answers from the cache alone.
+/// Borrows the cached run's items through the `Arc`, so nothing is copied.
 ///
 /// `completed_at` is the stamp the run wrote, not this read's time: the card
 /// says "Scanned 40 minutes ago" from it, and a cache hit re-stamped on read
 /// would present an hour-old posture as current.
 #[tauri::command]
-pub fn get_cached_audit_summary(
+pub async fn get_cached_audit_summary(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Option<CachedAuditSummary> {
-    state.auth.tenant_context(&tenant_id)?;
-    let run = state
+) -> Result<Option<CachedAuditSummary>, UiError> {
+    let Some(_) = state.auth.tenant_context(&tenant_id) else {
+        return Ok(None);
+    };
+    let Some(run) = state
         .cache
-        .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))?;
-    Some(CachedAuditSummary::from_items(
+        .get_typed::<CachedAuditRun>(CacheKind::Audit, &audit_cache_key(&tenant_id))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(CachedAuditSummary::from_items(
         &run.items,
         Some(run.completed_at.clone()),
         run.credential_policy_available,
         run.credential_policy_max_days,
-    ))
+    )))
 }

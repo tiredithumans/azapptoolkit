@@ -196,6 +196,11 @@ impl ScopeGroupConsolidation {
 /// throttling, and the gateway's own retry/backoff absorbs a 429.
 const MEMBER_COPY_CONCURRENCY: usize = 4;
 
+/// In-flight width for the per-group READS around a consolidation (source
+/// membership, resolving each retired group). Read-only, so the same small
+/// width as the copy keeps them inside Exchange's per-tenant throttling.
+const EXO_READ_CONCURRENCY: usize = 4;
+
 /// Inputs to [`consolidate_scope_group`], named at the call site (several are
 /// `&str`/`&[String]`, easy to transpose positionally).
 #[derive(Clone, Copy)]
@@ -252,15 +257,30 @@ pub(super) async fn consolidate_scope_group(
     //    and `plan_source_membership` owns every rule about what the results
     //    mean — including the load-bearing "an empty list is unreadable, not
     //    empty" one — so those rules are unit-testable without a session.
-    let mut reads: Vec<(&String, Result<Vec<ExoGroupMember>, String>)> =
-        Vec::with_capacity(source_dns.len());
-    for dn in source_dns {
-        let result = exo
-            .list_group_members(dn)
-            .await
-            .map_err(|err| err.to_string());
-        reads.push((dn, result));
-    }
+    //
+    //    Read [`EXO_READ_CONCURRENCY`] groups at a time rather than one after
+    //    another (each read is a proxied cmdlet of seconds). `buffered`, not
+    //    `buffer_unordered`: the reads come back in `source_dns` order, so the
+    //    plan — and the member order it hands the copy — is the same as a
+    //    serial walk's. Every read's outcome is kept; an error stays a per-group
+    //    `Err` the planner refuses on.
+    //    (The futures are built into a `Vec` first: a stream `.map` closure
+    //    returning a borrowing `async` block trips rustc's higher-ranked `Send`
+    //    inference at the `#[tauri::command]` boundary.)
+    let pending: Vec<_> = source_dns
+        .iter()
+        .map(|dn| async move {
+            let result = exo
+                .list_group_members(dn)
+                .await
+                .map_err(|err| err.to_string());
+            (dn, result)
+        })
+        .collect();
+    let reads: Vec<(&String, Result<Vec<ExoGroupMember>, String>)> = futures::stream::iter(pending)
+        .buffered(EXO_READ_CONCURRENCY)
+        .collect()
+        .await;
     let planned = plan_source_membership(
         &reads
             .iter()
@@ -580,9 +600,20 @@ pub(super) async fn retired_scope_groups(
     let scopes = scopes.unwrap_or_default();
     let policies = policies.unwrap_or_default();
 
+    // Resolved EXO_READ_CONCURRENCY at a time, in `source_dns` order (`buffered`)
+    // so the result lists the groups in the order the scope named them.
+    // (Futures collected first — see the source-membership read.)
+    let pending: Vec<_> = source_dns
+        .iter()
+        .map(|dn| async move { exo.get_group(dn).await.ok().flatten() })
+        .collect();
+    let resolved: Vec<Option<_>> = futures::stream::iter(pending)
+        .buffered(EXO_READ_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut out = Vec::new();
-    for dn in source_dns {
-        let resolved = exo.get_group(dn).await.ok().flatten();
+    for (dn, resolved) in source_dns.iter().zip(resolved) {
         let group = GroupIdentity {
             distinguished_name: dn.clone(),
             name: resolved.as_ref().and_then(|g| g.name.clone()),
@@ -661,9 +692,13 @@ pub async fn delete_exchange_scope_group(
         ));
     }
 
-    // Re-check references live; the caller's snapshot is advisory.
-    let scopes = exo.list_management_scopes().await?;
-    let policies = exo.get_application_access_policies().await?;
+    // Re-check references live; the caller's snapshot is advisory. The two
+    // org-wide reads are independent, so they run concurrently — and under
+    // `try_join!`, so EITHER failing still refuses the delete (fail closed).
+    let (scopes, policies) = futures::try_join!(
+        exo.list_management_scopes(),
+        exo.get_application_access_policies(),
+    )?;
     let references = references_to_group(&identity, &scopes, &policies);
     if !references.is_empty() {
         return Err(UiError::validation(

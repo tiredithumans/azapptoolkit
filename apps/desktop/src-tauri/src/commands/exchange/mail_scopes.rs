@@ -126,14 +126,21 @@ pub(crate) async fn resolve_mail_scopes(
     // the probe can't resolve the principal (the managed-identity case). One
     // lookup per app covers every permission; the bulk audit (`enrich == false`)
     // skips it to avoid an extra admin-API call per app.
-    let aap_override = if enrich {
-        legacy_aap_scope(exo, app_id).await
+    //
+    // The two reads are independent cmdlets, so the detail path runs them
+    // CONCURRENTLY — each is a proxied PowerShell invocation of seconds, and
+    // they used to run back to back. A plain `join!`, not `try_join!`: the
+    // policy lookup is consulted on the probe's error path too (the
+    // managed-identity fallback below), so neither may cancel the other.
+    let probe = exo.test_service_principal_authorization(app_id, None);
+    let (aap_override, probe) = if enrich {
+        futures::join!(legacy_aap_scope(exo, app_id), probe)
     } else {
-        None
+        (None, probe.await)
     };
 
     // Authoritative RBAC-for-Applications verdict.
-    let rows = match exo.test_service_principal_authorization(app_id, None).await {
+    let rows = match probe {
         Ok(rows) => rows,
         Err(err) => {
             // Log a concise code, not the raw body — an Exchange 403 can return a
