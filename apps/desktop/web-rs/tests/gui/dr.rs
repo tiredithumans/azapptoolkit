@@ -431,7 +431,8 @@ async fn privileged_grants_render_before_confirm_and_only_ticked_apps_are_approv
         ts::body_text()
     );
     assert!(ts::body_contains("Application.ReadWrite.All"));
-    assert!(ts::body_contains("High risk"));
+    // The badge ranks by value: Application.ReadWrite.All is tier-0.
+    assert!(ts::body_contains("Tier-0"));
     assert!(
         ts::body_contains("role-id-1"),
         "an unresolved permission shows its id"
