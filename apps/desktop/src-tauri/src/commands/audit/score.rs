@@ -63,6 +63,95 @@ pub(crate) fn derive_orgwide_mail_scopes(
     out
 }
 
+/// The principals holding the EWS `full_access_as_app` scope on Office 365
+/// Exchange Online, from the run's Office 365 grant read — the set
+/// [`derive_orgwide_mail_scopes`] reconciles against. Resource-checked, not
+/// value-only: the scope is unambiguous today, but the map carries the
+/// resource precisely so no caller has to rely on that.
+pub(crate) fn ews_full_access_holders(
+    office365_grants_by_sp: &HashMap<String, Vec<ResourcePermission>>,
+) -> HashSet<String> {
+    let ews = ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP);
+    office365_grants_by_sp
+        .iter()
+        .filter(|(_, grants)| grants.contains(&ews))
+        .map(|(sp_id, _)| sp_id.clone())
+        .collect()
+}
+
+/// Every app role granted to each service principal, with its resource: the
+/// run's Microsoft Graph matrix (bare values, Graph by construction) joined to
+/// the Office 365 Exchange Online / SharePoint Online grants. The one
+/// "what does this principal actually hold" map — the SP-only phase scores
+/// from it, and `score_one` merges an app's undeclared grants out of it.
+pub(crate) fn combine_granted_roles(
+    graph_roles_by_sp: &HashMap<String, Vec<String>>,
+    office365_grants_by_sp: &HashMap<String, Vec<ResourcePermission>>,
+) -> HashMap<String, Vec<ResourcePermission>> {
+    let mut out: HashMap<String, Vec<ResourcePermission>> = graph_roles_by_sp
+        .iter()
+        .map(|(sp_id, values)| {
+            (
+                sp_id.clone(),
+                values.iter().map(ResourcePermission::graph).collect(),
+            )
+        })
+        .collect();
+    for (sp_id, grants) in office365_grants_by_sp {
+        out.entry(sp_id.clone())
+            .or_default()
+            .extend(grants.iter().cloned());
+    }
+    out.retain(|_, grants| !grants.is_empty());
+    out
+}
+
+/// Folds the app roles actually GRANTED to an app's service principal into
+/// its manifest-derived permissions. Each granted `(resource, value)` the
+/// manifest does not declare is appended to `app_role_grants` — so Rules 1/2
+/// score the principal's real reach, not the manifest's claim — and recorded in
+/// `undeclared_grants` for the Rule 23 advisory. Declared-and-granted roles are
+/// already present and are skipped (the scorer dedups anyway). Resource ids
+/// compare case-insensitively: the manifest's `resourceAppId` and the
+/// well-known constants are both GUIDs, and casing is not identity.
+///
+/// `unresolved_resources` (lower-cased resource app ids) are DECLARED resources
+/// whose permission index failed to resolve, so their declarations were
+/// dropped: a grant on one is still merged for scoring, but never recorded as
+/// undeclared — whether the manifest names it is unknowable this run, and a
+/// false Rule 23 would tell the operator to revoke a declared permission.
+///
+/// Pure: the granted list comes from the run's tenant-wide matrices, so an
+/// undeclared grant costs no per-app read. An app registration was scored only
+/// on `requiredResourceAccess` before this, so a role granted straight to its
+/// SP — the classic way to hide privilege on an innocuous app — scored zero.
+pub(crate) fn merge_granted_roles(
+    perms: &mut AppPermissions,
+    granted: &[ResourcePermission],
+    unresolved_resources: &HashSet<String>,
+) {
+    let key = |g: &ResourcePermission| {
+        (
+            g.resource_app_id.as_deref().map(str::to_ascii_lowercase),
+            g.value.clone(),
+        )
+    };
+    let mut held: HashSet<(Option<String>, String)> =
+        perms.app_role_grants.iter().map(key).collect();
+    for g in granted {
+        if held.insert(key(g)) {
+            perms.app_role_grants.push(g.clone());
+            let unknowable = g
+                .resource_app_id
+                .as_deref()
+                .is_some_and(|r| unresolved_resources.contains(&r.to_ascii_lowercase()));
+            if !unknowable {
+                perms.undeclared_grants.push(g.clone());
+            }
+        }
+    }
+}
+
 /// Scores one SP-only candidate (foreign enterprise app, managed identity,
 /// orphaned SP). Pure scoring — every input was resolved tenant-wide, so there's
 /// no per-item Graph traffic. No **RBAC** verdict is resolved ON PURPOSE: a held
@@ -80,27 +169,19 @@ pub(crate) fn derive_orgwide_mail_scopes(
 pub(crate) fn score_sp_only(
     sp: &ServicePrincipal,
     ctx: &ScoreCtx,
-    graph_roles_by_sp: &HashMap<String, Vec<String>>,
     delegated_scopes_by_client: &HashMap<String, Vec<String>>,
-    ews_full_access_sps: &HashSet<String>,
     now: DateTime<Utc>,
 ) -> AuditItem {
-    // The Graph matrix holds Microsoft Graph roles by construction; the EWS
-    // blanket scope lives on the legacy Office 365 Exchange Online resource and
-    // is tracked separately, so it has to be re-attached here with its own
-    // resource or the scorer cannot see the tenant's broadest mailbox grant.
-    let mut app_role_grants: Vec<ResourcePermission> = graph_roles_by_sp
+    // Every granted role with its own resource: Microsoft Graph's, plus the
+    // Office 365 Exchange Online (EWS `full_access_as_app`,
+    // `Exchange.ManageAsApp`, the retired Outlook REST roles) and SharePoint
+    // Online roles the Graph matrix cannot see. Dropping the resource here
+    // would let a legacy-resource grant borrow a Graph grant's verdict.
+    let app_role_grants: Vec<ResourcePermission> = ctx
+        .granted_roles_by_sp
         .get(&sp.id)
-        .map(|values| {
-            values
-                .iter()
-                .map(ResourcePermission::graph)
-                .collect::<Vec<_>>()
-        })
+        .cloned()
         .unwrap_or_default();
-    if ews_full_access_sps.contains(&sp.id) {
-        app_role_grants.push(ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP));
-    }
     let mut perms = AppPermissions {
         app_role_grants,
         scope_values: delegated_scopes_by_client
@@ -112,6 +193,9 @@ pub(crate) fn score_sp_only(
         // as the consented set, so this per-scope copy would be redundant.
         admin_consented_scopes: None,
         mail_scopes: HashMap::new(),
+        // An SP-only row has no manifest: its grants ARE its permissions,
+        // so nothing is "undeclared".
+        undeclared_grants: Vec::new(),
     };
     let granted_grants = perms.app_role_grants.clone();
     apply_legacy_policy_verdict(
@@ -152,16 +236,20 @@ pub(crate) fn score_sp_only(
 /// The SP-only scoring candidates: service principals whose `appId` has no
 /// local application object (foreign enterprise apps, managed identities,
 /// orphaned SPs — paired SPs are already scored via the app-registration
-/// phase) AND that hold at least one Graph application-permission grant OR are
+/// phase) AND that hold at least one application-permission grant OR are
 /// flagged risky by Identity Protection. The grant requirement is the noise
 /// filter: it drops the hundreds of grantless first-party Microsoft SPs every
 /// tenant carries. Disabled SPs stay in (Rule 4 flags them).
 ///
-/// "Holds a grant" spans **both** mailbox resources: an SP holding only the EWS
-/// `full_access_as_app` scope has no Graph role at all, yet reaches every mailbox
-/// in the tenant — filtering on the Graph matrix alone dropped exactly the
-/// principal most worth scoring. Known limitation: roles held only on *other*
-/// non-Graph resources still aren't in any matrix, so such an SP is not scored.
+/// "Holds a grant" spans every resource the run reads ([`combine_granted_roles`]):
+/// Microsoft Graph, Office 365 Exchange Online and Office 365 SharePoint
+/// Online. An SP holding only the EWS `full_access_as_app` scope, only
+/// `Exchange.ManageAsApp`, or only SharePoint Online's `Sites.FullControl.All`
+/// has no Graph role at all, yet reaches every mailbox or site — filtering on
+/// the Graph matrix alone dropped exactly the principals most worth scoring.
+/// Known limitation: roles held only on OTHER resources (a third-party or
+/// custom API) are in no matrix, so an unflagged SP holding only those is not
+/// scored.
 ///
 /// The risky set joins as a second admission path: a compromised managed
 /// identity or foreign SP often holds NO enumerable grant (or its grant lives
@@ -171,26 +259,31 @@ pub(crate) fn score_sp_only(
 pub(crate) fn sp_audit_candidates(
     sp_index: &[ServicePrincipal],
     local_app_ids: &HashSet<String>,
-    graph_roles_by_sp: &HashMap<String, Vec<String>>,
-    ews_full_access_sps: &HashSet<String>,
+    granted_roles_by_sp: &HashMap<String, Vec<ResourcePermission>>,
     risky_by_sp: &HashMap<String, (String, String)>,
 ) -> Vec<ServicePrincipal> {
     sp_index
         .iter()
         .filter(|sp| !local_app_ids.contains(&sp.app_id))
         .filter(|sp| {
-            graph_roles_by_sp.get(&sp.id).is_some_and(|v| !v.is_empty())
-                || ews_full_access_sps.contains(&sp.id)
+            granted_roles_by_sp
+                .get(&sp.id)
+                .is_some_and(|v| !v.is_empty())
                 || risky_by_sp.contains_key(&sp.id)
         })
         .cloned()
         .collect()
 }
 
+/// The app's declared permissions, plus the (lower-cased) ids of declared
+/// resources whose permission index could NOT be resolved. Their declarations
+/// were dropped below, so `merge_granted_roles` must not call a grant on one of
+/// them "not in the manifest" — that is unknowable this run (which already
+/// carries the `PermissionResolution` gap).
 async fn resolve_permissions(
     resolver: &ResourceResolver,
     access: &[RequiredResourceAccess],
-) -> AppPermissions {
+) -> (AppPermissions, HashSet<String>) {
     let resources: HashSet<String> = access.iter().map(|r| r.resource_app_id.clone()).collect();
     // Resolve each distinct resource's index concurrently rather than one serial
     // await at a time (mirrors `resolve_required_resource_access` in
@@ -206,6 +299,11 @@ async fn resolve_permissions(
         .into_iter()
         .collect();
 
+    let unresolved: HashSet<String> = indexes
+        .iter()
+        .filter(|(_, index)| index.by_id.is_empty())
+        .map(|(id, _)| id.to_ascii_lowercase())
+        .collect();
     let mut out = AppPermissions::default();
     for resource in access {
         let index = match indexes.get(&resource.resource_app_id) {
@@ -230,7 +328,7 @@ async fn resolve_permissions(
             }
         }
     }
-    out
+    (out, unresolved)
 }
 
 pub(crate) async fn score_one(
@@ -263,7 +361,16 @@ pub(crate) async fn score_one(
             UiError::from(err)
         })?;
 
-    let mut perms = resolve_permissions(&ctx.resolver, &app.required_resource_access).await;
+    let (mut perms, unresolved_resources) =
+        resolve_permissions(&ctx.resolver, &app.required_resource_access).await;
+    // Score what the SP actually HOLDS, not only what the manifest declares:
+    // fold its granted roles (from the run's tenant-wide matrices) in before
+    // any rule — or the mailbox-scope probe below — reads `app_role_grants`.
+    if let Some(ref sp) = sp
+        && let Some(granted) = ctx.granted_roles_by_sp.get(&sp.id)
+    {
+        merge_granted_roles(&mut perms, granted, &unresolved_resources);
+    }
 
     // Admin-consent flag: true if any AllPrincipals grant names this SP as the
     // client (membership in the run's one tenant-wide prefetch).

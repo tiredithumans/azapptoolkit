@@ -28,7 +28,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, enforced_secret_max_days};
+use azapptoolkit_core::audit::{
+    CredentialActivity, MailPermissionScope, ResourcePermission, enforced_secret_max_days,
+};
 use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::{AppManagementPolicy, TenantAppManagementPolicy};
 use azapptoolkit_exchange::ExchangeClient;
@@ -87,6 +89,12 @@ pub(crate) struct ScoreCtx {
     /// Rule 13 falls back to the declared scopes rather than hiding them.
     pub(crate) admin_consented_scopes_by_client: Option<Arc<HashMap<String, Vec<String>>>>,
     pub(crate) orgwide_mail_by_sp: Arc<HashMap<String, HashSet<String>>>,
+    /// `spObjectId -> every app role granted to it`, each with its resource
+    /// (Microsoft Graph + Office 365 Exchange Online + SharePoint Online), from
+    /// the run's tenant-wide matrices (`score::combine_granted_roles`). The
+    /// SP-only phase scores from it; `score_one` merges an app's undeclared
+    /// grants out of it so an app is scored on what it holds.
+    pub(crate) granted_roles_by_sp: Arc<HashMap<String, Vec<ResourcePermission>>>,
     /// `appId -> Scoped { LegacyApplicationAccessPolicy }` for every app a
     /// `RestrictAccess` Application Access Policy confines, from the run's one
     /// tenant-wide policy read. Empty when Exchange is unavailable — every mail

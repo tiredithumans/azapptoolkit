@@ -124,6 +124,17 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Rule 23 — roles granted to the app's service principal that its
+    // manifest never requested. The grants are already weighted under
+    // `high_risk_perms`; this group names where they hide. Advisory: revoking
+    // a grant somebody made on purpose is admin-judged.
+    GroupSpec {
+        key: "granted_undeclared",
+        title: "Granted but not declared",
+        blurb: "Application permissions granted to the app's service principal that its manifest does not request, so the portal's API permissions blade never shows them — a common way to hide privilege. Confirm who granted each; revoke the ones the app doesn't need, or declare the ones it does.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     // Org-wide reach the toolkit cannot confine — advisory siblings of
     // `high_risk_perms`, split by the scorer's advice (remove vs. review).
     GroupSpec {
@@ -340,7 +351,7 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// section's own Fix with it. A section shows only the Fix for its own rule;
 /// the others are one click away in the section that owns them.
 ///
-/// Advisory groups (`high_risk_perms`, `unscopable_legacy_mailbox`,
+/// Advisory groups (`high_risk_perms`, `granted_undeclared`, `unscopable_legacy_mailbox`,
 /// `unconfinable_orgwide`, `disabled_by_microsoft`, `risky_service_principal`,
 /// `external_exposure`, `high_risk_delegated`, `unused_credential`,
 /// `no_local_app`) and the Healthy positives own none —
@@ -763,6 +774,7 @@ mod tests {
             issue::UNVERIFIED_PUBLISHER,
             issue::RISKY_SERVICE_PRINCIPAL,
             issue::UNUSED_CREDENTIAL,
+            issue::GRANTED_NOT_DECLARED,
         ] {
             let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
             assert!(
@@ -832,6 +844,7 @@ mod tests {
             "unscopable_legacy_mailbox",
             "unconfinable_orgwide",
             "unused_credential",
+            "granted_undeclared",
         ] {
             assert!(group_remediation_kinds(key).is_empty(), "advisory {key}");
         }

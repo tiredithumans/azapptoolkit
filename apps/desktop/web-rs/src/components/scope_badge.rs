@@ -46,6 +46,16 @@ pub use azapptoolkit_core::scoping::{
 /// `azapptoolkit_core::audit::risk_level_for_app_permission`.
 pub fn app_permission_risk_badge(value: &str) -> AnyView {
     match risk_level_for_app_permission(value) {
+        // Tier-0: one grant alone scores Critical in the audit, so the badge
+        // must not read like an ordinary high-risk permission.
+        Some(RiskLevel::Critical) => view! {
+            <Badge
+                label="Tier-0"
+                tone=BadgeTone::Critical
+                title="Tier-0 application permission — on its own a direct path to Global Administrator or tenant takeover"
+            />
+        }
+        .into_any(),
         Some(RiskLevel::High) => view! {
             <Badge
                 label="High risk"

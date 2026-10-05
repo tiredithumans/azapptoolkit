@@ -31,6 +31,44 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   sweep no longer blocks the window. Moving a mailbox scope to its managed group, deleting a
   retired group, and opening an app's mailbox-scope details also wait on fewer back-to-back
   Exchange calls.
+- **Tier-0 permissions are Critical on their own.** A permission that is by itself a path to
+  Global Administrator or tenant takeover now adds 25 points, so one grant ranks the app
+  Critical. `RoleManagement.ReadWrite.Directory`, `AppRoleAssignment.ReadWrite.All` and
+  `Application.ReadWrite.All` used to add 10. The PIM role and group assignment permissions,
+  `Policy.ReadWrite.PermissionGrant`, `Policy.ReadWrite.ConditionalAccess`,
+  `Domain.ReadWrite.All` and `UserAuthenticationMethod.ReadWrite.All` used to add nothing. The
+  permission badge reads "Tier-0". Audit scores shift with this release, so re-run the audit
+  before comparing with an earlier one.
+  `Directory.ReadWrite.All` stays high-risk. Several permissions that used to score nothing are
+  now high-risk, including `Exchange.ManageAsApp`, `Organization.ReadWrite.All`,
+  `DelegatedPermissionGrant.ReadWrite.All` and the remaining `Policy.ReadWrite.*` permissions.
+- **Permissions granted to an app but missing from its manifest are scored.** The audit read
+  only the permissions an app registration requests. A role granted straight to its service
+  principal never shows on the API permissions blade, and it scored nothing. It is now scored,
+  and the new "Granted but not declared" finding lists each one. Those grants don't get a
+  one-click Fix: review each and revoke it or add it to the manifest.
+- **Enterprise apps and managed identities that hold only Exchange Online or SharePoint Online
+  roles are audited.** Before, only Microsoft Graph roles and EWS full mailbox access got a
+  principal into the audit. Holding only `Exchange.ManageAsApp` or SharePoint Online
+  `Sites.FullControl.All` was skipped.
+- **The app's own one-year certificate no longer counts as long-lived.** A credential is
+  long-lived once it runs more than 366 whole days. The toolkit's default certificate (one year,
+  backdated an hour) and a 12-month secret that spans 29 February no longer add 3 points. A
+  secret with no end date now does.
+- **Never-expiring credentials no longer read as "no credentials".** An app whose only secrets
+  never expire showed under the App Registrations list's "None" credential filter. It now shows
+  as active.
+- **More delegated permissions count as broad.** `User.ReadWrite.All` and the write permissions
+  of the `Application`, `Policy`, `UserAuthenticationMethod`, `GroupMember`,
+  `DelegatedPermissionGrant`, `Calendars` and `Chat` families are now treated as broad. That
+  shows in three places: the audit's high-risk delegated finding (admin-consented grants only),
+  the delegated permission grants list (user-consented grants too), and the permission picker's
+  "Broad scope" badge.
+  `Files.SelectedOperations.Selected` and the other Selected permissions are no longer flagged.
+- **An audit that couldn't read the tenant's delegated permission grants says so.** Before,
+  admin-consent findings disappeared without a warning and the result was kept as a complete
+  scan. The audit now shows the incomplete-scan notice and doesn't keep the result. It does the
+  same when SharePoint Online's grants can't be read.
 
 ### Fixed
 

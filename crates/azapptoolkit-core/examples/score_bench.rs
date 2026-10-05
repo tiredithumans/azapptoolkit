@@ -22,6 +22,7 @@ fn main() {
         has_admin_consent: true,
         admin_consented_scopes: None,
         mail_scopes: Default::default(),
+        undeclared_grants: Vec::new(),
     };
     let app = Application {
         id: "obj".into(),

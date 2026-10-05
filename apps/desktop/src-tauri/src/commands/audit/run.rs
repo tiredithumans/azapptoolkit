@@ -22,11 +22,14 @@ use crate::state::AppState;
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
-    prefetch_credential_activity, prefetch_ews_full_access_grants, prefetch_graph_app_roles,
-    prefetch_legacy_access_policies, prefetch_risky_service_principals, prefetch_sign_in_activity,
+    prefetch_credential_activity, prefetch_graph_app_roles, prefetch_legacy_access_policies,
+    prefetch_office365_role_grants, prefetch_risky_service_principals, prefetch_sign_in_activity,
     prefetch_sp_index,
 };
-use super::score::{derive_orgwide_mail_scopes, score_one, score_sp_only, sp_audit_candidates};
+use super::score::{
+    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders, score_one,
+    score_sp_only, sp_audit_candidates,
+};
 use super::{AuditFailure, ResourceResolver, ScoreCtx, classify_audit_failure};
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
@@ -110,7 +113,7 @@ pub async fn run_audit(
         sp_index,
         consent_grants,
         graph_roles_by_sp,
-        ews_full_access_sps,
+        office365_grants,
         sign_in,
         credential_usage,
         app_policy,
@@ -153,13 +156,15 @@ pub async fn run_audit(
         // scoring phase below, and the mail-scopable subset feeds score_one's
         // scoped-mail reconciliation.
         prefetch_graph_app_roles(&client),
-        // ONE tenant-wide appRoleAssignedTo read on the legacy Office 365 Exchange
-        // Online SP, for the EWS `full_access_as_app` grants the Graph matrix
-        // can't see. Kept SEPARATE from the Graph matrix on purpose (the two
-        // resources' role values are not interchangeable), but it feeds BOTH
-        // score_one's reconciliation AND the SP-only phase: a principal holding
-        // only this scope has no Graph role at all, yet reaches every mailbox.
-        prefetch_ews_full_access_grants(&client),
+        // ONE tenant-wide appRoleAssignedTo read EACH on the legacy Office 365
+        // Exchange Online and SharePoint Online SPs, for the grants the Graph
+        // matrix can't see (EWS `full_access_as_app`, `Exchange.ManageAsApp`,
+        // SharePoint Online `Sites.*`). Every grant carries its resource — the
+        // two resources' role values are not interchangeable with Graph's — and
+        // it feeds score_one's reconciliation, its undeclared-grant merge AND
+        // the SP-only phase: a principal holding only these has no Graph role,
+        // yet can reach every mailbox or site.
+        prefetch_office365_role_grants(&client),
         // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
         // supported directory role). A *missing consent* (distinct from a
         // license/availability failure) sets `sign_in_consent_required`,
@@ -193,7 +198,8 @@ pub async fn run_audit(
     // capped at MAX_APPS_PER_RUN has not seen every app, so "no findings" from
     // it is "nothing found YET", exactly like a cancelled run.
     let (apps, truncated) = apps?;
-    let (admin_consent_clients, delegated_scopes_by_client, consent_grants_read) = consent_grants;
+    let (admin_consent_clients, delegated_scopes_by_client, consent_gap) = consent_grants;
+    let consent_grants_read = consent_gap.is_none();
     let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
     let (credential_usage_available, credential_activity_map) = credential_usage;
     let (app_policy_available, app_policy) = app_policy;
@@ -204,14 +210,16 @@ pub async fn run_audit(
     // because a tenant-wide read failed. Collected here so the result can say
     // so instead of reading as a clean scan (see `AuditRunResult::degraded`).
     let (graph_roles_by_sp, graph_roles_gap) = graph_roles_by_sp;
-    let (ews_full_access_sps, ews_gap) = ews_full_access_sps;
+    let (office365_grants, office365_gaps) = office365_grants;
     let (sp_index, sp_index_gap) = sp_index;
     // `mut` because a third kind of gap — per-principal scoring failures — can
     // only be known after the fan-out below has run.
-    let mut degraded: Vec<AuditCoverageGap> = [graph_roles_gap, ews_gap, sp_index_gap, risky_gap]
-        .into_iter()
-        .flatten()
-        .collect();
+    let mut degraded: Vec<AuditCoverageGap> =
+        [graph_roles_gap, sp_index_gap, risky_gap, consent_gap]
+            .into_iter()
+            .flatten()
+            .chain(office365_gaps)
+            .collect();
 
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
@@ -221,20 +229,21 @@ pub async fn run_audit(
     let legacy_policies = Arc::new(legacy_policies);
     let orgwide_mail_by_sp = Arc::new(derive_orgwide_mail_scopes(
         &graph_roles_by_sp,
-        &ews_full_access_sps,
+        &ews_full_access_holders(&office365_grants),
     ));
+    let granted_roles_by_sp =
+        Arc::new(combine_granted_roles(&graph_roles_by_sp, &office365_grants));
 
     // SP-only phase candidates: service principals whose appId has NO local
     // application object (foreign enterprise apps, managed identities, orphaned
-    // SPs) and that hold at least one Graph application-permission grant — OR
-    // are flagged risky by Identity Protection, so a risky grantless principal
-    // is still scored.
+    // SPs) and that hold at least one application-permission grant on Graph,
+    // Exchange Online or SharePoint Online — OR are flagged risky by Identity
+    // Protection, so a risky grantless principal is still scored.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     let sp_candidates = sp_audit_candidates(
         &sp_index,
         &local_app_ids,
-        &graph_roles_by_sp,
-        &ews_full_access_sps,
+        &granted_roles_by_sp,
         &risky_by_sp,
     );
     let total = apps.len() + sp_candidates.len();
@@ -270,6 +279,7 @@ pub async fn run_audit(
         admin_consented_scopes_by_client: consent_grants_read
             .then(|| delegated_scopes_by_client.clone()),
         orgwide_mail_by_sp,
+        granted_roles_by_sp,
         legacy_policies,
         exo_tripped,
         mail_scoping_unresolved: AtomicBool::new(false),
@@ -386,14 +396,7 @@ pub async fn run_audit(
             if cancel.is_cancelled() {
                 break;
             }
-            let item = score_sp_only(
-                &sp,
-                &ctx,
-                &graph_roles_by_sp,
-                &delegated_scopes_by_client,
-                &ews_full_access_sps,
-                now,
-            );
+            let item = score_sp_only(&sp, &ctx, &delegated_scopes_by_client, now);
             emit_progress(
                 &app_handle,
                 "audit-progress",

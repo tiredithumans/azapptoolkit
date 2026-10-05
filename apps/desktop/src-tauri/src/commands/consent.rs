@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::{
-    HIGH_RISK_APP_PERMISSIONS, MEDIUM_RISK_APP_PERMISSIONS, is_risky_delegated_scope,
+    RiskLevel, is_risky_delegated_scope, risk_level_for_app_permission,
 };
 use azapptoolkit_core::models::AdminConsentRequestPolicy;
 use azapptoolkit_core::scoping::{
@@ -41,14 +41,14 @@ const SCANNED_RESOURCE_APP_IDS: &[&str] = &[
 ];
 
 /// Classifies a resolved application-permission value as `high` / `medium` /
-/// `low` using the audit's risk lists.
+/// `low` using the audit's one classifier. Tier-0 (`RiskLevel::Critical`)
+/// folds into `high`: this view's facets are high/medium only, and a tier-0
+/// grant must never fall through to `low`.
 fn permission_risk(value: &str) -> &'static str {
-    if HIGH_RISK_APP_PERMISSIONS.contains(&value) {
-        "high"
-    } else if MEDIUM_RISK_APP_PERMISSIONS.contains(&value) {
-        "medium"
-    } else {
-        "low"
+    match risk_level_for_app_permission(value) {
+        Some(RiskLevel::Critical | RiskLevel::High) => "high",
+        Some(RiskLevel::Medium) => "medium",
+        _ => "low",
     }
 }
 
@@ -382,6 +382,11 @@ mod tests {
     #[test]
     fn permission_risk_classifies_against_audit_lists() {
         assert_eq!(permission_risk("Directory.ReadWrite.All"), "high");
+        // Tier-0 folds into the high facet, never `low`.
+        assert_eq!(
+            permission_risk("RoleManagement.ReadWrite.Directory"),
+            "high"
+        );
         assert_eq!(permission_risk("Mail.Send"), "high");
         assert_eq!(permission_risk("User.Read.All"), "medium");
         assert_eq!(permission_risk("Calendars.ReadWrite"), "medium");
