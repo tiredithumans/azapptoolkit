@@ -12,9 +12,8 @@ use azapptoolkit_core::audit::{
     MailPermissionScope, expired_password_key_ids, is_expired, subsuming_app_permissions,
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess};
-use azapptoolkit_core::scoping::{
-    exchange_role_for_resource_permission, is_scopable_exchange_resource_permission,
-};
+use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission;
+use azapptoolkit_exchange::targets::ScopableMailPermission;
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{invalidate_app_credentials, invalidate_app_lists};
@@ -435,7 +434,7 @@ pub(crate) async fn remediate_remove_redundant_permissions_core(
             // resolver takes. The same resource-aware gate
             // `broader_is_confined` applies below, so the two agree on what
             // a verdict can exist for.
-            let scopable: Vec<(String, &'static str)> = app
+            let scopable: Vec<ScopableMailPermission> = app
                 .required_resource_access
                 .iter()
                 .flat_map(|r| {
@@ -448,8 +447,7 @@ pub(crate) async fn remediate_remove_redundant_permissions_core(
                                 .filter(|a| a.r#type == "Role")
                                 .filter_map(move |a| ix.get(&a.id))
                                 .filter_map(move |value| {
-                                    exchange_role_for_resource_permission(&r.resource_app_id, value)
-                                        .map(|role| (value.clone(), role))
+                                    ScopableMailPermission::on_resource(&r.resource_app_id, value)
                                 })
                         })
                 })

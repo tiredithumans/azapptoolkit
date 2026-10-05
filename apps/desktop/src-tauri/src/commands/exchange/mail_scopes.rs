@@ -56,6 +56,20 @@ pub(crate) async fn try_held_orgwide_mail_grants(
     graph: &GraphClient,
     sp_object_id: &str,
 ) -> Result<HashSet<String>, UiError> {
+    Ok(try_held_orgwide_mail_permissions(graph, sp_object_id)
+        .await?
+        .into_iter()
+        .map(|p| p.value)
+        .collect())
+}
+
+/// [`try_held_orgwide_mail_grants`] with each grant's **resource** kept, for a
+/// caller that must ask a resource-aware question of it — the permission
+/// tester's legacy-policy gate (`is_aap_confinable_permission`) is one.
+pub(crate) async fn try_held_orgwide_mail_permissions(
+    graph: &GraphClient,
+    sp_object_id: &str,
+) -> Result<Vec<azapptoolkit_core::audit::ResourcePermission>, UiError> {
     let resources = mailbox_resource_roles(graph).await?;
     let assignments = graph.list_app_role_assignments(sp_object_id).await?;
     Ok(assignments
@@ -71,12 +85,17 @@ pub(crate) async fn try_held_orgwide_mail_grants(
         .filter(|(resource, _, value)| {
             is_scopable_exchange_resource_permission(Some(resource), value)
         })
-        .map(|(_, _, value)| value.to_string())
+        .map(
+            |(resource, _, value)| azapptoolkit_core::audit::ResourcePermission {
+                resource_app_id: Some(resource.to_string()),
+                value: value.to_string(),
+            },
+        )
         .collect())
 }
 
-/// Resolves the effective Exchange mailbox scoping for each `(value, exchange_role)`
-/// pair in `scopable`. Primary source: `Test-ServicePrincipalAuthorization`,
+/// Resolves the effective Exchange mailbox scoping for each permission in
+/// `scopable`. Primary source: `Test-ServicePrincipalAuthorization`,
 /// which reports the **Exchange RBAC layer only** — it deliberately *excludes*
 /// permissions granted separately in Microsoft Entra ID. A scoped RBAC verdict is
 /// therefore reconciled against `orgwide_granted` (the mail permissions the
@@ -95,10 +114,15 @@ pub(crate) async fn try_held_orgwide_mail_grants(
 /// since only the org-wide/scoped distinction affects the score (and `OrgWide`
 /// scores identically to a propagated/`Unknown` failure there).
 ///
-/// `scopable` carries the Exchange role **with** the value because the caller's
-/// resource-aware gate is the only gate: `targets_from_declared` for the
-/// manifest path, `exchange_role_for_resource_permission(&p.resource_app_id, ..)`
-/// for the held-permission path, the audit's `app_role_grants` for `score_one`.
+/// `scopable` carries the Exchange role **and** the AAP-confinability with the
+/// value because the caller's resource-aware gate is the only gate:
+/// `targets_from_declared` for the manifest path,
+/// `ScopableMailPermission::on_resource(&p.resource_app_id, ..)` for the
+/// held-permission path, the audit's `app_role_grants` for `score_one`. The
+/// legacy-AAP override (on the Ok path and as the probe-failure fallback)
+/// reaches only `aap_confinable` entries: a policy never governed the RBAC-only
+/// values (`MailboxItem.*`, `Mail-Advanced.*`, …), so on a policy-confined app
+/// those stay org-wide rather than reading "Scoped (legacy)".
 /// This function used to re-derive the role from the value against Microsoft
 /// Graph, which has no `full_access_as_app` — so the EWS row (role
 /// `Application EWS.AccessAsApp`, on Office 365 Exchange Online) was dropped
@@ -112,7 +136,7 @@ pub(crate) async fn try_held_orgwide_mail_grants(
 pub(crate) async fn resolve_mail_scopes(
     exo: &ExchangeClient,
     app_id: &str,
-    scopable: &[(String, &'static str)],
+    scopable: &[ScopableMailPermission],
     orgwide_granted: &HashSet<String>,
     enrich: bool,
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
@@ -154,10 +178,30 @@ pub(crate) async fn resolve_mail_scopes(
             // Detail path: a legacy AAP can still answer, and a principal Exchange
             // can't resolve simply has no RBAC scope (=> org-wide). Only a genuine
             // 403/consent failure propagates so the UI can offer "Grant consent".
-            let fallback = scope_from_rbac_error(err, aap_override)?;
+            //
+            // The policy answers only for what it governs. An RBAC-only value
+            // gets what the probe failure alone says: a principal Exchange
+            // can't resolve has no RBAC scope (=> org-wide); any other failure
+            // is indeterminate (=> `Unknown`, never a borrowed legacy scope).
+            // With no confinable value at all the policy is set aside, so a
+            // genuine 403 still propagates.
+            let rbac_only = if err.is_missing_object() {
+                MailPermissionScope::OrgWide
+            } else {
+                MailPermissionScope::Unknown
+            };
+            let aap = aap_override.filter(|_| scopable.iter().any(|s| s.aap_confinable));
+            let fallback = scope_from_rbac_error(err, aap)?;
             return Ok(scopable
                 .iter()
-                .map(|(perm, _role)| (perm.clone(), fallback.clone()))
+                .map(|s| {
+                    let verdict = if s.aap_confinable {
+                        fallback.clone()
+                    } else {
+                        rbac_only.clone()
+                    };
+                    (s.value.clone(), verdict)
+                })
                 .collect());
         }
     };
@@ -165,7 +209,12 @@ pub(crate) async fn resolve_mail_scopes(
     let mut out = HashMap::new();
     // scope name → (group_count, recipient_filter); `None` = unresolved scope.
     let mut scope_cache: HashMap<String, Option<(u32, String)>> = HashMap::new();
-    for (perm, role) in scopable {
+    for ScopableMailPermission {
+        value: perm,
+        exchange_role: role,
+        aap_confinable,
+    } in scopable
+    {
         // A composite role (`Application Mail Full Access`, `Application Exchange
         // Full Access`) confers this permission without carrying its role name,
         // so match the granted-permission list too.
@@ -174,8 +223,10 @@ pub(crate) async fn resolve_mail_scopes(
             .filter(|r| row_grants_permission(r, role, perm))
             .collect();
         let mut verdict = verdict_from_rows(&matching);
-        // Apply the legacy-AAP fallback only when RBAC shows org-wide.
+        // Apply the legacy-AAP fallback only when RBAC shows org-wide, and only
+        // to a permission a policy could govern.
         if matches!(verdict, MailPermissionScope::OrgWide)
+            && *aap_confinable
             && let Some(aap) = &aap_override
         {
             verdict = aap.clone();
@@ -249,7 +300,7 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
     tenant_id: &str,
     exo: &ExchangeClient,
     app_id: &str,
-    scopable: &[(String, &'static str)],
+    scopable: &[ScopableMailPermission],
     orgwide_granted: &HashSet<String>,
 ) -> Result<HashMap<String, MailPermissionScope>, ExchangeError> {
     // Nothing scopable ⇒ no probe and no cache entry (matches
@@ -286,10 +337,10 @@ pub(crate) async fn resolve_mail_scopes_audit_cached(
 pub(crate) fn audit_mail_scopes_key(
     tenant_id: &str,
     app_id: &str,
-    scopable: &[(String, &'static str)],
+    scopable: &[ScopableMailPermission],
     orgwide_granted: &HashSet<String>,
 ) -> String {
-    let mut values: Vec<&str> = scopable.iter().map(|(v, _)| v.as_str()).collect();
+    let mut values: Vec<&str> = scopable.iter().map(|s| s.value.as_str()).collect();
     values.sort_unstable();
     values.dedup();
     let held: Vec<&str> = values
@@ -305,6 +356,17 @@ pub(crate) fn audit_mail_scopes_key(
             held.join(",")
         ),
     )
+}
+
+/// Whether a Permissions-tab verdict set may be cached. An `Unknown` entry
+/// comes from a probe failure `resolve_mail_scopes` swallowed (an RBAC-only
+/// permission after a 403 the legacy policy answered for the rest); errors are
+/// never cached, so neither is a verdict derived from one — it would pin
+/// "Unknown" for the TTL after Exchange recovers.
+pub(crate) fn verdicts_are_cacheable(entries: &[MailScopeEntry]) -> bool {
+    !entries
+        .iter()
+        .any(|e| matches!(e.scope, MailPermissionScope::Unknown))
 }
 
 /// Cache key for a principal's resolved per-permission mailbox scopes:
@@ -369,9 +431,9 @@ pub async fn get_mail_permission_scopes(
     // role its resource maps it to — the target already resolved that
     // resource-aware, so the role travels with the value instead of being
     // re-derived against Microsoft Graph (which dropped the EWS row).
-    let scopable: Vec<(String, &'static str)> = targets_from_declared(&app, &resources)
-        .into_iter()
-        .map(|t| (t.graph_value, t.exchange_role))
+    let scopable: Vec<ScopableMailPermission> = targets_from_declared(&app, &resources)
+        .iter()
+        .map(ScopableMailPermission::from)
         .collect();
     if scopable.is_empty() {
         state
@@ -398,19 +460,21 @@ pub async fn get_mail_permission_scopes(
     // so every pair becomes a row (the EWS one included).
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
-        .map(|(value, role)| {
+        .map(|s| {
             let scope = scopes
-                .get(&value)
+                .get(&s.value)
                 .cloned()
                 .unwrap_or(MailPermissionScope::Unknown);
             MailScopeEntry {
-                graph_permission: value,
-                exchange_role: role.to_string(),
+                graph_permission: s.value,
+                exchange_role: s.exchange_role.to_string(),
                 scope,
             }
         })
         .collect();
-    state.cache.put_if_current(watch, &entries);
+    if verdicts_are_cacheable(&entries) {
+        state.cache.put_if_current(watch, &entries);
+    }
     Ok(entries)
 }
 
@@ -434,12 +498,9 @@ pub async fn get_mail_scopes_for_principal(
     // management scope can confine — and go on to report a mailbox scoping
     // verdict for it. Both callers already filtered this way client-side, but a
     // command is only as safe as its own gate.
-    let scopable: Vec<(String, &'static str)> = permissions
+    let scopable: Vec<ScopableMailPermission> = permissions
         .iter()
-        .filter_map(|p| {
-            exchange_role_for_resource_permission(&p.resource_app_id, &p.value)
-                .map(|role| (p.value.clone(), role))
-        })
+        .filter_map(|p| ScopableMailPermission::on_resource(&p.resource_app_id, &p.value))
         .collect();
     // Nothing scopable ⇒ no Exchange call (and no needless consent prompt).
     if scopable.is_empty() {
@@ -481,7 +542,7 @@ pub async fn get_mail_scopes_for_principal(
     };
 
     let exo = exchange_client_checked(&state, &tenant_id).await?;
-    // The vetted (value, role) pairs, as resolved against each permission's own
+    // The vetted permissions, as resolved against each permission's own
     // resource above. Value-keyed output is unambiguous because the two
     // confinable sets are disjoint: Microsoft Graph contributes the `Mail*` /
     // `Calendars.*` / `Contacts.*` family, Office 365 Exchange Online
@@ -490,18 +551,20 @@ pub async fn get_mail_scopes_for_principal(
 
     let entries: Vec<MailScopeEntry> = scopable
         .into_iter()
-        .map(|(value, role)| {
+        .map(|s| {
             let scope = scopes
-                .get(&value)
+                .get(&s.value)
                 .cloned()
                 .unwrap_or(MailPermissionScope::Unknown);
             MailScopeEntry {
-                graph_permission: value,
-                exchange_role: role.to_string(),
+                graph_permission: s.value,
+                exchange_role: s.exchange_role.to_string(),
                 scope,
             }
         })
         .collect();
-    state.cache.put_if_current(watch, &entries);
+    if verdicts_are_cacheable(&entries) {
+        state.cache.put_if_current(watch, &entries);
+    }
     Ok(entries)
 }

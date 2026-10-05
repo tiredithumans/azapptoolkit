@@ -404,6 +404,7 @@ version = "0.31.0"
 dependencies = [
  "azapptoolkit-core",
  "bytes",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
