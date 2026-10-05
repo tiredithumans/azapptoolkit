@@ -1221,7 +1221,8 @@ async fn the_migration_loop_tracks_attempts_and_stops() {
 /// command to the old `!items.is_empty()` gate.
 #[test]
 fn the_migration_command_invalidates_from_the_run_verdict() {
-    let src = include_str!("aap_migration.rs");
+    // Normalised: a Windows checkout has CRLF line endings.
+    let src = include_str!("aap_migration.rs").replace("\r\n", "\n");
     let body = src
         .split_once("pub async fn migrate_application_access_policies(")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
