@@ -41,6 +41,9 @@ pub async fn list_sso_certificate_expirations(
     {
         return Ok(cached);
     }
+    // Before the scan: a rollover that lands while it pages busts this key,
+    // and the store below must not re-cache the pre-rollover board.
+    let watch = state.cache.generation_for(CacheKind::Lists, &cache_key);
 
     let client = state.graph_for(&tenant_id);
     // `truncated` is logged by the client. The cap is SP_INDEX_MAX (10 000)
@@ -89,7 +92,7 @@ pub async fn list_sso_certificate_expirations(
     // Soonest first; an app with no resolvable expiry sorts last rather than
     // masquerading as urgent.
     rows.sort_by_key(|r| r.days_to_expiry.unwrap_or(i64::MAX));
-    state.cache.put(CacheKind::Lists, cache_key, &rows);
+    state.cache.put_if_current(watch, &rows);
     Ok(rows)
 }
 

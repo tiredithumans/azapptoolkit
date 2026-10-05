@@ -865,7 +865,8 @@ fn fold_site_result(
 ///
 /// Long-running: emits `site-sweep-progress` after each chunk of
 /// [`SWEEP_BATCH`] sites and polls its own `AppState.site_sweep_cancel` token
-/// (stopped only by [`cancel_site_sweep`], so no other run's Cancel can abort
+/// (stopped only by [`cancel_site_sweep`] and by sign-out
+/// (`AppState::forget_tenant`), so no other run's Cancel can abort
 /// it, and it aborts no other run) between dispatches. Per-site read failures increment `sites_failed`
 /// rather than aborting or silently reading as "no grants", so coverage is
 /// never overstated. The result is cached (60-minute audit TTL) under a
@@ -883,6 +884,12 @@ pub async fn sweep_site_permissions(
     // cancel issued during it, which `is_cancelled()` then discards. Pinned by
     // `repo_invariants::cancel`.
     let cancel = state.site_sweep_cancel.claim();
+    // Watched before the first await too: a site grant or removal mid-sweep
+    // busts this key, and the store below must not undo that with the
+    // pre-mutation index.
+    let sweep_watch = state
+        .cache
+        .generation_for(CacheKind::Audit, &sweep_cache_key(&tenant_id));
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     let (sites, truncated) = client
@@ -1038,9 +1045,7 @@ pub async fn sweep_site_permissions(
     // overstated" promise extends to the cache. A capped sweep IS cached, with
     // its flag; see `sweep_is_cacheable` for why that is safe.
     if sweep_is_cacheable(cancelled, sites_failed) {
-        state
-            .cache
-            .put(CacheKind::Audit, sweep_cache_key(&tenant_id), &result);
+        state.cache.put_if_current(sweep_watch, &result);
     }
     Ok(result)
 }

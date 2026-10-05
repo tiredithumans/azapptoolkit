@@ -473,9 +473,11 @@ impl Drop for IndexWatch<'_> {
 }
 
 impl Cache {
-    /// Ceiling on concurrently watched keys. Only tenant-wide index fetches
-    /// watch, and `single_flight` collapses same-key fetchers, so the live set
-    /// is a handful — a runaway guard, not a working limit. Past it
+    /// Ceiling on concurrently watched keys. Tenant-wide index fetches
+    /// (`single_flight` collapses same-key fetchers), one long scan per run
+    /// kind, and per-app mailbox-scope probes (bounded by the audit's fan-out
+    /// cap) watch, so the live set stays small — a runaway guard, not a
+    /// working limit. Past it
     /// `generation_for` returns [`Cache::WATCH_UNAVAILABLE`] and the store
     /// refuses.
     const MAX_WATCHES: usize = 256;
@@ -686,6 +688,23 @@ impl Cache {
         self.put_inner(kind, key, value, false);
     }
 
+    /// [`Self::put`] under the store-after-invalidate guard, **unpinned** — for
+    /// a long scan's result (an audit run, a tenant sweep, a per-app mailbox
+    /// probe) that a mutation can invalidate while the scan is still awaiting.
+    /// `watch` comes from a [`Cache::generation_for`] captured **before** the
+    /// fetch's first await; a lost race is skipped (`false`), so the
+    /// invalidation stands instead of being undone by the pre-mutation result
+    /// for the full TTL. Per-object keys belong here, never in the pinned
+    /// [`Self::put_index_if_current`].
+    pub fn put_if_current<T>(&self, watch: IndexWatch<'_>, value: &T) -> bool
+    where
+        T: serde::Serialize,
+    {
+        self.store_if_current(watch, |cache, kind, key| {
+            cache.put_inner(kind, key, value, false)
+        })
+    }
+
     /// Like [`Self::put`], but **pinned**: exempt from LRU eviction (TTL and
     /// invalidation still apply). Use only for tenant-wide *index* entries that
     /// cost a full directory scan to rebuild — they share a bucket with
@@ -761,7 +780,10 @@ impl Cache {
         // unseen.
         let (_, _, _, after) = watch.release();
         match after {
-            Some(now) if now == since => true,
+            // A declined store (`None` stamp: caching disabled for the kind,
+            // or a serialization failure) is not a store — report it as
+            // skipped, as the `put_*_if_current` docs promise.
+            Some(now) if now == since => stamp.is_some(),
             other => {
                 tracing::debug!(
                     %key,
@@ -827,6 +849,19 @@ impl Cache {
     /// to [`Self::put`]; `get::<T>` on such a key reads `Null` and misses.
     pub fn put_typed<T: Send + Sync + 'static>(&self, kind: CacheKind, key: String, value: Arc<T>) {
         self.put_typed_inner(kind, key, value, false);
+    }
+
+    /// [`Self::put_typed`] under the store-after-invalidate guard, unpinned —
+    /// the typed twin of [`Self::put_if_current`]. Returns `false` when the
+    /// store was skipped.
+    pub fn put_typed_if_current<T: Send + Sync + 'static>(
+        &self,
+        watch: IndexWatch<'_>,
+        value: Arc<T>,
+    ) -> bool {
+        self.store_if_current(watch, move |cache, kind, key| {
+            cache.put_typed_inner(kind, key, value, false)
+        })
     }
 
     /// [`Self::put_typed`] with the [`Self::put_index`] pin — the combination the
@@ -946,7 +981,7 @@ impl Cache {
             tracing::warn!(
                 %key,
                 watches = watches.len(),
-                "cache watch table full; the index store will refuse and re-fetch"
+                "cache watch table full; the guarded store will refuse and re-fetch"
             );
             drop(watches);
             return IndexWatch {

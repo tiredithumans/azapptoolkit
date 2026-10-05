@@ -507,6 +507,124 @@ fn a_full_watch_table_refuses_rather_than_storing_unproven() {
     );
 }
 
+/// Whether the live entry under `key` is pinned.
+fn is_pinned(cache: &Cache, kind: CacheKind, key: &str) -> Option<bool> {
+    cache.buckets[kind.idx()]
+        .lock()
+        .entries
+        .get(key)
+        .map(|e| e.pinned)
+}
+
+/// The unpinned guarded store refuses after each of the three invalidation
+/// shapes a mutation (or sign-out) uses. A long scan — an audit run, a site
+/// or Key Vault sweep, a mailbox-scope probe — awaits for minutes, and an
+/// unconditional store after it re-cached the pre-mutation result for the TTL,
+/// undoing the invalidation that landed mid-scan.
+#[test]
+fn an_unpinned_scan_result_that_raced_an_invalidation_is_not_stored() {
+    type Invalidation = fn(&Cache);
+    let shapes: [(&str, Invalidation); 3] = [
+        ("invalidate", |c| {
+            c.invalidate(CacheKind::Audit, "t1|audit_run")
+        }),
+        ("invalidate_prefix", |c| {
+            c.invalidate_prefix(CacheKind::Audit, "t1|");
+        }),
+        ("invalidate_tenant", |c| c.invalidate_tenant("t1")),
+    ];
+    for (shape, invalidate) in shapes {
+        let cache = Cache::new();
+        let key = "t1|audit_run";
+
+        let watch = cache.generation_for(CacheKind::Audit, key);
+        invalidate(&cache);
+        assert!(
+            !cache.put_if_current(watch, &Sample("stale".into())),
+            "{shape}: a result that lost the race must not be stored"
+        );
+        assert!(
+            cache.get::<Sample>(CacheKind::Audit, key).is_none(),
+            "{shape}: the invalidated key must stay empty"
+        );
+
+        let watch = cache.generation_for(CacheKind::Audit, key);
+        invalidate(&cache);
+        assert!(
+            !cache.put_typed_if_current(watch, Arc::new(vec![1u8])),
+            "{shape}: the typed twin must refuse too"
+        );
+        assert!(cache.get_typed::<Vec<u8>>(CacheKind::Audit, key).is_none());
+        assert_eq!(cache.watch_count(), 0, "{shape}: every watch released");
+    }
+}
+
+#[test]
+fn an_unraced_unpinned_guarded_store_lands_unpinned() {
+    // The healthy path still caches — and does NOT pin: these are per-object
+    // or per-run keys, and the pinned set must stay a handful of indexes.
+    let cache = Cache::new();
+    let watch = cache.generation_for(CacheKind::Lists, "t1|mail_scopes|declared|o1");
+    assert!(cache.put_if_current(watch, &Sample("v".into())));
+    assert_eq!(
+        cache.get::<Sample>(CacheKind::Lists, "t1|mail_scopes|declared|o1"),
+        Some(Sample("v".into()))
+    );
+    assert_eq!(
+        is_pinned(&cache, CacheKind::Lists, "t1|mail_scopes|declared|o1"),
+        Some(false)
+    );
+
+    let watch = cache.generation_for(CacheKind::Audit, "t1|audit_run");
+    assert!(cache.put_typed_if_current(watch, Arc::new(vec![3u8])));
+    assert_eq!(
+        cache
+            .get_typed::<Vec<u8>>(CacheKind::Audit, "t1|audit_run")
+            .as_deref(),
+        Some(&vec![3u8])
+    );
+    assert_eq!(
+        is_pinned(&cache, CacheKind::Audit, "t1|audit_run"),
+        Some(false)
+    );
+    assert_eq!(cache.watch_count(), 0);
+}
+
+#[test]
+fn a_guarded_store_the_cache_declined_reports_false() {
+    // `true` means "stored". With caching disabled nothing is written, so a
+    // guarded store must say so rather than claim a write that never happened.
+    let cache = Cache::new();
+    cache.set_enabled(false);
+    for (label, stored) in [
+        (
+            "put_if_current",
+            cache.put_if_current(cache.generation_for(CacheKind::Audit, "t1|a"), &1u8),
+        ),
+        (
+            "put_typed_if_current",
+            cache.put_typed_if_current(
+                cache.generation_for(CacheKind::Audit, "t1|b"),
+                Arc::new(1u8),
+            ),
+        ),
+        (
+            "put_index_if_current",
+            cache.put_index_if_current(cache.generation_for(CacheKind::Lists, "t1|c"), &1u8),
+        ),
+        (
+            "put_typed_index_if_current",
+            cache.put_typed_index_if_current(
+                cache.generation_for(CacheKind::Lists, "t1|d"),
+                Arc::new(1u8),
+            ),
+        ),
+    ] {
+        assert!(!stored, "{label}: a declined store must report false");
+    }
+    assert_eq!(cache.watch_count(), 0);
+}
+
 #[test]
 fn lowering_max_size_also_shrinks_the_two_per_object_buckets() {
     // `cap_for` clamped ServicePrincipal/Lists up to the per-object ceiling

@@ -302,6 +302,53 @@ Two shapes of this bug are worth naming, because both hid behind a guard that lo
   `put`, it was both unguarded and unpinned, although the `put_index` doc named it as pinned. It is
   now a guarded, pinned store in the shared App Registrations scan.
 
+**Long scans store through the guard too — unpinned.** The same race applies to every result a
+scan takes seconds to minutes to produce, pinned or not: the audit run (`audit_cache_key`), the
+site sweep (`sweep_cache_key`), the Key Vault sweep (`kv_sweep_cache_key`), the SSO certificate
+board (`sso_certificate_expirations_key`), the Grant-access picker's app-role resource directory
+(`app_role_resources_key`), the per-app detail fan-out (`app_detail_key`) and the per-app
+mailbox-scope verdicts (`mail_scopes_key`, all three discriminators). Each used to store with a plain `put`/`put_typed` after its last
+await, so a remediation, grant, scope change or sign-out's `invalidate_tenant` that landed
+mid-scan was undone, and the pre-mutation result (a stale all-clear, a stale org-wide verdict)
+served for the TTL. LRU is no safety net for an unpinned entry: nothing promises an eviction
+before the TTL does.
+
+So each captures `generation_for(kind, &key)` before the function's **first** await (right after
+its `claim()` where it has a `CancelToken`, otherwise right after the cache miss) and stores through
+`put_if_current` / `put_typed_if_current`, the unpinned twins of the index forms; they share
+`store_if_current`, so they refuse on the same exact-key, prefix and tenant invalidations. A
+per-object key (`mail_scopes|…`) is watched per key and **never** pinned. The watch table stays
+small: the per-app probes are bounded by the audit's fan-out cap (8) plus the open Permissions
+tabs, and a full table only makes the store refuse, which costs one re-probe. A guarded store
+returns `true` only when something was actually written: a store the cache declined (caching
+disabled, a serialization failure) returns `false`.
+
+The watch cannot cover an input read *before* it. The audit reads the org-wide Entra mail grants
+once at run start (`orgwide_mail_by_sp`), and each app's mailbox verdict is reconciled against
+that snapshot. A strip landing after the run start but before that app's probe drops the key
+before the probe's watch exists, so the watch stays clean. The audit verdict's key therefore
+carries the snapshot it was reconciled against (`audit_mail_scopes_key`:
+`audit|{app}|{perms}|orgwide:{held}`, where `held` is `perms` ∩ the org-wide set). A verdict built
+from a stale snapshot lands under a key that a run reading the live set never looks up.
+
+`repo_invariants::long_scan_results_store_through_the_guard` pins this: a function that builds
+one of these keys may write only through the unpinned guarded forms (no plain, no pinned write),
+and a function with an unpinned guarded store captures its watch before its first `.await`.
+Fixture modules mounted by `#[cfg(test)] mod …;` are skipped, because they seed these keys directly.
+The key set is a short list plus every key a command already watches for an unpinned guarded
+store, and each listed key must still have such a store. `the_audit_run_is_cached_only_behind_run_is_cacheable`
+follows the audit write through its watch binding.
+
+Sign-out also **stops** the read sweeps. `AppState::forget_tenant` calls `cancel()` on the audit,
+site-sweep, Key Vault sweep, mailbox-probe and backup flags. Their guarded stores would refuse
+anyway once `invalidate_tenant` bumps their watches, but left running they keep issuing
+requests against a purged session for minutes. It lives in `forget_tenant` rather than
+`sign_out`, so `sign_in` (a different operator on the same tenant) stops the previous account's
+scans too. That cancel is harmless when nothing is running, and `reauthenticate` never reaches
+it. The write runs (`bulk_cancel`, `migration_cancel`, `restore_cancel`) are not cancelled: once
+the tokens are purged, each stops at its dead-session latch. Pinned by
+`repo_invariants::sign_out_stops_every_read_sweep`, which derives the flags from `AppState`.
+
 The general rule for multi-step mutations: **a partial success is a real write — invalidate,
 gated on "something actually changed."** Audit remediations, `remove_exchange_mailbox_access`,
 `downgrade_application_permission`, `create_application`, `grant_single_permission`,

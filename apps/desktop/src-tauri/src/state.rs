@@ -311,9 +311,10 @@ pub struct AppState {
     // display-toggled panels), so runs of different kinds overlap: a flag shared
     // between kinds lets one kind's Cancel stop the other. Each flag is claimed
     // (`CancelFlag::claim`, once, before the first await) by one run kind and
-    // cancelled by exactly one command — pinned by
+    // cancelled by exactly one command (plus sign-out's `forget_tenant` for the
+    // read sweeps) — pinned by
     // `tests/repo_invariants/cancel.rs`.
-    /// `run_audit`; cancelled by `cancel_audit`.
+    /// `run_audit`; cancelled by `cancel_audit` and by sign-out (`forget_tenant`).
     pub audit_cancel: CancelFlag,
     /// Every `bulk_*` command; cancelled by `cancel_bulk`. Two bulk runs started
     /// from different bulk action bars share it, so one Cancel stops both.
@@ -321,13 +322,15 @@ pub struct AppState {
     /// `migrate_application_access_policies`; cancelled by `cancel_aap_migration`.
     pub migration_cancel: CancelFlag,
     /// `sweep_site_permissions` (Resource Access Sites tab and the per-app site
-    /// panel); cancelled by `cancel_site_sweep`.
+    /// panel); cancelled by `cancel_site_sweep` and by sign-out (`forget_tenant`).
     pub site_sweep_cancel: CancelFlag,
-    /// `sweep_key_vault_access`; cancelled by `cancel_key_vault_sweep`.
+    /// `sweep_key_vault_access`; cancelled by `cancel_key_vault_sweep` and by
+    /// sign-out (`forget_tenant`).
     pub key_vault_sweep_cancel: CancelFlag,
-    /// `find_mailbox_reachers`; cancelled by `cancel_mailbox_probe`.
+    /// `find_mailbox_reachers`; cancelled by `cancel_mailbox_probe` and by sign-out
+    /// (`forget_tenant`).
     pub mailbox_probe_cancel: CancelFlag,
-    /// `backup_tenant`; cancelled by `cancel_backup`.
+    /// `backup_tenant`; cancelled by `cancel_backup` and by sign-out (`forget_tenant`).
     pub backup_cancel: CancelFlag,
     /// `restore_tenant`; cancelled by `cancel_restore`.
     pub restore_cancel: CancelFlag,
@@ -551,7 +554,24 @@ impl AppState {
     /// kinds by the shared `{tenant_id}|` convention (and is unit-tested in
     /// core). A new `Mutex<HashMap<…>>` field on `AppState` must be named here —
     /// pinned by `repo_invariants/cache.rs`.
+    ///
+    /// It also stops every in-flight **read** sweep (audit, site and Key Vault
+    /// sweeps, mailbox probe, backup): their results belong to the session being
+    /// forgotten, the guarded stores would refuse them anyway once the tenant
+    /// sweep below bumps their watches, and left running they keep issuing
+    /// requests against a purged session. Here rather than in `sign_out` so
+    /// `sign_in` (a different operator on the same tenant) stops the previous
+    /// account's scans too; `reauthenticate` never calls this, so a re-auth in
+    /// place keeps its runs. The write runs (`bulk_cancel`, `migration_cancel`,
+    /// `restore_cancel`) are left alone: stopping one between writes is the
+    /// operator's call, and with the tokens gone each stops on its own at the
+    /// dead-session latch. Pinned by `repo_invariants/cache.rs`.
     pub fn forget_tenant(&self, tenant_id: &str) {
+        self.audit_cancel.cancel();
+        self.site_sweep_cancel.cancel();
+        self.key_vault_sweep_cancel.cancel();
+        self.mailbox_probe_cancel.cancel();
+        self.backup_cancel.cancel();
         self.graph_clients.lock().remove(tenant_id);
         self.exchange_clients.lock().remove(tenant_id);
         self.kv_clients.lock().retain(|(t, _), _| t != tenant_id);

@@ -66,7 +66,8 @@ const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Captures a full, portable backup of the tenant's app estate. Long-running
 /// (a batched per-app fan-out), so it polls its own [`AppState::backup_cancel`]
-/// token, stopped only by [`cancel_backup`]: a restore's Cancel cannot stop it
+/// token, stopped only by [`cancel_backup`] and by sign-out
+/// (`AppState::forget_tenant`): a restore's Cancel cannot stop it
 /// and vice versa, nor can an audit/bulk run's. Emits `backup-progress` ([`BulkProgress`]) events
 /// carrying the live adaptive concurrency cap.
 #[tauri::command]

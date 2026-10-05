@@ -79,7 +79,8 @@ fn keyvault_rbac_err(err: azapptoolkit_arm::ArmError) -> UiError {
 ///
 /// Long-running: emits `keyvault-sweep-progress` per vault and polls its own
 /// `AppState.key_vault_sweep_cancel` token (stopped only by
-/// [`cancel_key_vault_sweep`]) between dispatches. A per-vault
+/// [`cancel_key_vault_sweep`] and by sign-out, `AppState::forget_tenant`)
+/// between dispatches. A per-vault
 /// read failure increments `vaults_failed` rather than aborting or silently
 /// reading as "no access", so coverage is never overstated. A complete result
 /// is cached (60-minute audit TTL) under a tenant-prefixed key; a cancelled or
@@ -100,6 +101,12 @@ pub async fn sweep_key_vault_access(
     // (`is_cancelled()` compares `cancelled >= generation`). Pinned by
     // `repo_invariants::cancel`.
     let cancel = state.key_vault_sweep_cancel.claim();
+    // Watched before the first await too: an Azure role assignment mid-sweep
+    // busts this key, and the store below must not undo that with the
+    // pre-mutation rows.
+    let sweep_watch = state
+        .cache
+        .generation_for(CacheKind::Audit, &kv_sweep_cache_key(&tenant_id));
     // Acquire the ARM token up front so a missing-consent rejection surfaces as
     // the typed `consent_required` code (the UI offers a consent button)
     // instead of a generic error deep inside the ARM client.
@@ -306,7 +313,7 @@ pub async fn sweep_key_vault_access(
     // Cache only a COMPLETE sweep — serving a cancelled/partial result for the
     // next hour would overstate coverage.
     if !cancelled && vaults_failed == 0 {
-        cache.put(CacheKind::Audit, kv_sweep_cache_key(&tenant_id), &result);
+        state.cache.put_if_current(sweep_watch, &result);
     }
     Ok(result)
 }
