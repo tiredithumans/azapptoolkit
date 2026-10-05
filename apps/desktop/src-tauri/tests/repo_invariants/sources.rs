@@ -20,14 +20,174 @@ fn commands_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands")
 }
 
-/// Drops everything from the first `#[cfg(test)]` onward.
+/// Blanks every `#[cfg(test)]` item — the attribute and the item it gates —
+/// keeping the newlines, so line numbers in findings still point at the file.
 ///
 /// Fixtures legitimately call the fan-out drivers and mutation helpers without
 /// being commands, so scanning them produces findings against test code. The
 /// driver's OWN unit tests were the first false positives the source walk
 /// surfaced — four `dispatch_capped` call sites in `commands/dispatch.rs`.
-pub(crate) fn strip_tests(src: &str) -> &str {
-    src.split("#[cfg(test)]").next().unwrap_or(src)
+///
+/// This used to be `src.split("#[cfg(test)]").next()`: everything from the
+/// first occurrence of that TEXT onward. A doc comment mentioning the attribute
+/// (`applications/cache.rs` has one) silently hid the rest of the file from
+/// every rule, and a real `#[cfg(test)]` on one helper `fn` hid every production
+/// item after it. Now only a real attribute counts — a code line whose trimmed
+/// text starts with it, outside any comment or string — and only the item it
+/// gates is dropped.
+pub(crate) fn strip_tests(src: &str) -> String {
+    // `all(test, …)` is test-only; `any(test, …)` is NOT, so it stays.
+    const ATTRS: [&str; 3] = ["#[cfg(test)]", "#[cfg(all(test,", "#[cfg(all(test)"];
+    let code = code_mask(src);
+    let mut drop: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0usize;
+    for line in src.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        let at = line_start + indent;
+        line_start += line.len();
+        let trimmed = line.trim_start();
+        if !ATTRS.iter().any(|a| trimmed.starts_with(a)) || !code[at] {
+            continue;
+        }
+        if drop.last().is_some_and(|&(_, end)| at < end) {
+            continue; // inside an item already dropped
+        }
+        drop.push((at, gated_item_end(src, &code, at)));
+    }
+    let mut out = String::with_capacity(src.len());
+    for (i, c) in src.char_indices() {
+        if c == '\n' || !drop.iter().any(|&(a, b)| (a..b).contains(&i)) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The end (exclusive) of the item gated by the attribute at `at`, which may
+/// be an item, a field, a variant, a match arm, a parameter or a statement.
+///
+/// It ends at the first depth-0 `;` or `,` (included), at the `}` that closes
+/// its own first block (`mod tests { … }`, a `fn`), or just before a closer
+/// that would close the ENCLOSING scope (a last field, arm or parameter with
+/// no trailing comma). Without the last two, a gated struct field
+/// (`#[cfg(test)] expired_sweeps: u64,`) ran on through the rest of the file.
+/// `<…>` counts as nesting only at depth 0, and only where it opens generics
+/// (straight after an identifier, `:` or `&`), so `HashMap<K, V>` or
+/// `fn f<A, B>` does not end the item at its comma while `a < b` and `->`
+/// stay comparisons and arrows.
+fn gated_item_end(src: &str, code: &[bool], at: usize) -> usize {
+    let bytes = src.as_bytes();
+    let (mut depth, mut angle) = (0i32, 0i32);
+    for i in at + 1..bytes.len() {
+        if !code[i] {
+            continue;
+        }
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => return i,
+            b')' | b']' => depth -= 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 && angle == 0 {
+                    return i + 1;
+                }
+            }
+            b'<' if depth == 0
+                && i > 0
+                && (bytes[i - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[i - 1], b'_' | b':' | b'&')) =>
+            {
+                angle += 1;
+            }
+            b'>' if depth == 0 && angle > 0 && !matches!(bytes[i - 1], b'-' | b'=') => angle -= 1,
+            b';' | b',' if depth == 0 && angle == 0 => return i + 1,
+            _ => {}
+        }
+    }
+    src.len()
+}
+
+/// For each byte of `src`, whether it is code: not inside a `//` or `/* */`
+/// comment, a string (plain, byte or raw) or a char literal.
+pub(crate) fn code_mask(src: &str) -> Vec<bool> {
+    let b = src.as_bytes();
+    let ident = |i: usize| b[i].is_ascii_alphanumeric() || b[i] == b'_';
+    let mut mask = vec![true; b.len()];
+    let mut i = 0usize;
+    while i < b.len() {
+        let start = i;
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            let mut depth = 0usize;
+            while i < b.len() {
+                if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else if b[i] == b'r'
+            && (i == 0 || !ident(i - 1) || (b[i - 1] == b'b' && (i < 2 || !ident(i - 2))))
+            && matches!(b.get(i + 1), Some(b'"' | b'#'))
+        {
+            let mut j = i + 1;
+            while b.get(j) == Some(&b'#') {
+                j += 1;
+            }
+            if b.get(j) != Some(&b'"') {
+                i += 1;
+                continue; // `r#ident`, not a raw string
+            }
+            let close: Vec<u8> = std::iter::once(b'"')
+                .chain(std::iter::repeat_n(b'#', j - i - 1))
+                .collect();
+            i = b[j + 1..]
+                .windows(close.len())
+                .position(|w| w == close.as_slice())
+                .map_or(b.len(), |p| j + 1 + p + close.len());
+        } else if b[i] == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if b[i] == b'\'' {
+            // A char literal (`'{'`, `'\n'`, `'\u{2014}'`), not a lifetime.
+            let len = if b.get(i + 1) == Some(&b'\\') {
+                src.get(i + 3..)
+                    .and_then(|r| r.find('\''))
+                    .map(|p| p + 4)
+                    .filter(|&n| n <= 12)
+            } else {
+                src[i + 1..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .filter(|&n| b.get(i + 1 + n) == Some(&b'\''))
+                    .map(|n| n + 2)
+            };
+            i += len.unwrap_or(1);
+            if len.is_none() {
+                continue;
+            }
+        } else {
+            i += 1;
+            continue;
+        }
+        let end = i.min(b.len());
+        mask[start..end].fill(false);
+    }
+    mask
 }
 
 /// Every `.rs` file under `src/commands`, as (repo-relative-ish name, source),
@@ -65,7 +225,7 @@ pub(crate) fn command_modules() -> Vec<(String, String)> {
                 "commands/{}",
                 path.strip_prefix(&root).unwrap_or(&path).display()
             );
-            out.push((name.replace('\\', "/"), strip_tests(&src).to_string()));
+            out.push((name.replace('\\', "/"), strip_tests(&src)));
         }
     }
     assert!(
@@ -423,4 +583,87 @@ fn find_loop_keyword(src: &str) -> Option<(usize, usize)> {
         }
     }
     best
+}
+
+/// `strip_tests` drops only real `#[cfg(test)]` items. It used to cut the file
+/// at the first occurrence of the TEXT, so a doc comment mentioning the
+/// attribute hid every production item below it from every rule.
+#[test]
+fn strip_tests_drops_only_the_gated_items() {
+    let src = "\
+/// `#[cfg(test)]` is the enforcement, not this comment.
+pub fn kept_after_doc() {}
+const NOTE: &str = \"
+#[cfg(test)] inside a string\";
+#[cfg(test)]
+pub(crate) fn test_only(x: [u8; 2]) {
+    let _ = '}';
+}
+pub fn kept_after_fn() {}
+#[cfg(test)]
+mod tests;
+pub fn kept_after_decl() {}
+#[cfg(test)]
+mod inline {
+    fn fixture() {}
+}
+struct Bucket {
+    kept_field_before: u64,
+    #[cfg(test)]
+    test_field: u64,
+    #[cfg(test)]
+    test_map: HashMap<String, Vec<u8>>,
+    kept_field_after: u64,
+    #[cfg(test)]
+    test_last_field: u64
+}
+enum Kind {
+    #[cfg(test)]
+    TestVariant(u8),
+    KeptVariant,
+}
+fn kept_match(k: Kind) -> u8 {
+    match k {
+        #[cfg(test)]
+        Kind::TestVariant(n) => n,
+        Kind::KeptVariant => 0,
+    }
+}
+#[cfg(all(test, feature = \"x\"))]
+fn all_gated() {}
+#[cfg(any(test, feature = \"x\"))]
+fn kept_any_gated() {}
+";
+    let out = strip_tests(src);
+    assert_eq!(
+        out.lines().count(),
+        src.lines().count(),
+        "line numbers must survive"
+    );
+    for kept in [
+        "kept_after_doc",
+        "inside a string",
+        "kept_after_fn",
+        "kept_after_decl",
+        "kept_field_before",
+        "kept_field_after",
+        "KeptVariant",
+        "kept_match",
+        "Kind::KeptVariant => 0",
+        "kept_any_gated",
+    ] {
+        assert!(out.contains(kept), "`{kept}` was stripped:\n{out}");
+    }
+    for gone in [
+        "test_only",
+        "mod tests",
+        "fixture",
+        "test_field",
+        "test_map",
+        "test_last_field",
+        "TestVariant",
+        "all_gated",
+    ] {
+        assert!(!out.contains(gone), "`{gone}` survived:\n{out}");
+    }
 }

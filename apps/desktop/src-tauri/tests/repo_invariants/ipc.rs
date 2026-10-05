@@ -80,7 +80,7 @@ fn binding_files() -> Vec<(String, String)> {
             .expect("file name")
             .to_string_lossy()
             .into_owned();
-        out.push((name, sources::strip_tests(&src).to_string()));
+        out.push((name, sources::strip_tests(&src)));
     }
     out.sort();
     assert!(

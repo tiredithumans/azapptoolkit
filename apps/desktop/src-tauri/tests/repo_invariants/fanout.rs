@@ -456,7 +456,7 @@ fn every_paged_graph_read_sends_a_page_size() {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("read graph client source");
-        for (func, sized) in paged_read_sites(super::sources::strip_tests(&text)) {
+        for (func, sized) in paged_read_sites(&super::sources::strip_tests(&text)) {
             found += 1;
             if sized {
                 continue;
