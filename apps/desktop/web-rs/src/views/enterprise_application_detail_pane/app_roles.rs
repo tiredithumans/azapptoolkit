@@ -155,7 +155,7 @@ pub(super) fn AppRolesContent(
                     "App role updated."
                 });
                 reload.update(|n| *n += 1);
-                on_refresh.run(());
+                on_refresh.try_run(());
             },
             move |tenant_id| async move {
                 enterprise_application::upsert_enterprise_app_role(&tenant_id, &sp, &app, &input)
@@ -185,7 +185,7 @@ pub(super) fn AppRolesContent(
                     "App role disabled."
                 });
                 reload.update(|n| *n += 1);
-                on_refresh.run(());
+                on_refresh.try_run(());
             },
             move |tenant_id| async move {
                 enterprise_application::upsert_enterprise_app_role(&tenant_id, &sp, &app, &input)
@@ -210,7 +210,7 @@ pub(super) fn AppRolesContent(
                 pending_delete.set(None);
                 session.toast_success("App role deleted.");
                 reload.update(|n| *n += 1);
-                on_refresh.run(());
+                on_refresh.try_run(());
             },
             move |e| {
                 pending_delete.set(None);

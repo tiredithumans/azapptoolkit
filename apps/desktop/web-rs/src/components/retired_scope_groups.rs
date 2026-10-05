@@ -128,7 +128,7 @@ fn RetiredGroupRow(
                     armed.set(false);
                     session.toast_success("Group deleted.");
                     if let Some(cb) = on_deleted {
-                        cb.run(());
+                        cb.try_run(());
                     }
                 }
                 Err(e) => error.set(Some(e.message)),

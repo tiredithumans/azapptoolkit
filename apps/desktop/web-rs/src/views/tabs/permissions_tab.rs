@@ -156,7 +156,7 @@ fn run_grant(
                         session.toast_error(msg, None);
                     }
                 }
-                on_changed.run(());
+                on_changed.try_run(());
             }
             Err(e) => {
                 // Offer Retry only when the backend says the failure is transient.
@@ -370,7 +370,7 @@ pub fn PermissionsTab(
                 // Toast before `on_changed`: the reload rebuilds this tab.
                 session.toast_success(note);
                 pending_downgrade.set(None);
-                on_changed.run(());
+                on_changed.try_run(());
             },
             move |tenant_id| async move {
                 permissions::downgrade_application_permission(
@@ -432,7 +432,7 @@ pub fn PermissionsTab(
             move |()| {
                 session.toast_success(format!("Revoked {subject}."));
                 pending_revoke.set(None);
-                on_changed.run(());
+                on_changed.try_run(());
             },
             move |tenant_id| async move {
                 permissions::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id).await
@@ -446,7 +446,7 @@ pub fn PermissionsTab(
             move |_| {
                 session.toast_success(format!("Revoked {subject}."));
                 pending_revoke.set(None);
-                on_changed.run(());
+                on_changed.try_run(());
             },
             move |tenant_id| async move {
                 permissions::revoke_oauth2_scope(&tenant_id, &grant_id, &scope_value).await
@@ -466,7 +466,7 @@ pub fn PermissionsTab(
             move |()| {
                 session.toast_success(format!("Removed the {subject} declaration."));
                 pending_revoke.set(None);
-                on_changed.run(());
+                on_changed.try_run(());
             },
             move |tenant_id| async move {
                 permissions::remove_declared_permission(

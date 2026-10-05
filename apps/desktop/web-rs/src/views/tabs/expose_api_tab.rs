@@ -144,7 +144,7 @@ fn ExposeApiLoaded(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
                 uri_open.set(false);
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |tenant_id| {
                 let id = object_id.get_value();
@@ -158,7 +158,7 @@ fn ExposeApiLoaded(
             move |()| {
                 session.toast_success("Application ID URIs updated.");
                 pending_remove_uri.set(None);
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |tenant_id| {
                 let id = object_id.get_value();
@@ -242,7 +242,7 @@ fn ExposeApiLoaded(
                 } else {
                     "Scope updated."
                 });
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |tenant_id| {
                 let id = object_id.get_value();
@@ -258,7 +258,7 @@ fn ExposeApiLoaded(
             move |()| {
                 pending_delete_scope.set(None);
                 session.toast_success("Scope deleted.");
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |e| {
                 pending_delete_scope.set(None);
@@ -334,7 +334,7 @@ fn ExposeApiLoaded(
             move |()| {
                 pre_open.set(false);
                 session.toast_success("Authorized client application saved.");
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |tenant_id| {
                 let id = object_id.get_value();
@@ -350,7 +350,7 @@ fn ExposeApiLoaded(
             move |()| {
                 pending_remove_pre.set(None);
                 session.toast_success("Authorized client application removed.");
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |e| {
                 pending_remove_pre.set(None);

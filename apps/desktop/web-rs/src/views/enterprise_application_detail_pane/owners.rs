@@ -71,7 +71,7 @@ pub(super) fn OwnersContent(
                     });
                     // Reloads the detail (refetches owners) and tears this
                     // component down — do it last and skip resetting `busy`.
-                    on_refresh.run(());
+                    on_refresh.try_run(());
                 }
                 Err(e) => {
                     error.set(Some(e.message));
@@ -139,7 +139,7 @@ pub(super) fn OwnersContent(
                     "Default owners are already present.".to_string()
                 });
                 // Reloads the detail (refetches owners) and tears this down.
-                on_refresh.run(());
+                on_refresh.try_run(());
             }
         });
     };

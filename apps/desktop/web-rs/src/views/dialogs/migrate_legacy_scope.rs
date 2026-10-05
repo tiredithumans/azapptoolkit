@@ -89,7 +89,7 @@ pub fn MigrateLegacyScopeButton(
                                  Exchange can take 30 min–2 h to apply RBAC changes. Re-run the \
                                  audit to refresh scores.",
                             );
-                            on_done.run(row_id);
+                            on_done.try_run(row_id);
                         } else {
                             report.set(Some(r));
                         }

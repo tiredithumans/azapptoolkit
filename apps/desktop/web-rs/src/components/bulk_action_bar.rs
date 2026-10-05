@@ -34,7 +34,7 @@ use crate::components::ui::{Callout, FormError};
 use crate::constants::RENDER_PAGE;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
-use crate::state::use_session;
+use crate::state::{Session, use_session};
 use crate::util::{count_noun, parse_lines};
 
 /// One failed item from a bulk run, surfaced below the aggregate summary so the
@@ -179,10 +179,172 @@ fn unattempted_note(attempted: usize, reached: Option<usize>) -> String {
 /// Resolve an object id to the host-supplied display name, falling back to the
 /// id itself. One definition, because the failure labels and the progress row
 /// resolve the same ids out of the same map.
+///
+/// `try_`: a run's results are labelled after its await, and by then the host
+/// that derived `names` may be gone (sign-out unmounts the shell mid-run). A
+/// disposed map falls back to the id rather than panicking.
 fn label_with(names: Option<Signal<Arc<HashMap<String, String>>>>, key: &str) -> String {
     names
-        .and_then(|n| n.with(|m| m.get(key).cloned()))
+        .and_then(|n| n.try_with(|m| m.get(key).cloned()).flatten())
         .unwrap_or_else(|| key.to_string())
+}
+
+/// Everything a bulk run touches once its command returns, and the rules for
+/// touching it.
+///
+/// A run outlives the bar that started it, two ways:
+///
+/// - **The tenant it ran for is no longer active** (a switch, or sign-out,
+///   which clears the tenant and unmounts the whole authed shell). The result
+///   belongs to nobody on screen, and a toast pushed onto the shell-root
+///   `Session` would surface in the next sign-in — so the run lands nowhere.
+/// - **Same tenant, but the bar was unmounted** (the operator navigated away,
+///   or a Findings group collapsed). The bar's own signals are disposed, but
+///   the run's session-level effects still matter: its toasts and re-auth
+///   prompt, the confirmed-deleted ids leaving the session-owned selection, a
+///   failure that would otherwise be silent, and the host's refresh. Only the
+///   bar-local writes are skipped.
+///
+/// The decisions live here, synchronously, so the native tests drive the very
+/// code the spawned tasks run.
+#[derive(Clone, Copy)]
+struct Landing {
+    session: Session,
+    selection: RwSignal<HashSet<String>>,
+    names: Option<Signal<Arc<HashMap<String, String>>>>,
+    /// Run through `try_run` and NOT gated on the bar: a host can outlive its
+    /// bar (the audit's per-group bars share the workbench's refresh), and a
+    /// host that is gone simply skips it.
+    on_done: Option<Callback<()>>,
+    busy: RwSignal<bool>,
+    summary: RwSignal<Option<String>>,
+    failures: RwSignal<Vec<BulkFailure>>,
+    error: RwSignal<Option<String>>,
+    armed: RwSignal<Option<BulkAction>>,
+    undo_ids: RwSignal<Vec<String>>,
+}
+
+impl Landing {
+    /// Whether the bar's own signals are still live. `busy` stands in for the
+    /// set: they are created together, so they are disposed together.
+    fn bar_mounted(self) -> bool {
+        !self.busy.is_disposed()
+    }
+
+    fn done(self) {
+        if let Some(cb) = self.on_done {
+            cb.try_run(());
+        }
+    }
+
+    /// Land one action's result. `attempted` is the selection size the run
+    /// started from; every summary is measured against it.
+    fn finish_action(
+        self,
+        started_for: &str,
+        action: BulkAction,
+        attempted: usize,
+        parsed: Result<Parsed, azapptoolkit_dto::UiError>,
+    ) {
+        if !self.session.is_active_tenant(started_for) {
+            // A no-op on a disposed bar; a live one just needs its controls.
+            self.busy.set(false);
+            return;
+        }
+        let mounted = self.bar_mounted();
+        match parsed {
+            Ok(p) => {
+                // A failure carrying a re-auth-fatal code means the session
+                // died mid-run, not that these apps are broken. The backend
+                // already halted the loop; surface the recovery action so
+                // the operator re-authenticates in place (never a sign-out —
+                // that drops every data cache) instead of reading a list of
+                // failures with no obvious cause.
+                if let Some(dead) = session_dead_error(&p.failures) {
+                    self.session.report_if_session_dead(&dead);
+                }
+                if mounted {
+                    self.summary.set(Some(format!(
+                        "{}{}",
+                        p.summary,
+                        unattempted_note(attempted, p.reached)
+                    )));
+                    self.failures.set(p.failures);
+                    self.armed.set(None);
+                    // A completed delete leaves its confirmed-gone ids on hand
+                    // for one Undo run (recycle-bin restore).
+                    if matches!(action, BulkAction::Delete) {
+                        self.undo_ids.set(p.deleted.clone());
+                    }
+                }
+                // ONLY the ids the backend confirmed gone leave the
+                // selection. Clearing the whole set — what a bare
+                // "clears-selection" flag did — threw away the apps a
+                // cancelled delete never reached along with the ones it
+                // deleted, destroying the operator's work queue at the exact
+                // moment the summary was telling them to re-run. Not gated on
+                // the bar: the selection is the host's (usually the
+                // session's), and a deleted id left in it is a dangling one.
+                if !p.deleted.is_empty() {
+                    let gone: HashSet<String> = p.deleted.into_iter().collect();
+                    self.selection
+                        .try_update(|s| s.retain(|id| !gone.contains(id)));
+                }
+                self.done();
+            }
+            // The bar's inline error is this surface's message; with the bar
+            // gone, the session's sink is the only place it can still be read.
+            Err(e) if mounted => self.error.set(Some(e.message)),
+            Err(e) => self.session.report_command_error(&e),
+        }
+        self.busy.set(false);
+    }
+
+    /// Land an Undo (recycle-bin restore) result.
+    fn finish_undo(
+        self,
+        started_for: &str,
+        attempted: usize,
+        res: Result<bulk::BulkRestoreResult, azapptoolkit_dto::UiError>,
+    ) {
+        if !self.session.is_active_tenant(started_for) {
+            self.busy.set(false);
+            return;
+        }
+        let mounted = self.bar_mounted();
+        match res {
+            Ok(r) => {
+                let reached = r.outcomes.len();
+                let restored = r.outcomes.iter().filter(|o| o.restored).count();
+                let fails = failures_of(&r.outcomes, |id| label_with(self.names, id));
+                if let Some(dead) = session_dead_error(&fails) {
+                    self.session.report_if_session_dead(&dead);
+                }
+                // Read before `failures.set(fails)` moves the vec.
+                let clean = fails.is_empty();
+                if mounted {
+                    self.summary.set(Some(format!(
+                        "Restored {restored} of {}.{}",
+                        count_noun(attempted, "deleted app", "deleted apps"),
+                        unattempted_note(attempted, Some(reached))
+                    )));
+                    self.failures.set(fails);
+                }
+                if !r.cancelled && restored > 0 && clean {
+                    self.session
+                        .toast_success(format!("Restored {restored} of {attempted} deleted apps."));
+                }
+                self.done();
+            }
+            Err(e) => {
+                self.session.report_command_error(&e);
+                if mounted {
+                    self.error.set(Some(e.message));
+                }
+            }
+        }
+        self.busy.set(false);
+    }
 }
 
 /// The live progress row for an in-flight bulk run: a determinate bar, the
@@ -521,6 +683,19 @@ pub fn BulkActionBar(
     // "Undo (restore N deleted)" replays them through the recycle bin. Cleared
     // when any new run starts, so it can only ever name the LAST run.
     let undo_ids: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let armed: RwSignal<Option<BulkAction>> = RwSignal::new(None);
+    let landing = Landing {
+        session,
+        selection,
+        names,
+        on_done,
+        busy,
+        summary,
+        failures,
+        error,
+        armed,
+        undo_ids,
+    };
 
     // Sequential restore over the deleted ids — the same `bulk_*` shape as
     // every action here: one busy flag, summary + per-item failures, and a
@@ -544,38 +719,8 @@ pub fn BulkActionBar(
                 return;
             };
             let tid = &t.tenant_id;
-            match bulk::bulk_restore_deleted(tid, &ids).await {
-                Ok(r) => {
-                    let reached = r.outcomes.len();
-                    let restored = r.outcomes.iter().filter(|o| o.restored).count();
-                    let fails = failures_of(&r.outcomes, |id| label_with(names, id));
-                    if let Some(dead) = session_dead_error(&fails) {
-                        session.report_if_session_dead(&dead);
-                    }
-                    // Read before `failures.set(fails)` moves the vec.
-                    let clean = fails.is_empty();
-                    summary.set(Some(format!(
-                        "Restored {restored} of {}.{}",
-                        count_noun(attempted, "deleted app", "deleted apps"),
-                        unattempted_note(attempted, Some(reached))
-                    )));
-                    failures.set(fails);
-                    if !r.cancelled && restored > 0 && clean {
-                        session.toast_success(format!(
-                            "Restored {restored} of {attempted} deleted apps."
-                        ));
-                    }
-                    if let Some(cb) = on_done {
-                        cb.run(());
-                    }
-                }
-                Err(e) => {
-                    let msg = e.message.clone();
-                    session.report_command_error(&e);
-                    error.set(Some(msg));
-                }
-            }
-            busy.set(false);
+            let res = bulk::bulk_restore_deleted(tid, &ids).await;
+            landing.finish_undo(tid, attempted, res);
         });
     });
 
@@ -584,7 +729,6 @@ pub fn BulkActionBar(
     // before running. `armed` holds which action's panel is open; the input
     // fields reset whenever it changes, and `armed` itself clears when the
     // offered action set changes (e.g. the audit's finding filter switches).
-    let armed: RwSignal<Option<BulkAction>> = RwSignal::new(None);
     let confirm_text = RwSignal::new(String::new());
     let groups_text = RwSignal::new(String::new());
     let sites_text = RwSignal::new(String::new());
@@ -691,28 +835,23 @@ pub fn BulkActionBar(
             };
             let tid = &t.tenant_id;
             // Each arm reads its own result shape into the one `Parsed`.
-            let parsed: Result<Parsed, String> = match action {
+            let parsed: Result<Parsed, azapptoolkit_dto::UiError> = match action {
                 BulkAction::Grant => bulk::bulk_grant_permissions(tid, &ids)
                     .await
-                    .map(|r| parse_grant(r, label_for))
-                    .map_err(|e| e.message),
+                    .map(|r| parse_grant(r, label_for)),
                 BulkAction::RemoveExpired => bulk::bulk_remove_expired_credentials(tid, Some(&ids))
                     .await
-                    .map(parse_remove_expired)
-                    .map_err(|e| e.message),
+                    .map(parse_remove_expired),
                 BulkAction::RemoveRedundant => bulk::bulk_remove_redundant_permissions(tid, &ids)
                     .await
-                    .map(|r| parse_redundant(r, label_for))
-                    .map_err(|e| e.message),
+                    .map(|r| parse_redundant(r, label_for)),
                 BulkAction::ScopeMailbox => bulk::bulk_scope_mailbox_access(tid, &ids, &groups)
                     .await
-                    .map(|r| parse_scope("mailbox", r, label_for))
-                    .map_err(|e| e.message),
+                    .map(|r| parse_scope("mailbox", r, label_for)),
                 BulkAction::ScopeSharePoint => {
                     bulk::bulk_scope_sharepoint_access(tid, &ids, &sites, &role)
                         .await
                         .map(|r| parse_scope("SharePoint", r, label_for))
-                        .map_err(|e| e.message)
                 }
                 BulkAction::AddOwner => {
                     // Guarded non-None above; unwrap_or_default is unreachable.
@@ -720,7 +859,6 @@ pub fn BulkActionBar(
                     bulk::bulk_add_owner(tid, &ids, &principal_id)
                         .await
                         .map(|r| parse_add_owner(r, label_for))
-                        .map_err(|e| e.message)
                 }
                 // Subject empty => the backend defaults to `CN=SSO`; lifetime
                 // `None` => Entra's default. A bulk run is not the place to
@@ -729,58 +867,15 @@ pub fn BulkActionBar(
                     bulk::bulk_stage_sso_certificates(tid, &ids, "", None)
                         .await
                         .map(|r| parse_stage_certs(r, label_for))
-                        .map_err(|e| e.message)
                 }
                 BulkAction::DisableSignIn => bulk::bulk_disable_sign_in(tid, &ids)
                     .await
-                    .map(|r| parse_disable(r, label_for))
-                    .map_err(|e| e.message),
+                    .map(|r| parse_disable(r, label_for)),
                 BulkAction::Delete => bulk::bulk_delete_applications(tid, &ids)
                     .await
-                    .map(|r| parse_delete(r, label_for))
-                    .map_err(|e| e.message),
+                    .map(|r| parse_delete(r, label_for)),
             };
-            match parsed {
-                Ok(p) => {
-                    // A failure carrying a re-auth-fatal code means the session
-                    // died mid-run, not that these apps are broken. The backend
-                    // already halted the loop; surface the recovery action so
-                    // the operator re-authenticates in place (never a sign-out —
-                    // that drops every data cache) instead of reading a list of
-                    // failures with no obvious cause.
-                    if let Some(dead) = session_dead_error(&p.failures) {
-                        session.report_if_session_dead(&dead);
-                    }
-                    summary.set(Some(format!(
-                        "{}{}",
-                        p.summary,
-                        unattempted_note(attempted, p.reached)
-                    )));
-                    failures.set(p.failures);
-                    armed.set(None);
-                    // A completed delete leaves its confirmed-gone ids on hand
-                    // for one Undo run (recycle-bin restore). Snapshot first:
-                    // the selection cleanup below consumes them.
-                    if matches!(action, BulkAction::Delete) {
-                        undo_ids.set(p.deleted.clone());
-                    }
-                    // ONLY the ids the backend confirmed gone leave the
-                    // selection. Clearing the whole set — what a bare
-                    // "clears-selection" flag did — threw away the apps a
-                    // cancelled delete never reached along with the ones it
-                    // deleted, destroying the operator's work queue at the exact
-                    // moment the summary was telling them to re-run.
-                    if !p.deleted.is_empty() {
-                        let gone: HashSet<String> = p.deleted.into_iter().collect();
-                        selection.update(|s| s.retain(|id| !gone.contains(id)));
-                    }
-                    if let Some(cb) = on_done {
-                        cb.run(());
-                    }
-                }
-                Err(msg) => error.set(Some(msg)),
-            }
-            busy.set(false);
+            landing.finish_action(tid, action, attempted, parsed);
         });
     };
 
@@ -1381,6 +1476,230 @@ fn parse_delete(r: bulk::BulkDeleteResult, label_for: impl Fn(&str) -> String) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::provide_session;
+
+    fn tenant(id: &str) -> crate::bindings::TenantContext {
+        crate::bindings::TenantContext {
+            tenant_id: id.to_string(),
+            account_oid: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: None,
+            display_name: None,
+        }
+    }
+
+    /// A bar's worth of signals plus a host-owned `on_done` counter, built
+    /// the way `BulkActionBar` builds them: the bar's signals under `bar`, the
+    /// selection on the session, `on_done` and `names` under the host.
+    fn landing_in(bar: &Owner) -> (Landing, RwSignal<u32>) {
+        let session = use_session();
+        let done = RwSignal::new(0u32);
+        let map = RwSignal::new(Arc::new(HashMap::from([(
+            "a".to_string(),
+            "Contoso API".to_string(),
+        )])));
+        let names = Some(Signal::derive(move || map.get()));
+        let on_done = Some(Callback::new(move |()| done.update(|n| *n += 1)));
+        let landing = bar.with(|| Landing {
+            session,
+            selection: session.tenant_ui.selected_app_ids,
+            names,
+            on_done,
+            busy: RwSignal::new(true),
+            summary: RwSignal::new(None),
+            failures: RwSignal::new(Vec::new()),
+            error: RwSignal::new(None),
+            armed: RwSignal::new(Some(BulkAction::Delete)),
+            undo_ids: RwSignal::new(Vec::new()),
+        });
+        (landing, done)
+    }
+
+    fn select(session: Session, ids: &[&str]) {
+        session
+            .tenant_ui
+            .selected_app_ids
+            .set(ids.iter().map(|s| s.to_string()).collect());
+    }
+
+    fn selected(session: Session) -> Vec<String> {
+        let mut v: Vec<String> = session
+            .tenant_ui
+            .selected_app_ids
+            .get_untracked()
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn toast_messages(session: Session) -> Vec<String> {
+        session
+            .toasts
+            .with_untracked(|l| l.iter().map(|t| t.message.clone()).collect())
+    }
+
+    /// A delete of a,b out of a,b,c whose run also hit a dead session.
+    fn a_dead_delete() -> Parsed {
+        Parsed {
+            summary: "Deleted 2".to_string(),
+            failures: vec![BulkFailure {
+                label: "c".into(),
+                reason: "session expired".into(),
+                object_id: Some("c".into()),
+                code: Some("refresh_missing".into()),
+            }],
+            reached: Some(3),
+            deleted: vec!["a".into(), "b".into()],
+        }
+    }
+
+    #[test]
+    fn a_live_run_lands_in_the_bar_and_the_session() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            select(session, &["a", "b", "c"]);
+            let bar = Owner::new();
+            let (l, done) = landing_in(&bar);
+            l.finish_action("tenant-a", BulkAction::Delete, 3, Ok(a_dead_delete()));
+            assert_eq!(selected(session), vec!["c".to_string()]);
+            assert!(l.summary.get_untracked().is_some());
+            assert_eq!(l.armed.get_untracked(), None);
+            assert_eq!(l.undo_ids.get_untracked().len(), 2);
+            assert!(!l.busy.get_untracked());
+            assert_eq!(done.get_untracked(), 1);
+            assert_eq!(
+                session.toasts.with_untracked(Vec::len),
+                1,
+                "the re-auth prompt"
+            );
+        });
+    }
+
+    /// Navigating away (same tenant) unmounts the bar mid-run. Its own signals
+    /// are gone — and reading or running them used to panic the window — but
+    /// the run's session-level effects must still land.
+    #[test]
+    fn a_run_whose_bar_unmounted_still_lands_its_session_effects() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            select(session, &["a", "b", "c"]);
+            let bar = Owner::new();
+            let (l, done) = landing_in(&bar);
+            bar.cleanup();
+            assert!(!l.bar_mounted());
+            l.finish_action("tenant-a", BulkAction::Delete, 3, Ok(a_dead_delete()));
+            assert_eq!(
+                selected(session),
+                vec!["c".to_string()],
+                "deleted ids dangle"
+            );
+            assert_eq!(
+                session.toasts.with_untracked(Vec::len),
+                1,
+                "the re-auth prompt"
+            );
+            assert_eq!(done.get_untracked(), 1, "the host outlives its bar");
+            // A failure with no inline error left to show goes to the sink.
+            l.finish_action(
+                "tenant-a",
+                BulkAction::Grant,
+                3,
+                Err(azapptoolkit_dto::UiError::new(
+                    "forbidden",
+                    "no rights",
+                    false,
+                )),
+            );
+            assert!(
+                toast_messages(session)
+                    .iter()
+                    .any(|m| m.contains("no rights")),
+                "{:?}",
+                toast_messages(session)
+            );
+        });
+    }
+
+    /// Results are labelled after the await, when sign-out may already have
+    /// disposed the host's `names` map: the id stands in rather than a panic.
+    #[test]
+    fn a_disposed_names_map_labels_by_id() {
+        Owner::new().with(|| {
+            let host = Owner::new();
+            let names = host.with(|| {
+                Some(Signal::derive(|| {
+                    Arc::new(HashMap::from([(
+                        "a".to_string(),
+                        "Contoso API".to_string(),
+                    )]))
+                }))
+            });
+            assert_eq!(label_with(names, "a"), "Contoso API");
+            host.cleanup();
+            assert_eq!(label_with(names, "a"), "a");
+        });
+    }
+
+    /// Sign-out (tenant cleared, shell unmounted) or a tenant switch: the run
+    /// belongs to nobody on screen. Nothing lands — not the other tenant's
+    /// selection, not a toast that would carry into the next sign-in.
+    #[test]
+    fn a_run_whose_tenant_is_gone_lands_nowhere() {
+        for signed_out in [false, true] {
+            Owner::new().with(|| {
+                provide_session();
+                let session = use_session();
+                session.set_active_tenant(Some(tenant("tenant-a")));
+                let bar = Owner::new();
+                let (l, done) = landing_in(&bar);
+                if signed_out {
+                    session.set_active_tenant(None);
+                    bar.cleanup();
+                } else {
+                    session.set_active_tenant(Some(tenant("tenant-b")));
+                }
+                select(session, &["a", "b", "c"]);
+                l.finish_action("tenant-a", BulkAction::Delete, 3, Ok(a_dead_delete()));
+                l.finish_action(
+                    "tenant-a",
+                    BulkAction::Grant,
+                    3,
+                    Err(azapptoolkit_dto::UiError::new(
+                        "forbidden",
+                        "no rights",
+                        false,
+                    )),
+                );
+                l.finish_undo(
+                    "tenant-a",
+                    1,
+                    Ok(bulk::BulkRestoreResult {
+                        outcomes: vec![bulk::BulkRestoreOutcome {
+                            object_id: "a".into(),
+                            restored: true,
+                            sp_restored: true,
+                            error: None,
+                        }],
+                        cancelled: false,
+                    }),
+                );
+                assert_eq!(selected(session).len(), 3, "signed_out={signed_out}");
+                assert!(
+                    toast_messages(session).is_empty(),
+                    "signed_out={signed_out}"
+                );
+                assert_eq!(done.get_untracked(), 0, "signed_out={signed_out}");
+                if !signed_out {
+                    assert!(l.summary.get_untracked().is_none());
+                    assert!(!l.busy.get_untracked(), "the bar gets its controls back");
+                }
+            });
+        }
+    }
 
     /// The one destructive action confirmed by a plain click. Why: the backend
     /// re-resolves each app live and removes only permissions strictly covered

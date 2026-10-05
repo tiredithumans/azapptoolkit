@@ -40,8 +40,8 @@ pub fn CreateAppDialog(
             move |_| {
                 display_name.set(String::new());
                 description.set(String::new());
-                on_created.run(());
-                on_close.run(());
+                on_created.try_run(());
+                on_close.try_run(());
             },
             move |tenant_id| {
                 let input = CreateApplicationInput {
