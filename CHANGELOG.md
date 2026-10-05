@@ -31,6 +31,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   the older result is discarded, and the next view fetches fresh data. An audit that started
   before an org-wide mail grant was removed no longer leaves that app's mailbox verdict cached
   for the next audit. Signing out also stops any running audit, sweep, mailbox probe or backup.
+- **An interrupted sign-in save no longer leaves a broken saved sign-in.** If the app closed, or a
+  second copy of it was running, while it saved your sign-in, the next launch could load a
+  corrupted session that then failed. That is now detected, and you're asked to sign in once.
+  Saved sign-ins use a new format, so going back to an older version asks you to sign in once.
 
 ## [0.31.0] - 2026-10-03
 

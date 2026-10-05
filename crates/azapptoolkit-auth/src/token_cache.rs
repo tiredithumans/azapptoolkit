@@ -172,8 +172,9 @@ impl TokenCache {
 /// consecutively-numbered keyring entries and reassembled on load. macOS
 /// Keychain and the Linux Secret Service have far larger limits, but chunking
 /// on every platform keeps one code path. The budget is UTF-16 bytes (how
-/// Windows counts) with margin under 2560, and chunks cut only on `char`
-/// boundaries so concatenation round-trips exactly.
+/// Windows counts) with margin under 2560, and covers a chunk's WHOLE stored
+/// value — header included (see [`MAX_PAYLOAD_UTF16_BYTES`]). Chunks cut only
+/// on `char` boundaries so concatenation round-trips exactly.
 const MAX_CHUNK_UTF16_BYTES: usize = 2048;
 
 /// Keyring account label for chunk `idx`. Chunk 0 keeps the bare
@@ -187,43 +188,118 @@ fn chunk_account(tenant_id: &str, account_oid: &str, idx: usize) -> String {
     }
 }
 
-/// Marks a chunk-0 value that carries the set's chunk count, e.g. `azapp1:3:`.
+/// Marks the current chunk-0 format: `azapp2:{count}:{gen}:<data>`, with every
+/// later chunk stored as `{gen}:<data>`.
 ///
-/// The count is what makes a torn set **detectable**. `CHUNK_SET_LOCK`
-/// serializes writers within one process, but not a hard crash mid-write or a
-/// second app instance. Without it a partial set loads as a splice of two
-/// tokens; Entra rejects it as `invalid_grant`, which reads as a revoked
-/// session rather than a corrupt one.
-///
-/// Absent on a value written before this existed — read as a legacy set and
-/// concatenated as before, so an upgrade does not sign everyone out.
+/// Together they make a torn set **detectable**. `CHUNK_SET_LOCK` serializes
+/// writers within one process, but not a hard crash mid-write or a second app
+/// instance, and chunk 0 is written first — so either can leave a NEW chunk 0
+/// beside an OLD token's chunks 1... The count alone catches that only when the
+/// two tokens split into different numbers of chunks; the common case (two
+/// chunks each) would load as a splice, Entra would reject it as
+/// `invalid_grant`, and the failure would read as a revoked session rather than
+/// a corrupt one. `gen` is fresh per write, so a chunk from any other write
+/// fails the comparison whatever its count.
+const CHUNK_GEN_PREFIX: &str = "azapp2:";
+
+/// The previous chunk-0 marker, `azapp1:{count}:<data>`, with bare later
+/// chunks: count-checked only. Still READ, so an upgrade does not sign anyone
+/// out; never written. A value with neither marker predates both and is read
+/// as a plain concatenation, as before.
 const CHUNK_COUNT_PREFIX: &str = "azapp1:";
 
-/// Builds chunk 0's stored value: the marker, the total chunk count, and the
-/// payload.
-fn encode_chunk_zero(total: usize, payload: &str) -> String {
-    format!("{CHUNK_COUNT_PREFIX}{total}:{payload}")
+/// Random bytes behind a write generation; base64url-encoded (no padding) they
+/// become [`CHUNK_GEN_LEN`] characters.
+const CHUNK_GEN_BYTES: u32 = 12;
+
+/// Characters in an encoded write generation. Drawn from the base64url alphabet
+/// (`A-Z a-z 0-9 - _`), so it never contains the `:` that delimits it.
+const CHUNK_GEN_LEN: usize = 16;
+
+/// UTF-16 bytes held back from every chunk for its header: the worst case is
+/// chunk 0's `azapp2:` + a count of up to 20 digits (`usize::MAX`) + `:` + the
+/// generation + `:`, all ASCII. Reserving the worst case for every chunk keeps
+/// the split independent of the count it produces.
+const CHUNK_HEADER_RESERVE_UTF16_BYTES: usize =
+    2 * (CHUNK_GEN_PREFIX.len() + 20 + 1 + CHUNK_GEN_LEN + 1);
+
+/// The token bytes one chunk may carry, so payload + header never exceeds
+/// [`MAX_CHUNK_UTF16_BYTES`].
+const MAX_PAYLOAD_UTF16_BYTES: usize = MAX_CHUNK_UTF16_BYTES - CHUNK_HEADER_RESERVE_UTF16_BYTES;
+
+/// A fresh per-write generation id. `oauth2`'s CSRF generator is the crate's
+/// existing CSPRNG-backed source (`rand::thread_rng`, base64url-encoded); the
+/// value is only an identity tag, not a secret, so a CSRF type is a fine
+/// carrier.
+fn new_chunk_gen() -> String {
+    oauth2::CsrfToken::new_random_len(CHUNK_GEN_BYTES)
+        .secret()
+        .clone()
 }
 
-/// Splits chunk 0's stored value into `(declared count, payload)`, or `None`
-/// when it predates the marker.
-fn decode_chunk_zero(stored: &str) -> Option<(usize, &str)> {
-    let rest = stored.strip_prefix(CHUNK_COUNT_PREFIX)?;
-    let (count, payload) = rest.split_once(':')?;
-    Some((count.parse().ok()?, payload))
+/// Builds chunk `idx`'s stored value for a set of `total` chunks written under
+/// generation `chunk_gen`.
+fn encode_chunk(idx: usize, total: usize, chunk_gen: &str, payload: &str) -> String {
+    if idx == 0 {
+        format!("{CHUNK_GEN_PREFIX}{total}:{chunk_gen}:{payload}")
+    } else {
+        format!("{chunk_gen}:{payload}")
+    }
 }
 
-/// Splits `token` into chunks that each fit under the Windows blob limit,
-/// cutting only on `char` boundaries. Always returns at least one chunk (an
-/// empty token yields a single empty chunk) so the stored entry count is never
-/// zero.
+/// How chunk 0 declared the set it belongs to.
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkZero<'a> {
+    /// `azapp2:` — count and generation; every later chunk carries the gen.
+    Generation {
+        total: usize,
+        chunk_gen: &'a str,
+        payload: &'a str,
+    },
+    /// `azapp1:` — count only; later chunks are bare.
+    Count { total: usize, payload: &'a str },
+    /// No marker: written before either existed; a bare concatenation.
+    Legacy(&'a str),
+    /// `azapp2:` with a header that does not parse — corruption, since no
+    /// token begins with the marker. Fails closed.
+    Malformed,
+}
+
+/// Splits chunk 0's stored value by format. An `azapp1:` value whose header
+/// does not parse is read as legacy, as it was before `azapp2`.
+fn decode_chunk_zero(stored: &str) -> ChunkZero<'_> {
+    if let Some(rest) = stored.strip_prefix(CHUNK_GEN_PREFIX) {
+        let parsed = rest.split_once(':').and_then(|(count, rest)| {
+            let total = count.parse().ok()?;
+            let (chunk_gen, payload) = rest.split_once(':')?;
+            Some(ChunkZero::Generation {
+                total,
+                chunk_gen,
+                payload,
+            })
+        });
+        return parsed.unwrap_or(ChunkZero::Malformed);
+    }
+    if let Some(rest) = stored.strip_prefix(CHUNK_COUNT_PREFIX)
+        && let Some((count, payload)) = rest.split_once(':')
+        && let Ok(total) = count.parse()
+    {
+        return ChunkZero::Count { total, payload };
+    }
+    ChunkZero::Legacy(stored)
+}
+
+/// Splits `token` into payloads that each fit, header included, under the
+/// Windows blob limit, cutting only on `char` boundaries. Always returns at
+/// least one chunk (an empty token yields a single empty chunk) so the stored
+/// entry count is never zero.
 fn split_into_chunks(token: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut bytes = 0;
     for (idx, ch) in token.char_indices() {
         let width = ch.len_utf16() * 2;
-        if bytes > 0 && bytes + width > MAX_CHUNK_UTF16_BYTES {
+        if bytes > 0 && bytes + width > MAX_PAYLOAD_UTF16_BYTES {
             chunks.push(&token[start..idx]);
             start = idx;
             bytes = 0;
@@ -258,15 +334,14 @@ static CHUNK_SET_LOCK: Mutex<()> = Mutex::new(());
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
     ensure_keyring_store()?;
     let _guard = CHUNK_SET_LOCK.lock();
-    // A refresh token spans N keyring entries and `load` simply concatenates
-    // until one is missing — no length, no checksum, nothing marking where the
-    // token ends. A write that stops half way leaves chunks 0..k with the NEW
-    // token and k..old_len with the OLD one's tail, and the next load returns
-    // that splice as if it were a token: Entra rejects it, and the failure
-    // reads as a revoked refresh token rather than a corrupt one.
+    // A refresh token spans N keyring entries. A write that stops half way
+    // leaves chunks 0..k with the NEW token and k..old_len with the OLD one's
+    // tail; the per-write generation every chunk carries makes `load` read that
+    // as torn (no session) rather than splice it, but a torn set is still a
+    // forced sign-in, and nothing else would ever clear it.
     //
-    // So a partial write is rolled back to nothing: no session is a state the
-    // app already handles (it prompts to sign in); a spliced one is not.
+    // So a partial write is rolled back to nothing now: no session is a state
+    // the app already handles (it prompts to sign in).
     //
     // Unless nothing was written: a write refused at chunk 0 (a locked store)
     // left the previous set whole, and that token is still valid — Entra does
@@ -285,10 +360,13 @@ pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Re
     Ok(())
 }
 
-/// The write itself: every chunk, then the trailing chunks of any previously
-/// larger token — without which a shrunk token loads with a stale tail appended.
-/// Sets `overwrote_chunk_zero` once chunk 0 is replaced, so a failure can tell
-/// a torn set (roll back) from an untouched one (keep).
+/// The write itself: every chunk, then a best-effort sweep of any previously
+/// larger token's trailing chunks. The load reads an `azapp2` set by its
+/// declared count and ignores what follows, so a stale tail is clutter, not a
+/// splice — a failed sweep is logged, never an error that would roll back the
+/// complete new set. Sets `overwrote_chunk_zero` once chunk 0 is replaced, so a
+/// failed chunk write can tell a torn set (roll back) from an untouched one
+/// (keep).
 fn write_chunks(
     tenant_id: &str,
     account_oid: &str,
@@ -296,18 +374,19 @@ fn write_chunks(
     overwrote_chunk_zero: &mut bool,
 ) -> Result<()> {
     let chunks = split_into_chunks(token);
+    let chunk_gen = new_chunk_gen();
     for (idx, chunk) in chunks.iter().enumerate() {
         let account = chunk_account(tenant_id, account_oid, idx);
-        // Chunk 0 carries the set's total count, so a load can tell a complete
-        // set from a torn one. Written FIRST, so a crash leaves a count that
-        // exceeds what is stored — which fails closed — rather than a
-        // plausible-looking short set. Wiped once written (mirroring
-        // `load_chunks`): each chunk copy is plaintext token material.
-        let value = Zeroizing::new(if idx == 0 {
-            encode_chunk_zero(chunks.len(), chunk)
-        } else {
-            (*chunk).to_string()
-        });
+        // Chunk 0 carries the set's count and every chunk this write's
+        // generation, so a load can tell a complete set from a torn one.
+        // Chunk 0 is written FIRST, so a crash (or a second app instance)
+        // leaves a new chunk 0 beside chunks from another write: a count that
+        // disagrees with what is stored, or — when both tokens split into the
+        // same number of chunks — a generation that disagrees with chunk 0's.
+        // Either fails closed; the count alone missed the equal-count case.
+        // Wiped once written (mirroring `load_chunks`): each chunk copy is
+        // plaintext token material.
+        let value = Zeroizing::new(encode_chunk(idx, chunks.len(), &chunk_gen, chunk));
         keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(&value)?;
         if idx == 0 {
             *overwrote_chunk_zero = true;
@@ -316,10 +395,25 @@ fn write_chunks(
     let mut idx = chunks.len();
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
-        match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.delete_credential() {
-            Ok(()) => idx += 1,
-            Err(keyring_core::Error::NoEntry) => break,
-            Err(err) => return Err(AuthError::Keyring(err.to_string())),
+        let deleted = keyring_core::Entry::new(KEYRING_SERVICE, &account)
+            .map_err(|err| err.to_string())
+            .and_then(|entry| match entry.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring_core::Error::NoEntry) => Ok(false),
+                Err(err) => Err(err.to_string()),
+            });
+        match deleted {
+            Ok(true) => idx += 1,
+            Ok(false) => break,
+            Err(error) => {
+                tracing::warn!(
+                    target: "auth",
+                    chunk = idx,
+                    %error,
+                    "could not remove a stale refresh-token chunk; the new token is saved"
+                );
+                break;
+            }
         }
     }
     Ok(())
@@ -331,8 +425,8 @@ fn write_chunks(
 /// the result to keep the secret off freed heap pages, and that guarantee was
 /// undone in here. Each `get_password()` chunk is a fully-materialized plaintext
 /// `String` dropped un-wiped, and `push_str` reallocates as it grows, stranding
-/// the earlier buffer too — a refresh token spans one to two 2048-byte chunks,
-/// so at least one growth realloc happened on every refresh. Making it the
+/// the earlier buffer too — a refresh token usually spans two chunks, so at
+/// least one growth realloc happened on every refresh. Making it the
 /// return type turns the contract from a convention into something structural.
 pub fn load_refresh_token(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<String>>> {
     ensure_keyring_store()?;
@@ -350,25 +444,54 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
     let mut combined = Zeroizing::new(String::with_capacity(MAX_CHUNK_UTF16_BYTES * 2));
     let mut idx = 0;
     let mut declared: Option<usize> = None;
+    // Chunk 0's write generation (an `azapp2` set); every later chunk must
+    // carry the same one. Owned: it outlives the wiped `part` it came from.
+    let mut expected_gen: Option<String> = None;
+    let mut gen_mismatch = false;
     loop {
+        // An `azapp2` set is read by its declared count: every chunk's
+        // generation proves it is whole, so anything past it is a stale tail
+        // (a crash before a shrinking write's sweep, or a sweep that failed)
+        // and is ignored rather than read as a torn set. `azapp1`/legacy sets
+        // have no such proof and keep reading until an entry is missing.
+        if expected_gen.is_some() && declared == Some(idx) {
+            break;
+        }
         let account = chunk_account(tenant_id, account_oid, idx);
         match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.get_password() {
             Ok(part) => {
                 // Bound mutably and wiped after appending: the chunk is
                 // plaintext, and dropping it un-zeroized leaves the whole token
                 // recoverable from freed pages. The wipe covers the
-                // marker-carrying chunk 0 too — its payload is a borrow of
+                // marker-carrying chunks too — their payload is a borrow of
                 // `part`, so it must be appended before the wipe, not after.
                 let mut part = part;
                 if idx == 0 {
                     match decode_chunk_zero(&part) {
-                        Some((total, payload)) => {
+                        ChunkZero::Generation {
+                            total,
+                            chunk_gen,
+                            payload,
+                        } => {
+                            declared = Some(total);
+                            expected_gen = Some(chunk_gen.to_string());
+                            combined.push_str(payload);
+                        }
+                        ChunkZero::Count { total, payload } => {
                             declared = Some(total);
                             combined.push_str(payload);
                         }
-                        // Written before the marker existed: always a complete
-                        // set by construction, so read it as before.
-                        None => combined.push_str(&part),
+                        // Written before either marker existed: always a
+                        // complete set by construction, so read it as before.
+                        ChunkZero::Legacy(payload) => combined.push_str(payload),
+                        ChunkZero::Malformed => gen_mismatch = true,
+                    }
+                } else if let Some(chunk_gen) = expected_gen.as_deref() {
+                    match part.split_once(':') {
+                        Some((found, payload)) if found == chunk_gen => {
+                            combined.push_str(payload);
+                        }
+                        _ => gen_mismatch = true,
                     }
                 } else {
                     combined.push_str(&part);
@@ -383,10 +506,18 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
     if idx == 0 {
         return Ok(None);
     }
-    // Fail closed on a set that does not match its own declared length: "no
-    // session" is a state the app already handles (it prompts to sign in); a
-    // spliced token is not — it looks like a stored session until Entra
-    // rejects it as revoked.
+    // Fail closed on a set that does not match its own declared length or
+    // generation: "no session" is a state the app already handles (it prompts
+    // to sign in); a spliced token is not — it looks like a stored session
+    // until Entra rejects it as revoked.
+    if gen_mismatch {
+        tracing::warn!(
+            target: "auth",
+            found = idx,
+            "refresh token chunk set mixes writes; treating as no stored session"
+        );
+        return Ok(None);
+    }
     if let Some(total) = declared
         && total != idx
     {
@@ -535,7 +666,7 @@ mod tests {
         assert!(chunks.len() > 1, "large token should split");
         for chunk in &chunks {
             let utf16_bytes: usize = chunk.chars().map(|c| c.len_utf16() * 2).sum();
-            assert!(utf16_bytes <= MAX_CHUNK_UTF16_BYTES);
+            assert!(utf16_bytes <= MAX_PAYLOAD_UTF16_BYTES);
         }
         assert_eq!(chunks.concat(), token);
     }
@@ -547,7 +678,7 @@ mod tests {
         let chunks = split_into_chunks(&token);
         for chunk in &chunks {
             let utf16_bytes: usize = chunk.chars().map(|c| c.len_utf16() * 2).sum();
-            assert!(utf16_bytes <= MAX_CHUNK_UTF16_BYTES);
+            assert!(utf16_bytes <= MAX_PAYLOAD_UTF16_BYTES);
         }
         assert_eq!(chunks.concat(), token);
     }
@@ -607,14 +738,15 @@ mod tests {
     /// chunk, however many are there — not just the ones this write created.
     ///
     /// A partial write leaves chunks 0..k holding the new token and k.. the
-    /// previous one's tail, and `load` just concatenates until an entry is
-    /// missing, so it would return the splice as if it were a real token. A
-    /// rollback bounded by the *new* token's chunk count would leave exactly
-    /// that tail behind.
+    /// previous one's tail. The per-write generation already makes `load` read
+    /// that as no session, but the tail is still plaintext material of a token
+    /// Entra has not revoked, and nothing else would ever delete it. A rollback
+    /// bounded by the *new* token's chunk count would leave exactly that tail
+    /// behind.
     ///
-    /// The failing write needs a keyring that can be made to fail mid-loop,
-    /// which the mock store cannot do; this pins the property the rollback
-    /// depends on.
+    /// This pins the property on hand-planted chunks;
+    /// `a_write_failing_mid_set_rolls_back_every_chunk` drives a real failed
+    /// write.
     #[test]
     fn the_rollback_clears_chunks_it_did_not_write() {
         init_mock_keyring();
@@ -830,5 +962,242 @@ mod tests {
         let loaded = load_refresh_token(tenant, oid).unwrap().unwrap();
         assert_eq!(loaded.as_str(), "plain-token");
         assert!(!loaded.contains(CHUNK_COUNT_PREFIX));
+        assert!(!loaded.contains(CHUNK_GEN_PREFIX));
+    }
+
+    fn raw_chunk(tenant: &str, oid: &str, idx: usize) -> String {
+        keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, idx))
+            .unwrap()
+            .get_password()
+            .unwrap()
+    }
+
+    fn set_raw_chunk(tenant: &str, oid: &str, idx: usize, value: &str) {
+        keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, idx))
+            .unwrap()
+            .set_password(value)
+            .unwrap();
+    }
+
+    fn stored_gen(tenant: &str, oid: &str) -> String {
+        match decode_chunk_zero(&raw_chunk(tenant, oid, 0)) {
+            ChunkZero::Generation { chunk_gen, .. } => chunk_gen.to_string(),
+            other => panic!("new writes must use azapp2, got {other:?}"),
+        }
+    }
+
+    /// The case the count alone missed: a NEW chunk 0 beside an OLD token's
+    /// chunk 1 when both tokens split into the same number of chunks — what a
+    /// crash right after chunk 0, or a second app instance, leaves. Typical
+    /// refresh tokens make exactly two chunks, so this is the common tear.
+    #[test]
+    fn an_equal_count_splice_fails_closed() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-splice", "oid-splice");
+        let two_chunks = MAX_PAYLOAD_UTF16_BYTES / 2 + 100;
+        let token_a = "a".repeat(two_chunks);
+        let token_b = "b".repeat(two_chunks);
+
+        // Capture B's chunk 0 as a crashed write of B would have left it.
+        save_refresh_token(tenant, oid, &token_b).unwrap();
+        let b_chunk_zero = raw_chunk(tenant, oid, 0);
+
+        save_refresh_token(tenant, oid, &token_a).unwrap();
+        assert!(
+            raw_chunk(tenant, oid, 1).len() > CHUNK_GEN_LEN,
+            "A spans 2 chunks"
+        );
+        assert!(
+            keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, 2))
+                .unwrap()
+                .get_password()
+                .is_err(),
+            "A spans exactly 2 chunks"
+        );
+        set_raw_chunk(tenant, oid, 0, &b_chunk_zero);
+
+        assert_eq!(
+            load_refresh_token(tenant, oid).unwrap(),
+            None,
+            "B's chunk 0 + A's chunk 1 must not load as a token"
+        );
+    }
+
+    /// The `azapp1:` (count-only) format still loads — an upgrade must not
+    /// sign anyone out — and its count check still fails closed.
+    #[test]
+    fn an_azapp1_entry_still_loads() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-v1", "oid-v1");
+        set_raw_chunk(tenant, oid, 0, "azapp1:2:first-half.");
+        set_raw_chunk(tenant, oid, 1, "second-half");
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("first-half.second-half")
+        );
+
+        set_raw_chunk(tenant, oid, 0, "azapp1:3:first-half.");
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+
+        // Unlike `azapp2`, an `azapp1` count has no generation proving the set
+        // whole, so an extra trailing chunk still fails closed.
+        set_raw_chunk(tenant, oid, 0, "azapp1:1:first-half.");
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+    }
+
+    /// A chunk 0 carrying the `azapp2:` marker but no parseable header is
+    /// corruption (no token begins with the marker): no session, not a token
+    /// with the marker glued on.
+    #[test]
+    fn a_malformed_azapp2_header_fails_closed() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-malformed", "oid-malformed");
+        set_raw_chunk(tenant, oid, 0, "azapp2:notanumber");
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+    }
+
+    /// Tokens at the payload boundary round-trip, and every stored value —
+    /// header included — stays inside the Windows blob budget.
+    #[test]
+    fn a_token_at_the_chunk_boundary_round_trips_within_budget() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-boundary", "oid-boundary");
+
+        // The reserve covers the widest header any write can produce, computed
+        // from the real encoder: chunk 0 at the largest count (`usize::MAX`,
+        // which on 64-bit targets is `u64::MAX`) and a later chunk.
+        let chunk_gen = new_chunk_gen();
+        let widest = [
+            encode_chunk(0, usize::MAX, &chunk_gen, ""),
+            encode_chunk(1, usize::MAX, &chunk_gen, ""),
+            format!("{CHUNK_GEN_PREFIX}{}:{chunk_gen}:", u64::MAX),
+        ];
+        for header in &widest {
+            let header_bytes = header.encode_utf16().count() * 2;
+            assert!(
+                header_bytes <= CHUNK_HEADER_RESERVE_UTF16_BYTES,
+                "{header_bytes}-byte header exceeds the {CHUNK_HEADER_RESERVE_UTF16_BYTES}-byte reserve"
+            );
+        }
+        let exact = MAX_PAYLOAD_UTF16_BYTES / 2;
+        for (len, chunks) in [
+            (exact, 1),
+            (exact + 1, 2),
+            (exact * 2, 2),
+            (exact * 2 + 1, 3),
+        ] {
+            let token = "z".repeat(len);
+            assert_eq!(split_into_chunks(&token).len(), chunks, "len {len}");
+            save_refresh_token(tenant, oid, &token).unwrap();
+            for idx in 0..chunks {
+                let utf16_bytes = raw_chunk(tenant, oid, idx).encode_utf16().count() * 2;
+                assert!(
+                    utf16_bytes <= MAX_CHUNK_UTF16_BYTES,
+                    "chunk {idx} of a {len}-char token is {utf16_bytes} UTF-16 bytes"
+                );
+            }
+            assert_eq!(
+                load_refresh_token(tenant, oid)
+                    .unwrap()
+                    .as_deref()
+                    .map(String::as_str),
+                Some(token.as_str())
+            );
+        }
+    }
+
+    /// Every save draws a fresh generation, delimiter-free and of fixed length,
+    /// and tags each later chunk with it.
+    #[test]
+    fn each_save_uses_a_fresh_generation() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-gen", "oid-gen");
+        let token = "g".repeat(MAX_PAYLOAD_UTF16_BYTES / 2 + 1);
+        save_refresh_token(tenant, oid, &token).unwrap();
+        let first = stored_gen(tenant, oid);
+        assert_eq!(first.len(), CHUNK_GEN_LEN);
+        assert!(
+            first
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{first}"
+        );
+        assert!(raw_chunk(tenant, oid, 1).starts_with(&format!("{first}:")));
+
+        save_refresh_token(tenant, oid, &token).unwrap();
+        assert_ne!(stored_gen(tenant, oid), first);
+    }
+
+    /// An `azapp2` set is read by its declared count: a stale tail left by a
+    /// crash before a shrinking write's sweep loads the new token, not "torn".
+    #[test]
+    fn a_stale_tail_after_a_shrinking_write_is_ignored() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-tail", "oid-tail");
+        let three_chunks = "t".repeat(MAX_PAYLOAD_UTF16_BYTES + 10);
+        save_refresh_token(tenant, oid, &three_chunks).unwrap();
+        let (old1, old2) = (raw_chunk(tenant, oid, 1), raw_chunk(tenant, oid, 2));
+
+        save_refresh_token(tenant, oid, "short").unwrap();
+        // Put back what the sweep removed, as a crash before it would leave.
+        set_raw_chunk(tenant, oid, 1, &old1);
+        set_raw_chunk(tenant, oid, 2, &old2);
+
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("short")
+        );
+    }
+
+    /// A stale-chunk delete the store refuses happens after the new set is
+    /// whole: the save succeeds and the new token is kept, not rolled back.
+    #[test]
+    fn a_failed_stale_chunk_sweep_keeps_the_new_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-sweep", "oid-sweep");
+        let three_chunks = "s".repeat(MAX_PAYLOAD_UTF16_BYTES + 10);
+        save_refresh_token(tenant, oid, &three_chunks).unwrap();
+        fail_next_keyring_op(tenant, oid, 1);
+
+        save_refresh_token(tenant, oid, "short").unwrap();
+
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("short")
+        );
+    }
+
+    /// A chunk write the store refuses after chunk 0 rolls the whole set back —
+    /// new chunk 0 and old tail alike — leaving no session.
+    #[test]
+    fn a_write_failing_mid_set_rolls_back_every_chunk() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-midfail", "oid-midfail");
+        let three_chunks = |c: &str| c.repeat(MAX_PAYLOAD_UTF16_BYTES + 10);
+        save_refresh_token(tenant, oid, &three_chunks("a")).unwrap();
+        fail_next_keyring_op(tenant, oid, 1);
+
+        let result = save_refresh_token(tenant, oid, &three_chunks("b"));
+
+        assert!(matches!(result, Err(AuthError::Keyring(_))), "{result:?}");
+        assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
+        for idx in 0..3 {
+            assert!(
+                keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, idx))
+                    .unwrap()
+                    .get_password()
+                    .is_err(),
+                "chunk {idx} must be gone after the rollback"
+            );
+        }
     }
 }
