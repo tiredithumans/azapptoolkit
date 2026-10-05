@@ -84,14 +84,7 @@ pub fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScop
     // principal actually had, and the scope shown was decided by response order.
     // Naming them all keeps the verdict a statement about reach rather than
     // about ordering.
-    let mut names: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.allowed_resource_scope.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    names.sort();
-    names.dedup();
+    let mut names = distinct_scope_names(rows);
     let scope_name = match names.len() {
         0 => None,
         1 => names.pop(),
@@ -103,6 +96,26 @@ pub fn verdict_from_rows(rows: &[&ExoAuthorizationResult]) -> MailPermissionScop
         group_count: None,
         mechanism: ScopeMechanism::Rbac,
     }
+}
+
+/// The distinct, non-blank management-scope names `rows` confine to, sorted.
+///
+/// [`verdict_from_rows`] joins several into one display string (`"A, B"`), so
+/// a caller that wants to look the scope up must take the name from here, and
+/// only when there is exactly one: looking up the joined string as a single
+/// `Get-ManagementScope` identity found nothing and silently dropped the
+/// filter and group count.
+pub fn distinct_scope_names(rows: &[&ExoAuthorizationResult]) -> Vec<String> {
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.allowed_resource_scope.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Pure decision behind `commands::exchange::mail_scopes::legacy_aap_scope`

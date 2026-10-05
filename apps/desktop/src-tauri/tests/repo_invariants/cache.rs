@@ -1006,7 +1006,14 @@ fn sign_out_stops_every_read_sweep() {
     // Write runs, deliberately NOT cancelled on sign-out: stopping a
     // multi-step write between steps is the operator's call, and with the
     // tokens purged each stops on its own at the dead-session latch.
-    const WRITE_RUNS: [&str; 3] = ["bulk_cancel", "migration_cancel", "restore_cancel"];
+    // `scope_move_cancel` is the "Move to managed group" member copy — writes
+    // into a group, and a stopped copy already keeps the scope where it was.
+    const WRITE_RUNS: [&str; 4] = [
+        "bulk_cancel",
+        "migration_cancel",
+        "scope_move_cancel",
+        "restore_cancel",
+    ];
 
     let state = include_str!("../../src/state.rs").replace("\r\n", "\n");
     let (_, after) = state

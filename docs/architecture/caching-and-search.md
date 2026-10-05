@@ -365,7 +365,12 @@ create flows all follow it
 A core that can fail after its first write returns the landed-write flags plus an
 `Option<UiError>` (`downgrade_application_permission_core`, `create_application_core`, the grant
 cores' `GrantRun`); the command busts on those flags and only then returns the error. A failure
-before the first write stays a plain `Err` — nothing landed, so nothing is invalidated.
+before the first write stays a plain `Err` — nothing landed, so nothing is invalidated. One
+deliberate carve-out: the AAP migration busts on *any* real run that reached `migrate_one`
+(`migration_should_invalidate`), even when that app's `Err` came before its first write. Its
+writes span Exchange and Entra across many steps, threading landed-write flags through each would
+cost more than the one extra re-read an over-invalidation costs, and under-invalidating shows a
+stale scope verdict for the cache TTL.
 
 ## `CacheKind::ServicePrincipal` self-invalidates in the graph client
 
@@ -525,7 +530,8 @@ stays empty.
 
 **One flag per run kind, each with exactly one Cancel command.** `audit_cancel` (`run_audit`,
 `cancel_audit`), `bulk_cancel` (every `bulk_*`, `cancel_bulk`), `migration_cancel` (the AAP
-migration, `cancel_aap_migration`), `site_sweep_cancel` (`sweep_site_permissions`, from the Sites
+migration, `cancel_aap_migration`), `scope_move_cancel` (the "Move to managed group" member copy,
+`cancel_scope_move`), `site_sweep_cancel` (`sweep_site_permissions`, from the Sites
 tab and the per-app site panel, `cancel_site_sweep`), `key_vault_sweep_cancel`
 (`cancel_key_vault_sweep`), `mailbox_probe_cancel` (`find_mailbox_reachers`,
 `cancel_mailbox_probe`), `backup_cancel` (`cancel_backup`) and `restore_cancel` (`cancel_restore`).
