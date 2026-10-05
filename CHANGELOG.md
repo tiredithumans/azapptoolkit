@@ -5,6 +5,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **Lists, the Security tab and the Resource Access sweeps open faster on a revisit, and the window
+  no longer stalls while they load.** A cached list or scan result is now handed back as is
+  instead of being rebuilt on every visit, and reading the last security audit or site/Key Vault
+  sweep no longer blocks the window. Moving a mailbox scope to its managed group, deleting a
+  retired group, and opening an app's mailbox-scope details also wait on fewer back-to-back
+  Exchange calls.
+
 ### Fixed
 
 - **Sign-in is sturdier.** A momentary credential-store error while renewing a token no longer
