@@ -23,7 +23,7 @@ use azapptoolkit_core::models::{AppRoleAssignment, Application};
 use crate::models::ExoRoleAssignment;
 
 use crate::roles::{
-    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, composite_role_confers,
     exchange_role_for_resource_permission, is_aap_confinable_permission,
 };
 
@@ -117,6 +117,51 @@ pub struct ExchangeTarget {
     pub app_role_id: String,
     /// Object id of the resource service principal the grant is against.
     pub resource_sp_object_id: String,
+    /// Whether a legacy Application Access Policy could govern this grant
+    /// ([`is_aap_confinable_permission`] on its own resource). Decided here,
+    /// where the resource is in hand, because the verdict resolver only sees
+    /// the value and role.
+    pub aap_confinable: bool,
+}
+
+/// One permission the mailbox-scope resolver probes for: the value, the
+/// Exchange role its **own resource** maps it to, and whether a legacy
+/// Application Access Policy could govern it. Every field is decided where the
+/// resource is known, so the resolver — which keys its output by value — never
+/// re-derives anything from the bare name.
+///
+/// `aap_confinable` gates the legacy-policy override: a policy confines only
+/// what it governed (the eleven Graph values plus the EWS scope), so an
+/// RBAC-only permission such as `MailboxItem.ReadWrite.All` on a
+/// policy-confined app is still org-wide, never "Scoped (legacy)".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopableMailPermission {
+    /// Permission value, e.g. `Mail.Send` or `full_access_as_app`.
+    pub value: String,
+    pub exchange_role: &'static str,
+    pub aap_confinable: bool,
+}
+
+impl ScopableMailPermission {
+    /// `value` on `resource_app_id`, or `None` when that resource doesn't
+    /// expose it as an Exchange-scopable permission.
+    pub fn on_resource(resource_app_id: &str, value: &str) -> Option<Self> {
+        exchange_role_for_resource_permission(resource_app_id, value).map(|exchange_role| Self {
+            value: value.to_string(),
+            exchange_role,
+            aap_confinable: is_aap_confinable_permission(resource_app_id, value),
+        })
+    }
+}
+
+impl From<&ExchangeTarget> for ScopableMailPermission {
+    fn from(t: &ExchangeTarget) -> Self {
+        Self {
+            value: t.graph_value.clone(),
+            exchange_role: t.exchange_role,
+            aap_confinable: t.aap_confinable,
+        }
+    }
 }
 
 /// The request resolved no permission RBAC for Applications can confine.
@@ -139,6 +184,7 @@ pub fn exchange_target(
 ) -> Option<ExchangeTarget> {
     exchange_role_for_resource_permission(resource_app_id, &graph_value).map(|exchange_role| {
         ExchangeTarget {
+            aap_confinable: is_aap_confinable_permission(resource_app_id, &graph_value),
             graph_value,
             exchange_role,
             app_role_id,
@@ -325,6 +371,12 @@ pub fn is_org_wide_role_assignment(a: &ExoRoleAssignment) -> bool {
 /// report success. The caller states it as a "Scoping is NOT effective" warning;
 /// it does **not** remove the assignment, because the operator may have made it
 /// on purpose and removing access is a decision, not a side effect.
+///
+/// A **composite** role (`Application Mail Full Access`, `Application Exchange
+/// Full Access`) counts too when it bundles a target's permission
+/// ([`composite_role_confers`], the table the verdict layer reads): an org-wide
+/// `Application Mail Full Access` reaches every mailbox with `Mail.Send` just as
+/// an org-wide `Application Mail.Send` does.
 pub fn orgwide_role_assignments(
     existing: &[ExoRoleAssignment],
     targets: &[ExchangeTarget],
@@ -336,7 +388,10 @@ pub fn orgwide_role_assignments(
             let role = a.role.as_deref()?;
             targets
                 .iter()
-                .any(|t| t.exchange_role.eq_ignore_ascii_case(role))
+                .any(|t| {
+                    t.exchange_role.eq_ignore_ascii_case(role)
+                        || composite_role_confers(role, &t.graph_value)
+                })
                 .then(|| {
                     let identity = a
                         .identity
@@ -890,6 +945,7 @@ mod tests {
             exchange_role: "Application Mail.Read",
             app_role_id: "role-id".to_string(),
             resource_sp_object_id: "graph-sp".to_string(),
+            aap_confinable: true,
         }
     }
 
@@ -1088,6 +1144,7 @@ mod tests {
             exchange_role: role,
             app_role_id: "role-id".to_string(),
             resource_sp_object_id: "graph-sp".to_string(),
+            aap_confinable: true,
         }
     }
 
@@ -1371,6 +1428,20 @@ mod tests {
         // business.
         let other = assignment("Application Calendars.Read", None);
         assert!(orgwide_role_assignments(&[other], &targets).is_empty());
+
+        // An org-wide COMPOSITE role bundling a target's permission defeats the
+        // scope just the same; one that bundles none of them does not.
+        let mut full = assignment("Application Mail Full Access", None);
+        full.identity = Some("full-orgwide".into());
+        let send = [target_on("Mail.Send", "Application Mail.Send")];
+        assert_eq!(
+            orgwide_role_assignments(std::slice::from_ref(&full), &send),
+            vec![(
+                "Application Mail Full Access".to_string(),
+                "full-orgwide".to_string()
+            )]
+        );
+        assert!(orgwide_role_assignments(&[full], &targets).is_empty());
     }
 
     #[test]

@@ -29,13 +29,13 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
-use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope};
+use azapptoolkit_core::audit::{AuditPrincipalKind, MailPermissionScope, ResourcePermission};
 use azapptoolkit_core::models::{
     AppRoleAssignment, ResolvedSharePointResource, SelectedPermission,
 };
 use azapptoolkit_core::scoping::{
     OFFICE365_SHAREPOINT_ONLINE_APP_ID, SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED,
-    SP_LISTS_SELECTED, SP_SITES_SELECTED, SelectedScopeLevel,
+    SP_LISTS_SELECTED, SP_SITES_SELECTED, SelectedScopeLevel, is_aap_confinable_permission,
     is_scopable_exchange_resource_permission, is_sharepoint_orgwide_permission,
     selected_scope_accepts, selected_scope_level_for,
 };
@@ -76,19 +76,36 @@ use crate::state::AppState;
 /// empty list let a transient Graph failure answer a definite "No access" for
 /// an app holding `Mail.Read` tenant-wide. Mirrors path 1 of
 /// [`test_site_access`] (org-wide `Sites.*`).
-async fn orgwide_mailbox_grant(client: &GraphClient, app_id: &str) -> Result<Vec<String>, UiError> {
+async fn orgwide_mailbox_grant(
+    client: &GraphClient,
+    app_id: &str,
+) -> Result<Vec<ResourcePermission>, UiError> {
     let Some(sp) = client.get_service_principal_by_app_id(app_id).await? else {
         return Ok(Vec::new());
     };
     // Across BOTH mailbox-bearing resources, resource-aware — the shared
     // pipeline the Exchange scoping reconciliation reads, so the two can't drift.
-    let mut perms: Vec<String> =
-        crate::commands::exchange::try_held_orgwide_mail_grants(client, &sp.id)
-            .await?
-            .into_iter()
-            .collect();
-    perms.sort();
+    // The resource stays attached: the legacy-policy gate in [`entra_reach`]
+    // asks a resource-aware question of each grant.
+    let mut perms =
+        crate::commands::exchange::try_held_orgwide_mail_permissions(client, &sp.id).await?;
+    sort_permissions(&mut perms);
     Ok(perms)
+}
+
+/// Sorts by value (then resource) and drops exact duplicates, so the reported
+/// permission lists are stable across Graph's response order.
+fn sort_permissions(perms: &mut Vec<ResourcePermission>) {
+    perms.sort_by(|a, b| {
+        (a.value.as_str(), a.resource_app_id.as_deref())
+            .cmp(&(b.value.as_str(), b.resource_app_id.as_deref()))
+    });
+    perms.dedup();
+}
+
+/// The bare values of `perms`, for display.
+fn permission_values(perms: &[ResourcePermission]) -> Vec<String> {
+    perms.iter().map(|p| p.value.clone()).collect()
 }
 
 /// Exchange-RBAC-layer outcome for one (principal, mailbox) pair, derived
@@ -198,13 +215,33 @@ enum EntraReach {
 /// `policies` is the pre-fetched AAP list (`None` = couldn't be read). The
 /// live `Test-ApplicationAccessPolicy` call is made only when a policy
 /// actually names this app, so the common no-AAP case costs no extra cmdlet.
+///
+/// A policy answers only for what it governs ([`is_aap_confinable_permission`],
+/// on each grant's own resource). A held RBAC-only grant (`MailboxItem.*`,
+/// `Mail-Advanced.*`, …) is org-wide whatever any policy says, so it is
+/// reported as [`EntraReach::OrgWide`] before the policy is consulted —
+/// letting the live AAP test answer for it reported an org-wide grant as
+/// confined (or denied) for this mailbox.
 async fn entra_reach(
     exo: &ExchangeClient,
     app_id: &str,
     mailbox: &str,
-    perms: Vec<String>,
+    perms: Vec<ResourcePermission>,
     policies: Option<&[ExoApplicationAccessPolicy]>,
 ) -> EntraReach {
+    let ungoverned: Vec<String> = perms
+        .iter()
+        .filter(|p| {
+            !p.resource_app_id
+                .as_deref()
+                .is_some_and(|r| is_aap_confinable_permission(r, &p.value))
+        })
+        .map(|p| p.value.clone())
+        .collect();
+    if !ungoverned.is_empty() {
+        return EntraReach::OrgWide(ungoverned);
+    }
+    let perms = permission_values(&perms);
     let Some(policies) = policies else {
         return EntraReach::Unverified(perms);
     };
@@ -384,7 +421,7 @@ pub async fn test_mailbox_access(
             return match orgwide_mailbox_grant(&graph, &app_id).await {
                 Ok(perms) if !perms.is_empty() => Ok(synthesize(
                     &mailbox,
-                    &EntraReach::Unverified(perms),
+                    &EntraReach::Unverified(permission_values(&perms)),
                     &RbacReach::Indeterminate,
                 )),
                 // A dead session re-authenticates in place rather than
@@ -729,8 +766,8 @@ pub fn cancel_mailbox_probe(state: State<'_, AppState>) {
 fn mailbox_candidates(
     resources: &[ResourceRoles],
     assigned: Vec<AppRoleAssignment>,
-) -> HashMap<String, (Option<String>, Vec<String>)> {
-    let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+) -> HashMap<String, (Option<String>, Vec<ResourcePermission>)> {
+    let mut candidates: HashMap<String, (Option<String>, Vec<ResourcePermission>)> = HashMap::new();
     for a in assigned {
         if a.principal_type.as_deref() != Some("ServicePrincipal") {
             continue;
@@ -742,16 +779,19 @@ fn mailbox_candidates(
         if !is_scopable_exchange_resource_permission(Some(resource), value) {
             continue;
         }
-        let value = value.to_string();
+        // The resource stays attached for the legacy-policy gate.
+        let held = ResourcePermission {
+            resource_app_id: Some(resource.to_string()),
+            value: value.to_string(),
+        };
         candidates
             .entry(a.principal_id)
             .or_insert_with(|| (a.principal_display_name, Vec::new()))
             .1
-            .push(value);
+            .push(held);
     }
-    for (_, values) in candidates.values_mut() {
-        values.sort();
-        values.dedup();
+    for (_, held) in candidates.values_mut() {
+        sort_permissions(held);
     }
     candidates
 }
@@ -761,7 +801,7 @@ fn mailbox_candidates(
 /// grant — keeps its richer entry; a new one enters with empty held
 /// permissions, so its verdict can only come from the Exchange RBAC layer.
 fn merge_exchange_candidates(
-    candidates: &mut HashMap<String, (Option<String>, Vec<String>)>,
+    candidates: &mut HashMap<String, (Option<String>, Vec<ResourcePermission>)>,
     exchange_sps: Vec<ExoServicePrincipal>,
 ) {
     for sp in exchange_sps {
@@ -801,8 +841,9 @@ struct ProbeContext<'a> {
 struct ProbeCandidate {
     principal_id: String,
     display_name: Option<String>,
-    /// The candidate's held Entra grants, already known from the index.
-    held_permissions: Vec<String>,
+    /// The candidate's held Entra grants, already known from the index, each
+    /// with its resource.
+    held_permissions: Vec<ResourcePermission>,
     /// The batch-prewarmed `(appId, servicePrincipalType)`, when the prewarm
     /// covered this principal.
     prewarmed: Option<(String, Option<String>)>,
@@ -857,7 +898,7 @@ async fn probe_candidate(ctx: &ProbeContext<'_>, candidate: ProbeCandidate) -> P
                     row: MailboxReacherRow {
                         app_id: String::new(),
                         display_name,
-                        held_permissions,
+                        held_permissions: permission_values(&held_permissions),
                         verdict: AccessVerdict::Unknown,
                         roles: Vec::new(),
                         detail: Some("Couldn't resolve the service principal.".into()),
@@ -884,7 +925,7 @@ async fn probe_candidate(ctx: &ProbeContext<'_>, candidate: ProbeCandidate) -> P
             let entra = if held_permissions.is_empty() {
                 EntraReach::NotHeld
             } else {
-                EntraReach::Unverified(held_permissions.clone())
+                EntraReach::Unverified(permission_values(&held_permissions))
             };
             synthesize(mailbox, &entra, &RbacReach::Indeterminate)
         }
@@ -912,7 +953,7 @@ async fn probe_candidate(ctx: &ProbeContext<'_>, candidate: ProbeCandidate) -> P
             app_id,
             principal_id,
             display_name,
-            held_permissions,
+            held_permissions: permission_values(&held_permissions),
             verdict: result.verdict,
             roles: result.roles,
             detail: result.detail,
@@ -1661,23 +1702,24 @@ mod tests {
     // with empty held permissions; Graph-derived entries are never clobbered.
     #[test]
     fn merge_exchange_candidates_adds_new_and_keeps_graph_entries() {
-        let mut candidates: HashMap<String, (Option<String>, Vec<String>)> = HashMap::from([
-            (
-                "obj-1".to_string(),
+        let mut candidates: HashMap<String, (Option<String>, Vec<ResourcePermission>)> =
+            HashMap::from([
                 (
-                    Some("From Graph".to_string()),
-                    vec!["Mail.Read".to_string()],
+                    "obj-1".to_string(),
+                    (
+                        Some("From Graph".to_string()),
+                        vec![ResourcePermission::graph("Mail.Read")],
+                    ),
                 ),
-            ),
-            // An EWS-only holder found on the Office 365 Exchange Online SP.
-            (
-                "obj-ews".to_string(),
+                // An EWS-only holder found on the Office 365 Exchange Online SP.
                 (
-                    Some("EWS app".to_string()),
-                    vec![EWS_FULL_ACCESS_AS_APP.to_string()],
+                    "obj-ews".to_string(),
+                    (
+                        Some("EWS app".to_string()),
+                        vec![ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)],
+                    ),
                 ),
-            ),
-        ]);
+            ]);
         merge_exchange_candidates(
             &mut candidates,
             vec![
@@ -1690,12 +1732,15 @@ mod tests {
         assert_eq!(candidates.len(), 3);
         let kept = &candidates["obj-1"];
         assert_eq!(kept.0.as_deref(), Some("From Graph"));
-        assert_eq!(kept.1, vec!["Mail.Read".to_string()]);
+        assert_eq!(permission_values(&kept.1), vec!["Mail.Read".to_string()]);
         // The EWS grant survives the merge — an Exchange-store duplicate must
         // not reset it to "holds nothing" (which would probe as `no_access`).
         let ews = &candidates["obj-ews"];
         assert_eq!(ews.0.as_deref(), Some("EWS app"));
-        assert_eq!(ews.1, vec![EWS_FULL_ACCESS_AS_APP.to_string()]);
+        assert_eq!(
+            permission_values(&ews.1),
+            vec![EWS_FULL_ACCESS_AS_APP.to_string()]
+        );
         let added = &candidates["obj-2"];
         assert_eq!(added.0.as_deref(), Some("RBAC only"));
         assert!(added.1.is_empty());
@@ -1757,22 +1802,68 @@ mod tests {
                 assigned("sp-5", sp, "exo-sp", "role-ews"),
             ],
         );
-        assert_eq!(candidates["sp-1"].1, vec!["Mail.Read".to_string()]);
+        assert_eq!(
+            candidates["sp-1"].1,
+            vec![ResourcePermission::graph("Mail.Read")]
+        );
         assert_eq!(candidates["sp-1"].0.as_deref(), Some("sp-1 name"));
         assert_eq!(
             candidates["sp-2"].1,
-            vec![EWS_FULL_ACCESS_AS_APP.to_string()]
+            vec![ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)]
         );
-        // Sorted and deduped across both resources.
+        // Sorted and deduped across both resources, each keeping its resource.
         assert_eq!(
             candidates["sp-5"].1,
-            vec!["Mail.Read".to_string(), EWS_FULL_ACCESS_AS_APP.to_string()]
+            vec![
+                ResourcePermission::graph("Mail.Read"),
+                ResourcePermission::exchange_online(EWS_FULL_ACCESS_AS_APP)
+            ]
         );
         // The retired Outlook REST role, a non-mail role and a user are out.
         assert!(!candidates.contains_key("sp-3"));
         assert!(!candidates.contains_key("sp-4"));
         assert!(!candidates.contains_key("user-1"));
         assert_eq!(candidates.len(), 3);
+    }
+
+    // ── A legacy policy answers only for what it governs ─────────────────
+
+    /// `MailboxItem.ReadWrite.All` is RBAC-scopable but no Application Access
+    /// Policy ever confined it, so a policy naming the app must not answer for
+    /// it: the grant reaches every mailbox. Decided before any Exchange call —
+    /// the client points nowhere, so reaching it would fail the test.
+    #[tokio::test]
+    async fn a_policy_does_not_answer_for_an_rbac_only_grant() {
+        use azapptoolkit_core::token::StaticTokenProvider;
+        let exo = ExchangeClient::with_base_url(
+            StaticTokenProvider::new("t"),
+            "tenant-1",
+            "admin@contoso.com",
+            "http://127.0.0.1:9".to_string(),
+        );
+        let policies: Vec<ExoApplicationAccessPolicy> = serde_json::from_value(serde_json::json!([
+            { "Identity": "p", "AppId": "app-1", "ScopeName": "Sales", "AccessRight": "RestrictAccess" }
+        ]))
+        .unwrap();
+        let held = vec![
+            ResourcePermission::graph("Mail.Read"),
+            ResourcePermission::graph("MailboxItem.ReadWrite.All"),
+        ];
+        match entra_reach(&exo, "app-1", "a@x.com", held, Some(&policies)).await {
+            EntraReach::OrgWide(perms) => {
+                assert_eq!(perms, vec!["MailboxItem.ReadWrite.All".to_string()]);
+            }
+            _ => panic!("an ungoverned grant must read org-wide"),
+        }
+        // A grant with no resolved resource is never governed either.
+        let unresolved = vec![ResourcePermission {
+            resource_app_id: None,
+            value: "Mail.Read".into(),
+        }];
+        assert!(matches!(
+            entra_reach(&exo, "app-1", "a@x.com", unresolved, Some(&policies)).await,
+            EntraReach::OrgWide(_)
+        ));
     }
 
     // ── A failed Entra read is `unknown`, never "No access" ───────────────
@@ -1859,7 +1950,7 @@ mod tests {
         let client = graph_over(&server);
         assert_eq!(
             orgwide_mailbox_grant(&client, "app-1").await.unwrap(),
-            Vec::<String>::new()
+            Vec::<ResourcePermission>::new()
         );
         let held = sharepoint_grants_held(&client, "app-1").await.unwrap();
         assert!(held.orgwide.is_empty() && held.selected.is_empty());

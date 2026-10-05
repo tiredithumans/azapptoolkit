@@ -82,8 +82,9 @@ pub fn resource_label(resource_app_id: &str) -> &str {
 ///   [`is_unscopable_legacy_exchange_permission`] call it out for removal.
 /// - the composite roles (`Application Mail Full Access`, `Application Exchange
 ///   Full Access`) — they carry no permission name of their own; a row granting
-///   one is matched through `GrantedPermissions` by the verdict layer's
-///   `row_grants_permission`.
+///   one is matched through `GrantedPermissions`, or failing that the
+///   `azapptoolkit-exchange` composite table (`roles::composite_role_confers`),
+///   by the verdict layer's `row_grants_permission`.
 ///
 /// This used to be exactly the eleven values an Application Access Policy could
 /// confine, so that an AAP migration could always map what a policy governed.

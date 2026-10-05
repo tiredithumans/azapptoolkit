@@ -11,6 +11,7 @@ description = "Exchange Online Admin API client (RBAC for Applications) for azap
 azapptoolkit-core = { path = "../azapptoolkit-core" }
 
 bytes = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

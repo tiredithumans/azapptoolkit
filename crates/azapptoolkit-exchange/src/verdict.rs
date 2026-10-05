@@ -18,33 +18,89 @@
 use std::collections::{HashMap, HashSet};
 
 use azapptoolkit_core::audit::{MailPermissionScope, ResourcePermission, ScopeMechanism};
-use azapptoolkit_core::scoping::is_scopable_exchange_resource_permission;
+use azapptoolkit_core::scoping::is_aap_confinable_permission;
 
 use crate::error::ExchangeError;
 use crate::models::{ExoApplicationAccessPolicy, ExoAuthorizationResult};
-use crate::roles::is_blanket_mailbox_grant;
+use crate::roles::{composite_role_confers, is_blanket_mailbox_grant};
+
+/// The `Test-ServicePrincipalAuthorization` `ScopeType` values that name a real
+/// confinement, lower-cased: a custom management scope (`CustomRecipientScope`,
+/// also seen as `RecipientScope`) or an administrative unit (the
+/// `-RecipientAdministrativeUnitScope` assignment, in each spelling the
+/// codebase's AU readers know). An allowlist on purpose — see
+/// [`is_org_wide_auth_row`].
+const CONFINED_SCOPE_TYPES: &[&str] = &[
+    "customrecipientscope",
+    "recipientscope",
+    "administrativeunit",
+    "administrativeunitscope",
+    "recipientadministrativeunitscope",
+];
+
+/// `ScopeType` values the cmdlet uses for an organization-level (unconfined)
+/// row, lower-cased. Recognised so they read org-wide without the
+/// unrecognised-type warning.
+const ORG_WIDE_SCOPE_TYPES: &[&str] = &[
+    "",
+    "notapplicable",
+    "not applicable",
+    "organizationconfig",
+    "organizationscope",
+    "organization",
+];
 
 /// True when a `Test-ServicePrincipalAuthorization` row is *not* confined to a
-/// recipient scope — i.e. the grant reaches every mailbox in the tenant. The
-/// `ScopeType` enum returned by EXO uses values like `OrganizationConfig` /
-/// `NotApplicable` for org-wide; a custom management scope reports its name in
-/// `AllowedResourceScope` with a `*RecipientScope` type. We treat an empty /
-/// "Not Applicable" `AllowedResourceScope` as org-wide too, and default to
-/// org-wide (the conservative, never-under-report choice) when unsure.
+/// recipient scope — i.e. the grant reaches every mailbox in the tenant. An
+/// empty / "Not Applicable" `AllowedResourceScope` is org-wide, and so is any
+/// row whose `ScopeType` is not one of the known confining types (the private
+/// `CONFINED_SCOPE_TYPES`: a custom management scope or an administrative
+/// unit).
+///
+/// The `ScopeType` test is an **allowlist** of confinements, not a denylist of
+/// org-wide spellings. The denylist read any type it didn't recognise as
+/// confined, so a new or differently spelled org-level type beside a non-empty
+/// `AllowedResourceScope` reported a tenant-wide grant as scoped — and scored
+/// it at the reduced weight. Unsure now means org-wide (the conservative,
+/// never-under-report choice), and an unrecognised type is logged so the gap
+/// can be closed. Only the type is logged: the scope name is tenant data.
 pub fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
     let allowed = r.allowed_resource_scope.as_deref().unwrap_or("").trim();
     if allowed.is_empty() || allowed.eq_ignore_ascii_case("Not Applicable") {
         return true;
     }
-    matches!(
-        r.scope_type
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "" | "notapplicable" | "organizationconfig" | "organizationscope" | "organization"
-    )
+    let scope_type = r.scope_type.as_deref().unwrap_or("").trim();
+    if CONFINED_SCOPE_TYPES
+        .iter()
+        .any(|t| scope_type.eq_ignore_ascii_case(t))
+    {
+        return false;
+    }
+    if !ORG_WIDE_SCOPE_TYPES
+        .iter()
+        .any(|t| scope_type.eq_ignore_ascii_case(t))
+    {
+        warn_unrecognised_scope_type(scope_type);
+    }
+    true
+}
+
+/// Logs an unrecognised `ScopeType` once per distinct (lower-cased) value per
+/// process. The verdict reads rows per permission per app — and the mailbox
+/// reverse lookup per candidate — so an unconditional warning repeated the
+/// same line hundreds of times in one run.
+fn warn_unrecognised_scope_type(scope_type: &str) {
+    static SEEN: parking_lot::Mutex<Option<HashSet<String>>> = parking_lot::Mutex::new(None);
+    let first = SEEN
+        .lock()
+        .get_or_insert_with(HashSet::new)
+        .insert(scope_type.to_ascii_lowercase());
+    if first {
+        tracing::warn!(
+            scope_type,
+            "unrecognised Test-ServicePrincipalAuthorization ScopeType; reading the row as org-wide"
+        );
+    }
 }
 
 /// True when a `Test-ServicePrincipalAuthorization` row confers `value` — either
@@ -55,16 +111,34 @@ pub fn is_org_wide_auth_row(r: &ExoAuthorizationResult) -> bool {
 ///
 /// Matching `RoleName` alone missed every composite role, so a correctly scoped
 /// app produced no matching row and read `OrgWide`. The cmdlet reports the
-/// bundle in `GrantedPermissions`, so that is the authoritative field; the
-/// role-name check stays as the fast path and as a fallback for a row that omits
-/// the list.
+/// bundle in `GrantedPermissions`; the role-name check is the fast path, and the
+/// composite table ([`composite_role_confers`]) answers only for a composite row
+/// whose list is **absent or blank**. Without that fallback an **org-wide**
+/// composite row beside a scoped dedicated one was dropped and the permission
+/// read `Scoped` while it reached every mailbox. An explicit list is
+/// authoritative: consulting the table over it would let a *scoped* composite
+/// row whose list excludes the value join the fold and turn a genuine
+/// no-row `OrgWide` into `Scoped`.
+///
+/// Every comparison is case-insensitive: Exchange role names are, and the
+/// cmdlet echoes whatever case it stored. The list is split on commas,
+/// semicolons and whitespace, none of which a permission value contains.
 pub fn row_grants_permission(row: &ExoAuthorizationResult, role: &str, value: &str) -> bool {
-    if row.role_name.as_deref() == Some(role) {
+    let row_role = row.role_name.as_deref().map(str::trim);
+    if row_role.is_some_and(|r| r.eq_ignore_ascii_case(role.trim())) {
         return true;
     }
-    row.granted_permissions
+    match row
+        .granted_permissions
         .as_deref()
-        .is_some_and(|granted| granted.split(',').any(|g| g.trim() == value))
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        Some(granted) => granted
+            .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .any(|g| !g.is_empty() && g.eq_ignore_ascii_case(value.trim())),
+        None => row_role.is_some_and(|r| composite_role_confers(r, value)),
+    }
 }
 
 /// Folds the authorization rows for one Exchange role into a single verdict:
@@ -201,6 +275,15 @@ pub fn aap_verdict_for(
 ///
 /// A `Scoped` RBAC verdict is never overwritten: that app already migrated.
 ///
+/// Only a grant a policy could **govern** takes the override
+/// ([`is_aap_confinable_permission`]: the eleven Microsoft Graph values plus the
+/// EWS scope), not everything RBAC can scope. An Application Access Policy never
+/// confined `MailboxItem.*`, `Mail-Advanced.*` and the other RBAC-only values,
+/// so gating on the scopable set handed an org-wide `MailboxItem.ReadWrite.All`
+/// on a policy-confined app a "Scoped (legacy)" verdict and scored it at the
+/// reduced weight. The AAP migration already uses this gate
+/// (`targets::targets_from_grants`).
+///
 /// Takes the grants with their resources attached, not bare values: Office 365
 /// Exchange Online exposes its own `Mail.*` appRoles (retired Outlook REST) that
 /// an Application Access Policy cannot confine either, and a value-keyed test
@@ -214,8 +297,11 @@ pub fn apply_legacy_policy_verdict(
 ) {
     let Some(verdict) = verdict else { return };
     for grant in grants {
-        if !is_scopable_exchange_resource_permission(grant.resource_app_id.as_deref(), &grant.value)
-        {
+        let confinable = grant
+            .resource_app_id
+            .as_deref()
+            .is_some_and(|resource| is_aap_confinable_permission(resource, &grant.value));
+        if !confinable {
             continue;
         }
         match scopes.get(&grant.value) {
@@ -229,7 +315,10 @@ pub fn apply_legacy_policy_verdict(
 
 /// Per-app mailbox-scope fallback when `Test-ServicePrincipalAuthorization`
 /// itself fails (detail/enrich path only). An AAP confines the *whole* app (see
-/// `commands::exchange::mail_scopes::legacy_aap_scope` (desktop crate)), so the verdict applies to every scopable permission.
+/// `commands::exchange::mail_scopes::legacy_aap_scope` (desktop crate)), but
+/// only the permissions a policy governs: the caller passes `aap` only when at
+/// least one probed permission is [`is_aap_confinable_permission`], and applies
+/// the result to those alone.
 /// A `RestrictAccess` AAP keyed on this exact appId is stronger evidence than a
 /// failed probe, so it wins even over a 403. A principal Exchange can't resolve
 /// (the managed-identity case — it isn't in Exchange's SP store) has no RBAC
@@ -384,19 +473,145 @@ mod tests {
             (Some("SomeScope"), Some("organizationscope")),
             (Some("SomeScope"), Some("Organization")),
             (Some("SomeScope"), Some("")),
+            (Some("SomeScope"), None),
+            // Unrecognised types fail closed: unsure means org-wide.
+            (Some("SomeScope"), Some("Weird")),
+            (Some("SomeScope"), Some("OrganizationWideScope")),
         ] {
             assert!(
                 is_org_wide_auth_row(&row(None, None, scope, scope_type)),
                 "scope={scope:?} scope_type={scope_type:?} must read org-wide"
             );
         }
-        // A named scope with a recipient-level ScopeType is genuinely confined.
-        assert!(!is_org_wide_auth_row(&row(
-            None,
+        // A named scope with a known confining ScopeType is genuinely confined,
+        // in any case.
+        for scope_type in [
+            "RecipientScope",
+            "CustomRecipientScope",
+            "customrecipientscope",
+            "AdministrativeUnit",
+            " administrativeunit ",
+            "RecipientAdministrativeUnitScope",
+        ] {
+            assert!(
+                !is_org_wide_auth_row(&row(None, None, Some("app_scope_x"), Some(scope_type))),
+                "scope_type={scope_type:?} must read confined"
+            );
+        }
+    }
+
+    /// A composite row Exchange returned without `GrantedPermissions` (or with
+    /// it formatted differently) still confers its bundle. Dropping it let an
+    /// org-wide composite row beside a scoped dedicated one disappear from the
+    /// fold, so the permission read `Scoped` while it reached every mailbox.
+    #[test]
+    fn a_composite_row_without_its_list_confers_its_bundle() {
+        let bare = row(Some("Application Mail Full Access"), None, None, None);
+        assert!(row_grants_permission(
+            &bare,
+            "Application Mail.Send",
+            "Mail.Send"
+        ));
+        assert!(!row_grants_permission(
+            &bare,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+        let full = row(Some("application exchange full access"), None, None, None);
+        assert!(row_grants_permission(
+            &full,
+            "Application Calendars.ReadWrite",
+            "Calendars.ReadWrite"
+        ));
+        // Blank counts as absent.
+        let blank = row(Some("Application Mail Full Access"), Some("  "), None, None);
+        assert!(row_grants_permission(
+            &blank,
+            "Application Mail.ReadWrite",
+            "Mail.ReadWrite"
+        ));
+        // An explicit list is authoritative: a scoped composite row whose list
+        // excludes the value must not join the fold, or the no-row `OrgWide`
+        // turns into `Scoped`.
+        let narrowed = row(
+            Some("Application Exchange Full Access"),
+            Some("Mail.ReadWrite"),
+            Some("app_scope_x"),
+            Some("CustomRecipientScope"),
+        );
+        assert!(!row_grants_permission(
+            &narrowed,
+            "Application Mail.Send",
+            "Mail.Send"
+        ));
+        let matching: Vec<&ExoAuthorizationResult> = [&narrowed]
+            .into_iter()
+            .filter(|r| row_grants_permission(r, "Application Mail.Send", "Mail.Send"))
+            .collect();
+        assert_eq!(verdict_from_rows(&matching), MailPermissionScope::OrgWide);
+        // Space-separated list, different case.
+        let spaced = row(
+            Some("Some Custom Role"),
+            Some("mail.readwrite  MAIL.SEND"),
+            Some("app_scope_x"),
+            Some("CustomRecipientScope"),
+        );
+        assert!(row_grants_permission(
+            &spaced,
+            "Application Mail.Send",
+            "Mail.Send"
+        ));
+
+        // The fold: an org-wide composite row beside a scoped dedicated row
+        // unions to tenant-wide reach.
+        let scoped_dedicated = row(
+            Some("Application Mail.Send"),
+            Some("Mail.Send"),
+            Some("app_scope_x"),
+            Some("CustomRecipientScope"),
+        );
+        let rows = [scoped_dedicated, bare];
+        let matching: Vec<&ExoAuthorizationResult> = rows
+            .iter()
+            .filter(|r| row_grants_permission(r, "Application Mail.Send", "Mail.Send"))
+            .collect();
+        assert_eq!(matching.len(), 2);
+        assert_eq!(verdict_from_rows(&matching), MailPermissionScope::OrgWide);
+    }
+
+    /// Exchange role names are case-insensitive and the cmdlet echoes the
+    /// stored case; an exact compare dropped the row.
+    #[test]
+    fn a_mixed_case_row_matches() {
+        let r = row(
+            Some("application MAIL.read"),
             None,
             Some("app_scope_x"),
-            Some("RecipientScope")
-        )));
+            Some("CustomRecipientScope"),
+        );
+        assert!(row_grants_permission(
+            &r,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+        let listed = row(
+            None,
+            Some("MAIL.READ"),
+            Some("app_scope_x"),
+            Some("CustomRecipientScope"),
+        );
+        assert!(row_grants_permission(
+            &listed,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
+        // Still exact per token: Mail.ReadBasic is not Mail.Read.
+        let basic = row(None, Some("mail.readbasic"), None, None);
+        assert!(!row_grants_permission(
+            &basic,
+            "Application Mail.Read",
+            "Mail.Read"
+        ));
     }
 
     /// The composite-role case. Matching `RoleName` alone missed every bundled
@@ -797,6 +1012,29 @@ mod tests {
         assert!(
             !scopes.contains_key("MailboxSettings.Read"),
             "an unresolved resource must be scored conservatively, never as scoped"
+        );
+
+        // RBAC-only values (scopable, but never governed by a policy) keep
+        // whatever RBAC said: absent stays absent, OrgWide stays OrgWide.
+        let mut rbac_only = HashMap::from([(
+            "Mail-Advanced.ReadWrite.All".to_string(),
+            MailPermissionScope::OrgWide,
+        )]);
+        apply_legacy_policy_verdict(
+            &mut rbac_only,
+            &[
+                ResourcePermission::graph("MailboxItem.ReadWrite.All"),
+                ResourcePermission::graph("Mail-Advanced.ReadWrite.All"),
+            ],
+            Some(&legacy),
+        );
+        assert!(
+            !rbac_only.contains_key("MailboxItem.ReadWrite.All"),
+            "an AAP never confined MailboxItem.ReadWrite.All, so it must not read Scoped (legacy)"
+        );
+        assert_eq!(
+            rbac_only.get("Mail-Advanced.ReadWrite.All"),
+            Some(&MailPermissionScope::OrgWide)
         );
 
         // No policy for this app ⇒ untouched (today's behavior).

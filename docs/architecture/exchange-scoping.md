@@ -50,8 +50,30 @@ a separate gate, `is_aap_confinable_permission` (see below). Consequences to pre
   derives the blanket-grant set from it, resource-checked.
 - **Composite roles confer permissions without carrying their names.** `Application Mail Full Access`
   and `Application Exchange Full Access` bundle several permissions, so `verdict_from_rows` matches
-  rows via `row_grants_permission`, which reads `GrantedPermissions` as well as `RoleName`. Matching
-  role names alone reported a correctly scoped app as org-wide.
+  rows via `row_grants_permission`, which reads `GrantedPermissions` as well as `RoleName`, and falls
+  back to the static bundle table `roles::composite_role_confers` only when that list is absent or
+  blank (an explicit list is authoritative, so a scoped composite row that excludes the value can't
+  turn a no-row `OrgWide` into `Scoped`). Every comparison is case-insensitive. Matching role names alone reported a
+  correctly scoped app as org-wide; dropping a list-less **org-wide** composite row beside a scoped
+  dedicated one reported an org-wide app as scoped. `targets::orgwide_role_assignments` reads the same
+  table, so an org-wide composite assignment raises the "Scoping is NOT effective" warning too.
+- **A `Test-ServicePrincipalAuthorization` row is confined only by a known `ScopeType`.**
+  `is_org_wide_auth_row` allowlists the confining types (`CustomRecipientScope`, `RecipientScope`
+  and the administrative-unit spellings, case-insensitive); a blank/"Not Applicable"
+  `AllowedResourceScope` or any other type is org-wide, and an unrecognised type is logged (type
+  only, never the scope name; once per distinct type per process). A denylist of org-level
+  spellings read an unknown type as confined.
+- **The legacy-AAP override reaches only `is_aap_confinable_permission` values.** On both the audit
+  fold (`apply_legacy_policy_verdict`) and the detail path (`resolve_mail_scopes`' `aap_override`
+  and its probe-failure fallback), a policy answers only for what it governed. Each
+  `ScopableMailPermission` carries `aap_confinable`, decided where the resource is known
+  (`ScopableMailPermission::on_resource`, or `ExchangeTarget.aap_confinable` from
+  `exchange_target`). An RBAC-only value on a policy-confined app keeps its RBAC verdict: org-wide
+  when the probe found no scope or could not resolve the principal, `Unknown` after any other probe
+  failure, never "Scoped (legacy)". Such a failure-derived `Unknown` is never cached
+  (`verdicts_are_cacheable`). The permission tester's `entra_reach` applies the same gate to
+  resource-carrying held grants (`try_held_orgwide_mail_permissions`): an ungoverned grant is
+  `EntraReach::OrgWide` before any policy is consulted.
 
 **Two role sets, two gates.** The ten RBAC-only Graph roles (`MailboxFolder.*`, `MailboxItem.*`,
 `MailboxConfigItem.*`, `MailTips.ReadBasic.All`, `Mail-Advanced.ReadWrite.All`) are mapped like the

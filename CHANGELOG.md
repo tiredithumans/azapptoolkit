@@ -69,6 +69,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   admin-consent findings disappeared without a warning and the result was kept as a complete
   scan. The audit now shows the incomplete-scan notice and doesn't keep the result. It does the
   same when SharePoint Online's grants can't be read.
+- **Mailbox scope verdicts are more accurate, so some apps' scores go up and some go down.** On
+  the Security tab, the Permissions tab's Scope column and the Permission tester:
+  - A legacy Application Access Policy now scopes only the permissions it can govern.
+    `MailboxItem.ReadWrite.All` and the other RBAC-only permissions on a policy-confined app read
+    organization-wide instead of "Scoped (legacy)".
+  - An Exchange assignment with a scope type the app doesn't recognise now counts as
+    organization-wide, and the type is logged.
+  - Role and permission names now match in any case, and an `Application Mail Full Access` or
+    `Application Exchange Full Access` assignment counts even when Exchange omits the permissions
+    it bundles. An organization-wide one of these now counts against the app (score goes up). A
+    scoped one that used to be missed, and so read organization-wide, now counts as scoped
+    (score goes down). Scoping a permission that an organization-wide composite role already
+    covers now warns that the scope is not effective.
 
 ### Fixed
 

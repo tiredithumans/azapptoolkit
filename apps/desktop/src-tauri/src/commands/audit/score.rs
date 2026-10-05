@@ -14,10 +14,10 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
-    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, exchange_role_for_resource_permission,
-    is_scopable_exchange_resource_permission,
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission,
 };
 use azapptoolkit_exchange::ExchangeError;
+use azapptoolkit_exchange::targets::ScopableMailPermission;
 use azapptoolkit_exchange::verdict::apply_legacy_policy_verdict;
 use chrono::{DateTime, Utc};
 
@@ -410,12 +410,11 @@ pub(crate) async fn score_one(
     // role from here is what lets the resolver see the EWS row — re-deriving
     // it against Graph dropped that row, so a correctly RBAC-scoped EWS grant
     // scored at full org-wide weight.
-    let scopable: Vec<(String, &'static str)> = perms
+    let scopable: Vec<ScopableMailPermission> = perms
         .app_role_grants
         .iter()
         .filter_map(|g| {
-            exchange_role_for_resource_permission(g.resource_app_id.as_deref()?, &g.value)
-                .map(|role| (g.value.clone(), role))
+            ScopableMailPermission::on_resource(g.resource_app_id.as_deref()?, &g.value)
         })
         .collect();
     if let Some(exo) = exo {

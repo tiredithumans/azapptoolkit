@@ -129,7 +129,8 @@ org-wide grant never removed".
 **Legacy Application Access Policies (AAP).** The detail path resolves the legacy AAP up front
 (`enrich`-gated, so the *per-app probe* never pays the extra call) — keyed only on appId via an
 independent cmdlet, so it overrides an org-wide RBAC verdict **and** answers when the probe itself
-errors (the MI case, where the old code propagated before the AAP was ever read). A
+errors (the MI case, where the old code propagated before the AAP was ever read) — in both cases
+only for the `aap_confinable` permissions (see exchange-scoping.md). A
 `RestrictAccess` AAP yields `Scoped { mechanism: LegacyApplicationAccessPolicy }` (`DenyAccess` is
 a blocklist → still org-wide). The missing-principal→`OrgWide` vs. propagate decision is the pure
 `scope_from_rbac_error`, with `ExchangeError::is_missing_object` distinguishing the two failure
@@ -146,8 +147,10 @@ pure `apply_legacy_policy_verdict`. Three invariants:
 - **It is applied by the caller, after `resolve_mail_scopes_audit_cached`**, so that cache keeps
   holding the *pure RBAC* verdict and the audit's cache warmth still can't leak into the Permissions
   tab's (the reason the two use separate keys in the first place).
-- **It fills `OrgWide` and *missing* verdicts, never a `Scoped { Rbac }` one** — an app that already
-  migrated keeps its RBAC verdict. Filling a missing verdict is the same call `scope_from_rbac_error`
+- **It fills `OrgWide` and *missing* verdicts, never a `Scoped { Rbac }` one, and only for a grant
+  a policy could govern** (`is_aap_confinable_permission`, resource-aware) — an app that already
+  migrated keeps its RBAC verdict, and an RBAC-only grant (`MailboxItem.*`, `Mail-Advanced.*`, …) on a
+  policy-confined app stays org-wide at full weight. Filling a missing verdict is the same call `scope_from_rbac_error`
   makes: a policy keyed on this exact appId is stronger evidence than a probe that failed or never ran
   (breaker open, Exchange down, MI absent from the Exchange SP store), which is why it is applied
   *outside* the per-app Exchange block.

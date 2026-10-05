@@ -6,7 +6,15 @@
 use super::*;
 
 use azapptoolkit_core::models::AppRoleAssignment;
-use azapptoolkit_core::scoping::EWS_FULL_ACCESS_AS_APP;
+use azapptoolkit_core::scoping::{
+    EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
+};
+
+/// A Microsoft Graph permission as the resolver receives it.
+fn graph_perm(value: &str) -> ScopableMailPermission {
+    ScopableMailPermission::on_resource(MICROSOFT_GRAPH_APP_ID, value)
+        .expect("a scopable Graph mail permission")
+}
 
 fn grant(resource_sp_id: &str, app_role_id: &str) -> AppRoleAssignment {
     AppRoleAssignment {
@@ -124,10 +132,11 @@ async fn the_ews_scope_is_resolved_not_short_circuited() {
     let out = resolve_mail_scopes(
         &exo,
         "app-1",
-        &[(
-            EWS_FULL_ACCESS_AS_APP.to_string(),
-            "Application EWS.AccessAsApp",
-        )],
+        &[ScopableMailPermission::on_resource(
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            EWS_FULL_ACCESS_AS_APP,
+        )
+        .expect("the EWS scope is scopable")],
         &HashSet::new(),
         false,
     )
@@ -159,7 +168,7 @@ async fn a_graph_mail_row_resolves_through_the_same_path() {
     let out = resolve_mail_scopes(
         &exo,
         "app-1",
-        &[("Mail.Read".to_string(), "Application Mail.Read")],
+        &[graph_perm("Mail.Read")],
         &HashSet::new(),
         false,
     )
@@ -177,9 +186,13 @@ async fn a_graph_mail_row_resolves_through_the_same_path() {
 
 #[test]
 fn the_audit_verdict_key_carries_the_orgwide_snapshot_it_was_reconciled_against() {
-    let scopable = |vals: &[&str]| -> Vec<(String, &'static str)> {
+    let scopable = |vals: &[&str]| -> Vec<ScopableMailPermission> {
         vals.iter()
-            .map(|v| (v.to_string(), "Application Mail.Read"))
+            .map(|v| ScopableMailPermission {
+                value: v.to_string(),
+                exchange_role: "Application Mail.Read",
+                aap_confinable: true,
+            })
             .collect()
     };
     let set = |vals: &[&str]| -> HashSet<String> { vals.iter().map(|v| v.to_string()).collect() };
@@ -209,7 +222,7 @@ async fn a_verdict_cached_against_a_stale_orgwide_snapshot_is_not_served_to_a_fr
     // and must probe again rather than serve run 1's reconciliation.
     let (server, exo) = exo_answering_one_scoped_row("Application Mail.Read", "Mail.Read").await;
     let cache = Cache::new();
-    let scopable = [("Mail.Read".to_string(), "Application Mail.Read")];
+    let scopable = [graph_perm("Mail.Read")];
     let stale: HashSet<String> = ["Mail.Read".to_string()].into();
 
     let first =
@@ -262,6 +275,7 @@ fn graph_target(value: &str) -> ExchangeTarget {
         exchange_role: "Application Mail.Read",
         app_role_id: format!("role-{value}"),
         resource_sp_object_id: "graph-sp".to_string(),
+        aap_confinable: true,
     }
 }
 
@@ -570,7 +584,7 @@ async fn a_two_scope_verdict_is_not_enriched_as_one_scope() {
     let out = resolve_mail_scopes(
         &exo,
         "app-1",
-        &[("Mail.Read".to_string(), "Application Mail.Read")],
+        &[graph_perm("Mail.Read")],
         &HashSet::new(),
         true,
     )
@@ -600,6 +614,139 @@ async fn a_two_scope_verdict_is_not_enriched_as_one_scope() {
         !bodies.iter().any(|b| b.contains("Get-ManagementScope")),
         "no scope lookup for a joined name: {bodies:?}"
     );
+}
+
+/// An Exchange mock whose `Test-ServicePrincipalAuthorization` answers
+/// `probe` and whose `Get-ApplicationAccessPolicy` reports one
+/// `RestrictAccess` policy confining `app-1` to `Sales`.
+async fn exo_with_restrict_policy_and_probe(
+    probe: wiremock::ResponseTemplate,
+) -> (wiremock::MockServer, ExchangeClient) {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Test-ServicePrincipalAuthorization"))
+        .respond_with(probe)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-ApplicationAccessPolicy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "Identity": "app-1\\policy",
+                "AppId": "app-1",
+                "ScopeName": "Sales",
+                "AccessRight": "RestrictAccess"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let exo = ExchangeClient::with_base_url(
+        StaticTokenProvider::new("t"),
+        "tenant-1",
+        "admin@contoso.com",
+        server.uri(),
+    );
+    (server, exo)
+}
+
+fn is_legacy(scope: Option<&MailPermissionScope>) -> bool {
+    matches!(
+        scope,
+        Some(MailPermissionScope::Scoped {
+            mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
+            ..
+        })
+    )
+}
+
+/// A legacy policy confines only what it governed. `MailboxItem.ReadWrite.All`
+/// is RBAC-scopable but no Application Access Policy ever confined it, so on a
+/// policy-confined app with no RBAC scope it stays org-wide — gating the
+/// override on the scopable set read it "Scoped (legacy)" and scored it at the
+/// reduced weight.
+#[tokio::test]
+async fn the_legacy_override_skips_an_rbac_only_permission() {
+    let (_server, exo) = exo_with_restrict_policy_and_probe(
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+    )
+    .await;
+    let out = resolve_mail_scopes(
+        &exo,
+        "app-1",
+        &[
+            graph_perm("Mail.Read"),
+            graph_perm("MailboxItem.ReadWrite.All"),
+        ],
+        &HashSet::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(is_legacy(out.get("Mail.Read")), "{out:?}");
+    assert_eq!(
+        out.get("MailboxItem.ReadWrite.All"),
+        Some(&MailPermissionScope::OrgWide)
+    );
+}
+
+/// The probe-failure fallback honours the same gate. A principal Exchange
+/// can't resolve has no RBAC scope, so its RBAC-only grant is org-wide while
+/// the policy still answers for `Mail.Read`; a genuine 403 leaves the RBAC-only
+/// value indeterminate rather than lending it the policy's scope, and with
+/// nothing the policy governs, the 403 propagates as before.
+#[tokio::test]
+async fn the_probe_failure_fallback_skips_an_rbac_only_permission() {
+    let perms = [
+        graph_perm("Mail.Read"),
+        graph_perm("MailboxItem.ReadWrite.All"),
+    ];
+
+    let (_server, exo) =
+        exo_with_restrict_policy_and_probe(wiremock::ResponseTemplate::new(404).set_body_string(
+            "The operation couldn't be performed because object couldn't be found",
+        ))
+        .await;
+    let out = resolve_mail_scopes(&exo, "app-1", &perms, &HashSet::new(), true)
+        .await
+        .unwrap();
+    assert!(is_legacy(out.get("Mail.Read")), "{out:?}");
+    assert_eq!(
+        out.get("MailboxItem.ReadWrite.All"),
+        Some(&MailPermissionScope::OrgWide)
+    );
+
+    let (_server, exo) = exo_with_restrict_policy_and_probe(
+        wiremock::ResponseTemplate::new(403).set_body_string("Forbidden"),
+    )
+    .await;
+    let out = resolve_mail_scopes(&exo, "app-1", &perms, &HashSet::new(), true)
+        .await
+        .unwrap();
+    assert!(is_legacy(out.get("Mail.Read")), "{out:?}");
+    assert_eq!(
+        out.get("MailboxItem.ReadWrite.All"),
+        Some(&MailPermissionScope::Unknown)
+    );
+    // That failure-derived `Unknown` must not be cached by the commands.
+    let entry = |scope: MailPermissionScope| MailScopeEntry {
+        graph_permission: "MailboxItem.ReadWrite.All".into(),
+        exchange_role: "Application MailboxItem.ReadWrite".into(),
+        scope,
+    };
+    assert!(!verdicts_are_cacheable(&[
+        entry(MailPermissionScope::OrgWide),
+        entry(MailPermissionScope::Unknown)
+    ]));
+    assert!(verdicts_are_cacheable(&[entry(
+        MailPermissionScope::OrgWide
+    )]));
+    let err = resolve_mail_scopes(&exo, "app-1", &perms[1..], &HashSet::new(), true)
+        .await
+        .expect_err("no policy-governed permission: the 403 must reach the UI");
+    assert!(matches!(err, ExchangeError::Forbidden { .. }), "{err:?}");
 }
 
 /// The managed group's name for `app-1` under the default pattern.
