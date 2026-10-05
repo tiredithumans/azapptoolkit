@@ -170,6 +170,63 @@ the tenant-change note and, when the destination is the source tenant, a
 warning that restoring duplicates every app rather than rolling anything back.
 The frontend shows it before the operator confirms.
 
+**The plan shows what the file grants, and standing access needs a per-item
+opt-in.** For an unblocked manifest, `plan_restore` also reads the destination
+(read-only) to fill `RestorePlan.privileged` (`privileged_restore_items`).
+Per app: the admin consent Pass 3 would re-grant, each declared permission
+resolved to its value via `resolve_resource_sp` (one batched prewarm) and
+risk-ranked by `core::audit::risk_level_for_app_permission` (delegated scopes by
+`is_risky_delegated_scope`) — a permission nobody can resolve is shown by id as
+`Unknown`, except on an API this backup recreates (`restored_api`, whose values
+don't exist yet); each federated credential's issuer + subject (with the
+validation refusal, if any); its owners; the groups Pass 4 adds its service
+principal to; and, shown only, pre-authorized client appIds the backup does not
+recreate and the users/groups assigned to its roles. Per managed identity: its
+held app roles.
+
+An item **requires approval** (`requires_approval`) when it would gain standing
+access from the file:
+
+- an app whose consent covers **any application permission** (the risk lists
+  are a short denylist, not proof a permission is harmless), or a delegated
+  one that is broad (`is_risky_delegated_scope`) or `Unknown`;
+- an app with a federated credential validation accepts;
+- an app whose service principal joins a group (the file chooses it, and a
+  role-assignable group carries a directory role) — classified whether or not
+  the backup says the app had an SP, since Pass 3's consent or an adopted app
+  can supply one; Pass 4 adds memberships only for an app in `approvals`,
+  decided from the approvals themselves rather than the classification;
+- a managed identity with any app role.
+
+Low-risk delegated consent (`User.Read`), a refused credential, foreign
+pre-authorized clients and role assignees never need approval.
+
+The DR view lists the items under the counts, each that needs approval with a
+checkbox (none ticked by default; an "Approve all listed" button after the list
+ticks them all, for a large honest restore). Confirm stays enabled: an unticked item still restores, it just gets
+no standing access, and the confirm dialog says how many are left out.
+`restore_tenant` takes the ticked items as `approvals: Vec<RestoreApproval>` —
+**keyed by kind and source appId**, so approving an app never approves a managed
+identity with the same id (`manifest_problems` also requires MI source ids to be
+unique GUIDs) — and **enforces the gate itself**: `run_restore` recomputes the
+classification before Pass 1 (`unapproved_apps`, skipped when every app is
+approved). For an unapproved app, Pass 2 adds no federated credential and no
+owner, Pass 3 grants no consent, and Pass 4 adds no group membership; for an
+unapproved MI, Pass 5 re-binds no role. Each withheld set is a `ManualItem`
+("not approved in the plan"); the app is still created and wired (permissions
+declared, URIs, secrets, role assignments). A classification read that fails
+makes the permission `Unknown`, so a transient error withholds rather than
+grants. A dead session while planning is an error, not a plan of unknowns.
+
+**Consent grants only what the plan showed.** `grant_admin_consent_core`
+consents the *live* app's `requiredResourceAccess`, and the plan classified the
+backup's. Those differ when Pass 2's PATCH failed or was skipped (an empty
+manifest list sends none) — or on an adopted app someone pre-planted with its
+own permissions. So Pass 3 (`reconsent`) re-reads the app and consents only when
+its list equals the remapped backup list (order- and case-insensitive), through
+`grant_admin_consent_to_app_core` with that same read; a mismatch or a failed
+read is a `ManualItem`/warning, never a consent.
+
 `restore_tenant` replays the manifest in five passes so inter-app dependencies
 resolve:
 
@@ -186,12 +243,33 @@ resolve:
    authentication (each redirect URI through `core::redirect`, the logout URL
    through its stricter `validate_logout_url`, a rejected one dropped with a
    warning), federated credentials (validated + reported, below), owners (`resolve_principal`
-   by UPN / display name — unresolved are reported), and secret regeneration
+   by UPN / display name — unresolved are reported, see below), and secret regeneration
    (`add_password`, show-once values into the report). Every step is
    best-effort: a failure is a per-app warning, not a run failure.
 3. **Re-consent** — `grant_admin_consent_core` per app that had consent, run
-   *after* all apps are wired so a custom resource's SP + scopes already exist.
+   *after* all apps are wired so a custom resource's SP + scopes already exist —
+   only for an approved (or approval-free) app whose live declared permissions
+   still match the backup (above).
 4. **Enterprise applications** and 5. **Managed identities** — below.
+
+The passes live in `run_restore(client, &impl ProgressSink, CancelToken,
+RestoreRun)`; `restore_tenant` is the shell (manifest refusals, cloud check,
+claim, cache bust), so the pass loop is tested against wiremock like
+`restore_managed_identities`.
+
+**Principals resolve only on exactly one match.** A UPN is looked up exactly
+(`find_user_by_upn`, `userPrincipalName eq`). A display name is looked up
+exactly (`find_users_by_display_name` / `find_groups_by_display_name`:
+`displayName eq '<escaped>'`, `$top` page size, every page followed) in the
+collection `PrincipalRef.principal_type` names (an owner's `@odata.type` or an
+assignment's `principalType`): users or groups, never the other as a fallback; a
+type with no name lookup (a service principal) stays unresolved; with no
+recorded type (older backups) both are searched and exactly one match across
+them is required. Every match is counted — two same-named principals are `ambiguous: N matches` in the report, never the first
+one found; names are compared ignoring case, as `eq` does, so "Ops" and "OPS"
+are two — and a failed search is "lookup failed", never a reason to try the
+other collection. The run's memo caches the reason too, and the adoption owner
+allow-list takes only resolved ids.
 
 **Re-running a restore adopts what an earlier run created.** Pass 1 has no
 natural key that survives the tenant move — the appId changes and `api://{new}`
@@ -294,7 +372,8 @@ applied. The backup captures this detail in its batched Pass 2
 backed-up MI to one **already recreated** in the destination — by display name
 — and re-binds its held Graph app-roles to the new principal (grouped by
 resource appId, granted by value via the shared
-`grant_managed_identity_roles_core`). Two things are always runbook items
+`grant_managed_identity_roles_core`; a name that matches several destination
+MIs re-binds none of them and is a `ManualItem` naming them). Two things are always runbook items
 (`ManualItem`): MIs not yet recreated (recreate via ARM/Bicep, then run the
 restore again with the same backup — the apps it already created are adopted by
 their restore tag, not duplicated), and

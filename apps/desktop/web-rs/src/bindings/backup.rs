@@ -62,19 +62,39 @@ struct RestoreArgs<'a> {
     backup: &'a TenantBackup,
 }
 
-/// Dry-run analysis of restoring `backup` into the tenant — counts + warnings,
-/// no writes.
+/// Dry-run analysis of restoring `backup` into the tenant — counts, warnings
+/// and the privileged grants (`RestorePlan.privileged`), no writes.
 pub async fn plan_restore(tenant_id: &str, backup: &TenantBackup) -> Result<RestorePlan, UiError> {
     invoke_result("plan_restore", RestoreArgs { tenant_id, backup }).await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunRestoreArgs<'a> {
+    tenant_id: &'a str,
+    backup: &'a TenantBackup,
+    approvals: &'a [RestoreApproval],
+}
+
 /// Replays the backup's app registrations into the tenant. Long-running;
-/// subscribe to `events::restore_progress`.
+/// subscribe to `events::restore_progress`. `approvals` are the
+/// `RestorePlan.privileged` items the operator approved (by kind and source
+/// appId); any other item that requires approval restores without its
+/// standing access, each withheld grant reported as a manual item.
 pub async fn restore_tenant(
     tenant_id: &str,
     backup: &TenantBackup,
+    approvals: &[RestoreApproval],
 ) -> Result<RestoreReport, UiError> {
-    invoke_result("restore_tenant", RestoreArgs { tenant_id, backup }).await
+    invoke_result(
+        "restore_tenant",
+        RunRestoreArgs {
+            tenant_id,
+            backup,
+            approvals,
+        },
+    )
+    .await
 }
 
 #[derive(Serialize)]

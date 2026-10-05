@@ -136,6 +136,39 @@ async fn find_user_by_upn_filters_exactly_and_reads_a_miss_as_none() {
     );
 }
 
+/// An exact display-name lookup filters with `eq` (quote doubled), sends a
+/// page size, and follows `@odata.nextLink`, so every match is counted.
+#[tokio::test]
+async fn find_groups_by_display_name_is_exact_and_reads_every_page() {
+    let server = MockServer::start().await;
+    let next = format!("{}/groups?page=2", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/groups"))
+        .and(query_param("$filter", "displayName eq 'O''Brien Ops'"))
+        .and(query_param("$top", MAX_PAGE_SIZE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "g-1", "displayName": "O'Brien Ops" }],
+            "@odata.nextLink": next
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/groups"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "g-2", "displayName": "O'Brien Ops" }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let hits = client
+        .find_groups_by_display_name("O'Brien Ops")
+        .await
+        .unwrap();
+    let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(ids, ["g-1", "g-2"]);
+}
+
 #[tokio::test]
 async fn directory_audits_for_app_filters_by_target_resources() {
     let server = MockServer::start().await;

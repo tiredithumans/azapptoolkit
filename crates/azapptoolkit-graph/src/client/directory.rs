@@ -144,6 +144,37 @@ impl GraphClient {
         Ok(page.items)
     }
 
+    /// Every user whose `displayName` is exactly `name` (`displayName eq`, all
+    /// pages). The DR restore resolves a principal only when this returns one:
+    /// a prefix search's single page could not prove there is no second match.
+    pub async fn find_users_by_display_name(&self, name: &str) -> Result<Vec<DirectoryObject>> {
+        self.find_by_display_name("/users", name, "id,displayName,userPrincipalName")
+            .await
+    }
+
+    /// Every group whose `displayName` is exactly `name` (`displayName eq`, all
+    /// pages) — see [`Self::find_users_by_display_name`].
+    pub async fn find_groups_by_display_name(&self, name: &str) -> Result<Vec<DirectoryObject>> {
+        self.find_by_display_name("/groups", name, "id,displayName")
+            .await
+    }
+
+    async fn find_by_display_name(
+        &self,
+        collection: &str,
+        name: &str,
+        select: &str,
+    ) -> Result<Vec<DirectoryObject>> {
+        let filter = format!("displayName eq '{}'", escape_odata(name));
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$top", MAX_PAGE_SIZE),
+            ("$select", select),
+        ];
+        let page: Paged<DirectoryObject> = self.get_json(collection, &params, false).await?;
+        self.collect_all_pages(page, false).await
+    }
+
     /// Exact lookup of one user by `userPrincipalName` (bulk create's Owners
     /// column). A `$filter` rather than `/users/{upn}`: a guest UPN carries
     /// `#EXT#`, which would need path-escaping, and a miss reads as `Ok(None)`

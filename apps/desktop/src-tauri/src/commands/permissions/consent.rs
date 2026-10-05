@@ -58,8 +58,19 @@ pub(crate) async fn grant_admin_consent_core(
     object_id: &str,
 ) -> Result<GrantRun, UiError> {
     let app = client.get_application(object_id).await?;
+    grant_admin_consent_to_app_core(client, &app).await
+}
+
+/// [`grant_admin_consent_core`] for an application the caller has already
+/// read — and checked: the DR restore consents exactly the declared
+/// permissions it compared against the approved plan, never a second read
+/// that could have changed in between.
+pub(crate) async fn grant_admin_consent_to_app_core(
+    client: &azapptoolkit_graph::GraphClient,
+    app: &azapptoolkit_core::models::Application,
+) -> Result<GrantRun, UiError> {
     let (client_sp, sp_created) = client.ensure_service_principal(&app.app_id).await?;
-    match consent_with_sp(client, &app, &client_sp).await {
+    match consent_with_sp(client, app, &client_sp).await {
         Ok(result) => Ok(GrantRun {
             result,
             manifest_changed: false,

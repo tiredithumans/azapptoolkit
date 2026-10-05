@@ -381,6 +381,15 @@ pub struct RestorePlan {
     /// missing.
     #[serde(default)]
     pub skipped_in_backup: usize,
+    /// What the restore would grant from the file that confers standing
+    /// access: per app, the admin consent it re-grants (permission values
+    /// resolved live and risk-ranked), pre-authorized clients from outside the
+    /// backup and federated credentials; per managed identity, the Graph app
+    /// roles it re-binds. Empty for a blocked plan. An item with
+    /// [`PrivilegedRestoreItem::requires_approval`] is granted only when the
+    /// operator approves it — `restore_tenant` enforces that itself.
+    #[serde(default)]
+    pub privileged: Vec<PrivilegedRestoreItem>,
 }
 
 impl RestorePlan {
@@ -392,6 +401,126 @@ impl RestorePlan {
             || self.schema_too_new.is_some()
             || !self.invalid_manifest.is_empty()
     }
+}
+
+/// One app registration or managed identity whose restore grants access the
+/// operator should see before Confirm. The manifest is a file, and whoever
+/// wrote it chose these values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivilegedRestoreItem {
+    pub kind: PrivilegedKind,
+    /// With `kind`, the approval key `restore_tenant` takes
+    /// ([`RestoreApproval`]): the app's (or managed identity's) source appId.
+    pub source_app_id: String,
+    pub display_name: String,
+    /// Pass 3 re-grants tenant-wide admin consent for this app.
+    #[serde(default)]
+    pub admin_consent: bool,
+    /// Application permissions: the ones admin consent grants (apps), or the
+    /// Graph app roles re-bound (managed identities).
+    #[serde(default)]
+    pub app_roles: Vec<PrivilegedPermission>,
+    /// Delegated permissions admin consent grants on behalf of every user.
+    #[serde(default)]
+    pub delegated_scopes: Vec<PrivilegedPermission>,
+    /// Pre-authorized client appIds this backup does not recreate — apps that
+    /// may already exist and get consent-free delegated access to this API.
+    /// Shown only; never withheld.
+    #[serde(default)]
+    pub external_pre_authorized_clients: Vec<String>,
+    /// Secretless sign-in trusts the restore adds. Withheld unless approved.
+    #[serde(default)]
+    pub federated_credentials: Vec<PlannedFederatedCredential>,
+    /// Owners the restore adds (UPN or display name). Withheld unless approved
+    /// when the item [`requires_approval`](Self::requires_approval).
+    #[serde(default)]
+    pub owners: Vec<String>,
+    /// Groups the restored service principal is added to — the file chooses
+    /// them, and a role-assignable group carries a directory role. Withheld
+    /// unless approved.
+    #[serde(default)]
+    pub group_memberships: Vec<String>,
+    /// Users and groups assigned to the restored app's roles. Shown only.
+    #[serde(default)]
+    pub app_role_assignees: Vec<String>,
+    /// The restore grants this item standing access only once approved: for an
+    /// app, admin consent covering any application permission or a broad or
+    /// unidentified delegated one, any federated credential, or any group
+    /// membership; for a managed identity, any app role. Unapproved, the app
+    /// is still created and wired, but its consent, federated credentials,
+    /// owners and group memberships (an MI's roles) are withheld and reported
+    /// as manual items.
+    #[serde(default)]
+    pub requires_approval: bool,
+}
+
+/// What a [`PrivilegedRestoreItem`] describes.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum PrivilegedKind {
+    #[default]
+    App,
+    ManagedIdentity,
+}
+
+/// One item the operator approved in the plan — keyed by kind AND source
+/// appId, so approving an app never approves a managed identity that shares
+/// its id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreApproval {
+    pub kind: PrivilegedKind,
+    pub source_app_id: String,
+}
+
+/// One permission a restore grants, resolved against the destination tenant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivilegedPermission {
+    pub resource_app_id: String,
+    #[serde(default)]
+    pub resource_display_name: Option<String>,
+    /// The permission id from the manifest (empty for a managed identity's
+    /// role, which re-binds by value).
+    #[serde(default)]
+    pub permission_id: String,
+    /// The permission's value (`Mail.Read`), when it could be resolved.
+    #[serde(default)]
+    pub value: Option<String>,
+    pub risk: PermissionRisk,
+    /// The resource is an API this backup itself recreates, whose permission
+    /// values are not known until it exists.
+    #[serde(default)]
+    pub restored_api: bool,
+}
+
+/// A planned permission's risk, from `core::audit`'s classifiers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionRisk {
+    #[default]
+    Low,
+    Medium,
+    High,
+    /// The value could not be resolved in the destination, so its risk is
+    /// unknown; consenting to it needs approval.
+    Unknown,
+}
+
+/// A federated credential a restore would create, named in the plan.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedFederatedCredential {
+    pub name: String,
+    pub issuer: String,
+    pub subject: String,
+    /// Why validation will refuse it, when it will; refused credentials are
+    /// not created.
+    #[serde(default)]
+    pub rejected: Option<String>,
 }
 
 /// The manifest was written by a newer build; restore refuses it.
@@ -729,7 +858,32 @@ mod tests {
         assert_eq!(plan.managed_identities_to_rebind, 0);
         assert_eq!(plan.skipped_in_backup, 0);
         assert!(plan.invalid_manifest.is_empty());
+        assert!(plan.privileged.is_empty());
         assert!(!plan.is_blocked());
+    }
+
+    #[test]
+    fn a_privileged_item_round_trips_in_camel_case() {
+        let item = PrivilegedRestoreItem {
+            kind: PrivilegedKind::ManagedIdentity,
+            source_app_id: "src".into(),
+            display_name: "mi".into(),
+            app_roles: vec![PrivilegedPermission {
+                resource_app_id: "graph".into(),
+                value: Some("Mail.Send".into()),
+                risk: PermissionRisk::High,
+                ..Default::default()
+            }],
+            requires_approval: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["kind"], "managedIdentity");
+        assert_eq!(json["requiresApproval"], true);
+        assert_eq!(json["appRoles"][0]["risk"], "high");
+        let back: PrivilegedRestoreItem = serde_json::from_value(json).unwrap();
+        assert_eq!(back.app_roles[0].risk, PermissionRisk::High);
+        assert_eq!(back.kind, PrivilegedKind::ManagedIdentity);
     }
 
     /// `CredentialMeta` has no value field — this is the structural guarantee
