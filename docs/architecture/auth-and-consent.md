@@ -92,7 +92,16 @@ shown to the operator, never logged.
 **Keyring chunking (Windows footgun).** Refresh tokens are chunked across numbered keyring entries
 (`{tenant}:{oid}`, `{tenant}:{oid}#1`, …) in `token_cache.rs` because Windows Credential Manager
 caps a blob at 2560 UTF-16 bytes and Entra tokens exceed that — don't collapse them back to a
-single `set_password`, or Windows sign-in breaks. A failed write is rolled back to nothing only
+single `set_password`, or Windows sign-in breaks. Chunk 0 is `azapp2:{count}:{gen}:<data>` and
+every later chunk `{gen}:<data>`, `gen` a fresh random base64url id per write (so never `:`); the
+budget covers the header. A load whose count or any chunk's `gen` disagrees with chunk 0 is a torn
+set (a crash or a second instance mid-write) and reads as no session, never a splice — the count
+alone missed two tokens of equal chunk count. An `azapp2` set is read by its declared count, and
+the trailing chunks a shrinking write leaves behind are ignored; sweeping them is best-effort and
+never rolls back the new set. An older build reads `azapp2` as an unmarked token and fails once
+(a sign-in on downgrade). The older `azapp1:{count}:` chunk 0 (bare later
+chunks) and the unmarked pre-chunking form still load, so an upgrade signs no one out; new writes
+are always `azapp2`. A failed write is rolled back to nothing only
 once chunk 0 was overwritten; one refused at chunk 0 (a locked store) leaves the previous set whole,
 since that token is still valid. The silent refresh treats the write as best-effort
 (`RefreshTokenSave::BestEffort`: a `keyring` error is logged, the access token cached and returned);
