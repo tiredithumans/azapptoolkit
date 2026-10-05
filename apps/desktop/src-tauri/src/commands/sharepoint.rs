@@ -28,7 +28,7 @@ use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::graph_roles::{graph_role_id, graph_role_index, strip_app_role_grants};
 use crate::commands::permissions::declare_resource_access;
 use crate::commands::progress::emit_progress;
-use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
+use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
 use crate::dto::sharepoint::{
     AppSiteAccessDto, GrantSiteAccessResult, SelectedItemGrantDto, SelectedItemPermissionDto,
@@ -878,7 +878,7 @@ pub async fn sweep_site_permissions(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<SiteSweepResult, UiError> {
+) -> Result<Arc<SiteSweepResult>, UiError> {
     // Claimed before the first await: `list_all_sites` walks every site in the
     // tenant, and a token claimed after it carries a higher generation than a
     // cancel issued during it, which `is_cancelled()` then discards. Pinned by
@@ -919,8 +919,11 @@ pub async fn sweep_site_permissions(
     // previously ran at a FIXED width with no backoff — the per-request retry
     // absorbed 429s but the in-flight cap never yielded, so a throttling tenant
     // just ground through retries.
-    let tracker = Arc::new(ConcurrencyThrottle::new(SWEEP_CONCURRENCY));
-    let _observer_guard = ThrottleGuard::attach(client.clone(), tracker.clone());
+    //
+    // Through the shared `FanOutMeter` like every other capped fan-out. Only its
+    // cap is read: progress counts SITES on the collect side below (one joined
+    // result is a whole `$batch` chunk), so the per-task tick goes unused.
+    let meter = FanOutMeter::attach(client.clone(), SWEEP_CONCURRENCY);
 
     let mut rows: Vec<SiteAppGrantRow> = Vec::new();
     let mut sites_scanned = 0usize;
@@ -933,7 +936,7 @@ pub async fn sweep_site_permissions(
     // progress stay responsive between batches, and so a whole-batch failure
     // costs one chunk rather than the run.
     // Chunks are independent and results are folded per-chunk, so order does not
-    // matter — dispatch them through the shared driver with the tracker as the
+    // matter — dispatch them through the shared driver with the meter as the
     // cap. Previously this loop awaited one chunk at a time, which meant the
     // tracker attached above was never READ: the observer dutifully halved a
     // number nothing consulted, so the adaptive back-off the comment advertises
@@ -942,10 +945,7 @@ pub async fn sweep_site_permissions(
     let session = SessionDead::new();
     let stopped_early = dispatch_capped(
         chunks,
-        {
-            let tracker = tracker.clone();
-            move || tracker.current_limit()
-        },
+        || meter.limit(),
         |chunk| {
             // A dead session fails every remaining chunk identically — an
             // incomplete sweep must not be reported as the tenant's full
@@ -1031,7 +1031,7 @@ pub async fn sweep_site_permissions(
             .then_with(|| a.app_display_name.cmp(&b.app_display_name))
     });
 
-    let result = SiteSweepResult {
+    let result = Arc::new(SiteSweepResult {
         tenant_id: tenant_id.clone(),
         total_sites: total,
         sites_scanned,
@@ -1039,13 +1039,20 @@ pub async fn sweep_site_permissions(
         rows,
         cancelled,
         truncated,
-    };
+    });
     // Never cache a cancelled or partially-failed sweep: serving that gap for
     // the next hour would overstate coverage — the "coverage is never
     // overstated" promise extends to the cache. A capped sweep IS cached, with
     // its flag; see `sweep_is_cacheable` for why that is safe.
+    //
+    // Typed: the cached readers (`get_cached_site_sweep`, every per-app panel's
+    // `get_app_site_access`) take a refcount clone instead of decoding up to
+    // `MAX_SITES_PER_SWEEP` sites' grants from JSON per read. Read only with
+    // `get_typed` — an untyped `get` on this entry misses.
     if sweep_is_cacheable(cancelled, sites_failed) {
-        state.cache.put_if_current(sweep_watch, &result);
+        state
+            .cache
+            .put_typed_if_current(sweep_watch, Arc::clone(&result));
     }
     Ok(result)
 }
@@ -1079,18 +1086,24 @@ pub fn cancel_site_sweep(state: State<'_, AppState>) {
 /// TTL — so the view (and any future surface) can render without re-scanning.
 /// A capped run is served with its `truncated` flag, which the view renders as
 /// a coverage caveat.
+///
+/// `async` (off the main thread) and answering with the cached `Arc` — no copy
+/// of the sweep before serialization. Pinned by
+/// `repo_invariants::cache::cached_scan_reads_are_async_commands`.
 #[tauri::command]
-pub fn get_cached_site_sweep(
+pub async fn get_cached_site_sweep(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Option<SiteSweepResult> {
+) -> Result<Option<Arc<SiteSweepResult>>, UiError> {
     // A cache-only answer makes the `tenant_id` argument the only thing deciding
     // whose directory data is returned, so prove the session first (AGENTS.md's
     // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
-    state.auth.tenant_context(&tenant_id)?;
-    state
+    let Some(_) = state.auth.tenant_context(&tenant_id) else {
+        return Ok(None);
+    };
+    Ok(state
         .cache
-        .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))
+        .get_typed::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key(&tenant_id)))
 }
 
 /// The sites one principal can reach under `Sites.Selected`, and the roles it
@@ -1110,20 +1123,25 @@ pub fn get_cached_site_sweep(
 /// bridge so one collapsible panel could keep a handful would put a multi-MB
 /// payload on the Permissions tab of every app that declares a `Sites.*`
 /// permission.
+///
+/// `async`, and the projection borrows the typed cached sweep: it used to
+/// decode the whole tenant sweep from JSON on the main thread per panel open.
 #[tauri::command]
-pub fn get_app_site_access(
+pub async fn get_app_site_access(
     state: State<'_, AppState>,
     tenant_id: String,
     app_id: String,
-) -> Option<AppSiteAccessDto> {
+) -> Result<Option<AppSiteAccessDto>, UiError> {
     // A cache-only answer makes the `tenant_id` argument the only thing deciding
     // whose directory data is returned, so prove the session first (AGENTS.md's
     // #1 footgun). Pinned by `a_command_answering_from_cache_alone_checks_the_session`.
-    state.auth.tenant_context(&tenant_id)?;
-    let sweep: SiteSweepResult = state
+    let Some(_) = state.auth.tenant_context(&tenant_id) else {
+        return Ok(None);
+    };
+    Ok(state
         .cache
-        .get(CacheKind::Audit, &sweep_cache_key(&tenant_id))?;
-    Some(AppSiteAccessDto::from_sweep(&sweep, &app_id))
+        .get_typed::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key(&tenant_id))
+        .map(|sweep| AppSiteAccessDto::from_sweep(&sweep, &app_id)))
 }
 
 /// Exports the (frontend-filtered) site-grant rows to CSV/JSON via the OS save
@@ -1319,19 +1337,26 @@ mod tests {
             cancelled: false,
             truncated: false,
         };
-        cache.put(CacheKind::Audit, sweep_cache_key("t1"), &sweep);
-        cache.put(CacheKind::Audit, sweep_cache_key("t2"), &sweep);
+        // Typed, as the sweep stores it: an untyped `get` would miss either way
+        // and make the survival assertion meaningless.
+        let sweep = std::sync::Arc::new(sweep);
+        cache.put_typed(
+            CacheKind::Audit,
+            sweep_cache_key("t1"),
+            std::sync::Arc::clone(&sweep),
+        );
+        cache.put_typed(CacheKind::Audit, sweep_cache_key("t2"), sweep);
 
         invalidate_site_sweep(&cache, "t1");
 
         assert!(
             cache
-                .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t1"))
+                .get_typed::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t1"))
                 .is_none()
         );
         assert!(
             cache
-                .get::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t2"))
+                .get_typed::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t2"))
                 .is_some(),
             "other tenant must survive"
         );

@@ -13,7 +13,8 @@ The convention is universal: every kind — Lists, Audit (`{tenant}|audit_run`,
 prefix-sweeps **all four kinds**, so a different operator signing into the *same* tenant never
 reads the previous session's audit/sweep/SP data. The audit-run entry is stored typed
 (`put_typed`, unpinned) and must be read with `get_typed::<CachedAuditRun>` — an untyped `get` on
-it misses. `sign_out` calls `AppState::forget_tenant`, the one sign-out sweep: every per-tenant
+it misses. The site and Key Vault sweeps are typed the same way (`put_typed_if_current`, read with
+`get_typed::<SiteSweepResult>` / `get_typed::<KeyVaultSweepResult>`). `sign_out` calls `AppState::forget_tenant`, the one sign-out sweep: every per-tenant
 client map (graph/exchange/kv/arm/la), the tenant's idle single-flight gates, and
 `invalidate_tenant`. A new `Mutex<HashMap<…>>` field on `AppState` must be named there (pinned by
 `repo_invariants/cache.rs::sign_out_forgets_every_per_tenant_map_on_app_state`). The `sign_in`
@@ -107,6 +108,51 @@ client directly.
   Enterprise card wins the gate it runs its lean scan and the list scan follows serially.
 - Tradeoff: a cold standalone Credential Expiry visit now also reads the SP index (gated,
   concurrent with the app scan, and shared with every other reader).
+
+### Every pinned entry is typed
+
+All eight pinned keys (the two indexes, the search and gallery corpora, the App Registrations /
+Enterprise Apps / Managed Identities lists and the credential-expiry roll-up) are stored with
+`put_typed_index_if_current` (the gallery: `put_typed_index`). `Cache` has no untyped pinned store left. A warm list visit is then a refcount
+clone of the cached `Arc<Vec<Row>>`, not a walk of the JSON tree back into thousands of rows; the
+list commands return that `Arc` (`Result<Arc<Vec<Row>>, UiError>`), which serde writes exactly as
+the `Vec` the binding decodes (`repo_invariants/ipc.rs` treats `Arc<T>` as `T` on the backend side).
+The list rows and roll-up are read through `apps_pairing_hit` / `credential_expirations_hit` (under
+`apps_pairing_cached` / `credential_expirations_cached`); the Enterprise Apps and Managed Identities
+commands read their key with `get_typed` directly.
+
+**Footgun:** an untyped `cache.get` on a typed entry *misses* (its JSON body is `Null`), silently
+costing the full rescan the pin exists to avoid. Pinned by
+`repo_invariants::cache::pinned_keys_are_read_only_through_get_typed`: no untyped pinned write
+remains, no untyped `get` names a pinnable key builder (inline or through a `let key = …`), and every
+pinnable key has a typed reader.
+
+### Cached scan reads are `async` commands
+
+`get_cached_audit`, `get_cached_audit_summary`, `get_cached_site_sweep`, `get_app_site_access` and
+`get_cached_key_vault_access` answer from the `CacheKind::Audit` bucket alone. They used to be sync
+`fn`s, which Tauri runs on the main thread: hydrating the Security tab copied and serialized up to
+10 000 scored items with the window frozen, and every per-app site panel decoded the whole tenant
+sweep from JSON there. They are now `async fn … -> Result<Option<_>, UiError>`, keeping the session
+proof as `let Some(_) = state.auth.tenant_context(&tenant_id) else { return Ok(None) }` (no session
+still reads as "nothing cached"). The two sweep readers return the cached `Arc`; `get_cached_audit`
+still copies the items once, because `AuditRunResult` is a wire DTO that owns them. The frontend
+binds them with `invoke_result` and folds an `Err` into `None`. Pinned by
+`repo_invariants::cache::cached_scan_reads_are_async_commands`.
+
+### TTL sweeps have slack
+
+`Bucket::evict_if_needed` sweeps expired entries only once the oldest is past `ttl + ttl/8`
+(`Bucket::sweep_after`). Without the slack, writes streaming across an expiry front swept on every
+`put` (the next-oldest entry expired a moment after each sweep): O(n) per write under the bucket
+mutex. A sweep now leaves nothing older than the TTL, so sweeps are at most one per `ttl/8`.
+Correctness rides on `Cache::lookup`, which enforces the exact TTL on every read, so an entry the
+sweep has not reached yet is never served. The slack applies only below the cap: a `put` that
+takes a bucket over its cap sweeps at the **exact** TTL before LRU picks a victim, so an entry that
+is expired but inside the slack never pushes out a live one. That at-cap sweep is rate-limited to
+one per `Bucket::at_cap_sweep_interval` (`ttl/64`, at least 5 ms), otherwise a full bucket on an
+expiry front swept on every `put` again; inside the gap the put falls through to plain LRU. The LRU index is pruned in place
+(`prune_lru`) rather than rebuilt by cloning every key.
 
 ## Filtering happens in the frontend, on lean rows
 
@@ -277,7 +323,8 @@ a pinned entry that is not a stale read that ages out in seconds — LRU cannot 
 shows a deleted app (or misses a new one) until the 60-minute TTL.
 
 So every pinned index built from a live scan captures `cache.generation_for(kind, key)` **before**
-the fetch and stores through `put_index_if_current` / `put_typed_index_if_current`, which drop a
+the fetch and stores through `put_typed_index_if_current` (the only pinned guarded store; the
+untyped `put_index` / `put_index_if_current` were removed once every pinned entry was typed), which drop a
 snapshot whose key was invalidated in between. The counters are per **key**, so a credential-only
 mutation — which drops `apps_pairing` and a per-app detail precisely in order to PRESERVE the
 tenant-wide indexes — cannot make a valid index store refuse.
@@ -403,9 +450,13 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   Whole-batch failures must degrade to per-object reads through `dispatch::batch_or_serial`,
   never fail the run.
 - **`ConcurrencyThrottle`** (`commands/throttle.rs`) — wired as the client's `ThrottleObserver`
-  and fed to `dispatch_capped` as `|| throttle.current_limit()`, so the in-flight cap halves on
-  429 and recovers when quiet. Attach/detach with the `ThrottleGuard::attach(client, tracker)`
-  RAII (used by the audit and the bulk fan-outs) so an early `?` can't leave a stale observer
+  and fed to `dispatch_capped` as `|| meter.limit()`, so the in-flight cap halves on
+  429 and recovers when quiet. Wire it through `FanOutMeter::attach(client, cap)` (the audit, the
+  bulk fan-outs, the site sweep and the DR backup), which owns the tracker, a completion counter
+  (`meter.ticker().tick()` → `(done, cap)`) and the `ThrottleGuard` RAII; nothing outside
+  `throttle.rs` calls `ThrottleGuard::attach` (pinned by
+  `repo_invariants::fanout::the_throttle_observer_is_attached_only_through_fan_out_meter`). The
+  guard detaches on drop, so an early `?` can't leave a stale observer
   halving the shared per-tenant client's cap, and a finishing fan-out detaches only its own tracker
   (the slot is single: a concurrent attach displaces the earlier run, which then runs at a fixed
   cap — logged). The halve window is anchored on the last *halving*, not the last 429, so a

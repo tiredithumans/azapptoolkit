@@ -40,7 +40,7 @@ use crate::state::AppState;
 pub async fn list_credential_expirations(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<Vec<CredentialRowDto>, UiError> {
+) -> Result<std::sync::Arc<Vec<CredentialRowDto>>, UiError> {
     // The cache-HIT path returns before any client is built, so it needs its
     // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;

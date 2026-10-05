@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
-use tokio::sync::Mutex;
 
 use azapptoolkit_core::models::{
     AppRoleAssignment, Application, ApplicationExposeApi, DirectoryObject,
@@ -30,7 +29,7 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::{ProgressSink, emit_progress};
-use crate::commands::throttle::{ConcurrencyThrottle, ThrottleGuard};
+use crate::commands::throttle::{FanOutMeter, FanOutTicker};
 use crate::dto::UiError;
 use crate::dto::backup::{
     AppRegistrationBackup, AppRoleAssigneeRef, AppRoleGrantRef, BACKUP_SCHEMA_VERSION,
@@ -94,9 +93,10 @@ pub async fn backup_tenant(
     // 429s Graph reports inside a `$batch`) halves the chunk cap; it recovers
     // after a quiet window. Detach the observer however the run exits — an early
     // `?` (e.g. the index reads below failing) must not leave a stale tracker
-    // halving the shared per-tenant client's cap on unrelated traffic.
-    let throttle = Arc::new(ConcurrencyThrottle::new(INITIAL_DR_CONCURRENCY));
-    let _observer_guard = ThrottleGuard::attach(client.clone(), throttle.clone());
+    // halving the shared per-tenant client's cap on unrelated traffic. The
+    // meter's completion counter is the backup's running `done`, shared by all
+    // three passes (it used to be a hand-rolled tracker + an async-locked count).
+    let meter = FanOutMeter::attach(client.clone(), INITIAL_DR_CONCURRENCY);
 
     // Enumerate the estate up front so progress has a real denominator. BOTH
     // indexes are the shared per-tenant entries the lists populate, so a backup
@@ -119,14 +119,13 @@ pub async fn backup_tenant(
     let app_total = app_index.len();
     let ent_total = sp_index.len() - managed.len();
     let total = app_total + ent_total + managed.len();
-    emit(&app_handle, 0, total, None, Some(throttle.current_limit()));
+    emit(&app_handle, 0, total, None, Some(meter.limit()));
 
     // ---- App registrations: batched full-config fan-out ----
     // The set of appIds that have a service principal — derived from the index
     // we already hold, so the per-app capture needs no SP lookup of its own.
     let sp_app_ids: Arc<std::collections::HashSet<String>> =
         Arc::new(sp_index.iter().map(|sp| sp.app_id.clone()).collect());
-    let done = Arc::new(Mutex::new(0usize));
     let app_pairs: Vec<(String, String)> = app_index
         .iter()
         .map(|a| (a.app_id.clone(), a.id.clone()))
@@ -139,23 +138,21 @@ pub async fn backup_tenant(
     let mut skipped: Vec<SkippedObject> = Vec::new();
     let cancelled = dispatch_capped(
         app_chunks,
-        || throttle.current_limit(),
+        || meter.limit(),
         |chunk| {
             if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
             let app_handle = app_handle.clone();
-            let done = done.clone();
+            let ticker = meter.ticker();
             let sp_app_ids = sp_app_ids.clone();
-            let throttle = throttle.clone();
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let tick = BackupTicker {
                     sink: &app_handle,
-                    done: &done,
+                    ticker: &ticker,
                     total,
-                    throttle: &throttle,
                 };
                 backup_app_chunk(&client, chunk, &sp_app_ids, &tick, &session).await
             }))
@@ -202,24 +199,22 @@ pub async fn backup_tenant(
     let mut enterprise_apps: Vec<EnterpriseAppBackup> = Vec::with_capacity(ent_total);
     let ent_cancelled = dispatch_capped(
         ent_chunks,
-        || throttle.current_limit(),
+        || meter.limit(),
         |chunk| {
             if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
             let client = client.clone();
             let app_handle = app_handle.clone();
-            let done = done.clone();
+            let ticker = meter.ticker();
             let map = app_obj_by_app_id.clone();
             let tenant = tenant_arc.clone();
-            let throttle = throttle.clone();
             let session = session.clone();
             Some(tokio::spawn(async move {
                 let tick = BackupTicker {
                     sink: &app_handle,
-                    done: &done,
+                    ticker: &ticker,
                     total,
-                    throttle: &throttle,
                 };
                 backup_enterprise_chunk(&client, chunk, &tenant, &map, &tick, &session).await
             }))
@@ -244,11 +239,11 @@ pub async fn backup_tenant(
     // (source scopes don't exist in the destination) and the MI detail view
     // already surfaces it for DR planning. A per-MI read failure is recorded in
     // `skipped`; a dead session or a cancel aborts the backup (the `?`).
+    let ticker = meter.ticker();
     let tick = BackupTicker {
         sink: &app_handle,
-        done: &done,
+        ticker: &ticker,
         total,
-        throttle: &throttle,
     };
     let (managed_identities, mut mi_skipped) =
         backup_managed_identities(&client, &managed, &cancel, &tick, &session).await?;
@@ -438,7 +433,7 @@ async fn backup_app_chunk<S: ProgressSink>(
                 ));
             }
         }
-        tick.advance(None).await;
+        tick.advance(None);
     }
     (out, skipped)
 }
@@ -561,7 +556,7 @@ async fn backup_enterprise_chunk<S: ProgressSink>(
         if let Some(b) = entry {
             out.push(b);
         }
-        tick.advance(Some(index_sp.display_name.clone())).await;
+        tick.advance(Some(index_sp.display_name.clone()));
     }
     (out, skipped)
 }
@@ -784,7 +779,7 @@ async fn backup_managed_identities<S: ProgressSink>(
             arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
             held_app_roles,
         });
-        tick.advance(Some(sp.display_name.clone())).await;
+        tick.advance(Some(sp.display_name.clone()));
     }
     // A resource-SP resolve can latch the session too.
     if session.is_dead() {
@@ -978,30 +973,20 @@ fn principal_ref_from_dir(o: &DirectoryObject) -> PrincipalRef {
 /// Advances the backup's shared running count by one processed object and
 /// emits the matching `backup-progress` event, carrying the live adaptive cap.
 ///
-/// One per spawned chunk (and one for the MI pass), all sharing `done`. The
+/// One per spawned chunk (and one for the MI pass), all sharing the run's
+/// [`FanOutMeter`] count through their [`FanOutTicker`]. The
 /// passes take this instead of an `&AppHandle` so they run in a test with a
 /// `Recorder` sink — see `progress::ProgressSink` for why that is the seam.
 struct BackupTicker<'a, S> {
     sink: &'a S,
-    done: &'a Mutex<usize>,
+    ticker: &'a FanOutTicker,
     total: usize,
-    throttle: &'a ConcurrencyThrottle,
 }
 
 impl<S: ProgressSink> BackupTicker<'_, S> {
-    async fn advance(&self, current_app: Option<String>) {
-        let count = {
-            let mut d = self.done.lock().await;
-            *d += 1;
-            *d
-        };
-        emit(
-            self.sink,
-            count,
-            self.total,
-            current_app,
-            Some(self.throttle.current_limit()),
-        );
+    fn advance(&self, current_app: Option<String>) {
+        let (count, cap) = self.ticker.tick();
+        emit(self.sink, count, self.total, current_app, Some(cap));
     }
 }
 
@@ -1058,19 +1043,17 @@ mod tests {
         assert!(err.message.contains("UTF-16"), "{}", err.message);
     }
 
-    /// A ticker that records into `rec`; the events carry `throttle`'s cap, so
-    /// a test can assert it.
+    /// A ticker that records into `rec`; the events carry `fan`'s cap, so a
+    /// test can assert it.
     fn ticker<'a>(
         rec: &'a Recorder,
-        done: &'a Mutex<usize>,
-        throttle: &'a ConcurrencyThrottle,
+        fan: &'a FanOutTicker,
         total: usize,
     ) -> BackupTicker<'a, Recorder> {
         BackupTicker {
             sink: rec,
-            done,
+            ticker: fan,
             total,
-            throttle,
         }
     }
 
@@ -1174,7 +1157,6 @@ mod tests {
 
         let client = mock_graph(&server);
 
-        let done = Mutex::new(0usize);
         let chunk = vec![
             ("app-1".to_string(), "obj-1".to_string()),
             ("app-2".to_string(), "obj-2".to_string()),
@@ -1184,8 +1166,8 @@ mod tests {
         // A recording sink stands in for the Tauri AppHandle, so the progress
         // this pass emits is asserted too.
         let rec = Recorder::default();
-        let throttle = ConcurrencyThrottle::new(4);
-        let tick = ticker(&rec, &done, &throttle, 2);
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, 2);
         let session = SessionDead::new();
         let (out, skipped) = backup_app_chunk(&client, chunk, &sp_app_ids, &tick, &session).await;
 
@@ -1207,7 +1189,7 @@ mod tests {
             "the operator needs to know what failed"
         );
         // Progress still advances for every object in the chunk, including the skip.
-        assert_eq!(*done.lock().await, 2);
+        assert_eq!(fan.done(), 2);
         // ...one `backup-progress` event per object, each carrying the live cap.
         // The app pass names no current app.
         let events = rec.payloads::<BulkProgress>("backup-progress");
@@ -1240,10 +1222,9 @@ mod tests {
         // Never answered: the token fails before any request is sent.
         let server = wiremock::MockServer::start().await;
         let client = mock_graph_with(&server, dead_token(), Cache::new());
-        let done = Mutex::new(0usize);
         let rec = Recorder::default();
-        let throttle = ConcurrencyThrottle::new(4);
-        let tick = ticker(&rec, &done, &throttle, 1);
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, 1);
         let session = SessionDead::new();
         let (out, _skipped) = backup_app_chunk(
             &client,
@@ -1289,10 +1270,9 @@ mod tests {
 
         let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
         let cancel = crate::state::CancelFlag::new().claim();
-        let done = Mutex::new(0usize);
         let rec = Recorder::default();
-        let throttle = ConcurrencyThrottle::new(4);
-        let tick = ticker(&rec, &done, &throttle, 2);
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, 2);
         let session = SessionDead::new();
         let (out, skipped) = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
             .await
@@ -1312,7 +1292,7 @@ mod tests {
         assert_eq!(skipped[0].display_name.as_deref(), Some("mi-one"));
         assert!(!skipped[0].reason.is_empty());
         assert!(!session.is_dead(), "a transient 500 must not latch");
-        assert_eq!(*done.lock().await, 2);
+        assert_eq!(fan.done(), 2);
         // One event per MI, in input order, naming the MI — the unreadable one
         // included, since it is still captured.
         let events = rec.payloads::<BulkProgress>("backup-progress");
@@ -1332,10 +1312,9 @@ mod tests {
         let client = mock_graph_with(&server, dead_token(), Cache::new());
         let managed = vec![mi("mi-1", "mi-one"), mi("mi-2", "mi-two")];
         let cancel = crate::state::CancelFlag::new().claim();
-        let done = Mutex::new(0usize);
         let rec = Recorder::default();
-        let throttle = ConcurrencyThrottle::new(4);
-        let tick = ticker(&rec, &done, &throttle, 2);
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, 2);
         let session = SessionDead::new();
         let err = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
             .await
