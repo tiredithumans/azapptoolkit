@@ -35,6 +35,13 @@ per-scope lock across the backoff (intended for a short wait — same-key waiter
 result instead of re-POSTing into the same throttle — but not for the minutes the shared policy
 honours for Graph / ARM writes).
 
+**The `/token` response is distrusted at the edges.** Its client follows no redirects (a 307/308
+would replay the code + verifier or the refresh token to the `Location` host; a 3xx is a terminal
+`token_exchange`), the body is read into a wiped buffer capped at `MAX_TOKEN_RESPONSE_BYTES`
+(64 KiB — "token response too large", never parsed), and `expires_in` is capped at
+`MAX_TOKEN_TTL_SECS` (2 days) before any date arithmetic, which used to panic under the refresh lock
+on an absurd value.
+
 **An abandoned browser round trip is `cancelled`.** The redirect wait (`REDIRECT_WAIT`, 300 s)
 timing out, or Entra redirecting `access_denied` with `error_subcode=cancel` or with no AADSTS code
 in its description, is `AuthError::Cancelled`. A coded `access_denied` (AADSTS65004, a declined
@@ -62,7 +69,15 @@ The one restore failure returned as an error is an unreachable token endpoint (`
 captive portal, a proxy down) — the refresh token is untouched (only `InvalidGrant` purges it), so
 the launch screen shows a warning Callout with a Retry of the silent restore
 (`views::sign_in::attempt_restore`, shared by `Root`'s launch attempt and the button) instead of
-sending the operator to a browser that can't load Entra ID either.
+sending the operator to a browser that can't load Entra ID either. The remembered UPN and display
+name are only what was true at the last sign-in: when the restoring refresh returns an id token, its
+`tid`/`oid` must match the remembered context (`ensure_same_identity`; a mismatch is refused,
+leaves nothing cached, deletes the foreign refresh token just rotated into the remembered keyring
+entry, and the command drops `last_account` so the next launch shows sign-in rather than repeating
+the refusal) and its `preferred_username`/`name` replace the stored ones, which the command writes
+back with `remember_account` — so a renamed UPN reaches `login_hint` and `X-AnchorMailbox`. No id
+token → the stored names stand; one that does not parse is refused (unknown identity), as the
+interactive flows refuse it.
 
 **A browser that won't launch offers its link in the app.** When `open_system_browser` fails (no
 default handler, a confined `xdg-open`, a policy blocking the handler), `run_auth_code_flow` hands
@@ -77,7 +92,12 @@ shown to the operator, never logged.
 **Keyring chunking (Windows footgun).** Refresh tokens are chunked across numbered keyring entries
 (`{tenant}:{oid}`, `{tenant}:{oid}#1`, …) in `token_cache.rs` because Windows Credential Manager
 caps a blob at 2560 UTF-16 bytes and Entra tokens exceed that — don't collapse them back to a
-single `set_password`, or Windows sign-in breaks.
+single `set_password`, or Windows sign-in breaks. A failed write is rolled back to nothing only
+once chunk 0 was overwritten; one refused at chunk 0 (a locked store) leaves the previous set whole,
+since that token is still valid. The silent refresh treats the write as best-effort
+(`RefreshTokenSave::BestEffort`: a `keyring` error is logged, the access token cached and returned);
+the interactive flows keep failing on it, so a session the keyring could not record is reported
+while the operator is present.
 
 ## Optional on-demand extra-scope tokens
 
@@ -229,6 +249,12 @@ which a sign-out/sign-in cycle would.
   launch to restore. For a multi-chunk (Windows) token, a failure after the first chunk is gone keeps
   the in-memory session but leaves the stored token unloadable. Every keyring call in the service
   runs on the blocking pool (pinned by a source scan in `service/mod.rs`).
+- The interactive **`sign_in`** is the one flow that sweeps: the account picker can return a
+  different operator on the same tenant, and neither token slots nor data caches key on the account.
+  `EntraAuthService::sign_in` drops every token slot of the tenant before seeding the new read
+  token; the `sign_in` command deletes a different previous account's keyring token
+  (`forget_previous_account`, a no-op for the live account) and calls `AppState::forget_tenant`.
+  `reauthenticate` and the `InvalidGrant` purge never do.
 - The configured tenant id is canonicalised (`core::identity::canonical_tenant_id`: trimmed,
   lowercase) wherever it enters (`EntraAuthService::new`, `AppState` resolution, `set_auth_config`),
   because Entra issues `tid` lowercase and the tid check, cache keys and launch restore compare

@@ -1,6 +1,6 @@
 use tauri::State;
 
-use azapptoolkit_auth::{EntraAuthService, SignInOutcome, TenantContext};
+use azapptoolkit_auth::{AuthError, EntraAuthService, SignInOutcome, TenantContext};
 
 use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
@@ -29,14 +29,42 @@ where
     });
 }
 
+/// Interactive sign-in (`prompt=select_account`). The account picker can hand
+/// back a DIFFERENT operator on the same tenant than the one before, and the
+/// tenant data caches key on the tenant, not the account — so a sign-in sweeps
+/// them (`AppState::forget_tenant`) and deletes the previous account's keyring
+/// token. Only here: `reauthenticate` and the dead-session purge keep the data
+/// caches, since they are pinned to the same account.
 #[tauri::command]
 pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiError> {
+    // Read before `remember_account` below overwrites it.
+    let previous = state.remembered_account();
     let outcome = state.auth.sign_in().await.map_err(UiError::from)?;
+    let tenant = &outcome.tenant;
+    if let Some(previous) = previous
+        && previous.tenant_id == tenant.tenant_id
+        && previous.account_oid != tenant.account_oid
+    {
+        // Nothing would address the old `{tenant}:{oid}` keyring entry again
+        // once the pointer moves to the new account, so it would sit there as
+        // a live refresh token. Best-effort: the sign-in itself succeeded.
+        if let Err(err) = state
+            .auth
+            .forget_previous_account(&previous.tenant_id, &previous.account_oid)
+            .await
+        {
+            let code = UiError::from(err).code;
+            tracing::warn!(target: "auth", %code, "could not delete the previous account's stored sign-in");
+        }
+    }
     // Remember WHO signed in (not the token — that is already in the keyring) so
     // the next launch can restore this session silently instead of putting the
     // operator back through the account picker. Best-effort: see
     // `AppState::remember_account`.
-    state.remember_account(&outcome.tenant);
+    state.remember_account(tenant);
+    // A previous account's lists, audit run and lookups must never be read by
+    // this one (see `AppState::forget_tenant`).
+    state.forget_tenant(&tenant.tenant_id);
     Ok(outcome)
 }
 
@@ -65,7 +93,32 @@ pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<Tenant
     let Some(tenant) = state.remembered_account() else {
         return Ok(None);
     };
-    restore_outcome(state.auth.restore_session(&tenant).await)
+    let result = state.auth.restore_session(&tenant).await;
+    if forgets_the_remembered_account(&result) {
+        // The stored sign-in belonged to someone else (the service already
+        // deleted its token); drop the pointer too, so the next launch shows
+        // the sign-in card instead of repeating the refused restore.
+        state.forget_account();
+    }
+    let restored = restore_outcome(result)?;
+    // The refresh's id token carries the account's current UPN and display
+    // name; a rename since the last sign-in is written back so the next launch
+    // (and its `login_hint`) starts from it.
+    if let Some(fresh) = &restored
+        && *fresh != tenant
+    {
+        state.remember_account(fresh);
+    }
+    Ok(restored)
+}
+
+/// Whether a restore attempt proved the remembered account wrong: the refresh
+/// came back for a different identity (`EntraAuthService::restore_session`'s
+/// `Authorization`, the only one a silent grant produces). Every other failure
+/// keeps the pointer — offline, a locked keyring and a revoked token are not
+/// evidence it addresses the wrong account.
+fn forgets_the_remembered_account(result: &azapptoolkit_auth::Result<SignInOutcome>) -> bool {
+    matches!(result, Err(AuthError::Authorization(_)))
 }
 
 /// [`restore_session`]'s answer for one silent restore attempt: the restored
@@ -197,7 +250,7 @@ pub async fn request_scope_step_up(
 
 #[cfg(test)]
 mod tests {
-    use super::restore_outcome;
+    use super::{forgets_the_remembered_account, restore_outcome};
     use azapptoolkit_auth::{AuthError, SignInOutcome, TenantContext};
 
     fn tenant() -> TenantContext {
@@ -237,5 +290,24 @@ mod tests {
             .expect("a restored session is Ok")
             .expect("and carries its tenant");
         assert_eq!(restored.tenant_id, "t1");
+    }
+
+    #[test]
+    fn only_an_identity_mismatch_forgets_the_remembered_account() {
+        assert!(forgets_the_remembered_account(&Err(
+            AuthError::Authorization("session restore completed with a different account".into())
+        )));
+        for kept in [
+            AuthError::InvalidGrant("x".into()),
+            AuthError::RefreshTokenMissing("t".into()),
+            AuthError::Keyring("locked".into()),
+            AuthError::TokenExchange("malformed id_token".into()),
+        ] {
+            let label = format!("{kept:?}");
+            assert!(!forgets_the_remembered_account(&Err(kept)), "{label}");
+        }
+        assert!(!forgets_the_remembered_account(&Ok(SignInOutcome {
+            tenant: tenant()
+        })));
     }
 }

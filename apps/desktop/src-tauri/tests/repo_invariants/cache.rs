@@ -5,7 +5,7 @@
 //! AGENTS.md calls cross-tenant leakage "the #1 footgun"; these are the rules
 //! that keep it mechanical rather than remembered.
 
-use super::sources::is_fn_header;
+use super::sources::{code_lines, is_fn_header};
 
 // No `include_str!` table here on purpose: every rule below derives its subject
 // from `sources::command_modules()`, the same source-tree walk `sources.rs` was
@@ -1135,5 +1135,38 @@ fn sign_out_forgets_every_per_tenant_map_on_app_state() {
         !sign_out.contains("_clients.lock()"),
         "`sign_out` re-inlines a partial client sweep — call `AppState::forget_tenant` instead, \
          or a per-tenant map sign-out does not forget slips back in"
+    );
+}
+
+/// Sign-in sweeps the tenant's data caches; re-authentication never does.
+///
+/// The account picker can hand back a different operator on the same tenant,
+/// and every cache key is `{tenant_id}|{kind}` — no account — so without the
+/// sweep the new operator was served the previous one's lists and audit run.
+/// `reauthenticate` is the opposite contract (same account, enforced by an
+/// oid check; the caches are the point of re-authenticating in place), so it
+/// must not grow the same call.
+#[test]
+fn sign_in_forgets_the_tenant_but_reauthenticate_keeps_its_caches() {
+    let auth = include_str!("../../src/commands/auth.rs").replace("\r\n", "\n");
+    let body = |name: &str| -> String {
+        let (_, after) = auth
+            .split_once(&format!("pub async fn {name}("))
+            .unwrap_or_else(|| panic!("{name} command in commands/auth.rs"));
+        let (body, _) = after
+            .split_once("\n}\n")
+            .unwrap_or_else(|| panic!("end of {name}"));
+        // Comments stripped, so prose that mentions the call can't satisfy
+        // (or trip) the rule.
+        code_lines(body).collect::<Vec<_>>().join("\n")
+    };
+    assert!(
+        body("sign_in").contains("forget_tenant("),
+        "`sign_in` must call `AppState::forget_tenant`: a different account on the same tenant \
+         would otherwise read the previous account's cached data"
+    );
+    assert!(
+        !body("reauthenticate").contains("forget_tenant("),
+        "`reauthenticate` restores the SAME account in place and must keep the data caches"
     );
 }

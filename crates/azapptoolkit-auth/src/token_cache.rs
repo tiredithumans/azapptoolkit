@@ -267,11 +267,19 @@ pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Re
     //
     // So a partial write is rolled back to nothing: no session is a state the
     // app already handles (it prompts to sign in); a spliced one is not.
-    if let Err(err) = write_chunks(tenant_id, account_oid, token) {
-        // Best-effort: if the keyring is failing the cleanup may fail too;
-        // either way the original error is what the caller needs. Lock-free
-        // form: this thread already holds the guard.
-        let _ = delete_chunks(tenant_id, account_oid);
+    //
+    // Unless nothing was written: a write refused at chunk 0 (a locked store)
+    // left the previous set whole, and that token is still valid — Entra does
+    // not revoke a refresh token on rotation. Wiping it would turn one keyring
+    // hiccup into a forced sign-in.
+    let mut overwrote_chunk_zero = false;
+    if let Err(err) = write_chunks(tenant_id, account_oid, token, &mut overwrote_chunk_zero) {
+        if overwrote_chunk_zero {
+            // Best-effort: if the keyring is failing the cleanup may fail too;
+            // either way the original error is what the caller needs.
+            // Lock-free form: this thread already holds the guard.
+            let _ = delete_chunks(tenant_id, account_oid);
+        }
         return Err(err);
     }
     Ok(())
@@ -279,7 +287,14 @@ pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Re
 
 /// The write itself: every chunk, then the trailing chunks of any previously
 /// larger token — without which a shrunk token loads with a stale tail appended.
-fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
+/// Sets `overwrote_chunk_zero` once chunk 0 is replaced, so a failure can tell
+/// a torn set (roll back) from an untouched one (keep).
+fn write_chunks(
+    tenant_id: &str,
+    account_oid: &str,
+    token: &str,
+    overwrote_chunk_zero: &mut bool,
+) -> Result<()> {
     let chunks = split_into_chunks(token);
     for (idx, chunk) in chunks.iter().enumerate() {
         let account = chunk_account(tenant_id, account_oid, idx);
@@ -294,6 +309,9 @@ fn write_chunks(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
             (*chunk).to_string()
         });
         keyring_core::Entry::new(KEYRING_SERVICE, &account)?.set_password(&value)?;
+        if idx == 0 {
+            *overwrote_chunk_zero = true;
+        }
     }
     let mut idx = chunks.len();
     loop {
@@ -617,6 +635,28 @@ mod tests {
             load_refresh_token(tenant, oid).unwrap(),
             None,
             "a rollback must leave NO session rather than a spliced one"
+        );
+    }
+
+    /// A write the store refuses at chunk 0 changed nothing, so the previous
+    /// (still valid) token must survive — rolling back there used to wipe it
+    /// and force a sign-in over one locked-keyring moment.
+    #[test]
+    fn a_write_refused_at_chunk_zero_keeps_the_previous_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("chunk0-tenant", "chunk0-oid");
+        save_refresh_token(tenant, oid, "old").unwrap();
+        fail_next_keyring_op(tenant, oid, 0);
+
+        let result = save_refresh_token(tenant, oid, "new");
+
+        assert!(matches!(result, Err(AuthError::Keyring(_))), "{result:?}");
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("old")
         );
     }
 
