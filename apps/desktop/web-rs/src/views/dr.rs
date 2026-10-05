@@ -4,13 +4,18 @@
 //! (restore regenerates secrets and surfaces the show-once values), and managed
 //! identities are Azure resources recreated out-of-band.
 
+use std::collections::BTreeSet;
+
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, Card, CopyableId, FormError, SectionHeader};
+use crate::components::scope_badge::app_permission_risk_badge;
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, Card, CopyableId, FormError, SectionHeader,
+};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 use crate::util::{count_noun, plural};
@@ -43,6 +48,9 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     // ---- Restore state ----
     let loaded: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
     let plan: RwSignal<Option<backup::RestorePlan>> = RwSignal::new(None);
+    // Source appIds the operator approved in the plan's privileged list; only
+    // these get their high-risk consent / managed-identity roles granted.
+    let approvals: RwSignal<BTreeSet<backup::RestoreApproval>> = RwSignal::new(BTreeSet::new());
     let confirm_open = RwSignal::new(false);
     let restoring = RwSignal::new(false);
     let restore_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -131,6 +139,8 @@ pub fn DisasterRecoveryView() -> impl IntoView {
             match backup::load_backup_from_file().await {
                 Ok(Some(b)) => match backup::plan_restore(&tenant.tenant_id, &b).await {
                     Ok(p) => {
+                        // A new file starts with nothing approved.
+                        approvals.set(BTreeSet::new());
                         plan.set(Some(p));
                         loaded.set(Some(b));
                     }
@@ -153,13 +163,14 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         let (Some(tenant), Some(b)) = (session.active_tenant.get(), loaded.get()) else {
             return;
         };
+        let approved: Vec<backup::RestoreApproval> = approvals.get().into_iter().collect();
         confirm_open.set(false);
         restoring.set(true);
         restore_error.set(None);
         report.set(None);
         restore_progress.set(None);
         leptos::task::spawn_local(async move {
-            match backup::restore_tenant(&tenant.tenant_id, &b).await {
+            match backup::restore_tenant(&tenant.tenant_id, &b, &approved).await {
                 Ok(r) => {
                     let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
                     session.toast_success(format!(
@@ -211,6 +222,19 @@ pub fn DisasterRecoveryView() -> impl IntoView {
     // Restore is blocked on a cloud mismatch or a too-new manifest (both hard
     // errors from the backend too).
     let plan_blocked = move || plan.get().is_some_and(|p| p.is_blocked());
+    // Items whose high-risk grant the restore will skip: approval required,
+    // not given. Named in the confirm dialog so skipping is a known choice.
+    let unapproved = move || {
+        let approved = approvals.get();
+        plan.with(|p| {
+            p.as_ref().map_or(0, |p| {
+                p.privileged
+                    .iter()
+                    .filter(|i| i.requires_approval && !approved.contains(&approval_key(i)))
+                    .count()
+            })
+        })
+    };
 
     view! {
         <div class="tool-page dr-view">
@@ -392,7 +416,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
 
                 // Plan preview (before confirming).
                 <Show when=move || plan.get().is_some() && report.get().is_none()>
-                    {move || plan.get().map(|p| view! { <RestorePlanView plan=p /> })}
+                    {move || plan.get().map(|p| view! { <RestorePlanView plan=p approvals=approvals /> })}
                 </Show>
 
                 // Live restore progress.
@@ -428,6 +452,15 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                      their restore tag) and completes them instead of duplicating them. The new \
                      secret values are shown only once — save the report afterwards."
                 </p>
+                <Show when=move || { unapproved() > 0 }>
+                    <p class="dr-view__note">
+                        {move || format!(
+                            "{} not approved: the restore leaves out {} consent, credentials, owners, group memberships or app roles and lists them in the report for you to grant manually.",
+                            count_noun(unapproved(), "item needing approval is", "items needing approval are"),
+                            if unapproved() == 1 { "its" } else { "their" },
+                        )}
+                    </p>
+                </Show>
                 <div class="dr-view__actions">
                     <Button appearance=ButtonAppearance::Primary on_click=do_restore>"Restore"</Button>
                     <Button appearance=ButtonAppearance::Subtle on_click=move |_| confirm_open.set(false)>
@@ -444,7 +477,12 @@ pub fn DisasterRecoveryView() -> impl IntoView {
 /// a duplicate warning when the backup is being restored into the tenant it
 /// came from.
 #[component]
-fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
+fn RestorePlanView(
+    plan: backup::RestorePlan,
+    /// The source appIds approved for their high-risk grants.
+    approvals: RwSignal<BTreeSet<backup::RestoreApproval>>,
+) -> impl IntoView {
+    let privileged = (!plan.privileged.is_empty()).then(|| plan.privileged.clone());
     let cloud = plan.cloud_mismatch.clone();
     let schema = plan.schema_too_new.clone();
     let invalid = (!plan.invalid_manifest.is_empty()).then(|| plan.invalid_manifest.clone());
@@ -530,7 +568,217 @@ fn RestorePlanView(plan: backup::RestorePlan) -> impl IntoView {
                     )}</li>
                 })}
             </ul>
+            {privileged.map(|items| view! { <PrivilegedGrants items=items approvals=approvals /> })}
         </div>
+    }
+}
+
+/// The approval key for a plan item: its kind and source appId, so approving
+/// an app never approves a managed identity that shares the id.
+fn approval_key(item: &backup::PrivilegedRestoreItem) -> backup::RestoreApproval {
+    backup::RestoreApproval {
+        kind: item.kind,
+        source_app_id: item.source_app_id.clone(),
+    }
+}
+
+/// The access the backup file would grant — admin consent (with each
+/// permission's value and risk), federated credentials, owners, group
+/// memberships, managed-identity app roles, and (shown only) pre-authorized
+/// clients from outside the backup and role assignees — shown before Confirm,
+/// with an approval checkbox on each item that needs one.
+#[component]
+fn PrivilegedGrants(
+    items: Vec<backup::PrivilegedRestoreItem>,
+    approvals: RwSignal<BTreeSet<backup::RestoreApproval>>,
+) -> impl IntoView {
+    let needs_approval = items.iter().filter(|i| i.requires_approval).count();
+    let tone = if needs_approval > 0 { "warn" } else { "info" };
+    // Every item that needs approval: what "Approve all listed" ticks. After
+    // the list, so it is reached only having scrolled past what it approves;
+    // nothing starts ticked.
+    let all_keys: BTreeSet<backup::RestoreApproval> = items
+        .iter()
+        .filter(|i| i.requires_approval)
+        .map(approval_key)
+        .collect();
+    view! {
+        <div class="dr-view__privileged">
+            <h3 class="dr-view__subhead">"Access this restore grants"</h3>
+            <Callout tone=tone>
+                "These come from the backup file, so whoever wrote the file chose them — review them before you restore. "
+                {(needs_approval > 0).then(|| format!(
+                    "{} standing access that needs your approval. Unapproved, the app is still created and wired, but its admin consent, federated credentials, owners and group memberships (a managed identity's app roles) are left out and listed in the report.",
+                    count_noun(needs_approval, "item grants", "items grant"),
+                ))}
+            </Callout>
+            <ul class="dr-view__report-list">
+                {items.into_iter().map(|item| view! { <PrivilegedItem item=item approvals=approvals /> }).collect_view()}
+            </ul>
+            {(needs_approval > 1).then(move || view! {
+                <div class="dr-view__actions">
+                    <Button
+                        appearance=ButtonAppearance::Secondary
+                        on_click=move |_| approvals.update(|a| a.extend(all_keys.iter().cloned()))
+                    >
+                        "Approve all listed"
+                    </Button>
+                </div>
+            })}
+        </div>
+    }
+}
+
+#[component]
+fn PrivilegedItem(
+    item: backup::PrivilegedRestoreItem,
+    approvals: RwSignal<BTreeSet<backup::RestoreApproval>>,
+) -> impl IntoView {
+    let is_mi = item.kind == backup::PrivilegedKind::ManagedIdentity;
+    let key = approval_key(&item);
+    let checked_key = key.clone();
+    let roles_heading = if is_mi {
+        "Graph app roles re-bound:"
+    } else {
+        "Application permissions consented tenant-wide:"
+    };
+    let roles = item.app_roles.clone();
+    let scopes = item.delegated_scopes.clone();
+    let external = item.external_pre_authorized_clients.clone();
+    let fics = item.federated_credentials.clone();
+    let owners = item.owners.clone();
+    let groups = item.group_memberships.clone();
+    let assignees = item.app_role_assignees.clone();
+    view! {
+        <li class="dr-view__report-app dr-view__privileged-item">
+            <div class="dr-view__report-head">
+                <strong>{item.display_name.clone()}</strong>
+                <span class="dr-view__report-id">
+                    {if is_mi { "managed identity" } else { "app registration" }}
+                </span>
+                {item.admin_consent.then(|| view! { <Badge label="admin consent" tone=BadgeTone::Warning /> })}
+                {item.requires_approval.then(|| view! { <Badge label="needs approval" tone=BadgeTone::Danger /> })}
+            </div>
+            {(!roles.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">{roles_heading}</p>
+                <PermissionList perms=roles delegated=false />
+            })}
+            {(!scopes.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">"Delegated permissions consented for every user:"</p>
+                <PermissionList perms=scopes delegated=true />
+            })}
+            {(!external.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">
+                    {format!(
+                        "Pre-authorized client{} not in this backup (consent-free access to this API): {}",
+                        plural(external.len()),
+                        external.join(", "),
+                    )}
+                </p>
+            })}
+            {(!fics.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">"Federated credentials (secretless sign-in):"</p>
+                <ul class="dr-view__perm-list">
+                    {fics.into_iter().map(|f| {
+                        let refused = f.rejected.map(|r| format!(" — will be refused: {r}"));
+                        view! {
+                            <li>
+                                {format!("'{}': issuer {}, subject {}", f.name, f.issuer, f.subject)}
+                                {refused}
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            })}
+            {(!owners.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">{format!("Owners: {}", owners.join(", "))}</p>
+            })}
+            {(!groups.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">
+                    {format!("Joins group{}: {}", plural(groups.len()), groups.join(", "))}
+                </p>
+            })}
+            {(!assignees.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">
+                    {format!("Assigned to the app's roles: {}", assignees.join(", "))}
+                </p>
+            })}
+            {item.requires_approval.then(move || view! {
+                <label class="checkbox-row dr-view__approve">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || approvals.with(|a| a.contains(&checked_key))
+                        on:change=move |ev| {
+                            let on = event_target_checked(&ev);
+                            let key = key.clone();
+                            approvals.update(|a| {
+                                if on {
+                                    a.insert(key);
+                                } else {
+                                    a.remove(&key);
+                                }
+                            });
+                        }
+                    />
+                    {if is_mi {
+                        " Approve: re-bind these app roles"
+                    } else {
+                        " Approve: grant this app's consent, credentials, owners and group memberships"
+                    }}
+                </label>
+            })}
+        </li>
+    }
+}
+
+/// One row per planned permission: its value (or id when it couldn't be
+/// resolved), its resource, and its risk badge.
+#[component]
+fn PermissionList(perms: Vec<backup::PrivilegedPermission>, delegated: bool) -> impl IntoView {
+    view! {
+        <ul class="dr-view__perm-list">
+            {perms.into_iter().map(|p| {
+                let resource = p
+                    .resource_display_name
+                    .clone()
+                    .unwrap_or_else(|| p.resource_app_id.clone());
+                let label = p.value.clone().unwrap_or_else(|| p.permission_id.clone());
+                let badge = permission_risk_badge(&p, delegated);
+                view! {
+                    <li>
+                        <strong>{label}</strong>
+                        {format!(" on {resource} ")}
+                        {badge}
+                    </li>
+                }
+            }).collect_view()}
+        </ul>
+    }
+}
+
+/// The badge for one planned permission. An application permission's risk
+/// comes from the shared `app_permission_risk_badge`; the plan adds the two
+/// states only it knows: unresolved, and an API this backup recreates.
+fn permission_risk_badge(p: &backup::PrivilegedPermission, delegated: bool) -> AnyView {
+    match (p.risk, p.value.as_deref()) {
+        (backup::PermissionRisk::Unknown, _) => view! {
+            <Badge
+                label="Unknown"
+                tone=BadgeTone::Unknown
+                title="Couldn't be resolved in this tenant, so its risk is unknown — consenting to it needs approval"
+            />
+        }
+        .into_any(),
+        _ if p.restored_api => view! {
+            <Badge label="API in this backup" tone=BadgeTone::Info title="Defined by an app this restore recreates" />
+        }
+        .into_any(),
+        (backup::PermissionRisk::High, Some(_)) if delegated => view! {
+            <Badge label="Broad" tone=BadgeTone::Warning title="Broad delegated permission, consented for every user" />
+        }
+        .into_any(),
+        (_, Some(value)) if !delegated => app_permission_risk_badge(value),
+        _ => ().into_any(),
     }
 }
 

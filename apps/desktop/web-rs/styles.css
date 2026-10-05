@@ -4142,6 +4142,21 @@ h3 {
 .dr-view__failures {
   margin-top: var(--space-3);
 }
+.dr-view__privileged {
+  margin-top: var(--space-3);
+}
+.dr-view__perm-list {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+.dr-view__approve {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
 
 .dr-view__subhead {
   margin: var(--space-4) 0 var(--space-2);
