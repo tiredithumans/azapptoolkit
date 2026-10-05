@@ -1,6 +1,8 @@
 //! The toolkit-managed scope group: create + membership commands, consolidating
 //! a scope source onto it, and the fail-closed management-scope repoint.
 
+use futures::StreamExt;
+
 use super::*;
 
 // ---------------- Managed scope group (create + membership) ----------------
@@ -163,19 +165,81 @@ pub(super) struct ScopeGroupConsolidation {
     pub(super) scope_dns: Vec<String>,
     /// `true` when `scope_dns` is the managed group (i.e. the move is on).
     pub(super) consolidated: bool,
+    /// `true` when Cancel (or a dead session) stopped the member copy. The scope
+    /// stays on its source groups, exactly as for an unverified copy.
+    pub(super) incomplete: bool,
+    /// Why the move is refused, when that is already known from reads alone —
+    /// an unreadable source, or a managed group holding mailboxes the source
+    /// doesn't. Lets a dry run say "this would be refused" instead of
+    /// presenting a plan that cannot succeed. Also pushed to `warnings`.
+    pub(super) refusal: Option<String>,
+}
+
+impl ScopeGroupConsolidation {
+    /// The scope stays exactly where it is: nothing copied, nothing verified.
+    fn kept(group_name: String, source_dns: &[String], unverified: Vec<String>) -> Self {
+        Self {
+            group_name,
+            copied: Vec::new(),
+            unverified,
+            scope_dns: source_dns.to_vec(),
+            consolidated: false,
+            incomplete: false,
+            refusal: None,
+        }
+    }
+}
+
+/// How many `Add-DistributionGroupMember` calls a consolidation keeps in flight.
+/// Serial adds made a several-thousand-member group a many-minute wait with no
+/// way out; a small fixed width keeps it well inside Exchange's per-tenant
+/// throttling, and the gateway's own retry/backoff absorbs a 429.
+const MEMBER_COPY_CONCURRENCY: usize = 4;
+
+/// In-flight width for the per-group READS around a consolidation (source
+/// membership, resolving each retired group). Read-only, so the same small
+/// width as the copy keeps them inside Exchange's per-tenant throttling.
+const EXO_READ_CONCURRENCY: usize = 4;
+
+/// Inputs to [`consolidate_scope_group`], named at the call site (several are
+/// `&str`/`&[String]`, easy to transpose positionally).
+#[derive(Clone, Copy)]
+pub(super) struct ConsolidateParams<'a> {
+    pub(super) exo: &'a ExchangeClient,
+    pub(super) app_id: &'a str,
+    /// The groups whose membership is copied: the policies' groups, or the
+    /// groups the app's scope names today.
+    pub(super) source_dns: &'a [String],
+    pub(super) tenant_defaults: &'a TenantDefaults,
+    pub(super) dry_run: bool,
+    /// The app's management-scope filter as Exchange has it now, if the scope
+    /// exists. When it already names the managed group alone, extra members in
+    /// that group are the app's CURRENT reach, not a widening.
+    pub(super) live_filter: Option<&'a str>,
+    /// The caller's run token (claimed once, before its first await).
+    pub(super) cancel: &'a CancelToken,
 }
 
 /// Copies every member of `source_dns`' groups into the toolkit-managed group
 /// and decides — fail-closed — which DNs the scope filter should name.
 /// `dry_run` reads only: it enumerates and reports, and creates/copies nothing.
+///
+/// The copy stops on Cancel or a dead session, and a stopped copy keeps the
+/// source — the verify step would refuse a partial copy anyway, and repointing
+/// after the operator pressed Cancel is not what they asked for.
 pub(super) async fn consolidate_scope_group(
-    exo: &ExchangeClient,
-    app_id: &str,
-    source_dns: &[String],
-    tenant_defaults: &TenantDefaults,
-    dry_run: bool,
+    params: ConsolidateParams<'_>,
     warnings: &mut Vec<String>,
 ) -> ScopeGroupConsolidation {
+    let ConsolidateParams {
+        exo,
+        app_id,
+        source_dns,
+        tenant_defaults,
+        dry_run,
+        live_filter,
+        cancel,
+    } = params;
     let group_name = tenant_defaults.group_name_for(app_id);
     let keep_source = |warnings: &mut Vec<String>, why: String| {
         warnings.push(format!(
@@ -193,15 +257,30 @@ pub(super) async fn consolidate_scope_group(
     //    and `plan_source_membership` owns every rule about what the results
     //    mean — including the load-bearing "an empty list is unreadable, not
     //    empty" one — so those rules are unit-testable without a session.
-    let mut reads: Vec<(&String, Result<Vec<ExoGroupMember>, String>)> =
-        Vec::with_capacity(source_dns.len());
-    for dn in source_dns {
-        let result = exo
-            .list_group_members(dn)
-            .await
-            .map_err(|err| err.to_string());
-        reads.push((dn, result));
-    }
+    //
+    //    Read [`EXO_READ_CONCURRENCY`] groups at a time rather than one after
+    //    another (each read is a proxied cmdlet of seconds). `buffered`, not
+    //    `buffer_unordered`: the reads come back in `source_dns` order, so the
+    //    plan — and the member order it hands the copy — is the same as a
+    //    serial walk's. Every read's outcome is kept; an error stays a per-group
+    //    `Err` the planner refuses on.
+    //    (The futures are built into a `Vec` first: a stream `.map` closure
+    //    returning a borrowing `async` block trips rustc's higher-ranked `Send`
+    //    inference at the `#[tauri::command]` boundary.)
+    let pending: Vec<_> = source_dns
+        .iter()
+        .map(|dn| async move {
+            let result = exo
+                .list_group_members(dn)
+                .await
+                .map_err(|err| err.to_string());
+            (dn, result)
+        })
+        .collect();
+    let reads: Vec<(&String, Result<Vec<ExoGroupMember>, String>)> = futures::stream::iter(pending)
+        .buffered(EXO_READ_CONCURRENCY)
+        .collect()
+        .await;
     let planned = plan_source_membership(
         &reads
             .iter()
@@ -217,21 +296,66 @@ pub(super) async fn consolidate_scope_group(
     let members = match planned {
         Ok(members) => members,
         Err(unreadable) => {
-            keep_source(
-                warnings,
-                Refusal::UnreadableSourceGroups(unreadable).to_string(),
-            );
+            let why = Refusal::UnreadableSourceGroups(unreadable).to_string();
+            keep_source(warnings, why.clone());
             return ScopeGroupConsolidation {
-                group_name,
-                copied: Vec::new(),
-                unverified: Vec::new(),
-                scope_dns: source_dns.to_vec(),
-                consolidated: false,
+                refusal: Some(why),
+                ..ScopeGroupConsolidation::kept(group_name, source_dns, Vec::new())
             };
         }
     };
 
     let copied: Vec<String> = members.iter().map(|m| m.identity.clone()).collect();
+
+    // 1b. What the managed group ALREADY holds. The move means "the managed
+    //     group equals the source", so a member the source doesn't have would be
+    //     a widening, not a copy (`Refusal::ExtraManagedMembers` — e.g. a G1
+    //     copy left by an earlier refused run, before the policy moved to G2).
+    //     A missing group reads as empty (`invoke_optional`). A real run refuses
+    //     here, before writing anything into a group it would not repoint at;
+    //     the post-copy re-read in step 3 is still the authoritative check.
+    //
+    //     Skipped when the live scope ALREADY names the managed group alone:
+    //     its members are then the app's current reach, so nothing can widen,
+    //     and refusing would block every re-run once an operator edits the
+    //     managed group (which is how reach is meant to be edited).
+    let managed_is_live = match live_filter {
+        Some(filter) => matches!(
+            exo.get_distribution_group(&group_name).await,
+            Ok(Some(g)) if g
+                .distinguished_name
+                .as_deref()
+                .is_some_and(|dn| filter_names_only_group(filter, dn))
+        ),
+        None => false,
+    };
+    let mut refusal = None;
+    if !managed_is_live {
+        match exo.list_group_members(&group_name).await {
+            Ok(existing) => {
+                let extras = extra_members(&members, &existing);
+                if !extras.is_empty() {
+                    let why = Refusal::ExtraManagedMembers(extras).to_string();
+                    if !dry_run {
+                        keep_source(warnings, why.clone());
+                        return ScopeGroupConsolidation {
+                            refusal: Some(why),
+                            ..ScopeGroupConsolidation::kept(group_name, source_dns, Vec::new())
+                        };
+                    }
+                    warnings.push(format!("the move would be refused: {why}"));
+                    refusal = Some(why);
+                }
+            }
+            Err(err) if dry_run => warnings.push(format!(
+                "could not read '{group_name}' to check it holds no mailbox beyond the source \
+                 ({err}); the move re-checks before repointing"
+            )),
+            // A real run re-reads the group after the copy, and that read decides.
+            Err(_) => {}
+        }
+    }
+
     if dry_run {
         return ScopeGroupConsolidation {
             group_name,
@@ -240,11 +364,23 @@ pub(super) async fn consolidate_scope_group(
             // A plan mutates nothing, so the live filter is still the source's.
             scope_dns: source_dns.to_vec(),
             consolidated: false,
+            incomplete: false,
+            refusal,
         };
     }
 
     // 2. Create the managed group if needed and copy the membership in.
     //    Individual failures are collected, not fatal — step 3 is what decides.
+    if cancel.is_cancelled() {
+        keep_source(
+            warnings,
+            format!("stopped before anything was copied into '{group_name}'"),
+        );
+        return ScopeGroupConsolidation {
+            incomplete: true,
+            ..ScopeGroupConsolidation::kept(group_name, source_dns, copied)
+        };
+    }
     let managed_dn = match exo
         .ensure_security_group(&group_name, &sanitize_alias(&group_name))
         .await
@@ -252,54 +388,86 @@ pub(super) async fn consolidate_scope_group(
         Ok(g) => g.distinguished_name,
         Err(err) => {
             keep_source(warnings, format!("could not create '{group_name}' ({err})"));
-            return ScopeGroupConsolidation {
-                group_name,
-                copied: Vec::new(),
-                unverified: copied,
-                scope_dns: source_dns.to_vec(),
-                consolidated: false,
-            };
+            return ScopeGroupConsolidation::kept(group_name, source_dns, copied);
         }
     };
-    for m in &members {
-        if let Err(err) = exo.add_group_member(&group_name, &m.identity).await {
-            warnings.push(format!(
-                "could not add {} to {group_name}: {err}",
-                m.identity
-            ));
-        }
+    let session = SessionDead::new();
+    let copy = copy_members(exo, &group_name, &members, cancel, &session).await;
+    for (identity, err) in &copy.failed {
+        warnings.push(format!("could not add {identity} to {group_name}: {err}"));
+    }
+    if copy.not_attempted > 0 || cancel.is_cancelled() || session.is_dead() {
+        let why = if session.is_dead() {
+            "the session ended"
+        } else {
+            "the run was cancelled"
+        };
+        keep_source(
+            warnings,
+            format!(
+                "{why} while copying mailboxes into '{group_name}' ({} of {} not copied)",
+                members.len() - copy.landed.len(),
+                members.len()
+            ),
+        );
+        let (landed, not_landed): (Vec<&SourceMember>, Vec<&SourceMember>) = members
+            .iter()
+            .partition(|m| copy.landed.contains(m.key.as_str()));
+        return ScopeGroupConsolidation {
+            copied: landed.iter().map(|m| m.identity.clone()).collect(),
+            incomplete: true,
+            ..ScopeGroupConsolidation::kept(
+                group_name,
+                source_dns,
+                not_landed.iter().map(|m| m.identity.clone()).collect(),
+            )
+        };
     }
 
     // 3. Verify against the group's ACTUAL membership rather than trusting the
-    //    adds: EXO accepts some recipient types and then doesn't list them.
-    let present: Vec<String> = match exo.list_group_members(&group_name).await {
-        Ok(list) => list
-            .iter()
-            .filter_map(source_member)
-            .map(|m| m.key)
-            .collect(),
-        Err(err) => {
-            keep_source(
-                warnings,
-                format!("could not re-read '{group_name}' to verify the copy ({err})"),
-            );
-            return ScopeGroupConsolidation {
-                group_name,
-                copied: Vec::new(),
-                unverified: copied,
-                scope_dns: source_dns.to_vec(),
-                consolidated: false,
-            };
-        }
-    };
-    let unverified = unverified_members(&members, &present);
+    //    adds: EXO accepts some recipient types and then doesn't list them. The
+    //    same read names any member the source does not have (moot when the
+    //    live scope is already the managed group — see step 1b).
+    let skip_extras = managed_is_live
+        || live_filter
+            .zip(managed_dn.as_deref())
+            .is_some_and(|(filter, dn)| filter_names_only_group(filter, dn));
+    let (present, extras): (HashSet<String>, Vec<String>) =
+        match exo.list_group_members(&group_name).await {
+            Ok(list) => (
+                list.iter()
+                    .filter_map(source_member)
+                    .map(|m| m.key)
+                    .collect(),
+                if skip_extras {
+                    Vec::new()
+                } else {
+                    extra_members(&members, &list)
+                },
+            ),
+            Err(err) => {
+                keep_source(
+                    warnings,
+                    format!("could not re-read '{group_name}' to verify the copy ({err})"),
+                );
+                return ScopeGroupConsolidation::kept(group_name, source_dns, copied);
+            }
+        };
+    let present_keys: Vec<String> = present.iter().cloned().collect();
+    let unverified = unverified_members(&members, &present_keys);
 
     // 4. The decision itself is pure and lives in `azapptoolkit-exchange`, where
     //    it is unit-testable without a signed-in session. It re-parses the
     //    filter it is about to replace, so the plan can never disagree with what
     //    gets overwritten. Sources were proved readable above, hence `&[]`.
     let source_filter = member_of_group_filter(source_dns);
-    let plan = plan_consolidation(&source_filter, managed_dn.as_deref(), &[], unverified.len());
+    let plan = plan_consolidation(
+        &source_filter,
+        managed_dn.as_deref(),
+        &[],
+        unverified.len(),
+        &extras,
+    );
     let (scope_dns, consolidated) = match plan {
         Ok(plan) => (plan.scope_dns, true),
         Err(why) => {
@@ -322,13 +490,90 @@ pub(super) async fn consolidate_scope_group(
         group_name,
         copied: members
             .iter()
-            .filter(|m| present.iter().any(|k| k == &m.key))
+            .filter(|m| present.contains(&m.key))
             .map(|m| m.identity.clone())
             .collect(),
         unverified,
         scope_dns,
         consolidated,
+        incomplete: false,
+        refusal: None,
     }
+}
+
+/// What [`copy_members`] did: the keys that landed, the adds that failed for
+/// good (identity, error), and how many never started.
+struct MemberCopy {
+    landed: HashSet<String>,
+    failed: Vec<(String, ExchangeError)>,
+    not_attempted: usize,
+}
+
+/// Adds `members` to `group_name`, [`MEMBER_COPY_CONCURRENCY`] at a time, each
+/// add gated on Cancel and on a dead session (a dead session fails every
+/// remaining add identically). Then retries each failed add ONCE, serially,
+/// under the same gates: concurrent adds to one group can collide on Exchange's
+/// "object was modified" conflict, which a second, uncontended attempt clears.
+///
+/// Owned items (not `members.iter()`): a stream of borrowed items trips the
+/// higher-ranked `Send` check `#[tauri::command]` futures must pass.
+async fn copy_members(
+    exo: &ExchangeClient,
+    group_name: &str,
+    members: &[SourceMember],
+    cancel: &CancelToken,
+    session: &SessionDead,
+) -> MemberCopy {
+    let outcomes: Vec<(SourceMember, Option<Result<(), ExchangeError>>)> =
+        futures::stream::iter(members.to_vec())
+            .map(|m| {
+                let (group_name, session) = (group_name.to_string(), session.clone());
+                async move {
+                    if cancel.is_cancelled() || session.is_dead() {
+                        return (m, None);
+                    }
+                    let result = exo.add_group_member(&group_name, &m.identity).await;
+                    if let Err(err) = &result {
+                        session.note_code(err.ui_code());
+                    }
+                    (m, Some(result))
+                }
+            })
+            .buffer_unordered(MEMBER_COPY_CONCURRENCY)
+            .collect()
+            .await;
+
+    let mut copy = MemberCopy {
+        landed: HashSet::new(),
+        failed: Vec::new(),
+        not_attempted: 0,
+    };
+    let mut retry: Vec<(SourceMember, ExchangeError)> = Vec::new();
+    for (m, outcome) in outcomes {
+        match outcome {
+            None => copy.not_attempted += 1,
+            Some(Ok(())) => {
+                copy.landed.insert(m.key);
+            }
+            Some(Err(err)) => retry.push((m, err)),
+        }
+    }
+    for (m, first) in retry {
+        if cancel.is_cancelled() || session.is_dead() {
+            copy.failed.push((m.identity, first));
+            continue;
+        }
+        match exo.add_group_member(group_name, &m.identity).await {
+            Ok(()) => {
+                copy.landed.insert(m.key);
+            }
+            Err(err) => {
+                session.note_code(err.ui_code());
+                copy.failed.push((m.identity, err));
+            }
+        }
+    }
+    copy
 }
 
 /// Resolves the groups a repoint left behind and reports what still references
@@ -355,9 +600,20 @@ pub(super) async fn retired_scope_groups(
     let scopes = scopes.unwrap_or_default();
     let policies = policies.unwrap_or_default();
 
+    // Resolved EXO_READ_CONCURRENCY at a time, in `source_dns` order (`buffered`)
+    // so the result lists the groups in the order the scope named them.
+    // (Futures collected first — see the source-membership read.)
+    let pending: Vec<_> = source_dns
+        .iter()
+        .map(|dn| async move { exo.get_group(dn).await.ok().flatten() })
+        .collect();
+    let resolved: Vec<Option<_>> = futures::stream::iter(pending)
+        .buffered(EXO_READ_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut out = Vec::new();
-    for dn in source_dns {
-        let resolved = exo.get_group(dn).await.ok().flatten();
+    for (dn, resolved) in source_dns.iter().zip(resolved) {
         let group = GroupIdentity {
             distinguished_name: dn.clone(),
             name: resolved.as_ref().and_then(|g| g.name.clone()),
@@ -436,9 +692,13 @@ pub async fn delete_exchange_scope_group(
         ));
     }
 
-    // Re-check references live; the caller's snapshot is advisory.
-    let scopes = exo.list_management_scopes().await?;
-    let policies = exo.get_application_access_policies().await?;
+    // Re-check references live; the caller's snapshot is advisory. The two
+    // org-wide reads are independent, so they run concurrently — and under
+    // `try_join!`, so EITHER failing still refuses the delete (fail closed).
+    let (scopes, policies) = futures::try_join!(
+        exo.list_management_scopes(),
+        exo.get_application_access_policies(),
+    )?;
     let references = references_to_group(&identity, &scopes, &policies);
     if !references.is_empty() {
         return Err(UiError::validation(
@@ -697,6 +957,10 @@ pub(super) async fn repoint_scope_if_stale(
 ///
 /// `dry_run` reads only — it reports the mailboxes it would copy and changes
 /// nothing.
+///
+/// The member copy is a write loop as long as the source group, so it claims
+/// `scope_move_cancel` (stopped by [`cancel_scope_move`]) before its first
+/// await; a stopped copy keeps the scope where it was and reports `incomplete`.
 #[tauri::command]
 pub async fn move_exchange_scope_to_managed_group(
     state: State<'_, AppState>,
@@ -704,6 +968,7 @@ pub async fn move_exchange_scope_to_managed_group(
     app_id: String,
     dry_run: bool,
 ) -> Result<ExchangeScopeConsolidationResult, UiError> {
+    let cancel = state.scope_move_cancel.claim();
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let defaults = load_tenant_defaults(&tenant_id);
     let scope_name = defaults.scope_name_for(&app_id);
@@ -769,20 +1034,30 @@ pub async fn move_exchange_scope_to_managed_group(
             repointed: false,
             retired_groups: Vec::new(),
             dry_run,
+            incomplete: false,
+            refused: None,
             warnings: vec!["already scoped to the toolkit-managed group".into()],
         });
     }
 
     let consolidation = consolidate_scope_group(
-        &exo,
-        &app_id,
-        &source_dns,
-        &defaults,
-        dry_run,
+        ConsolidateParams {
+            exo: &exo,
+            app_id: &app_id,
+            source_dns: &source_dns,
+            tenant_defaults: &defaults,
+            dry_run,
+            live_filter: Some(current_filter),
+            cancel: &cancel,
+        },
         &mut warnings,
     )
     .await;
 
+    // The refusal is the plan's headline; don't repeat it as a note below it.
+    if let Some(why) = &consolidation.refusal {
+        warnings.retain(|w| !w.contains(why.as_str()));
+    }
     if dry_run || !consolidation.consolidated {
         return Ok(ExchangeScopeConsolidationResult {
             app_id,
@@ -798,6 +1073,8 @@ pub async fn move_exchange_scope_to_managed_group(
             // the app is still scoped to.
             retired_groups: Vec::new(),
             dry_run,
+            incomplete: consolidation.incomplete,
+            refused: consolidation.refusal,
             warnings,
         });
     }
@@ -828,8 +1105,18 @@ pub async fn move_exchange_scope_to_managed_group(
         repointed: true,
         retired_groups,
         dry_run,
+        incomplete: false,
+        refused: None,
         warnings,
     })
+}
+
+/// Stops an in-progress [`move_exchange_scope_to_managed_group`] member copy.
+/// Adds already in flight finish; none start after it, and the scope keeps its
+/// current filter (a partial copy is never repointed at).
+#[tauri::command]
+pub fn cancel_scope_move(state: State<'_, AppState>) {
+    state.scope_move_cancel.cancel();
 }
 
 /// The warning line for the group(s) a repoint retired — **named**, because "the

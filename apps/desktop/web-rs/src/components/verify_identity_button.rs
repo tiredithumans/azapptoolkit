@@ -63,7 +63,7 @@ pub fn VerifyIdentityButton(
                 }
             }
             busy.set(false);
-            on_verified.run(());
+            on_verified.try_run(());
         });
     };
 

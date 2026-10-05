@@ -185,13 +185,19 @@ impl Drop for ThrottleGuard {
 /// The adaptive-throttle + completion-counter pair every capped fan-out needs,
 /// wired once.
 ///
-/// Four commands each built this by hand — `bulk_delete_applications`,
-/// `bulk_grant_permissions`, `run_audit` and `sweep_site_permissions` — as an
+/// Every capped Graph fan-out built this by hand — the bulk commands,
+/// `run_audit`, `sweep_site_permissions` and `backup_tenant` — as an
 /// `Arc<ConcurrencyThrottle>`, a `ThrottleGuard::attach`, and a completion
 /// counter bumped inside the spawned task before emitting progress.
-/// Four copies of the wiring is four places to get the *observer lifetime* and
+/// N copies of the wiring is N places to get the *observer lifetime* and
 /// the *cap re-read* right, and that scaffold is where `dispatch_capped`'s
-/// `is_dead()` gating and the progress contract live.
+/// `is_dead()` gating and the progress contract live. They all use this now,
+/// and `ThrottleGuard::attach` has no caller outside this module (pinned by
+/// `repo_invariants::fanout::the_throttle_observer_is_attached_only_through_fan_out_meter`).
+///
+/// The counter is optional to use: the site sweep counts *sites* on its
+/// collect side (one joined result is a whole `$batch` chunk), so it reads
+/// only [`Self::limit`] and leaves the per-task tick unused.
 ///
 /// Deliberately NOT a generic fan-out driver: the per-item work, the result
 /// collection and the progress payload genuinely differ per command
@@ -259,6 +265,23 @@ impl FanOutTicker {
     pub(crate) fn tick(&self) -> (usize, usize) {
         let done = self.done.fetch_add(1, Ordering::AcqRel) + 1;
         (done, self.tracker.current_limit())
+    }
+}
+
+#[cfg(test)]
+impl FanOutTicker {
+    /// A ticker with no client attached, for tests that drive a fan-out's
+    /// per-chunk work directly (the DR backup passes).
+    pub(crate) fn detached(initial: usize) -> Self {
+        Self {
+            tracker: Arc::new(ConcurrencyThrottle::new(initial)),
+            done: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The count so far.
+    pub(crate) fn done(&self) -> usize {
+        self.done.load(Ordering::Acquire)
     }
 }
 

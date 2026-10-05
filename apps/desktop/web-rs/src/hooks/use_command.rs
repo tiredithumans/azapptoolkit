@@ -59,24 +59,61 @@ impl CommandState {
         if self.busy.try_get_untracked().unwrap_or(true) {
             return;
         }
-        let busy = self.busy;
+        let this = *self;
         let tenant_id = self
             .session
             .active_tenant
             .get_untracked()
             .map(|t| t.tenant_id);
-        busy.set(true);
+        self.busy.set(true);
         leptos::task::spawn_local(async move {
             let Some(tenant_id) = tenant_id else {
-                busy.set(false);
+                this.busy.set(false);
                 return;
             };
-            match op(tenant_id).await {
-                Ok(value) => on_ok(value),
-                Err(e) => on_err(e),
-            }
-            busy.set(false);
+            let result = op(tenant_id.clone()).await;
+            this.land(&tenant_id, result, on_ok, on_err);
         });
+    }
+
+    /// Where a [`run_with`](Self::run_with) result lands once its command
+    /// returns — the call outlives what started it, two ways:
+    ///
+    /// - **The tenant it ran for is no longer active** (a switch, or sign-out,
+    ///   which clears the tenant and unmounts the shell). Nothing lands: the
+    ///   view shows another tenant or none, and a toast pushed onto the
+    ///   shell-root `Session` would surface in the next sign-in.
+    /// - **Same tenant, but the owning component was unmounted** (its pane
+    ///   closed mid-save). `on_ok` / `on_err` read and run that component's
+    ///   signals and callbacks, which panic once disposed, so neither runs. A
+    ///   success needs no further word; a failure goes to the session's sink so
+    ///   a write that failed is never silent.
+    ///
+    /// `busy` is always cleared (a no-op on a disposed handle). Synchronous so
+    /// it is testable without spawning.
+    pub(crate) fn land<T>(
+        self,
+        started_for: &str,
+        result: Result<T, azapptoolkit_dto::UiError>,
+        on_ok: impl FnOnce(T),
+        on_err: impl FnOnce(azapptoolkit_dto::UiError),
+    ) {
+        if !self.session.is_active_tenant(started_for) {
+            self.busy.set(false);
+            return;
+        }
+        if self.busy.is_disposed() {
+            if let Err(e) = result {
+                self.session
+                    .report_command_error_for(&e, self.consent_feature);
+            }
+            return;
+        }
+        match result {
+            Ok(value) => on_ok(value),
+            Err(e) => on_err(e),
+        }
+        self.busy.set(false);
     }
 
     /// Run a mutating command, storing any error message in `error` (cleared at
@@ -314,6 +351,102 @@ mod tests {
             username: None,
             display_name: None,
         }
+    }
+
+    fn forbidden() -> azapptoolkit_dto::UiError {
+        azapptoolkit_dto::UiError::new("forbidden", "no rights", false)
+    }
+
+    fn messages(session: Session) -> Vec<String> {
+        session
+            .toasts
+            .with_untracked(|list| list.iter().map(|t| t.message.clone()).collect())
+    }
+
+    #[test]
+    fn a_live_result_runs_its_handlers_and_clears_busy() {
+        Owner::new().with(|| {
+            provide_session();
+            use_session().set_active_tenant(Some(tenant("tenant-a")));
+            let cmd = use_command();
+            cmd.busy.set(true);
+            let ran = Rc::new(std::cell::Cell::new(false));
+            let r = ran.clone();
+            cmd.land(
+                "tenant-a",
+                Ok(()),
+                move |()| r.set(true),
+                |_| panic!("on_err"),
+            );
+            assert!(ran.get());
+            assert!(!cmd.busy.get_untracked());
+        });
+    }
+
+    #[test]
+    fn a_result_after_a_tenant_switch_or_sign_out_lands_nowhere() {
+        // Sign-out clears the tenant (and unmounts the shell), so both reach
+        // the same branch: no handler, no toast carried into the next tenant.
+        for next in [Some(tenant("tenant-b")), None] {
+            Owner::new().with(|| {
+                provide_session();
+                let session = use_session();
+                session.set_active_tenant(Some(tenant("tenant-a")));
+                let cmd = use_command();
+                cmd.busy.set(true);
+                session.set_active_tenant(next.clone());
+                cmd.land(
+                    "tenant-a",
+                    Ok(()),
+                    |()| panic!("on_ok"),
+                    |_| panic!("on_err"),
+                );
+                cmd.land(
+                    "tenant-a",
+                    Err(forbidden()),
+                    |()| panic!("on_ok"),
+                    |_| panic!("on_err"),
+                );
+                assert!(messages(session).is_empty(), "{:?}", messages(session));
+                assert!(
+                    !cmd.busy.get_untracked(),
+                    "the handle gets its controls back"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn a_result_after_its_view_closed_never_runs_its_handlers() {
+        // The pane closed mid-save: its handlers read disposed signals and
+        // callbacks (a panic), so they are skipped — but a failed write still
+        // reaches the session's sink rather than vanishing.
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let pane = Owner::new();
+            let cmd = pane.with(use_command);
+            pane.cleanup();
+            cmd.land(
+                "tenant-a",
+                Ok(()),
+                |()| panic!("on_ok"),
+                |_| panic!("on_err"),
+            );
+            assert!(messages(session).is_empty(), "a success needs no word");
+            cmd.land(
+                "tenant-a",
+                Err(forbidden()),
+                |()| panic!("on_ok"),
+                |_| panic!("on_err"),
+            );
+            assert!(
+                messages(session).iter().any(|m| m.contains("no rights")),
+                "{:?}",
+                messages(session)
+            );
+        });
     }
 
     /// `fail_toast` for `e` with a counting re-run, then click the toast's

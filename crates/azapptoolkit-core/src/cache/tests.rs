@@ -4,8 +4,7 @@
 /// A bucket at its entry cap must not run the full TTL sweep on every `put`
 /// when nothing can have expired.
 ///
-/// `evict_expired` is a `retain` over `n`, plus a `rebuild_lru` that clones
-/// every key `String` into a fresh `BTreeMap`, plus a `min()` scan — all
+/// `evict_expired` is a `retain` over `n` plus an LRU-index prune — all
 /// under the bucket mutex the interactive list reads contend on. Past the
 /// cap that ran on every insert although `anything_expired == false` is a
 /// proof it would remove nothing.
@@ -51,6 +50,152 @@ fn an_expired_entry_is_still_swept_below_the_cap() {
     assert!(bucket.entries.is_empty());
 }
 
+/// Puts streaming across an expiry front must not sweep on every write.
+///
+/// Without slack, once the oldest entry passed the TTL every `put` found
+/// "something expired" (the next-oldest, a hair younger, expired a moment
+/// later) and paid a full O(n) sweep — O(n²) across the front. With
+/// [`Bucket::sweep_after`]'s `ttl / 8` slack a sweep leaves nothing older than
+/// the TTL, so the next one needs more than `ttl / 8` to pass: the sweep count
+/// is bounded by ELAPSED TIME, not by the number of writes.
+///
+/// Timing-robust by construction: the loop runs for a wall-clock duration (not
+/// a put count), and the only bound asserted is the time-based one, which is a
+/// hard property of the slack whatever the scheduler does to the sleeps. A
+/// slow runner makes fewer puts, never more sweeps per unit of time. The
+/// generous TTL keeps the per-put sweeps of a regression (one per put once
+/// the front is reached, every millisecond or so) far above that bound.
+#[test]
+fn streaming_puts_across_an_expiry_front_sweep_at_a_bounded_rate() {
+    let ttl = Duration::from_millis(200);
+    let slack = ttl / 8;
+    let mut bucket = Bucket::new();
+    let started = std::time::Instant::now();
+    let mut i = 0usize;
+    // Three TTLs: the front is reached (after `ttl + slack`) and streamed
+    // across for well over a TTL.
+    while started.elapsed() < ttl * 3 {
+        bucket.insert(format!("k{i}"), Arc::new(serde_json::json!(i)), None, false);
+        bucket.evict_if_needed(ttl, usize::MAX);
+        i += 1;
+        sleep(Duration::from_millis(1));
+    }
+    let elapsed = started.elapsed();
+    let bound = u64::try_from(elapsed.as_nanos() / slack.as_nanos()).unwrap_or(u64::MAX) + 1;
+    assert!(
+        bucket.expired_sweeps >= 1,
+        "the stream crossed the TTL, so at least one sweep had to reclaim it"
+    );
+    assert!(
+        bucket.expired_sweeps <= bound,
+        "{} sweeps over {i} puts in {elapsed:?} — more than one per ttl/8 ({bound} max)",
+        bucket.expired_sweeps
+    );
+    // The LRU index stays in step with the pruned entries.
+    assert!(bucket.lru.len() >= bucket.entries.len());
+    assert!(bucket.lru.values().all(|k| bucket.entries.contains_key(k)));
+}
+
+/// At the cap, an entry expired but still inside the sweep slack must not
+/// keep its slot at the cost of a LIVE entry: the sweep runs at the exact TTL
+/// before LRU picks a victim.
+///
+/// `old` is touched after `live1` is written, so LRU order alone would evict
+/// `live1` — the live entry. (If the sleep overshoots past the slack too, the
+/// below-cap rule sweeps `old` anyway and the assertions still hold; the test
+/// can lose its edge on a slow runner but never flake.)
+#[test]
+fn a_full_bucket_sweeps_at_the_exact_ttl_before_evicting_a_live_entry() {
+    let ttl = Duration::from_millis(400);
+    let mut bucket = Bucket::new();
+    bucket.insert("old".into(), Arc::new(serde_json::json!(0)), None, false);
+    bucket.evict_if_needed(ttl, 2);
+    sleep(ttl + Duration::from_millis(10));
+    bucket.insert("live1".into(), Arc::new(serde_json::json!(1)), None, false);
+    bucket.evict_if_needed(ttl, 2);
+    // Most recently used now — LRU would pick `live1` next.
+    bucket.touch("old");
+    bucket.insert("live2".into(), Arc::new(serde_json::json!(2)), None, false);
+    bucket.evict_if_needed(ttl, 2);
+
+    assert!(
+        !bucket.entries.contains_key("old"),
+        "the expired entry goes first"
+    );
+    assert!(
+        bucket.entries.contains_key("live1") && bucket.entries.contains_key("live2"),
+        "no live entry may be evicted while an expired one holds a slot"
+    );
+}
+
+/// A FULL bucket on an expiry front must not sweep on every put either.
+///
+/// The at-cap exact-TTL sweep alone reintroduced the per-put O(n) pass: each
+/// sweep freed one slot, the next put refilled it and found the next entry a
+/// hair past the TTL. It is rate-limited to one per
+/// [`Bucket::at_cap_sweep_interval`]. Pinned entries keep the bucket over its
+/// cap for the whole run (LRU cannot evict them), which is exactly the shape
+/// where every put is "over cap with something expired".
+///
+/// Timing-robust like its below-cap twin: the loop runs for wall time and the
+/// only assertion is the hard bound — two sweeps are always more than
+/// `at_cap_sweep_interval` apart (the slack path needs `ttl / 8`, which is
+/// longer) — so a slow runner makes fewer puts, never more sweeps per unit of
+/// time. A regression sweeps once per put (every millisecond or so), far
+/// above that bound.
+#[test]
+fn a_full_bucket_on_an_expiry_front_sweeps_at_a_bounded_rate() {
+    let ttl = Duration::from_millis(320);
+    let interval = Bucket::at_cap_sweep_interval(ttl);
+    let mut bucket = Bucket::new();
+    let started = std::time::Instant::now();
+    let mut i = 0usize;
+    while started.elapsed() < ttl * 3 {
+        bucket.insert(format!("k{i}"), Arc::new(serde_json::json!(i)), None, true);
+        bucket.evict_if_needed(ttl, 8);
+        i += 1;
+        sleep(Duration::from_millis(1));
+    }
+    let elapsed = started.elapsed();
+    let bound = u64::try_from(elapsed.as_nanos() / interval.as_nanos()).unwrap_or(u64::MAX) + 1;
+    assert!(
+        bucket.expired_sweeps >= 1,
+        "the stream crossed the TTL, so expired entries had to be reclaimed"
+    );
+    assert!(
+        bucket.expired_sweeps <= bound,
+        "{} sweeps over {i} puts in {elapsed:?} — more than one per {interval:?} ({bound} max)",
+        bucket.expired_sweeps
+    );
+}
+
+/// The slack delays only the *reclaim*; a read still enforces the exact TTL,
+/// so an expired entry the sweep has not reached yet is never served.
+#[test]
+fn a_lookup_never_returns_an_entry_past_its_ttl() {
+    let cache = Cache::new();
+    let ttl = Duration::from_millis(30);
+    cache.configure(None, None, None, None, Some(ttl), None);
+    let mut written: Vec<(String, std::time::Instant)> = Vec::new();
+    for i in 0..120u32 {
+        let key = format!("t|k{i}");
+        cache.put(CacheKind::Lists, key.clone(), &i);
+        // Stamped AFTER the put: the entry's own `inserted` is no later, so a
+        // stamp past the TTL proves the entry is too.
+        written.push((key, std::time::Instant::now()));
+        for (key, at) in &written {
+            if at.elapsed() > ttl {
+                assert!(
+                    cache.get::<u32>(CacheKind::Lists, key).is_none(),
+                    "{key} served {:?} after its write, past the {ttl:?} TTL",
+                    at.elapsed()
+                );
+            }
+        }
+        sleep(Duration::from_millis(1));
+    }
+}
+
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::thread::sleep;
@@ -62,37 +207,6 @@ struct Sample(String);
 /// they can look straight at what eviction actually did.
 fn entry_count(cache: &Cache, kind: CacheKind) -> usize {
     cache.buckets[kind.idx()].lock().entries.len()
-}
-
-#[test]
-fn a_serialized_index_stored_after_an_invalidation_it_raced_is_dropped() {
-    // The `put_index` twin of the typed race below. The three list caches
-    // (App Registrations pairing, Enterprise Apps, Managed Identities) store
-    // through this one, are pinned, and are dropped by the same
-    // `invalidate_app_lists` a mutation fires — so an unconditional store
-    // re-pinned the pre-mutation rows and showed a deleted app for the full
-    // TTL.
-    let cache = Cache::new();
-    let key = "t1|apps_pairing".to_string();
-
-    let watch = cache.generation_for(CacheKind::Lists, &key);
-    // ... the paginated scan happens here, and a mutation lands during it.
-    cache.invalidate_prefix(CacheKind::Lists, "t1|");
-
-    let stored = cache.put_index_if_current(watch, &vec![1u8]);
-    assert!(!stored, "a snapshot that lost the race must not be stored");
-    assert!(
-        cache.get::<Vec<u8>>(CacheKind::Lists, &key).is_none(),
-        "the invalidated key must stay empty, not hold the stale scan"
-    );
-
-    // The uncontended path still stores, and still pins.
-    let watch = cache.generation_for(CacheKind::Lists, &key);
-    assert!(cache.put_index_if_current(watch, &vec![2u8]));
-    assert_eq!(
-        cache.get::<Vec<u8>>(CacheKind::Lists, &key),
-        Some(vec![2u8])
-    );
 }
 
 #[test]
@@ -376,7 +490,7 @@ fn a_losing_writer_does_not_evict_the_winner_that_replaced_it() {
         c.invalidate(CacheKind::Lists, &k);
         let b_watch = c.generation_for(CacheKind::Lists, &k);
         assert!(
-            c.put_index_if_current(b_watch, &vec![2u8]),
+            c.store_if_current(b_watch, |c, kind, k| c.put_inner(kind, k, &vec![2u8], true)),
             "B took its watch after the invalidation, so B must be allowed to store"
         );
         stamp
@@ -607,10 +721,6 @@ fn a_guarded_store_the_cache_declined_reports_false() {
                 cache.generation_for(CacheKind::Audit, "t1|b"),
                 Arc::new(1u8),
             ),
-        ),
-        (
-            "put_index_if_current",
-            cache.put_index_if_current(cache.generation_for(CacheKind::Lists, "t1|c"), &1u8),
         ),
         (
             "put_typed_index_if_current",
@@ -960,10 +1070,11 @@ fn eviction_is_by_recency_not_insertion_order() {
 fn pinned_entries_survive_lru_pressure() {
     let cache = Cache::new();
     cache.configure(None, None, None, None, None, Some(4));
-    cache.put_index(
+    let _ = cache.put_inner(
         CacheKind::Permissions,
         "t1|sp_index".into(),
         &Sample("index".into()),
+        true,
     );
     for i in 0..50 {
         cache.put(
@@ -979,15 +1090,21 @@ fn pinned_entries_survive_lru_pressure() {
 /// A read through the WRONG accessor misses; it never destroys the entry.
 ///
 /// The twin of the `get` rule below. `put_typed` stores `Value::Null` as its
-/// untyped body and `put_index` stores no typed body at all, so each is
+/// untyped body and an untyped pinned store has no typed body at all, so each is
 /// guaranteed to fail through the other's door — which made a single
 /// mistaken read permanently evict a pinned tenant-wide index, the thing
 /// pinning exists to protect, and sent every surface into a full rescan.
 #[test]
 fn a_read_through_the_wrong_accessor_never_evicts_the_entry() {
     let cache = Cache::new();
-    // Untyped + pinned, the shape `put_index` gives a tenant-wide index.
-    cache.put_index(CacheKind::Lists, "t1|sp_index".into(), &Sample("a".into()));
+    // Untyped + pinned — no public API makes this shape any more, but the
+    // door rule must hold for any entry the bucket can hold.
+    let _ = cache.put_inner(
+        CacheKind::Lists,
+        "t1|sp_index".into(),
+        &Sample("a".into()),
+        true,
+    );
     assert!(
         cache
             .get_typed::<Vec<u32>>(CacheKind::Lists, "t1|sp_index")
@@ -1021,7 +1138,12 @@ fn a_read_through_the_wrong_accessor_never_evicts_the_entry() {
 #[test]
 fn pinned_entries_are_still_swept_by_tenant_invalidation() {
     let cache = Cache::new();
-    cache.put_index(CacheKind::Lists, "t1|sp_index".into(), &Sample("a".into()));
+    let _ = cache.put_inner(
+        CacheKind::Lists,
+        "t1|sp_index".into(),
+        &Sample("a".into()),
+        true,
+    );
     cache.put_typed_index(CacheKind::Lists, "t1|corpus".into(), Arc::new(vec![1u32]));
     cache.invalidate_tenant("t1");
     assert!(

@@ -16,6 +16,17 @@ CSS-in-Rust, no per-component stylesheets. Every class selector in it must be re
 renders transparent. Both are pinned by `web-rs/tests/stylesheet_coverage.rs`, so a rule whose
 component is gone is deleted with it.
 
+**A command's result can land after its component is gone.** Sign-out clears the tenant and
+unmounts the whole authed shell; closing a pane disposes its tabs. Reading a disposed signal or
+`.run(`-ing a disposed `Callback` panics the window, so after an await: check the tenant the call
+started for (`Session::is_active_tenant`) and land nothing if it changed, since a toast would
+otherwise carry into the next sign-in; on the same tenant, skip the component-local writes once
+it is disposed but keep the session-level effects (toasts, re-auth prompts, a session-owned
+selection), and call callbacks with `try_run`. `CommandState::land` does this for every
+`use_command` runner (an `on_err` whose view is gone goes to the session's sink); the bulk bar's
+`Landing` does it for its runs. Hand-spawned tasks use `.try_run(` after an await, pinned by
+`web-rs/tests/post_await_callbacks.rs`.
+
 ## One primitive per UI pattern
 
 The design-consistency invariant: every recurring UI pattern has exactly one primitive, and new

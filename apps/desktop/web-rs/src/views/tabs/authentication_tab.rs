@@ -139,7 +139,7 @@ fn AuthenticationForm(
         cmd.run(
             move |()| {
                 session.toast_success("Authentication settings saved.");
-                on_saved.run(());
+                on_saved.try_run(());
             },
             move |tenant_id| {
                 let logout_url = {

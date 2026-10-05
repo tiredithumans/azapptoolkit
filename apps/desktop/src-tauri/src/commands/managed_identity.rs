@@ -8,6 +8,7 @@
 //! `Grant-AzManagedIdentityPermission` cmdlets.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 use tauri::{AppHandle, State};
@@ -40,14 +41,15 @@ pub(crate) fn mi_key(tenant_id: &str) -> String {
 pub async fn list_managed_identities(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<Vec<ManagedIdentityDto>, UiError> {
+) -> Result<Arc<Vec<ManagedIdentityDto>>, UiError> {
     // The cache-HIT path below returns before any client is built, so the
     // `graph_for` on the miss path is not a session proof for it.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let key = mi_key(&tenant_id);
+    // Typed + pinned: read only through `get_typed` (an untyped `get` misses).
     if let Some(cached) = state
         .cache
-        .get::<Vec<ManagedIdentityDto>>(CacheKind::Lists, &key)
+        .get_typed::<Vec<ManagedIdentityDto>>(CacheKind::Lists, &key)
     {
         tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
@@ -66,21 +68,24 @@ pub async fn list_managed_identities(
     // LRU's reach for the full TTL.
     let watch = state.cache.generation_for(CacheKind::Lists, &key);
     let sps = crate::commands::applications::sp_index_cached(&state, &client, &tenant_id).await?;
-    let rows: Vec<ManagedIdentityDto> = sps
-        .iter()
-        .filter(|sp| sp.service_principal_type.as_deref() == Some("ManagedIdentity"))
-        .map(|sp| ManagedIdentityDto {
-            id: sp.id.clone(),
-            app_id: sp.app_id.clone(),
-            display_name: sp.display_name.clone(),
-            account_enabled: sp.account_enabled,
-            mi_subtype: MiSubtype::from_alternative_names(&sp.alternative_names),
-        })
-        .collect();
+    let rows: Arc<Vec<ManagedIdentityDto>> = Arc::new(
+        sps.iter()
+            .filter(|sp| sp.service_principal_type.as_deref() == Some("ManagedIdentity"))
+            .map(|sp| ManagedIdentityDto {
+                id: sp.id.clone(),
+                app_id: sp.app_id.clone(),
+                display_name: sp.display_name.clone(),
+                account_enabled: sp.account_enabled,
+                mi_subtype: MiSubtype::from_alternative_names(&sp.alternative_names),
+            })
+            .collect(),
+    );
 
     // Guarded like its source index: a mutation that landed mid-scan already
     // dropped this key, and re-pinning the pre-mutation rows would outlive it.
-    state.cache.put_index_if_current(watch, &rows);
+    state
+        .cache
+        .put_typed_index_if_current(watch, Arc::clone(&rows));
     Ok(rows)
 }
 

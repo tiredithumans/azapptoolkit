@@ -38,6 +38,17 @@ impl Session {
     }
 
     /// Toggle an application object id in the bulk-selection set.
+    /// Whether `tenant_id` is still the active tenant — the post-await check
+    /// for a command that started for it. Sign-out clears the tenant, so a
+    /// result that lands after it fails this too, and must not report into
+    /// the next sign-in. Untracked and disposal-safe (`false` if the session
+    /// itself is gone).
+    pub fn is_active_tenant(&self, tenant_id: &str) -> bool {
+        self.active_tenant
+            .try_with_untracked(|t| t.as_ref().map(|t| t.tenant_id.as_str()) == Some(tenant_id))
+            .unwrap_or(false)
+    }
+
     pub fn toggle_app_selected(&self, id: String) {
         toggle_in(self.tenant_ui.selected_app_ids, id);
     }

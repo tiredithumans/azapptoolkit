@@ -126,14 +126,21 @@ pub(crate) async fn resolve_mail_scopes(
     // the probe can't resolve the principal (the managed-identity case). One
     // lookup per app covers every permission; the bulk audit (`enrich == false`)
     // skips it to avoid an extra admin-API call per app.
-    let aap_override = if enrich {
-        legacy_aap_scope(exo, app_id).await
+    //
+    // The two reads are independent cmdlets, so the detail path runs them
+    // CONCURRENTLY — each is a proxied PowerShell invocation of seconds, and
+    // they used to run back to back. A plain `join!`, not `try_join!`: the
+    // policy lookup is consulted on the probe's error path too (the
+    // managed-identity fallback below), so neither may cancel the other.
+    let probe = exo.test_service_principal_authorization(app_id, None);
+    let (aap_override, probe) = if enrich {
+        futures::join!(legacy_aap_scope(exo, app_id), probe)
     } else {
-        None
+        (None, probe.await)
     };
 
     // Authoritative RBAC-for-Applications verdict.
-    let rows = match exo.test_service_principal_authorization(app_id, None).await {
+    let rows = match probe {
         Ok(rows) => rows,
         Err(err) => {
             // Log a concise code, not the raw body — an Exchange 403 can return a
@@ -178,13 +185,20 @@ pub(crate) async fn resolve_mail_scopes(
         verdict = reconcile_orgwide_grant(verdict, perm, orgwide_granted);
         // Enrich an RBAC management scope with its recipient filter + group
         // count (display only). Legacy-AAP scopes carry no management scope, so
-        // they are matched out here.
+        // they are matched out here. Only a SINGLE scope is looked up: with
+        // several, the verdict's name is a joined display string ("A, B") that
+        // names no scope, and one filter/group count can't describe a union.
+        let single_scope = match distinct_scope_names(&matching).as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        };
         if enrich
             && let MailPermissionScope::Scoped {
                 scope_name: Some(name),
                 mechanism: ScopeMechanism::Rbac,
                 ..
             } = &verdict
+            && single_scope.as_deref() == Some(name.as_str())
         {
             let name = name.clone();
             let resolved = match scope_cache.get(&name) {

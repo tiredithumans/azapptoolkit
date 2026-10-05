@@ -543,3 +543,39 @@ fn the_page_size_rule_fires_on_a_read_without_top() {
         vec![("list_capped".to_string(), false)]
     );
 }
+
+/// The adaptive-throttle observer is attached only through
+/// `throttle::FanOutMeter`.
+///
+/// `FanOutMeter` exists so the tracker, the RAII `ThrottleGuard` and the
+/// completion counter are wired once. Its doc claimed `sweep_site_permissions`
+/// had already moved onto it while that sweep (and the DR backup) still built
+/// the pair by hand — a second copy of the wiring is a second place to get the
+/// observer lifetime or the cap re-read wrong, and nothing noticed the drift.
+/// So no command module other than `throttle.rs` names `ThrottleGuard::attach`.
+#[test]
+fn the_throttle_observer_is_attached_only_through_fan_out_meter() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut meters = 0usize;
+    for (name, src) in super::sources::command_modules() {
+        for line in super::sources::code_lines(&src) {
+            if line.contains("FanOutMeter::attach(") {
+                meters += 1;
+            }
+            if name != "commands/throttle.rs" && line.contains("ThrottleGuard::attach(") {
+                offenders.push(format!("{name}: {}", line.trim()));
+            }
+        }
+    }
+    // The bulk commands (3), the audit, the site sweep and the DR backup.
+    assert!(
+        meters >= 6,
+        "found only {meters} `FanOutMeter::attach` call(s) — the scan is broken"
+    );
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled throttle wiring — use `FanOutMeter::attach(client, cap)` and \
+         `|| meter.limit()`:\n  {}",
+        offenders.join("\n  ")
+    );
+}

@@ -119,7 +119,7 @@ pub fn DeletedAppsDialog(
                             ""
                         };
                         session.toast_success(format!("Restored {name}{sp_note}."));
-                        on_mutated.run(());
+                        on_mutated.try_run(());
                         reload.update(|n| *n = n.wrapping_add(1));
                     } else if restored {
                         // App came back but a paired SP failed — say so rather
@@ -129,7 +129,7 @@ pub fn DeletedAppsDialog(
                             format!("App restored, but its enterprise app was not: {msg}"),
                             None,
                         );
-                        on_mutated.run(());
+                        on_mutated.try_run(());
                         reload.update(|n| *n = n.wrapping_add(1));
                     } else if let Some(e) = fatal {
                         // Per-row failures arrive as `BulkError`; the session

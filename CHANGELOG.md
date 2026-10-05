@@ -5,6 +5,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **Lists, the Security tab and the Resource Access sweeps open faster on a revisit, and the window
+  no longer stalls while they load.** A cached list or scan result is now handed back as is
+  instead of being rebuilt on every visit, and reading the last security audit or site/Key Vault
+  sweep no longer blocks the window. Moving a mailbox scope to its managed group, deleting a
+  retired group, and opening an app's mailbox-scope details also wait on fewer back-to-back
+  Exchange calls.
+
 ### Fixed
 
 - **Sign-in is sturdier.** A momentary credential-store error while renewing a token no longer
@@ -35,6 +44,25 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   second copy of it was running, while it saved your sign-in, the next launch could load a
   corrupted session that then failed. That is now detected, and you're asked to sign in once.
   Saved sign-ins use a new format, so going back to an older version asks you to sign in once.
+- **Signing out or switching tenants mid-action no longer crashes the window.** A bulk action or
+  a save that finished after you signed out or switched tenants could crash the window, and its
+  notifications carried over into the next sign-in. It now reports nothing. Leaving a view while
+  its save or bulk action is still running no longer crashes the window either: its notifications
+  still appear, a failure is reported instead of lost, and apps a bulk delete removed leave the
+  selection.
+- **Exchange mailbox scoping no longer widens access or reports a partial result as done.** "Move
+  to managed group" and the legacy-policy migration now refuse to point a scope at the
+  toolkit-managed group when that group already holds mailboxes the source group doesn't. The
+  preview now says the move would be refused and names those mailboxes, instead of offering "Move
+  now". Before, a group left over from an earlier attempt was reused as
+  it was, so the app could end up reaching both the old and the new mailboxes. Scoped access now
+  warns when an org-wide Exchange role assignment for the same role still gives the app every
+  mailbox. Groups with more than 1000 members are now read in full instead of being cut off at
+  1000. "Remove all…" now reports assignments it couldn't remove instead of only counting the ones
+  it did, and fails when none came off. A move to the managed group can be stopped while it copies
+  members, and a stopped move leaves the scope where it was. Stopping a migration while it copies
+  members now leaves that app on its legacy policy, unchanged, and reports the run as incomplete. A migration re-run for a policy
+  stored with an upper-case app ID no longer reports the app as "partial" every time.
 
 ## [0.31.0] - 2026-10-03
 

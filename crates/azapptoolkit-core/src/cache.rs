@@ -171,9 +171,10 @@ struct Entry {
 struct Bucket {
     entries: HashMap<String, Entry>,
     // LRU ordering index: `last_access` tick -> key, so eviction pops the oldest
-    // in O(log n). Kept in step with `entries` on insert/touch/remove;
-    // `retain`/`clear` rebuild it wholesale. May briefly hold stale ticks (entry
-    // gone or re-touched) — `evict_lru` skips them, keeping hot-path
+    // in O(log n). Kept in step with `entries` on insert/touch/remove; after a
+    // bulk removal (`retain`, `evict_expired`) `prune_lru` drops the rows of
+    // removed entries in place, and `clear` empties it. May briefly hold stale
+    // ticks (entry gone or re-touched) — `evict_lru` skips them, keeping hot-path
     // bookkeeping to a single `remove` + `insert`.
     lru: BTreeMap<u64, String>,
     tick: u64,
@@ -183,6 +184,9 @@ struct Bucket {
     /// each sweep, never narrowed on plain removal: a conservative lower bound,
     /// so it may buy one unnecessary sweep but never miss one.
     oldest_insert: Option<Instant>,
+    /// When [`Bucket::evict_expired`] last ran; `None` before the first sweep.
+    /// Rate-limits the at-cap exact-TTL sweep (see [`Bucket::evict_if_needed`]).
+    last_sweep: Option<Instant>,
     /// Test-only count of full TTL sweeps, so the "don't sweep when nothing can
     /// have expired" property is asserted, not just structured. Kept out of
     /// [`CacheStats`]: a public field would force the diagnostics UI to render
@@ -202,6 +206,7 @@ impl Bucket {
             lru: BTreeMap::new(),
             tick: 0,
             oldest_insert: None,
+            last_sweep: None,
             #[cfg(test)]
             expired_sweeps: 0,
             next_stamp: 0,
@@ -272,12 +277,11 @@ impl Bucket {
         }
     }
 
-    /// Drops every entry whose key fails `keep`, then rebuilds the LRU index.
-    /// Invalidation sweeps are infrequent, so a wholesale rebuild is cheaper to
-    /// reason about than threading removals through the index.
+    /// Drops every entry whose key fails `keep`, then prunes the LRU index of
+    /// the rows that no longer name a live entry.
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.entries.retain(|k, _| keep(k));
-        self.rebuild_lru();
+        self.prune_lru();
     }
 
     fn clear(&mut self) {
@@ -287,26 +291,66 @@ impl Bucket {
         self.oldest_insert = None;
     }
 
-    fn rebuild_lru(&mut self) {
-        self.lru = self
-            .entries
-            .iter()
-            .map(|(k, e)| (e.last_access, k.clone()))
-            .collect();
+    /// Drops, in place, every LRU row whose entry is gone or has been touched
+    /// since (its live tick has a row of its own). This used to rebuild the
+    /// index wholesale, cloning every key `String` of the bucket into a fresh
+    /// `BTreeMap` — per sweep, under the bucket mutex.
+    fn prune_lru(&mut self) {
+        let entries = &self.entries;
+        self.lru
+            .retain(|tick, key| entries.get(key).is_some_and(|e| e.last_access == *tick));
     }
 
     /// Drops every entry older than `ttl`. Without it TTL is enforced only on
     /// read, so an entry nothing reads again keeps its slot indefinitely — and
     /// a *pinned* index is invisible to LRU, so forever. Called from
     /// [`Bucket::evict_if_needed`].
+    ///
+    /// One pass over the entries computes the surviving `oldest_insert` too,
+    /// rather than a second `min()` scan after the `retain`.
     fn evict_expired(&mut self, ttl: Duration) {
         #[cfg(test)]
         {
             self.expired_sweeps += 1;
         }
-        self.entries.retain(|_, e| e.inserted.elapsed() <= ttl);
-        self.rebuild_lru();
-        self.oldest_insert = self.entries.values().map(|e| e.inserted).min();
+        let mut oldest: Option<Instant> = None;
+        self.entries.retain(|_, e| {
+            let keep = e.inserted.elapsed() <= ttl;
+            if keep {
+                oldest = Some(oldest.map_or(e.inserted, |o| o.min(e.inserted)));
+            }
+            keep
+        });
+        self.prune_lru();
+        self.oldest_insert = oldest;
+        self.last_sweep = Some(Instant::now());
+    }
+
+    /// How far past the TTL the oldest entry must be before a `put` sweeps.
+    ///
+    /// Without slack, a bucket whose entries were written as a steady stream
+    /// sits on an *expiry front*: after each sweep the new oldest entry is a
+    /// hair younger than the TTL, expires a moment later, and the next `put`
+    /// sweeps again — an O(n) pass per write, O(n²) across the front, under the
+    /// mutex the interactive list reads contend on. With `ttl / 8` of slack a
+    /// sweep removes everything written in that window at once, so sweeps are
+    /// at most one per `ttl / 8` however fast the writes come.
+    ///
+    /// Correctness does not depend on the sweep: [`Cache::lookup`] enforces the
+    /// exact TTL on every read, so an expired entry the sweep has not reached
+    /// yet is never served — it only holds its slot a little longer.
+    fn sweep_after(ttl: Duration) -> Duration {
+        ttl.saturating_add(ttl / 8)
+    }
+
+    /// The minimum gap between two at-cap exact-TTL sweeps: `ttl / 64`, but
+    /// never under 5 ms. Without it a FULL bucket on an expiry front swept on
+    /// every `put` again — each sweep frees one slot, the next put refills it
+    /// and finds the next entry a hair past the TTL — the O(n²) the slack was
+    /// added to remove. Inside the gap the put falls through to plain LRU
+    /// eviction; the exact TTL is still enforced on read.
+    fn at_cap_sweep_interval(ttl: Duration) -> Duration {
+        (ttl / 64).max(Duration::from_millis(5))
     }
 
     /// The `put` path's eviction pass, run only when there is something to
@@ -315,15 +359,32 @@ impl Bucket {
     /// load-bearing and neither subsumes the other:
     ///
     /// * **At cap** — LRU has to make room. Nothing else does.
-    /// * **Something has expired** — the only pass that reclaims entries
-    ///   nothing reads again, including an expired *pinned* index LRU cannot
-    ///   touch; a below-cap bucket would hold those until the process exits.
+    /// * **Something has expired** (below the cap, by more than
+    ///   [`Bucket::sweep_after`]'s slack; at the cap, at all) — the only pass that reclaims entries nothing reads again,
+    ///   including an expired *pinned* index LRU cannot touch; a below-cap
+    ///   bucket would hold those until the process exits.
     ///
     /// The expiry test is one `Instant` comparison against `oldest_insert`, so
     /// the common put — under cap, nothing expired — costs the insert alone.
     fn evict_if_needed(&mut self, ttl: Duration, max_size: usize) {
-        let anything_expired = self.oldest_insert.is_some_and(|o| o.elapsed() > ttl);
-        if !anything_expired && self.entries.len() <= max_size {
+        // Over the cap, LRU is about to evict something, so sweep at the EXACT
+        // TTL first: an entry expired but still inside the slack must go before
+        // a live one is pushed out for its slot — unless a sweep ran within
+        // `at_cap_sweep_interval`, which keeps a full bucket on an expiry front
+        // from sweeping per put. Below the cap nothing is displaced, so the
+        // slack only delays reclaiming dead memory.
+        let over_cap = self.entries.len() > max_size;
+        let exact_allowed = over_cap
+            && self
+                .last_sweep
+                .is_none_or(|t| t.elapsed() > Self::at_cap_sweep_interval(ttl));
+        let limit = if exact_allowed {
+            ttl
+        } else {
+            Self::sweep_after(ttl)
+        };
+        let anything_expired = self.oldest_insert.is_some_and(|o| o.elapsed() > limit);
+        if !anything_expired && !over_cap {
             return;
         }
         // Honour the flag on BOTH branches, not just the early return: past the
@@ -695,42 +756,13 @@ impl Cache {
     /// fetch's first await; a lost race is skipped (`false`), so the
     /// invalidation stands instead of being undone by the pre-mutation result
     /// for the full TTL. Per-object keys belong here, never in the pinned
-    /// [`Self::put_index_if_current`].
+    /// [`Self::put_typed_index_if_current`].
     pub fn put_if_current<T>(&self, watch: IndexWatch<'_>, value: &T) -> bool
     where
         T: serde::Serialize,
     {
         self.store_if_current(watch, |cache, kind, key| {
             cache.put_inner(kind, key, value, false)
-        })
-    }
-
-    /// Like [`Self::put`], but **pinned**: exempt from LRU eviction (TTL and
-    /// invalidation still apply). Use only for tenant-wide *index* entries that
-    /// cost a full directory scan to rebuild — they share a bucket with
-    /// thousands of cheap per-app entries, so without the pin one mail-heavy
-    /// audit run evicts them. The pinned set must stay a bounded handful of
-    /// keys; never pin a per-directory-object key.
-    pub fn put_index<T>(&self, kind: CacheKind, key: String, value: &T)
-    where
-        T: serde::Serialize,
-    {
-        self.put_inner(kind, key, value, true);
-    }
-
-    /// [`Self::put_index`] under the store-after-invalidate guard — the
-    /// serializing twin of [`Self::put_typed_index_if_current`]: `since` comes
-    /// from a [`Cache::generation_for`] captured **before** the fetch, and a
-    /// lost race is skipped (`false`). Every pinned index built from a
-    /// tenant-wide scan belongs here — a pinned entry is out of LRU's reach,
-    /// so a lost race is the wrong answer until TTL expiry, not a stale read
-    /// that ages out.
-    pub fn put_index_if_current<T>(&self, watch: IndexWatch<'_>, value: &T) -> bool
-    where
-        T: serde::Serialize,
-    {
-        self.store_if_current(watch, |cache, kind, key| {
-            cache.put_inner(kind, key, value, true)
         })
     }
 
@@ -864,9 +896,16 @@ impl Cache {
         })
     }
 
-    /// [`Self::put_typed`] with the [`Self::put_index`] pin — the combination the
-    /// large, read-hot tenant indexes want: no re-deserialize on read *and* not
-    /// evictable by the per-app entries sharing their bucket.
+    /// [`Self::put_typed`], but **pinned**: exempt from LRU eviction (TTL and
+    /// invalidation still apply) — the combination the large, read-hot tenant
+    /// indexes want: no re-deserialize on read *and* not evictable by the
+    /// per-app entries sharing their bucket. Use only for tenant-wide *index*
+    /// entries that cost a full directory scan to rebuild; the pinned set must
+    /// stay a bounded handful of keys, never a per-directory-object key.
+    ///
+    /// There is deliberately no untyped (serializing) pinned store: every
+    /// pinned entry is read on every warm list visit, so it is kept typed and a
+    /// read is a refcount clone, not a JSON decode.
     pub fn put_typed_index<T: Send + Sync + 'static>(
         &self,
         kind: CacheKind,

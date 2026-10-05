@@ -111,6 +111,29 @@ pub(super) fn still_granted_orgwide(kept: &[&str]) -> String {
     )
 }
 
+/// One "Scoping is NOT effective" line per org-wide Exchange role assignment
+/// that already grants a role this run is scoping (see
+/// `targets::orgwide_role_assignments`). Same voice as the
+/// `still_granted_orgwide` warning: RBAC unions, so the scoped assignment added
+/// beside it confines nothing. Reported, never removed — an org-wide assignment
+/// may be deliberate, and taking access away is the operator's call.
+pub(super) fn orgwide_assignment_warnings(
+    existing: &[azapptoolkit_exchange::models::ExoRoleAssignment],
+    targets: &[ExchangeTarget],
+) -> Vec<String> {
+    orgwide_role_assignments(existing, targets)
+        .into_iter()
+        .map(|(role, identity)| {
+            format!(
+                "Scoping is NOT effective for {role}: an org-wide Exchange assignment {identity} \
+                 remains, and Exchange RBAC adds to that assignment rather than replacing it, so \
+                 the app still reaches every mailbox with it. Remove that assignment in Exchange \
+                 if the app should be confined."
+            )
+        })
+        .collect()
+}
+
 /// "it" for one permission, "them" for several.
 pub(super) fn it_or_them(n: usize) -> &'static str {
     if n == 1 { "it" } else { "them" }
@@ -163,6 +186,9 @@ pub(super) async fn assign_scoped_roles(
 ) -> Result<(Vec<String>, Vec<String>, Vec<(ExchangeTarget, bool)>), UiError> {
     let existing = exo.get_role_assignments(app_id).await?;
     let plan = plan_role_assignments(&existing, scope_name, targets);
+    // A scoped role beside an org-wide assignment of the same role confines
+    // nothing; say so rather than report a scoping that has no effect.
+    warnings.extend(orgwide_assignment_warnings(&existing, targets));
 
     let mut roles_assigned = Vec::new();
     let mut roles_skipped = Vec::new();
@@ -553,6 +579,58 @@ pub async fn list_exchange_role_assignments(
         .collect())
 }
 
+/// The label a removal result names an assignment by: its role, else its
+/// identity, else its name.
+fn assignment_label(a: &azapptoolkit_exchange::models::ExoRoleAssignment) -> String {
+    a.role
+        .clone()
+        .or_else(|| a.identity.clone())
+        .or_else(|| a.name.clone())
+        .unwrap_or_else(|| "(unnamed assignment)".to_string())
+}
+
+/// The failure an assignment with no `Identity` becomes. It cannot be removed
+/// (the cmdlet needs the identity), so it is still in place — skipping it
+/// silently let "Removed 2" read as complete while a third role still granted
+/// mailbox access.
+pub(super) fn identityless_failure(
+    a: &azapptoolkit_exchange::models::ExoRoleAssignment,
+) -> ExchangeAssignmentFailure {
+    ExchangeAssignmentFailure {
+        assignment: assignment_label(a),
+        reason: "Exchange returned this assignment without an identity, so it could not be \
+                 removed — remove it in Exchange"
+            .to_string(),
+    }
+}
+
+/// Whether a removal run failed outright: nothing came off and something is
+/// still in place. `first_error` carries the first rejection's classification
+/// (so a dead session still reads as one); an identity-less-only failure is a
+/// validation error. `None` ⇒ return the (possibly partial) result.
+pub(super) fn removal_failed_outright(
+    removed: &[String],
+    failed: &[ExchangeAssignmentFailure],
+    first_error: Option<UiError>,
+) -> Option<UiError> {
+    if !removed.is_empty() || failed.is_empty() {
+        return None;
+    }
+    let list = failed
+        .iter()
+        .map(|f| format!("{} ({})", f.assignment, f.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let message = format!(
+        "no Exchange role assignment was removed, so this principal's mailbox scoping is \
+         unchanged: {list}"
+    );
+    Some(match first_error {
+        Some(err) => UiError::new(err.code, message, err.retryable),
+        None => UiError::validation("exchange_assignment_unremovable", message),
+    })
+}
+
 #[tauri::command]
 pub async fn remove_exchange_mailbox_access(
     state: State<'_, AppState>,
@@ -561,29 +639,60 @@ pub async fn remove_exchange_mailbox_access(
 ) -> Result<ExchangeAccessRemovalResult, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let assignments = exo.get_role_assignments(&app_id).await?;
+    let (result, removed_any) = remove_role_assignments(&exo, app_id, assignments).await;
+    // Assignments were really removed (even on partial success, and even when
+    // the run then reports failure), changing the cached per-permission scope
+    // verdicts and audit-relevant state — invalidate because state really
+    // changed.
+    if removed_any {
+        invalidate_app_lists(&state.cache, &tenant_id);
+    }
+    result
+}
+
+/// The removal loop behind [`remove_exchange_mailbox_access`]: removes every
+/// assignment it can, counts the rest as `failed` (an identity-less row is a
+/// failure, never a silent skip), and fails outright when nothing came off and
+/// something is still assigned (see [`removal_failed_outright`]). Returns the
+/// result and whether any removal landed — the caller's invalidation flag.
+pub(super) async fn remove_role_assignments(
+    exo: &ExchangeClient,
+    app_id: String,
+    assignments: Vec<azapptoolkit_exchange::models::ExoRoleAssignment>,
+) -> (Result<ExchangeAccessRemovalResult, UiError>, bool) {
     let mut removed = Vec::new();
-    let mut warnings = Vec::new();
+    let mut failed = Vec::new();
+    let mut first_error: Option<UiError> = None;
     for a in assignments {
         let Some(identity) = a.identity.clone() else {
+            failed.push(identityless_failure(&a));
             continue;
         };
         match exo.remove_role_assignment(&identity).await {
             Ok(()) => removed.push(a.role.unwrap_or(identity)),
-            Err(err) => warnings.push(format!("failed to remove assignment {identity}: {err}")),
+            Err(err) => {
+                failed.push(ExchangeAssignmentFailure {
+                    assignment: assignment_label(&a),
+                    reason: err.to_string(),
+                });
+                first_error.get_or_insert_with(|| err.into());
+            }
         }
     }
-    warnings.push(
-        "the management scope and Exchange service-principal pointer were left in place".into(),
-    );
-    // Assignments were really removed (even on partial success), changing the
-    // cached per-permission scope verdicts and audit-relevant state — same
-    // rule as the audit remediations: invalidate because state really changed.
-    if !removed.is_empty() {
-        invalidate_app_lists(&state.cache, &tenant_id);
+    let removed_any = !removed.is_empty();
+    if let Some(err) = removal_failed_outright(&removed, &failed, first_error) {
+        return (Err(err), removed_any);
     }
-    Ok(ExchangeAccessRemovalResult {
-        app_id,
-        removed_assignments: removed,
-        warnings,
-    })
+    (
+        Ok(ExchangeAccessRemovalResult {
+            app_id,
+            removed_assignments: removed,
+            failed,
+            warnings: vec![
+                "the management scope and Exchange service-principal pointer were left in place"
+                    .into(),
+            ],
+        }),
+        removed_any,
+    )
 }

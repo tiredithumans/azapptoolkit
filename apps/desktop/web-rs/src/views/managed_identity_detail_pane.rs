@@ -566,7 +566,7 @@ fn AssignAzureRolePanel(
                 Ok(()) => {
                     open.set(false);
                     scope.set(String::new());
-                    on_assigned.run(());
+                    on_assigned.try_run(());
                 }
                 Err(e) => {
                     // The shared recovery toast, aimed at ARM: "Grant consent"

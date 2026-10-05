@@ -539,7 +539,9 @@ pub fn CredentialsTab(
                 // before the user can copy the one-time secret value.
                 match cred.secret_text {
                     Some(text) => revealed.set(Some(text)),
-                    None => on_changed_cb.run(()),
+                    None => {
+                        on_changed_cb.try_run(());
+                    }
                 }
             },
             move |e| error.set(Some(e.message)),
@@ -572,7 +574,7 @@ pub fn CredentialsTab(
             match applications::remove_password(&t.tenant_id, &id, &key_id).await {
                 Ok(()) => {
                     session.toast_success("Secret removed.");
-                    on_changed_cb.run(());
+                    on_changed_cb.try_run(());
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -597,7 +599,7 @@ pub fn CredentialsTab(
             match applications::remove_certificate_credential(&t.tenant_id, &id, &key_id).await {
                 Ok(()) => {
                     session.toast_success("Certificate removed.");
-                    on_changed_cb.run(());
+                    on_changed_cb.try_run(());
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -641,7 +643,7 @@ pub fn CredentialsTab(
                         None,
                     );
                 }
-                on_changed_cb.run(());
+                on_changed_cb.try_run(());
             },
             move |e| {
                 session.report_if_session_dead(&e);
@@ -718,7 +720,7 @@ pub fn CredentialsTab(
                         None,
                     );
                 }
-                on_changed_cb.run(());
+                on_changed_cb.try_run(());
             },
             move |e| error.set(Some(e.message)),
             move |tenant_id| {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
@@ -98,10 +99,11 @@ pub async fn get_directory_index_status(
 /// One full `/applications` list scan, projected three ways. See
 /// [`scan_app_list`].
 pub(crate) struct AppListScan {
-    /// The App Registrations list rows (`apps_pairing`).
-    pub(crate) rows: Vec<ApplicationListRowDto>,
+    /// The App Registrations list rows (`apps_pairing`) — the same `Arc` the
+    /// typed cache entry holds.
+    pub(crate) rows: Arc<Vec<ApplicationListRowDto>>,
     /// The tenant-wide credential-expiry roll-up (`credential_expirations`).
-    pub(crate) credentials: Vec<CredentialRowDto>,
+    pub(crate) credentials: Arc<Vec<CredentialRowDto>>,
 }
 
 /// The ONE full `/applications` list scan behind the App Registrations list,
@@ -170,8 +172,13 @@ pub(crate) async fn scan_app_list(
     // The credential roll-up, pinned and guarded: a credential add/remove that
     // raced this scan dropped the key, and the pre-mutation snapshot must not
     // re-land for the full TTL.
-    let credentials = crate::commands::credentials::credential_rows(&apps, now);
-    state.cache.put_index_if_current(creds_watch, &credentials);
+    //
+    // Typed (`put_typed_index_if_current`): a warm read is a refcount clone,
+    // not a decode of the whole roll-up from JSON.
+    let credentials = Arc::new(crate::commands::credentials::credential_rows(&apps, now));
+    state
+        .cache
+        .put_typed_index_if_current(creds_watch, Arc::clone(&credentials));
 
     // The app-name index, stripped to the three fields it carries: six surfaces
     // hold an `Arc` to this entry, and the credential arrays must not be pinned
@@ -192,22 +199,25 @@ pub(crate) async fn scan_app_list(
         .iter()
         .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
         .collect();
-    let rows: Vec<ApplicationListRowDto> = apps
-        .into_iter()
-        .map(|application| {
-            let paired = by_app_id
-                .get(application.app_id.as_str())
-                .map(|id| (*id).to_string());
-            ApplicationListRowDto::from_application(application, paired, now)
-        })
-        .collect();
+    let rows: Arc<Vec<ApplicationListRowDto>> = Arc::new(
+        apps.into_iter()
+            .map(|application| {
+                let paired = by_app_id
+                    .get(application.app_id.as_str())
+                    .map(|id| (*id).to_string());
+                ApplicationListRowDto::from_application(application, paired, now)
+            })
+            .collect(),
+    );
 
     // Pinned: a tenant-wide index (one paginated scan over every app
     // registration), not a per-object entry — it must not be evictable by the
     // thousands of `app_detail|…` writes that share this bucket. The caller
     // still gets these rows; only the caching of a snapshot that lost the race
-    // is skipped.
-    state.cache.put_index_if_current(rows_watch, &rows);
+    // is skipped. Typed, like the roll-up above.
+    state
+        .cache
+        .put_typed_index_if_current(rows_watch, Arc::clone(&rows));
 
     Ok(AppListScan { rows, credentials })
 }
@@ -229,7 +239,7 @@ pub(crate) async fn scan_app_list(
 pub async fn list_applications_with_pairing(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<Vec<ApplicationListRowDto>, UiError> {
+) -> Result<Arc<Vec<ApplicationListRowDto>>, UiError> {
     // The cache-HIT path returns before any client is built, so it needs its
     // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
@@ -768,18 +778,14 @@ mod handler_tests {
         let scan = scan_app_list(&state, TENANT).await.expect("scan");
 
         assert_eq!(scan.rows.len(), 1, "the caller still gets its rows");
+        // Through the typed accessors: an untyped `get` on these entries
+        // always misses, which would make both assertions pass vacuously.
         assert!(
-            state
-                .cache
-                .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &credential_expirations_key(TENANT))
-                .is_none(),
+            credential_expirations_hit(&state.cache, TENANT).is_none(),
             "the credential roll-up re-pinned a pre-write snapshot"
         );
         assert!(
-            state
-                .cache
-                .get::<Vec<ApplicationListRowDto>>(CacheKind::Lists, &apps_pairing_key(TENANT))
-                .is_none(),
+            apps_pairing_hit(&state.cache, TENANT).is_none(),
             "the list rows re-pinned a pre-write snapshot"
         );
         assert!(sp_index_hit(&state.cache, TENANT).is_some());
@@ -809,12 +815,7 @@ mod handler_tests {
             );
         }
 
-        assert!(
-            state
-                .cache
-                .get::<Vec<CredentialRowDto>>(CacheKind::Lists, &credential_expirations_key(TENANT))
-                .is_some()
-        );
+        assert!(credential_expirations_hit(&state.cache, TENANT).is_some());
     }
 
     /// The app POST lands (`obj-new` / `app-new`), no SP exists yet, and the

@@ -88,7 +88,7 @@ Deep-dive: caching-and-search.md
 - **Invalidate caches only on `Ok`** (tiers: `invalidate_app_lists` / `_credentials` / `_detail_state` / `_details`); a pinned index or a long scan's result takes `generation_for` before the fetch and stores via `*_if_current`.
 - **`CacheKind::ServicePrincipal` self-invalidates in the graph client**, never in the command aggregators.
 - **Long-running writes stop on Cancel AND on a dead session:** `claim()` a `CancelToken` before the first await, latch `dispatch::SessionDead`, flag the result incomplete; fan-outs never return a partial result.
-- **Batched Graph fan-out + adaptive throttle** (`$batch` + `ConcurrencyThrottle` via `ThrottleGuard::attach`, degrading to per-object reads); never a hand-rolled loop; `$expand` + advanced query fails silently.
+- **Batched Graph fan-out + adaptive throttle** (`$batch` + `ConcurrencyThrottle` via `FanOutMeter::attach`, degrading to per-object reads); never a hand-rolled loop; `$expand` + advanced query fails silently.
 - **Every paged read sends `$top`** (`client::MAX_PAGE_SIZE`; `/applications` sends `DEFAULT_APP_PAGE_SIZE`) — paging is serial.
 - **Full-collection PATCH for `appRoles` / `oauth2PermissionScopes`:** re-read live, mutate, write the whole array back; disable then remove; exposed app roles edit the paired application as raw JSON; bust with `invalidate_app_details` only.
 - **camelCase vs snake_case:** Graph domain models are camel (no serde rename), DTOs/bindings snake; `Application` + `AuditItem` cross IPC as-is, so a rename is a wire-format change.
@@ -136,6 +136,7 @@ Deep-dive: audit-findings-and-remediation.md
 Deep-dive: frontend-workspace.md
 
 - **Reactivity is closure-based** (`{move || sig.get()}`); state is `RwSignal<T>` on a context-provided `Session`; CSS is global BEM-ish; a bare-key shortcut must no-op in a text field.
+- **A result can land after its component is gone:** post-await, gate on `Session::is_active_tenant` (land nothing on a switch/sign-out), keep session-level effects when only the view closed, and `try_run` callbacks (`CommandState::land`; pinned by `tests/post_await_callbacks.rs`).
 - **One primitive per UI pattern** (`SectionHeader`, skeletons, `DetailLoadError`, `Callout`, `ShowMore`) — reuse, never re-implement.
 - **Open-items workspace:** `session.open_item(...)` fills ONE shared `Session.open_items`; dock + workspace mount once in `shell.rs`; `open_items` + `shown_items` reset in `set_active_tenant`; no `selected_*_id` signals.
 - **Per-list filter state lives on `Session.tenant_ui`** and resets by structure — a new field goes in the substruct with a `reset()` line + the pinning test.

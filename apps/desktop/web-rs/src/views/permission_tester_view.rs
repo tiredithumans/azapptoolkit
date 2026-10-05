@@ -332,7 +332,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                     // Clear `busy` first — `do_test` early-returns while it's set,
                     // and it re-sets it for the actual run.
                     busy.set(false);
-                    do_test.run(());
+                    do_test.try_run(());
                 }
                 Err(e) => {
                     busy.set(false);
@@ -363,7 +363,9 @@ pub fn PermissionTesterView() -> impl IntoView {
             pending_revoke.set(None);
             perms_busy.set(false);
             match r {
-                Ok(()) => do_test.run(()),
+                Ok(()) => {
+                    do_test.try_run(());
+                }
                 Err(e) => {
                     if e.is_consent_required() {
                         needs_consent.set(true);

@@ -24,13 +24,18 @@ pub async fn cancel_audit() {
     invoke::<()>("cancel_audit", ()).await
 }
 
-pub async fn get_cached_audit(tenant_id: &str) -> Option<AuditRunResult> {
-    invoke("get_cached_audit", TenantArg { tenant_id }).await
+/// The last completed run, if one is cached. `Ok(None)` means none is (or the
+/// tenant has no session); the command is async on the backend, so it is
+/// bound fallible like every other async command.
+pub async fn get_cached_audit(tenant_id: &str) -> Result<Option<AuditRunResult>, UiError> {
+    invoke_result("get_cached_audit", TenantArg { tenant_id }).await
 }
 
 /// The cached run reduced to the Home posture card's counts — never the items.
-pub async fn get_cached_audit_summary(tenant_id: &str) -> Option<CachedAuditSummary> {
-    invoke("get_cached_audit_summary", TenantArg { tenant_id }).await
+pub async fn get_cached_audit_summary(
+    tenant_id: &str,
+) -> Result<Option<CachedAuditSummary>, UiError> {
+    invoke_result("get_cached_audit_summary", TenantArg { tenant_id }).await
 }
 
 #[derive(Serialize)]

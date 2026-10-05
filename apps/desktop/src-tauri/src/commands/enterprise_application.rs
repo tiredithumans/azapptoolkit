@@ -7,6 +7,7 @@
 //! without per-row Graph round trips.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
@@ -63,14 +64,16 @@ fn sp_to_enterprise_dto(
 pub async fn list_enterprise_applications(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<Vec<EnterpriseApplicationDto>, UiError> {
+) -> Result<Arc<Vec<EnterpriseApplicationDto>>, UiError> {
     // The cache-HIT path below returns before any client is built, so the
     // `graph_for` on the miss path is not a session proof for it.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let key = enterprise_key(&tenant_id);
+    // Typed + pinned: a warm visit is a refcount clone, not a JSON decode of
+    // every row. An untyped `get` here would miss and rescan.
     if let Some(cached) = state
         .cache
-        .get::<Vec<EnterpriseApplicationDto>>(CacheKind::Lists, &key)
+        .get_typed::<Vec<EnterpriseApplicationDto>>(CacheKind::Lists, &key)
     {
         tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "hit");
         return Ok(cached);
@@ -99,21 +102,24 @@ pub async fn list_enterprise_applications(
         .map(|a| (a.app_id.as_str(), a.id.as_str()))
         .collect();
 
-    let rows: Vec<EnterpriseApplicationDto> = sps
-        .iter()
-        .filter(|sp| sp.service_principal_type.as_deref() != Some("ManagedIdentity"))
-        .map(|sp| {
-            let paired = by_app_id
-                .get(sp.app_id.as_str())
-                .map(|id| (*id).to_string());
-            sp_to_enterprise_dto(sp.clone(), &tenant_id, paired)
-        })
-        .collect();
+    let rows: Arc<Vec<EnterpriseApplicationDto>> = Arc::new(
+        sps.iter()
+            .filter(|sp| sp.service_principal_type.as_deref() != Some("ManagedIdentity"))
+            .map(|sp| {
+                let paired = by_app_id
+                    .get(sp.app_id.as_str())
+                    .map(|id| (*id).to_string());
+                sp_to_enterprise_dto(sp.clone(), &tenant_id, paired)
+            })
+            .collect(),
+    );
 
-    // Pinned: a tenant-wide index, not a per-object entry (see `put_index`).
+    // Pinned: a tenant-wide index, not a per-object entry (see `put_typed_index_if_current`).
     // Guarded: a mutation that landed mid-scan already dropped this key, and
     // re-pinning the pre-mutation rows would outlive it.
-    state.cache.put_index_if_current(watch, &rows);
+    state
+        .cache
+        .put_typed_index_if_current(watch, Arc::clone(&rows));
     Ok(rows)
 }
 

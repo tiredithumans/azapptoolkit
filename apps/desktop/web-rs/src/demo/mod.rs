@@ -1464,6 +1464,7 @@ fn register_fixtures() {
         "cancel_backup",
         "cancel_restore",
         "cancel_aap_migration",
+        "cancel_scope_move",
     ] {
         mock_ok(cmd, &());
     }

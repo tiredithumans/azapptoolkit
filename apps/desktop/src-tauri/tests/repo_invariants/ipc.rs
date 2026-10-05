@@ -243,6 +243,65 @@ fn norm_type(t: &str) -> String {
     out
 }
 
+/// `norm`-alised type text with every `Arc<X>` replaced by `X`.
+///
+/// serde serializes an `Arc<T>` exactly as the `T` it points to, so a command
+/// returning a typed cache entry (`Result<Arc<Vec<Row>>, UiError>`, a refcount
+/// clone rather than a deep copy) puts the same bytes on the wire as one
+/// returning `Result<Vec<Row>, UiError>`, and its binding decodes the plain
+/// type. Applied to the backend side only: the frontend has no reason to ask
+/// for an `Arc`.
+fn strip_arc(norm: &str) -> String {
+    let mut out = norm.to_string();
+    while let Some(at) = out
+        .match_indices("Arc<")
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || !is_ident(out.as_bytes()[at - 1]))
+    {
+        let open = at + "Arc".len();
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, b) in out.bytes().enumerate().skip(open) {
+            match b {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        out = format!(
+            "{}{}{}",
+            &out[..at],
+            &out[open + 1..close],
+            &out[close + 1..]
+        );
+    }
+    out
+}
+
+#[test]
+fn strip_arc_unwraps_every_arc_and_nothing_else() {
+    assert_eq!(
+        strip_arc("Result<Arc<Vec<X>>,UiError>"),
+        "Result<Vec<X>,UiError>"
+    );
+    assert_eq!(
+        strip_arc("Result<Option<Arc<Run>>,UiError>"),
+        "Result<Option<Run>,UiError>"
+    );
+    assert_eq!(strip_arc("(Arc<A>,Arc<B<C>>)"), "(A,B<C>)");
+    assert_eq!(strip_arc("MyArc<X>"), "MyArc<X>");
+    assert_eq!(strip_arc("Vec<X>"), "Vec<X>");
+}
+
 /// One `invoke*("command", args)` call site in a binding file.
 #[derive(Debug, Clone, PartialEq)]
 struct Call {
@@ -603,7 +662,7 @@ fn binding_return_types_match_their_commands() {
         let Some(cmd) = commands.get(&call.command) else {
             continue;
         };
-        let backend = norm_type(&cmd.ret);
+        let backend = strip_arc(&norm_type(&cmd.ret));
         let binding = match norm_type(&call.ret) {
             t if t.is_empty() => "()".to_string(),
             t => t,

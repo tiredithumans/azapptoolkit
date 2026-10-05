@@ -219,7 +219,7 @@ pub fn ExchangeScopingSection(
                             "org-wide grants"
                         ),
                     ));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 } else {
                     // Hold the reload so the notes survive to be read; refresh
                     // the assignments list in place (a local signal, unaffected).
@@ -291,7 +291,7 @@ pub fn ExchangeScopingSection(
             move |r: exchange::ExchangeScopeConsolidationResult| {
                 if r.repointed && r.warnings.is_empty() {
                     session.toast_success(format!("Scope now points at “{}”.", r.group_name));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 } else {
                     // A plan, a fail-closed no-op, or a repoint with notes: all
                     // three have to be readable, so they stay inline (the same
@@ -337,7 +337,7 @@ pub fn ExchangeScopingSection(
                         count_noun(r.items.len(), "app", "apps"),
                         count_noun(policies, "legacy policy", "legacy policies"),
                     ));
-                    on_changed.run(());
+                    on_changed.try_run(());
                 }
             },
             move |tenant_id| async move {
@@ -483,6 +483,7 @@ pub fn ExchangeScopingSection(
                                     >
                                         "Move to managed group…"
                                     </Button>
+                                    {move || move_cmd.busy.get().then(|| view! { <ScopeMoveStop /> })}
                                     <Button
                                         class="button--danger"
                                         appearance=Signal::derive(|| ButtonAppearance::Subtle)
@@ -511,6 +512,20 @@ pub fn ExchangeScopingSection(
                                     .map(|r| {
                                         let tone = if r.repointed { "ok" } else { "warn" };
                                         let headline = match (r.dry_run, r.repointed) {
+                                            // A plan the reads alone already show would be
+                                            // refused: say so, never "copy N… then point".
+                                            (true, _) if r.refused.is_some() => {
+                                                format!(
+                                                    "The move would be refused, so nothing will change: {}",
+                                                    r.refused.clone().unwrap_or_default(),
+                                                )
+                                            }
+                                            (false, false) if r.incomplete => {
+                                                format!(
+                                                    "Move stopped — scope “{}” still points at its current group(s).",
+                                                    r.scope_name,
+                                                )
+                                            }
                                             (true, _) => {
                                                 format!(
                                                     "Plan: copy {} into “{}”, then point scope “{}” at it. Nothing has changed yet.",
@@ -538,6 +553,8 @@ pub fn ExchangeScopingSection(
                                         let unverified = r.members_unverified.clone();
                                         let warnings = r.warnings.clone();
                                         let is_plan = r.dry_run;
+                                        // Only a plan that can succeed offers "Move now".
+                                        let can_move = is_plan && r.refused.is_none();
                                         let retired = r.retired_groups.clone();
                                         let retired_app_id = r.app_id.clone();
                                         view! {
@@ -584,7 +601,7 @@ pub fn ExchangeScopingSection(
                                                     })
                                                 />
                                                 <div class="actions-row">
-                                                    {is_plan
+                                                    {can_move
                                                         .then(|| {
                                                             view! {
                                                                 <Button
@@ -639,9 +656,22 @@ pub fn ExchangeScopingSection(
                                                     "Exchange role assignment",
                                                     "Exchange role assignments",
                                                 );
-                                                session.toast_success(format!("Removed {removed}"));
+                                                // A partial removal must not read as done:
+                                                // whatever is still assigned still grants
+                                                // mailbox access.
+                                                match removal_failure_note(&res) {
+                                                    Some(note) => {
+                                                        session.toast_error(
+                                                            format!("Removed {removed}, but {note}"),
+                                                            None,
+                                                        );
+                                                    }
+                                                    None => {
+                                                        session.toast_success(format!("Removed {removed}"));
+                                                    }
+                                                }
                                                 reload.update(|v| *v += 1);
-                                                on_changed.run(());
+                                                on_changed.try_run(());
                                             },
                                             move |tenant_id: String| async move {
                                                 exchange::remove_exchange_mailbox_access(&tenant_id, &aid)
@@ -774,6 +804,50 @@ pub fn ExchangeScopingSection(
     }
 }
 
+/// Stops an in-flight "Move to managed group" copy. Adds already in flight
+/// finish; the scope keeps its current filter. Mounted only while the move is
+/// busy, so each run gets a fresh button (the `AapMigrationStop` precedent).
+#[component]
+fn ScopeMoveStop() -> impl IntoView {
+    let stopping = RwSignal::new(false);
+    let do_stop = move |_| {
+        if stopping.get() {
+            return;
+        }
+        stopping.set(true);
+        leptos::task::spawn_local(async move {
+            let _ = exchange::cancel_scope_move().await;
+        });
+    };
+    view! {
+        <Button
+            appearance=Signal::derive(|| ButtonAppearance::Subtle)
+            on_click=Box::new(do_stop)
+            disabled=Signal::derive(move || stopping.get())
+        >
+            {move || if stopping.get() { "Stopping…" } else { "Stop move" }}
+        </Button>
+    }
+}
+
+/// What a partial "Remove all…" left behind, or `None` when nothing failed:
+/// "N could not be removed: Role (reason); …".
+fn removal_failure_note(res: &exchange::ExchangeAccessRemovalResult) -> Option<String> {
+    if res.failed.is_empty() {
+        return None;
+    }
+    let list = res
+        .failed
+        .iter()
+        .map(|f| format!("{} ({})", f.assignment, f.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "{} could not be removed and still grant mailbox access: {list}",
+        count_noun(res.failed.len(), "assignment", "assignments"),
+    ))
+}
+
 /// The Scope cell of "Current Exchange role assignments". An assignment with
 /// no management scope is org-wide only when nothing else confines it: one
 /// made with `-RecipientAdministrativeUnitScope` reaches just that unit.
@@ -818,6 +892,26 @@ mod tests {
             custom_recipient_write_scope: None,
             recipient_administrative_unit_scope: None,
         }
+    }
+
+    #[test]
+    fn a_partial_removal_names_what_is_still_assigned() {
+        let mut res = exchange::ExchangeAccessRemovalResult {
+            app_id: "app-1".into(),
+            removed_assignments: vec!["Application Mail.Send".into()],
+            failed: Vec::new(),
+            warnings: Vec::new(),
+        };
+        assert_eq!(removal_failure_note(&res), None);
+        res.failed.push(exchange::ExchangeAssignmentFailure {
+            assignment: "Application Mail.Read".into(),
+            reason: "denied".into(),
+        });
+        let note = removal_failure_note(&res).expect("a failure is reported");
+        assert!(
+            note.contains("1 assignment") && note.contains("Application Mail.Read (denied)"),
+            "{note}"
+        );
     }
 
     #[test]

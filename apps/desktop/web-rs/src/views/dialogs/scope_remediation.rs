@@ -130,7 +130,7 @@ pub fn ScopeMailboxButton(
                             "org-wide grants"
                         )
                     ));
-                    on_done.run(target.row_id());
+                    on_done.try_run(target.row_id());
                 }
                 // A warned grant stays in the modal and keeps the row's Fix:
                 // the common warning ("a management scope already exists for
@@ -366,7 +366,7 @@ pub fn ScopeSharePointButton(
                             count_noun(sites, "site", "sites"),
                             count_noun(removed, "org-wide grant", "org-wide grants"),
                         ));
-                        on_done.run(target.row_id());
+                        on_done.try_run(target.row_id());
                     }
                     Err(e) if e.is_consent_required() => {
                         needs_consent.set(true);

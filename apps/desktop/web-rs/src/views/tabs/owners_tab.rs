@@ -78,7 +78,7 @@ pub fn OwnersTab(
                 Ok(()) => {
                     raw_query.set(String::new());
                     session.toast_success("Owner added.");
-                    on_changed_cb.run(());
+                    on_changed_cb.try_run(());
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -129,7 +129,7 @@ pub fn OwnersTab(
             } else {
                 session.toast_success("Default owners are already present.");
             }
-            on_changed_cb.run(());
+            on_changed_cb.try_run(());
             adding_defaults.set(false);
         });
     };
@@ -153,7 +153,7 @@ pub fn OwnersTab(
             {
                 Ok(()) => {
                     session.toast_success("Owner removed.");
-                    on_changed_cb.run(());
+                    on_changed_cb.try_run(());
                 }
                 Err(e) => error.set(Some(e.message)),
             }
@@ -253,7 +253,7 @@ pub fn OwnersTab(
                     } else {
                         session.toast_success("Owners updated.");
                     }
-                    on_changed_cb.run(());
+                    on_changed_cb.try_run(());
                 }
                 Err(e) => {
                     session.report_if_session_dead(&e);

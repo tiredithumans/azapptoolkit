@@ -706,6 +706,207 @@ fn pinned_index_writes_are_guarded_except_the_static_gallery_corpus() {
     );
 }
 
+/// Every pinned entry is stored **typed**, and every read of a pinnable key goes
+/// through `get_typed` (or a typed accessor such as `sp_index_hit`).
+///
+/// A pinned entry is a tenant-wide list, read on every warm visit. Stored as
+/// JSON, each read walked the whole tree back into rows — thousands of rows per
+/// tab switch — so they all moved to `put_typed_index_if_current`. That move
+/// has a sharp edge: a typed entry keeps `Null` as its JSON body, so an untyped
+/// `cache.get` against it does not fail, it *misses*, and the caller silently
+/// pays the full directory rescan the pin exists to avoid. One stale reader
+/// left on `get::<Vec<T>>` would defeat the cache without a single error.
+///
+/// So: no untyped pinned write remains, no untyped `cache.get` names a
+/// [`PINNABLE_KEYS`] builder (directly, or through a `let key = …` binding in
+/// the same function), and — so the rule cannot pass by scanning nothing —
+/// every pinnable key has at least one typed reader.
+#[test]
+fn pinned_keys_are_read_only_through_get_typed() {
+    let mut untyped_writes: Vec<String> = Vec::new();
+    let mut untyped_reads: Vec<String> = Vec::new();
+    let mut typed_readers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for (name, src) in super::sources::command_modules() {
+        for line in code_lines(&src) {
+            if line.contains("put_index(") || line.contains("put_index_if_current(") {
+                untyped_writes.push(format!("{name}: {}", line.trim()));
+            }
+        }
+        for func in super::sources::functions_in(&src) {
+            for (typed, key) in cache_get_keys(&func.body) {
+                if typed {
+                    typed_readers.extend(key);
+                } else if let Some(key) = key {
+                    untyped_reads.push(format!("{name}::{} reads `{key}` untyped", func.name));
+                }
+            }
+        }
+    }
+    assert!(
+        untyped_writes.is_empty(),
+        "untyped pinned write(s) — store a pinned entry with `put_typed_index_if_current` so a \
+         warm read is a refcount clone, not a JSON decode:\n  {}",
+        untyped_writes.join("\n  ")
+    );
+    assert!(
+        untyped_reads.is_empty(),
+        "untyped `cache.get` on a pinned (typed) key — it always MISSES, silently costing a \
+         tenant-wide rescan. Use `get_typed` or the key's `*_hit` accessor:\n  {}",
+        untyped_reads.join("\n  ")
+    );
+    let unread: Vec<&&str> = PINNABLE_KEYS
+        .iter()
+        .filter(|k| !typed_readers.contains(**k))
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "no `get_typed` read found for {unread:?} — either the reader moved to a form this \
+         scan cannot resolve (fix the scan) or it reads the key untyped"
+    );
+}
+
+/// Each `cache.get…(…)` call in `body`: whether it is `get_typed`, and the
+/// [`PINNABLE_KEYS`] builder its key argument resolves to, if any. The key is
+/// resolved either inline (`&apps_pairing_key(t)`) or through a
+/// `let <ident> = <builder>(…)` binding in the same body.
+fn cache_get_keys(body: &str) -> Vec<(bool, Option<&'static str>)> {
+    let mask = code_mask(body);
+    let code: String = body
+        .char_indices()
+        .map(|(i, c)| if mask[i] { c } else { ' ' })
+        .collect();
+    let (flat, _) = flatten_out_whitespace(&code);
+    let pinnable_in = |text: &str| {
+        PINNABLE_KEYS.iter().copied().find(|k| {
+            text.match_indices(k)
+                .any(|(at, _)| at == 0 || !is_ident_char(text.as_bytes()[at - 1]))
+        })
+    };
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = flat[from..].find("cache.get") {
+        let at = from + hit + "cache.get".len();
+        from = at;
+        let rest = &flat[at..];
+        let (typed, rest_at) = match rest.strip_prefix("_typed") {
+            Some(_) => (true, at + "_typed".len()),
+            None => (false, at),
+        };
+        let rest = &flat[rest_at..];
+        let open = if rest.starts_with('(') {
+            rest_at
+        } else if rest.starts_with("::<") {
+            match rest.find('(') {
+                Some(p) => rest_at + p,
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        let Some(close) = matching_paren(&flat, open) else {
+            continue;
+        };
+        let args = &flat[open + 1..close];
+        let key = pinnable_in(args).or_else(|| {
+            // `CacheKind::Lists,&key` → resolve `key` through its `let`.
+            let ident = args.rsplit(',').next()?.trim_start_matches('&');
+            if ident.is_empty() || !ident.bytes().all(is_ident_char) {
+                return None;
+            }
+            let binding = format!("let{ident}=");
+            flat.match_indices(&binding).find_map(|(b, _)| {
+                let end = flat[b..].find(';').map_or(flat.len(), |e| b + e);
+                pinnable_in(&flat[b + binding.len()..end])
+            })
+        });
+        out.push((typed, key));
+    }
+    out
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[test]
+fn the_pinned_read_detector_resolves_inline_and_let_bound_keys() {
+    let body = "{
+        let key = mi_key(&tenant_id);
+        if let Some(c) = state
+            .cache
+            .get::<Vec<ManagedIdentityDto>>(CacheKind::Lists, &key)
+        {}
+        let _ = cache.get_typed::<Vec<X>>(CacheKind::Lists, &apps_pairing_key(t));
+        let _ = cache.get(CacheKind::Lists, &credential_expirations_key(t));
+        let other = app_detail_key(t, o);
+        let _ = cache.get::<D>(CacheKind::Lists, &other);
+        let _ = cache.get::<D>(CacheKind::Lists, &foo_mi_key(t));
+        // cache.get::<D>(CacheKind::Lists, &enterprise_key(t)) in a comment
+    }";
+    assert_eq!(
+        cache_get_keys(body),
+        vec![
+            (false, Some("mi_key(")),
+            (true, Some("apps_pairing_key(")),
+            (false, Some("credential_expirations_key(")),
+            (false, None),
+            (false, None),
+        ]
+    );
+}
+
+/// A command that reads a long-scan result from the cache (the
+/// `CacheKind::Audit` bucket: the audit run, the site sweep, the Key Vault
+/// sweep) is an `async fn`.
+///
+/// Tauri runs a sync command on the main thread. These entries are the largest
+/// the app caches — up to 10 000 scored items, or every site's grants — and the
+/// four cached readers were sync: hydrating the Security tab copied and
+/// serialized the whole run with the window frozen. AGENTS.md's command shape
+/// (`async fn` → `Result<T, UiError>`) already says so; this makes it
+/// mechanical for the bucket where it costs the most.
+#[test]
+fn cached_scan_reads_are_async_commands() {
+    let modules: std::collections::HashMap<String, String> =
+        super::sources::command_modules().into_iter().collect();
+    let mut checked: Vec<String> = Vec::new();
+    let mut offenders: Vec<String> = Vec::new();
+    for cmd in super::sources::commands() {
+        let mask = code_mask(&cmd.body);
+        let code: String = cmd
+            .body
+            .char_indices()
+            .map(|(i, c)| if mask[i] { c } else { ' ' })
+            .collect();
+        let (flat, _) = flatten_out_whitespace(&code);
+        if !flat.contains("CacheKind::Audit") || first_cache_read(&flat).is_none() {
+            continue;
+        }
+        checked.push(format!("{}::{}", cmd.module, cmd.name));
+        let header = format!("fn {}(", cmd.name);
+        let is_async = modules[&cmd.module]
+            .lines()
+            .find(|l| l.contains(&header) && is_fn_header(l.trim_start()))
+            .is_some_and(|l| l.contains("async fn "));
+        if !is_async {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+    // get_cached_audit, get_cached_audit_summary, save_audit_to_file,
+    // get_cached_site_sweep, get_app_site_access, get_cached_key_vault_access.
+    const KNOWN_AUDIT_CACHE_READERS: usize = 6;
+    assert!(
+        checked.len() >= KNOWN_AUDIT_CACHE_READERS,
+        "found only {checked:?} reading the Audit bucket — the scan is broken"
+    );
+    assert!(
+        offenders.is_empty(),
+        "sync command(s) reading a cached scan result run on the MAIN thread — make them \
+         `async fn … -> Result<_, UiError>`:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 /// The guard is only a guard if the watch is taken **before** the fetch it is
 /// meant to cover.
 ///
@@ -1006,7 +1207,14 @@ fn sign_out_stops_every_read_sweep() {
     // Write runs, deliberately NOT cancelled on sign-out: stopping a
     // multi-step write between steps is the operator's call, and with the
     // tokens purged each stops on its own at the dead-session latch.
-    const WRITE_RUNS: [&str; 3] = ["bulk_cancel", "migration_cancel", "restore_cancel"];
+    // `scope_move_cancel` is the "Move to managed group" member copy — writes
+    // into a group, and a stopped copy already keeps the scope where it was.
+    const WRITE_RUNS: [&str; 4] = [
+        "bulk_cancel",
+        "migration_cancel",
+        "scope_move_cancel",
+        "restore_cancel",
+    ];
 
     let state = include_str!("../../src/state.rs").replace("\r\n", "\n");
     let (_, after) = state
@@ -1525,11 +1733,13 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 11] = [
+const CACHED_ACCESSORS: [&str; 13] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
     "credential_expirations_cached(",
+    "apps_pairing_hit(",
+    "credential_expirations_hit(",
     "indexes_cached(",
     "sp_index_hit(",
     "app_name_index_hit(",

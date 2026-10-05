@@ -136,7 +136,19 @@ impl AuditController {
             let Some(t) = t else { return };
             let tenant_id = t.tenant_id.clone();
             leptos::task::spawn_local(async move {
-                let cached = audit::get_cached_audit(&tenant_id).await;
+                // A failed hydrate reads as "no cached run" (the operator can
+                // still run the audit), but says so in the console.
+                let cached = match audit::get_cached_audit(&tenant_id).await {
+                    Ok(cached) => cached,
+                    Err(err) => {
+                        leptos::logging::warn!(
+                            "get_cached_audit failed ({}): {}",
+                            err.code,
+                            err.message
+                        );
+                        None
+                    }
+                };
                 let still_active = tenant
                     .get_untracked()
                     .map(|t| t.tenant_id == tenant_id)
