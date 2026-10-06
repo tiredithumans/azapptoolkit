@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-05
+
 ### Changed
 
 - **A restore shows the access a backup file grants, and grants it only when you approve.**
