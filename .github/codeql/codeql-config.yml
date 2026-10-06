@@ -9,9 +9,20 @@ name: "azapptoolkit CodeQL config"
 # quality. `**/target` covers the workspace + every crate's build dir; the
 # web-rs `dist` is a Trunk artifact (and the macro-existence stub the workflow
 # drops, see `just _stub-frontend-dist`).
+#
+# Test-only sources are excluded too: every `tests/` directory (integration
+# tests, web-rs GUI tests, the graph client's `#[cfg(test)] mod tests` dir) and
+# every `tests.rs` / `*_tests.rs` file (each mounted only under `#[cfg(test)]`).
+# CodeQL reads their `assert!` messages and fixture nonces as cleartext logging
+# and hard-coded crypto; those alerts were all dismissed "used in tests". Test
+# modules written INLINE in a production file can't be path-ignored — dismiss
+# those per alert.
 paths-ignore:
   - "**/target"
   - "apps/desktop/web-rs/dist"
+  - "**/tests/**"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
 
 # Default ("code-scanning") query suite — matches the prior default-setup
 # behaviour and keeps false-positive noise low. `security-extended` is a later
