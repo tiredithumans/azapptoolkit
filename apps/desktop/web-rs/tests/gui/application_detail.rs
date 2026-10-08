@@ -80,3 +80,109 @@ async fn error_state_offers_retry_that_reloads() {
     ts::click(".ui-load-error button");
     ts::wait_for(|| ts::call_count("get_application_detail") > before).await;
 }
+
+/// The two list reload counters, read without tracking.
+fn reloads(m: &ts::Mounted) -> (u32, u32) {
+    (
+        m.session.apps_reload.get_untracked(),
+        m.session.enterprise_apps_reload.get_untracked(),
+    )
+}
+
+/// A delete from the detail pane refreshes both lists: the row used to linger
+/// in App Registrations until something else refetched, and Graph deletes the
+/// app's service principal along with it. The backend patches its caches for
+/// the delete, so both refetches are cache hits.
+#[wasm_bindgen_test]
+async fn deleting_from_the_detail_pane_refreshes_both_lists() {
+    ts::reset();
+    ts::mock_ok(
+        "get_application_detail",
+        &fixtures::application_detail("obj-1", "app-1", "Contoso CRM"),
+    );
+    ts::mock_ok("delete_application", &());
+
+    let m = ts::mount_view(
+        || view! { <ApplicationDetailPane object_id=Signal::derive(|| "obj-1".to_string()) /> },
+    );
+    ts::wait_for(|| ts::body_contains("Contoso CRM")).await;
+    let (apps, enterprise) = reloads(&m);
+
+    ts::click_button_labelled("Delete");
+    ts::wait_for(|| ts::query(".modal").is_some()).await;
+    ts::click_button_labelled_in(".modal", "Delete");
+
+    ts::wait_for(|| reloads(&m) == (apps + 1, enterprise + 1)).await;
+    assert_eq!(
+        ts::last_call("delete_application")
+            .unwrap()
+            .arg_str("objectId")
+            .as_deref(),
+        Some("obj-1")
+    );
+}
+
+/// [`ts::wait_for`] that names the step it was stuck on and dumps the page.
+async fn settle(step: &str, f: impl Fn() -> bool) {
+    for _ in 0..300 {
+        if f() {
+            return;
+        }
+        ts::tick().await;
+    }
+    panic!("stuck at {step}; body:\n{}", ts::body_text());
+}
+
+/// A rename refreshes the App Registrations list, whose rows show the name.
+/// A description edit does not: no list shows it.
+#[wasm_bindgen_test]
+async fn a_rename_refreshes_the_app_list_and_a_description_edit_does_not() {
+    ts::reset();
+    ts::mock_ok(
+        "get_application_detail",
+        &fixtures::application_detail("obj-1", "app-1", "Contoso CRM"),
+    );
+    ts::mock_ok("update_application", &());
+
+    let m = ts::mount_view(
+        || view! { <ApplicationDetailPane object_id=Signal::derive(|| "obj-1".to_string()) /> },
+    );
+    settle("loaded", || ts::body_contains("Contoso CRM")).await;
+    let (apps, _) = reloads(&m);
+
+    ts::click_button_labelled("Edit");
+    settle("rename form", || {
+        ts::query(".overview-tab .form-grid input").is_some()
+    })
+    .await;
+    ts::set_input_value(".overview-tab .form-grid input", "Contoso CRM v2");
+    settle("rename Save enabled", || {
+        ts::button_labelled_enabled("Save")
+    })
+    .await;
+    ts::click_button_labelled("Save");
+    settle("rename landed", || reloads(&m).0 == apps + 1).await;
+
+    settle("Edit again", || ts::button_labelled_enabled("Edit")).await;
+    ts::click_button_labelled("Edit");
+    settle("description form", || {
+        ts::query(".overview-tab textarea").is_some()
+    })
+    .await;
+    ts::set_input_value(".overview-tab textarea", "A new description");
+    settle("description Save enabled", || {
+        ts::button_labelled_enabled("Save")
+    })
+    .await;
+    ts::click_button_labelled("Save");
+    settle("description sent", || {
+        ts::call_count("update_application") == 2
+    })
+    .await;
+    settle("form closed", || ts::button_labelled_enabled("Edit")).await;
+    assert_eq!(
+        reloads(&m).0,
+        apps + 1,
+        "a description edit refetched the list"
+    );
+}

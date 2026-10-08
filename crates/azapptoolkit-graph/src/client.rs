@@ -89,7 +89,9 @@ pub use applications::{
     DELETED_APPS_MAX, DELETED_SPS_MAX, ImplicitGrantSettingsPatch,
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
-pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
+pub use service_principals::{
+    ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch, sp_index_row,
+};
 pub(crate) use transport::{batch_sub_url, escape_odata, not_found_as_none, search_phrase};
 
 pub struct GraphClient {

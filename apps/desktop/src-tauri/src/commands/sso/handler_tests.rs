@@ -780,7 +780,7 @@ async fn an_oidc_secret_is_minted_inside_the_two_year_cap() {
     let state = AppState::for_test(TENANT, &server.uri());
     let client = state.graph_for(TENANT);
 
-    let summary = configure_oidc(
+    let (summary, minted) = configure_oidc(
         &client,
         CloudEnvironment::Commercial,
         OBJECT,
@@ -792,6 +792,8 @@ async fn an_oidc_secret_is_minted_inside_the_two_year_cap() {
     .await
     .expect("the secret is minted");
     assert!(summary.client_secret.is_some());
+    // The metadata handed to the cache patch never carries the value.
+    assert!(minted.expect("the secret's metadata").secret_text.is_none());
 
     let requests = server
         .received_requests()

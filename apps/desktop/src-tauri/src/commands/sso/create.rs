@@ -6,13 +6,16 @@ use std::time::Duration;
 use tauri::State;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
+use azapptoolkit_core::models::PasswordCredential;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::{
     ApplicationSpaPatch, ApplicationSsoPatch, ApplicationWebPatch, ServicePrincipalSigningKeyPatch,
     ServicePrincipalSsoModePatch,
 };
 
-use crate::commands::applications::{augment_with_object_id, invalidate_app_lists};
+use crate::commands::applications::{
+    CreatedApp, augment_with_object_id, invalidate_app_lists, record_created_apps,
+};
 use crate::dto::UiError;
 use crate::dto::sso::{OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput, SamlSsoSummary};
 use crate::state::AppState;
@@ -93,18 +96,33 @@ pub(crate) async fn create_saml_sso_application_core(
     let sp_id = pair.service_principal.id.clone();
 
     // From here a failure leaves a half-configured app the user can finish in
-    // the SSO tab; we never auto-delete. Bust caches on any early return that
-    // got past instantiate so the new (paired) SP shows up in the lists.
+    // the SSO tab; we never auto-delete. The caches change on any return that
+    // got past instantiate so the new (paired) SP shows up in the lists: a
+    // clean run patches the pair in, and a failed step, which may still have
+    // landed, busts the list tier. Steps 2-6 change nothing a list row shows
+    // (the signing cert is on the SP, not in the app's credentials).
     let result = configure_saml(
         &client, cloud, &object_id, &sp_id, tenant_id, &app_id, &input,
     )
     .await;
-    invalidate_app_lists(&state.cache, tenant_id);
+    if result.is_ok() {
+        record_created_apps(
+            &state.cache,
+            tenant_id,
+            &[CreatedApp {
+                application: &pair.application,
+                service_principal: Some(&pair.service_principal),
+                added_password: None,
+            }],
+        );
+    } else {
+        invalidate_app_lists(&state.cache, tenant_id);
+    }
     result.map_err(|e| augment_with_object_id(e, &object_id))
 }
 
-/// Steps 2–6 of the SAML flow, factored out so the caller can always invalidate
-/// caches once instantiate succeeded. Steps 5b (notification emails) and 6
+/// Steps 2–6 of the SAML flow, factored out so the caller can always update
+/// the caches once instantiate succeeded. Steps 5b (notification emails) and 6
 /// (custom claims) are best-effort: non-fatal, reported in `warnings` so the
 /// summary never reads as a clean success when one of them did not land.
 pub(crate) async fn configure_saml(
@@ -277,14 +295,34 @@ pub(crate) async fn create_oidc_sso_application_core(
     let app_id = pair.application.app_id.clone();
     let sp_id = pair.service_principal.id.clone();
 
+    // As for SAML: patch on a clean run, bust on a failed step. The client
+    // secret is minted after instantiate, so it rides along for the list
+    // row's credential badge and the expiry roll-up.
     let result = configure_oidc(
         &client, cloud, &object_id, &app_id, &sp_id, tenant_id, &input,
     )
     .await;
-    invalidate_app_lists(&state.cache, tenant_id);
-    result.map_err(|e| augment_with_object_id(e, &object_id))
+    if let Ok((_, secret)) = &result {
+        record_created_apps(
+            &state.cache,
+            tenant_id,
+            &[CreatedApp {
+                application: &pair.application,
+                service_principal: Some(&pair.service_principal),
+                added_password: secret.as_ref(),
+            }],
+        );
+    } else {
+        invalidate_app_lists(&state.cache, tenant_id);
+    }
+    result
+        .map(|(summary, _)| summary)
+        .map_err(|e| augment_with_object_id(e, &object_id))
 }
 
+/// Steps 2-3 of the OIDC flow. Returns the summary plus the minted secret's
+/// metadata (its `secret_text` cleared; the value travels only in the
+/// summary) so the caller can patch the list caches.
 pub(crate) async fn configure_oidc(
     client: &GraphClient,
     cloud: CloudEnvironment,
@@ -293,7 +331,7 @@ pub(crate) async fn configure_oidc(
     sp_id: &str,
     tenant_id: &str,
     input: &OidcSsoConfigInput,
-) -> Result<OidcSsoSummary, UiError> {
+) -> Result<(OidcSsoSummary, Option<PasswordCredential>), UiError> {
     // Redirect URIs (web and/or SPA). Only include the keys actually provided.
     let web = (!input.redirect_uris.is_empty()).then(|| ApplicationWebPatch {
         redirect_uris: Some(input.redirect_uris.clone()),
@@ -313,25 +351,26 @@ pub(crate) async fn configure_oidc(
     }
 
     // Optional client secret (show-once).
-    let (client_secret, client_secret_expiry) = if let Some(name) = input
+    let (client_secret, client_secret_expiry, minted) = if let Some(name) = input
         .secret_display_name
         .as_deref()
         .filter(|s| !s.is_empty())
     {
         let days = resolve_secret_lifetime_days(input.secret_lifetime_days)?;
         let lifetime = Duration::from_secs(u64::from(days) * 86_400);
-        let secret =
+        let mut secret =
             with_replication_retry(|| client.add_password(object_id, name, lifetime)).await?;
         (
-            secret.secret_text.clone(),
+            secret.secret_text.take(),
             secret.end_date_time.map(|d| d.to_rfc3339()),
+            Some(secret),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let (authority, discovery_url) = oidc_summary_urls(cloud, tenant_id);
-    Ok(OidcSsoSummary {
+    let summary = OidcSsoSummary {
         object_id: object_id.to_string(),
         service_principal_id: sp_id.to_string(),
         client_id: app_id.to_string(),
@@ -342,5 +381,6 @@ pub(crate) async fn configure_oidc(
         spa_redirect_uris: input.spa_redirect_uris.clone(),
         client_secret,
         client_secret_expiry,
-    })
+    };
+    Ok((summary, minted))
 }

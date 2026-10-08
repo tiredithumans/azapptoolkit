@@ -184,15 +184,7 @@ pub(crate) async fn scan_app_list(
     // hold an `Arc` to this entry, and the credential arrays must not be pinned
     // into it. Stored every time; the store is guarded, so a warm index is
     // simply left as it is.
-    let lean: Vec<Application> = apps
-        .iter()
-        .map(|a| Application {
-            id: a.id.clone(),
-            app_id: a.app_id.clone(),
-            display_name: a.display_name.clone(),
-            ..Default::default()
-        })
-        .collect();
+    let lean: Vec<Application> = apps.iter().map(cache::app_name_index_row).collect();
     cache::app_name_index_store_if_current(&state.cache, lean, name_watch);
 
     let by_app_id: HashMap<&str, &str> = sps
@@ -361,10 +353,15 @@ pub async fn create_application(
 /// rule is reachable from a test (the `add_password_core` seam; the `_core`
 /// name is the Graph-only helper below).
 ///
-/// Once the registration POST has landed the app exists, so the list tier is
-/// busted **whatever** happens after it — a partial success is a real write —
+/// Once the registration POST has landed the app exists, so the list caches
+/// change **whatever** happens after it — a partial success is a real write —
 /// and only then is a later step's error surfaced, naming the new app's object
 /// id so the operator can finish or delete it instead of creating a duplicate.
+///
+/// A clean create patches the new app (and its SP and initial secret) into the
+/// cached lists, so the reload that follows is a cache hit, not a tenant-wide
+/// rescan. A partial one busts the list tier: the failed step (an SP POST, a
+/// secret) may still have landed, and nothing in hand describes it.
 pub(crate) async fn create_application_in_state(
     state: &AppState,
     tenant_id: &str,
@@ -372,10 +369,23 @@ pub(crate) async fn create_application_in_state(
 ) -> Result<CreateApplicationResult, UiError> {
     let client = state.graph_for(tenant_id);
     let (result, error) = create_application_core(&client, input).await?;
-    invalidate_app_lists(&state.cache, tenant_id);
     match error {
-        Some(e) => Err(augment_with_object_id(e, &result.application.id)),
-        None => Ok(result),
+        Some(e) => {
+            invalidate_app_lists(&state.cache, tenant_id);
+            Err(augment_with_object_id(e, &result.application.id))
+        }
+        None => {
+            record_created_apps(
+                &state.cache,
+                tenant_id,
+                &[CreatedApp {
+                    application: &result.application,
+                    service_principal: result.service_principal.as_ref(),
+                    added_password: result.initial_secret.as_ref(),
+                }],
+            );
+            Ok(result)
+        }
     }
 }
 
@@ -537,7 +547,19 @@ pub async fn update_application(
         required_resource_access: None,
     };
     client.update_application(&object_id, &graph_patch).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    if graph_patch.display_name.is_some() || graph_patch.sign_in_audience.is_some() {
+        // The list rows carry the name and audience: rewrite them in place.
+        record_renamed_app(
+            &state.cache,
+            &tenant_id,
+            &object_id,
+            graph_patch.display_name.as_deref(),
+            graph_patch.sign_in_audience.as_deref(),
+        );
+    } else {
+        // Description and notes show only in the detail pane.
+        invalidate_app_details(&state.cache, &tenant_id);
+    }
     Ok(())
 }
 
@@ -549,7 +571,7 @@ pub async fn delete_application(
 ) -> Result<(), UiError> {
     let client = state.graph_for(&tenant_id);
     client.delete_application(&object_id).await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    record_deleted_apps(&state.cache, &tenant_id, &[object_id]);
     Ok(())
 }
 
@@ -978,7 +1000,7 @@ mod handler_tests {
     /// Once the initial secret is minted, a dead session in the owner loop
     /// must not turn the command into an `Err`: that would drop the only copy
     /// of the secret value. The loop still stops and lists every owner as
-    /// failed, and the list tier is still busted.
+    /// failed, and the new app still reaches the cached lists.
     #[tokio::test]
     async fn a_dead_session_after_the_initial_secret_keeps_the_secret() {
         // Two write bearers: the app POST and the addPassword get them, the
@@ -1030,9 +1052,206 @@ mod handler_tests {
             0,
             "no owner add reached Graph after the session died"
         );
+        // No owner add reached Graph, so the create is fully described by what
+        // came back: it is patched into the cached index, not rescanned.
+        let names = app_name_index_hit(&state.cache, TENANT).expect("the index is kept");
         assert!(
-            !indexes_intact(&state, TENANT),
-            "the landed create still busts the list tier"
+            names.iter().any(|a| a.id == "obj-new"),
+            "the landed create reaches the cached lists"
+        );
+    }
+
+    /// What the patch tier is for. A clean create (app + SP + initial secret)
+    /// lands in every scanned cache, so the list reload that follows is
+    /// served without paging `/applications` or `/servicePrincipals` again.
+    /// Both scan mocks expect exactly the one warm-up scan.
+    #[tokio::test]
+    async fn a_clean_create_is_patched_into_the_warm_lists_without_a_rescan() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+        apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("warm-up scan");
+
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "obj-new",
+                "appId": "app-new",
+                "displayName": "New",
+                "passwordCredentials": [],
+                "keyCredentials": [],
+            })))
+            .mount(&server)
+            .await;
+        // Ahead of the index mock, which matches every SP GET.
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-new'"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "sp-new",
+                "appId": "app-new",
+                "displayName": "New",
+                "servicePrincipalType": "Application",
+                "tags": ["WindowsAzureActiveDirectoryIntegratedApp"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/applications/obj-new/addPassword"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "k-new",
+                "displayName": "initial",
+                "endDateTime": "2099-06-01T00:00:00Z",
+                "secretText": "s3cret",
+            })))
+            .mount(&server)
+            .await;
+
+        let res = create_application_in_state(
+            &state,
+            TENANT,
+            CreateApplicationInput {
+                display_name: "New".into(),
+                create_service_principal: true,
+                initial_secret_display_name: Some("initial".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a clean create");
+        assert_eq!(
+            res.initial_secret.and_then(|s| s.secret_text).as_deref(),
+            Some("s3cret"),
+            "the patch must not consume the show-once value"
+        );
+
+        let rows = apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        let row = rows.iter().find(|r| r.id == "obj-new").expect("new row");
+        assert_eq!(row.paired_service_principal_id.as_deref(), Some("sp-new"));
+        assert_eq!(
+            row.password_credential_count, 1,
+            "the initial secret counts"
+        );
+        assert!(
+            rows.iter().any(|r| r.id == "obj-1"),
+            "the scanned row stays"
+        );
+
+        let creds = credential_expirations_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        assert_eq!(
+            creds
+                .iter()
+                .map(|c| c.app_object_id.as_str())
+                .collect::<Vec<_>>(),
+            ["obj-1", "obj-new"],
+            "the new secret joins the roll-up in expiry order"
+        );
+
+        let sps = sp_index_hit(&state.cache, TENANT).expect("the SP index is kept");
+        let sp = sps.iter().find(|s| s.id == "sp-new").expect("new SP");
+        assert!(
+            sp.tags.is_empty(),
+            "the patched SP carries only the index's fields"
+        );
+        let names = app_name_index_hit(&state.cache, TENANT).expect("the name index is kept");
+        assert!(names.iter().any(|a| a.id == "obj-new"));
+    }
+
+    /// A delete removes the app's rows and its home-tenant SP (Graph deletes
+    /// it along with the app) from the warm caches, again without a rescan.
+    #[tokio::test]
+    async fn a_delete_is_patched_out_of_the_warm_lists_without_a_rescan() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+        apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("warm-up scan");
+
+        record_deleted_apps(&state.cache, TENANT, &["obj-1".to_string()]);
+
+        let rows = apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        assert!(rows.is_empty());
+        let creds = credential_expirations_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        assert!(creds.is_empty());
+        let sps = sp_index_hit(&state.cache, TENANT).expect("the SP index is kept");
+        assert!(
+            sps.iter().all(|s| s.app_id != "app-1"),
+            "the paired SP left"
+        );
+        let names = app_name_index_hit(&state.cache, TENANT).expect("the name index is kept");
+        assert!(names.is_empty());
+    }
+
+    /// A rename rewrites the name wherever the scanned caches carry it.
+    #[tokio::test]
+    async fn a_rename_is_patched_into_the_warm_lists_without_a_rescan() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+        apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("warm-up scan");
+
+        record_renamed_app(
+            &state.cache,
+            TENANT,
+            "obj-1",
+            Some("Renamed"),
+            Some("AzureADMultipleOrgs"),
+        );
+
+        let rows = apps_pairing_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        assert_eq!(rows[0].display_name, "Renamed");
+        assert_eq!(
+            rows[0].sign_in_audience.as_deref(),
+            Some("AzureADMultipleOrgs")
+        );
+        let creds = credential_expirations_cached(&state, TENANT)
+            .await
+            .expect("cache hit");
+        assert_eq!(creds[0].app_display_name, "Renamed");
+        let names = app_name_index_hit(&state.cache, TENANT).expect("the name index is kept");
+        assert_eq!(names[0].display_name, "Renamed");
+        let sps = sp_index_hit(&state.cache, TENANT).expect("the SP index is kept");
+        assert_eq!(
+            sps[0].display_name, "Demo App",
+            "Graph syncs the SP's name later; the index keeps what Graph returns"
         );
     }
 }
