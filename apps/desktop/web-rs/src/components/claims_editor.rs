@@ -15,8 +15,8 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Input, Select};
 
 use crate::bindings::sso::{
-    ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, TransformInputClaimDto,
-    TransformOutputClaimDto, TransformParamDto,
+    ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, DEFAULT_NAME_ID_ATTRIBUTE,
+    DEFAULT_SAML_CLAIMS, TransformInputClaimDto, TransformOutputClaimDto, TransformParamDto,
 };
 use crate::components::ui::Callout;
 
@@ -50,39 +50,23 @@ const TRANSFORM_METHODS: [&str; 5] = [
 /// lets a schema entry with the same `SamlClaimType` supersede the basic one.
 /// `Name ID` is reference-only (`overridable = false`): its "URI" here is a
 /// descriptive placeholder, and the NameID/subject has its own sourcing rules.
+/// The four overridable rows come from `dto::sso::DEFAULT_SAML_CLAIMS`, the one
+/// list the "Attributes & claims" view also reads.
 /// See <https://learn.microsoft.com/entra/identity-platform/saml-claims-customization>.
-const BASIC_CLAIM_SET: [(&str, &str, &str, bool); 5] = [
-    (
+fn basic_claim_set() -> Vec<(&'static str, &'static str, &'static str, bool)> {
+    std::iter::once((
         "Name ID (subject)",
         "nameid (format emailAddress)",
-        "userprincipalname",
+        DEFAULT_NAME_ID_ATTRIBUTE,
         false,
-    ),
-    (
-        "name",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
-        "userprincipalname",
-        true,
-    ),
-    (
-        "emailaddress",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-        "mail",
-        true,
-    ),
-    (
-        "givenname",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
-        "givenname",
-        true,
-    ),
-    (
-        "surname",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
-        "surname",
-        true,
-    ),
-];
+    ))
+    .chain(
+        DEFAULT_SAML_CLAIMS
+            .iter()
+            .map(|&(name, uri, attribute)| (name, uri, attribute, true)),
+    )
+    .collect()
+}
 
 /// Pushes a pre-filled schema row that overrides a basic claim (source `user`,
 /// the given attribute, and the basic claim's SAML URI), ready to tweak + save.
@@ -590,9 +574,9 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
                     <span class="claims-editor__basic-ref-head">"SAML claim URI"</span>
                     <span class="claims-editor__basic-ref-head">"Source"</span>
                     <span class="claims-editor__basic-ref-head"></span>
-                    {BASIC_CLAIM_SET
-                        .iter()
-                        .map(|&(name, uri, src, overridable)| {
+                    {basic_claim_set()
+                        .into_iter()
+                        .map(|(name, uri, src, overridable)| {
                             let action = if overridable {
                                 view! {
                                     <Button
@@ -1356,13 +1340,13 @@ mod tests {
         // rows pinned here — Name ID's "URI" is a descriptive placeholder that
         // must never be seeded.
         with_owner(|| {
-            let overridable: Vec<_> = BASIC_CLAIM_SET.iter().filter(|r| r.3).collect();
+            let overridable: Vec<_> = basic_claim_set().into_iter().filter(|r| r.3).collect();
             assert_eq!(
                 overridable.len(),
                 4,
                 "every basic claim but Name ID is overridable"
             );
-            for &&(name, saml_uri, attribute, _) in &overridable {
+            for &(name, saml_uri, attribute, _) in &overridable {
                 assert!(
                     saml_uri.starts_with("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/"),
                     "{name}: an overridable basic claim needs its real SAML URI, got {saml_uri}"
@@ -1388,7 +1372,7 @@ mod tests {
             }
 
             // The one non-overridable row is the placeholder-URI Name ID.
-            let fixed: Vec<_> = BASIC_CLAIM_SET.iter().filter(|r| !r.3).collect();
+            let fixed: Vec<_> = basic_claim_set().into_iter().filter(|r| !r.3).collect();
             assert_eq!(fixed.len(), 1);
             assert!(
                 !fixed[0].1.starts_with("http"),
