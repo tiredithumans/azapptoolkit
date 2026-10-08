@@ -5,6 +5,17 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **An enterprise app's SSO tab shows its claims the way the Entra admin center does.**
+  "Attributes & claims" now lists the Required claim (Unique User Identifier, with its Name ID
+  format) and then every Additional claim, and says where they come from: Entra's defaults, the
+  admin center, or a claims mapping policy. Claims set up in the admin center were missing before,
+  and group claims are now listed too. The editor below still saves a claims mapping policy, and it
+  now warns that saving replaces the claims set in the admin center, which can then no longer edit
+  them. In US Government and China clouds, where Microsoft offers no way to read the admin center's
+  claims, the tab says so and claims editing works as before.
+
 ## [0.32.0] - 2026-10-05
 
 ### Changed

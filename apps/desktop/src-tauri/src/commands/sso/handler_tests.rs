@@ -846,3 +846,120 @@ async fn an_out_of_range_secret_lifetime_never_reaches_graph() {
         requests.len()
     );
 }
+
+/// Mounts a SAML SP whose paired app has `group_claims`, no claims mapping
+/// policy, and `portal` as the admin center's custom claims policy read.
+async fn mount_claims_app(server: &MockServer, portal: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path("/v1.0/servicePrincipals/sp-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "sp-1", "appId": "app-1", "preferredSingleSignOnMode": "saml",
+            "keyCredentials": [], "notificationEmailAddresses": []
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1.0/applications"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": OBJECT, "appId": "app-1", "displayName": "Demo" }]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1.0/applications/{OBJECT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": OBJECT, "appId": "app-1", "groupMembershipClaims": "SecurityGroup"
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1.0/servicePrincipals/sp-1/claimsMappingPolicies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/beta/servicePrincipals/sp-1/claimsPolicy"))
+        .respond_with(portal)
+        .mount(server)
+        .await;
+}
+
+/// Claims set in the Entra admin center live in its (beta) custom claims
+/// policy, which the tab now reads: the Name ID is the Required claim and every
+/// custom claim is an Additional one, group claims included.
+#[tokio::test]
+async fn the_sso_tab_reads_the_admin_centers_claims() {
+    let server = MockServer::start().await;
+    mount_claims_app(
+        &server,
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "includeBasicClaimSet": false,
+            "claims": [
+                { "@odata.type": "#microsoft.graph.samlNameIdClaim", "nameIdFormat": "emailAddress",
+                  "configurations": [{ "attribute": { "source": "user", "id": "mail" } }] },
+                { "@odata.type": "#microsoft.graph.customClaim", "name": "department",
+                  "namespace": "http://contoso.com/claims", "tokenFormat": ["saml"],
+                  "configurations": [{ "attribute": { "source": "user", "id": "department" } }] }
+            ]
+        })),
+    )
+    .await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    let cfg = get_sso_config_core(&state, TENANT, "sp-1".into())
+        .await
+        .expect("the SSO config reads");
+
+    assert!(!cfg.claims_read_failed);
+    let view = cfg.claims_view.expect("both policies were read");
+    assert_eq!(
+        view.source,
+        azapptoolkit_dto::sso::ClaimsSource::PortalPolicy
+    );
+    assert_eq!(view.required.value, "user.mail");
+    let names: Vec<&str> = view.additional.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "http://contoso.com/claims/department",
+            "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+        ]
+    );
+}
+
+/// An unreadable admin-center policy leaves no view (a half-read one could
+/// name the wrong claims) and blocks claims edits like an unreadable mapping
+/// policy does: a save could override claims nobody saw.
+#[tokio::test]
+async fn an_unreadable_admin_center_policy_shows_no_view_and_blocks_edits() {
+    let server = MockServer::start().await;
+    mount_claims_app(&server, ResponseTemplate::new(403)).await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    let cfg = get_sso_config_core(&state, TENANT, "sp-1".into())
+        .await
+        .expect("the SSO config still reads");
+
+    assert!(cfg.claims_view.is_none());
+    assert!(cfg.claims_read_failed);
+}
+
+/// No admin-center policy (404) and no mapping policy: Entra's defaults.
+#[tokio::test]
+async fn an_uncustomized_app_shows_entra_defaults() {
+    let server = MockServer::start().await;
+    mount_claims_app(&server, ResponseTemplate::new(404)).await;
+    let state = AppState::for_test(TENANT, &server.uri());
+
+    let cfg = get_sso_config_core(&state, TENANT, "sp-1".into())
+        .await
+        .unwrap();
+
+    let view = cfg.claims_view.expect("a 404 is no policy, not a failure");
+    assert_eq!(view.source, azapptoolkit_dto::sso::ClaimsSource::Default);
+    assert_eq!(
+        view.additional.len(),
+        5,
+        "four defaults plus the groups claim"
+    );
+}

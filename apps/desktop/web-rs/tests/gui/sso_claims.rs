@@ -1,4 +1,6 @@
-//! GUI tests for the SSO tab's "Attributes & claims" save guard.
+//! GUI tests for the SSO tab's "Attributes & claims": the admin-center view
+//! (Required claim, then Additional claims, and where they come from) and the
+//! editor's save guard.
 //!
 //! The behaviour worth pinning: **an unread claims policy is never saved
 //! over.** When the backend couldn't read the assigned claims-mapping policy
@@ -17,6 +19,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::sso::{ClaimRowDto, ClaimsSource, ClaimsViewDto};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::enterprise_application_detail_pane::sso_tab::SsoContent;
 
@@ -26,6 +29,15 @@ const UNREAD: &str = "Couldn't read this app's current claims policy";
 fn mount(claims_read_failed: bool) -> ts::Mounted {
     let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
     cfg.claims_read_failed = claims_read_failed;
+    if claims_read_failed {
+        // As the backend reports it: no view when a policy couldn't be read.
+        cfg.claims_view = None;
+    }
+    mount_cfg(cfg)
+}
+
+/// Mounts the SSO tab over `cfg`.
+fn mount_cfg(mut cfg: azapptoolkit_dto::sso::SsoConfigDto) -> ts::Mounted {
     cfg.rollover = Some(fixtures::signing_cert_rollover_steady(
         "sp-demo", "app-demo",
     ));
@@ -169,4 +181,102 @@ async fn a_read_claims_policy_can_be_saved() {
     assert!(!save.disabled());
     save.click();
     ts::wait_for(|| ts::call_count("set_claims_mapping") == 1).await;
+}
+
+fn row(name: &str, value: &str, detail: Option<&str>) -> ClaimRowDto {
+    ClaimRowDto {
+        name: name.into(),
+        token_types: vec!["SAML".into()],
+        value: value.into(),
+        detail: detail.map(Into::into),
+    }
+}
+
+/// Claims set in the admin center read as the admin center shows them: the
+/// Name ID as the Required claim with its format, every other claim under
+/// Additional claims, and a warning that saving here would override them.
+#[wasm_bindgen_test]
+async fn admin_center_claims_split_into_required_and_additional() {
+    ts::reset();
+    let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
+    cfg.claims_view = Some(ClaimsViewDto {
+        source: ClaimsSource::PortalPolicy,
+        mapping_policy_name: None,
+        portal_policy_overridden: false,
+        portal_policy_unreadable: false,
+        required: row(
+            "Unique User Identifier (Name ID)",
+            "user.employeeid",
+            Some("[nameid-format:persistent]"),
+        ),
+        additional: vec![row(
+            "http://contoso.com/claims/department",
+            "user.department",
+            None,
+        )],
+    });
+    let _m = mount_cfg(cfg);
+
+    ts::wait_for(|| ts::body_contains("Required claim")).await;
+    for text in [
+        "Configured in the Microsoft Entra admin center.",
+        "Unique User Identifier (Name ID)",
+        "user.employeeid",
+        "[nameid-format:persistent]",
+        "Additional claims",
+        "http://contoso.com/claims/department",
+        "user.department",
+        "Saving here creates a claims mapping policy",
+    ] {
+        assert!(ts::body_contains(text), "missing: {text}");
+    }
+}
+
+/// An assigned claims mapping policy is named as the source, says it overrides
+/// the admin center's claims, and the editor (which edits that policy) carries
+/// no "saving overrides" warning.
+#[wasm_bindgen_test]
+async fn a_mapping_policy_names_itself_and_what_it_overrides() {
+    ts::reset();
+    let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
+    cfg.claims_view = Some(ClaimsViewDto {
+        source: ClaimsSource::MappingPolicy,
+        mapping_policy_name: Some("Custom claims".into()),
+        portal_policy_overridden: true,
+        ..fixtures::default_claims_view()
+    });
+    let _m = mount_cfg(cfg);
+
+    ts::wait_for(|| ts::body_contains("Required claim")).await;
+    assert!(ts::body_contains(
+        "Set by the claims mapping policy “Custom claims”"
+    ));
+    assert!(ts::body_contains(
+        "It overrides the claims configured in the admin center."
+    ));
+    assert!(!ts::body_contains(
+        "Saving here creates a claims mapping policy"
+    ));
+}
+
+/// In a cloud without the admin center's claims read, the view says what it
+/// can't show instead of presenting Entra's defaults as "not customized".
+#[wasm_bindgen_test]
+async fn a_cloud_without_the_admin_center_read_says_what_is_missing() {
+    ts::reset();
+    let mut cfg = fixtures::sso_config("sp-demo", "app-demo");
+    cfg.claims_view = Some(ClaimsViewDto {
+        portal_policy_unreadable: true,
+        ..fixtures::default_claims_view()
+    });
+    let _m = mount_cfg(cfg);
+
+    ts::wait_for(|| ts::body_contains("Required claim")).await;
+    assert!(ts::body_contains(
+        "This cloud can't read claims configured in the Entra admin center"
+    ));
+    assert!(
+        !ts::body_contains("Not customized"),
+        "an unread admin-center policy is never reported as no customization"
+    );
 }
