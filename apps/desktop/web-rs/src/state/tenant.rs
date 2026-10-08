@@ -88,6 +88,20 @@ impl Session {
         self.apps_reload.update(|n| *n = n.wrapping_add(1));
     }
 
+    /// Force the enterprise-applications list to refetch.
+    pub fn bump_enterprise_apps_reload(&self) {
+        self.enterprise_apps_reload
+            .update(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Both entity lists refetch: for a write that adds or removes an app
+    /// registration together with its paired service principal. The backend
+    /// patches its caches for these writes, so both refetches are cache hits.
+    pub fn bump_app_and_enterprise_reload(&self) {
+        self.bump_apps_reload();
+        self.bump_enterprise_apps_reload();
+    }
+
     /// Signal that a fresh audit was cached, so audit-derived surfaces outside
     /// the audit view (the Home posture tile) refetch.
     pub fn bump_audit_reload(&self) {

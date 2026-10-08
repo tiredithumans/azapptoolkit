@@ -19,12 +19,35 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Changed
 
+- **Creating, deleting or renaming an app registration no longer reloads every app in the tenant.**
+  The lists used to throw away their cached copy after each of these and fetch every app
+  registration and enterprise application again, which took a long time in a large tenant. They
+  now add, remove or rename just that app, so they refresh straight away. This covers the New app
+  dialog, bulk create, the SSO wizard, gallery apps, single and bulk delete, and editing an app's
+  name or sign-in audience. If a step fails partway, the lists still do a full refresh.
+- **An enterprise app's SSO tab shows its claims the way the Entra admin center does.**
+  "Attributes & claims" now lists the Required claim (Unique User Identifier, with its Name ID
+  format) and then every Additional claim, and says where they come from: Entra's defaults, the
+  admin center, or a claims mapping policy. Claims set up in the admin center were missing before,
+  and group claims are now listed too. The editor below still saves a claims mapping policy, and it
+  now warns that saving replaces the claims set in the admin center, which can then no longer edit
+  them. In US Government and China clouds, where Microsoft offers no way to read the admin center's
+  claims, the tab says so and claims editing works as before.
+
 - **The Permission Tester names who each SharePoint permission entry is for.** Entries that read
   "User or group (not a Selected app grant)" now show the user, Microsoft 365 group, SharePoint
   group or sharing link, with its email or sign-in name where SharePoint gives one.
 - **Granting SharePoint site or item access no longer reloads every app in the tenant.** These
   grants only change the app's permissions, so they now refresh just the app's details and the
   audit instead of re-fetching every app registration and enterprise application.
+
+### Fixed
+
+- **The App Registrations list now updates after you delete or rename an app from its details.**
+  A deleted app stayed in the list, and a renamed one kept its old name, until something else
+  refreshed it. Enterprise Applications now also refreshes when you delete an app (its enterprise
+  application is deleted with it) or create one from the New app dialog, and App Registrations
+  refreshes after an app is created with the SSO wizard or from the gallery.
 
 ## [0.32.0] - 2026-10-05
 

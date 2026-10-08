@@ -529,6 +529,8 @@ pub async fn bulk_delete_applications(
 
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
+    // A task that never reported back may still have landed its DELETE.
+    let mut lost_task = false;
     let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         object_ids,
@@ -572,7 +574,10 @@ pub async fn bulk_delete_applications(
         |joined| match joined {
             Ok(Ok(id)) => deleted.push(id),
             Ok(Err(f)) => failed.push(f),
-            Err(err) => tracing::warn!(?err, "bulk delete join error"),
+            Err(err) => {
+                lost_task = true;
+                tracing::warn!(?err, "bulk delete join error");
+            }
         },
     )
     .await;
@@ -592,10 +597,16 @@ pub async fn bulk_delete_applications(
         },
     );
 
-    // Bust first: the deletions that landed are real regardless of how the run
-    // ended (see the sweep above).
+    // Update the caches first: the deletions that landed are real regardless of
+    // how the run ended (see the sweep above). A clean run removes exactly the
+    // deleted rows. A failed or lost DELETE may still have landed, and only a
+    // rescan can tell, so that run busts the list tier.
     if !deleted.is_empty() {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+        if failed.is_empty() && !lost_task {
+            super::applications::record_deleted_apps(&state.cache, &tenant_id, &deleted);
+        } else {
+            super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+        }
     }
     if session.is_dead() {
         return Err(session.err("the bulk delete"));
@@ -772,6 +783,11 @@ pub async fn bulk_create_applications(
 ) -> Result<BulkCreateResult, UiError> {
     let cancel = state.bulk_cancel.claim();
     let client = state.graph_for(&tenant_id);
+    // The registrations that landed cleanly, as Graph returned them, so the
+    // list caches can be patched instead of rescanned.
+    let created = parking_lot::Mutex::new(Vec::<Application>::new());
+    // A registration that landed with a later step failed: see below.
+    let partial = std::sync::atomic::AtomicBool::new(false);
 
     let (outcomes, cancelled) = run_bulk_seq(
         &app_handle,
@@ -780,6 +796,7 @@ pub async fn bulk_create_applications(
         |spec| spec.display_name.clone(),
         |spec| {
             let client = client.clone();
+            let (created, partial) = (&created, &partial);
             async move {
                 if let Some(rejection) = validate_create_spec(&spec) {
                     return rejection;
@@ -837,29 +854,36 @@ pub async fn bulk_create_applications(
                     // An owner add that failed without stopping the run (not
                     // re-auth-fatal) is listed on the row by UPN — the app is
                     // there, but not as the inventory described it.
-                    Ok((r, None)) => BulkCreateOutcome {
-                        message: owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns),
-                        display_name: r.application.display_name,
-                        status: "created".into(),
-                        app_id: Some(r.application.app_id),
-                        error: None,
-                    },
+                    Ok((r, None)) => {
+                        created.lock().push(r.application.clone());
+                        BulkCreateOutcome {
+                            message: owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns),
+                            display_name: r.application.display_name,
+                            status: "created".into(),
+                            app_id: Some(r.application.app_id),
+                            error: None,
+                        }
+                    }
                     // The registration landed and a later step failed: the app
-                    // exists (so `any_created` busts the list tier below) and
-                    // the error still reaches the row — and `run_bulk_seq`,
-                    // which stops on a re-auth-fatal code.
-                    Ok((r, Some(e))) => BulkCreateOutcome {
-                        display_name: r.application.display_name,
-                        status: "created".into(),
-                        app_id: Some(r.application.app_id),
-                        message: Some(
-                            match owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns) {
-                                Some(owners) => format!("{} {owners}", e.message),
-                                None => e.message.clone(),
-                            },
-                        ),
-                        error: Some(e.into()),
-                    },
+                    // exists (so the list caches change below) and the error
+                    // still reaches the row — and `run_bulk_seq`, which stops
+                    // on a re-auth-fatal code.
+                    Ok((r, Some(e))) => {
+                        partial.store(true, std::sync::atomic::Ordering::Relaxed);
+                        BulkCreateOutcome {
+                            display_name: r.application.display_name,
+                            status: "created".into(),
+                            app_id: Some(r.application.app_id),
+                            message: Some(
+                                match owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns)
+                                {
+                                    Some(owners) => format!("{} {owners}", e.message),
+                                    None => e.message.clone(),
+                                },
+                            ),
+                            error: Some(e.into()),
+                        }
+                    }
                     Err(e) => BulkCreateOutcome {
                         display_name: spec.display_name,
                         status: "failed".into(),
@@ -873,9 +897,24 @@ pub async fn bulk_create_applications(
     )
     .await;
 
-    let any_created = !validate_only && outcomes.iter().any(|o| o.status == "created");
-    if any_created {
+    // Every clean create is patched into the cached lists, so the reload that
+    // follows is a cache hit. A partial create busts the list tier instead,
+    // because the failed step may still have landed.
+    if partial.into_inner() {
         super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+    } else {
+        let created = created.into_inner();
+        if !created.is_empty() {
+            let rows: Vec<_> = created
+                .iter()
+                .map(|application| super::applications::CreatedApp {
+                    application,
+                    service_principal: None,
+                    added_password: None,
+                })
+                .collect();
+            super::applications::record_created_apps(&state.cache, &tenant_id, &rows);
+        }
     }
     Ok(BulkCreateResult {
         validate_only,

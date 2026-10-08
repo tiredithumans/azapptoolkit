@@ -8,6 +8,97 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The SAML claim URI namespace Entra's default claims live under.
+pub const CLAIMS_NAMESPACE: &str = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims";
+
+/// The SAML claim URI of the Name ID ("Unique User Identifier") in a claims
+/// mapping policy's schema.
+pub const NAME_IDENTIFIER_CLAIM: &str =
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier";
+
+/// The user attribute Entra sources the Name ID from when nothing overrides it.
+pub const DEFAULT_NAME_ID_ATTRIBUTE: &str = "userprincipalname";
+
+/// The Name ID format Entra emits when nothing overrides it.
+pub const DEFAULT_NAME_ID_FORMAT: &str = "emailAddress";
+
+/// The additional SAML claims Entra emits for an app nothing customizes, as
+/// `(short name, claim URI, user attribute)`, in the admin center's order. The
+/// one definition the "Attributes & claims" view and the claims editor's
+/// reference grid both read.
+/// See <https://learn.microsoft.com/entra/identity-platform/saml-claims-customization>.
+pub const DEFAULT_SAML_CLAIMS: [(&str, &str, &str); 4] = [
+    (
+        "emailaddress",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "mail",
+    ),
+    (
+        "givenname",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
+        "givenname",
+    ),
+    (
+        "name",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        "userprincipalname",
+    ),
+    (
+        "surname",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
+        "surname",
+    ),
+];
+
+/// Where an app's SAML claims come from, in the order Entra applies them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimsSource {
+    /// Nothing is customized: Entra's default claims.
+    Default,
+    /// The custom claims policy the Entra admin center writes.
+    PortalPolicy,
+    /// An assigned claims mapping policy. It is authoritative: it overrides the
+    /// admin center's claims, and the admin center can't edit them while it
+    /// is assigned.
+    MappingPolicy,
+}
+
+/// One row of the "Attributes & claims" view, written as the admin center
+/// writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRowDto {
+    /// The claim name as emitted: a SAML claim URI, or a JWT claim name.
+    pub name: String,
+    /// The token types the claim is emitted in (`SAML`, `JWT`).
+    pub token_types: Vec<String>,
+    /// The value, e.g. `user.mail`, `"constant"`, `Join(user.givenname, user.surname)`.
+    pub value: String,
+    /// Anything else the admin center shows beside it: the Name ID format,
+    /// conditions, a JWT-only note.
+    pub detail: Option<String>,
+}
+
+/// The app's SAML claims split as the Entra admin center shows them: the
+/// required Name ID claim, then every additional claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimsViewDto {
+    pub source: ClaimsSource,
+    /// The assigned claims mapping policy's display name, for `MappingPolicy`.
+    pub mapping_policy_name: Option<String>,
+    /// A claims mapping policy is assigned AND the admin center also holds a
+    /// custom claims policy, which the mapping policy overrides.
+    pub portal_policy_overridden: bool,
+    /// This cloud can't read the admin center's custom claims policy (it is a
+    /// global-cloud-only beta API), so claims configured there are not shown,
+    /// and a `Default` source means "nothing else found", not "not customized".
+    #[serde(default)]
+    pub portal_policy_unreadable: bool,
+    /// "Unique User Identifier (Name ID)".
+    pub required: ClaimRowDto,
+    pub additional: Vec<ClaimRowDto>,
+}
+
 /// One claim-schema entry in a claims-mapping policy (a row in the portal's
 /// "Attributes & Claims" blade). Models the full documented entry — see
 /// <https://learn.microsoft.com/entra/identity-platform/reference-claims-customization>.
@@ -340,6 +431,12 @@ pub struct SsoConfigDto {
     /// not offer Save, or it would replace claims the operator never saw.
     #[serde(default)]
     pub claims_read_failed: bool,
+    /// The app's claims as the Entra admin center shows them (Required claim,
+    /// then Additional claims), read from whichever policy is in effect.
+    /// `None` when either policy could not be read: a half-read view would
+    /// misstate the claims, and [`Self::claims_read_failed`] is then set.
+    #[serde(default)]
+    pub claims_view: Option<ClaimsViewDto>,
     /// `requestSignatureVerification.isSignedRequestRequired` on the paired
     /// application — Entra's "require signed authentication requests" gate.
     /// `None` means UNKNOWN (the app read returned no `requestSignatureVerification`

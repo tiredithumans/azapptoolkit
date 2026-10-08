@@ -7,6 +7,7 @@ pub mod browser_fallback_notice;
 pub mod bulk_action_bar;
 pub mod changelog_notes;
 pub mod claims_editor;
+pub mod claims_overview;
 pub mod collapsible_scoping_section;
 pub mod date_range_filter;
 pub mod detail_header;

@@ -85,7 +85,7 @@ Deep-dive: caching-and-search.md
 - **Security-critical app:** never write secrets to disk or logs; scope tokens per resource.
 - **Tauri commands:** `#[tauri::command] async fn` → `State<'_, AppState>` → `Result<T, UiError>`; frontend args use `#[serde(rename_all = "camelCase")]`.
 - **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, sign-out and `sign_in` sweep every kind (never `reauthenticate`), the two tenant-wide indexes are read only through their typed accessors, and a cache-only command must prove the session.
-- **Invalidate caches only on `Ok`** (tiers: `invalidate_app_lists` / `_credentials` / `_detail_state` / `_details`); a pinned index or a long scan's result takes `generation_for` before the fetch and stores via `*_if_current`.
+- **Invalidate caches only on `Ok`** (tiers: `invalidate_app_lists` / `_credentials` / `_detail_state` / `_details`); a clean create/delete/rename patches the scanned lists instead (`record_created_apps` / `record_deleted_apps` / `record_renamed_app`); a pinned index or a long scan's result takes `generation_for` before the fetch and stores via `*_if_current`.
 - **`CacheKind::ServicePrincipal` self-invalidates in the graph client**, never in the command aggregators.
 - **Long-running writes stop on Cancel AND on a dead session:** `claim()` a `CancelToken` before the first await, latch `dispatch::SessionDead`, flag the result incomplete; fan-outs never return a partial result.
 - **Batched Graph fan-out + adaptive throttle** (`$batch` + `ConcurrencyThrottle` via `FanOutMeter::attach`, degrading to per-object reads); never a hand-rolled loop; `$expand` + advanced query fails silently.

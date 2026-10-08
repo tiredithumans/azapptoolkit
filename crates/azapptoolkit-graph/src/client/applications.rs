@@ -556,7 +556,7 @@ impl GraphClient {
     ) -> Result<Option<serde_json::Value>> {
         self.get_application_fields_raw(
             object_id,
-            "id,appId,identifierUris,web,spa,requestSignatureVerification",
+            "id,appId,identifierUris,web,spa,requestSignatureVerification,groupMembershipClaims",
         )
         .await
     }

@@ -1289,6 +1289,81 @@ pub struct ClaimsMappingPolicy {
     pub is_organization_default: Option<bool>,
 }
 
+/// The custom claims policy the Entra admin center writes for an app's
+/// "Attributes & Claims" (`GET /beta/servicePrincipals/{id}/claimsPolicy`).
+/// Read-only here: the claims list is polymorphic (`customClaim`,
+/// `samlNameIdClaim`), told apart by `@odata.type`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomClaimsPolicy {
+    #[serde(default)]
+    pub include_basic_claim_set: Option<bool>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub claims: Vec<CustomClaim>,
+}
+
+/// One entry of [`CustomClaimsPolicy::claims`]: a `customClaim` or the
+/// `samlNameIdClaim` (the Name ID, with its `nameIdFormat`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomClaim {
+    #[serde(default, rename = "@odata.type")]
+    pub odata_type: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub token_format: Vec<String>,
+    #[serde(default)]
+    pub saml_attribute_name_format: Option<String>,
+    /// Set on the `samlNameIdClaim` only.
+    #[serde(default)]
+    pub name_id_format: Option<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub configurations: Vec<CustomClaimConfiguration>,
+}
+
+impl CustomClaim {
+    /// Whether this entry is the Name ID claim.
+    pub fn is_name_id(&self) -> bool {
+        self.odata_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("#microsoft.graph.samlNameIdClaim"))
+    }
+}
+
+/// How a custom claim is sourced, optionally under a condition.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomClaimConfiguration {
+    #[serde(default)]
+    pub condition: Option<serde_json::Value>,
+    #[serde(default)]
+    pub attribute: Option<CustomClaimAttribute>,
+    /// Polymorphic transformations (`joinTransformation`, …), kept raw: the
+    /// view only names them and lists their inputs.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub transformations: Vec<serde_json::Value>,
+}
+
+/// A claim value's source: a `sourcedAttribute` (`source` + `id`) or a
+/// `valueBasedAttribute` (a constant `value`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomClaimAttribute {
+    #[serde(default, rename = "@odata.type")]
+    pub odata_type: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub is_extension_attribute: Option<bool>,
+}
+
 /// One entry of the app-recycle-bin read
 /// `/directory/deletedItems/microsoft.graph.application`.
 ///

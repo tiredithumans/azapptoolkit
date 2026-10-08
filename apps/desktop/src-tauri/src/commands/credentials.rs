@@ -214,8 +214,15 @@ pub(crate) fn credential_rows(apps: &[Application], now: DateTime<Utc>) -> Vec<C
             });
         }
     }
-    rows.sort_by_key(|r| sort_key(r.days_to_expiry));
+    sort_credential_rows(&mut rows);
     rows
+}
+
+/// The roll-up's one order: soonest expiry first, no expiry last. Stable, so
+/// a patched roll-up (`applications::record_created_apps`) keeps its other
+/// rows where the scan put them.
+pub(crate) fn sort_credential_rows(rows: &mut [CredentialRowDto]) {
+    rows.sort_by_key(|r| sort_key(r.days_to_expiry));
 }
 
 /// Sort by days-to-expiry ascending; `None` (no expiry) sorts last.
