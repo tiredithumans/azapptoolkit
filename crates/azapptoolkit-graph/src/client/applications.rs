@@ -656,6 +656,28 @@ impl GraphClient {
         self.collect_all_pages(page, false).await
     }
 
+    /// The application's `tags`, read on their own. Kept off the typed
+    /// [`Application`], which crosses IPC as-is.
+    pub async fn get_application_tags(&self, object_id: &str) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct AppTags {
+            #[serde(default)]
+            tags: Option<Vec<String>>,
+        }
+        let path = format!("/applications/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "id,tags")];
+        let app: AppTags = self.get_json(&path, &params, false).await?;
+        Ok(app.tags.unwrap_or_default())
+    }
+
+    /// Replaces the application's `tags`. Graph writes the whole collection, so
+    /// a caller re-reads the live set with [`Self::get_application_tags`],
+    /// changes only its own entries, and writes all of them back.
+    pub async fn set_application_tags(&self, object_id: &str, tags: &[String]) -> Result<()> {
+        self.patch_application_web(object_id, &serde_json::json!({ "tags": tags }))
+            .await
+    }
+
     /// PATCH `/applications/{id}` with a caller-built body carrying the SSO fields
     /// (`identifierUris`, `web.redirectUris`, `web.logoutUrl`, `spa.redirectUris`). Kept
     /// separate from the typed `AppPatch` so the widely-used struct stays untouched; accepts any

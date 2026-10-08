@@ -93,6 +93,7 @@ fn selected_item_scope_result() -> azapptoolkit_dto::sharepoint::SelectedItemSco
         declared_permission: true,
         granted: Vec::new(),
         warnings: Vec::new(),
+        recorded_on_app: true,
     }
 }
 

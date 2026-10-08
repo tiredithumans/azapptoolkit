@@ -15,8 +15,8 @@ use azapptoolkit_core::models::{
     DriveItem, FederatedIdentityCredential, GroupSummary, NewKeyCredential, OAuth2PermissionGrant,
     OAuth2PermissionScope, Organization, Paged, PasswordCredential, PreAuthorizedApplication,
     RequiredResourceAccess, ResolvedSharePointResource, RiskyServicePrincipal, SelectedPermission,
-    SelfSignedCertificate, ServicePrincipal, ServicePrincipalSignInActivity, Site, SiteList,
-    SitePermission, SynchronizationJob, TenantAppManagementPolicy,
+    SelfSignedCertificate, ServicePrincipal, ServicePrincipalSignInActivity, SharePointNamed, Site,
+    SiteList, SitePermission, SynchronizationJob, TenantAppManagementPolicy,
 };
 use azapptoolkit_core::scoping::SelectedScopeLevel;
 use url::Url;
@@ -89,6 +89,7 @@ pub use applications::{
 };
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch};
+pub use sharepoint::SelectedTarget;
 pub(crate) use transport::{batch_sub_url, escape_odata, not_found_as_none, search_phrase};
 
 pub struct GraphClient {

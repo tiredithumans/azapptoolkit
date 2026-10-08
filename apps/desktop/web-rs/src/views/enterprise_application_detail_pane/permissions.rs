@@ -10,10 +10,13 @@ use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
+use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSection;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
 use azapptoolkit_core::audit::MailPermissionScope;
-use azapptoolkit_core::scoping::is_sharepoint_site_access_permission;
+use azapptoolkit_core::scoping::{
+    is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
+};
 use std::collections::HashMap;
 
 #[component]
@@ -267,6 +270,38 @@ pub(super) fn PermissionsContent(
                                         )
                                     })
                             });
+                            // Item grants are recorded on an app registration,
+                            // so the section needs the paired one; a bare SP has
+                            // nowhere to keep the record.
+                            let item_values: Vec<String> = list
+                                .iter()
+                                .filter_map(|p| p.app_role_value.clone().filter(|v| {
+                                    is_scoped_sharepoint_item_resource_permission(
+                                        p.resource_app_id.as_deref(),
+                                        v,
+                                    )
+                                }))
+                                .collect();
+                            let paired_app = signal
+                                .with(|d| d.service_principal.paired_app_registration_id.clone());
+                            let item_section = paired_app
+                                .filter(|_| !item_values.is_empty())
+                                .map(|object_id| {
+                                    view! {
+                                        <SharePointItemScopesSection
+                                            object_id=Signal::derive(move || object_id.clone())
+                                            sp_object_id=sp_id
+                                            app_id=app_id
+                                            app_display_name=display_name
+                                            permission_values=Signal::derive(move || {
+                                                item_values.clone()
+                                            })
+                                            on_changed=Callback::new(move |()| {
+                                                reload.update(|n| *n += 1)
+                                            })
+                                        />
+                                    }
+                                });
                             let exchange_section = (!mail_values.is_empty()).then(|| {
                                 view! {
                                     <ExchangeScopingSection
@@ -316,6 +351,7 @@ pub(super) fn PermissionsContent(
                                 />
                                 {exchange_section}
                                 {sharepoint_section}
+                                {item_section}
                             }
                                 .into_any()
                         }

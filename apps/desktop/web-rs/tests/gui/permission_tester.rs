@@ -170,17 +170,27 @@ async fn revoke_targets_the_tested_url_and_reruns_the_probe() {
                 "app_id": "99999999-8888-7777-6666-555555555555",
                 "app_display_name": "Contoso Sync",
             },
-            { "id": "perm-2", "roles": ["Read"], "app_id": null, "app_display_name": null },
+            {
+                "id": "perm-2", "roles": ["Read"], "app_id": null, "app_display_name": null,
+                "principals": [{ "kind": "site_group", "id": "10",
+                                 "display_name": "Finance Members", "detail": null }],
+            },
+            {
+                "id": "perm-3", "roles": ["Write"], "app_id": null, "app_display_name": null,
+                "principals": [{ "kind": "user", "id": "u-1",
+                                 "display_name": "Jane Doe", "detail": "jane@contoso.com" }],
+            },
         ]),
     );
     ts::mock_ok("remove_selected_item_permission", &serde_json::json!(null));
     let _m = mount_and_probe().await;
 
-    ts::wait_for(|| grant_rows() == 2).await;
+    ts::wait_for(|| grant_rows() == 3).await;
     assert!(ts::body_contains("Contoso Sync"));
-    assert!(ts::body_contains(
-        "User or group (not a Selected app grant)"
-    ));
+    // Who each non-app entry is, by name, instead of "user or group".
+    assert!(ts::body_contains("SharePoint group · Finance Members"));
+    assert!(ts::body_contains("User · Jane Doe"));
+    assert!(ts::body_contains("jane@contoso.com"));
     assert_eq!(
         revoke_buttons(),
         1,

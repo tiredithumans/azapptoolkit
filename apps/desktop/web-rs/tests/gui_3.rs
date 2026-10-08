@@ -29,3 +29,5 @@ mod orgwide_scope_callout;
 mod permission_picker;
 #[path = "gui/scope_wizard.rs"]
 mod scope_wizard;
+#[path = "gui/sharepoint_item_scopes.rs"]
+mod sharepoint_item_scopes;

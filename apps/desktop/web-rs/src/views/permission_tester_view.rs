@@ -19,6 +19,7 @@ use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search, sharepoint};
+use crate::components::permission_principal::principal_label;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
     Badge, BadgeTone, Callout, DataTable, FormError, SectionHeader, TabBar, TabBarItem,
@@ -638,22 +639,16 @@ pub fn PermissionTesterView() -> impl IntoView {
                             row=move |p: sharepoint::SelectedItemPermissionDto| {
                                 let perm_id = p.id.clone();
                                 let roles = p.roles.join(", ");
-                                // Only app grants are revocable here. A
-                                // `grantedToV2` entry without an application is
-                                // user or group sharing — revoking it would cut
-                                // a person's access, not an app's, and this view
+                                // Only app grants are revocable here. An entry
+                                // without an application is a user, group or
+                                // sharing link — revoking it would cut a
+                                // person's access, not an app's, and this view
                                 // has no business doing that. An entry whose
-                                // application fails to resolve also lands here
-                                // (no revoke), so a parse gap never deletes.
-                                let (who, app_grant) = match (&p.app_id, &p.app_display_name) {
-                                    (Some(id), Some(name)) => (name.clone(), Some(id.clone())),
-                                    (Some(id), None) => (id.clone(), Some(id.clone())),
-                                    (None, _) => (
-                                        "User or group (not a Selected app grant)".to_string(),
-                                        None,
-                                    ),
-                                };
-                                let secondary = p.app_id.clone().filter(|id| id != &who);
+                                // application fails to resolve has no `app_id`
+                                // either (no revoke), so a parse gap never
+                                // deletes.
+                                let app_grant = p.app_id.clone();
+                                let (who, secondary) = principal_label(&p);
                                 let label = who.clone();
                                 // Precomputed: the `on_click` closure below
                                 // moves `label`, so the aria-label can't borrow

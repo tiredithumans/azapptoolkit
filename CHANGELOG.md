@@ -5,6 +5,27 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Added
+
+- **A "SharePoint item access" section on an app's Permissions tab lists the libraries, folders
+  and files it was granted, and lets you add or remove one.** It appears for apps holding
+  `Lists.`, `ListItems.` or `Files.SelectedOperations.Selected`, next to "SharePoint site access",
+  and shows each grant's current role. Remove revokes the app's access to that one item. Add grants
+  read or write access to a URL you paste. Rows that are no longer granted or no longer exist can
+  be dropped from the list. SharePoint can't list an app's item grants, so the app records each
+  grant made through azapptoolkit on the app registration (one tag per grant). Grants made before
+  this version or elsewhere appear once you track them by URL. To change a role, remove the access
+  and grant it again.
+
+### Changed
+
+- **The Permission Tester names who each SharePoint permission entry is for.** Entries that read
+  "User or group (not a Selected app grant)" now show the user, Microsoft 365 group, SharePoint
+  group or sharing link, with its email or sign-in name where SharePoint gives one.
+- **Granting SharePoint site or item access no longer reloads every app in the tenant.** These
+  grants only change the app's permissions, so they now refresh just the app's details and the
+  audit instead of re-fetching every app registration and enterprise application.
+
 ## [0.32.0] - 2026-10-05
 
 ### Changed

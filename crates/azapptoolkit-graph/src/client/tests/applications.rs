@@ -759,3 +759,38 @@ async fn publishing_application_app_roles_drops_the_cached_resource_definitions(
 
     assert_only_resource_definitions_dropped(&client);
 }
+
+/// Tags are read on their own `$select` and written back as one collection:
+/// Graph replaces the whole array, so every tag the caller passes (its own and
+/// everyone else's) is in the body.
+#[tokio::test]
+async fn application_tags_read_alone_and_write_as_one_collection() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-1"))
+        .and(query_param("$select", "id,tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "obj-1", "tags": ["azapptoolkit:restoredFrom:x", "HideApp"]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/applications/obj-1"))
+        .and(wiremock::matchers::body_json(
+            serde_json::json!({ "tags": ["HideApp", "new"] }),
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    assert_eq!(
+        client.get_application_tags("obj-1").await.unwrap(),
+        ["azapptoolkit:restoredFrom:x", "HideApp"]
+    );
+    client
+        .set_application_tags("obj-1", &["HideApp".to_string(), "new".to_string()])
+        .await
+        .unwrap();
+}
