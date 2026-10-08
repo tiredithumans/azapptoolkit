@@ -945,11 +945,33 @@ pub struct SitePermission {
     pub granted_to_identities: Vec<SiteIdentitySet>,
 }
 
+/// Graph's `sharePointIdentitySet`: who a permission entry grants to. Exactly
+/// one kind is usually set, except that a person often arrives as BOTH `user`
+/// (the Entra account) and `siteUser` (its SharePoint profile), and a group as
+/// `group` plus `siteGroup`.
+///
+/// Only `application` is ever written (in `json!` request bodies, not through
+/// this type); the others are read so a row can say WHO it grants to instead
+/// of "not an app".
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteIdentitySet {
     #[serde(default)]
     pub application: Option<SiteIdentity>,
+    /// An Entra user. `id` is its directory object id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<SiteIdentity>,
+    /// An Entra group (security or Microsoft 365). `id` is its object id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<SiteIdentity>,
+    /// A SharePoint user profile. `id` is SharePoint-local, never a directory id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_user: Option<SiteIdentity>,
+    /// A SharePoint group (e.g. "Finance Members"). `id` is SharePoint-local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_group: Option<SiteIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<SiteIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -959,6 +981,25 @@ pub struct SiteIdentity {
     pub id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Set on `user` and `group` identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Set on `siteUser` and `siteGroup` identities: the SharePoint claims login
+    /// (`i:0#.f|membership|jane@contoso.com`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_name: Option<String>,
+}
+
+/// The `link` facet of a sharing-link permission entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharingLink {
+    /// `view`, `edit`, `review`, `embed`, …
+    #[serde(default, rename = "type")]
+    pub link_type: Option<String>,
+    /// `anonymous`, `organization`, `users`, `existingAccess`.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// A permission entry on a securable *below* the site collection — a list, a
@@ -983,6 +1024,17 @@ pub struct SelectedPermission {
     pub granted_to_v2: Option<SiteIdentitySet>,
     #[serde(default)]
     pub granted_to: Option<SiteIdentitySet>,
+    /// The people a sharing link was sent to. Set on `link` entries, which
+    /// carry no `grantedToV2`.
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub granted_to_identities_v2: Vec<SiteIdentitySet>,
+    /// Present when the entry is a sharing link rather than a direct grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<SharingLink>,
 }
 
 impl SelectedPermission {
@@ -996,6 +1048,12 @@ impl SelectedPermission {
             .or(self.granted_to.as_ref())
             .and_then(|set| set.application.as_ref())
             .and_then(|app| app.id.as_deref())
+    }
+
+    /// The identity set the entry grants to: `grantedToV2`, falling back to the
+    /// deprecated `grantedTo` the driveItem endpoint echoes.
+    pub fn granted_to_set(&self) -> Option<&SiteIdentitySet> {
+        self.granted_to_v2.as_ref().or(self.granted_to.as_ref())
     }
 
     /// The display name recorded with the grant, when Graph echoed one back.
@@ -1047,6 +1105,22 @@ impl SiteList {
 pub struct FolderFacet {
     #[serde(default)]
     pub child_count: Option<i64>,
+}
+
+/// A list's or a driveItem's name, read back from stored ids. One shape serves
+/// both `GET /sites/{s}/lists/{l}` (`displayName`) and the list item's
+/// `driveItem` (`name`, `folder`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePointNamed {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub web_url: Option<String>,
+    #[serde(default)]
+    pub folder: Option<FolderFacet>,
 }
 
 /// Presence marks a driveItem as a file.

@@ -427,6 +427,41 @@ impl GraphClient {
         self.scoped_get_retried(token, &url).await
     }
 
+    /// The permissions on each list or list item `targets` names, in one scoped
+    /// `$batch` (20 per POST), with any multi-page entry list followed to the
+    /// end on the same SharePoint token. One result per target, in order.
+    pub async fn batch_list_selected_permissions(
+        &self,
+        targets: &[SelectedTarget<'_>],
+    ) -> Result<Vec<Result<Vec<SelectedPermission>>>> {
+        let token = self.sharepoint_token()?;
+        let urls: Vec<String> = targets
+            .iter()
+            .map(|t| format!("{}/permissions?$top={MAX_PAGE_SIZE}", t.path()))
+            .collect();
+        let pages: Vec<Result<Paged<SelectedPermission>>> =
+            self.batch_get_json_scoped(token, &urls).await?;
+        self.finish_paged_batch_scoped(token, pages).await
+    }
+
+    /// The name and URL of each list or list item `targets` names, in one
+    /// scoped `$batch`. A list item is read through its `driveItem`, which
+    /// carries the file or folder name. One result per target, in order.
+    pub async fn batch_get_selected_target_names(
+        &self,
+        targets: &[SelectedTarget<'_>],
+    ) -> Result<Vec<Result<SharePointNamed>>> {
+        let token = self.sharepoint_token()?;
+        let urls: Vec<String> = targets
+            .iter()
+            .map(|t| match t.item_id {
+                Some(_) => format!("{}/driveItem?$select=id,name,webUrl,folder", t.path()),
+                None => format!("{}?$select=id,name,displayName,webUrl", t.path()),
+            })
+            .collect();
+        self.batch_get_json_scoped(token, &urls).await
+    }
+
     /// Lists the application permissions on a list.
     pub async fn list_list_permissions(
         &self,
@@ -1002,5 +1037,27 @@ mod tests {
             ),
             "/sites/contoso-my.sharepoint.com:/personal/user_contoso_com"
         );
+    }
+}
+
+/// A list (`item_id: None`) or a list item, addressed by ids alone. Used to
+/// re-read a sub-site Selected grant recorded on an app without its URL.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedTarget<'a> {
+    pub site_id: &'a str,
+    pub list_id: &'a str,
+    pub item_id: Option<&'a str>,
+}
+
+impl SelectedTarget<'_> {
+    /// The relative Graph path of the list or the list item.
+    fn path(&self) -> String {
+        match self.item_id {
+            Some(item) => format!(
+                "/sites/{}/lists/{}/items/{item}",
+                self.site_id, self.list_id
+            ),
+            None => format!("/sites/{}/lists/{}", self.site_id, self.list_id),
+        }
     }
 }

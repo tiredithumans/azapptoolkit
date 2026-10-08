@@ -994,6 +994,14 @@ fn register_fixtures() {
     mock_each("list_selected_item_permissions", |_args| {
         Some(Vec::<azapptoolkit_dto::sharepoint::SelectedItemPermissionDto>::new())
     });
+    // No demo app holds an item-level Selected permission, so the section never
+    // mounts; an empty record keeps the read safe if one ever does.
+    mock_each("list_app_item_scopes", |_args| {
+        Some(azapptoolkit_dto::sharepoint::AppItemScopesDto {
+            entries: Vec::new(),
+            malformed: 0,
+        })
+    });
 
     let scopes_by_id: HashMap<String, Vec<MailScopeEntry>> = apps
         .iter()

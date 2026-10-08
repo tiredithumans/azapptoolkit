@@ -2127,10 +2127,11 @@ mod tests {
             granted_to_v2: Some(SiteIdentitySet {
                 application: app_id.map(|id| SiteIdentity {
                     id: Some(id.into()),
-                    display_name: None,
+                    ..Default::default()
                 }),
+                ..Default::default()
             }),
-            granted_to: None,
+            ..Default::default()
         }
     }
 

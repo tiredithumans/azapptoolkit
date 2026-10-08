@@ -26,6 +26,7 @@ use crate::components::scope_badge::{
 };
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
+use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSection;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::ToastAction;
 use crate::components::type_chip::{AppKind, TypeChip};
@@ -863,6 +864,54 @@ pub fn PermissionsTab(
                                 app_display_name=Signal::derive(move || {
                                     detail.with(|d| d.application.display_name.clone())
                                 })
+                            />
+                        }
+                    })
+            }}
+            {move || {
+                // The application item-level Selected permissions the app
+                // declares or holds: what a grant from the section can ride.
+                let item_values: Vec<String> = detail.with(|d| {
+                    let mut values: Vec<String> = d
+                        .resolved_permissions
+                        .iter()
+                        .filter(|p| p.permission_kind == PermissionKind::Application)
+                        .filter_map(|p| {
+                            p.permission_value.clone().filter(|v| {
+                                is_scoped_sharepoint_item_resource_permission(
+                                    Some(&p.resource_app_id),
+                                    v,
+                                )
+                            })
+                        })
+                        .collect();
+                    values.dedup();
+                    values
+                });
+                (!item_values.is_empty())
+                    .then(|| {
+                        view! {
+                            <SharePointItemScopesSection
+                                object_id=Signal::derive(move || {
+                                    detail.with(|d| d.application.id.clone())
+                                })
+                                sp_object_id=Signal::derive(move || {
+                                    detail
+                                        .with(|d| {
+                                            d.service_principal
+                                                .as_ref()
+                                                .map(|sp| sp.id.clone())
+                                                .unwrap_or_default()
+                                        })
+                                })
+                                app_id=Signal::derive(move || {
+                                    detail.with(|d| d.application.app_id.clone())
+                                })
+                                app_display_name=Signal::derive(move || {
+                                    detail.with(|d| d.application.display_name.clone())
+                                })
+                                permission_values=Signal::derive(move || item_values.clone())
+                                on_changed=on_changed
                             />
                         }
                     })

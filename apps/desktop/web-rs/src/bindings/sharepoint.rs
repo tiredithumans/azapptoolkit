@@ -273,6 +273,92 @@ pub async fn grant_selected_item_access(
     .await
 }
 
+// ---------------- Per-app item-access record ----------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppItemScopesArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
+    app_id: &'a str,
+}
+
+/// The libraries, folders and files recorded on an app registration, each
+/// with what SharePoint says about it now. Only grants made through this app
+/// (or tracked by URL) are recorded: Graph can't list an app's item grants.
+pub async fn list_app_item_scopes(
+    tenant_id: &str,
+    object_id: &str,
+    app_id: &str,
+) -> Result<AppItemScopesDto, UiError> {
+    invoke_result(
+        "list_app_item_scopes",
+        AppItemScopesArgs {
+            tenant_id,
+            object_id,
+            app_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveAppItemScopeArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
+    app_id: &'a str,
+    scope: &'a ItemScopeRef,
+    permission_id: Option<&'a str>,
+}
+
+/// Revokes the app's grant on one recorded resource (when `permission_id` is
+/// set) and drops it from the record; without one, only drops the record.
+pub async fn remove_app_item_scope(
+    tenant_id: &str,
+    object_id: &str,
+    app_id: &str,
+    scope: &ItemScopeRef,
+    permission_id: Option<&str>,
+) -> Result<(), UiError> {
+    invoke_result(
+        "remove_app_item_scope",
+        RemoveAppItemScopeArgs {
+            tenant_id,
+            object_id,
+            app_id,
+            scope,
+            permission_id,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackAppItemScopeArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
+    url: &'a str,
+}
+
+/// Records an existing grant by URL so the app's list shows it.
+pub async fn track_app_item_scope(
+    tenant_id: &str,
+    object_id: &str,
+    url: &str,
+) -> Result<ItemScopeRef, UiError> {
+    invoke_result(
+        "track_app_item_scope",
+        TrackAppItemScopeArgs {
+            tenant_id,
+            object_id,
+            url,
+        },
+    )
+    .await
+}
+
 // ---------------- Site-access export ----------------
 
 /// The panel's own coverage sentence rides along with the rows: a site whose

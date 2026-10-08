@@ -303,8 +303,126 @@ pub struct SharePointResourceRef {
 pub struct SelectedItemPermissionDto {
     pub id: String,
     pub roles: Vec<String>,
+    /// Set only for an app grant. The one field revoke keys off, so a user's or
+    /// group's access can never be revoked from an app-centric view.
     pub app_id: Option<String>,
     pub app_display_name: Option<String>,
+    /// Who the entry grants to, for display: one principal for a direct grant,
+    /// or a [`PrincipalKind::SharingLink`] followed by the people it was sent
+    /// to. Empty when Graph named no identity the app recognises.
+    #[serde(default)]
+    pub principals: Vec<PermissionPrincipalDto>,
+}
+
+/// What kind of principal a SharePoint permission entry grants to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKind {
+    Application,
+    /// An Entra user account.
+    User,
+    /// An Entra group (security or Microsoft 365).
+    Group,
+    /// A SharePoint user profile with no Entra identity in the entry.
+    SiteUser,
+    /// A SharePoint group, such as "Finance Members".
+    SiteGroup,
+    Device,
+    /// A sharing link. `detail` holds its scope and type.
+    SharingLink,
+}
+
+/// One principal of a SharePoint permission entry, projected for display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionPrincipalDto {
+    pub kind: PrincipalKind,
+    /// A directory object id for `User`/`Group`/`Application`; SharePoint-local
+    /// otherwise.
+    pub id: Option<String>,
+    pub display_name: Option<String>,
+    /// The email or sign-in name for a person or group, or "scope, type" for a
+    /// sharing link.
+    pub detail: Option<String>,
+}
+
+/// The principals of one permission entry. A sharing link comes first, then
+/// the identity it grants to, then the people it was sent to; a person seen as
+/// both `user` and `siteUser` is one principal, not two.
+pub fn principals_of(
+    p: &azapptoolkit_core::models::SelectedPermission,
+) -> Vec<PermissionPrincipalDto> {
+    let mut out: Vec<PermissionPrincipalDto> = Vec::new();
+    if let Some(link) = &p.link {
+        let detail = [link.scope.as_deref(), link.link_type.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(PermissionPrincipalDto {
+            kind: PrincipalKind::SharingLink,
+            id: None,
+            display_name: None,
+            detail: (!detail.is_empty()).then_some(detail),
+        });
+    }
+    for principal in p
+        .granted_to_set()
+        .into_iter()
+        .chain(&p.granted_to_identities_v2)
+        .filter_map(principal_of_set)
+    {
+        let seen = out
+            .iter()
+            .any(|o| o.kind == principal.kind && o.id.is_some() && o.id == principal.id);
+        if !seen {
+            out.push(principal);
+        }
+    }
+    out
+}
+
+/// The single most specific principal of an identity set: an app, then the
+/// Entra user or group (with the SharePoint profile's login as a fallback
+/// detail), then the SharePoint-only identities.
+fn principal_of_set(
+    set: &azapptoolkit_core::models::SiteIdentitySet,
+) -> Option<PermissionPrincipalDto> {
+    use azapptoolkit_core::models::SiteIdentity;
+    let make = |kind, identity: &SiteIdentity, detail: Option<String>| PermissionPrincipalDto {
+        kind,
+        id: identity.id.clone(),
+        display_name: identity.display_name.clone().filter(|n| !n.is_empty()),
+        detail,
+    };
+    let login = |identity: Option<&SiteIdentity>| {
+        identity
+            .and_then(|i| i.login_name.as_deref())
+            .map(|l| l.rsplit('|').next().unwrap_or(l).to_string())
+            .filter(|l| !l.is_empty())
+    };
+    if let Some(app) = &set.application {
+        return Some(make(PrincipalKind::Application, app, None));
+    }
+    if let Some(user) = &set.user {
+        let detail = user.email.clone().or_else(|| login(set.site_user.as_ref()));
+        return Some(make(PrincipalKind::User, user, detail));
+    }
+    if let Some(group) = &set.group {
+        return Some(make(PrincipalKind::Group, group, group.email.clone()));
+    }
+    if let Some(site_group) = &set.site_group {
+        return Some(make(PrincipalKind::SiteGroup, site_group, None));
+    }
+    if let Some(site_user) = &set.site_user {
+        return Some(make(
+            PrincipalKind::SiteUser,
+            site_user,
+            login(Some(site_user)),
+        ));
+    }
+    set.device
+        .as_ref()
+        .map(|device| make(PrincipalKind::Device, device, None))
 }
 
 /// One target granted (or attempted) during a `grant_selected_item_access` run.
@@ -333,4 +451,190 @@ pub struct SelectedItemScopeResult {
     pub declared_permission: bool,
     pub granted: Vec<SelectedItemGrantDto>,
     pub warnings: Vec<String>,
+    /// True when every granted target was recorded on the app registration
+    /// (its `tags`), so the per-app "SharePoint item access" list shows it.
+    /// False for a service-principal-only principal, which has no registration
+    /// to record on; a failed record is also listed in `warnings`.
+    #[serde(default)]
+    pub recorded_on_app: bool,
+}
+
+/// A library, folder or file grant recorded on an app registration, addressed
+/// by ids so it survives renames and moves. `level` is
+/// [`SelectedScopeLevel::List`], [`SelectedScopeLevel::ListItem`] or
+/// [`SelectedScopeLevel::File`] (folders included, as the resolver reports).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ItemScopeRef {
+    pub level: SelectedScopeLevel,
+    pub site_id: String,
+    pub list_id: String,
+    pub item_id: Option<String>,
+}
+
+/// What SharePoint says now about one recorded grant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ItemScopeStatus {
+    /// This app holds an entry on the resource.
+    Granted {
+        permission_id: String,
+        roles: Vec<String>,
+    },
+    /// The resource's entries were read, and none is this app's.
+    NotGranted,
+    /// The resource no longer exists (404).
+    Missing,
+    /// The entries could not be read, so nothing is claimed either way.
+    Unreadable { message: String },
+}
+
+/// One row of the per-app "SharePoint item access" list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppItemScopeDto {
+    pub scope: ItemScopeRef,
+    /// The library, folder or file name, when SharePoint returned one.
+    pub name: Option<String>,
+    pub web_url: Option<String>,
+    pub is_folder: bool,
+    pub status: ItemScopeStatus,
+}
+
+/// Outcome of `list_app_item_scopes`: the grants recorded on one app, each
+/// with its live status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppItemScopesDto {
+    pub entries: Vec<AppItemScopeDto>,
+    /// Recorded tags that were not valid and were ignored.
+    pub malformed: usize,
+}
+
+/// `principals_of` against the shapes Graph returns on list, list-item and
+/// driveItem permission entries.
+#[cfg(test)]
+mod principal_tests {
+    use super::{PermissionPrincipalDto, PrincipalKind, principals_of};
+    use azapptoolkit_core::models::SelectedPermission;
+
+    fn principals(entry: serde_json::Value) -> Vec<PermissionPrincipalDto> {
+        let p: SelectedPermission = serde_json::from_value(entry).expect("a Graph permission");
+        principals_of(&p)
+    }
+
+    fn one(
+        kind: PrincipalKind,
+        id: &str,
+        name: &str,
+        detail: Option<&str>,
+    ) -> PermissionPrincipalDto {
+        PermissionPrincipalDto {
+            kind,
+            id: Some(id.into()),
+            display_name: Some(name.into()),
+            detail: detail.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn each_identity_kind_is_named() {
+        let cases = [
+            (
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "application": { "id": "app-1", "displayName": "Sync" } } }),
+                one(PrincipalKind::Application, "app-1", "Sync", None),
+            ),
+            (
+                // A person arrives as both the Entra user and the SharePoint
+                // profile: one principal, named by the user, email as detail.
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "user": { "id": "u-1", "displayName": "Jane Doe", "email": "jane@contoso.com" },
+                    "siteUser": { "id": "12", "displayName": "Jane Doe",
+                                  "loginName": "i:0#.f|membership|jane@contoso.com" } } }),
+                one(
+                    PrincipalKind::User,
+                    "u-1",
+                    "Jane Doe",
+                    Some("jane@contoso.com"),
+                ),
+            ),
+            (
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "user": { "id": "u-2", "displayName": "Raj" },
+                    "siteUser": { "id": "13", "loginName": "i:0#.f|membership|raj@contoso.com" } } }),
+                one(PrincipalKind::User, "u-2", "Raj", Some("raj@contoso.com")),
+            ),
+            (
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "group": { "id": "g-1", "displayName": "Finance", "email": "finance@contoso.com" } } }),
+                one(
+                    PrincipalKind::Group,
+                    "g-1",
+                    "Finance",
+                    Some("finance@contoso.com"),
+                ),
+            ),
+            (
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "siteGroup": { "id": "10", "displayName": "Finance Members" } } }),
+                one(PrincipalKind::SiteGroup, "10", "Finance Members", None),
+            ),
+            (
+                serde_json::json!({ "id": "p", "grantedToV2": {
+                    "siteUser": { "id": "14", "displayName": "Ops",
+                                  "loginName": "i:0#.f|membership|ops@contoso.com" } } }),
+                one(
+                    PrincipalKind::SiteUser,
+                    "14",
+                    "Ops",
+                    Some("ops@contoso.com"),
+                ),
+            ),
+        ];
+        for (entry, want) in cases {
+            assert_eq!(principals(entry.clone()), vec![want], "{entry}");
+        }
+    }
+
+    /// The driveItem endpoint echoes the deprecated singular `grantedTo`.
+    #[test]
+    fn granted_to_is_read_when_granted_to_v2_is_absent() {
+        let got = principals(serde_json::json!({ "id": "p", "grantedTo": {
+            "user": { "id": "u-1", "displayName": "Jane Doe" } } }));
+        assert_eq!(got[0].kind, PrincipalKind::User);
+        assert_eq!(got[0].display_name.as_deref(), Some("Jane Doe"));
+    }
+
+    /// A sharing link is named as one, followed by each person it was sent to.
+    #[test]
+    fn a_sharing_link_lists_its_scope_and_recipients() {
+        let got = principals(serde_json::json!({
+            "id": "p",
+            "roles": ["read"],
+            "link": { "scope": "users", "type": "view", "webUrl": "https://x" },
+            "grantedToIdentitiesV2": [
+                { "user": { "id": "u-1", "displayName": "Jane Doe", "email": "jane@contoso.com" } },
+                { "user": { "id": "u-2", "displayName": "Raj" } },
+                { "user": { "id": "u-1", "displayName": "Jane Doe" } }
+            ]
+        }));
+        assert_eq!(got[0].kind, PrincipalKind::SharingLink);
+        assert_eq!(got[0].detail.as_deref(), Some("users, view"));
+        assert_eq!(
+            got[1..]
+                .iter()
+                .map(|p| p.id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["u-1", "u-2"],
+            "recipients in order, each once"
+        );
+    }
+
+    /// An entry naming nothing the app knows yields no principal, not a guess.
+    #[test]
+    fn an_unrecognised_entry_has_no_principal() {
+        assert!(principals(serde_json::json!({ "id": "p", "grantedToV2": {} })).is_empty());
+        assert!(principals(serde_json::json!({ "id": "p", "grantedToV2": null })).is_empty());
+        assert!(
+            principals(serde_json::json!({ "id": "p", "grantedToIdentitiesV2": null })).is_empty()
+        );
+    }
 }

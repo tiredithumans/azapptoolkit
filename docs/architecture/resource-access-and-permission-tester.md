@@ -193,7 +193,13 @@ verified: a per-URL grant made in the Grant-access wizard can be undone here (sa
 `remove_selected_item_permission` core as the wizard's, no cache involvement). Only
 application entries get a Revoke — a `grantedToV2` entry without an application is user or group
 sharing, and this surface never cuts a person's access (including when the app lookup simply
-failed: no button). The caveat from `sharepoint-selected.md` rides with the table: an empty list
+failed: no button). Every entry is named: `SiteIdentitySet` reads `user`, `group`, `siteUser`,
+`siteGroup` and `device` as well as `application`, sharing links are read from `link` plus
+`grantedToIdentitiesV2`, and `dto::sharepoint::principals_of` projects them (a person seen as both
+`user` and `siteUser` is one principal). An Entra user or group Graph listed by id alone is named
+through one read-token `$batch` of `/directoryObjects/{id}`; SharePoint-local ids are never sent,
+and a failed lookup leaves the id on the row. `components::permission_principal::principal_label`
+renders the cell, shared with the per-app "SharePoint item access" section. The caveat from `sharepoint-selected.md` rides with the table: an empty list
 means "no grants on this resource", never "no item-level access elsewhere", and a *failed* entry
 read hides the table rather than rendering it empty (the read must answer before "no grants" is a
 provable claim; the verdict above still renders — it is complete on its own). A successful revoke

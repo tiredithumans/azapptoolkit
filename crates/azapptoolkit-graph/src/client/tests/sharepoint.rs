@@ -596,3 +596,112 @@ async fn batch_list_site_permissions_continues_page_two_on_the_sharepoint_token(
     assert_eq!(perms[0].id, "perm-1");
     assert_eq!(perms[1].id, "perm-2");
 }
+
+/// The two id-addressed reads behind the per-app item-access list: each target
+/// becomes one sub-request, a list item is named through its `driveItem`, and
+/// a missing target is its own `NotFound`, not a failure of the batch.
+#[tokio::test]
+async fn selected_targets_are_read_by_id_in_one_scoped_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .and(header("authorization", "Bearer sp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                { "id": "0", "status": 200, "body": {
+                    "id": "list-1", "name": "Shared Documents", "displayName": "Documents",
+                    "webUrl": "https://contoso.sharepoint.com/sites/Fin/Shared%20Documents" } },
+                { "id": "1", "status": 200, "body": {
+                    "id": "di-1", "name": "2026", "webUrl": "https://x/2026",
+                    "folder": { "childCount": 3 } } },
+                { "id": "2", "status": 404, "body": { "error": { "code": "itemNotFound" } } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let targets = [
+        SelectedTarget {
+            site_id: "s,1,2",
+            list_id: "list-1",
+            item_id: None,
+        },
+        SelectedTarget {
+            site_id: "s,1,2",
+            list_id: "list-1",
+            item_id: Some("17"),
+        },
+        SelectedTarget {
+            site_id: "s,1,2",
+            list_id: "list-1",
+            item_id: Some("99"),
+        },
+    ];
+    let names = client
+        .batch_get_selected_target_names(&targets)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        names[0].as_ref().unwrap().display_name.as_deref(),
+        Some("Documents")
+    );
+    let folder = names[1].as_ref().unwrap();
+    assert_eq!(folder.name.as_deref(), Some("2026"));
+    assert!(folder.folder.is_some());
+    assert!(matches!(names[2], Err(GraphError::NotFound(_))));
+
+    let body: serde_json::Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    let urls: Vec<&str> = body["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["url"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "/sites/s,1,2/lists/list-1?$select=id,name,displayName,webUrl",
+            "/sites/s,1,2/lists/list-1/items/17/driveItem?$select=id,name,webUrl,folder",
+            "/sites/s,1,2/lists/list-1/items/99/driveItem?$select=id,name,webUrl,folder",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn selected_permissions_are_read_by_id_with_a_page_size() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                { "id": "0", "status": 200, "body": { "value": [
+                    { "id": "p1", "roles": ["read"],
+                      "grantedToV2": { "application": { "id": "app-1" } } } ] } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_sharepoint_token(StaticTokenProvider::new("sp"));
+    let out = client
+        .batch_list_selected_permissions(&[SelectedTarget {
+            site_id: "s,1,2",
+            list_id: "list-1",
+            item_id: Some("17"),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(out[0].as_ref().unwrap()[0].app_id(), Some("app-1"));
+
+    let body: serde_json::Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    assert_eq!(
+        body["requests"][0]["url"].as_str().unwrap(),
+        format!("/sites/s,1,2/lists/list-1/items/17/permissions?$top={MAX_PAGE_SIZE}")
+    );
+}

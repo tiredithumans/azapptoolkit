@@ -21,7 +21,7 @@ use azapptoolkit_core::scoping::{
     selected_scope_accepts, selected_scope_level_for,
 };
 
-use crate::commands::applications::{invalidate_app_detail_state, invalidate_app_lists};
+use crate::commands::applications::invalidate_app_detail_state;
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
@@ -443,8 +443,10 @@ pub async fn convert_site_access_to_selected(
     }
 
     // The Sites.Selected grant / org-wide removal change the SP's app-role
-    // assignments the cached lists reflect. Invalidate only on this success path.
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // assignments: detail-pane and audit state, never a list row (no list
+    // shows assignments), so the detail tier, not a tenant-wide list rescan.
+    // Invalidate only on this success path.
+    invalidate_app_detail_state(&state.cache, &tenant_id);
     // The per-site grants are what the cached sweep indexes (the org-wide
     // strip is not — the sweep holds per-site rows only), so bust it whenever
     // at least one site grant landed.
@@ -479,16 +481,76 @@ pub async fn convert_site_access_to_selected(
 //   the library's unique permission scopes. The UI warns before granting; the
 //   backend just records it in the result.
 
-fn to_item_dto(p: SelectedPermission) -> SelectedItemPermissionDto {
+pub(crate) fn to_item_dto(p: SelectedPermission) -> SelectedItemPermissionDto {
     SelectedItemPermissionDto {
         id: p.id.clone(),
         roles: p.roles.clone(),
         app_id: p.app_id().map(str::to_string),
         app_display_name: p.app_display_name().map(str::to_string),
+        principals: crate::dto::sharepoint::principals_of(&p),
     }
 }
 
-fn to_resource_ref(r: ResolvedSharePointResource, input_url: String) -> SharePointResourceRef {
+/// Names the Entra users and groups Graph listed by id alone.
+///
+/// SharePoint usually echoes a `displayName`, but an entry for a principal it
+/// has not cached can arrive with only the directory object id. Those ids go
+/// through one read-token `$batch` of `/directoryObjects/{id}`. SharePoint-local
+/// ids (`siteUser`, `siteGroup`) are never sent: they are not directory ids.
+/// Best effort: a failed lookup leaves the id on the row, never drops the row.
+pub(crate) async fn fill_principal_names(
+    client: &azapptoolkit_graph::GraphClient,
+    perms: &mut [SelectedItemPermissionDto],
+) {
+    use crate::dto::sharepoint::PrincipalKind;
+    use azapptoolkit_core::models::DirectoryObject;
+
+    let mut ids: Vec<String> = perms
+        .iter()
+        .flat_map(|p| &p.principals)
+        .filter(|p| matches!(p.kind, PrincipalKind::User | PrincipalKind::Group))
+        .filter(|p| p.display_name.is_none())
+        .filter_map(|p| p.id.clone())
+        .filter(|id| azapptoolkit_core::guid::is_guid(id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return;
+    }
+    let urls: Vec<String> = ids
+        .iter()
+        .map(|id| format!("/directoryObjects/{id}?$select=id,displayName,userPrincipalName,mail"))
+        .collect();
+    let found: HashMap<String, DirectoryObject> =
+        match client.batch_get_json::<DirectoryObject>(&urls).await {
+            Ok(results) => results
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|o| (o.id.clone(), o))
+                .collect(),
+            Err(err) => {
+                tracing::debug!(?err, "principal name lookup failed; showing ids");
+                return;
+            }
+        };
+    for principal in perms.iter_mut().flat_map(|p| p.principals.iter_mut()) {
+        if principal.display_name.is_some() {
+            continue;
+        }
+        if let Some(object) = principal.id.as_ref().and_then(|id| found.get(id)) {
+            principal.display_name = object.display_name.clone();
+            if principal.detail.is_none() {
+                principal.detail = object.mail.clone().or(object.user_principal_name.clone());
+            }
+        }
+    }
+}
+
+pub(crate) fn to_resource_ref(
+    r: ResolvedSharePointResource,
+    input_url: String,
+) -> SharePointResourceRef {
     SharePointResourceRef {
         level: r.level,
         site_id: r.site_id,
@@ -643,20 +705,34 @@ pub async fn grant_selected_item_access(
         }
     }
 
-    // The Selected appRole grant changes the SP's app-role assignments the
-    // cached lists reflect. Invalidate only on this success path.
+    // The Selected appRole grant changes the SP's app-role assignments:
+    // detail-pane and audit state, never a list row, so the detail tier.
+    // Invalidate only on this success path.
     //
     // The per-resource permissions are deliberately NOT swept into
     // `invalidate_site_sweep`: that index holds `/sites/{id}/permissions` rows,
     // and a list or item grant creates none of those. Busting it here would
     // force a tenant-wide re-sweep for a change it cannot observe.
-    invalidate_app_lists(&state.cache, &tenant_id);
+    invalidate_app_detail_state(&state.cache, &tenant_id);
+
+    // 3. Record each landed grant on the app registration, the only per-app
+    //    list of them there is (Graph can't enumerate an app's item grants).
+    let recorded_on_app = crate::commands::sharepoint_item_scopes::record_granted(
+        &state,
+        &client,
+        &tenant_id,
+        object_id.as_deref(),
+        &granted,
+        &mut warnings,
+    )
+    .await;
 
     Ok(SelectedItemScopeResult {
         granted_role_added,
         declared_permission,
         granted,
         warnings,
+        recorded_on_app,
     })
 }
 
@@ -724,7 +800,9 @@ pub async fn list_selected_item_permissions(
         .await
         .map_err(sharepoint_item_err)?;
     let perms = read_permissions(&client, &resolved).await?;
-    Ok(perms.into_iter().map(to_item_dto).collect())
+    let mut rows: Vec<SelectedItemPermissionDto> = perms.into_iter().map(to_item_dto).collect();
+    fill_principal_names(&client, &mut rows).await;
+    Ok(rows)
 }
 
 async fn read_permissions(
@@ -1288,8 +1366,9 @@ mod tests {
             granted_to_identities: vec![SiteIdentitySet {
                 application: Some(SiteIdentity {
                     id: Some(app_id.into()),
-                    display_name: None,
+                    ..Default::default()
                 }),
+                ..Default::default()
             }],
         }
     }
@@ -1427,7 +1506,7 @@ mod tests {
         let user_perm = SitePermission {
             id: "perm-u".into(),
             roles: vec!["read".into()],
-            granted_to_identities: vec![SiteIdentitySet { application: None }],
+            granted_to_identities: vec![SiteIdentitySet::default()],
         };
         fold_site_result(
             &mut rows,

@@ -12,8 +12,9 @@ or the site/item selection panels in the frontend. The Exchange sibling is
 (`Sites.Selected` = scoped to individually-granted sites; every other `Sites.*` = org-wide), so the
 verdict needs no live call and no `mail_scopes`-style map — Rule 12 derives it directly, and the
 Permissions-tab "Scope" column / audit facets reuse the same name check. Graph has **no reverse
-`appId → sites` lookup**, so the named sites can't be enumerated (only per-site via the SharePoint site
-access section on the Permissions tab). `Sites.ReadWrite.All` is scored high-risk (a deliberate net-new deviation from the PowerShell
+`appId → sites` lookup**, so the named sites are found from the site side: the tenant site sweep
+behind "Sites this app can reach" in the SharePoint site access section on the Permissions tab (see
+[resource-access-and-permission-tester.md](./resource-access-and-permission-tester.md)). `Sites.ReadWrite.All` is scored high-risk (a deliberate net-new deviation from the PowerShell
 source, alongside `Sites.FullControl.All`).
 
 ## The Selected family is four levels, not one
@@ -56,6 +57,46 @@ Four things about the sub-site three that the site path does not have to deal wi
   has no app grants", never "this app has no item-level access". Any future panel must say so —
   the Permission tester's grants table (F094) says so on the section and in its empty-message, and
   its GUI tests pin the wording.
+
+## The per-app record of item grants
+
+Since Graph can't answer "which libraries, folders and files can this app reach", the app keeps
+its own answer: **one `tags` entry per grant on the app registration**
+(`commands::sharepoint_item_scopes`). On the app object rather than on one machine, so every
+operator sees the same list.
+
+- **Format:** `azapptoolkit:spItem:v1|{level}|{site_id}|{list_id}[|{item_id}]`, where `level` is
+  `list`, `list_item` or `file` (folders are `file`, as the resolver reports them). Ids, not URLs:
+  they survive renames and moves, and a URL can exceed Entra's 256-character tag limit. A tag that
+  would exceed it is not recorded, and the grant result says so.
+- **Tags are untrusted input.** Anyone who can edit the app can edit them, and their ids go into
+  Graph paths, so `decode_tag` accepts only `host,guid,guid` / a GUID / a numeric item id, and
+  counts anything else (an unknown version included) as `malformed` without acting on it.
+- **Writes are full-collection and serialized.** Graph replaces the whole `tags` array, so
+  `remember`/`forget` re-read the live tags, change only their own entries, and write everything
+  back (the DR `restoredFrom` marker and any other tag survive), under a per-app
+  `single_flight("{tenant}|app_tags|{object_id}")`.
+- **Who records.** `grant_selected_item_access` records every landed grant when it has an
+  `object_id`: the Grant-access wizard and the section alike. A record failure is a warning, never
+  a rollback of the grant (`recorded_on_app` says whether everything was recorded). A
+  service-principal-only principal (managed identity, foreign enterprise app) has no registration,
+  so nothing is recorded and no section is offered.
+- **Reading back.** `list_app_item_scopes` reads each recorded resource's permission entries and
+  name in two scoped `$batch`es and reports `Granted { permission_id, roles }`, `NotGranted` (read,
+  and none is this app's), `Missing` (404) or `Unreadable`. A failed read is never `NotGranted`.
+- **Removing.** `remove_app_item_scope` re-reads the resource and deletes the entry only if it is
+  **this app's** application grant (`not_this_apps_grant` otherwise), then forgets the record.
+  Without a permission id it only forgets the record, touching no SharePoint endpoint.
+- **Grants made elsewhere** (before this version, in the Permission Tester, by script) are not in
+  the record until tracked by URL (`track_app_item_scope`). The section's copy and empty state say
+  so; the list is "what azapptoolkit recorded", never "everything this app can reach".
+- **No role change in place.** Graph v1.0 has no role update for list or list-item permissions
+  (beta only), and remove-then-add would cut access in between, so a role change is Remove, then
+  Add with the other role, and the section says so.
+
+The UI is `components::sharepoint_item_scopes_section` ("SharePoint item access"), mounted on the
+app-registration Permissions tab when an Application row is a sub-site Selected scope, and on the
+enterprise pane only when the SP has a paired app registration.
 
 A grant at any sub-site level also **breaks SharePoint permission inheritance** on its target and
 consumes one of the library's unique permission scopes (guidance: stay under 5 000 per library).
