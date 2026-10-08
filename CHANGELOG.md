@@ -5,6 +5,23 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **Creating, deleting or renaming an app registration no longer reloads every app in the tenant.**
+  The lists used to throw away their cached copy after each of these and fetch every app
+  registration and enterprise application again, which took a long time in a large tenant. They
+  now add, remove or rename just that app, so they refresh straight away. This covers the New app
+  dialog, bulk create, the SSO wizard, gallery apps, single and bulk delete, and editing an app's
+  name or sign-in audience. If a step fails partway, the lists still do a full refresh.
+
+### Fixed
+
+- **The App Registrations list now updates after you delete or rename an app from its details.**
+  A deleted app stayed in the list, and a renamed one kept its old name, until something else
+  refreshed it. Enterprise Applications now also refreshes when you delete an app (its enterprise
+  application is deleted with it) or create one from the New app dialog, and App Registrations
+  refreshes after an app is created with the SSO wizard or from the gallery.
+
 ## [0.32.0] - 2026-10-05
 
 ### Changed

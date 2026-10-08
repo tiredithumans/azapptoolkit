@@ -277,6 +277,38 @@ impl Bucket {
         }
     }
 
+    /// Swaps the typed value under `key` **only if** it is still the exact
+    /// allocation `expected` (pointer identity, not equality). Returns whether
+    /// it swapped.
+    ///
+    /// Everything else about the entry is kept: `inserted`, so a patch never
+    /// extends the TTL of the scan it patched; `pinned`; the LRU slot; and the
+    /// `stamp`. Keeping the stamp is deliberate. If the patched value came from
+    /// a store whose rollback is still in flight (see
+    /// [`Cache::store_if_current`]), that rollback must still remove it.
+    /// Comparing by pointer instead of stamp is what lets two racing patches
+    /// tell each other apart. The caller holds a clone of `expected`, so its
+    /// allocation cannot be freed and reused in the window.
+    fn replace_typed_if_same(
+        &mut self,
+        key: &str,
+        expected: &TypedValue,
+        next: TypedValue,
+    ) -> bool {
+        match self.entries.get_mut(key) {
+            Some(entry)
+                if entry
+                    .typed
+                    .as_ref()
+                    .is_some_and(|t| Arc::ptr_eq(t, expected)) =>
+            {
+                entry.typed = Some(next);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Drops every entry whose key fails `keep`, then prunes the LRU index of
     /// the rows that no longer name a live entry.
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
@@ -988,6 +1020,65 @@ impl Cache {
                 None
             }
         }
+    }
+
+    /// How many times [`Self::patch_typed_index`] re-reads and re-applies its
+    /// patch after another writer replaced the entry under it.
+    const PATCH_ATTEMPTS: usize = 3;
+
+    /// Rewrites a typed index entry in place. Use it for a write that has the
+    /// changed object in hand, such as a create that got the new app back from
+    /// Graph. The alternative is dropping a tenant-wide index that costs a full
+    /// directory scan to rebuild.
+    ///
+    /// Semantics: **invalidate, unless the entry can be patched.** It always
+    /// bumps the key's watches first, exactly as [`Self::invalidate`] does, so a
+    /// scan that started before the write refuses to pin its pre-write
+    /// snapshot. Then:
+    /// - The live entry, read as `T`, is handed to `patch`, which runs outside
+    ///   the bucket lock. The result is swapped in only if the entry is still
+    ///   the one that was read. On a lost race, the patch is re-applied to
+    ///   whatever replaced it, so `patch` must be idempotent: upsert by id,
+    ///   remove by id, set a field by id.
+    /// - A missing, expired or other-typed entry, a `patch` that returns
+    ///   `None`, or a race lost three times in a row removes the
+    ///   entry and returns `false`. The worst case is the plain invalidation.
+    ///
+    /// The patched entry keeps its insert time, so its TTL still counts from
+    /// the scan that produced it, not from the patch.
+    pub fn patch_typed_index<T: Send + Sync + 'static>(
+        &self,
+        kind: CacheKind,
+        key: &str,
+        patch: impl Fn(&T) -> Option<T>,
+    ) -> bool {
+        self.bump_watches(Some(kind), |watched| watched == key);
+        if let Some((_, ttl)) = self.limits_if_enabled(kind) {
+            for _ in 0..Self::PATCH_ATTEMPTS {
+                let read = self.buckets[kind.idx()]
+                    .lock()
+                    .entries
+                    .get(key)
+                    .filter(|e| e.inserted.elapsed() <= ttl)
+                    .and_then(|e| e.typed.clone());
+                let Some(read) = read else { break };
+                let Some(next) = Arc::clone(&read)
+                    .downcast::<T>()
+                    .ok()
+                    .and_then(|current| patch(&current))
+                else {
+                    break;
+                };
+                if self.buckets[kind.idx()]
+                    .lock()
+                    .replace_typed_if_same(key, &read, Arc::new(next))
+                {
+                    return true;
+                }
+            }
+        }
+        self.buckets[kind.idx()].lock().remove(key);
+        false
     }
 
     /// Start watching one key for invalidation across a long live fetch.

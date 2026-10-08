@@ -17,6 +17,50 @@ pub struct ServicePrincipalSigningKeyPatch {
     pub preferred_token_signing_key_thumbprint: String,
 }
 
+/// The `$select` of the tenant service-principal index
+/// ([`GraphClient::list_service_principals_index`]). [`sp_index_row`] keeps
+/// exactly these fields, so a row patched into the cached index matches a
+/// scanned one.
+///
+/// `alternativeNames` is here so the managed-identity list can be a filter
+/// over THIS index rather than a second, near-identical `/servicePrincipals`
+/// scan of its own. It is what `MiSubtype::from_alternative_names` reads to
+/// tell a system-assigned identity from a user-assigned one, and it is empty
+/// for the non-MI service principals that dominate the index.
+/// `disabledByMicrosoftStatus` rides along so SP-only audit rows (foreign apps,
+/// MIs, orphaned SPs, with no local application object) can carry Microsoft's
+/// own disable flag (Rule 21).
+pub(crate) const SP_INDEX_SELECT: &[&str] = &[
+    "id",
+    "appId",
+    "displayName",
+    "accountEnabled",
+    "servicePrincipalType",
+    "appOwnerOrganizationId",
+    "createdDateTime",
+    "alternativeNames",
+    "disabledByMicrosoftStatus",
+];
+
+/// `sp` projected to the fields the tenant index selects. A write
+/// that created a service principal patches this into the cached index
+/// instead of dropping it, and the projection keeps the patched row identical
+/// to what the next scan would return.
+pub fn sp_index_row(sp: &ServicePrincipal) -> ServicePrincipal {
+    ServicePrincipal {
+        id: sp.id.clone(),
+        app_id: sp.app_id.clone(),
+        display_name: sp.display_name.clone(),
+        account_enabled: sp.account_enabled,
+        service_principal_type: sp.service_principal_type.clone(),
+        app_owner_organization_id: sp.app_owner_organization_id.clone(),
+        created_date_time: sp.created_date_time,
+        alternative_names: sp.alternative_names.clone(),
+        disabled_by_microsoft_status: sp.disabled_by_microsoft_status.clone(),
+        ..ServicePrincipal::default()
+    }
+}
+
 /// `$select` projection for a single `ServicePrincipal` read — the full set of
 /// fields the typed [`ServicePrincipal`] model deserializes. Directory-object
 /// resources (`servicePrincipal` included) need an explicit `$select` to
@@ -171,20 +215,9 @@ impl GraphClient {
     /// restates it — page 1 and pages 2+ are served by the same store.
     /// Pagination follows `@odata.nextLink` up to [`SP_INDEX_MAX`].
     pub async fn list_service_principals_index(&self) -> Result<Vec<ServicePrincipal>> {
+        let select = SP_INDEX_SELECT.join(",");
         let params: [(&str, &str); 3] = [
-            (
-                // `alternativeNames` is here so the managed-identity list can be
-                // a filter over THIS index rather than a second, near-identical
-                // `/servicePrincipals` scan of its own — it is what
-                // `MiSubtype::from_alternative_names` reads to tell a
-                // system-assigned identity from a user-assigned one. It is empty
-                // for the non-MI service principals that dominate the index.
-                // `disabledByMicrosoftStatus` rides along so SP-only audit rows
-                // (foreign apps, MIs, orphaned SPs — no local application
-                // object) can carry Microsoft's own disable flag (Rule 21).
-                "$select",
-                "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus",
-            ),
+            ("$select", select.as_str()),
             ("$count", "true"),
             ("$top", MAX_PAGE_SIZE),
         ];

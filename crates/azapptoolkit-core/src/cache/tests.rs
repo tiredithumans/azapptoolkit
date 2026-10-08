@@ -1433,3 +1433,190 @@ fn expired_entries_miss() {
         "an expired entry should read as a miss"
     );
 }
+
+/// The read side of every `patch_typed_index` test: the entry's typed value,
+/// its insert time and its pin, straight from the bucket.
+fn typed_entry(cache: &Cache, key: &str) -> Option<(Vec<u8>, Instant, bool)> {
+    let bucket = cache.buckets[CacheKind::Lists.idx()].lock();
+    let entry = bucket.entries.get(key)?;
+    let value = Arc::clone(entry.typed.as_ref()?)
+        .downcast::<Vec<u8>>()
+        .ok()?;
+    Some(((*value).clone(), entry.inserted, entry.pinned))
+}
+
+/// A patch rewrites the entry and keeps what the scan gave it. The pin keeps
+/// per-app churn from evicting it. The insert time means a patch never
+/// stretches the TTL of the scan it patched: the rows it did not touch were
+/// classified when that scan ran.
+#[test]
+fn a_patch_rewrites_a_pinned_index_and_keeps_its_insert_time() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![1u8, 2]));
+    let (_, inserted, _) = typed_entry(&cache, key).unwrap();
+    sleep(Duration::from_millis(5));
+
+    assert!(
+        cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, key, |v| {
+            let mut next = v.clone();
+            next.push(3);
+            Some(next)
+        })
+    );
+
+    let (value, after, pinned) = typed_entry(&cache, key).unwrap();
+    assert_eq!(value, vec![1, 2, 3]);
+    assert_eq!(after, inserted, "a patch must not restart the TTL");
+    assert!(pinned, "a patch must not unpin the index");
+    assert_eq!(
+        cache.get_typed::<Vec<u8>>(CacheKind::Lists, key).as_deref(),
+        Some(&vec![1, 2, 3])
+    );
+}
+
+/// The race the bump exists for. A scan that captured its watch before the
+/// write paged the pre-write collection. If its store landed after the patch,
+/// it would pin a snapshot missing the write for the full TTL.
+#[test]
+fn a_scan_that_started_before_a_patch_refuses_its_store() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![1u8]));
+    let watch = cache.generation_for(CacheKind::Lists, key);
+
+    assert!(
+        cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, key, |v| {
+            let mut next = v.clone();
+            next.push(2);
+            Some(next)
+        })
+    );
+
+    assert!(
+        !cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])),
+        "the pre-write snapshot must refuse"
+    );
+    assert_eq!(typed_entry(&cache, key).unwrap().0, vec![1, 2]);
+}
+
+/// A cold key has nothing to patch, but the write still happened. A scan
+/// already in flight is paging the pre-write collection and must refuse, as
+/// it would after a plain `invalidate`.
+#[test]
+fn a_patch_of_a_cold_key_still_refuses_an_older_scan() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    let watch = cache.generation_for(CacheKind::Lists, key);
+
+    assert!(!cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, key, |v| Some(v.clone())));
+
+    assert!(!cache.put_typed_index_if_current(watch, Arc::new(vec![1u8])));
+    assert!(typed_entry(&cache, key).is_none());
+}
+
+/// Every way a patch can decline degrades to the plain invalidation, never
+/// to leaving the unpatched entry in place: the caller wrote something the
+/// entry no longer reflects.
+#[test]
+fn a_patch_that_cannot_apply_drops_the_entry() {
+    let cache = Cache::new();
+
+    let declined = "t1|declined";
+    cache.put_typed_index(CacheKind::Lists, declined.into(), Arc::new(vec![1u8]));
+    assert!(!cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, declined, |_| None));
+    assert!(typed_entry(&cache, declined).is_none());
+
+    let other_type = "t1|other_type";
+    cache.put_typed_index(
+        CacheKind::Lists,
+        other_type.into(),
+        Arc::new(String::from("x")),
+    );
+    assert!(!cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, other_type, |v| Some(v.clone())));
+    assert!(
+        cache
+            .get_typed::<String>(CacheKind::Lists, other_type)
+            .is_none()
+    );
+
+    cache.configure(
+        None,
+        None,
+        None,
+        None,
+        Some(Duration::from_millis(10)),
+        None,
+    );
+    let expired = "t1|expired";
+    cache.put_typed_index(CacheKind::Lists, expired.into(), Arc::new(vec![1u8]));
+    sleep(Duration::from_millis(20));
+    assert!(!cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, expired, |v| Some(v.clone())));
+    assert_eq!(entry_count(&cache, CacheKind::Lists), 0);
+}
+
+/// Another writer replacing the entry while the patch is computed (a newer
+/// scan, or a second patch) must not be overwritten by a value derived from
+/// the old one. The patch is re-applied to the replacement instead.
+#[test]
+fn a_patch_that_loses_a_race_reapplies_to_the_replacement() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![1u8]));
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+
+    assert!(
+        cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, key, |v| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // A racing writer lands between the read and the swap.
+                cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![7u8]));
+            }
+            let mut next = v.clone();
+            next.push(2);
+            Some(next)
+        })
+    );
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(typed_entry(&cache, key).unwrap().0, vec![7, 2]);
+}
+
+/// A writer that keeps winning cannot leave the stale patch behind: after
+/// `PATCH_ATTEMPTS` lost swaps the key is dropped.
+#[test]
+fn a_patch_that_keeps_losing_drops_the_entry() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![1u8]));
+
+    assert!(
+        !cache.patch_typed_index::<Vec<u8>>(CacheKind::Lists, key, |v| {
+            cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![7u8]));
+            Some(v.clone())
+        })
+    );
+
+    assert!(typed_entry(&cache, key).is_none());
+}
+
+/// The swap keeps the entry's stamp, so a rollback aimed at the store the
+/// patch built on still removes it. That store lost a race to an
+/// invalidation, and patching it does not make its other rows current.
+#[test]
+fn a_rollback_of_the_patched_store_still_removes_the_patch() {
+    let mut bucket = Bucket::new();
+    let old: TypedValue = Arc::new(vec![1u8]);
+    let stamp = bucket.insert(
+        "k".into(),
+        Arc::new(serde_json::Value::Null),
+        Some(Arc::clone(&old)),
+        true,
+    );
+
+    assert!(bucket.replace_typed_if_same("k", &old, Arc::new(vec![1u8, 2])));
+    assert!(
+        !bucket.replace_typed_if_same("k", &old, Arc::new(vec![9u8])),
+        "a second swap against the replaced value must lose"
+    );
+    assert!(bucket.remove_if_stamp("k", stamp));
+}

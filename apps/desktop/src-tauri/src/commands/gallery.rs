@@ -17,7 +17,7 @@ use tauri::State;
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::ApplicationTemplate;
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::{CreatedApp, record_created_apps};
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
     ApplicationTemplateDto, GalleryAppSummary, GallerySearchResultsDto,
@@ -286,8 +286,8 @@ fn starts_word(hay: &str, needle: &str) -> bool {
 /// (`applicationTemplates/{id}/instantiate`) — one call that provisions the app +
 /// service principal preconfigured for that gallery app. SSO is then finished on
 /// the app's SSO tab (the template seeds the metadata). Reuses the same
-/// `Application.ReadWrite.All` write scope as the custom SSO create; busts the app
-/// lists on success so the new SP appears.
+/// `Application.ReadWrite.All` write scope as the custom SSO create; patches the
+/// new app and SP into the cached lists on success so both appear.
 #[tauri::command]
 pub async fn create_gallery_application(
     state: State<'_, AppState>,
@@ -306,7 +306,17 @@ pub async fn create_gallery_application(
     let pair = client
         .instantiate_application_template(&template_id, name)
         .await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // One write that returned both objects: patch them into the cached lists
+    // rather than rescanning the tenant for them.
+    record_created_apps(
+        &state.cache,
+        &tenant_id,
+        &[CreatedApp {
+            application: &pair.application,
+            service_principal: Some(&pair.service_principal),
+            added_password: None,
+        }],
+    );
     Ok(GalleryAppSummary {
         object_id: pair.application.id,
         service_principal_id: pair.service_principal.id,

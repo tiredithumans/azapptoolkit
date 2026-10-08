@@ -112,6 +112,8 @@ pub fn ApplicationDetailPane(
             move |()| {
                 delete_open.set(false);
                 session.close_item_by_entity(OpenItemKind::AppReg, &object_id.get_untracked());
+                // Graph deletes the app's service principal with it.
+                session.bump_app_and_enterprise_reload();
                 session.toast_success("Application deleted.");
             },
             move |tenant_id| {

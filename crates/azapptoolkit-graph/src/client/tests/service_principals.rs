@@ -759,3 +759,43 @@ async fn list_service_principals_index_continues_as_an_advanced_query() {
     assert_eq!(sps.len(), 2, "page 2 answered only as an advanced query");
     assert_eq!(sps[1].id, "sp-2");
 }
+
+/// A row patched into the cached SP index must look exactly like a scanned
+/// one: every field the index selects survives the projection, and nothing
+/// else does. A field added to the `$select` but not to `sp_index_row` (or
+/// the reverse) fails here.
+#[test]
+fn sp_index_row_keeps_exactly_the_index_select() {
+    let full: ServicePrincipal = serde_json::from_value(serde_json::json!({
+        "id": "sp-1",
+        "appId": "app-1",
+        "displayName": "Demo",
+        "accountEnabled": true,
+        "disabledByMicrosoftStatus": "NotDisabled",
+        "appRoleAssignmentRequired": true,
+        "servicePrincipalType": "Application",
+        "passwordCredentials": [{ "keyId": "k1" }],
+        "keyCredentials": [{ "keyId": "k2" }],
+        "appRoles": [{ "id": "r1", "value": "Read" }],
+        "oauth2PermissionScopes": [{ "id": "s1", "value": "user_impersonation" }],
+        "appOwnerOrganizationId": "tenant-1",
+        "alternativeNames": ["isExplicit=False"],
+        "tags": ["HideApp"],
+        "createdDateTime": "2026-01-01T00:00:00Z",
+        "notes": "n"
+    }))
+    .unwrap();
+
+    let row = serde_json::to_value(sp_index_row(&full)).unwrap();
+    let mut kept: Vec<&str> = row
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, v)| !(v.is_null() || v.as_array().is_some_and(Vec::is_empty)))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    kept.sort_unstable();
+    let mut selected = service_principals::SP_INDEX_SELECT.to_vec();
+    selected.sort_unstable();
+    assert_eq!(kept, selected);
+}

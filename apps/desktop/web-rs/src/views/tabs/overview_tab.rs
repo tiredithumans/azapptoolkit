@@ -10,6 +10,7 @@ use thaw::{Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize,
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
 use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
+use crate::state::use_session;
 
 /// The sign-in audiences, as `(Graph value, label)` in display order — the one
 /// list: this tab's editor and `create_app_dialog` both render from it.
@@ -78,6 +79,7 @@ pub fn OverviewTab(
     #[prop(into)] detail: Signal<Arc<ApplicationDetail>>,
     #[prop(into)] on_changed: Callback<()>,
 ) -> impl IntoView {
+    let session = use_session();
     let editing = RwSignal::new(false);
     let cmd = use_command();
 
@@ -118,10 +120,19 @@ pub fn OverviewTab(
         let desc = description.get();
         let notes_val = notes.get();
         let on_changed_cb = on_changed;
+        // The list rows show the name and audience, not the description or
+        // notes, so only those two refetch the list.
+        let list_changed = {
+            let patch = overview_patch(&app, &dn, &aud, &desc, &notes_val);
+            patch.display_name.is_some() || patch.sign_in_audience.is_some()
+        };
         cmd.run(
             move |()| {
                 editing.set(false);
                 on_changed_cb.try_run(());
+                if list_changed {
+                    session.bump_apps_reload();
+                }
             },
             move |tenant_id| {
                 let patch = overview_patch(&app, &dn, &aud, &desc, &notes_val);

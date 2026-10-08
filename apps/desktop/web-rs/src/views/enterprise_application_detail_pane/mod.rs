@@ -209,7 +209,7 @@ fn EnterpriseAppPanel(
                 Ok(()) => {
                     delete_open.set(false);
                     session.close_item_by_entity(OpenItemKind::Enterprise, &id);
-                    session.enterprise_apps_reload.update(|n| *n += 1);
+                    session.bump_enterprise_apps_reload();
                     session.toast_success("Enterprise application deleted.");
                 }
                 Err(e) => delete_error.set(Some(e.message)),

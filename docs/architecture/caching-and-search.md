@@ -268,9 +268,10 @@ list keys, and the list drifted twice more after that; it is now pinned both way
 (`repo_invariants::the_list_tier_doc_names_every_key_invalidate_app_lists_drops` checks this
 paragraph names every key the function drops, and
 `invalidate_app_lists_drops_every_app_set_key_and_nothing_else` checks the runtime behaviour). Any
-mutation that can add/remove/rename a service principal or app registration (`create_application`,
-`grant_exchange_mailbox_access`) must call it, or a stale pairing/search index survives until the
-TTL.
+mutation that can add/remove/rename a service principal or app registration
+(`grant_exchange_mailbox_access`, `bulk_restore_deleted`) must call it, or a stale pairing/search
+index survives until the TTL. A create, delete or rename that holds the changed object takes the
+patch tier instead (below).
 
 **The recycle bin is the deliberate non-cache.** `list_recently_deleted` reads
 `/directory/deletedItems/microsoft.graph.application` live on every dialog open and keeps nothing:
@@ -291,6 +292,37 @@ apps-pairing, the *one* app's detail, the credential-expiry list and the audit r
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+
+**Set changes with the object in hand take the patch tier.** A create, delete or rename used to
+call `invalidate_app_lists`, so the list reload that followed re-paged every `/applications` and
+`/servicePrincipals` page: tens of seconds on a large tenant, for one row. Each of these writes
+already knows what changed. The create POST (and `instantiate`) returns the new `Application` and
+`ServicePrincipal`, a delete knows its object ids, and a rename knows its fields. So
+`record_created_apps`, `record_deleted_apps` and `record_renamed_app` (`applications/cache.rs`)
+rewrite the four scanned entries (`apps_pairing`, `app_name_index`, `credential_expirations`,
+`sp_index`) in place through `Cache::patch_typed_index`. Everything else the list tier drops goes
+through `invalidate_app_list_projections`; those entries rebuild from the patched indexes without a
+Graph scan. `patch_tier_tests::the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries`
+pins the two sets together. The callers are the single and bulk create, the SAML/OIDC wizards, the
+gallery create, the single and bulk delete, and `update_application` when the name or audience
+changed (description or notes alone take `invalidate_app_details`). The rules:
+
+- Only a clean `Ok` takes the patch tier. A step that failed after the first write (a partial
+  create, a failed or lost bulk DELETE, a failed SSO configure step) may still have landed, and
+  nothing in hand describes it, so it calls `invalidate_app_lists`.
+- A patch that can't apply drops its key, so the worst case is the old cost. That covers a cold or
+  expired key, a list at `APPS_MAX` / `SP_INDEX_MAX` (a truncated scan, where only a rescan knows
+  which rows belong), and a delete whose `appId` no cached app entry can resolve (only `sp_index`
+  drops).
+- A delete also removes the app's SP from `sp_index`, because Graph deletes an app's service
+  principal in its home tenant along with it. A rename leaves `sp_index` alone: Graph syncs an SP's
+  `displayName` from its app only eventually, so the Enterprise Apps row keeps what Graph returns
+  until the TTL or a Refresh.
+- A created SP is projected through `azapptoolkit_graph::client::sp_index_row` and a created app
+  through `app_name_index_row`, so a patched row matches a scanned one. An added secret's
+  `secret_text` is cleared before it reaches any row.
+- Patches are idempotent (upsert, remove or set by id). The cache re-applies a patch that lost a
+  race, and a scan that started after the write already contains it.
 
 **Detail-affecting mutations that cannot change the set take `invalidate_app_detail_state`**
 (= `invalidate_app_details` + `invalidate_audit_cache`): grant/revoke/scope a permission
@@ -343,6 +375,14 @@ checked, which is how two production sites drifted. The caller still returns its
 re-fetch. `repo_invariants::pinned_index_writes_are_guarded_except_the_static_gallery_corpus` pins
 this — the sole exemption is the application gallery corpus, a static tenant-independent catalog no
 mutation here can invalidate.
+
+**A patch is a write the guard must see too.** `Cache::patch_typed_index` bumps the key's watches
+before it reads, as `invalidate` does, so a scan that captured its watch before the write refuses
+its pre-write snapshot. It computes the patch outside the bucket lock and swaps only if the entry is
+still the allocation it read (pointer identity), re-applying the patch up to three times when
+another writer got there first. The swap keeps the entry's `inserted`, so a patch never extends the
+TTL of the scan it patched. It also keeps the `stamp`, so a rollback aimed at the store the patch
+built on still removes it.
 
 Two shapes of this bug are worth naming, because both hid behind a guard that looked present:
 

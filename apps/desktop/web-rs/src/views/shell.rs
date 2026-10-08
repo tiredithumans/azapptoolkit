@@ -573,22 +573,16 @@ where
 fn ToolDialogs() -> impl IntoView {
     let session = use_session();
     let ui = session.tenant_ui;
-    let bump_enterprise_apps = move || {
-        session
-            .enterprise_apps_reload
-            .update(|n| *n = n.wrapping_add(1))
-    };
+    // Every create below adds an app registration AND its service principal,
+    // so both lists refetch.
+    let on_created = Callback::new(move |()| session.bump_app_and_enterprise_reload());
     view! {
         {tool_dialog(
             ActiveView::Apps,
             ui.create_open,
             move |open, on_close| {
                 view! {
-                    <CreateAppDialog
-                        open=open
-                        on_close=on_close
-                        on_created=Callback::new(move |()| session.bump_apps_reload())
-                    />
+                    <CreateAppDialog open=open on_close=on_close on_created=on_created />
                 }
             },
         )}
@@ -610,11 +604,7 @@ fn ToolDialogs() -> impl IntoView {
             ui.sso_wizard_open,
             move |open, on_close| {
                 view! {
-                    <SsoWizardDialog
-                        open=open
-                        on_close=on_close
-                        on_created=Callback::new(move |()| bump_enterprise_apps())
-                    />
+                    <SsoWizardDialog open=open on_close=on_close on_created=on_created />
                 }
             },
         )}
@@ -628,11 +618,7 @@ fn ToolDialogs() -> impl IntoView {
             ui.gallery_open,
             move |open, on_close| {
                 view! {
-                    <GalleryDialog
-                        open=open
-                        on_close=on_close
-                        on_created=Callback::new(move |()| bump_enterprise_apps())
-                    />
+                    <GalleryDialog open=open on_close=on_close on_created=on_created />
                 }
             },
         )}

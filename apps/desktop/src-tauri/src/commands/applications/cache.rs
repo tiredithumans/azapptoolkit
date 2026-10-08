@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch};
-use azapptoolkit_core::models::{Application, ServicePrincipal};
+use azapptoolkit_core::models::{Application, PasswordCredential, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
 use crate::dto::applications::ApplicationListRowDto;
@@ -186,6 +186,303 @@ pub(crate) fn invalidate_app_credentials(cache: &Cache, tenant_id: &str, object_
     cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     // Expiring-credential findings change ⇒ the cached audit run is stale.
     crate::commands::audit::invalidate_audit_cache(cache, tenant_id);
+}
+
+// ---------------- The patch tier ----------------
+//
+// A create, delete or rename changes the app set, which used to mean
+// `invalidate_app_lists` and a full `/applications` + `/servicePrincipals`
+// re-enumeration on the next list visit. These writes already hold what
+// changed (Graph returns the created objects, a delete knows its ids, a
+// rename knows its fields), so the four scanned entries are patched with
+// `Cache::patch_typed_index` instead. Everything else `invalidate_app_lists`
+// drops is a projection the next read rebuilds without a tenant scan, so it is
+// dropped the same way. Each patch falls back to dropping its key when it
+// can't apply, so the worst case is the old cost. Call only on a clean `Ok`.
+// A partial failure may have landed a write nobody can describe, so it takes
+// `invalidate_app_lists`.
+
+/// One app registration a write just created, as Graph returned it.
+pub(crate) struct CreatedApp<'a> {
+    pub(crate) application: &'a Application,
+    /// The paired service principal, when the same write created it.
+    pub(crate) service_principal: Option<&'a ServicePrincipal>,
+    /// A secret added after the create POST (the dialog's initial secret, the
+    /// OIDC wizard's client secret). The POST response predates it, but the
+    /// list row's credential badge and the expiry roll-up must show it. Its
+    /// `secret_text` is never copied into the cache.
+    pub(crate) added_password: Option<&'a PasswordCredential>,
+}
+
+/// `app` projected to the app-name index's three fields. The scan and the
+/// patch tier share it, so a patched row matches a scanned one.
+pub(crate) fn app_name_index_row(app: &Application) -> Application {
+    Application {
+        id: app.id.clone(),
+        app_id: app.app_id.clone(),
+        display_name: app.display_name.clone(),
+        ..Default::default()
+    }
+}
+
+/// Replaces the row `same` picks, or appends `row` when there is none, so a
+/// patch re-applied after a lost race (or to a scan that already saw the
+/// write) cannot duplicate it.
+fn upsert<T>(rows: &mut Vec<T>, row: T, same: impl Fn(&T) -> bool) {
+    match rows.iter_mut().find(|r| same(r)) {
+        Some(slot) => *slot = row,
+        None => rows.push(row),
+    }
+}
+
+/// What `invalidate_app_lists` drops besides the four scanned entries the
+/// patch tier rewrites. All are rebuilt from the patched indexes (or, for the
+/// role directory, only when the Grant-access picker opens).
+fn invalidate_app_list_projections(cache: &Cache, tenant_id: &str) {
+    cache.invalidate(CacheKind::Lists, &enterprise_key(tenant_id));
+    cache.invalidate(CacheKind::Lists, &search_corpus_key(tenant_id));
+    cache.invalidate(
+        CacheKind::Lists,
+        &crate::commands::managed_identity::mi_key(tenant_id),
+    );
+    invalidate_app_role_resources(cache, tenant_id);
+    invalidate_app_details(cache, tenant_id);
+    crate::commands::audit::invalidate_audit_cache(cache, tenant_id);
+}
+
+/// The patch tier for app registrations a write created. Rows are upserted
+/// into the App Registrations list, the app-name index and the expiry roll-up.
+/// A created service principal goes into the SP index.
+pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[CreatedApp<'_>]) {
+    let now = chrono::Utc::now();
+    let apps: Vec<(Application, Option<String>)> = created
+        .iter()
+        .map(|c| {
+            let mut app = c.application.clone();
+            if let Some(added) = c.added_password {
+                app.password_credentials
+                    .retain(|p| p.key_id != added.key_id);
+                app.password_credentials.push(PasswordCredential {
+                    secret_text: None,
+                    ..added.clone()
+                });
+            }
+            (app, c.service_principal.map(|sp| sp.id.clone()))
+        })
+        .collect();
+    let created_ids: std::collections::HashSet<&str> =
+        apps.iter().map(|(app, _)| app.id.as_str()).collect();
+
+    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+        CacheKind::Lists,
+        &apps_pairing_key(tenant_id),
+        |rows| {
+            let mut next = rows.clone();
+            for (app, sp_id) in &apps {
+                let row = ApplicationListRowDto::from_application(app.clone(), sp_id.clone(), now);
+                upsert(&mut next, row, |r| r.id == app.id);
+            }
+            // Past the cap the scan truncated, and only a rescan knows which
+            // rows belong in the first `APPS_MAX`.
+            (next.len() <= super::APPS_MAX).then_some(next)
+        },
+    );
+    cache.patch_typed_index::<Vec<Application>>(
+        CacheKind::Lists,
+        &app_name_index_key(tenant_id),
+        |rows| {
+            let mut next = rows.clone();
+            for (app, _) in &apps {
+                upsert(&mut next, app_name_index_row(app), |r| r.id == app.id);
+            }
+            (next.len() <= super::APPS_MAX).then_some(next)
+        },
+    );
+    cache.patch_typed_index::<Vec<CredentialRowDto>>(
+        CacheKind::Lists,
+        &credential_expirations_key(tenant_id),
+        |rows| {
+            let mut next: Vec<CredentialRowDto> = rows
+                .iter()
+                .filter(|r| !created_ids.contains(r.app_object_id.as_str()))
+                .cloned()
+                .collect();
+            let created_apps: Vec<Application> = apps.iter().map(|(app, _)| app.clone()).collect();
+            next.extend(crate::commands::credentials::credential_rows(
+                &created_apps,
+                now,
+            ));
+            crate::commands::credentials::sort_credential_rows(&mut next);
+            Some(next)
+        },
+    );
+    let sps: Vec<ServicePrincipal> = created
+        .iter()
+        .filter_map(|c| {
+            c.service_principal
+                .map(azapptoolkit_graph::client::sp_index_row)
+        })
+        .collect();
+    if !sps.is_empty() {
+        cache.patch_typed_index::<Vec<ServicePrincipal>>(
+            CacheKind::Lists,
+            &sp_index_key(tenant_id),
+            |index| {
+                let mut next = index.clone();
+                for sp in &sps {
+                    upsert(&mut next, sp.clone(), |s| s.id == sp.id);
+                }
+                (next.len() <= azapptoolkit_graph::client::SP_INDEX_MAX).then_some(next)
+            },
+        );
+    }
+    invalidate_app_list_projections(cache, tenant_id);
+}
+
+/// The patch tier for deleted app registrations. Their rows leave the App
+/// Registrations list, the app-name index and the expiry roll-up. Their
+/// home-tenant service principals leave the SP index, because Graph deletes
+/// an app's SP in its home tenant along with it.
+///
+/// The SP index is keyed by `appId`, which a delete doesn't carry, so the ids
+/// are resolved from the cached app entries before those are patched. If one
+/// can't be resolved, the SP index is dropped rather than left holding a
+/// deleted SP.
+pub(crate) fn record_deleted_apps(cache: &Cache, tenant_id: &str, object_ids: &[String]) {
+    let deleted: std::collections::HashSet<&str> = object_ids.iter().map(String::as_str).collect();
+    let app_ids: Option<std::collections::HashSet<String>> = {
+        let names = app_name_index_hit(cache, tenant_id);
+        let rows = apps_pairing_hit(cache, tenant_id);
+        deleted
+            .iter()
+            .map(|id| {
+                let from_names = names
+                    .as_deref()
+                    .and_then(|n| n.iter().find(|a| a.id == *id))
+                    .map(|a| a.app_id.clone());
+                from_names.or_else(|| {
+                    rows.as_deref()
+                        .and_then(|r| r.iter().find(|row| row.id == *id))
+                        .map(|row| row.app_id.clone())
+                })
+            })
+            .collect()
+    };
+
+    // A truncated index loses a row here that a rescan would backfill from
+    // past the cap, so a full index is dropped, not patched.
+    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+        CacheKind::Lists,
+        &apps_pairing_key(tenant_id),
+        |rows| {
+            (rows.len() < super::APPS_MAX).then(|| {
+                rows.iter()
+                    .filter(|r| !deleted.contains(r.id.as_str()))
+                    .cloned()
+                    .collect()
+            })
+        },
+    );
+    cache.patch_typed_index::<Vec<Application>>(
+        CacheKind::Lists,
+        &app_name_index_key(tenant_id),
+        |rows| {
+            (rows.len() < super::APPS_MAX).then(|| {
+                rows.iter()
+                    .filter(|a| !deleted.contains(a.id.as_str()))
+                    .cloned()
+                    .collect()
+            })
+        },
+    );
+    cache.patch_typed_index::<Vec<CredentialRowDto>>(
+        CacheKind::Lists,
+        &credential_expirations_key(tenant_id),
+        |rows| {
+            Some(
+                rows.iter()
+                    .filter(|r| !deleted.contains(r.app_object_id.as_str()))
+                    .cloned()
+                    .collect(),
+            )
+        },
+    );
+    match app_ids {
+        Some(app_ids) => {
+            cache.patch_typed_index::<Vec<ServicePrincipal>>(
+                CacheKind::Lists,
+                &sp_index_key(tenant_id),
+                |index| {
+                    (index.len() < azapptoolkit_graph::client::SP_INDEX_MAX).then(|| {
+                        index
+                            .iter()
+                            .filter(|sp| !app_ids.contains(&sp.app_id))
+                            .cloned()
+                            .collect()
+                    })
+                },
+            );
+        }
+        None => cache.invalidate(CacheKind::Lists, &sp_index_key(tenant_id)),
+    }
+    invalidate_app_list_projections(cache, tenant_id);
+}
+
+/// The patch tier for a rename (or sign-in audience change) of one app
+/// registration. The fields are rewritten wherever the scanned entries carry
+/// them.
+///
+/// The SP index is left alone. Graph syncs a service principal's
+/// `displayName` from its app only eventually, so the Enterprise Apps row
+/// keeps the name Graph currently returns until the TTL or a Refresh.
+pub(crate) fn record_renamed_app(
+    cache: &Cache,
+    tenant_id: &str,
+    object_id: &str,
+    display_name: Option<&str>,
+    sign_in_audience: Option<&str>,
+) {
+    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+        CacheKind::Lists,
+        &apps_pairing_key(tenant_id),
+        |rows| {
+            let mut next = rows.clone();
+            if let Some(row) = next.iter_mut().find(|r| r.id == object_id) {
+                if let Some(name) = display_name {
+                    row.display_name = name.to_string();
+                }
+                if let Some(audience) = sign_in_audience {
+                    row.sign_in_audience = Some(audience.to_string());
+                }
+            }
+            Some(next)
+        },
+    );
+    if let Some(name) = display_name {
+        cache.patch_typed_index::<Vec<Application>>(
+            CacheKind::Lists,
+            &app_name_index_key(tenant_id),
+            |rows| {
+                let mut next = rows.clone();
+                if let Some(app) = next.iter_mut().find(|a| a.id == object_id) {
+                    app.display_name = name.to_string();
+                }
+                Some(next)
+            },
+        );
+        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+            CacheKind::Lists,
+            &credential_expirations_key(tenant_id),
+            |rows| {
+                let mut next = rows.clone();
+                for row in next.iter_mut().filter(|r| r.app_object_id == object_id) {
+                    row.app_display_name = name.to_string();
+                }
+                Some(next)
+            },
+        );
+    }
+    invalidate_app_list_projections(cache, tenant_id);
 }
 
 /// Reads the cached per-tenant service-principal index, if present.
@@ -990,5 +1287,330 @@ mod detail_cache_tests {
                 .is_none(),
             "audit run dropped"
         );
+    }
+}
+
+/// The patch tier: each `record_*` rewrites the four scanned entries in place
+/// and drops exactly the projections `invalidate_app_lists` would have dropped
+/// alongside them. Its end-to-end twins, which also prove no rescan follows,
+/// are in `applications::handler_tests`.
+#[cfg(test)]
+mod patch_tier_tests {
+    use super::*;
+    use crate::commands::audit::audit_cache_key;
+    use crate::commands::exchange::mail_scopes_key;
+    use crate::commands::managed_identity::mi_key;
+    use std::collections::BTreeSet;
+
+    const T: &str = "t1";
+
+    fn app(id: &str) -> Application {
+        Application {
+            id: id.to_string(),
+            app_id: format!("app-{id}"),
+            display_name: id.to_string(),
+            password_credentials: vec![PasswordCredential {
+                key_id: format!("k-{id}"),
+                end_date_time: Some("2099-01-01T00:00:00Z".parse().unwrap()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn sp(id: &str, app_id: &str) -> ServicePrincipal {
+        ServicePrincipal {
+            id: id.to_string(),
+            app_id: app_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Everything `invalidate_app_lists` drops besides the scanned four.
+    fn projection_keys(t: &str) -> Vec<String> {
+        vec![
+            enterprise_key(t),
+            search_corpus_key(t),
+            mi_key(t),
+            app_role_resources_key(t),
+            app_detail_key(t, "obj"),
+            mail_scopes_key(t, "declared|obj"),
+        ]
+    }
+
+    /// The four scanned entries as `scan_app_list` and `sp_index_cached` store
+    /// them (typed, pinned), holding `obj-1`, plus every projection.
+    fn seeded(apps_in_list: Vec<Application>) -> Arc<Cache> {
+        let cache = Cache::new();
+        let now = chrono::Utc::now();
+        let rows: Vec<ApplicationListRowDto> = apps_in_list
+            .iter()
+            .map(|a| ApplicationListRowDto::from_application(a.clone(), None, now))
+            .collect();
+        let names: Vec<Application> = apps_in_list.iter().map(app_name_index_row).collect();
+        let creds = crate::commands::credentials::credential_rows(&apps_in_list, now);
+        let sps: Vec<ServicePrincipal> =
+            apps_in_list.iter().map(|a| sp("sp-1", &a.app_id)).collect();
+        cache.put_typed_index(CacheKind::Lists, apps_pairing_key(T), Arc::new(rows));
+        cache.put_typed_index(CacheKind::Lists, app_name_index_key(T), Arc::new(names));
+        cache.put_typed_index(
+            CacheKind::Lists,
+            credential_expirations_key(T),
+            Arc::new(creds),
+        );
+        cache.put_typed_index(CacheKind::Lists, sp_index_key(T), Arc::new(sps));
+        for key in projection_keys(T) {
+            cache.put(CacheKind::Lists, key.clone(), &key);
+        }
+        cache.put(CacheKind::Audit, audit_cache_key(T), &"audit".to_string());
+        cache
+    }
+
+    fn list_ids(cache: &Cache) -> Vec<String> {
+        apps_pairing_hit(cache, T)
+            .expect("the list rows are kept")
+            .iter()
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    fn assert_projections_dropped(cache: &Cache, what: &str) {
+        for key in projection_keys(T) {
+            assert!(
+                cache.get::<String>(CacheKind::Lists, &key).is_none(),
+                "{what}: {key} must fall"
+            );
+        }
+        assert!(
+            cache
+                .get::<String>(CacheKind::Audit, &audit_cache_key(T))
+                .is_none(),
+            "{what}: the audit run must fall"
+        );
+    }
+
+    #[test]
+    fn a_create_patches_the_scanned_entries_and_drops_the_projections() {
+        let cache = seeded(vec![app("obj-1")]);
+        let new_app = app("obj-2");
+        let new_sp = sp("sp-2", "app-obj-2");
+        record_created_apps(
+            &cache,
+            T,
+            &[CreatedApp {
+                application: &new_app,
+                service_principal: Some(&new_sp),
+                added_password: None,
+            }],
+        );
+
+        assert_eq!(list_ids(&cache), ["obj-1", "obj-2"]);
+        assert_eq!(app_name_index_hit(&cache, T).unwrap().len(), 2);
+        assert_eq!(credential_expirations_hit(&cache, T).unwrap().len(), 2);
+        assert!(
+            sp_index_hit(&cache, T)
+                .unwrap()
+                .iter()
+                .any(|s| s.id == "sp-2")
+        );
+        assert_projections_dropped(&cache, "create");
+    }
+
+    /// The cache retries a patch that lost a race against a newer entry, and
+    /// a scan that ran after the create already holds the app. Either way a
+    /// create applied twice must leave one row, not two.
+    #[test]
+    fn a_create_applied_twice_leaves_one_row() {
+        let cache = seeded(vec![app("obj-1")]);
+        let new_app = app("obj-2");
+        let created = [CreatedApp {
+            application: &new_app,
+            service_principal: None,
+            added_password: None,
+        }];
+        record_created_apps(&cache, T, &created);
+        record_created_apps(&cache, T, &created);
+
+        assert_eq!(list_ids(&cache), ["obj-1", "obj-2"]);
+        assert_eq!(app_name_index_hit(&cache, T).unwrap().len(), 2);
+        assert_eq!(credential_expirations_hit(&cache, T).unwrap().len(), 2);
+    }
+
+    /// A secret minted after the POST shows in the row and the roll-up.
+    #[test]
+    fn a_secret_added_after_the_post_reaches_the_row_and_the_roll_up() {
+        let cache = seeded(vec![]);
+        let bare = Application {
+            id: "obj-2".into(),
+            app_id: "app-2".into(),
+            ..Default::default()
+        };
+        let secret = PasswordCredential {
+            key_id: "k-new".into(),
+            end_date_time: Some("2099-01-01T00:00:00Z".parse().unwrap()),
+            secret_text: Some("s3cret".into()),
+            ..Default::default()
+        };
+        record_created_apps(
+            &cache,
+            T,
+            &[CreatedApp {
+                application: &bare,
+                service_principal: None,
+                added_password: Some(&secret),
+            }],
+        );
+
+        let rows = apps_pairing_hit(&cache, T).unwrap();
+        assert_eq!(rows[0].password_credential_count, 1);
+        assert_eq!(credential_expirations_hit(&cache, T).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_delete_patches_the_scanned_entries_and_drops_the_projections() {
+        let cache = seeded(vec![app("obj-1"), app("obj-2")]);
+        record_deleted_apps(&cache, T, &["obj-1".to_string()]);
+
+        assert_eq!(list_ids(&cache), ["obj-2"]);
+        assert_eq!(app_name_index_hit(&cache, T).unwrap().len(), 1);
+        assert!(
+            credential_expirations_hit(&cache, T)
+                .unwrap()
+                .iter()
+                .all(|r| r.app_object_id != "obj-1")
+        );
+        assert!(
+            sp_index_hit(&cache, T)
+                .unwrap()
+                .iter()
+                .all(|s| s.app_id != "app-obj-1"),
+            "Graph deletes the home-tenant SP with its app"
+        );
+        assert_projections_dropped(&cache, "delete");
+    }
+
+    /// The SP index is keyed by `appId`, which a delete doesn't carry. When no
+    /// cached entry can resolve it, the index is dropped rather than left
+    /// holding the deleted app's SP. The other entries are still patched.
+    #[test]
+    fn a_delete_with_an_unresolvable_app_id_drops_only_the_sp_index() {
+        let cache = seeded(vec![app("obj-1")]);
+        record_deleted_apps(&cache, T, &["obj-unknown".to_string()]);
+
+        assert!(sp_index_hit(&cache, T).is_none());
+        assert_eq!(list_ids(&cache), ["obj-1"]);
+        assert!(app_name_index_hit(&cache, T).is_some());
+    }
+
+    #[test]
+    fn a_rename_patches_the_scanned_entries_and_drops_the_projections() {
+        let cache = seeded(vec![app("obj-1")]);
+        record_renamed_app(&cache, T, "obj-1", Some("Renamed"), None);
+
+        assert_eq!(
+            apps_pairing_hit(&cache, T).unwrap()[0].display_name,
+            "Renamed"
+        );
+        assert_eq!(
+            app_name_index_hit(&cache, T).unwrap()[0].display_name,
+            "Renamed"
+        );
+        assert_eq!(
+            credential_expirations_hit(&cache, T).unwrap()[0].app_display_name,
+            "Renamed"
+        );
+        assert!(
+            sp_index_hit(&cache, T).is_some(),
+            "the SP index is untouched"
+        );
+        assert_projections_dropped(&cache, "rename");
+    }
+
+    /// A list at `APPS_MAX` came from a truncated scan. Only a rescan knows
+    /// which rows belong in it, so the patch tier drops it instead.
+    #[test]
+    fn a_list_at_the_cap_is_dropped_not_patched() {
+        let full: Vec<Application> = (0..APPS_MAX_FOR_TEST)
+            .map(|i| Application {
+                id: format!("obj-{i}"),
+                app_id: format!("app-{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let cache = seeded(full);
+        let new_app = app("obj-new");
+        record_created_apps(
+            &cache,
+            T,
+            &[CreatedApp {
+                application: &new_app,
+                service_principal: None,
+                added_password: None,
+            }],
+        );
+        assert!(apps_pairing_hit(&cache, T).is_none(), "create past the cap");
+
+        let cache = seeded(
+            (0..APPS_MAX_FOR_TEST)
+                .map(|i| Application {
+                    id: format!("obj-{i}"),
+                    app_id: format!("app-{i}"),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        record_deleted_apps(&cache, T, &["obj-0".to_string()]);
+        assert!(
+            apps_pairing_hit(&cache, T).is_none(),
+            "delete from a full list"
+        );
+    }
+
+    const APPS_MAX_FOR_TEST: usize = super::super::APPS_MAX;
+
+    /// `invalidate_app_list_projections` must keep dropping exactly what
+    /// `invalidate_app_lists` drops besides the four scanned entries. A key
+    /// added to the list tier and not here would survive every create, delete
+    /// and rename, stale until the TTL. Read from the source, like the doc pin
+    /// in `repo_invariants/cache.rs`.
+    #[test]
+    fn the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries() {
+        let src = include_str!("cache.rs");
+        let body = |name: &str| {
+            let start = src
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("{name} moved"));
+            // From the opening brace, so the function's own name isn't a call.
+            let rest = &src[start..];
+            let rest = &rest[rest.find('{').expect("function body")..];
+            &rest[..rest.find("\n}\n").expect("function end")]
+        };
+        let calls = |text: &str| -> BTreeSet<String> {
+            text.match_indices('(')
+                .filter_map(|(at, _)| {
+                    let head = &text[..at];
+                    let start = head
+                        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .map_or(0, |i| i + 1);
+                    let ident = &head[start..];
+                    (ident.ends_with("_key") || ident.starts_with("invalidate_"))
+                        .then(|| ident.to_string())
+                })
+                .collect()
+        };
+
+        let list_tier = calls(body("invalidate_app_lists"));
+        let mut patch_tier = calls(body("invalidate_app_list_projections"));
+        patch_tier.extend(
+            [
+                "apps_pairing_key",
+                "app_name_index_key",
+                "credential_expirations_key",
+                "sp_index_key",
+            ]
+            .map(String::from),
+        );
+        assert!(list_tier.len() >= 8, "parsed {list_tier:?}");
+        assert_eq!(patch_tier, list_tier);
     }
 }
