@@ -117,7 +117,7 @@ Some features need admin-consent/premium scopes beyond the sign-in bundle:
 | `Synchronization.Read.All` | SCIM provisioning |
 | `AuditLog.Read.All` | Directory activity / change log (the Activity tab), **and** the two sign-in reports: the service-principal sign-in-activity report behind the audit's unused-app detection, **and** the beta `reports/appCredentialSignInActivities` behind the unused-credential advisory and the Credentials tab's Last-used column (that one is **Global cloud only** — a sovereign cloud reads it as unavailable and the feature stays off). Both reports' least-privileged scope is `AuditLog.Read.All`, **not** `Reports.Read.All`. |
 | `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token` — the CA tab's "Grant consent" covers the policy reads too (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
-| `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. |
+| `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. The same token also reads the admin center's **custom claims policy** (beta `servicePrincipals/{id}/claimsPolicy`; see "Attributes & claims: what the admin center shows" below). |
 | `Sites.FullControl.All` | SharePoint `Sites.Selected` — list/grant/revoke a site's per-app permissions in the Permissions tab's SharePoint site access section. The site-permission endpoints require it even for **reads**, since the verb-selected read token only holds `Directory.Read.All`. |
 | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` (one token) | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Learn's "Add members" table documents the pair for a `servicePrincipal` member (Graph must also write the SP); `Application.ReadWrite.All` is already in the write bundle, so this widens nothing. Deliberately the membership-only group scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
 | ARM `management.azure.com/.default` | Managed-identity Azure RBAC |
@@ -600,3 +600,26 @@ additive and inactive, so a bulk run changes nothing for users; activation flips
 - Takes **service-principal** ids. `Session.tenant_ui.selected_sso_cert_ids` is deliberately a third
   selection set alongside `selected_app_ids`/`selected_audit_ids`, which hold app-registration object
   ids — feeding SP ids to an app-registration bulk command would target the wrong objects entirely.
+
+## Attributes & claims: what the admin center shows
+
+An app's SAML claims can live in three places, and Entra applies the first that exists:
+
+| Source | Where | Notes |
+|---|---|---|
+| Claims mapping policy | `servicePrincipals/{id}/claimsMappingPolicies` (v1.0) | The legacy model, and what the SSO tab's editor writes. Authoritative: while one is assigned the admin center can't edit the app's claims, and it overrides the admin center's policy. |
+| Custom claims policy | `servicePrincipals/{id}/claimsPolicy` (**beta only, global cloud only**) | What the admin center's "Attributes & Claims" page writes: `customClaim` entries plus a `samlNameIdClaim` (the Name ID, with `nameIdFormat`). A 404 or an empty `value` collection means none; both documented response shapes (the bare object and a `value` collection) are accepted, and any other shape is an error, never an empty policy. Not asked for outside the global cloud (`sso::config::portal_claims_readable`): the view then sets `portal_policy_unreadable` and says admin-center claims can't be shown, and editing stays available. |
+| Defaults | `dto::sso::DEFAULT_SAML_CLAIMS` | Name ID `user.userprincipalname` (`emailAddress` format) plus `emailaddress`, `givenname`, `name`, `surname`. |
+
+`get_sso_config` reads both policies in its first wave and `commands::sso::claims_view` projects
+them into `SsoConfigDto.claims_view`: the Required claim (Name ID) and every Additional claim,
+written as the admin center writes values (`user.mail`, `"constant"`,
+`Join(user.givenname, ".", user.surname)`), with the basic claim set merged in when a policy turns it
+on and the application's `groupMembershipClaims` listed as the `groups` claim. Before this, only the
+mapping policy was read, so claims configured in the admin center never showed. The view is `None`
+when either read fails (a half-read view could name the wrong claims), and that also sets
+`claims_read_failed`, keeping Save off.
+
+The editor still writes a claims mapping policy (the custom claims policy has no v1.0 write). When
+the claims in effect are not already a mapping policy's, the tab warns that saving creates one that
+replaces the admin center's claims and stops the admin center editing them.

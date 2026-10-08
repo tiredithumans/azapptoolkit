@@ -25,6 +25,7 @@
 
 mod board;
 mod claims;
+mod claims_view;
 mod config;
 mod create;
 mod metadata;

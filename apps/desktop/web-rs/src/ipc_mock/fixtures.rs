@@ -326,6 +326,7 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         claims_policy: None,
         claims_policy_id: None,
         claims_read_failed: false,
+        claims_view: Some(default_claims_view()),
         // The demo app's posture is the healthy one: verification on, no weak
         // algorithms. The alert shapes are exercised by the gui tests, which
         // mutate this fixture — the demo shows what a live tenant typically
@@ -334,6 +335,45 @@ pub fn sso_config(object_id: &str, app_id: &str) -> SsoConfigDto {
         allowed_weak_signature_algorithms: None,
         summary: Some(SsoSummary::Saml(saml_sso_summary(object_id, app_id))),
         rollover: Some(signing_cert_rollover(object_id, app_id)),
+    }
+}
+
+/// An uncustomized SAML app's "Attributes & claims", as `get_sso_config`
+/// projects it: Entra's default Name ID and additional claims, plus a security
+/// group claim, so the demo shows both tables doing real work.
+pub fn default_claims_view() -> azapptoolkit_dto::sso::ClaimsViewDto {
+    use azapptoolkit_dto::sso::{
+        ClaimRowDto, ClaimsSource, ClaimsViewDto, DEFAULT_NAME_ID_ATTRIBUTE,
+        DEFAULT_NAME_ID_FORMAT, DEFAULT_SAML_CLAIMS,
+    };
+    let saml = || vec!["SAML".to_string()];
+    let mut additional: Vec<ClaimRowDto> = DEFAULT_SAML_CLAIMS
+        .iter()
+        .map(|&(_, uri, attribute)| ClaimRowDto {
+            name: uri.to_string(),
+            token_types: saml(),
+            value: format!("user.{attribute}"),
+            detail: None,
+        })
+        .collect();
+    additional.push(ClaimRowDto {
+        name: "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups".to_string(),
+        token_types: saml(),
+        value: "user.groups [SecurityGroup]".to_string(),
+        detail: None,
+    });
+    ClaimsViewDto {
+        source: ClaimsSource::Default,
+        mapping_policy_name: None,
+        portal_policy_overridden: false,
+        portal_policy_unreadable: false,
+        required: ClaimRowDto {
+            name: "Unique User Identifier (Name ID)".to_string(),
+            token_types: saml(),
+            value: format!("user.{DEFAULT_NAME_ID_ATTRIBUTE}"),
+            detail: Some(format!("[nameid-format:{DEFAULT_NAME_ID_FORMAT}]")),
+        },
+        additional,
     }
 }
 

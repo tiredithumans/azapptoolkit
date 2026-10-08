@@ -318,3 +318,91 @@ async fn missing_app_management_policy_collection_reads_as_empty() {
             .is_empty()
     );
 }
+
+/// The admin center's custom claims policy rides the policy token, and an app
+/// without one (404) reads as `None`, not an error.
+#[tokio::test]
+async fn custom_claims_policy_reads_on_the_policy_token_and_404_is_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/claimsPolicy"))
+        .and(header("authorization", "Bearer pw"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "includeBasicClaimSet": true,
+            "claims": [{ "@odata.type": "#microsoft.graph.samlNameIdClaim",
+                         "nameIdFormat": "persistent", "configurations": null }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-2/claimsPolicy"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_policy_write_token(StaticTokenProvider::new("pw"));
+
+    let policy = client
+        .get_custom_claims_policy("sp-1")
+        .await
+        .unwrap()
+        .expect("a policy");
+    assert_eq!(policy.include_basic_claim_set, Some(true));
+    assert!(policy.claims[0].is_name_id());
+    assert_eq!(
+        policy.claims[0].name_id_format.as_deref(),
+        Some("persistent")
+    );
+    assert!(
+        client
+            .get_custom_claims_policy("sp-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The API reference documents a `value` collection; the how-to, the bare
+/// object. Both read as the policy, and an empty collection is no policy.
+#[tokio::test]
+async fn custom_claims_policy_accepts_the_collection_shape_too() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/claimsPolicy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "includeBasicClaimSet": false, "claims": [
+                { "@odata.type": "#microsoft.graph.customClaim", "name": "dept",
+                  "configurations": [] }
+            ] }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-2/claimsPolicy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-3/claimsPolicy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": "x" })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri()).with_policy_write_token(StaticTokenProvider::new("pw"));
+
+    let policy = client
+        .get_custom_claims_policy("sp-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(policy.claims[0].name.as_deref(), Some("dept"));
+    assert!(
+        client
+            .get_custom_claims_policy("sp-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        client.get_custom_claims_policy("sp-3").await.is_err(),
+        "an unknown shape is an error, never an empty policy"
+    );
+}

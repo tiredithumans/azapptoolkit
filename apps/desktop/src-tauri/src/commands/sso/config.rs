@@ -33,6 +33,13 @@ use super::{
 /// One read fills the whole tab: the app-owner [`SsoSummary`] and (for SAML)
 /// the rollover panel's initial [`SigningCertRolloverDto`] are projected from
 /// the same service-principal read, so opening the tab reads the SP once.
+/// Whether this cloud offers the admin center's custom claims policy read. The
+/// beta `servicePrincipals/{id}/claimsPolicy` is documented for the global
+/// service only (not US Government L4/L5 or China).
+pub(crate) fn portal_claims_readable(cloud: CloudEnvironment) -> bool {
+    cloud == CloudEnvironment::Commercial
+}
+
 #[tauri::command]
 pub async fn get_sso_config(
     state: State<'_, AppState>,
@@ -56,9 +63,25 @@ pub(crate) async fn get_sso_config_core(
     // input service_principal_id and are independent of each other (and of the
     // SP→app→app-SSO chain below), so read them concurrently — folding the
     // claims round trip into the first wave instead of trailing the whole chain.
-    let (sp, claims_result) = tokio::join!(
+    // The admin center's own claims live in the (beta) custom claims policy, a
+    // third independent read of the same first wave. It exists in the global
+    // cloud only: elsewhere it is not asked for (`Ok(None)` = "can't be read
+    // here"), so a national-cloud tenant keeps its claims editing instead of
+    // tripping the unreadable-claims guard on a call that can never succeed.
+    let portal_read = async {
+        if portal_claims_readable(cloud) {
+            client
+                .get_custom_claims_policy(&service_principal_id)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let (sp, claims_result, portal_result) = tokio::join!(
         client.get_service_principal_sso_fields(&service_principal_id),
         client.list_assigned_claims_mapping_policies(&service_principal_id),
+        portal_read,
     );
 
     let sp =
@@ -89,6 +112,7 @@ pub(crate) async fn get_sso_config_core(
         spa_redirect_uris,
         signed_requests_required,
         allowed_weak_signature_algorithms,
+        group_claims,
     ) = match client.find_application_by_app_id(&app_id).await? {
         Some(app) => {
             let app_sso = client.get_application_sso_fields(&app.id).await?;
@@ -100,7 +124,21 @@ pub(crate) async fn get_sso_config_core(
                 .as_ref()
                 .map(extract_request_signature_verification)
                 .unwrap_or_default();
-            (app.id, ids, redirects, logout, spa, signed, weak)
+            let group_claims = app_sso
+                .as_ref()
+                .and_then(|a| a.get("groupMembershipClaims"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            (
+                app.id,
+                ids,
+                redirects,
+                logout,
+                spa,
+                signed,
+                weak,
+                group_claims,
+            )
         }
         None => (
             String::new(),
@@ -108,6 +146,7 @@ pub(crate) async fn get_sso_config_core(
             Vec::new(),
             None,
             Vec::new(),
+            None,
             None,
             None,
         ),
@@ -121,25 +160,51 @@ pub(crate) async fn get_sso_config_core(
     // Claims: best-effort (read concurrently in the first wave above). A missing
     // scope/consent leaves the policy unset AND flags the read as failed, so the
     // tab never offers a save over a policy it couldn't see.
-    let (claims_policy, claims_policy_id, claims_read_failed) = match claims_result {
-        Ok(policies) => match policies.into_iter().next() {
-            Some(policy) => {
-                let parsed = policy
-                    .definition
-                    .first()
-                    .map(|d| parse_claims_definition(d))
-                    .unwrap_or_default();
-                (Some(parsed), Some(policy.id), false)
+    let (claims_policy, claims_policy_id, claims_policy_name, claims_read_failed) =
+        match claims_result {
+            Ok(policies) => match policies.into_iter().next() {
+                Some(policy) => {
+                    let parsed = policy
+                        .definition
+                        .first()
+                        .map(|d| parse_claims_definition(d))
+                        .unwrap_or_default();
+                    (Some(parsed), Some(policy.id), policy.display_name, false)
+                }
+                None => (None, None, None, false),
+            },
+            Err(err) => {
+                tracing::debug!(
+                    ?err,
+                    "claims policy unreadable; SSO tab will block claims edits"
+                );
+                (None, None, None, true)
             }
-            None => (None, None, false),
-        },
-        Err(err) => {
-            tracing::debug!(
-                ?err,
-                "claims policy unreadable; SSO tab will block claims edits"
+        };
+    // The admin-center view needs BOTH policies: a mapping policy overrides the
+    // admin center's, and showing either alone could name the wrong claims. An
+    // unreadable admin-center policy also blocks claims edits, since the
+    // editor's warning about overriding it would be a guess.
+    let (claims_view, claims_read_failed) = match (&portal_result, claims_read_failed) {
+        (Ok(portal), false) => {
+            let mut view = super::claims_view::claims_view(
+                claims_policy
+                    .as_ref()
+                    .map(|policy| super::claims_view::AssignedMappingPolicy {
+                        policy,
+                        name: claims_policy_name.as_deref(),
+                    }),
+                portal.as_ref().and_then(Option::as_ref),
+                group_claims.as_deref(),
             );
-            (None, None, true)
+            view.portal_policy_unreadable = portal.is_none();
+            (Some(view), false)
         }
+        (Err(err), _) => {
+            tracing::debug!(?err, "custom claims policy unreadable; no claims view");
+            (None, true)
+        }
+        (Ok(_), true) => (None, true),
     };
 
     let mut dto = SsoConfigDto {
@@ -159,6 +224,7 @@ pub(crate) async fn get_sso_config_core(
         claims_policy,
         claims_policy_id,
         claims_read_failed,
+        claims_view,
         signed_requests_required,
         allowed_weak_signature_algorithms,
         summary: None,

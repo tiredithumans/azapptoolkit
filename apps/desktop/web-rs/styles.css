@@ -1493,6 +1493,14 @@ h3 {
 }
 /* Collapsible scoping sections under the permissions table (Exchange /
    SharePoint) — bordered so they read as tools, not more table rows. */
+/* The read-only "Attributes & claims" view on the SSO tab: source line, then
+   the Required and Additional claim tables. */
+.claims-overview {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
 .detail-section {
   display: grid;
   gap: var(--space-2);

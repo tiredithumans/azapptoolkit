@@ -1013,3 +1013,21 @@ fn activation_guard_refuses_missing_and_expired_and_is_a_no_op_when_active() {
     let err = activation_target(&expired_leftover(), A_HEX).expect_err("expired");
     assert_eq!(err.code, "cert_expired");
 }
+
+/// The admin center's custom claims policy is a global-cloud-only beta API.
+/// A national cloud must not ask for it: the call can never succeed there, and
+/// a failed claims read turns claims editing off.
+#[test]
+fn the_admin_center_claims_read_is_global_cloud_only() {
+    use azapptoolkit_core::cloud::CloudEnvironment;
+    assert!(super::config::portal_claims_readable(
+        CloudEnvironment::Commercial
+    ));
+    for cloud in [
+        CloudEnvironment::UsGov,
+        CloudEnvironment::UsGovDod,
+        CloudEnvironment::China,
+    ] {
+        assert!(!super::config::portal_claims_readable(cloud), "{cloud:?}");
+    }
+}

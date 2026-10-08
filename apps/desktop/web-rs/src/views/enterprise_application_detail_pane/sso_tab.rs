@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::bindings::sso::ClaimsSource;
+use crate::components::claims_overview::ClaimsOverview;
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyBlock, DataTable};
 use crate::hooks::use_command::use_command;
 use crate::util::{expiry_label, expiry_tone};
@@ -619,6 +621,15 @@ fn SsoEditor(
     // which may be false, so Save stays off until a read succeeds. Plain bool —
     // every reload re-mounts this editor through `SsoContent`'s Suspense.
     let claims_unread = cfg.claims_read_failed;
+    // The admin-center view of the claims (Required, then Additional), read from
+    // whichever policy is in effect. `StoredValue` so the `<Show>` child stays `Fn`.
+    let claims_view = StoredValue::new(cfg.claims_view.clone());
+    // Saving through the editor creates (or edits) a claims mapping policy. Unless
+    // one is already in effect, that newly overrides the admin center's claims.
+    let save_overrides_portal = cfg
+        .claims_view
+        .as_ref()
+        .is_some_and(|v| v.source != ClaimsSource::MappingPolicy);
     // Signed-AuthnRequest enforcement, read from the paired application.
     // Read-only by design: v1.0 documents `requestSignatureVerification` on the
     // read side but its `application-update` property list omits it, so there is
@@ -939,6 +950,7 @@ fn SsoEditor(
                 </Button>
 
                 <h4>"Attributes & claims"</h4>
+                {move || claims_view.get_value().map(|v| view! { <ClaimsOverview view=v /> })}
                 {claims_unread
                     .then(|| {
                         view! {
@@ -951,6 +963,15 @@ fn SsoEditor(
                                 >
                                     "Load claims"
                                 </Button>
+                            </Callout>
+                        }
+                    })}
+                <h5>"Edit with a claims mapping policy"</h5>
+                {save_overrides_portal
+                    .then(|| {
+                        view! {
+                            <Callout tone="warn">
+                                "Saving here creates a claims mapping policy that replaces the claims set in the admin center, and the admin center can no longer edit them."
                             </Callout>
                         }
                     })}

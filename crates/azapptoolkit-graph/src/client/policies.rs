@@ -56,6 +56,56 @@ impl GraphClient {
         Ok(page.items)
     }
 
+    /// The custom claims policy the Entra admin center writes for this service
+    /// principal's "Attributes & Claims", or `None` when the app has none (the
+    /// admin center hasn't customized it). Beta only, and **global cloud only**:
+    /// the resource has no v1.0 form and no national-cloud deployment, so the
+    /// caller decides whether to ask at all. Rides `policy_write_token`
+    /// (`Policy.ReadWrite.ApplicationConfiguration`, the documented least
+    /// privilege for this read).
+    ///
+    /// Microsoft documents two response shapes: the policy object itself (the
+    /// how-to's examples) and a `value` collection holding it (the API
+    /// reference). Both are accepted; an empty collection is no policy. Reading
+    /// the wrong shape as a policy would show "configured in the admin center"
+    /// with no claims, so anything else is a deserialize error, not an empty
+    /// policy.
+    pub async fn get_custom_claims_policy(
+        &self,
+        service_principal_id: &str,
+    ) -> Result<Option<CustomClaimsPolicy>> {
+        let token = self.policy_write_token()?;
+        let url = format!(
+            "{}/servicePrincipals/{service_principal_id}/claimsPolicy",
+            self.beta_base()
+        );
+        let Some(body) =
+            not_found_as_none(self.scoped_get::<serde_json::Value>(token, &url).await)?
+        else {
+            return Ok(None);
+        };
+        let policy = match body.get("value") {
+            Some(serde_json::Value::Array(items)) => match items.first() {
+                Some(first) => first.clone(),
+                None => return Ok(None),
+            },
+            Some(_) => {
+                return Err(GraphError::Deserialize(
+                    "claimsPolicy: `value` is not a collection".into(),
+                ));
+            }
+            None => body,
+        };
+        if !policy.is_object() {
+            return Err(GraphError::Deserialize(
+                "claimsPolicy: the policy is not an object".into(),
+            ));
+        }
+        serde_json::from_value(policy)
+            .map(Some)
+            .map_err(|e| GraphError::Deserialize(e.to_string()))
+    }
+
     /// Unassigns a policy from a service principal — the tenant-level object survives;
     /// [`Self::delete_claims_mapping_policy`] removes it. Requires `policy_write_token`.
     pub async fn remove_claims_mapping_policy(
