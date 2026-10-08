@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-08
+
 ### Added
 
 - **A "SharePoint item access" section on an app's Permissions tab lists the libraries, folders
