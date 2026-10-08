@@ -1575,7 +1575,8 @@ mod patch_tier_tests {
     /// in `repo_invariants/cache.rs`.
     #[test]
     fn the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries() {
-        let src = include_str!("cache.rs");
+        // Windows checks the source out with CRLF line endings.
+        let src = include_str!("cache.rs").replace("\r\n", "\n");
         let body = |name: &str| {
             let start = src
                 .find(&format!("fn {name}("))
