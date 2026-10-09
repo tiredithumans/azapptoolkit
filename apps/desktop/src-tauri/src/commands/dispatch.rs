@@ -1,6 +1,6 @@
 //! Bounded-concurrency task dispatch shared by the long-running fan-out
 //! commands (security audit, site sweep, mailbox probe, bulk credential
-//! sweep).
+//! sweep), and the one ARM fan-out width the control-plane sweeps share.
 //!
 //! Exists because the per-command backpressure loops each awaited a completed
 //! task with `let _ = futures.next().await` to enforce their in-flight cap —
@@ -12,6 +12,13 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::dto::UiError;
+
+/// Per-sweep width of the ARM control-plane fan-outs (the Key Vault picker
+/// and RBAC reads, readiness, managed-identity Azure roles, Graph usage):
+/// one value so the sweeps agree, keeping each inside ARM's rate limits (429s
+/// are retried with backoff in the client). It bounds each sweep, not their
+/// sum; a bigger estate takes proportionally longer rather than truncating.
+pub(crate) const ARM_CONCURRENCY: usize = 8;
 
 /// Latches "the session is dead" across a [`dispatch_capped`] run.
 ///

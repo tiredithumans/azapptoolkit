@@ -166,15 +166,42 @@ pub struct BulkCreatePermission {
     pub kind: PermissionKind,
 }
 
+/// What a bulk create did with one spec. On the wire as the lowercase word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BulkCreateStatus {
+    /// Validation-only run: the spec would be created as described.
+    Valid,
+    /// Rejected before anything was created (either run kind): local
+    /// validation failed, or a named owner or permission does not resolve in
+    /// the tenant. `message` says why and `error` stays `None`.
+    Invalid,
+    /// The app exists — as described, or with a `message` naming what did not
+    /// land (an owner, a later step).
+    Created,
+    /// A backend call failed and nothing was created.
+    Failed,
+}
+
+impl BulkCreateStatus {
+    /// The wire word, for display when an outcome carries no message.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Created => "created",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkCreateOutcome {
     pub display_name: String,
-    /// `valid` / `invalid` for a validation-only run; `created` / `failed` for
-    /// a real run.
-    pub status: String,
+    pub status: BulkCreateStatus,
     pub app_id: Option<String>,
     /// Human-readable detail for ANY non-success status, including the
-    /// validation ones (`invalid`) that never involve a backend call.
+    /// rejections (`invalid`) that created nothing.
     pub message: Option<String>,
     /// Set only when the failure came from a backend call, so the create path
     /// can participate in the run-level fatal check like every other bulk
@@ -189,6 +216,30 @@ pub struct BulkCreateResult {
     pub validate_only: bool,
     pub outcomes: Vec<BulkCreateOutcome>,
     pub cancelled: bool,
+}
+
+#[cfg(test)]
+mod bulk_create_status_tests {
+    use super::BulkCreateStatus as S;
+
+    /// The wire words are the ones the frontend matched as strings before the
+    /// enum; serde and `as_str` must agree with them and each other.
+    #[test]
+    fn bulk_create_status_wire_words_are_stable() {
+        for (s, word) in [
+            (S::Valid, "valid"),
+            (S::Invalid, "invalid"),
+            (S::Created, "created"),
+            (S::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(s).unwrap(), serde_json::json!(word));
+            assert_eq!(
+                serde_json::from_value::<S>(serde_json::json!(word)).unwrap(),
+                s
+            );
+            assert_eq!(s.as_str(), word);
+        }
+    }
 }
 
 // ---------------- Bulk remove redundant permissions ----------------

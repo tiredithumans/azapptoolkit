@@ -9,7 +9,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::bulk::{
-    BulkCreateOutcome, BulkCreatePermission, BulkCreateResult, BulkCreateSpec,
+    BulkCreateOutcome, BulkCreatePermission, BulkCreateResult, BulkCreateSpec, BulkCreateStatus,
 };
 use azapptoolkit_dto::permissions::PermissionKind;
 use azapptoolkit_web_rs::test_support as ts;
@@ -85,7 +85,7 @@ async fn a_partial_create_is_a_problem_and_declared_permissions_say_unconsented(
             validate_only: false,
             outcomes: vec![BulkCreateOutcome {
                 display_name: "Payroll Sync".to_string(),
-                status: "created".to_string(),
+                status: BulkCreateStatus::Created,
                 app_id: Some("app-1".to_string()),
                 message: Some("Owner(s) not added: alice@contoso.com.".to_string()),
                 error: None,
