@@ -205,18 +205,31 @@ jobs:
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        # `shell: powershell` only propagates the LAST native exit code, so a
+        # failed MSI signature followed by a successful NSIS one would pass the
+        # step and ship an unsigned installer — check every signtool call. The
+        # decoded .pfx is removed on every exit path so the signing material
+        # never outlives the step on the runner.
         run: |
           $cert = [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
-          [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", $cert)
-          $signtool = Resolve-Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
-            | Select-Object -Last 1
-          $targets = @(
-            "target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi",
-            "target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe"
-          )
-          Get-ChildItem -Path $targets | ForEach-Object {
-            & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
-              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [System.IO.File]::WriteAllBytes($pfx, $cert)
+          try {
+            $signtool = Resolve-Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" `
+              | Select-Object -Last 1
+            $targets = @(
+              "target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi",
+              "target\x86_64-pc-windows-msvc\release\bundle\nsis\*-setup.exe"
+            )
+            $installers = @(Get-ChildItem -Path $targets)
+            if ($installers.Count -eq 0) { throw "no installers found to sign under $($targets -join ', ')" }
+            foreach ($installer in $installers) {
+              & $signtool sign /f $pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
+                /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed on $($installer.Name) (exit $LASTEXITCODE)" }
+            }
+          } finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue $pfx
           }
 
       # Authenticode signing rewrites the installer bytes, invalidating the

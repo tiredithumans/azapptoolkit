@@ -323,7 +323,8 @@ This replaces the placeholder PNGs checked into the repo with proper
 The release workflow signs both installers with `signtool.exe` when
 `WINDOWS_CERTIFICATE` (base64-encoded PFX) and
 `WINDOWS_CERTIFICATE_PASSWORD` are configured as GitHub Actions
-secrets. A self-signed test certificate is fine for internal
+secrets. The step fails if either signature fails, and the decoded PFX is
+deleted from the runner before the step ends. A self-signed test certificate is fine for internal
 distribution; an EV cert is recommended for external distribution.
 
 ## Updater keys
@@ -390,7 +391,9 @@ Required secrets for `release.yml`, stored on the **`release` environment**
 (Settings → Environments → `release`, deployment rule: tags matching `v*`),
 not as repository secrets — so only a `v*` tag run can read them. The
 workflow is read-only by default; only the `release` job holds
-`contents: write`, and no checkout persists its token:
+`contents: write`, and no checkout persists its token. `pages.yml` follows the same split:
+its build job holds no Pages write or OIDC token; only `deploy` does
+(pinned by `pages_workflow_grants_the_deploy_token_only_to_the_deploy_job`):
 
 | Secret                                 | Purpose                                            |
 |----------------------------------------|----------------------------------------------------|

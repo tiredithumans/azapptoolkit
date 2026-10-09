@@ -846,32 +846,20 @@ fn release_workflow_grants_write_and_secrets_only_where_needed() {
         "release.yml's top-level permissions must be `contents: read`; grant write per job"
     );
 
-    // Split into jobs: two-space-indented `name:` keys under `jobs:`.
-    let jobs_at = lines
-        .iter()
-        .position(|l| *l == "jobs:")
-        .expect("release.yml lost `jobs:`");
-    let mut jobs: Vec<(String, Vec<&str>)> = Vec::new();
-    for l in &lines[jobs_at + 1..] {
-        let is_job_key = l.starts_with("  ")
-            && !l.starts_with("   ")
-            && l.trim_end().ends_with(':')
-            && !l.trim_start().starts_with('#');
-        if is_job_key {
-            jobs.push((l.trim().trim_end_matches(':').to_string(), Vec::new()));
-        } else if let Some((_, body)) = jobs.last_mut() {
-            body.push(l);
-        }
-    }
+    let jobs = workflow_jobs(&lines, "release.yml");
     assert!(
         jobs.iter().any(|(n, _)| n == "release"),
         "no `release` job found"
     );
 
     for (name, body) in &jobs {
-        let writes = body.iter().any(|l| l.trim() == "contents: write");
+        let entries: Vec<&str> = body.iter().map(|l| yaml_entry(l)).collect();
+        assert!(
+            !entries.iter().any(|e| e.contains("write-all")),
+            "job `{name}`: `write-all` grants every scope at once"
+        );
         assert_eq!(
-            writes,
+            entries.contains(&"contents: write"),
             name == "release",
             "job `{name}`: only the `release` job may hold `contents: write`"
         );
@@ -896,6 +884,100 @@ fn release_workflow_grants_write_and_secrets_only_where_needed() {
                 "job `{name}` reads the updater signing key but is not bound to the `release` \
                  environment"
             );
+        }
+    }
+}
+
+/// Split a workflow's `jobs:` section into `(job name, body lines)` pairs: a job
+/// is a two-space-indented `name:` key, and its body runs to the next one.
+fn workflow_jobs<'a>(lines: &[&'a str], file: &str) -> Vec<(String, Vec<&'a str>)> {
+    let jobs_at = lines
+        .iter()
+        .position(|l| *l == "jobs:")
+        .unwrap_or_else(|| panic!("{file} lost `jobs:`"));
+    let mut jobs: Vec<(String, Vec<&'a str>)> = Vec::new();
+    for l in &lines[jobs_at + 1..] {
+        let is_job_key = l.starts_with("  ")
+            && !l.starts_with("   ")
+            && l.trim_end().ends_with(':')
+            && !l.trim_start().starts_with('#');
+        if is_job_key {
+            jobs.push((l.trim().trim_end_matches(':').to_string(), Vec::new()));
+        } else if let Some((_, body)) = jobs.last_mut() {
+            body.push(l);
+        }
+    }
+    jobs
+}
+
+/// One workflow line with any trailing `# comment` and surrounding whitespace
+/// removed, so `pages: write # why` still reads as the grant it is.
+fn yaml_entry(line: &str) -> &str {
+    line.split(" #").next().unwrap_or(line).trim()
+}
+
+/// The entries of the top-level `permissions:` mapping: every indented,
+/// non-blank, non-comment line that follows it, up to the next top-level key.
+fn top_level_permissions<'a>(lines: &[&'a str], file: &str) -> Vec<&'a str> {
+    let top = lines
+        .iter()
+        .position(|l| *l == "permissions:")
+        .unwrap_or_else(|| panic!("{file} lost its top-level `permissions:` block"));
+    lines[top + 1..]
+        .iter()
+        .take_while(|l| l.trim().is_empty() || l.starts_with(' '))
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| yaml_entry(l))
+        .collect()
+}
+
+/// The Pages `build` job compiles both Rust trees — every dependency's build
+/// script and proc-macro — so it must hold neither the Pages write token (which
+/// also edits the site's settings) nor an OIDC token (which any federated
+/// credential trusting this repo would accept). Only `deploy`, which runs no
+/// third-party code, may carry `pages: write` + `id-token: write` (the same
+/// split #293 gave release.yml), and no job may take `write-all` or persist
+/// its checkout token.
+#[test]
+fn pages_workflow_grants_the_deploy_token_only_to_the_deploy_job() {
+    let pages = include_str!("../../../../../.github/workflows/pages.yml");
+    let lines: Vec<&str> = pages.lines().collect();
+
+    assert_eq!(
+        top_level_permissions(&lines, "pages.yml"),
+        ["contents: read"],
+        "pages.yml's top-level permissions must be exactly `contents: read`; grant write per job"
+    );
+
+    let jobs = workflow_jobs(&lines, "pages.yml");
+    assert!(
+        jobs.iter().any(|(n, _)| n == "deploy"),
+        "no `deploy` job found"
+    );
+    for (name, body) in &jobs {
+        let entries: Vec<&str> = body.iter().map(|l| yaml_entry(l)).collect();
+        assert!(
+            !entries.iter().any(|e| e.contains("write-all")),
+            "job `{name}`: `write-all` grants every scope at once"
+        );
+        for grant in ["pages: write", "id-token: write"] {
+            assert_eq!(
+                entries.contains(&grant),
+                name == "deploy",
+                "job `{name}`: only the `deploy` job may hold `{grant}`"
+            );
+        }
+        for (i, l) in body.iter().enumerate() {
+            if l.contains("uses: actions/checkout@") {
+                let next = body[i + 1..]
+                    .iter()
+                    .take(3)
+                    .any(|n| n.trim() == "persist-credentials: false");
+                assert!(
+                    next,
+                    "job `{name}`: actions/checkout must set `persist-credentials: false`"
+                );
+            }
         }
     }
 }
