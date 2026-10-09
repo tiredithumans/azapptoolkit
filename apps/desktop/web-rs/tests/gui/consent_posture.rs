@@ -6,8 +6,9 @@
 //! the assigned policies, since whether each still allows what its name
 //! implies is not knowable from the read); a tenant with self-consent
 //! confirmed-off or with an unreadable policy pair must render NOTHING —
-//! silence, not "all clear". These tests pin all three states on both
-//! surfaces. The grants tests scope their "no Callout" assertions by text:
+//! silence, not "all clear" — except that Home adds a muted suggestion when
+//! self-consent is off but the admin consent workflow is confirmed off too.
+//! These tests pin every state on both surfaces. The grants tests scope their "no Callout" assertions by text:
 //! the grants fixture's permanent risky-scope banner is its own warn Callout,
 //! so a blanket "no .alert anywhere" assertion would fail for reasons
 //! unrelated to this feature.
@@ -89,8 +90,8 @@ fn mount_home(p: TenantConsentPostureDto) -> ts::Mounted {
 async fn grants_warn_when_user_consent_is_unrestricted() {
     ts::reset();
     let _m = mount_grants(posture(Some(vec![LEGACY]), Some(true), Some(false)));
-    ts::wait_for(|| ts::body_contains("potentially self-granted")).await;
-    let cls = alert_class("self-granted").expect("the posture note must be a Callout");
+    ts::wait_for(|| ts::body_contains("without an admin")).await;
+    let cls = alert_class("without an admin").expect("the posture note must be a Callout");
     assert!(
         cls.contains("alert--warn"),
         "unrestricted user consent is a risk, not a neutral fact: {cls}"
@@ -99,7 +100,7 @@ async fn grants_warn_when_user_consent_is_unrestricted() {
     // policy still allows, so the operator gets the evidence, not a verdict.
     assert!(ts::body_contains(LEGACY));
     assert!(ts::body_contains(
-        "This tenant also allows user consent for risky apps."
+        "Users can also approve apps Microsoft flags as risky."
     ));
     let call = ts::last_call("get_tenant_consent_posture").expect("posture read");
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
@@ -115,7 +116,7 @@ async fn grants_stay_silent_when_consent_is_confirmed_restricted() {
     ts::wait_for(|| ts::query_all(".data-table tbody tr").len() == 4).await;
     ts::tick().await;
     assert!(
-        !ts::body_contains("default user role"),
+        !ts::body_contains("without an admin"),
         "confirmed-restricted consent renders no posture note; body was: {}",
         ts::body_text()
     );
@@ -131,7 +132,7 @@ async fn grants_stay_silent_on_an_unreadable_policy_pair() {
     ts::wait_for(|| ts::query_all(".data-table tbody tr").len() == 4).await;
     ts::tick().await;
     assert!(
-        !ts::body_contains("self-granted") && !ts::body_contains("risky apps."),
+        !ts::body_contains("without an admin") && !ts::body_contains("flags as risky"),
         "unknown posture renders nothing; body was: {}",
         ts::body_text()
     );
@@ -141,31 +142,45 @@ async fn grants_stay_silent_on_an_unreadable_policy_pair() {
 async fn home_warns_when_user_consent_is_unrestricted() {
     ts::reset();
     let _m = mount_home(posture(Some(vec![LEGACY]), Some(true), Some(false)));
-    ts::wait_for(|| ts::body_contains("delegated permissions to themselves")).await;
-    let cls = alert_class("delegated permissions to themselves")
+    ts::wait_for(|| ts::body_contains("without an admin")).await;
+    let cls = alert_class("without an admin")
         .expect("the posture note renders through the Callout primitive");
     assert!(cls.contains("alert--warn"), "{cls}");
     assert!(ts::body_contains(
-        "This tenant also allows user consent for risky apps."
+        "Users can also approve apps Microsoft flags as risky."
     ));
     // The note must not displace the run-derived counts (independent reads).
     ts::wait_for(|| ts::body_contains("Scanned ")).await;
 }
 
 #[wasm_bindgen_test]
-async fn home_states_the_restricted_facts_quietly() {
+async fn home_stays_silent_on_the_recommended_setup() {
     ts::reset();
+    // User consent off + admin consent workflow on is the recommended setup:
+    // nothing to act on, so the card says nothing about consent.
     let _m = mount_home(posture(Some(vec![]), None, Some(true)));
-    ts::wait_for(|| ts::body_contains("User self-consent is off for the default user role.")).await;
-    assert!(ts::body_contains("Admin consent workflow: on."));
-    // Facts render as a muted line, NOT as a warn Callout — and the one
-    // permanent Callout on this card belongs to other features.
+    ts::wait_for(|| ts::body_contains("Scanned ")).await;
+    ts::tick().await;
+    ts::tick().await;
+    assert!(
+        !ts::body_contains("without an admin") && !ts::body_contains("approve apps"),
+        "the recommended setup renders no consent note; body was: {}",
+        ts::body_text()
+    );
+}
+
+#[wasm_bindgen_test]
+async fn home_suggests_the_admin_consent_workflow_when_it_is_off() {
+    ts::reset();
+    let _m = mount_home(posture(Some(vec![]), None, Some(false)));
+    ts::wait_for(|| ts::body_contains("the admin consent workflow is off")).await;
+    // A suggestion, not an alarm: a muted line, never a warn Callout.
     assert!(
         ts::query_all(".alert").iter().all(|e| !e
             .text_content()
             .unwrap_or_default()
-            .contains("self-consent")),
-        "restricted posture must not alarm; body was: {}",
+            .contains("admin consent workflow")),
+        "a missing workflow must not alarm; body was: {}",
         ts::body_text()
     );
 }
@@ -180,7 +195,9 @@ async fn home_stays_silent_on_an_unknown_posture() {
     ts::tick().await;
     ts::tick().await;
     assert!(
-        !ts::body_contains("self-consent") && !ts::body_contains("risky apps."),
+        !ts::body_contains("without an admin")
+            && !ts::body_contains("approve apps")
+            && !ts::body_contains("flags as risky"),
         "unknown posture renders nothing; body was: {}",
         ts::body_text()
     );

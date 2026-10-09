@@ -5,6 +5,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **The consent notes on the Home page's Security Posture card and the Consent grants page are
+  easier to read.** They now say whether users can approve apps' access to their own data without
+  an admin, and that any per-user grant may have been made that way. When users can't, the Home
+  card no longer shows a consent note, unless the admin consent workflow is also off, in which
+  case it says users have no way to ask an admin for approval.
+
 ## [0.33.0] - 2026-10-08
 
 ### Added

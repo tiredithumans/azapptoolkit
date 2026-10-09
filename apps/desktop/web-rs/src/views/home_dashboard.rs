@@ -661,30 +661,39 @@ fn card_lists(key: &str) -> bool {
 /// view's header Callout but sized for the card. Whole-DTO contract: an absent
 /// `default_user_role_consent_policies` is UNKNOWN — neither "consent is
 /// restricted" nor "all clear" — so it renders nothing, exactly like the
-/// credential-lifetime line's policy-unavailable case below it.
+/// credential-lifetime line's policy-unavailable case below it. The
+/// recommended setup (user consent off, admin consent workflow on) also
+/// renders nothing; only a confirmed-off workflow gets a muted line.
 fn consent_posture_note(p: &TenantConsentPostureDto) -> impl IntoView {
     let Some(names) = p.default_user_role_consent_policies.as_ref() else {
         return ().into_any();
     };
     if !names.is_empty() {
         let mut text = format!(
-            "Users here can grant delegated permissions to themselves — the app-consent policies \
-             ({}) assigned to the default user role make every per-user grant in the audit \
-             potentially self-granted.",
+            "Users in this tenant can approve apps' access to their own data without an admin \
+             (consent policy: {}). Any per-user permission in the audit may have been granted \
+             this way, not by an admin.",
             names.join(", ")
         );
         if p.risky_app_user_consent == Some(true) {
-            text.push_str(" This tenant also allows user consent for risky apps.");
+            text.push_str(" Users can also approve apps Microsoft flags as risky.");
         }
         return view! { <Callout tone="warn">{text}</Callout> }.into_any();
     }
-    let mut line = String::from("User self-consent is off for the default user role.");
-    match p.admin_consent_workflow_enabled {
-        Some(true) => line.push_str(" Admin consent workflow: on."),
-        Some(false) => line.push_str(" Admin consent workflow: off."),
-        None => {}
+    // User consent is off. With the admin consent workflow on, that is the
+    // recommended setup and the card says nothing; an unknown workflow state
+    // says nothing either. Only a confirmed-off workflow earns a line, as a
+    // suggestion rather than a warning.
+    if p.admin_consent_workflow_enabled != Some(false) {
+        return ().into_any();
     }
-    view! { <p class="muted">{line}</p> }.into_any()
+    view! {
+        <p class="muted">
+            "Users can't approve apps on their own, and they can't ask an admin for approval \
+             either: the admin consent workflow is off."
+        </p>
+    }
+    .into_any()
 }
 
 /// One ranked "Top findings" line: tone dot · title · count · chevron, drilling
