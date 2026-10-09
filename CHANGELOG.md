@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-10-09
+
 ### Changed
 
 - **The consent notes on the Home page's Security Posture card and the Consent grants page are
