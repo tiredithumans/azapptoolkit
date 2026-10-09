@@ -113,6 +113,12 @@ pub fn SsoWizardDialog(
     if let Some(t) = session.active_tenant.get_untracked() {
         leptos::task::spawn_local(async move {
             let d = crate::bindings::defaults::get_tenant_defaults(&t.tenant_id).await;
+            // The dialog can close before this local read returns, and reading
+            // a disposed signal panics the window; another tenant's default is
+            // not this one's.
+            if notification_emails.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
             let emails = d.enterprise_application.default_notification_emails;
             if !emails.is_empty() && notification_emails.get_untracked().trim().is_empty() {
                 notification_emails.set(emails.join("\n"));
@@ -125,7 +131,9 @@ pub fn SsoWizardDialog(
     // Runs the create command for the chosen protocol. Reused by the Create
     // button and by the retry-after-consent button.
     let run_create = move || {
-        if busy.get_untracked() {
+        // Reached after an await on the consent-retry path, when the dialog
+        // may be disposed: reading a disposed signal panics, so check first.
+        if busy.is_disposed() || busy.get_untracked() {
             return;
         }
         let Some(t) = session.active_tenant.get_untracked() else {
@@ -241,7 +249,15 @@ pub fn SsoWizardDialog(
         error.set(None);
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&tenant_id, "policy_write").await {
+            let consent = auth::request_scope_consent(&tenant_id, "policy_write").await;
+            // Land nothing on a switched or signed-out tenant: the task outlives
+            // the dialog (`frontend-workspace.md`), and the retried create here
+            // would surface — or write — in whatever tenant is active now.
+            if !session.is_active_tenant(&tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match consent {
                 Ok(()) => {
                     needs_consent.set(false);
                     busy.set(false);

@@ -118,6 +118,13 @@ pub fn ScopeMailboxButton(
                     .await
                 }
             };
+            // Land nothing on a switched or signed-out tenant: the task outlives
+            // the dialog (`frontend-workspace.md`), and a toast here would
+            // surface in whatever tenant is active now.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
             match outcome {
                 Ok(res) if res.warnings.is_empty() => {
                     open.set(false);
@@ -167,7 +174,12 @@ pub fn ScopeMailboxButton(
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "exchange").await {
+            let consent = auth::request_scope_consent(&t.tenant_id, "exchange").await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match consent {
                 Ok(()) => {
                     needs_consent.set(false);
                     session.toast_success("Consent granted — select Scope access to continue.");
@@ -357,6 +369,10 @@ pub fn ScopeSharePointButton(
                     .await
                     .map(|res| (res.sites_granted.len(), res.removed_orgwide_grants.len())),
                 };
+                if !session.is_active_tenant(&t.tenant_id) {
+                    busy.set(false);
+                    return;
+                }
                 match outcome {
                     Ok((sites, removed)) => {
                         open.set(false);
@@ -391,7 +407,12 @@ pub fn ScopeSharePointButton(
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
+            let consent = auth::request_scope_consent(&t.tenant_id, "sharepoint").await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match consent {
                 Ok(()) => {
                     needs_consent.set(false);
                     session.toast_success("Consent granted — choose Read or Write to continue.");

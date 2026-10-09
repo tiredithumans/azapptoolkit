@@ -616,3 +616,63 @@ async fn a_preseed_the_wizard_cannot_scope_is_granted_org_wide() {
     ts::wait_for(|| ts::call_count("grant_single_permission") == 1).await;
     assert_eq!(ts::call_count("convert_site_access_to_selected"), 0);
 }
+
+/// The consent round trip is a browser prompt the user can leave open while
+/// switching tenant. The retried apply used to re-resolve the ACTIVE tenant,
+/// so the grant would land on the one switched to meanwhile (here the wizard
+/// outlives the switch; in the app the switch disposes its pane, and the old
+/// code panicked instead); the task now lands nothing for a tenant that is no
+/// longer active.
+#[wasm_bindgen_test]
+async fn a_consent_retry_does_not_apply_to_a_tenant_switched_to_meanwhile() {
+    let m = mount_wizard(None);
+    ts::mock_err(
+        "grant_single_permission",
+        &fixtures::ui_error("consent_required", "consent required (AADSTS65001)"),
+    );
+    ts::mock_ok("request_scope_consent", &());
+    ts::mock_ok("list_exchange_scope_group", &populated_scope_group());
+
+    ts::wait_for(|| ts::body_contains("Mail.Read")).await;
+    ts::select_picker_permission("Mail.Read");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| scope_mode_radios().len() == 3).await;
+    let radios = scope_mode_radios();
+    radios[radios.len() - 1].click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("EVERY resource")).await;
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::has_button_labelled("Grant consent & retry")).await;
+
+    // A retry would now succeed — so a leaked one is visible as a second call.
+    ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+    ts::click_button_labelled("Grant consent & retry");
+    // Synchronously after the click: the consent task is queued but has not
+    // resumed, so the switch lands while the "prompt" is open.
+    let mut other = ts::test_tenant();
+    other.tenant_id = "other-tenant".into();
+    m.session.set_active_tenant(Some(other));
+    ts::wait_for(|| ts::call_count("request_scope_consent") == 1).await;
+    ts::tick().await;
+
+    // The consent went out for the tenant that started it: the switch landed
+    // after the click handler captured it, so the ordering is what this test
+    // assumes.
+    let consent = ts::last_call("request_scope_consent").unwrap();
+    assert_eq!(consent.arg_str("tenantId").as_deref(), Some("test-tenant"));
+    assert_eq!(
+        ts::call_count("grant_single_permission"),
+        1,
+        "the retried apply must not run against the tenant switched to meanwhile"
+    );
+    assert!(
+        m.session.toasts.with_untracked(|t| t.is_empty()),
+        "nothing lands on the new tenant"
+    );
+    assert!(
+        ts::button_labelled_enabled("Grant consent & retry"),
+        "the gate releases `busy` when it bails"
+    );
+}
