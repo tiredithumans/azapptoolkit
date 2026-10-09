@@ -332,8 +332,25 @@ fn split_into_chunks(token: &str) -> Vec<&str> {
 static CHUNK_SET_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Result<()> {
+    save_refresh_token_if(tenant_id, account_oid, token, || true).map(|_| ())
+}
+
+/// [`save_refresh_token`], but only while `still_current()` holds — evaluated
+/// under the chunk-set lock, the same lock a sign-out's delete takes, so a
+/// refresh that finished after the operator signed out (or switched account)
+/// either lands before that delete, which then removes it, or sees the moved
+/// session epoch and writes nothing. Returns whether the token was stored.
+pub fn save_refresh_token_if(
+    tenant_id: &str,
+    account_oid: &str,
+    token: &str,
+    still_current: impl FnOnce() -> bool,
+) -> Result<bool> {
     ensure_keyring_store()?;
     let _guard = CHUNK_SET_LOCK.lock();
+    if !still_current() {
+        return Ok(false);
+    }
     // A refresh token spans N keyring entries. A write that stops half way
     // leaves chunks 0..k with the NEW token and k..old_len with the OLD one's
     // tail; the per-write generation every chunk carries makes `load` read that
@@ -357,7 +374,7 @@ pub fn save_refresh_token(tenant_id: &str, account_oid: &str, token: &str) -> Re
         }
         return Err(err);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The write itself: every chunk, then a best-effort sweep of any previously
@@ -532,6 +549,24 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
     Ok(Some(combined))
 }
 
+/// [`delete_refresh_token`], then `on_deleted()` — still under the chunk-set
+/// lock, and only when the delete succeeded. The sign-out path moves the
+/// session epoch there: a refresh that finished before the delete has had its
+/// write removed, one that finishes after it sees the moved epoch and writes
+/// nothing, and a delete that fails leaves the epoch — and so every live
+/// client — exactly as it was.
+pub fn delete_refresh_token_then(
+    tenant_id: &str,
+    account_oid: &str,
+    on_deleted: impl FnOnce(),
+) -> Result<()> {
+    ensure_keyring_store()?;
+    let _guard = CHUNK_SET_LOCK.lock();
+    delete_chunks(tenant_id, account_oid)?;
+    on_deleted();
+    Ok(())
+}
+
 pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     ensure_keyring_store()?;
     let _guard = CHUNK_SET_LOCK.lock();
@@ -584,14 +619,26 @@ pub fn delete_refresh_token_if_current(
 /// it. Split out so `save_refresh_token`'s rollback cannot deadlock on its own
 /// guard.
 fn delete_chunks(tenant_id: &str, account_oid: &str) -> Result<()> {
+    // A delete that failed partway (chunk 0 gone, a later chunk refused) leaves
+    // a gap at the front; stopping at the first missing entry would then end
+    // the retry at idx 0 and report success with token fragments still on
+    // disk. Deletes are rare, so a few no-op probes past a gap cost nothing.
+    const GAP_TOLERANCE: usize = 4;
     let mut idx = 0;
+    let mut missing_run = 0;
     loop {
         let account = chunk_account(tenant_id, account_oid, idx);
         match keyring_core::Entry::new(KEYRING_SERVICE, &account)?.delete_credential() {
-            Ok(()) => idx += 1,
-            Err(keyring_core::Error::NoEntry) => break,
+            Ok(()) => missing_run = 0,
+            Err(keyring_core::Error::NoEntry) => {
+                missing_run += 1;
+                if missing_run >= GAP_TOLERANCE {
+                    break;
+                }
+            }
             Err(err) => return Err(AuthError::Keyring(err.to_string())),
         }
+        idx += 1;
     }
     Ok(())
 }
@@ -1199,5 +1246,53 @@ mod tests {
                 "chunk {idx} must be gone after the rollback"
             );
         }
+    }
+
+    /// A sign-out whose delete fails after chunk 0 is gone leaves chunks 1..
+    /// behind a gap. The retry used to stop at the missing chunk 0 and report
+    /// success; it now walks past the gap and removes the fragments.
+    #[test]
+    fn a_delete_that_failed_after_chunk_zero_is_finished_by_the_retry() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-delgap", "oid-delgap");
+        let three_chunks = "a".repeat(MAX_PAYLOAD_UTF16_BYTES + 10);
+        save_refresh_token(tenant, oid, &three_chunks).unwrap();
+        fail_next_keyring_op(tenant, oid, 1);
+
+        let first = delete_refresh_token(tenant, oid);
+        assert!(matches!(first, Err(AuthError::Keyring(_))), "{first:?}");
+        delete_refresh_token(tenant, oid).unwrap();
+
+        for idx in 0..3 {
+            assert!(
+                keyring_core::Entry::new(KEYRING_SERVICE, &chunk_account(tenant, oid, idx))
+                    .unwrap()
+                    .get_password()
+                    .is_err(),
+                "chunk {idx} must be gone after the retried delete"
+            );
+        }
+    }
+
+    /// A refused `still_current` writes nothing and leaves the previous set.
+    #[test]
+    fn a_save_whose_session_moved_on_stores_nothing() {
+        init_mock_keyring();
+        let (tenant, oid) = ("tenant-fence", "oid-fence");
+        save_refresh_token(tenant, oid, "old").unwrap();
+        assert!(!save_refresh_token_if(tenant, oid, "late", || false).unwrap());
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .map(|t| t.to_string()),
+            Some("old".into())
+        );
+        assert!(save_refresh_token_if(tenant, oid, "new", || true).unwrap());
+        assert_eq!(
+            load_refresh_token(tenant, oid)
+                .unwrap()
+                .map(|t| t.to_string()),
+            Some("new".into())
+        );
     }
 }

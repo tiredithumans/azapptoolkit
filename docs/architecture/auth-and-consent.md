@@ -249,15 +249,36 @@ which a sign-out/sign-in cycle would.
 - The `InvalidGrant` purge is conditional (`token_cache::delete_refresh_token_if_current`): it
   deletes only if the keyring still holds the token that just failed, compared and deleted under
   the chunk-set lock. Refresh locks are per scope set, so a slow refresh can fail with the old token
-  after `reauthenticate` stored a new one; that newer session is kept and the call returns
-  `RefreshTokenMissing` without dropping the tenant, so the silent `refresh_session` retry recovers.
-  A narrow window remains: a `reauthenticate` landing between the delete and the in-memory cleanup
-  loses its cached tokens and registration (its keyring token survives for launch restore).
-- `sign_out` deletes the keyring token (the one fallible step) first, and clears the token cache and
-  `known_tenants` only after it succeeds, so a failure never leaves a refresh token for the next
-  launch to restore. For a multi-chunk (Windows) token, a failure after the first chunk is gone keeps
-  the in-memory session but leaves the stored token unloadable. Every keyring call in the service
-  runs on the blocking pool (pinned by a source scan in `service/mod.rs`).
+  after `reauthenticate` stored a new one; that newer session is kept and the refresh is retried
+  once with it (a second rejection then purges as usual). The in-memory cleanup after a purge runs
+  only while the session epoch (below) is unchanged, so a `sign_in` that landed during the POST
+  keeps its registration and slots.
+- **A session epoch fences late stores.** `EntraAuthService::session_epoch` moves on `sign_in` and
+  `sign_out` (never on `reauthenticate`, `restore_session` or a consent/step-up round trip). Every
+  token-yielding flow captures it before its round trip, and `store_token_outcome` stores nothing
+  once it has moved: the keyring write goes through `save_refresh_token_if`, whose check runs
+  under the chunk-set lock the sign-out delete also takes, and the cache put runs under the
+  registry lock `sign_in`/`sign_out` hold while they sweep. A late refresh therefore fails
+  `NotSignedIn` instead of writing the previous account's rotated refresh token back (stranded,
+  since `last_account` is gone) or serving its access token to the next account's writes.
+  `ScopedTokenAdapter` captures the epoch when built and refuses to mint under a newer one, so a
+  write run holding an `Arc<GraphClient>` across a same-tenant account switch stops at the
+  dead-session latch rather than minting the new account's tokens (`forget_tenant` drops the client
+  maps, but not the `Arc`s a run already holds).
+- `sign_out` deletes the keyring token (the one fallible step) and moves the epoch inside that
+  delete, under the chunk-set lock and only once it succeeded (`delete_refresh_token_then`), then
+  clears the token cache and `known_tenants`; so a failure never leaves a refresh token for the
+  next launch to restore, and leaves the epoch — and every live client — as it was. A multi-chunk
+  (Windows) delete that fails after chunk 0 leaves fragments behind a gap; the retry walks past up
+  to three missing chunks (`delete_chunks`), so a retried sign-out removes them.
+- `reauthenticate`, consent and step-up round trips do not move the epoch, so the purge's
+  epoch check does not cover them: one landing between the purge's keyring delete and its
+  in-memory cleanup still loses its cached tokens and registration (its keyring token survives for
+  launch restore) — the same narrow window as before. Every keyring call in the
+  service runs on the blocking pool (pinned by a source scan in `service/mod.rs`).
+- A CAE claims challenge bypasses the cache, but the double-checked read under the refresh lock
+  still returns a token minted while the caller waited (its expiry differs from the one the caller
+  saw before the lock): a fan-out whose every request is challenged makes one `/token` POST.
 - The interactive **`sign_in`** is the one flow that sweeps: the account picker can return a
   different operator on the same tenant, and neither token slots nor data caches key on the account.
   `EntraAuthService::sign_in` drops every token slot of the tenant before seeding the new read

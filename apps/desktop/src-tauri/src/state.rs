@@ -570,7 +570,9 @@ impl AppState {
     /// place keeps its runs. The write runs (`bulk_cancel`, `migration_cancel`,
     /// `scope_move_cancel`, `restore_cancel`) are left alone: stopping one between writes is the
     /// operator's call, and with the tokens gone each stops on its own at the
-    /// dead-session latch. Pinned by `repo_invariants/cache.rs`.
+    /// dead-session latch — its `ScopedTokenAdapter` was built under the previous
+    /// session epoch and refuses to mint under the new one, even across a
+    /// same-tenant account switch. Pinned by `repo_invariants/cache.rs`.
     pub fn forget_tenant(&self, tenant_id: &str) {
         self.audit_cancel.cancel();
         self.site_sweep_cancel.cancel();
