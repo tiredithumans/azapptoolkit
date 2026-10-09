@@ -6,10 +6,17 @@ impl GraphClient {
     /// whose composite `id` is needed for the permission endpoints. Reads via
     /// the SharePoint scope: `/sites/{id}/permissions` (the next calls) require
     /// `Sites.FullControl.All`, which the default read token lacks.
+    ///
+    /// The URL is operator-typed (or pasted), so `site_lookup_path` refuses
+    /// anything that is not a plain site address before the request, and the
+    /// id Graph answers with must stand as one path segment — it is what the
+    /// permission endpoints are addressed by next.
     pub async fn get_site_by_url(&self, site_url: &str) -> Result<Site> {
         let token = self.sharepoint_token()?;
-        let url = format!("{}{}", self.base_url, site_lookup_path(site_url));
-        self.scoped_get_retried(token, &url).await
+        let url = format!("{}{}", self.base_url, site_lookup_path(site_url)?);
+        let site: Site = self.scoped_get_retried(token, &url).await?;
+        validate::require_path_segment("site id", &site.id)?;
+        Ok(site)
     }
 
     /// Lists a site's application permissions, following `nextLink` until
@@ -112,7 +119,12 @@ impl GraphClient {
             .await
     }
 
+    /// `permission_id` arrives from the webview, so it is shape-checked before
+    /// it is spliced into the DELETE path: `../../../drives/{d}/items/{i}` under
+    /// the FullControl bearer could delete a file.
     pub async fn remove_site_permission(&self, site_id: &str, permission_id: &str) -> Result<()> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("permission id", permission_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/permissions/{permission_id}",
@@ -553,6 +565,9 @@ impl GraphClient {
         list_id: &str,
         permission_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
+        validate::require_path_segment("permission id", permission_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/permissions/{permission_id}",
@@ -569,6 +584,10 @@ impl GraphClient {
         item_id: &str,
         permission_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
+        validate::require_path_segment("item id", item_id)?;
+        validate::require_path_segment("permission id", permission_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/items/{item_id}/permissions/{permission_id}",
@@ -608,22 +627,41 @@ fn granted_to_v2_body(app_id: &str, app_display_name: &str, roles: &[String]) ->
 /// strip the decoration and keep only the site collection (managed path + name),
 /// which is what the permissions endpoints operate on. URLs without an app token
 /// are passed through unchanged so subsite paths keep resolving as before.
-fn site_lookup_path(site_url: &str) -> String {
-    let trimmed = site_url.trim().trim_end_matches('/');
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
-    // Drop any query string / fragment (sharing links carry ?d=..&csf=1&web=1&e=..).
-    let without_query = without_scheme
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(without_scheme);
-    let (host, rest) = match without_query.split_once('/') {
-        Some((h, p)) => (h, p),
-        None => (without_query, ""),
+///
+/// The text is operator-typed, so it is parsed as a URL first (`url::Url`,
+/// which resolves `..`/`%2e%2e` dot segments and turns `\` into `/` the way a
+/// browser would) and the path is rebuilt from the parsed segments — nothing
+/// typed can climb out of `/sites/{host}:/`. A segment holding a `:` (Graph's
+/// path-addressing pivot: `/sites/Fin:/drive/root:/x` answers with a
+/// driveItem, not a site), an encoded `/`, `\`, `:` or `.`, or a host that is
+/// not a hostname, is refused rather than sent on the `Sites.FullControl.All`
+/// bearer. Refusals never echo the input.
+fn site_lookup_path(site_url: &str) -> Result<String> {
+    let refuse = || {
+        GraphError::Protocol(
+            "refusing a site URL that is not a plain SharePoint site address".to_string(),
+        )
     };
-    let decorated = segs_of(rest);
+    let trimmed = site_url.trim();
+    let absolute = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let parsed = Url::parse(&absolute).map_err(|_| refuse())?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(refuse());
+    }
+    // Credentials and a port have no place in a site address, and silently
+    // dropping them would send a request the operator did not read.
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.port().is_some() {
+        return Err(refuse());
+    }
+    let host = parsed.host_str().ok_or_else(refuse)?.to_ascii_lowercase();
+    if !is_hostname(&host) {
+        return Err(refuse());
+    }
+    let decorated = segs_of(parsed.path());
     let was_decorated = decorated.len() != undecorated_segments(&decorated).len()
         || decorated
             .first()
@@ -639,12 +677,38 @@ fn site_lookup_path(site_url: &str) -> String {
             segs.truncate(i + 2);
         }
     }
+    if segs.iter().any(|s| !is_site_path_segment(s)) {
+        return Err(refuse());
+    }
     let rel = segs.join("/");
-    if rel.is_empty() {
+    Ok(if rel.is_empty() {
         format!("/sites/{host}")
     } else {
         format!("/sites/{host}:/{rel}")
-    }
+    })
+}
+
+/// A plausible hostname: non-empty labels of letters, digits and hyphens.
+/// `.` and `..` parse as hosts (`https://./`) and would then be resolved as
+/// dot segments by the transport, climbing out of `/sites/`.
+fn is_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// Whether one parsed path segment can stand in a site address: not a dot
+/// segment, no `:` (path-addressing pivot) or `\`, and no percent-encoded
+/// `/`, `\`, `:` or `.` for Graph to decode into one.
+fn is_site_path_segment(seg: &str) -> bool {
+    let lower = seg.to_ascii_lowercase();
+    seg != "."
+        && seg != ".."
+        && !seg.contains([':', '\\'])
+        && !["%2f", "%5c", "%3a", "%2e"]
+            .iter()
+            .any(|enc| lower.contains(enc))
 }
 
 /// Joins the parts of an operator-facing resource path.
@@ -694,7 +758,9 @@ fn undecorated_segments<'a>(segs: &[&'a str]) -> Vec<&'a str> {
 }
 
 /// Parses a user-supplied URL into `(lowercase host, undecorated path segments)`
-/// with every segment percent-encoded the way Graph's path addressing expects.
+/// with every segment percent-encoded the way Graph's path addressing expects —
+/// or `None` when the text is not a URL on a hostname whose every segment can
+/// stand in a Graph path (`is_site_path_segment`).
 ///
 /// Routing through `url::Url` is what makes the encoding question disappear: a
 /// hand-typed `.../Shared Documents/Q1 Invoices` and a browser-copied
@@ -710,11 +776,20 @@ fn url_host_and_segments(raw: &str) -> Option<(String, Vec<String>)> {
     };
     let parsed = Url::parse(&absolute).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
+    if !is_hostname(&host) {
+        return None;
+    }
     let raw_segs = segs_of(parsed.path());
-    let segs = undecorated_segments(&raw_segs)
+    let segs: Vec<String> = undecorated_segments(&raw_segs)
         .into_iter()
         .map(str::to_string)
         .collect();
+    // The same refusals as `site_lookup_path`: these segments are spliced into
+    // `root:/{path}:` drive addressing on the same bearer, where a `:` or an
+    // encoded `/` pivots just as it does on the site lookup.
+    if segs.iter().any(|s| !is_site_path_segment(s)) {
+        return None;
+    }
     Some((host, segs))
 }
 
@@ -792,26 +867,114 @@ fn site_relative_path(site_url: &str, target_url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// `site_lookup_path` for an address the tests expect to be accepted.
+    fn lookup(site_url: &str) -> String {
+        site_lookup_path(site_url).expect("a plain site address is accepted")
+    }
+
+    /// Every one of these climbs, pivots or smuggles its way out of
+    /// `/sites/{host}:/` — or did, when the typed text was spliced into the
+    /// path verbatim: `\..\..\..\..\me` passed a `/`-only split and was sent
+    /// as `GET /v1.0/me` on the Sites.FullControl.All bearer, and a `:` in a
+    /// segment made Graph answer with a driveItem that then deserialised as a
+    /// `Site`.
+    #[test]
+    fn site_lookup_path_refuses_anything_but_a_plain_site_address() {
+        for bad in [
+            "https://contoso.sharepoint.com/sites/Fin:/drive/root:/x",
+            "https://contoso.sharepoint.com/sites/Fin%2f..%2f..%2fme",
+            "https://contoso.sharepoint.com/sites/Fin%5c..",
+            "https://contoso.sharepoint.com/sites/Fin%3a",
+            "https://contoso.sharepoint.com/sites/Fin%2e%2ex",
+            "https://user:pw@contoso.sharepoint.com/sites/Fin",
+            "https://contoso.sharepoint.com:8443/sites/Fin",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://con toso.sharepoint.com/sites/Fin",
+            "https://[::1]/sites/Fin",
+            // `.` and `..` parse as hosts, and the transport would then resolve
+            // them as dot segments.
+            "https://./sites/Fin",
+            "https://../",
+            ".",
+            "https://contoso..sharepoint.com/sites/Fin",
+            "",
+        ] {
+            let err = site_lookup_path(bad).unwrap_err();
+            assert!(
+                matches!(&err, GraphError::Protocol(m) if m == "refusing a site URL that is not a plain SharePoint site address"),
+                "{bad:?}: {err:?}"
+            );
+        }
+        // Dot segments are resolved the way a browser resolves them, and the
+        // rebuilt path stays inside the host's site tree.
+        assert_eq!(
+            lookup("https://contoso.sharepoint.com/sites/Public/../Finance"),
+            "/sites/contoso.sharepoint.com:/sites/Finance"
+        );
+        assert_eq!(
+            lookup("https://contoso.sharepoint.com/sites/X/../../../../me"),
+            "/sites/contoso.sharepoint.com:/me"
+        );
+        // Backslashes are what a browser makes of them, and the climb still
+        // ends under the host's site tree: this used to be sent as
+        // `GET /v1.0/me`.
+        assert_eq!(
+            lookup(r"https://contoso.sharepoint.com/sites/X\..\..\..\..\me"),
+            "/sites/contoso.sharepoint.com:/me"
+        );
+        // Host casing and a bare host are normalised, not refused.
+        assert_eq!(
+            lookup("CONTOSO.sharepoint.com/sites/Finance"),
+            "/sites/contoso.sharepoint.com:/sites/Finance"
+        );
+    }
+
+    /// The item resolver's parser refuses the same segments: its output is
+    /// spliced into `root:/{path}:` drive addressing on the same bearer.
+    #[test]
+    fn url_host_and_segments_refuses_a_segment_that_would_pivot() {
+        for bad in [
+            "https://contoso.sharepoint.com/sites/Fin/Shared%20Documents/x:/y",
+            "https://contoso.sharepoint.com/sites/Fin/Shared%2fDocuments",
+            "https://./sites/Fin",
+        ] {
+            assert_eq!(url_host_and_segments(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            url_host_and_segments("https://contoso.sharepoint.com/sites/Fin/Shared%20Documents/Q1"),
+            Some((
+                "contoso.sharepoint.com".to_string(),
+                vec![
+                    "sites".to_string(),
+                    "Fin".to_string(),
+                    "Shared%20Documents".to_string(),
+                    "Q1".to_string()
+                ]
+            ))
+        );
+    }
+
     #[test]
     fn site_lookup_path_handles_clean_root_and_subsite_urls() {
         // Clean site collection URL.
         assert_eq!(
-            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing"),
+            lookup("https://contoso.sharepoint.com/sites/Marketing"),
             "/sites/contoso.sharepoint.com:/sites/Marketing"
         );
         // Trailing slash is tolerated.
         assert_eq!(
-            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing/"),
+            lookup("https://contoso.sharepoint.com/sites/Marketing/"),
             "/sites/contoso.sharepoint.com:/sites/Marketing"
         );
         // Bare tenant root has no relative path.
         assert_eq!(
-            site_lookup_path("https://contoso.sharepoint.com"),
+            lookup("https://contoso.sharepoint.com"),
             "/sites/contoso.sharepoint.com"
         );
         // Subsite paths (no app token) are preserved verbatim.
         assert_eq!(
-            site_lookup_path("https://contoso.sharepoint.com/sites/Marketing/Team"),
+            lookup("https://contoso.sharepoint.com/sites/Marketing/Team"),
             "/sites/contoso.sharepoint.com:/sites/Marketing/Team"
         );
     }
@@ -900,7 +1063,7 @@ mod tests {
         // which is right for the site endpoints. The item resolver needs the
         // opposite: the library and folder below the site are the target.
         assert_eq!(
-            site_lookup_path(
+            lookup(
                 "https://contoso.sharepoint.com/:f:/r/sites/Finance/Shared%20Documents/Invoices?csf=1&web=1"
             ),
             "/sites/contoso.sharepoint.com:/sites/Finance"
@@ -921,9 +1084,7 @@ mod tests {
         // `/sites/Finance/Shared Documents/Invoices` as a *site* and 404s. Only
         // the share-link form was ever truncated.
         assert_eq!(
-            site_lookup_path(
-                "https://contoso.sharepoint.com/sites/Finance/Shared%20Documents/Invoices"
-            ),
+            lookup("https://contoso.sharepoint.com/sites/Finance/Shared%20Documents/Invoices"),
             "/sites/contoso.sharepoint.com:/sites/Finance/Shared%20Documents/Invoices",
             "the site lookup itself is unchanged — this is why the resolver must truncate first"
         );
@@ -1018,21 +1179,19 @@ mod tests {
         // The "Copy link" form that produced `Resource not found for the
         // segment ':x:'`: app token + redirect + library + file + query string.
         assert_eq!(
-            site_lookup_path(
+            lookup(
                 "https://contoso.sharepoint.com/:x:/r/sites/Marketing/Shared%20Documents/Book.xlsx?d=w123&csf=1&web=1&e=abc"
             ),
             "/sites/contoso.sharepoint.com:/sites/Marketing"
         );
         // Word doc on a Teams-provisioned site.
         assert_eq!(
-            site_lookup_path(
-                "https://contoso.sharepoint.com/:w:/r/teams/Sales/Docs/Plan.docx?web=1"
-            ),
+            lookup("https://contoso.sharepoint.com/:w:/r/teams/Sales/Docs/Plan.docx?web=1"),
             "/sites/contoso.sharepoint.com:/teams/Sales"
         );
         // OneDrive (personal) sharing link.
         assert_eq!(
-            site_lookup_path(
+            lookup(
                 "https://contoso-my.sharepoint.com/:b:/r/personal/user_contoso_com/Documents/Report.pdf?csf=1"
             ),
             "/sites/contoso-my.sharepoint.com:/personal/user_contoso_com"

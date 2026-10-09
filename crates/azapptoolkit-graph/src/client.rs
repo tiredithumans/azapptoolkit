@@ -78,6 +78,7 @@ mod sharepoint;
 #[cfg(test)]
 mod tests;
 mod transport;
+mod validate;
 
 // Request/patch bodies and wire helpers re-exported at their historical `client::` paths:
 // src-tauri's imports (`azapptoolkit_graph::client::AppPatch`, …) and the sibling modules'

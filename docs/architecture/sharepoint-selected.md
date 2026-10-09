@@ -119,6 +119,35 @@ here, not an edge one. The PATCH invalidates the detail cache itself, because th
 still fail. `object_id` is `None` for a service-principal-only principal (enterprise app / managed
 identity): there is no registration to declare on, and `declared_permission` comes back false.
 
+Both paths also check the **pairing** before any write: the webview sends `sp_object_id`,
+`object_id` and `app_id` as three arguments, so `declare_and_grant_graph_role` resolves the service
+principal by object id and `declare_graph_role` reads the registration, and each must carry the
+`appId` the per-resource grant is made to (`principal_mismatch` otherwise — nothing declared,
+assigned or granted). A separate gate covers the role on all three grant commands
+(`grant_site_access` included): `core::scoping::is_grantable_selected_role` admits only `read` and
+`write` at every level, so a webview call cannot grant `owner` or `fullcontrol` the wizard never
+offers.
+
+## Input boundary: URLs and ids in Graph paths
+
+The site lookup, the item resolver's URL parser and every permission DELETE splice operator- or
+webview-supplied text into a path sent on the `Sites.FullControl.All` bearer, so the graph client
+validates at that boundary rather than trusting its callers (pinned by `repo_invariants/trust.rs`);
+the other ids a call takes come from Graph's own responses.
+
+- **Site URLs** go through `site_lookup_path`, which parses the text as a URL (`url::Url` resolves
+  `..` / `%2e%2e` and turns `\` into `/` the way a browser does), rebuilds the path from the parsed
+  segments so nothing can climb out of `/sites/{host}:/`, and refuses a segment holding `:` (Graph's
+  path-addressing pivot — `/sites/Fin:/drive/root:/x` answers with a driveItem), an encoded `/`,
+  `\`, `:` or `.`, a host with an empty label (`.` and `..` parse as hosts), credentials, a port or
+  a non-http(s) scheme. The id Graph answers with must itself be a single path segment. The item
+  resolver's `url_host_and_segments` applies the same segment rule, because its output is spliced
+  into `root:/{path}:` drive addressing. Refusals never echo the input.
+- **Permission, site, list and item ids** in every DELETE go through
+  `validate::require_path_segment` (the `azapptoolkit-arm` / `azapptoolkit-keyvault` pattern):
+  non-empty, not a dot segment, none of `/ \ ? # % :`, no whitespace or control character. A
+  `permission_id` of `../../../drives/{d}/items/{i}` could delete a file.
+
 ## Who may grant: the site collection is not the sub-site
 
 The scope requirement is the same (`Sites.FullControl.All`), but the **user** requirement is not, and

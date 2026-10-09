@@ -27,6 +27,18 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   the remaining mailboxes as not attempted instead of failing each of them with the same error.
   The add path also looks the group up once instead of twice.
 
+### Security
+
+- **SharePoint site and item access commands validate what they put into a Graph path.** A pasted
+  site URL is parsed the way a browser parses it and rebuilt from its segments, so text such as
+  `\..\..\me` or a `:` pivot can no longer redirect the lookup to another Graph resource under the
+  SharePoint token; the ids in a remove (site, list, item, permission) must each be a single path
+  segment, or the remove is refused before it runs; and the role a grant carries must be `read` or
+  `write`. For the "Sites.Selected" conversion and library, folder and file grants, the app
+  registration and service principal named must belong to the app being granted, or nothing is
+  declared, assigned or granted. The conversion's per-site warnings now carry the same guidance a
+  permission error shows elsewhere.
+
 ## [0.33.1] - 2026-10-09
 
 ### Changed

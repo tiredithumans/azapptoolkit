@@ -17,8 +17,8 @@ use azapptoolkit_core::models::{
     AppRoleAssignment, ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_sharepoint_orgwide,
-    selected_scope_accepts, selected_scope_level_for,
+    MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_grantable_selected_role,
+    is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
 };
 
 use crate::commands::applications::invalidate_app_detail_state;
@@ -44,6 +44,25 @@ fn should_remove_orgwide(remove_orgwide: bool, any_site_granted: bool) -> bool {
     remove_orgwide && any_site_granted
 }
 
+/// Refuses a role the UI never offers before anything is granted. The commands
+/// take the role as a free string from the webview, and the per-resource
+/// permission endpoints accept stronger ones (`owner`, `fullcontrol`,
+/// `manage`), so without this a webview call could grant more than the
+/// wizard shows.
+fn require_grantable_roles(roles: &[String]) -> Result<(), UiError> {
+    match roles.iter().find(|r| !is_grantable_selected_role(r)) {
+        None if roles.is_empty() => Err(UiError::validation(
+            "unsupported_role",
+            "no role to grant; use read or write",
+        )),
+        None => Ok(()),
+        Some(_) => Err(UiError::validation(
+            "unsupported_role",
+            "a role other than read or write was requested; a Selected grant carries read or write",
+        )),
+    }
+}
+
 /// Declares `role_id` as a Microsoft Graph **application** permission on the app
 /// registration, mirroring what the ordinary grant path
 /// (`permissions::grant_single_permission_core`) does before it creates the
@@ -64,12 +83,18 @@ async fn declare_graph_role(
     cache: &Cache,
     tenant_id: &str,
     object_id: Option<&str>,
+    app_id: &str,
     role_id: &str,
 ) -> Result<bool, UiError> {
     let Some(object_id) = object_id else {
         return Ok(false);
     };
     let mut app = client.get_application(object_id).await?;
+    // The registration being declared on must be the app the resource grant
+    // names: the three ids arrive separately from the webview, and a pairing
+    // that drifted would declare on one app while another received the
+    // per-resource permission.
+    require_same_app(&app.app_id, app_id, "app registration")?;
     if !declare_resource_access(
         &mut app.required_resource_access,
         MICROSOFT_GRAPH_APP_ID,
@@ -99,6 +124,24 @@ struct GraphRolePrincipal<'a> {
     /// The app registration to declare on; `None` for an SP-only principal.
     object_id: Option<&'a str>,
     sp_object_id: &'a str,
+    /// The appId the per-resource grant is made to. Both objects above are
+    /// checked against it before anything is written.
+    app_id: &'a str,
+}
+
+/// Refuses an object whose `appId` is not the one the grant names.
+fn require_same_app(found: &str, app_id: &str, what: &str) -> Result<(), UiError> {
+    if found.eq_ignore_ascii_case(app_id) {
+        Ok(())
+    } else {
+        Err(UiError::validation(
+            "principal_mismatch",
+            format!(
+                "the {what} does not belong to the app being granted; nothing was declared, \
+                 assigned or granted"
+            ),
+        ))
+    }
 }
 
 /// What [`declare_and_grant_graph_role`] changed.
@@ -129,11 +172,20 @@ async fn declare_and_grant_graph_role(
     value: &str,
 ) -> Result<GraphRoleGrant, UiError> {
     let role_id = graph_role_id(role_value_by_id, value)?;
+    // The service principal the appRole is assigned to must be the app the
+    // resource grant names — resolved from the object id, never trusted from
+    // the pairing the webview sent.
+    let sp = client
+        .get_service_principal_by_object_id(principal.sp_object_id)
+        .await?
+        .ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
+    require_same_app(&sp.app_id, principal.app_id, "service principal")?;
     let declared_permission = declare_graph_role(
         client,
         cache,
         principal.tenant_id,
         principal.object_id,
+        principal.app_id,
         &role_id,
     )
     .await?;
@@ -284,6 +336,7 @@ pub async fn grant_site_access(
     site_url: String,
     roles: Vec<String>,
 ) -> Result<GrantSiteAccessResult, UiError> {
+    require_grantable_roles(&roles)?;
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let site = client
         .get_site_by_url(&site_url)
@@ -370,6 +423,7 @@ pub async fn convert_site_access_to_selected(
     role: String,
     remove_orgwide: bool,
 ) -> Result<SiteScopeResult, UiError> {
+    require_grantable_roles(std::slice::from_ref(&role))?;
     // The per-site grants ride the SharePoint scope, pre-acquired here.
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
     let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
@@ -392,6 +446,7 @@ pub async fn convert_site_access_to_selected(
             tenant_id: &tenant_id,
             object_id: object_id.as_deref(),
             sp_object_id: &sp_object_id,
+            app_id: &app_id,
         },
         &graph_sp_id,
         &role_value_by_id,
@@ -407,7 +462,11 @@ pub async fn convert_site_access_to_selected(
         let site = match client.get_site_by_url(url).await {
             Ok(site) => site,
             Err(err) => {
-                warnings.push(format!("could not resolve site '{url}': {err}"));
+                // Through the module's own mapper, not `Display`, so a 403
+                // carries its `sharepoint_sites_selected` remediation and
+                // Graph's raw body stays out of the panel.
+                let ui = sharepoint_err(err);
+                warnings.push(format!("could not resolve site '{url}': {}", ui.message));
                 continue;
             }
         };
@@ -420,7 +479,10 @@ pub async fn convert_site_access_to_selected(
                 site_display_name: site.display_name,
                 permission: to_dto(perm),
             }),
-            Err(err) => warnings.push(format!("failed to grant access to '{url}': {err}")),
+            Err(err) => {
+                let ui = sharepoint_err(err);
+                warnings.push(format!("failed to grant access to '{url}': {}", ui.message));
+            }
         }
     }
 
@@ -610,6 +672,7 @@ pub async fn grant_selected_item_access(
     target_urls: Vec<String>,
     role: String,
 ) -> Result<SelectedItemScopeResult, UiError> {
+    require_grantable_roles(std::slice::from_ref(&role))?;
     let scope_level = selected_scope_level_for(Some(MICROSOFT_GRAPH_APP_ID), &permission_value)
         .filter(|l| l.breaks_inheritance())
         .ok_or_else(|| {
@@ -644,6 +707,7 @@ pub async fn grant_selected_item_access(
             tenant_id: &tenant_id,
             object_id: object_id.as_deref(),
             sp_object_id: &sp_object_id,
+            app_id: &app_id,
         },
         &graph_sp_id,
         &role_value_by_id,
@@ -1628,6 +1692,13 @@ mod tests {
             .expect(0)
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/servicePrincipals/sp1$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp1", "appId": "app-1", "displayName": "App"
+            })))
+            .mount(&server)
+            .await;
 
         let client = crate::commands::test_support::mock_graph(&server);
         let index: HashMap<String, String> =
@@ -1645,6 +1716,7 @@ mod tests {
                 tenant_id: "t1",
                 object_id: None,
                 sp_object_id: "sp1",
+                app_id: "app-1",
             },
             "graph-sp",
             &index,
@@ -1655,5 +1727,130 @@ mod tests {
         .expect("nothing to do is success");
         assert!(!out.declared_permission);
         assert!(!out.granted_role_added);
+    }
+
+    /// The webview sends `sp_object_id`, `object_id` and `app_id` as three
+    /// separate arguments. A pairing that drifted would assign the appRole to
+    /// one principal while another app received the per-resource permission,
+    /// so both objects are resolved and checked against `app_id` before any
+    /// write — and nothing is declared, assigned or granted on a mismatch.
+    #[tokio::test]
+    async fn a_principal_that_is_not_the_named_app_is_refused_before_any_write() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/servicePrincipals/sp1$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp1", "appId": "someone-else", "displayName": "Other"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = crate::commands::test_support::mock_graph(&server);
+        let index: HashMap<String, String> =
+            [("role-selected".to_string(), "Sites.Selected".to_string())].into();
+        let err = declare_and_grant_graph_role(
+            &client,
+            &Cache::new(),
+            &GraphRolePrincipal {
+                tenant_id: "t1",
+                object_id: None,
+                sp_object_id: "sp1",
+                app_id: "app-1",
+            },
+            "graph-sp",
+            &index,
+            &[],
+            SP_SITES_SELECTED,
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("a service principal of another app must be refused");
+        };
+        assert_eq!(err.code, "principal_mismatch", "{err:?}");
+    }
+
+    /// The app-registration half of the pairing: the SP is this app's, but the
+    /// `object_id` names another registration. Nothing is patched or posted.
+    #[tokio::test]
+    async fn a_registration_that_is_not_the_named_app_is_refused_before_any_write() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/servicePrincipals/sp1$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp1", "appId": "app-1", "displayName": "App"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/applications/obj-other$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "obj-other", "appId": "someone-else", "displayName": "Other",
+                "requiredResourceAccess": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = crate::commands::test_support::mock_graph(&server);
+        let index: HashMap<String, String> =
+            [("role-selected".to_string(), "Sites.Selected".to_string())].into();
+        let err = declare_and_grant_graph_role(
+            &client,
+            &Cache::new(),
+            &GraphRolePrincipal {
+                tenant_id: "t1",
+                object_id: Some("obj-other"),
+                sp_object_id: "sp1",
+                app_id: "app-1",
+            },
+            "graph-sp",
+            &index,
+            &[],
+            SP_SITES_SELECTED,
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("a registration of another app must be refused");
+        };
+        assert_eq!(err.code, "principal_mismatch", "{err:?}");
+    }
+
+    #[test]
+    fn only_read_and_write_pass_the_role_gate() {
+        assert!(require_grantable_roles(&["read".into()]).is_ok());
+        assert!(require_grantable_roles(&["read".into(), "write".into()]).is_ok());
+        for bad in [
+            vec![],
+            vec!["owner".to_string()],
+            vec!["read".to_string(), "fullcontrol".to_string()],
+        ] {
+            let err = require_grantable_roles(&bad).expect_err("refused");
+            assert_eq!(err.code, "unsupported_role", "{bad:?}");
+        }
     }
 }
