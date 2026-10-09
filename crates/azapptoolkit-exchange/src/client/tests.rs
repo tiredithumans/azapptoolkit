@@ -1096,6 +1096,90 @@ async fn set_management_scope_filter_refuses_an_unreadable_filter_before_writing
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn set_management_scope_filter_refuses_a_compound_filter_before_writing() {
+    // Names a group and parses completely, but carries a clause this client
+    // cannot preserve or prove: the post-write proof compares group SETS, so
+    // it could only ever report this as "landed" while the scope reached
+    // every user mailbox (or every mailbox but the group). Refuse before the
+    // cmdlet, not after.
+    let server = MockServer::start().await;
+    mount_no_request_expected(&server).await;
+    let client = make_client(&server.uri());
+    for filter in [
+        "MemberOfGroup -eq 'CN=A,DC=x' -or RecipientTypeDetails -eq 'UserMailbox'",
+        "MemberOfGroup -eq 'CN=A,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+        "-not (MemberOfGroup -eq 'CN=A,DC=x')",
+    ] {
+        match client
+            .set_management_scope_filter("app_scope_app-1", filter)
+            .await
+        {
+            Err(ExchangeError::Protocol(m)) => {
+                assert!(m.contains("other conditions"), "{filter:?}: {m}");
+                assert!(m.contains("Nothing was changed"), "{filter:?}: {m}");
+            }
+            other => panic!("{filter:?} must be refused, got {other:?}"),
+        }
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "no cmdlet may run for a filter this client cannot prove"
+    );
+}
+
+#[tokio::test]
+async fn set_management_scope_filter_rejects_a_landed_filter_that_reaches_more() {
+    // Exchange echoes a filter that names the wanted group AND another
+    // condition (a concurrent edit between the Set and the Get). The DN-set
+    // comparison this proof used to be read it as {Managed} == {Managed} and
+    // reported a verified repoint while the scope reached every user mailbox.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Set-ManagementScope",
+                "Parameters": {
+                    "Identity": "app_scope_app-1",
+                    "RecipientRestrictionFilter": "MemberOfGroup -eq 'CN=Managed,DC=prod'",
+                    "Confirm": false
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .and(body_json(json!({
+            "CmdletInput": {
+                "CmdletName": "Get-ManagementScope",
+                "Parameters": { "Identity": "app_scope_app-1" }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [{
+                "Name": "app_scope_app-1",
+                "RecipientFilter": "(MemberOfGroup -eq 'CN=Managed,DC=prod') -or (RecipientTypeDetails -eq 'UserMailbox')"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let err = client
+        .set_management_scope_filter("app_scope_app-1", "MemberOfGroup -eq 'CN=Managed,DC=prod'")
+        .await
+        .expect_err(
+            "a landed filter that reaches more than the wanted groups must not report success",
+        );
+    assert!(
+        err.to_string()
+            .contains("cannot read as a pure MemberOfGroup OR-chain"),
+        "error must say the proof could not be made, got: {err}"
+    );
+}
+
 // ── ensure_management_scope is create-only ──────────────────────────────────
 
 #[tokio::test]

@@ -5,6 +5,28 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Fixed
+
+- **Scoping a mailbox permission, or migrating a legacy Application Access Policy, no longer
+  treats an existing management scope as "already confined to these groups" when its filter does
+  anything beyond naming them.** A filter that named the right groups but also reached other
+  mailboxes (an `-or` on another property), excluded them (`-not`), or narrowed them (`-and`)
+  counted as a match, so the app's Exchange roles were bound to that scope and its org-wide grants
+  removed against it, while the report said the app was scoped to those groups. Such a scope is now
+  refused before any role or grant changes (and the migration's dry run says so), the same way a
+  scope with a filter the app cannot read already was. The management-scope mutator applies the
+  same proof before and after it writes.
+- **Reading a management scope's filter no longer mistakes group text inside another property's
+  quoted value for a group clause, nor loses a real group clause that follows one.** The second
+  case mattered: the "Retire group" check could report a group that a scope still names as
+  unreferenced and offer to delete it. That check now also treats a filter that mentions the
+  group's name anywhere as a possible reference.
+- **Re-running a mailbox scoping no longer reports the app "partial" when Exchange echoes a role
+  name in a different case than the toolkit's.**
+- **Adding or removing scope-group members stops as soon as the sign-in session ends**, reporting
+  the remaining mailboxes as not attempted instead of failing each of them with the same error.
+  The add path also looks the group up once instead of twice.
+
 ## [0.33.1] - 2026-10-09
 
 ### Changed

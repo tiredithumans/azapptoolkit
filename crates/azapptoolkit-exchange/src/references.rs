@@ -44,6 +44,14 @@ impl GroupIdentity {
         .flatten()
         .any(|id| id.eq_ignore_ascii_case(candidate))
     }
+
+    /// Whether `text` mentions this group's distinguished name anywhere,
+    /// case-insensitively — the parser-independent backstop the retire guard
+    /// uses, where a false "may reference" only withholds a delete.
+    pub fn named_in_text(&self, text: &str) -> bool {
+        let dn = self.distinguished_name.trim();
+        !dn.is_empty() && text.to_lowercase().contains(&dn.to_lowercase())
+    }
 }
 
 /// Everything that still references `group`, as far as Exchange lets us ask —
@@ -87,7 +95,11 @@ pub fn references_to_group(
         let groups = scope_groups_in_filter(filter);
         if groups.dns.iter().any(|dn| group.matches(dn)) {
             out.push(format!("management scope '{scope_name}'"));
-        } else if !groups.complete {
+        } else if !groups.complete || group.named_in_text(filter) {
+            // The second arm is a backstop for the parser itself: a quoting
+            // form it does not model could hide a real clause from both the
+            // clause scan and the token count, and the only cost of a false
+            // "may reference" is a withheld delete.
             out.push(format!(
                 "management scope '{scope_name}' (filter not fully readable — it may reference this group)"
             ));
@@ -213,5 +225,35 @@ mod tests {
         );
         assert_eq!(refs.len(), 1, "{refs:?}");
         assert!(refs[0].contains("not fully readable"), "{refs:?}");
+    }
+
+    /// The parser-independent backstop: a filter that mentions the group's DN
+    /// in a form the clause scanner does not model (here, inside a
+    /// double-quoted literal) is still a possible reference. The only cost of
+    /// a false positive is a withheld delete.
+    #[test]
+    fn a_filter_that_names_the_group_anywhere_counts_as_a_possible_reference() {
+        let group = retired("CN=Retired,DC=x", "Retired");
+        let refs = references_to_group(
+            &group,
+            &[scope(
+                "app_scope_app-1",
+                "CustomAttribute1 -eq \"MemberOfGroup -eq 'cn=retired,dc=X'\"",
+            )],
+            &[],
+        );
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert!(refs[0].contains("may reference"), "{refs:?}");
+
+        // ...while a filter naming some other group is still clean.
+        let refs = references_to_group(
+            &group,
+            &[scope(
+                "app_scope_app-2",
+                "MemberOfGroup -eq 'CN=Other,DC=x'",
+            )],
+            &[],
+        );
+        assert!(refs.is_empty(), "{refs:?}");
     }
 }

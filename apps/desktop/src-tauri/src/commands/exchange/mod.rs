@@ -24,11 +24,11 @@ use azapptoolkit_exchange::models::{
 };
 use azapptoolkit_exchange::references::{GroupIdentity, references_to_group};
 use azapptoolkit_exchange::targets::{
-    ExchangeTarget, Refusal, RoleStep, ScopableMailPermission, ScopeGroups, UnrewritableFilter,
-    count_member_of_group, exchange_target, filter_names_only_group, filter_targets_by_value,
-    fold_dn, mailbox_resources_complete, orgwide_role_assignments, plan_consolidation,
-    plan_role_assignments, policies_safe_to_remove, require_scopable_targets, rewritable_scope_dns,
-    same_dn, scope_groups_in_filter, targets_from_declared, targets_from_grants,
+    ExchangeTarget, Refusal, RoleStep, ScopableMailPermission, UnrewritableFilter,
+    count_member_of_group, exact_scope_dns, exchange_target, filter_names_only_group,
+    filter_targets_by_value, fold_dn, mailbox_resources_complete, orgwide_role_assignments,
+    plan_consolidation, plan_role_assignments, policies_safe_to_remove, require_scopable_targets,
+    rewritable_scope_dns, same_dn, targets_from_declared, targets_from_grants,
     targets_safe_to_strip,
 };
 // The pure mailbox-scope decisions now live in the crate, where they are

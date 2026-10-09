@@ -445,7 +445,15 @@ pub fn plan_role_assignments(
     let mut assigner: HashMap<&str, usize> = HashMap::new();
     let mut steps = Vec::with_capacity(targets.len());
     for (i, t) in targets.iter().enumerate() {
-        if in_place.contains(t.exchange_role) {
+        // Case-insensitive, like the scope name above and every other role
+        // comparison in this crate: the cmdlets echo whatever case they
+        // stored, and a role echoed in another case read as "not in place",
+        // was re-assigned, failed as a duplicate, and left the app "partial"
+        // on every re-run — the loop #298 closed for scope names.
+        if in_place
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(t.exchange_role))
+        {
             steps.push(RoleStep::AlreadyScoped);
         } else if let Some(&first) = assigner.get(t.exchange_role) {
             steps.push(RoleStep::SameRoleAs { mirrors: first });
@@ -527,21 +535,17 @@ fn read_opath_literal(s: &str, open: usize) -> Option<(String, usize)> {
 /// `MemberOfGroup` clause, which both widened the scope and dropped the
 /// restriction it came from.
 fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
-    const KEY: &str = "memberofgroup";
     let lower = filter.to_ascii_lowercase();
     let bytes = filter.as_bytes();
     let mut out = Vec::new();
-    let mut from = 0usize;
-    while let Some(rel) = lower[from..].find(KEY) {
-        let start = from + rel;
-        let mut i = start + KEY.len();
-        from = i;
+    for start in member_of_group_keys(&lower) {
+        let mut i = start + MEMBER_OF_GROUP_KEY.len();
         // The key must be a whole property name, not the tail of a longer one.
-        // `find` matches a substring, so `NotMemberOfGroup -eq '…'` read as a
-        // plain `MemberOfGroup` clause — and `rewritable_scope_dns` would then
-        // see a pure OR-chain, blank the clause out, find no residue, and
-        // rewrite the filter WITHOUT the exclusion. That widens the scope's
-        // reach, in the one product area whose purpose is narrowing it.
+        // A substring match let `NotMemberOfGroup -eq '…'` read as a plain
+        // `MemberOfGroup` clause — and `rewritable_scope_dns` would then see a
+        // pure OR-chain, blank the clause out, find no residue, and rewrite
+        // the filter WITHOUT the exclusion. That widens the scope's reach, in
+        // the one product area whose purpose is narrowing it.
         if !starts_property(&lower, start) {
             continue;
         }
@@ -571,9 +575,63 @@ fn member_of_group_clauses(filter: &str) -> Vec<MemberClause> {
             span: (start, end),
             dn,
         });
-        from = end;
     }
     out
+}
+
+const MEMBER_OF_GROUP_KEY: &str = "memberofgroup";
+
+/// Byte offsets of every `memberofgroup` token in `lower` (an ASCII-lowercased
+/// filter) that sits **outside a quoted literal** — the one scan both
+/// [`member_of_group_clauses`] and [`count_member_of_group`] read from.
+///
+/// They used to scan separately, and only the counter tracked quotes. A key
+/// inside some other property's literal (`CustomAttribute1 -eq 'x MemberOfGroup
+/// -eq ' -or MemberOfGroup -eq 'CN=G'`) was then parsed as a clause with a
+/// bogus DN while the counter ignored it, so the clause and key counts agreed,
+/// the parse read as complete, and the real group was missing from the set —
+/// the retire guard reported it unreferenced. One scan cannot disagree with
+/// itself.
+///
+/// Both OPATH literal forms are tracked: single quotes (with the `''` escape)
+/// and double quotes, each inert inside the other.
+fn member_of_group_keys(lower: &str) -> Vec<usize> {
+    let bytes = lower.as_bytes();
+    let mut keys = Vec::new();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                // OPATH escapes an inner quote by doubling it, so `''` inside
+                // a literal stays inside it.
+                if in_single && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+                i += 1;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            }
+            _ if !in_single && !in_double && lower[i..].starts_with(MEMBER_OF_GROUP_KEY) => {
+                keys.push(i);
+                i += MEMBER_OF_GROUP_KEY.len();
+            }
+            // Advance a whole CHARACTER, not a byte. `i` indexes a `str`, so a
+            // byte-at-a-time walk lands mid-sequence on the first non-ASCII
+            // character outside a quoted literal and `lower[i..]` panics on
+            // the char boundary. Operator-authored filters reach this from
+            // three call sites this crate did not generate the input for, and
+            // a smart quote or a non-breaking space pasted from a document is
+            // enough.
+            _ => i += lower[i..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    keys
 }
 
 /// Whether the `memberofgroup` occurrence at `at` starts a property name rather
@@ -618,13 +676,29 @@ impl ScopeGroups {
     pub fn folded_dns(&self) -> HashSet<String> {
         self.dns.iter().map(|d| fold_dn(d)).collect()
     }
+}
 
-    /// Same confinement: BOTH fully read and equal case-folded DN sets. An
-    /// incomplete parse is never equal, not even to itself — its unread
-    /// remainder is exactly what could differ.
-    pub fn same_groups_as(&self, other: &ScopeGroups) -> bool {
-        self.complete && other.complete && self.folded_dns() == other.folded_dns()
-    }
+/// The case-folded group set a filter confines access to — `Some` only when
+/// the filter is a pure `MemberOfGroup` OR-chain ([`rewritable_scope_dns`]),
+/// `None` for anything else.
+///
+/// This is the ONE comparison behind every "does this scope already confine
+/// exactly these groups?" check: the grant's existing-scope guard, the AAP
+/// migration's agreement test, [`filter_names_only_group`] and the
+/// management-scope mutator's pre- and post-write proofs. It used to be a DN
+/// *set* comparison (`ScopeGroups::same_groups_as`), which read `MemberOfGroup
+/// -eq 'G' -or RecipientTypeDetails -eq 'UserMailbox'` and `-not
+/// (MemberOfGroup -eq 'G')` both as "confines exactly {G}": the clauses parsed
+/// and the token count agreed, so the parse was complete, and the residue was
+/// never looked at. The grant then kept that scope, assigned the app's roles
+/// to it and stripped the org-wide Entra grants — against a scope reaching
+/// every user mailbox (or every mailbox *except* G) while the report said
+/// "scoped to G". An unreadable or compound filter is never agreement; the
+/// caller refuses, and the scope keeps working exactly as it is.
+pub fn exact_scope_dns(filter: &str) -> Option<HashSet<String>> {
+    rewritable_scope_dns(filter)
+        .ok()
+        .map(|dns| dns.iter().map(|d| fold_dn(d)).collect())
 }
 
 /// Case-folds one group DN for comparison (Exchange echoes DNs in its own
@@ -654,58 +728,22 @@ pub fn scope_groups_in_filter(filter: &str) -> ScopeGroups {
     }
 }
 
-/// The group DNs a filter names, for callers that only compare one filter's
-/// group *set* to another's without depending on Exchange's exact
-/// whitespace/paren formatting. Use [`scope_groups_in_filter`] where a missing
-/// DN would be read as an absence of reference.
-pub fn group_dns_in_filter(filter: &str) -> HashSet<String> {
-    scope_groups_in_filter(filter).dns
-}
-
-/// Counts `MemberOfGroup` clauses in an OPATH recipient filter (the number of
-/// groups a management scope confines access to).
+/// Counts `MemberOfGroup` tokens in an OPATH recipient filter (the number of
+/// groups a management scope confines access to, when every token is a plain
+/// `-eq` clause).
 ///
-/// Occurrences **inside a quoted literal do not count** — the same rule
-/// `member_of_group_clauses` follows. This is what makes
-/// [`scope_groups_in_filter`]'s `complete` flag meaningful: it compares the
-/// clauses parsed against the clauses present, so a group whose DN happens to
-/// contain the text `memberofgroup` (`CN=memberofgroup-admins,…` — an ordinary
-/// name) used to inflate this count, mark a perfectly readable filter
-/// incomplete, and make `rewritable_scope_dns` refuse to rewrite a filter this
-/// crate had itself generated.
+/// Occurrences **inside a quoted literal do not count** — the same scan
+/// (`member_of_group_keys`) `member_of_group_clauses` reads from. This is
+/// what makes [`scope_groups_in_filter`]'s `complete` flag meaningful: it
+/// compares the clauses parsed against the tokens present, so a group whose
+/// DN happens to contain the text `memberofgroup` (`CN=memberofgroup-admins,…`
+/// — an ordinary name) used to inflate this count, mark a perfectly readable
+/// filter incomplete, and make `rewritable_scope_dns` refuse to rewrite a
+/// filter this crate had itself generated. A lookalike property
+/// (`NotMemberOfGroup`) still counts here and never parses as a clause, which
+/// is what turns it into a refusal.
 pub fn count_member_of_group(filter: &str) -> usize {
-    const KEY: &str = "memberofgroup";
-    let lower = filter.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut count = 0usize;
-    let mut i = 0usize;
-    let mut in_quotes = false;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            // OPATH escapes an inner quote by doubling it, so `''` inside a
-            // literal stays inside it.
-            if in_quotes && bytes.get(i + 1) == Some(&b'\'') {
-                i += 2;
-                continue;
-            }
-            in_quotes = !in_quotes;
-            i += 1;
-            continue;
-        }
-        if !in_quotes && lower[i..].starts_with(KEY) {
-            count += 1;
-            i += KEY.len();
-            continue;
-        }
-        // Advance a whole CHARACTER, not a byte. `i` indexes a `str` two lines
-        // up, so a byte-at-a-time walk lands mid-sequence on the first
-        // non-ASCII character outside a quoted literal and `lower[i..]` panics
-        // on the char boundary. Operator-authored filters reach this from three
-        // call sites this crate did not generate the input for, and a smart
-        // quote or a non-breaking space pasted from a document is enough.
-        i += lower[i..].chars().next().map_or(1, char::len_utf8);
-    }
-    count
+    member_of_group_keys(&filter.to_ascii_lowercase()).len()
 }
 
 /// Why a stored recipient filter cannot be rewritten from a list of group DNs.
@@ -865,18 +903,22 @@ fn capped_list(items: &[String]) -> String {
     }
 }
 
-/// Whether `filter` confines access to the group `dn` and nothing else — fully
-/// read, at least one clause, every clause that group (case-folded).
+/// Whether `filter` confines access to the group `dn` and nothing else — a pure
+/// `MemberOfGroup` OR-chain ([`exact_scope_dns`]) every clause of which names
+/// that group (case-folded).
 ///
 /// A consolidation whose scope ALREADY points at the managed group alone cannot
 /// widen anything by "repointing" at it: the app's reach is already exactly
 /// that group's membership, extras included (an operator adding mailboxes to the
 /// managed group after the move is the intended way to edit reach). The
 /// extra-members refusal therefore does not apply, and applying it refused
-/// every re-run of such an app.
+/// every re-run of such an app. A filter that names the managed group *and*
+/// something else (`-or RecipientTypeDetails …`, a `-not` around it) is not
+/// "the managed group alone" — its reach is not the group's membership — so it
+/// gets the full check.
 pub fn filter_names_only_group(filter: &str, dn: &str) -> bool {
-    let groups = scope_groups_in_filter(filter);
-    groups.complete && !groups.dns.is_empty() && groups.dns.iter().all(|d| same_dn(d, dn))
+    let wanted = fold_dn(dn);
+    exact_scope_dns(filter).is_some_and(|dns| dns.iter().all(|d| *d == wanted))
 }
 
 /// Decides — fail closed — whether a management scope may be repointed at the
@@ -1204,6 +1246,41 @@ mod tests {
         let unparsed = "MemberOfGroup -like 'CN=a,DC=x'";
         assert_eq!(count_member_of_group(unparsed), 1);
         assert!(!scope_groups_in_filter(unparsed).complete);
+
+        // A key inside ANOTHER property's literal. The clause scan used to
+        // ignore quotes while the counter honoured them: it parsed the token
+        // inside `'x MemberOfGroup -eq '` as a clause with a bogus DN, the
+        // counts agreed (1 == 1), the parse read as complete, and `CN=G` was
+        // missing from the set — so the retire guard reported G unreferenced.
+        let inside =
+            "CustomAttribute1 -eq 'x MemberOfGroup -eq ' -or MemberOfGroup -eq 'CN=G,DC=x'";
+        assert_eq!(count_member_of_group(inside), 1);
+        let groups = scope_groups_in_filter(inside);
+        assert!(groups.complete);
+        assert_eq!(groups.dns, HashSet::from(["CN=G,DC=x".to_string()]));
+        assert!(matches!(
+            rewritable_scope_dns(inside),
+            Err(UnrewritableFilter::UnsupportedClause { .. })
+        ));
+
+        // A double-quoted literal is a literal too.
+        let double = "CustomAttribute1 -eq \"MemberOfGroup -eq 'CN=G,DC=x'\"";
+        assert_eq!(count_member_of_group(double), 0);
+        assert!(scope_groups_in_filter(double).dns.is_empty());
+        assert_eq!(
+            rewritable_scope_dns(double),
+            Err(UnrewritableFilter::NoGroupClauses)
+        );
+        // ...and a quote of the other kind inside it does not open a literal.
+        let nested = "MemberOfGroup -eq 'CN=say \"hi\",DC=x' -or MemberOfGroup -eq 'CN=G,DC=x'";
+        assert_eq!(count_member_of_group(nested), 2);
+        assert_eq!(
+            rewritable_scope_dns(nested),
+            Ok(vec![
+                "CN=G,DC=x".to_string(),
+                "CN=say \"hi\",DC=x".to_string()
+            ])
+        );
     }
 
     /// A lookalike property and a blank operand must both REFUSE, not rewrite.
@@ -1293,7 +1370,7 @@ mod tests {
         let mixed = "Office -eq \u{2019}Z\u{fc}rich\u{2019} -and MemberOfGroup -eq 'CN=a,DC=x'";
         assert_eq!(count_member_of_group(mixed), 1);
 
-        // Non-ASCII INSIDE a literal was always safe (the `!in_quotes`
+        // Non-ASCII INSIDE a literal was always safe (the in-literal
         // short-circuit skipped the slice); pin it so the fix keeps it that way.
         let inside = crate::client::member_of_group_filter(&["CN=Z\u{fc}rich,DC=x".to_string()]);
         assert_eq!(count_member_of_group(&inside), 1);
@@ -1397,6 +1474,28 @@ mod tests {
             &[target_on("Mail.Read", "Application Mail.Read")],
         );
         assert_eq!(steps, vec![RoleStep::AlreadyScoped]);
+    }
+
+    /// The role name is compared the same way: Exchange echoes the role in
+    /// whatever case it stored, and a case-sensitive compare read a scoped
+    /// `application mail.read` as absent, re-assigned it, failed on the
+    /// duplicate and reported the app "partial" on every re-run — the loop
+    /// the scope-name fix above closed, one field over.
+    #[test]
+    fn the_role_name_matches_case_insensitively() {
+        let existing = [assignment(
+            "application mail.read",
+            Some("app_scope_71487acd-ec93-476d-bd0e-6c8b31831053"),
+        )];
+        let steps = plan_role_assignments(
+            &existing,
+            "app_scope_71487acd-ec93-476d-bd0e-6c8b31831053",
+            &[
+                target_on("Mail.Read", "Application Mail.Read"),
+                target_on("Mail.Send", "Application Mail.Send"),
+            ],
+        );
+        assert_eq!(steps, vec![RoleStep::AlreadyScoped, RoleStep::Assign]);
     }
 
     #[test]
@@ -1549,34 +1648,13 @@ mod tests {
     }
 
     #[test]
-    fn group_dns_in_filter_round_trips_and_ignores_formatting() {
-        // Round-trips what `member_of_group_filter` produces, set-wise.
-        let dns = ["CN=a,DC=x".to_string(), "CN=b,DC=y".to_string()];
-        assert_eq!(
-            group_dns_in_filter(&crate::client::member_of_group_filter(&dns)),
-            dns.iter().cloned().collect()
-        );
-        // Exchange may echo the filter with extra parens/whitespace; the group
-        // *set* is what is compared, so those differences don't count.
-        assert_eq!(
-            group_dns_in_filter("(MemberOfGroup  -eq  'CN=a,DC=x')"),
-            group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'")
-        );
-        // A genuinely different group set is detected.
-        assert_ne!(
-            group_dns_in_filter("MemberOfGroup -eq 'CN=a,DC=x'"),
-            group_dns_in_filter("MemberOfGroup -eq 'CN=b,DC=y'"),
-        );
-    }
-
-    #[test]
     fn only_member_of_group_operands_are_read_as_group_dns() {
         // A quoted literal belonging to another property is NOT a group DN.
         // Reading it as one re-emitted `RecipientTypeDetails -eq 'UserMailbox'`
         // as a MemberOfGroup clause on rewrite — widening the scope and
         // dropping the restriction it came from.
         let f = "RecipientTypeDetails -eq 'UserMailbox' -and MemberOfGroup -eq 'CN=b,DC=x'";
-        let got = group_dns_in_filter(f);
+        let got = scope_groups_in_filter(f).dns;
         assert_eq!(got, HashSet::from(["CN=b,DC=x".to_string()]));
         assert_eq!(count_member_of_group(f), 1);
     }
@@ -1590,7 +1668,7 @@ mod tests {
         let filter = crate::client::member_of_group_filter(&dns);
         assert!(filter.contains("O''Brien"), "escaping must be exercised");
         assert_eq!(
-            group_dns_in_filter(&filter),
+            scope_groups_in_filter(&filter).dns,
             HashSet::from([dns[0].clone()])
         );
         assert_eq!(rewritable_scope_dns(&filter).unwrap(), dns);
@@ -1767,6 +1845,20 @@ mod tests {
             managed()
         ));
         assert!(!filter_names_only_group("", managed()));
+        // Names the managed group — and other mailboxes too. Its reach is not
+        // the group's membership, so the extra-members check must still run.
+        for compound in [
+            "MemberOfGroup -eq 'CN=Managed,DC=x' -or RecipientTypeDetails -eq 'UserMailbox'",
+            "MemberOfGroup -eq 'CN=Managed,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+            "-not (MemberOfGroup -eq 'CN=Managed,DC=x')",
+        ] {
+            assert!(!filter_names_only_group(compound, managed()), "{compound}");
+        }
+        // Exchange's own reformatting of the pure case still counts.
+        assert!(filter_names_only_group(
+            "((MemberOfGroup -eq 'cn=managed,dc=X'))",
+            managed()
+        ));
     }
 
     #[test]
@@ -1820,36 +1912,50 @@ mod tests {
     }
 
     #[test]
-    fn same_groups_as_folds_case_and_refuses_incomplete() {
-        let a = scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x'");
-        assert!(a.same_groups_as(&scope_groups_in_filter("MemberOfGroup -eq 'cn=a,DC=X'")));
+    fn exact_scope_dns_folds_case_and_refuses_anything_but_a_pure_or_chain() {
+        let a = exact_scope_dns("MemberOfGroup -eq 'CN=A,DC=x'");
+        assert!(a.is_some());
+        assert_eq!(a, exact_scope_dns("MemberOfGroup -eq 'cn=a,DC=X'"));
         assert!(same_dn("CN=A,DC=x", "cn=a,dc=X"));
 
         // Unicode folding, not ASCII-only.
-        assert!(
-            scope_groups_in_filter("MemberOfGroup -eq 'CN=Zürich,DC=x'").same_groups_as(
-                &scope_groups_in_filter("MemberOfGroup -eq 'cn=ZÜRICH,DC=x'")
-            )
+        assert_eq!(
+            exact_scope_dns("MemberOfGroup -eq 'CN=Zürich,DC=x'"),
+            exact_scope_dns("MemberOfGroup -eq 'cn=ZÜRICH,DC=x'")
         );
 
-        let ab = scope_groups_in_filter(
-            "(MemberOfGroup -eq 'CN=A,DC=x') -or (MemberOfGroup -eq 'CN=B,DC=x')",
+        // Exchange's own reformatting of the same chain is the same set.
+        let ab = exact_scope_dns(
+            "((MemberOfGroup -eq 'CN=A,DC=x') -or (MemberOfGroup -eq 'CN=B,DC=x'))",
         );
-        assert!(ab.complete);
-        assert!(
-            !a.same_groups_as(&ab),
-            "a different group set is not the same"
+        assert!(ab.is_some());
+        assert_eq!(
+            ab,
+            exact_scope_dns("MemberOfGroup -eq 'CN=B,DC=x' -or MemberOfGroup -eq 'CN=A,DC=x'")
         );
-        assert!(!ab.same_groups_as(&a));
+        assert_ne!(a, ab, "a different group set is not the same");
 
-        let partial =
-            scope_groups_in_filter("MemberOfGroup -eq 'CN=A,DC=x' -or MemberOfGroup -like 'CN=B*'");
-        assert!(!partial.complete);
-        assert!(
-            !partial.same_groups_as(&partial),
-            "an incomplete parse is never the same, not even as itself"
-        );
-        assert!(!partial.same_groups_as(&a));
-        assert!(!a.same_groups_as(&partial));
+        // Everything below used to compare EQUAL to {A} under the DN-set
+        // comparison: the clause and token counts agreed, so the parse was
+        // "complete", and the residue was never looked at. Each one reaches
+        // mailboxes the set does not say, so none may ever be agreement.
+        for compound in [
+            // Widened by another property.
+            "MemberOfGroup -eq 'CN=A,DC=x' -or RecipientTypeDetails -eq 'UserMailbox'",
+            // Narrowed by another property — not the same reach either.
+            "MemberOfGroup -eq 'CN=A,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+            // Inverted: everything EXCEPT A.
+            "-not (MemberOfGroup -eq 'CN=A,DC=x')",
+            "(-not(MemberOfGroup -eq 'CN=A,DC=x'))",
+            // The clause sits inside another property's double-quoted literal.
+            "CustomAttribute1 -eq \"MemberOfGroup -eq 'CN=A,DC=x'\"",
+            // Not fully readable.
+            "MemberOfGroup -eq 'CN=A,DC=x' -or MemberOfGroup -like 'CN=B*'",
+            // Confines nothing.
+            "RecipientTypeDetails -eq 'UserMailbox'",
+            "",
+        ] {
+            assert_eq!(exact_scope_dns(compound), None, "{compound:?}");
+        }
     }
 }

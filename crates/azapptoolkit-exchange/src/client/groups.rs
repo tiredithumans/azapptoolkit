@@ -48,8 +48,21 @@ impl ExchangeClient {
     /// re-resolve in that case — the DN is what a `MemberOfGroup`
     /// management-scope filter must reference.
     pub async fn ensure_security_group(&self, name: &str, alias: &str) -> Result<ExoGroup> {
+        self.ensure_security_group_reporting(name, alias)
+            .await
+            .map(|(group, _)| group)
+    }
+
+    /// [`ensure_security_group`](Self::ensure_security_group), also reporting
+    /// whether this call created the group — read from the one lookup it
+    /// makes, so a caller needs no second `Get-DistributionGroup` to tell.
+    pub async fn ensure_security_group_reporting(
+        &self,
+        name: &str,
+        alias: &str,
+    ) -> Result<(ExoGroup, bool)> {
         if let Some(existing) = self.get_distribution_group(name).await? {
-            return Ok(existing);
+            return Ok((existing, false));
         }
         let values = self
             .invoke_command(
@@ -64,11 +77,11 @@ impl ExchangeClient {
             .await?;
         let created: ExoGroup = first_as(values, "New-DistributionGroup")?;
         if created.distinguished_name.is_some() {
-            return Ok(created);
+            return Ok((created, true));
         }
         match self.get_distribution_group(name).await? {
-            Some(resolved) => Ok(resolved),
-            None => Ok(created),
+            Some(resolved) => Ok((resolved, true)),
+            None => Ok((created, true)),
         }
     }
 

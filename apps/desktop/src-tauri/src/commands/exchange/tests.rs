@@ -413,6 +413,26 @@ fn a_divergent_or_unreadable_scope_filter_is_never_agreement() {
         &wanted
     ));
     assert!(!scope_filter_agrees("", &wanted));
+
+    // Names the wanted group AND something else. The DN-set comparison this
+    // used to be read every one of these as "confines exactly {Managed}", so
+    // the migration bound the app's roles to the scope and stripped its
+    // org-wide grants — against a reach of every user mailbox, every mailbox
+    // but Managed, or a narrower set the report did not describe.
+    for compound in [
+        "MemberOfGroup -eq 'CN=Managed,DC=x' -or RecipientTypeDetails -eq 'UserMailbox'",
+        "MemberOfGroup -eq 'CN=Managed,DC=x' -and RecipientTypeDetails -eq 'UserMailbox'",
+        "-not (MemberOfGroup -eq 'CN=Managed,DC=x')",
+        "(-not(MemberOfGroup -eq 'CN=Managed,DC=x'))",
+        "CustomAttribute1 -eq \"MemberOfGroup -eq 'CN=Managed,DC=x'\"",
+    ] {
+        assert!(!scope_filter_agrees(compound, &wanted), "{compound}");
+    }
+    // ...while Exchange's own re-parenthesising of the pure chain still agrees.
+    assert!(scope_filter_agrees(
+        "((MemberOfGroup -eq 'CN=Managed,DC=x'))",
+        &wanted
+    ));
 }
 
 /// The migration refuses a pre-existing scope that confines nothing.
