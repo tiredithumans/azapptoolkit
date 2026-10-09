@@ -444,13 +444,24 @@ pub struct PrivilegedRestoreItem {
     /// Users and groups assigned to the restored app's roles. Shown only.
     #[serde(default)]
     pub app_role_assignees: Vec<String>,
+    /// Reply URLs the restore writes (web, SPA and public-client), where the
+    /// file chose to have this app's auth codes and tokens delivered. Written
+    /// either way; with admin consent they gate approval, because consented
+    /// tokens would then be routed to a host the file picked.
+    #[serde(default)]
+    pub reply_urls: Vec<String>,
+    /// The restore enables the public-client fallback (tokens without a
+    /// secret). Same gate as [`reply_urls`](Self::reply_urls).
+    #[serde(default)]
+    pub public_client: bool,
     /// The restore grants this item standing access only once approved: for an
     /// app, admin consent covering any application permission or a broad or
-    /// unidentified delegated one, any federated credential, or any group
-    /// membership; for a managed identity, any app role. Unapproved, the app
-    /// is still created and wired, but its consent, federated credentials,
-    /// owners and group memberships (an MI's roles) are withheld and reported
-    /// as manual items.
+    /// unidentified delegated one — or any consent at all when the file also
+    /// names owners, reply URLs or the public-client flag — any federated
+    /// credential, or any group membership; for a managed identity, any app
+    /// role. Unapproved, the app is still created and wired, but its consent,
+    /// federated credentials, owners and group memberships (an MI's roles) are
+    /// withheld and reported as manual items.
     #[serde(default)]
     pub requires_approval: bool,
 }
@@ -551,7 +562,7 @@ pub struct RestoreReport {
     /// was re-applied to a service principal recreated by the app-reg restore.
     #[serde(default)]
     pub enterprise_apps: Vec<RestoredEnterpriseApp>,
-    /// Managed identities matched by name in the destination, with their Graph
+    /// Managed identities matched by name and sub-type in the destination, with their Graph
     /// app-roles re-bound. (Azure RBAC re-creation is a manual runbook item —
     /// source scopes don't exist in the destination.)
     #[serde(default)]
