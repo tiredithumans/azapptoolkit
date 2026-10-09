@@ -107,6 +107,13 @@ pub fn DeletedAppsDialog(
         let session = session;
         leptos::task::spawn_local(async move {
             let result = bulk::bulk_restore_deleted(&tenant_id, &[object_id]).await;
+            // Land nothing on a switched or signed-out tenant: the task outlives
+            // the dialog (`frontend-workspace.md`), and a toast here would
+            // surface in whatever tenant is active now.
+            if !session.is_active_tenant(&tenant_id) {
+                busy_row.set(None);
+                return;
+            }
             match result {
                 Ok(res) => {
                     let outcome = res.outcomes.first();
@@ -177,7 +184,12 @@ pub fn DeletedAppsDialog(
         let tenant_id = t.tenant_id;
         let session = session;
         leptos::task::spawn_local(async move {
-            match applications::purge_deleted_application(&tenant_id, &object_id).await {
+            let purged = applications::purge_deleted_application(&tenant_id, &object_id).await;
+            if !session.is_active_tenant(&tenant_id) {
+                busy_row.set(None);
+                return;
+            }
+            match purged {
                 Ok(()) => {
                     session.toast_success(format!("Deleted {name} permanently."));
                     reload.update(|n| *n = n.wrapping_add(1));

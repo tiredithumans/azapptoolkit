@@ -562,7 +562,11 @@ pub fn ScopeWizard(
     };
     let close = move || {
         reset();
-        on_close.run(());
+        // `try_run`: the apply task calls this after an await, when the
+        // wizard may already be disposed (the pane closed, or a sign-out and
+        // sign-in back into the same tenant while the apply ran), and `run`
+        // on a disposed callback panics the window.
+        on_close.try_run(());
     };
 
     // Re-anchor the mode (and any mechanism-specific cart state) to the cart as
@@ -609,7 +613,9 @@ pub fn ScopeWizard(
     let on_toggle = Callback::new(move |sel: PickerSelection| toggle(sel));
 
     let run_apply = move || {
-        if busy.get_untracked() {
+        // Reached after an await on the consent-retry path, when the wizard
+        // may be disposed: reading a disposed signal panics, so check first.
+        if busy.is_disposed() || busy.get_untracked() {
             return;
         }
         let Some(t) = session.active_tenant.get_untracked() else {
@@ -698,6 +704,7 @@ pub fn ScopeWizard(
         busy.set(true);
         error.set(None);
         needs_consent.set(false);
+        let started_for = tenant_id.clone();
         leptos::task::spawn_local(async move {
             let res = match plan {
                 Plan::OrgWide => apply_orgwide(tenant_id, target, items).await,
@@ -711,6 +718,13 @@ pub fn ScopeWizard(
                     apply_sharepoint_item_scoped(tenant_id, target, urls, role, value).await
                 }
             };
+            // Land nothing on a switched or signed-out tenant: the task outlives
+            // the dialog (`frontend-workspace.md`), and a toast here would
+            // surface in whatever tenant is active now.
+            if !session.is_active_tenant(&started_for) {
+                busy.set(false);
+                return;
+            }
             match res {
                 Ok(summary) => {
                     session.toast_success(summary);
@@ -742,7 +756,15 @@ pub fn ScopeWizard(
         error.set(None);
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&tenant_id, scope).await {
+            let consent = auth::request_scope_consent(&tenant_id, scope).await;
+            // Land nothing on a switched or signed-out tenant: the task outlives
+            // the dialog (`frontend-workspace.md`), and the retried apply here
+            // would surface — or write — in whatever tenant is active now.
+            if !session.is_active_tenant(&tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match consent {
                 Ok(()) => {
                     needs_consent.set(false);
                     busy.set(false);

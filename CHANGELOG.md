@@ -28,6 +28,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   used to keep the pre-write answer; it is now discarded.
 - **The credential-expiry roll-up follows the app list when a create or delete happens in a
   tenant at the list cap**, so it is rebuilt by the same rescan instead of patched past the cap.
+- **The Grant-access and SSO wizards no longer crash the window when their pane or dialog closes,
+  or you sign out or switch tenant, while a grant — or the consent before a retry — is still in
+  flight.** The scope-remediation dialogs and the Recently deleted dialog likewise show no result
+  toast for a tenant you have left.
 - **Scoping a mailbox permission, or migrating a legacy Application Access Policy, no longer
   treats an existing management scope as "already confined to these groups" when its filter does
   anything beyond naming them.** A filter that named the right groups but also reached other

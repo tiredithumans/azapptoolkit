@@ -37,7 +37,6 @@ impl Session {
         self.restore_open_items();
     }
 
-    /// Toggle an application object id in the bulk-selection set.
     /// Whether `tenant_id` is still the active tenant — the post-await check
     /// for a command that started for it. Sign-out clears the tenant, so a
     /// result that lands after it fails this too, and must not report into
@@ -49,6 +48,7 @@ impl Session {
             .unwrap_or(false)
     }
 
+    /// Toggle an application object id in the bulk-selection set.
     pub fn toggle_app_selected(&self, id: String) {
         toggle_in(self.tenant_ui.selected_app_ids, id);
     }
