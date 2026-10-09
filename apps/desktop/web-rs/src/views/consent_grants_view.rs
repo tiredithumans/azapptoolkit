@@ -59,13 +59,13 @@ pub fn ConsentGrantsView() -> impl IntoView {
             return None;
         }
         let mut text = format!(
-            "Users in this tenant can grant delegated permissions to themselves — the app-consent \
-             policies ({}) assigned to the default user role make every 'User' grant below \
-             potentially self-granted.",
+            "Users in this tenant can approve apps' access to their own data without an admin \
+             (consent policy: {}). Any 'User' grant below may have been granted this way, not by \
+             an admin.",
             names.join(", ")
         );
         if p.risky_app_user_consent == Some(true) {
-            text.push_str(" This tenant also allows user consent for risky apps.");
+            text.push_str(" Users can also approve apps Microsoft flags as risky.");
         }
         Some(("warn".to_string(), text))
     });
