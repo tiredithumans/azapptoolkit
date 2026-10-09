@@ -330,6 +330,10 @@ doc: _stub-frontend-dist
 web-doc:
     cargo doc --locked --no-deps --target wasm32-unknown-unknown
 
+# One advisory pedantic lint posture for both trees — a lint change is made
+# once here, never per recipe.
+pedantic_flags := "-W clippy::pedantic -W clippy::nursery --allow clippy::missing_errors_doc --allow clippy::missing_panics_doc --allow clippy::doc_markdown --allow clippy::module_name_repetitions --allow clippy::must_use_candidate --allow clippy::similar_names --allow clippy::type_complexity"
+
 # Advisory pedantic+nursery sweep — NOT a gate and deliberately not in any
 # verify chain (review F216). A curated low-FP subset is gated through
 # `[workspace.lints.clippy]` instead; this recipe shows the full tally with
@@ -340,13 +344,13 @@ web-doc:
 # needless_pass_by_value, derive_partial_eq_without_eq, map_unwrap_or,
 # future_not_send. `-W` not `-D`: nothing fails on a lie here.
 clippy-pedantic: _stub-frontend-dist
-    cargo clippy --locked --workspace --all-targets -- -W clippy::pedantic -W clippy::nursery --allow clippy::missing_errors_doc --allow clippy::missing_panics_doc --allow clippy::doc_markdown --allow clippy::module_name_repetitions --allow clippy::must_use_candidate --allow clippy::similar_names --allow clippy::type_complexity
+    cargo clippy --locked --workspace --all-targets -- {{pedantic_flags}}
 
 # The same advisory tally for the frontend tree (own lockfile, own lint
 # posture — see web-clippy).
 [working-directory('apps/desktop/web-rs')]
 web-clippy-pedantic:
-    cargo clippy --locked --target wasm32-unknown-unknown --all-targets --features test-support -- -W clippy::pedantic -W clippy::nursery --allow clippy::missing_errors_doc --allow clippy::missing_panics_doc --allow clippy::doc_markdown --allow clippy::module_name_repetitions --allow clippy::must_use_candidate --allow clippy::similar_names --allow clippy::type_complexity
+    cargo clippy --locked --target wasm32-unknown-unknown --all-targets --features test-support -- {{pedantic_flags}}
 
 # The inner loop while iterating: type-check BOTH trees (the root workspace incl.
 # every test target, and the wasm frontend) with no codegen and no tests. Not a

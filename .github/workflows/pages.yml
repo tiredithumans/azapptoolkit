@@ -17,13 +17,14 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Pages deploy needs to write the Pages artifact and mint an OIDC token; the
-# build only reads the repo. Declared explicitly so a repo-default change can't
-# silently re-broaden them.
+# Read-only by default: the build job compiles every dependency's build script
+# and proc-macro, so it must hold neither the Pages write token (which also
+# edits the site's settings) nor an OIDC token (which any federated credential
+# trusting this repo would accept). Only `deploy` (which runs no third-party
+# build code) gets those, per job below. Declared explicitly so a repo-default
+# change can't silently re-broaden them (pinned by repo_invariants/release.rs).
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Never cancel an in-flight deploy (it can leave Pages half-published); queue
 # instead. Independent of the CI concurrency group.
@@ -35,8 +36,14 @@ jobs:
   build:
     name: Build demo bundle
     runs-on: ubuntu-latest
+    # `actions/configure-pages` reads the site config; nothing here writes.
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           targets: wasm32-unknown-unknown
@@ -68,6 +75,10 @@ jobs:
     name: Deploy to Pages
     needs: build
     runs-on: ubuntu-latest
+    # The only job that writes the Pages deployment and mints its OIDC token.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       # Whichever attempt succeeded carries the page_url (a failed attempt emits none).
