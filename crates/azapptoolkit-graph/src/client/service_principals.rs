@@ -113,12 +113,19 @@ impl GraphClient {
         if let Some(cached) = self.cache.get(CacheKind::ServicePrincipal, &cache_key) {
             return Ok(cached);
         }
+        // Watched across the fetch: a mutator's sweep landing while this read
+        // is in flight bumps the watch, and the pre-mutation object is then
+        // not stored for the TTL (`invalidate_prefix` only bumps watches it
+        // finds, so an unwatched store won the race).
+        let watch = self
+            .cache
+            .generation_for(CacheKind::ServicePrincipal, &cache_key);
         let filter = format!("appId eq '{}'", escape_odata(app_id));
         let params: [(&str, &str); 2] = [("$filter", filter.as_str()), ("$top", "1")];
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, false).await?;
         let sp = page.items.into_iter().next();
-        self.cache.put(CacheKind::ServicePrincipal, cache_key, &sp);
+        self.cache.put_if_current(watch, &sp);
         Ok(sp)
     }
 
@@ -136,6 +143,9 @@ impl GraphClient {
         if let Some(cached) = self.cache.get(CacheKind::ServicePrincipal, &cache_key) {
             return Ok(cached);
         }
+        let watch = self
+            .cache
+            .generation_for(CacheKind::ServicePrincipal, &cache_key);
         let filter = format!("appId eq '{}'", escape_odata(app_id));
         let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
@@ -145,7 +155,7 @@ impl GraphClient {
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, false).await?;
         let sp = page.items.into_iter().next();
-        self.cache.put(CacheKind::ServicePrincipal, cache_key, &sp);
+        self.cache.put_if_current(watch, &sp);
         Ok(sp)
     }
 
@@ -429,7 +439,10 @@ impl GraphClient {
         for (id, page) in missing.iter().zip(pages) {
             // A failed sub-request leaves the cache cold; the per-item lookup
             // retries. An empty page caches `None`, exactly like the single
-            // lookup it mirrors.
+            // lookup it mirrors. Unwatched on purpose: a watch per id would
+            // overflow `Cache::MAX_WATCHES` for a tenant-sized prewarm, and a
+            // sweep that lands mid-batch is corrected by the next mutator's
+            // sweep or the TTL — this is a best-effort warm-up, not a read.
             if let Ok(page) = page {
                 let sp = page.items.into_iter().next();
                 self.cache.put(kind, key(id), &sp);
@@ -519,8 +532,10 @@ impl GraphClient {
     }
 
     /// Drops **everything** cached about this tenant's service principals: the
-    /// SP objects themselves and the tenant-wide grant matrices that describe
-    /// what they can reach.
+    /// SP objects themselves, the resource-SP permission definitions
+    /// (`resolve_resource_sp` — a deleted API's roles would otherwise resolve,
+    /// and a restored one stay "absent", for the TTL) and the tenant-wide
+    /// grant matrices that describe what they can reach.
     ///
     /// The two live under different `CacheKind`s, so `invalidate_sp_cache`
     /// alone left `{tenant}|grants:oauth2_all` and
@@ -536,6 +551,7 @@ impl GraphClient {
     /// across them is how the halves drifted apart.
     pub(crate) fn invalidate_principal_caches(&self) {
         self.invalidate_sp_cache();
+        self.invalidate_resource_sp_cache();
         self.invalidate_grant_cache();
     }
 
@@ -693,6 +709,9 @@ impl GraphClient {
         {
             return Ok(cached);
         }
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let filter = format!("appId eq '{}'", escape_odata(resource_app_id));
         let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
@@ -702,7 +721,7 @@ impl GraphClient {
         let page: Paged<ServicePrincipal> =
             self.get_json("/servicePrincipals", &params, false).await?;
         let sp = page.items.into_iter().next();
-        self.cache.put(CacheKind::Permissions, cache_key, &sp);
+        self.cache.put_if_current(watch, &sp);
         Ok(sp)
     }
 

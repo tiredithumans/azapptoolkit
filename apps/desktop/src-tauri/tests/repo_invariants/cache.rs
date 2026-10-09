@@ -27,19 +27,18 @@ use super::sources::{code_lines, code_mask, is_fn_header};
 /// than a broad one someone learns to suppress.
 #[test]
 fn cache_invalidation_never_runs_on_an_error_path() {
+    let invalidators = invalidators();
     let mut offenders: Vec<String> = Vec::new();
     for (name, src) in super::sources::command_modules() {
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || !INVALIDATORS.iter().any(|f| line.contains(f)) {
+            if trimmed.starts_with("//") || !invalidators.iter().any(|f| line.contains(f)) {
                 continue;
             }
-            // Skip the definitions themselves — by the `fn` keyword, not by the
-            // `invalidate_app` prefix, so a tiered invalidator defined in another
-            // module (`invalidate_kv_sweep`, `invalidate_site_sweep`) is skipped
-            // by name rather than by luck.
-            if line.contains("fn invalidate_") {
+            // Skip the definitions themselves: a derived name is a function
+            // whose header this scan would otherwise read as a call site.
+            if is_fn_header(trimmed) {
                 continue;
             }
             let indent = line.len() - trimmed.len();
@@ -377,6 +376,10 @@ fn key_calls_in(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The tiered invalidators every rule here must at least cover — a floor, not
+/// the set. The set itself is derived from the source ([`invalidators`]), so a
+/// new helper that drops or patches a cache entry is covered the day it is
+/// written; this floor only stops the derivation from silently shrinking.
 const INVALIDATORS: &[&str] = &[
     "invalidate_app_lists(",
     "invalidate_app_credentials(",
@@ -385,6 +388,200 @@ const INVALIDATORS: &[&str] = &[
     "invalidate_app_role_resources(",
     "invalidate_kv_sweep(",
 ];
+
+/// What a function must call to count as touching the cache.
+const CACHE_MUTATORS: &[&str] = &[
+    ".invalidate(",
+    ".invalidate_prefix(",
+    ".invalidate_tenant(",
+    ".clear_kind(",
+    ".patch_typed_index(",
+];
+
+/// Every synchronous, non-command function under `commands/` that drops or
+/// patches a cache entry — directly, or through another such function — as
+/// `name(` needles.
+///
+/// Derived to a fixpoint from the source, not listed: the patch tier
+/// (`record_created_apps`, `record_deleted_apps`, `record_renamed_app`) and
+/// six `invalidate_*` helpers in other modules were outside the hand-kept
+/// list, so the "only on `Ok`" rule never looked at their call sites.
+/// Synchronous only: an async core that writes to Graph and then busts is a
+/// mutation, and a fallback to one inside an `Err` arm is legitimate.
+fn invalidators() -> Vec<String> {
+    use std::collections::BTreeSet;
+    let commands: BTreeSet<String> = super::sources::commands()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let functions: Vec<super::sources::Function> = super::sources::command_modules()
+        .iter()
+        .flat_map(|(_, src)| super::sources::functions_in(src))
+        .collect();
+    // Seeded empty: the floor below is then a real check on the derivation,
+    // not something it was handed.
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let before = names.len();
+        for f in &functions {
+            if f.is_async || commands.contains(&f.name) || names.contains(&f.name) {
+                continue;
+            }
+            let calls_mutator = CACHE_MUTATORS.iter().any(|m| f.body.contains(m))
+                || names.iter().any(|n| f.body.contains(&format!("{n}(")));
+            if calls_mutator {
+                names.insert(f.name.clone());
+            }
+        }
+        if names.len() == before {
+            break;
+        }
+    }
+    for floor in INVALIDATORS {
+        assert!(
+            names.contains(floor.trim_end_matches('(')),
+            "the derived invalidator set lacks `{floor}` — the derivation is broken, or the \
+             helper was renamed (update the floor)"
+        );
+    }
+    assert!(
+        [
+            "record_created_apps",
+            "record_deleted_apps",
+            "record_renamed_app"
+        ]
+        .iter()
+        .all(|n| names.contains(*n)),
+        "the patch tier must derive as an invalidator: {names:?}"
+    );
+    names.into_iter().map(|n| format!("{n}(")).collect()
+}
+
+/// The Graph client's own source files — `client.rs` and `client/*.rs`, not
+/// its tests — as (name, source).
+fn graph_client_modules() -> Vec<(String, String)> {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/azapptoolkit-graph/src");
+    let mut files = vec![src_root.join("client.rs")];
+    for entry in std::fs::read_dir(src_root.join("client"))
+        .expect("graph client dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            files.push(path);
+        }
+    }
+    let mut out = Vec::new();
+    for path in files {
+        let src = std::fs::read_to_string(&path).expect("read graph client source");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        out.push((name, super::sources::strip_tests(&src)));
+    }
+    assert!(
+        out.len() >= 5,
+        "walked {} graph client files — the walk is broken",
+        out.len()
+    );
+    out.sort();
+    out
+}
+
+/// A read-through in the Graph client stores through a watch captured before
+/// its first await, never a plain `put` after one.
+///
+/// `invalidate_prefix` bumps only the watches it finds, so an unwatched store
+/// that lost the race with a mutator's sweep kept the pre-mutation object for
+/// the TTL — the per-appId SP lookups, the resource-SP resolver and both grant
+/// matrices did exactly that. The batch prewarm (`prewarm_sps`, which
+/// `prewarm_resource_sps` delegates to) is exempt by name: a watch per id
+/// would overflow the watch table, and it is best-effort by design.
+#[test]
+fn graph_client_read_throughs_store_through_a_watch() {
+    const EXEMPT: &[&str] = &["prewarm_sps"];
+    let mut offenders = Vec::new();
+    let mut exempted = Vec::new();
+    for (file, src) in graph_client_modules() {
+        for f in super::sources::functions_in(&src) {
+            let body: String = f.body.split_whitespace().collect();
+            if !body.contains(".cache.put(") || !body.contains(".await") {
+                continue;
+            }
+            if EXEMPT.contains(&f.name.as_str()) {
+                exempted.push(f.name.clone());
+                continue;
+            }
+            offenders.push(format!("{file}::{}", f.name));
+        }
+    }
+    for name in EXEMPT {
+        assert!(
+            exempted.iter().any(|e| e == name),
+            "`{name}` is exempt but no longer stores after an await — drop the exemption"
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "Graph read-throughs that `cache.put` after an await: {offenders:?}\n\
+         Capture `self.cache.generation_for(kind, &key)` before the fetch and store through \
+         `put_if_current(watch, &value)`, so a sweep that lands mid-fetch wins."
+    );
+}
+
+/// Every Graph write that changes a service principal — or deletes/restores an
+/// app registration, which deletes/restores its SP — sweeps the SP cache.
+///
+/// `invalidate_sp_cache` is keyed by appId while the mutators take object
+/// ids, so the sweep lives in the client (the AGENTS.md rule) and every such
+/// mutator has to call it: `delete_application` and `restore_deleted_item`
+/// did not, leaving a deleted SP and its grants cached for the TTL.
+#[test]
+fn graph_client_sp_mutators_sweep_the_sp_cache() {
+    let mut offenders = Vec::new();
+    let mut found = 0usize;
+    for (file, src) in graph_client_modules() {
+        for f in super::sources::functions_in(&src) {
+            let body: String = f.body.split_whitespace().collect();
+            // The object itself (`"/servicePrincipals/{id}"`), not a child
+            // collection under it (`…/owners/…/$ref`, `…/appRoleAssignedTo/…`),
+            // which other sweeps own.
+            let exact = |collection: &str| {
+                let needle = format!("\"/{collection}/{{");
+                body.match_indices(&needle).any(|(at, _)| {
+                    body[at + needle.len()..]
+                        .split('"')
+                        .next()
+                        .is_some_and(|rest| rest.ends_with('}') && !rest.contains('/'))
+                })
+            };
+            let sp_write = exact("servicePrincipals")
+                && (body.contains("Method::DELETE") || body.contains("Method::PATCH"));
+            let app_delete = exact("applications") && body.contains("Method::DELETE");
+            let restore = body.contains("/restore\"") && body.contains("Method::POST");
+            if !(sp_write || app_delete || restore) {
+                continue;
+            }
+            found += 1;
+            if body.contains("invalidate_sp_cache(")
+                || body.contains("invalidate_principal_caches(")
+            {
+                continue;
+            }
+            offenders.push(format!("{file}::{}", f.name));
+        }
+    }
+    // Tags, delete SP, patch SP, remove SP key credential, delete app, restore.
+    assert!(
+        found >= 6,
+        "found {found} SP-affecting writes — the scan is broken"
+    );
+    assert!(
+        offenders.is_empty(),
+        "SP-affecting Graph writes that never sweep the SP cache: {offenders:?}\n\
+         Call `self.invalidate_sp_cache()` (or `invalidate_principal_caches()` when grants are \
+         affected) on the `Ok` path."
+    );
+}
 
 /// An **in-place** write on one app never busts the list tier.
 ///

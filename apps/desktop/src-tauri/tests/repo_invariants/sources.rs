@@ -456,6 +456,9 @@ pub(crate) fn is_fn_header(trimmed: &str) -> bool {
 /// body.
 pub(crate) struct Function {
     pub(crate) name: String,
+    /// `async fn` — a rule about synchronous helpers can leave the I/O cores
+    /// out without naming them.
+    pub(crate) is_async: bool,
     /// Brace-balanced body with every `//` line removed, so a comment that
     /// merely names a validator cannot satisfy a rule that asks for the call.
     pub(crate) body: String,
@@ -483,6 +486,7 @@ pub(crate) fn functions_in(src: &str) -> Vec<Function> {
             continue;
         };
         let fn_at = line_at + (line.len() - trimmed.len()) + kw;
+        let is_async = trimmed[..kw].split_whitespace().any(|w| w == "async");
         let name: String = src[fn_at + 3..]
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -508,7 +512,11 @@ pub(crate) fn functions_in(src: &str) -> Vec<Function> {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        out.push(Function { name, body });
+        out.push(Function {
+            name,
+            is_async,
+            body,
+        });
     }
     out
 }

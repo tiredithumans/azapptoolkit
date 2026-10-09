@@ -344,11 +344,16 @@ impl GraphClient {
         );
         // `beta_base()` derives from `base_url`, so the first URL is same-origin
         // by construction; the helper checks every nextLink after it.
+        // Watched across the fetch, so a sweep that lands meanwhile is not
+        // undone by storing the pre-sweep read for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let first: Paged<ServicePrincipalSignInActivity> = self.scoped_get(token, &url).await?;
         let out = self
             .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
             .await?;
-        self.cache.put(CacheKind::Permissions, cache_key, &out);
+        self.cache.put_if_current(watch, &out);
         Ok(out)
     }
 
@@ -384,11 +389,16 @@ impl GraphClient {
             "{}/reports/appCredentialSignInActivities?$top={MAX_PAGE_SIZE}",
             self.beta_base()
         );
+        // Watched across the fetch, so a sweep that lands meanwhile is not
+        // undone by storing the pre-sweep read for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let first: Paged<AppCredentialSignInActivity> = self.scoped_get(token, &url).await?;
         let out = self
             .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
             .await?;
-        self.cache.put(CacheKind::Permissions, cache_key, &out);
+        self.cache.put_if_current(watch, &out);
         Ok(out)
     }
 

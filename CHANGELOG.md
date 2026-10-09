@@ -20,6 +20,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   token fragments.**
 - **Many requests answered with the same continuous-access-evaluation challenge at once make one
   token request**, not one per request.
+- **Deleting or restoring an app registration no longer leaves its service principal, and the
+  permission grants that named it, cached for up to an hour.** The Security tab and the Consent
+  grants page could keep showing a deleted enterprise application's application permissions as
+  live, or miss a restored one's. A lookup of a service principal, a resource's permission
+  definitions or the tenant's grant lists that was still in flight when such a write landed also
+  used to keep the pre-write answer; it is now discarded.
+- **The credential-expiry roll-up follows the app list when a create or delete happens in a
+  tenant at the list cap**, so it is rebuilt by the same rescan instead of patched past the cap.
 - **Scoping a mailbox permission, or migrating a legacy Application Access Policy, no longer
   treats an existing management scope as "already confined to these groups" when its filter does
   anything beyond naming them.** A filter that named the right groups but also reached other

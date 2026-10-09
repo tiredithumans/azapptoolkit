@@ -413,10 +413,17 @@ impl GraphClient {
             .await
     }
 
+    /// Deleting an app registration deletes its home-tenant service principal
+    /// with it, so the per-appId SP entries and the grant matrices that named
+    /// it are swept on `Ok` — the same sweep `delete_service_principal` runs.
+    /// Without it the Security tab kept reporting the deleted SP's application
+    /// permissions as live for up to the 60-minute TTL.
     pub async fn delete_application(&self, object_id: &str) -> Result<()> {
         let path = format!("/applications/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await
+            .await?;
+        self.invalidate_principal_caches();
+        Ok(())
     }
 
     /// Recycle bin: the tenant's deleted app registrations, paged to the cap.
@@ -465,10 +472,16 @@ impl GraphClient {
     /// `application/json` Content-Type the documented bodyless-POST form
     /// expects, and a POST is never replayed (`retry_class_for` →
     /// `NonIdempotent`), so a restore can't double-fire.
+    ///
+    /// This restores service principals too (the bulk restore brings an app's
+    /// paired SP back with a second call), so the SP and grant caches are
+    /// swept on `Ok` like a delete sweeps them.
     pub async fn restore_deleted_item(&self, object_id: &str) -> Result<()> {
         let path = format!("/directory/deletedItems/{object_id}/restore");
         self.send_no_content(Method::POST, &path, Some(&serde_json::json!({})))
-            .await
+            .await?;
+        self.invalidate_principal_caches();
+        Ok(())
     }
 
     /// Permanently removes a deleted app (the option the reworded bulk-delete

@@ -408,6 +408,101 @@ async fn delete_application_returns_ok_on_204() {
     client.delete_application("obj-1").await.unwrap();
 }
 
+/// Deleting an app registration deletes its service principal with it: the
+/// per-appId SP entry and the grant matrices must not outlive the DELETE.
+#[tokio::test]
+async fn deleting_an_application_drops_the_sp_and_grant_caches() {
+    let server = MockServer::start().await;
+    // The appId lookup fires twice: once to prime, once after the delete.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Demo App" }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/applications/obj-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:oauth2_all".to_string(),
+        &serde_json::json!([{ "clientId": "sp-1" }]),
+    );
+
+    client.delete_application("obj-1").await.unwrap();
+
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|grants:oauth2_all")
+            .is_none(),
+        "the grant matrix must not survive an app delete"
+    );
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    server.verify().await;
+}
+
+/// `restore_deleted_item` also restores service principals (the bulk restore
+/// brings the paired SP back with a second call): same sweep as a delete.
+#[tokio::test]
+async fn restoring_a_deleted_item_drops_the_sp_and_grant_caches() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": []
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/directory/deletedItems/obj-1/restore"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "obj-1" })),
+        )
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    // Primes `None`: the app had no SP while deleted.
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    client.cache.put(
+        CacheKind::Permissions,
+        "tenant-test|grants:oauth2_all".to_string(),
+        &serde_json::json!([{ "clientId": "sp-1" }]),
+    );
+
+    client.restore_deleted_item("obj-1").await.unwrap();
+
+    assert!(
+        client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, "tenant-test|grants:oauth2_all")
+            .is_none(),
+        "the grant matrix must not survive a restore"
+    );
+
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    server.verify().await;
+}
+
 #[tokio::test]
 async fn add_owner_posts_full_odata_id() {
     let server = MockServer::start().await;
