@@ -50,6 +50,14 @@ pub struct ScopedTokenAdapter {
     auth: Arc<EntraAuthService>,
     tenant_id: String,
     scopes: Vec<String>,
+    /// The session epoch this adapter was built under. A sign-out or a
+    /// same-tenant account switch moves it, and `AppState::forget_tenant`
+    /// drops the client maps — but a write run that already holds an
+    /// `Arc<GraphClient>` keeps calling; tokens resolve by tenant, so without
+    /// this check it would mint the NEW account's tokens for the OLD
+    /// operator's run. Re-auth in place does not move the epoch, so a run
+    /// survives it.
+    epoch: u64,
     /// When `true`, tokens are acquired CAE-aware (advertise `cp1`; honor a
     /// claims challenge). Set only for the Microsoft Graph clients, which handle
     /// the `401 insufficient_claims` retry; other resources stay non-CAE so they
@@ -59,10 +67,12 @@ pub struct ScopedTokenAdapter {
 
 impl ScopedTokenAdapter {
     pub fn new(auth: Arc<EntraAuthService>, tenant_id: String, scopes: Vec<String>) -> Arc<Self> {
+        let epoch = auth.session_epoch();
         Arc::new(Self {
             auth,
             tenant_id,
             scopes,
+            epoch,
             cae: false,
         })
     }
@@ -74,18 +84,31 @@ impl ScopedTokenAdapter {
         tenant_id: String,
         scopes: Vec<String>,
     ) -> Arc<Self> {
+        let epoch = auth.session_epoch();
         Arc::new(Self {
             auth,
             tenant_id,
             scopes,
+            epoch,
             cae: true,
         })
+    }
+
+    /// Refuses to mint once the session this adapter was built under has
+    /// ended: `not_signed_in`, which every long-running loop stops on.
+    fn require_live_session(&self) -> Result<(), TokenError> {
+        if self.auth.session_epoch() == self.epoch {
+            Ok(())
+        } else {
+            Err(token_error(AuthError::NotSignedIn))
+        }
     }
 }
 
 #[async_trait]
 impl BearerProvider for ScopedTokenAdapter {
     async fn bearer(&self) -> Result<String, TokenError> {
+        self.require_live_session()?;
         let mut token = if self.cae {
             self.auth
                 .access_token_for_scopes_cae(&self.tenant_id, &self.scopes, None)
@@ -96,6 +119,10 @@ impl BearerProvider for ScopedTokenAdapter {
                 .await
         }
         .map_err(token_error)?;
+        // Again after the wait: a caller parked on the refresh lock across a
+        // sign-out and sign-in would otherwise be handed the new account's
+        // token by the re-check under that lock.
+        self.require_live_session()?;
         // `AccessToken: Drop` (zeroizes on drop), so we can't move the inner
         // String out — extract it via `mem::take`, leaving the husk to be
         // dropped harmlessly.
@@ -108,11 +135,13 @@ impl BearerProvider for ScopedTokenAdapter {
         if !self.cae {
             return self.bearer().await;
         }
+        self.require_live_session()?;
         let mut token = self
             .auth
             .access_token_for_scopes_cae(&self.tenant_id, &self.scopes, Some(claims))
             .await
             .map_err(token_error)?;
+        self.require_live_session()?;
         Ok(std::mem::take(&mut token.token))
     }
 }

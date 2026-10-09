@@ -33,6 +33,7 @@ use oauth2::{CsrfToken, PkceCodeChallenge};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
@@ -46,7 +47,7 @@ use azapptoolkit_core::identity::{SignInOutcome, TenantContext, canonical_tenant
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
     AccessToken, PurgeOutcome, TokenCache, delete_refresh_token, delete_refresh_token_if_current,
-    load_refresh_token, save_refresh_token, scope_key,
+    delete_refresh_token_then, load_refresh_token, save_refresh_token_if, scope_key,
 };
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
@@ -137,6 +138,17 @@ pub struct EntraAuthService {
     /// cache read taken under the lock.
     refresh_locks: RefreshLocks,
     known_tenants: Mutex<HashMap<String, TenantContext>>,
+    /// The session epoch: bumped by `sign_in` and `sign_out` (never by
+    /// `reauthenticate`, `restore_session` or a consent/step-up round trip).
+    /// Every token-yielding flow captures it before its round trip and
+    /// `store_token_outcome` stores nothing — keyring or cache — once it has
+    /// moved, so a refresh that completes after the operator signed out or
+    /// switched account cannot write the old account's rotated refresh token
+    /// back or serve its access token to the new account's writes. A
+    /// `ScopedTokenAdapter` built under one epoch refuses to mint under the
+    /// next, which stops a write run that straddled a same-tenant account
+    /// switch. `Arc` so the blocking keyring write can check it.
+    session_epoch: Arc<AtomicU64>,
     http: reqwest::Client,
     /// Opens the `/authorize` URL of an interactive flow. Always
     /// [`open_system_browser`] in the app; a field (not a direct call) so tests
@@ -178,6 +190,7 @@ impl EntraAuthService {
             cache: TokenCache::new(),
             refresh_locks: Mutex::new(HashMap::new()),
             known_tenants: Mutex::new(HashMap::new()),
+            session_epoch: Arc::new(AtomicU64::new(1)),
             http: token_http_client(),
             open_browser: Box::new(open_system_browser),
             browser_fallback: Mutex::new(None),
@@ -611,7 +624,19 @@ impl EntraAuthService {
         // account), so drop every audience's slot — write, ARM, Exchange, Key
         // Vault — before seeding the new account's read token. Otherwise the
         // next write would be served the previous operator's token.
-        self.cache.invalidate_tenant(&tenant_id);
+        // ...and move the session epoch in the same critical section, so a
+        // refresh of the previous account that completes from here on stores
+        // nothing (see `session_epoch`).
+        let fence = {
+            let mut registry = self.known_tenants.lock();
+            self.cache.invalidate_tenant(&tenant_id);
+            // The previous account's registration goes too: a concurrent
+            // acquisition between here and the insert below would otherwise
+            // resolve the old account under the new epoch and cache its token
+            // in a slot the new account then reads.
+            registry.remove(&tenant_id);
+            self.bump_session_epoch()
+        };
         // Initial sign-in: no requested-scope fallback (matches the original
         // `unwrap_or_default`); the grant response always echoes `scope` here.
         self.store_token_outcome(
@@ -620,6 +645,7 @@ impl EntraAuthService {
             &[],
             true,
             RefreshTokenSave::Required,
+            fence,
             token,
         )
         .await?;
@@ -705,12 +731,14 @@ impl EntraAuthService {
         prompt: &str,
         action: &str,
     ) -> Result<()> {
-        let tenant = self
-            .known_tenants
-            .lock()
-            .get(tenant_id)
-            .cloned()
-            .ok_or(AuthError::NotSignedIn)?;
+        let (tenant, fence) = {
+            let registry = self.known_tenants.lock();
+            let tenant = registry
+                .get(tenant_id)
+                .cloned()
+                .ok_or(AuthError::NotSignedIn)?;
+            (tenant, self.session_epoch())
+        };
 
         // The round trip needs an ID token (to confirm the same account
         // completed it) and a refresh token, so ensure the OIDC/offline scopes
@@ -744,6 +772,7 @@ impl EntraAuthService {
             scopes,
             cae,
             RefreshTokenSave::Required,
+            fence,
             token,
         )
         .await?;
@@ -781,6 +810,18 @@ impl EntraAuthService {
             .await
     }
 
+    /// The current session epoch (see the field). A caller that builds a
+    /// long-lived token consumer captures it and compares on every mint.
+    pub fn session_epoch(&self) -> u64 {
+        self.session_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Moves the session epoch and returns the new value — the fence a flow
+    /// that just started a session stores under.
+    fn bump_session_epoch(&self) -> u64 {
+        self.session_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// The lazily-created refresh lock for a `(tenant, scope set)`, keyed
     /// identically to the token cache (canonical `scope_key`) so two requests
     /// for the same audience serialize on one lock while unrelated audiences
@@ -804,6 +845,12 @@ impl EntraAuthService {
     /// Credential Manager iterates numbered chunk entries), so it runs off the
     /// async worker via `spawn_blocking` — centralizing here keeps the
     /// interactive flows from stalling other tokio tasks with an inline write.
+    ///
+    /// `fence` is the session epoch the flow captured before its round trip:
+    /// once it has moved (a sign-out or an account switch landed meanwhile),
+    /// nothing is stored and the call fails `NotSignedIn`, which every
+    /// long-running loop already stops on.
+    #[allow(clippy::too_many_arguments)]
     async fn store_token_outcome(
         &self,
         tenant: &TenantContext,
@@ -811,6 +858,7 @@ impl EntraAuthService {
         scope_fallback: &[String],
         cae: bool,
         save: RefreshTokenSave,
+        fence: u64,
         mut token: TokenResponse,
     ) -> Result<AccessToken> {
         // A bogus `expires_in` (up to u64::MAX) is capped before any
@@ -826,7 +874,13 @@ impl EntraAuthService {
         // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
         if let Some(refresh) = token.refresh_token.take() {
             let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
-            let task = tokio::task::spawn_blocking(move || save_refresh_token(&t, &oid, &refresh));
+            let epoch = Arc::clone(&self.session_epoch);
+            // The fence is evaluated under the keyring's chunk-set lock, which
+            // a sign-out's delete also takes: a late write either lands first
+            // (and the delete removes it) or sees the moved epoch and skips.
+            let task = tokio::task::spawn_blocking(move || {
+                save_refresh_token_if(&t, &oid, &refresh, || epoch.load(Ordering::SeqCst) == fence)
+            });
             let saved = match task.await {
                 Ok(saved) => saved,
                 Err(e) => Err(AuthError::Keyring(format!(
@@ -834,7 +888,15 @@ impl EntraAuthService {
                 ))),
             };
             match (saved, save) {
-                (Ok(()), _) => {}
+                (Ok(false), _) => {
+                    tracing::info!(
+                        target: "auth",
+                        tenant_id = %tenant.tenant_id,
+                        "a token refresh finished after the session ended; discarding it"
+                    );
+                    return Err(AuthError::NotSignedIn);
+                }
+                (Ok(true), _) => {}
                 (Err(AuthError::Keyring(_)), RefreshTokenSave::BestEffort) => {
                     // No error text. The access token below is still good; the
                     // previous refresh token survives a write refused at chunk
@@ -856,8 +918,21 @@ impl EntraAuthService {
             expires_at,
             scopes,
         };
+        // Under the registry lock, which `sign_in`/`sign_out` hold while they
+        // move the epoch and sweep the slots: a late put cannot slip in between.
+        let registry = self.known_tenants.lock();
+        if self.session_epoch() != fence {
+            drop(registry);
+            tracing::info!(
+                target: "auth",
+                tenant_id = %tenant.tenant_id,
+                "a token refresh finished after the session ended; discarding it"
+            );
+            return Err(AuthError::NotSignedIn);
+        }
         self.cache
             .put(tenant.tenant_id.clone(), cache_scopes, cae, access.clone());
+        drop(registry);
         Ok(access)
     }
 
@@ -886,115 +961,142 @@ impl EntraAuthService {
         // A CAE request (`claims` always carries cp1) reads and fills the CAE
         // slot; a plain one the non-CAE slot — never the other's token.
         let cae = claims.is_some();
+        // What the slot held BEFORE waiting for the lock. A claims challenge
+        // bypasses the cache, but a token minted while this caller waited is a
+        // post-challenge token already: every challenged request in a fan-out
+        // used to re-POST serially under the lock instead of sharing it.
+        let before = self.cache.get(tenant_id, scopes, cae);
         if !bypass_cache
-            && let Some(existing) = self.cache.get(tenant_id, scopes, cae)
+            && let Some(existing) = before.as_ref()
             && !existing.needs_refresh(REFRESH_LEEWAY_SECS)
         {
-            return Ok((existing, None));
+            return Ok((existing.clone(), None));
         }
 
         let lock = self.refresh_lock_for(tenant_id, scopes);
         let _guard = lock.lock().await;
-        if !bypass_cache
-            && let Some(fresh) = self.cache.get(tenant_id, scopes, cae)
+        if let Some(fresh) = self.cache.get(tenant_id, scopes, cae)
             && !fresh.needs_refresh(REFRESH_LEEWAY_SECS)
+            && (!bypass_cache
+                || before
+                    .as_ref()
+                    .is_none_or(|b| b.expires_at != fresh.expires_at))
         {
             return Ok((fresh, None));
         }
 
-        let tenant = self
-            .known_tenants
-            .lock()
-            .get(tenant_id)
-            .cloned()
-            .ok_or(AuthError::NotSignedIn)?;
-
-        // Hold the plaintext refresh secret in a Zeroizing buffer so the copy
-        // we POST is wiped when this scope ends, not left on a freed heap
-        // page. The keyring read is a blocking OS syscall (Windows Credential
-        // Manager iterates numbered chunk entries), so run it off the async
-        // worker via spawn_blocking — otherwise it stalls other tokio tasks
-        // while this holds the refresh lock.
-        let refresh_secret = zeroize::Zeroizing::new({
-            let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
-            tokio::task::spawn_blocking(move || load_refresh_token(&t, &oid))
-                .await
-                .map_err(|e| AuthError::Keyring(format!("keyring read task failed: {e}")))??
-                .ok_or_else(|| AuthError::RefreshTokenMissing(tenant.tenant_id.clone()))?
-        });
+        let (tenant, fence) = {
+            let registry = self.known_tenants.lock();
+            let tenant = registry
+                .get(tenant_id)
+                .cloned()
+                .ok_or(AuthError::NotSignedIn)?;
+            (tenant, self.session_epoch())
+        };
 
         let authority = format!("{}/{}", self.auth_root, tenant.tenant_id);
         let scope = scopes.join(" ");
-        let mut params = vec![
-            ("client_id", self.client_id.as_str()),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_secret.as_str()),
-            ("scope", scope.as_str()),
-        ];
-        // CAE: advertise cp1 and/or forward a claims challenge.
-        if let Some(c) = claims {
-            params.push(("claims", c));
-        }
-        let token = match self.post_token(&authority, &params).await {
-            Ok(t) => t,
-            Err(AuthError::InvalidGrant(reason)) => {
-                // The refresh token we sent is no longer usable. Purge it and
-                // drop any cached access tokens for the tenant so the next call
-                // surfaces a clean "not signed in" rather than looping on a
-                // stale token — but only if the keyring still holds THAT token.
-                // Refresh locks are per scope set, so this POST can have been
-                // in flight while a `reauthenticate`/consent stored a new one;
-                // an unconditional purge would erase the session the operator
-                // just re-established. The compare and delete run under the
-                // keyring's chunk-set lock (on the blocking pool), so no save
-                // can land between them.
-                tracing::warn!(tenant_id = %tenant.tenant_id, %reason, "refresh token rejected, purging");
+        // One silent retry when the stored token was replaced while this
+        // refresh was in flight (a `reauthenticate`/consent round trip under
+        // another scope set's lock): the newer token is reloaded and used,
+        // instead of reporting the live session dead.
+        let mut retried_superseded = false;
+        let token = loop {
+            // Hold the plaintext refresh secret in a Zeroizing buffer so the
+            // copy we POST is wiped when this scope ends, not left on a freed
+            // heap page. The keyring read is a blocking OS syscall (Windows
+            // Credential Manager iterates numbered chunk entries), so run it
+            // off the async worker via spawn_blocking — otherwise it stalls
+            // other tokio tasks while this holds the refresh lock.
+            let refresh_secret = zeroize::Zeroizing::new({
                 let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
-                let rejected = refresh_secret.clone();
-                let purge = tokio::task::spawn_blocking(move || {
-                    delete_refresh_token_if_current(&t, &oid, &rejected)
-                })
-                .await;
-                if let Ok(Ok(PurgeOutcome::Superseded)) = purge {
-                    // The newer session stays; the caller's silent retry
-                    // (`refresh_session`) picks it up.
-                    tracing::info!(
-                        tenant_id = %tenant.tenant_id,
-                        "refresh token was replaced while this refresh was in flight; keeping the newer session"
-                    );
+                tokio::task::spawn_blocking(move || load_refresh_token(&t, &oid))
+                    .await
+                    .map_err(|e| AuthError::Keyring(format!("keyring read task failed: {e}")))??
+                    .ok_or_else(|| AuthError::RefreshTokenMissing(tenant.tenant_id.clone()))?
+            });
+            let mut params = vec![
+                ("client_id", self.client_id.as_str()),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_secret.as_str()),
+                ("scope", scope.as_str()),
+            ];
+            // CAE: advertise cp1 and/or forward a claims challenge.
+            if let Some(c) = claims {
+                params.push(("claims", c));
+            }
+            match self.post_token(&authority, &params).await {
+                Ok(t) => break t,
+                Err(AuthError::InvalidGrant(reason)) => {
+                    // The refresh token we sent is no longer usable. Purge it and
+                    // drop any cached access tokens for the tenant so the next call
+                    // surfaces a clean "not signed in" rather than looping on a
+                    // stale token — but only if the keyring still holds THAT token.
+                    // Refresh locks are per scope set, so this POST can have been
+                    // in flight while a `reauthenticate`/consent stored a new one;
+                    // an unconditional purge would erase the session the operator
+                    // just re-established. The compare and delete run under the
+                    // keyring's chunk-set lock (on the blocking pool), so no save
+                    // can land between them.
+                    tracing::warn!(tenant_id = %tenant.tenant_id, %reason, "refresh token rejected, purging");
+                    let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+                    let rejected = refresh_secret.clone();
+                    let purge = tokio::task::spawn_blocking(move || {
+                        delete_refresh_token_if_current(&t, &oid, &rejected)
+                    })
+                    .await;
+                    if let Ok(Ok(PurgeOutcome::Superseded)) = purge {
+                        if self.session_epoch() != fence {
+                            // The newer token belongs to a newer session; a
+                            // retry would mint for it and then be refused.
+                            return Err(AuthError::NotSignedIn);
+                        }
+                        if !retried_superseded {
+                            retried_superseded = true;
+                            tracing::info!(
+                                tenant_id = %tenant.tenant_id,
+                                "refresh token was replaced while this refresh was in flight; retrying with the newer one"
+                            );
+                            continue;
+                        }
+                        // The newer session stays; the caller's silent retry
+                        // (`refresh_session`) picks it up.
+                        return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
+                    }
+                    // Deleted, already gone, or the keyring failed (ignored, as the
+                    // purge always was): the session is dead either way — unless
+                    // the epoch moved meanwhile, in which case the registration and
+                    // slots belong to a newer session (a sign-in that landed during
+                    // this POST) and are left alone.
+                    let mut registry = self.known_tenants.lock();
+                    if self.session_epoch() == fence {
+                        self.cache.invalidate_tenant(&tenant.tenant_id);
+                        registry.remove(&tenant.tenant_id);
+                    }
+                    drop(registry);
                     return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
                 }
-                // Deleted, already gone, or the keyring failed (ignored, as the
-                // purge always was): the session is dead either way. One narrow
-                // window remains: a `reauthenticate` that stores a new token
-                // and re-registers the tenant after the delete above but before
-                // the two lines below would lose its cached tokens and
-                // registration (its keyring token survives, so launch restore
-                // still finds it).
-                self.cache.invalidate_tenant(&tenant.tenant_id);
-                self.known_tenants.lock().remove(&tenant.tenant_id);
-                return Err(AuthError::RefreshTokenMissing(tenant.tenant_id.clone()));
+                Err(AuthError::ConsentRequired(reason)) => {
+                    // The refresh token is still valid — only these specific scopes
+                    // lack consent, which a silent grant cannot obtain. Do NOT purge
+                    // (that would sign the user out over a missing optional scope);
+                    // surface so the caller can run interactive incremental consent.
+                    tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "scope needs interactive consent");
+                    return Err(AuthError::ConsentRequired(reason));
+                }
+                Err(AuthError::InteractionRequired(reason)) => {
+                    // A Conditional Access step-up for THIS resource (MFA,
+                    // registration, an external challenge). The refresh token is
+                    // still valid for every other audience — MSAL keeps the account
+                    // on `InteractionRequiredAuthError` — so do NOT purge, drop the
+                    // cached tokens or forget the tenant: that signed the operator
+                    // out of Graph browsing over an ARM-only MFA policy. Surface so
+                    // the caller can run `step_up_for_scopes`.
+                    tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "resource needs an interactive step-up");
+                    return Err(AuthError::InteractionRequired(reason));
+                }
+                Err(e) => return Err(e),
             }
-            Err(AuthError::ConsentRequired(reason)) => {
-                // The refresh token is still valid — only these specific scopes
-                // lack consent, which a silent grant cannot obtain. Do NOT purge
-                // (that would sign the user out over a missing optional scope);
-                // surface so the caller can run interactive incremental consent.
-                tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "scope needs interactive consent");
-                return Err(AuthError::ConsentRequired(reason));
-            }
-            Err(AuthError::InteractionRequired(reason)) => {
-                // A Conditional Access step-up for THIS resource (MFA,
-                // registration, an external challenge). The refresh token is
-                // still valid for every other audience — MSAL keeps the account
-                // on `InteractionRequiredAuthError` — so do NOT purge, drop the
-                // cached tokens or forget the tenant: that signed the operator
-                // out of Graph browsing over an ARM-only MFA policy. Surface so
-                // the caller can run `step_up_for_scopes`.
-                tracing::info!(tenant_id = %tenant.tenant_id, %scope, %reason, "resource needs an interactive step-up");
-                return Err(AuthError::InteractionRequired(reason));
-            }
-            Err(e) => return Err(e),
         };
 
         // With `openid` in the set, a refresh returns an id token too: the
@@ -1017,6 +1119,7 @@ impl EntraAuthService {
                 scopes,
                 cae,
                 RefreshTokenSave::BestEffort,
+                fence,
                 token,
             )
             .await?;
@@ -1034,10 +1137,26 @@ impl EntraAuthService {
     /// (Windows), a failure after the first chunk is gone still leaves the
     /// in-memory session, but the stored token can no longer be loaded, so the
     /// next launch does not restore it.
+    ///
+    /// The session epoch moves inside the delete, under the keyring's
+    /// chunk-set lock and only once the delete succeeded: a silent refresh
+    /// that finished before it has had its rotated token removed, one that
+    /// finishes after it sees the moved epoch and stores nothing (keyring or
+    /// cache), and a delete that fails leaves the epoch — and so every live
+    /// client adapter — exactly as it was, so "still signed in" stays true.
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
-        delete_refresh_token_off_worker(&tenant.tenant_id, &tenant.account_oid).await?;
+        let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+        let epoch = Arc::clone(&self.session_epoch);
+        tokio::task::spawn_blocking(move || {
+            delete_refresh_token_then(&t, &oid, || {
+                epoch.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .await
+        .map_err(|e| AuthError::Keyring(format!("keyring delete task failed: {e}")))??;
+        let mut registry = self.known_tenants.lock();
         self.cache.invalidate_tenant(&tenant.tenant_id);
-        self.known_tenants.lock().remove(&tenant.tenant_id);
+        registry.remove(&tenant.tenant_id);
         Ok(())
     }
 
@@ -1191,6 +1310,9 @@ impl EntraAuthService {
     /// (see `Self::access_token_inner`), so the caller — which still holds the
     /// context — must supply the `login_hint`/identity to match against.
     pub async fn reauthenticate(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
+        // Re-auth keeps the session: no bump, but a sign-out that lands during
+        // the browser round trip still wins.
+        let fence = self.session_epoch();
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
             .run_auth_code_flow(&initial_scopes, "login", tenant.username.as_deref(), true)
@@ -1206,14 +1328,20 @@ impl EntraAuthService {
             &initial_scopes,
             true,
             RefreshTokenSave::Required,
+            fence,
             token,
         )
         .await?;
         // Restore the (validated) context: a prior `InvalidGrant` removed it, and
-        // `tenant_context()` and every token lookup read `known_tenants`.
-        self.known_tenants
-            .lock()
-            .insert(tenant.tenant_id.clone(), tenant.clone());
+        // `tenant_context()` and every token lookup read `known_tenants`. Under
+        // the fence: a sign-out that landed between the store and here must
+        // not be undone by re-registering a tenant whose tokens it just swept.
+        let mut registry = self.known_tenants.lock();
+        if self.session_epoch() != fence {
+            return Err(AuthError::NotSignedIn);
+        }
+        registry.insert(tenant.tenant_id.clone(), tenant.clone());
+        drop(registry);
         Ok(SignInOutcome {
             tenant: tenant.clone(),
         })
@@ -1291,6 +1419,7 @@ fn ensure_same_identity(claims: &IdClaims, tenant: &TenantContext, action: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token_cache::save_refresh_token;
     use crate::token_cache::{fail_next_keyring_op, init_mock_keyring};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1316,6 +1445,7 @@ mod tests {
             cache: TokenCache::new(),
             refresh_locks: Mutex::new(HashMap::new()),
             known_tenants: Mutex::new(HashMap::new()),
+            session_epoch: Arc::new(AtomicU64::new(1)),
             // The production client, so its redirect policy is under test.
             http: token_http_client(),
             open_browser,
@@ -1747,12 +1877,19 @@ mod tests {
             },
         );
         let context = svc.tenant_context(tenant).unwrap();
+        let epoch = svc.session_epoch();
         fail_next_keyring_op(tenant, oid, 0);
 
         // A locked credential store: nothing is cleared, so "you are still
         // signed in" is true and the next launch has nothing stale to restore.
+        // The session epoch stays too, so every live client keeps minting.
         let result = svc.sign_out(&context).await;
         assert!(matches!(result, Err(AuthError::Keyring(_))), "{result:?}");
+        assert_eq!(
+            svc.session_epoch(),
+            epoch,
+            "a failed sign-out moves no epoch"
+        );
         assert!(svc.tenant_context(tenant).is_some());
         assert!(svc.cache.get(tenant, &read, true).is_some());
         assert_eq!(
@@ -1760,20 +1897,33 @@ mod tests {
             Some("stored-refresh-token")
         );
 
-        // The retry succeeds and clears all three.
+        // The retry succeeds and clears all three, and moves the epoch.
         svc.sign_out(&context).await.unwrap();
+        assert!(svc.session_epoch() > epoch);
         assert!(svc.tenant_context(tenant).is_none());
         assert!(svc.cache.get(tenant, &read, true).is_none());
         assert_eq!(stored_token(tenant, oid), None);
     }
 
+    /// The re-authentication lands while the old token's refresh is still in
+    /// flight: the old token is rejected, the newer one is kept — and used,
+    /// once, instead of reporting the live session dead.
     #[tokio::test]
-    async fn invalid_grant_does_not_purge_a_token_stored_during_the_refresh() {
+    async fn invalid_grant_keeps_a_token_stored_during_the_refresh_and_retries_with_it() {
         let server = MockServer::start().await;
         let (tenant, oid) = ("superseded-tenant", "superseded-oid");
         let (t, o) = (tenant.to_string(), oid.to_string());
-        // The re-authentication lands while the old token's refresh is still
-        // in flight: the responder stores the new token, then rejects the old.
+        // The retry carries the newer token: it succeeds.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("rt-reauthed"))
+            .respond_with(token_ok("after-reauth"))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The first POST (the old token): the responder stores the new token
+        // as a `reauthenticate` would, then rejects the old one.
         Mock::given(method("POST"))
             .and(path(format!("/{tenant}/oauth2/v2.0/token")))
             .respond_with(move |_: &wiremock::Request| {
@@ -1783,17 +1933,114 @@ mod tests {
                     "error_description": "AADSTS70000: refresh token expired"
                 }))
             })
+            .expect(1)
             .mount(&server)
             .await;
         let svc = signed_in_service(server.uri(), tenant, oid);
 
-        let result = svc
+        let token = svc
             .access_token_for_scopes(tenant, &["https://management.azure.com/.default".into()])
-            .await;
+            .await
+            .unwrap();
 
-        assert!(matches!(result, Err(AuthError::RefreshTokenMissing(_))));
+        assert_eq!(token.token, "after-reauth");
         assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-reauthed"));
         assert!(svc.tenant_context(tenant).is_some());
+        server.verify().await;
+    }
+
+    /// A silent refresh in flight when the operator signs out: its late
+    /// result must store nothing — neither the rotated refresh token (which
+    /// `sign_out` cleared `last_account` for, stranding it forever) nor the
+    /// access token (served to the next account's writes by the cache fast
+    /// path).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refresh_in_flight_across_sign_out_leaves_nothing_behind() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("signout-race-tenant", "signout-race-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "access_token": "late-at",
+                        "refresh_token": "rotated-rt",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    }))
+                    .set_delay(std::time::Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        let svc = Arc::new(signed_in_service(server.uri(), tenant, oid));
+        let context = svc.tenant_context(tenant).unwrap();
+
+        let refresh = {
+            let svc = svc.clone();
+            tokio::spawn(async move { svc.access_token_for_scopes(tenant, &arm_scopes()).await })
+        };
+        // Wait until the /token POST is in flight, then sign out under it.
+        for _ in 0..200 {
+            if !server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        svc.sign_out(&context).await.unwrap();
+
+        let late = refresh.await.unwrap();
+        assert!(matches!(late, Err(AuthError::NotSignedIn)), "{late:?}");
+        assert_eq!(stored_token(tenant, oid), None);
+        assert!(svc.cache.get(tenant, &arm_scopes(), false).is_none());
+        assert!(svc.tenant_context(tenant).is_none());
+    }
+
+    /// A claims challenge bypasses the cache, but a token minted while this
+    /// caller waited for the refresh lock is a post-challenge token already:
+    /// eight challenged requests make one POST, not eight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cae_challenges_collapse_to_one_token_call() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("cae-stampede-tenant", "cae-stampede-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_ok("re-minted").set_delay(std::time::Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = Arc::new(signed_in_service(server.uri(), tenant, oid));
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("revoked", &read),
+        );
+        let challenge = URL_SAFE_NO_PAD
+            .encode(r#"{"access_token":{"nbf":{"essential":true,"value":"1700000000"}}}"#);
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let (svc, read, challenge) = (svc.clone(), read.clone(), challenge.clone());
+            set.spawn(async move {
+                svc.access_token_for_scopes_cae("cae-stampede-tenant", &read, Some(&challenge))
+                    .await
+                    .map(|t| t.token.clone())
+            });
+        }
+        let mut tokens = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            tokens.push(joined.unwrap().unwrap());
+        }
+
+        assert_eq!(tokens.len(), 8);
+        assert!(tokens.iter().all(|t| t == "re-minted"), "{tokens:?}");
+        server.verify().await;
     }
 
     /// Every keyring call in the service runs on the blocking pool: they are
@@ -1813,7 +2060,9 @@ mod tests {
             }
             let calls_keyring = [
                 "save_refresh_token(",
+                "save_refresh_token_if(",
                 "load_refresh_token(",
+                "delete_refresh_token_then(",
                 "delete_refresh_token(",
                 "delete_refresh_token_if_current(",
             ]
@@ -3205,9 +3454,13 @@ mod tests {
             fresh_token("account-a-arm", &arm_scopes()),
         );
 
+        let epoch_before = svc.session_epoch();
         let outcome = svc.sign_in().await.unwrap();
 
         assert_eq!(outcome.tenant.account_oid, oid_b);
+        // The session epoch moved, so anything built for account A (an
+        // adapter, a late refresh) is refused from here on.
+        assert!(svc.session_epoch() > epoch_before);
         assert!(svc.cache.get(tenant, &write, true).is_none());
         assert!(svc.cache.get(tenant, &arm_scopes(), false).is_none());
         assert_eq!(

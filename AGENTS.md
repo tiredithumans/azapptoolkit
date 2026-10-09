@@ -106,6 +106,7 @@ Deep-dive: auth-and-consent.md
 - **Extra-scope tokens ride `ScopedTokenAdapter`**, never the sign-in scope set, and every call degrades gracefully.
 - **Silent grants can't obtain consent:** AADSTS65001/65004 → `AuthError::ConsentRequired` (≠ `InvalidGrant`); a "Grant consent" button needs `AppState::ensure_*` pre-acquisition.
 - **A dead session forces re-auth in place** (`refresh_missing` / `not_signed_in` → `reauthenticate`, one interactive round trip, data caches kept) — never sign the user out.
+- **A session epoch fences late token stores:** moved by `sign_in`/`sign_out` only; `store_token_outcome` stores nothing once it moved, and a `ScopedTokenAdapter` built under an older epoch refuses to mint.
 - **Role/scope catalog:** three auth planes share one capabilities catalog — add an entry instead of a hardcoded role string; splice its remediation into 403s via `graph_err::forbidden_remediation`.
 - **SAML signing-cert rollover derives its phase from live SP state**; a thumbprint is SHA-1 and `core::thumbprint::canonical` is its one converter.
 - **Auth trusts are validated wherever minted** (`core::federation` on every path; bounded SAML cert lifetimes).

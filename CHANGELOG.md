@@ -7,6 +7,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Signing out, or signing in as another account, now discards a token refresh that was still
+  in flight.** Such a refresh used to finish after the sign-out and write the previous account's
+  rotated refresh token back into the credential store (where nothing would ever remove it) and
+  its access token back into memory, where the next account's writes could be served with it. A
+  tool run started before a same-tenant account switch also stops at the sign-in prompt instead
+  of continuing with the new account's tokens.
+- **A refresh that lost a race with a re-authentication retries with the newer sign-in** instead
+  of reporting the session as needing re-authentication. A sign-in that lands while a refresh is
+  being rejected keeps its session.
+- **Retrying a sign-out whose credential-store delete failed partway now removes the remaining
+  token fragments.**
+- **Many requests answered with the same continuous-access-evaluation challenge at once make one
+  token request**, not one per request.
 - **Scoping a mailbox permission, or migrating a legacy Application Access Policy, no longer
   treats an existing management scope as "already confined to these groups" when its filter does
   anything beyond naming them.** A filter that named the right groups but also reached other
