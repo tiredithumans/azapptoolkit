@@ -407,6 +407,8 @@ async fn privileged_grants_render_before_confirm_and_only_ticked_apps_are_approv
     let hr_sync = PrivilegedRestoreItem {
         group_memberships: vec!["Global Admins".into()],
         owners: vec!["alice@contoso.com".into()],
+        reply_urls: vec!["https://hr.example/cb".into()],
+        public_client: true,
         ..consenting("src-b", "HR Sync", None, PermissionRisk::Unknown)
     };
     let _m = load_plan(RestorePlan {
@@ -438,6 +440,9 @@ async fn privileged_grants_render_before_confirm_and_only_ticked_apps_are_approv
         "an unresolved permission shows its id"
     );
     assert!(ts::body_contains("Unknown"));
+    // Where consented tokens would be delivered is shown with the item.
+    assert!(ts::body_contains("Reply URL: https://hr.example/cb"));
+    assert!(ts::body_contains("Public client"));
     assert!(ts::body_contains(
         "issuer https://token.actions.githubusercontent.com"
     ));

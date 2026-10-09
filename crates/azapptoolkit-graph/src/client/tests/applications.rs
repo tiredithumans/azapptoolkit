@@ -302,7 +302,7 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
         .and(query_param("$top", "10"))
         .and(query_param(
             "$select",
-            "id,appId,displayName,createdDateTime,passwordCredentials",
+            "id,appId,displayName,createdDateTime,passwordCredentials,keyCredentials",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{

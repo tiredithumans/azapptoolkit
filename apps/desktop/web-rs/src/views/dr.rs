@@ -613,7 +613,7 @@ fn PrivilegedGrants(
             <Callout tone=tone>
                 "These come from the backup file, so whoever wrote the file chose them — review them before you restore. "
                 {(needs_approval > 0).then(|| format!(
-                    "{} standing access that needs your approval. Unapproved, the app is still created and wired, but its admin consent, federated credentials, owners and group memberships (a managed identity's app roles) are left out and listed in the report.",
+                    "{} standing access that needs your approval. Unapproved, the app is still created and wired, but its admin consent, federated credentials, owners and group memberships (a managed identity's app roles) are left out and listed in the report. Owners, reply URLs and the public-client flag are shown so you can see where consented tokens would go.",
                     count_noun(needs_approval, "item grants", "items grant"),
                 ))}
             </Callout>
@@ -654,6 +654,8 @@ fn PrivilegedItem(
     let owners = item.owners.clone();
     let groups = item.group_memberships.clone();
     let assignees = item.app_role_assignees.clone();
+    let reply_urls = item.reply_urls.clone();
+    let public_client = item.public_client;
     view! {
         <li class="dr-view__report-app dr-view__privileged-item">
             <div class="dr-view__report-head">
@@ -697,6 +699,14 @@ fn PrivilegedItem(
             })}
             {(!owners.is_empty()).then(|| view! {
                 <p class="dr-view__report-note">{format!("Owners: {}", owners.join(", "))}</p>
+            })}
+            {(!reply_urls.is_empty()).then(|| view! {
+                <p class="dr-view__report-note">
+                    {format!("Reply URL{}: {}", plural(reply_urls.len()), reply_urls.join(", "))}
+                </p>
+            })}
+            {public_client.then(|| view! {
+                <p class="dr-view__report-note">"Public client: tokens without a secret (fallback enabled)"</p>
             })}
             {(!groups.is_empty()).then(|| view! {
                 <p class="dr-view__report-note">

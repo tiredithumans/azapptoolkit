@@ -26,6 +26,31 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 - **Adding or removing scope-group members stops as soon as the sign-in session ends**, reporting
   the remaining mailboxes as not attempted instead of failing each of them with the same error.
   The add path also looks the group up once instead of twice.
+- **A restore no longer adopts a tagged app that holds credentials the backup does not name.**
+  Re-running a restore finishes the apps an earlier run created, recognised by their restore tag. An
+  app carrying that tag but holding a certificate the backup does not list by thumbprint (a
+  restore never uploads one), a secret the backup does not name or more same-named secrets than
+  it lists, or a federated credential the backup does not list is now left alone and reported,
+  instead of being adopted and handed the backup's permissions, secrets and admin consent. A
+  federated credential an earlier run created is recognised by its issuer, subject and audiences,
+  not by name alone. A credential you added yourself after an earlier run is refused the same
+  way; the report item says to finish that app by hand or remove the credential and run again.
+- **The restore plan shows an app's owners, reply URLs and public-client flag, and an app that
+  gets admin consent from the file alongside any of them now needs your approval.** An owner can
+  add a secret and a reply URL is where consented tokens are delivered, so a file that both
+  consents an app and chooses where its tokens go is no longer applied unseen. Unapproved, the app
+  is still created and wired; its consent and owners are withheld and listed in the report.
+- **Cancel and a lost sign-in session stop a restore inside every pass**, including the
+  managed-identity pass and the per-app loops over owners, secrets, federated credentials, role
+  assignees and group memberships, instead of only between passes. A sign-in session that ends
+  while an owner, assignee or group is being looked up now stops the restore and asks you to sign
+  in again, instead of every remaining owner, assignee and group being reported as a failed
+  lookup.
+- **A restore matches a managed identity by sub-type as well as name**, so a user-assigned
+  identity created under a system-assigned one's name (or the reverse) is reported as not found
+  instead of receiving the other's app roles.
+- **A restore that re-binds managed-identity roles without creating any app now refreshes the
+  audit**, so the Security tab reflects the new grants without a manual rescan.
 
 ### Security
 

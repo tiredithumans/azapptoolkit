@@ -61,7 +61,7 @@ multi-authority auth.
    MIs; soft-deleted MI service principals can't be recovered. So MIs are a
    **redeploy runbook + permission re-bind**, never a restorable object: the
    infra team recreates them (ARM/Bicep) with new principal ids, then the
-   restore re-binds their Graph app-roles, matched by `display_name`, and lists
+   restore re-binds their Graph app-roles, matched by `display_name` and sub-type, and lists
    their Azure RBAC as a runbook item.
 
 ## The manifest (`azapptoolkit-dto/src/backup.rs`)
@@ -179,7 +179,8 @@ risk-ranked by `core::audit::risk_level_for_app_permission` (delegated scopes by
 `is_risky_delegated_scope`) — a permission nobody can resolve is shown by id as
 `Unknown`, except on an API this backup recreates (`restored_api`, whose values
 don't exist yet); each federated credential's issuer + subject (with the
-validation refusal, if any); its owners; the groups Pass 4 adds its service
+validation refusal, if any); its owners; its reply URLs and public-client flag (the ones
+Pass 2 would write); the groups Pass 4 adds its service
 principal to; and, shown only, pre-authorized client appIds the backup does not
 recreate and the users/groups assigned to its roles. Per managed identity: its
 held app roles.
@@ -190,6 +191,10 @@ access from the file:
 - an app whose consent covers **any application permission** (the risk lists
   are a short denylist, not proof a permission is harmless), or a delegated
   one that is broad (`is_risky_delegated_scope`) or `Unknown`;
+- an app the file both consents (any consent, low-risk delegated included) and names
+  owners, reply URLs or the public-client flag for — an owner can add a secret, and a
+  reply URL is where consented tokens are delivered, so a file that both consents an
+  app and chooses where its tokens go is not applied unseen;
 - an app with a federated credential validation accepts;
 - an app whose service principal joins a group (the file chooses it, and a
   role-assignable group carries a directory role) — classified whether or not
@@ -199,7 +204,9 @@ access from the file:
 - a managed identity with any app role.
 
 Low-risk delegated consent (`User.Read`), a refused credential, foreign
-pre-authorized clients and role assignees never need approval.
+pre-authorized clients and role assignees never need approval on their own, and
+neither do owners, reply URLs or the public-client flag without consent — all are
+shown on the item either way.
 
 The DR view lists the items under the counts, each that needs approval with a
 checkbox (none ticked by default; an "Approve all listed" button after the list
@@ -268,8 +275,8 @@ recorded type (older backups) both are searched and exactly one match across
 them is required. Every match is counted — two same-named principals are `ambiguous: N matches` in the report, never the first
 one found; names are compared ignoring case, as `eq` does, so "Ops" and "OPS"
 are two — and a failed search is "lookup failed", never a reason to try the
-other collection. The run's memo caches the reason too, and the adoption owner
-allow-list takes only resolved ids.
+other collection. The run's memo caches the reason too, a failed lookup is noted on `SessionDead` like
+every other read, and the adoption owner allow-list takes only resolved ids.
 
 **Re-running a restore adopts what an earlier run created.** Pass 1 has no
 natural key that survives the tenant move — the appId changes and `api://{new}`
@@ -297,14 +304,25 @@ destination (through the run's principal memo, which Pass 2 reuses). Any other
 owner is a `ManualItem` that names them; the operator removes them and re-runs,
 or deletes the app to have it recreated. A re-run by a *different* admin than the
 first run is refused the same way — fail closed, and the item says who owns it.
-Only then does the app join the remap: its SP is ensured (the earlier run may
+The tag lookup's credential lists (`foreign_certificates`, `foreign_secrets`) and a
+separate `list_federated_credentials` read refuse a hit holding a certificate whose
+thumbprint the manifest does not list (a restore uploads none; the runbook's own
+re-upload is known by thumbprint), a secret the manifest does not name or more
+same-named ones than it lists (a multiset of the non-expired names), or a federated
+credential the manifest does not name on name, issuer, subject and audiences
+(`fic_key`, the same tuple Pass 2 skips "already exists" on; a flexible credential,
+with no subject, can never be matched and is foreign): the standing access an
+owner check cannot see. A credential the operator added after an earlier run is
+refused the same way — the item says to finish the app by hand or remove it and
+re-run. A same-named secret is the one residue; Pass 2 reports it rather than
+keeping it silently. Only then does the app join the remap: its SP is ensured (the earlier run may
 have died between the two POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
 
-A failed lookup — of the tag or of the owners — **fails closed** into a
+A failed lookup — of the tag, of the owners or of the federated credentials — **fails closed** into a
 `ManualItem` too: creating blind is how a re-run duplicates the estate, and
 adopting blind is how someone else's app is granted this one's consent. For an adopted app Pass 2 re-applies the
 full-replace PATCHes as-is and skips what is already there among the additive
-writes: federated credentials by name, owners by resolved id, secrets by display
+writes: federated credentials by `fic_key`, owners by resolved id, secrets by display
 name (as a multiset). Pass 3 updates existing grants, so it needs nothing. Known
 limitation: Pass 4 does not de-duplicate, so a re-run's repeated app-role
 assignments and group memberships come back as per-app warnings. Apps restored by
@@ -341,7 +359,9 @@ be the person who wrote it. So pass 2 treats each one as untrusted input:
 
 It refuses a **cross-cloud** manifest outright, claims its own `restore_cancel`
 (stopped only by `cancel_restore`, never by a backup's Cancel; a cancel stops at
-the next item in whichever pass is running and the report flags the run
+the next item in whichever pass is running — including inside each pass's
+per-item loops (owners, secrets, federated credentials, assignees, group
+memberships, managed identities) and the report flags the run
 cancelled, so a re-run adopts the already-created, tagged apps and finishes
 them), emits `restore-progress`, and busts the destination's list
 caches (`invalidate_app_lists`) when anything was created. The `RestoreReport`
@@ -370,6 +390,8 @@ applied. The backup captures this detail in its batched Pass 2
 **Managed identities** restore in Pass 5. MIs can't be created via Graph
 (they're Azure resources), so `restore_managed_identities` matches each
 backed-up MI to one **already recreated** in the destination — by display name
+and, where both sides know it, sub-type (`MiSubtype` from `alternativeNames`; an
+identity with none is `Unknown` and still matches)
 — and re-binds its held Graph app-roles to the new principal (grouped by
 resource appId, granted by value via the shared
 `grant_managed_identity_roles_core`; a name that matches several destination
