@@ -22,14 +22,10 @@ use azapptoolkit_core::capabilities::{
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::ActiveDirectoryRole;
 
+use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use crate::state::{AppState, ConsentFeature};
-
-/// Max concurrent ARM calls for the per-subscription role-assignment sweep.
-/// Matches the Key Vault / managed-identity sweeps so a large estate stays
-/// inside ARM's rate limits (429s are retried in the client).
-const ARM_CONCURRENCY: usize = 8;
 
 /// Builds the readiness report for `tenant_id`. Never cached — the whole point is
 /// freshness after a PIM activation; the underlying token probes reuse the

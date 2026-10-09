@@ -23,7 +23,7 @@ use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::{Cache, CacheKind};
 
 use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
-use crate::commands::dispatch::{SessionDead, dispatch_capped};
+use crate::commands::dispatch::{ARM_CONCURRENCY, SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::progress::emit_progress;
@@ -31,10 +31,6 @@ use crate::dto::UiError;
 use crate::dto::keyvault::{KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult};
 use crate::state::AppState;
 
-/// Max concurrent ARM calls (vault enumeration, per-vault role reads, role-def
-/// resolution). Matches the managed-identity Azure-roles command so a large
-/// estate stays inside ARM's rate limits (429s retried in the client).
-const ARM_CONCURRENCY: usize = 8;
 /// Safety cap on vaults per sweep — bounds a pathological estate. Raise if a
 /// user legitimately hits it.
 const MAX_VAULTS_PER_SWEEP: usize = 2_000;

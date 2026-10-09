@@ -20,6 +20,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Textarea};
 
 use crate::bindings::bulk;
+use crate::bindings::bulk::BulkCreateStatus;
 use crate::bindings::events;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure, BulkProgressRow};
 use crate::components::icon::IconName;
@@ -125,25 +126,33 @@ pub fn BulkActionsView() -> impl IntoView {
                         // (an owner not added, a later step failed): the app
                         // exists, but not as the input described it.
                         .filter(|o| {
-                            !matches!(o.status.as_str(), "created" | "valid") || o.message.is_some()
+                            !matches!(
+                                o.status,
+                                BulkCreateStatus::Created | BulkCreateStatus::Valid
+                            ) || o.message.is_some()
                         })
                         .map(|o| BulkFailure {
                             label: o.display_name.clone(),
-                            reason: o.message.clone().unwrap_or_else(|| o.status.clone()),
+                            reason: o
+                                .message
+                                .clone()
+                                .unwrap_or_else(|| o.status.as_str().to_string()),
                             // The apps this flow reports on were never created,
                             // so there is no object id to re-select — the only
                             // shape in the app where that is true.
                             object_id: None,
-                            // `None` for a validation rejection (`invalid`),
-                            // which never reached the backend and so says
-                            // nothing about the session.
+                            // `None` for a rejection (`invalid`), which
+                            // created nothing and says nothing about the
+                            // session.
                             code: o.error.as_ref().map(|e| e.code.clone()),
                         })
                         .collect();
                     let ok = r.outcomes.len() - fails.len();
                     let consent_note = if declares
                         && !r.validate_only
-                        && r.outcomes.iter().any(|o| o.status == "created")
+                        && r.outcomes
+                            .iter()
+                            .any(|o| o.status == BulkCreateStatus::Created)
                     {
                         " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant consent."
                     } else {

@@ -11,16 +11,12 @@ use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_keyvault::{KeyVaultError, SecretSetRequest};
 
 use crate::commands::applications::invalidate_app_credentials;
+use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::dto::UiError;
 use crate::dto::keyvault::{
     KvSecretItemDto, KvSecretValueDto, RotateCredentialInput, RotateCredentialResult,
 };
 use crate::state::AppState;
-
-/// Max concurrent ARM calls for the cross-subscription vault sweep. Matches the
-/// Key Vault RBAC / managed-identity sweeps so a large estate stays inside ARM's
-/// rate limits (429s are retried in the client).
-const ARM_CONCURRENCY: usize = 8;
 
 // ---------------- Commands ----------------
 

@@ -2,9 +2,16 @@
 //!
 //! Single source of truth for types the WASM front-end and Tauri backend
 //! exchange over `invoke()` / event payloads — with one sanctioned exception:
-//! a few `azapptoolkit-core` domain types (`Application`, `Organization`,
-//! `AuditItem` + its remediation/scope subtree) also cross IPC by direct
-//! re-use, since both sides share the same Rust definitions. Kept
+//! `azapptoolkit-core` domain types also cross IPC by direct re-use, since
+//! both sides share the same Rust definitions. By category: the Graph
+//! `models` records a DTO embeds verbatim (`Application`, `ServicePrincipal`,
+//! `DirectoryObject`, the credential and app-role records,
+//! `RequiredResourceAccess`, the OAuth2 grant/scope records);
+//! `AuditItem` + its remediation/scope subtree, the `audit` status and kind
+//! enums, `PostureCounts` and `MailPermissionScope`;
+//! `scoping::SelectedScopeLevel` and `cloud::CloudEnvironment`. The
+//! frontend bindings also take `Organization`, `TenantContext` /
+//! `SignInOutcome` and `TenantDefaults` straight from core. Kept
 //! dependency-light (`serde` + `chrono`) so it compiles cleanly to
 //! `wasm32-unknown-unknown`. Backend-only `From<…Error>` conversions are gated
 //! behind the `backend` feature.

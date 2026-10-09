@@ -15,6 +15,7 @@ use azapptoolkit_core::cache::CacheKind;
 use futures::stream::{self, StreamExt};
 use tauri::State;
 
+use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::dto::UiError;
 use crate::dto::usage::{GraphUsageResult, GraphUsageRow};
 use crate::state::AppState;
@@ -24,10 +25,6 @@ use crate::state::AppState;
 const USAGE_ROW_CAP: usize = 200;
 /// Safety cap on workspace table-presence probes per discovery run.
 const MAX_WORKSPACES_PROBED: usize = 50;
-
-/// Bounded fan-out width for the ARM control-plane sweep, matching the shared
-/// value the Key Vault picker / readiness / managed-identity sweeps use.
-const ARM_CONCURRENCY: usize = 8;
 
 /// Tenant-prefixed cache key for the discovered workspace (cross-tenant
 /// leakage guard, same convention as the list caches).

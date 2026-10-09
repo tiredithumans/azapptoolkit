@@ -18,6 +18,7 @@ use azapptoolkit_core::azure_roles::{RoleContext, is_high_privilege_role};
 use azapptoolkit_core::cache::CacheKind;
 
 use crate::commands::arm_roles::{resolve_role_names_cached, role_display_name};
+use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
@@ -25,12 +26,6 @@ use crate::dto::managed_identity::{
     AzureRoleDto, AzureRolesResult, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
 };
 use crate::state::AppState;
-
-/// Max concurrent ARM calls (per-subscription fetches + role-def resolution).
-/// Bounds fan-out so scanning every subscription stays within ARM's rate limits
-/// (429s are retried with backoff in the client); a large estate just takes
-/// proportionally longer rather than truncating the result.
-const ARM_CONCURRENCY: usize = 8;
 
 pub(crate) fn mi_key(tenant_id: &str) -> String {
     format!("{tenant_id}|mi")

@@ -31,10 +31,11 @@ use crate::dto::UiError;
 use crate::dto::applications::CreateApplicationInput;
 use crate::dto::bulk::{
     AppRemovalSummary, BulkAddOwnerResult, BulkCreateOutcome, BulkCreateResult, BulkCreateSpec,
-    BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome, BulkDisableSignInResult, BulkError,
-    BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome, BulkProgress, BulkRemoveExpiredResult,
-    BulkRemoveRedundantOutcome, BulkRemoveRedundantResult, BulkRestoreOutcome, BulkRestoreResult,
-    BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome, BulkStageCertResult,
+    BulkCreateStatus, BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome,
+    BulkDisableSignInResult, BulkError, BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome,
+    BulkProgress, BulkRemoveExpiredResult, BulkRemoveRedundantOutcome, BulkRemoveRedundantResult,
+    BulkRestoreOutcome, BulkRestoreResult, BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome,
+    BulkStageCertResult,
 };
 use crate::dto::permissions::PermissionKind;
 use crate::state::{AppState, CancelToken};
@@ -84,7 +85,7 @@ fn validate_create_spec(spec: &BulkCreateSpec) -> Option<BulkCreateOutcome> {
     let invalid = |message: String| {
         Some(BulkCreateOutcome {
             display_name: spec.display_name.clone(),
-            status: "invalid".into(),
+            status: BulkCreateStatus::Invalid,
             app_id: None,
             message: Some(message),
             // A local rejection never reached the backend, so it carries no wire
@@ -810,7 +811,7 @@ pub async fn bulk_create_applications(
                     Err(Unresolved::Invalid(message)) => {
                         return BulkCreateOutcome {
                             display_name: spec.display_name,
-                            status: "invalid".into(),
+                            status: BulkCreateStatus::Invalid,
                             app_id: None,
                             message: Some(message),
                             error: None,
@@ -819,7 +820,7 @@ pub async fn bulk_create_applications(
                     Err(Unresolved::Failed(e)) => {
                         return BulkCreateOutcome {
                             display_name: spec.display_name,
-                            status: "failed".into(),
+                            status: BulkCreateStatus::Failed,
                             app_id: None,
                             message: Some(e.message.clone()),
                             error: Some(e.into()),
@@ -829,7 +830,7 @@ pub async fn bulk_create_applications(
                 if validate_only {
                     return BulkCreateOutcome {
                         display_name: spec.display_name,
-                        status: "valid".into(),
+                        status: BulkCreateStatus::Valid,
                         app_id: None,
                         message: None,
                         error: None,
@@ -859,7 +860,7 @@ pub async fn bulk_create_applications(
                         BulkCreateOutcome {
                             message: owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns),
                             display_name: r.application.display_name,
-                            status: "created".into(),
+                            status: BulkCreateStatus::Created,
                             app_id: Some(r.application.app_id),
                             error: None,
                         }
@@ -872,7 +873,7 @@ pub async fn bulk_create_applications(
                         partial.store(true, std::sync::atomic::Ordering::Relaxed);
                         BulkCreateOutcome {
                             display_name: r.application.display_name,
-                            status: "created".into(),
+                            status: BulkCreateStatus::Created,
                             app_id: Some(r.application.app_id),
                             message: Some(
                                 match owners_not_added(&r.failed_owner_ids, &owner_ids, &owner_upns)
@@ -886,7 +887,7 @@ pub async fn bulk_create_applications(
                     }
                     Err(e) => BulkCreateOutcome {
                         display_name: spec.display_name,
-                        status: "failed".into(),
+                        status: BulkCreateStatus::Failed,
                         app_id: None,
                         message: Some(e.message.clone()),
                         error: Some(e.into()),
@@ -1782,7 +1783,7 @@ mod tests {
         }
 
         let rejected = validate_create_spec(&spec("Ok", Some("AzureADandPersonal"))).unwrap();
-        assert_eq!(rejected.status, "invalid");
+        assert_eq!(rejected.status, BulkCreateStatus::Invalid);
         assert!(rejected.message.unwrap().contains("AzureADandPersonal"));
         // A local rejection carries no wire code, so it can never be mistaken
         // for a session failure by the run-level fatal check.
@@ -1791,7 +1792,7 @@ mod tests {
         // Whitespace-only names are rejected too — Graph would take the round
         // trip and fail.
         let blank = validate_create_spec(&spec("   ", None)).unwrap();
-        assert_eq!(blank.status, "invalid");
+        assert_eq!(blank.status, BulkCreateStatus::Invalid);
     }
 
     const GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
@@ -1843,7 +1844,7 @@ mod tests {
             ),
         ] {
             let rejected = validate_create_spec(&spec).expect(needle);
-            assert_eq!(rejected.status, "invalid");
+            assert_eq!(rejected.status, BulkCreateStatus::Invalid);
             assert!(rejected.message.unwrap().contains(needle), "{needle}");
             assert!(rejected.error.is_none());
         }
