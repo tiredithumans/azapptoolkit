@@ -800,3 +800,47 @@ fn retry_scan_sources() -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
 fn relative(root: &std::path::Path, src: &std::path::Path) -> String {
     src.strip_prefix(root).unwrap_or(src).display().to_string()
 }
+
+/// Every SharePoint permission DELETE in the Graph client shape-checks each id
+/// it splices into the path, and the site lookup validates the operator's URL.
+///
+/// `permission_id` arrives from the webview and `site_id` / `list_id` /
+/// `item_id` from earlier Graph responses or app-registration tags; the DELETE
+/// runs on the `Sites.FullControl.All` bearer, so `../../../drives/{d}/items/{i}`
+/// in any of them could delete a file this crate otherwise has no call for. The
+/// rule is per function: a wrapper does not inherit its callee's check.
+#[test]
+fn every_sharepoint_permission_delete_validates_its_path_segments() {
+    let src = include_str!("../../../../../crates/azapptoolkit-graph/src/client/sharepoint.rs");
+    let fns = functions_in(src);
+    let deletes: Vec<&str> = fns
+        .iter()
+        .filter(|f| f.body.contains("Method::DELETE"))
+        .map(|f| f.name.as_str())
+        .collect();
+    assert!(
+        deletes.len() >= 3,
+        "only {} DELETE function(s) found in graph client/sharepoint.rs — the scan is broken: \
+         {deletes:?}",
+        deletes.len()
+    );
+    let offenders: Vec<&str> = fns
+        .iter()
+        .filter(|f| f.body.contains("Method::DELETE") && !names(&f.body, "require_path_segment("))
+        .map(|f| f.name.as_str())
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "SharePoint DELETE(s) that splice an id into the path without \
+         `validate::require_path_segment`: {offenders:?}"
+    );
+    let lookup = fns
+        .iter()
+        .find(|f| f.name == "get_site_by_url")
+        .expect("graph client/sharepoint.rs lost get_site_by_url");
+    assert!(
+        names(&lookup.body, "site_lookup_path(") && names(&lookup.body, "require_path_segment("),
+        "get_site_by_url must build its path through site_lookup_path (which refuses anything but \
+         a plain site address) and shape-check the id Graph answers with"
+    );
+}

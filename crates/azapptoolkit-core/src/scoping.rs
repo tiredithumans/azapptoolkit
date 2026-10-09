@@ -319,6 +319,19 @@ pub const SP_LIST_ITEMS_SELECTED: &str = "ListItems.SelectedOperations.Selected"
 /// documents). The *destination* decides, not the Graph path used to reach it.
 pub const SP_FILES_SELECTED: &str = "Files.SelectedOperations.Selected";
 
+/// The per-resource roles a Selected grant may carry, at every level of the
+/// hierarchy: `read` or `write`. Graph also accepts `owner`, `fullcontrol`
+/// and `manage` on a site permission, which the UI never offers — so a grant
+/// command checks the role it was handed against this list rather than
+/// forwarding whatever the webview sent to the `Sites.FullControl.All` bearer.
+pub const SELECTED_GRANT_ROLES: [&str; 2] = ["read", "write"];
+
+/// Whether `role` is one a Selected grant may carry ([`SELECTED_GRANT_ROLES`]).
+/// Exact and lowercase, as Graph spells them.
+pub fn is_grantable_selected_role(role: &str) -> bool {
+    SELECTED_GRANT_ROLES.contains(&role)
+}
+
 /// Which SharePoint securable a Selected scope confines an application to.
 ///
 /// Microsoft's Selected family is one model applied at four levels of the same
@@ -646,6 +659,23 @@ pub fn scope_kind_for(resource_app_id: Option<&str>, value: &str) -> Option<Scop
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_read_and_write_are_grantable_selected_roles() {
+        assert!(is_grantable_selected_role("read"));
+        assert!(is_grantable_selected_role("write"));
+        for bad in [
+            "owner",
+            "fullcontrol",
+            "manage",
+            "Read",
+            "WRITE",
+            "",
+            "read ",
+        ] {
+            assert!(!is_grantable_selected_role(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn maps_common_mail_permissions() {
