@@ -337,19 +337,22 @@ pub(super) async fn apply_exchange_mailbox_scope(
                 ));
             };
             // Same confinement, case-folded (Exchange echoes DNs in its own
-            // casing) and fail-closed: a filter with a `MemberOfGroup` clause
-            // this parser cannot read is never agreement, even when the part it
-            // did read equals the requested groups.
-            let wanted = ScopeGroups {
-                dns: dns.iter().cloned().collect(),
-                complete: true,
-            };
-            if !scope_groups_in_filter(existing_filter).same_groups_as(&wanted) {
+            // casing) and fail-closed: a filter that is anything but a pure
+            // `MemberOfGroup` OR-chain naming exactly these groups is never
+            // agreement — not an unreadable clause, and not a filter that
+            // names the right groups and ALSO reaches other mailboxes (`-or
+            // RecipientTypeDetails …`) or inverts them (`-not`). Those used to
+            // compare equal on the DN set alone, so the app's roles were bound
+            // to the existing scope and its org-wide grants stripped against a
+            // reach the report did not describe.
+            let wanted: HashSet<String> = dns.iter().map(|d| fold_dn(d)).collect();
+            if exact_scope_dns(existing_filter) != Some(wanted) {
                 return Err(UiError::validation(
                     "scope_group_mismatch",
                     format!(
-                        "a management scope “{scope_name}” already exists for this app with a different group set, \
-                         and Exchange keeps the existing scope — so the groups requested here would NOT have been \
+                        "a management scope “{scope_name}” already exists for this app and either confines a \
+                         different group set or has a filter that does more than name these groups, and \
+                         Exchange keeps the existing scope — so the groups requested here would NOT have been \
                          applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
                          changes what every role assignment using it reaches, so it is a deliberate action, not a \
                          side effect of granting: use “Move to managed group” to consolidate onto the \

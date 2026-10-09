@@ -443,21 +443,28 @@ pub(super) async fn migrate_one(
         // would then refuse (or, before the refusal existed, silently not
         // deliver) — an operator approving the plan could not see the difference.
         if let Some(current) = existing_filter.as_deref() {
-            // Case-FOLDED, like the post-write proof in `rbac.rs`: Exchange
-            // returns DNs in its own casing, so a raw comparison warns about a
-            // scope that in fact already confines exactly the wanted groups.
-            // An unreadable current filter is never agreement.
-            if !scope_groups_in_filter(current)
-                .same_groups_as(&scope_groups_in_filter(&scope_filter))
-            {
-                warnings.push(format!(
-                    "a management scope “{scope_name}” already exists and confines access to a \
-                     different set of groups than this plan computed. Its filter is ({current}). \
-                     Exchange keeps an existing scope rather than replacing it, so the migration \
-                     will repoint it only if the group consolidation verifies and no explicit \
-                     scope name was supplied — otherwise it will refuse this app and change \
-                     nothing."
-                ));
+            // The same proof the real run uses (`scope_filter_agrees`): case-
+            // folded, and never agreement for a filter that is not a pure
+            // OR-chain of exactly the wanted groups. A filter the run could
+            // never rewrite gets the promise it can keep — a refusal — rather
+            // than "will repoint if…".
+            if !scope_filter_agrees(current, &scope_filter) {
+                warnings.push(match rewritable_scope_dns(current) {
+                    Err(why) => format!(
+                        "a management scope “{scope_name}” already exists and its filter \
+                         ({current}) can't be verified or rewritten: {why}. Exchange keeps an \
+                         existing scope rather than replacing it, so the migration will refuse \
+                         this app and change nothing."
+                    ),
+                    Ok(_) => format!(
+                        "a management scope “{scope_name}” already exists and confines access to a \
+                         different set of groups than this plan computed. Its filter is ({current}). \
+                         Exchange keeps an existing scope rather than replacing it, so the migration \
+                         will repoint it only if the group consolidation verifies and no explicit \
+                         scope name was supplied — otherwise it will refuse this app and change \
+                         nothing."
+                    ),
+                });
             }
         }
         return Ok(MigratedApp {

@@ -257,11 +257,14 @@ scopes can't clash). Three commands manage the group, all in `commands::exchange
 - `list_exchange_scope_group` — `Get-DistributionGroup` + `Get-DistributionGroupMember`; returns
   whether the group exists, its SMTP/DN, and its members.
 - `add_exchange_scope_group_members` — `New-DistributionGroup -Type Security -IgnoreNamingPolicy`
-  on first use (idempotent), then `Add-DistributionGroupMember` per mailbox; per-mailbox failures
-  are collected, not fatal. Adding an existing member is a no-op (the client swallows the EXO
-  "already a member" 400).
+  on first use (idempotent; one `Get-DistributionGroup` tells whether it created), then
+  `Add-DistributionGroupMember` per mailbox; per-mailbox failures are collected, not fatal. Adding
+  an existing member is a no-op (the client swallows the EXO "already a member" 400).
 - `remove_exchange_scope_group_members` — `Remove-DistributionGroupMember`
   `-BypassSecurityGroupManagerCheck` (removing a non-member is a no-op).
+- Both loops latch `SessionDead` (the shared `mutate_members`): once the session dies, the
+  remaining mailboxes are reported "not attempted" rather than failed N times. A pasted list is
+  bounded, so it carries no Cancel flag.
 
 #### Consolidating an existing scope onto the managed group
 
@@ -286,9 +289,11 @@ Invariants, each of which exists because its absence *narrows* access silently:
   `ExchangeScopeConsolidationResult.refused` makes the plan say it would be refused instead of
   offering "Move now"; a real run refuses before copying anything, and the post-copy re-read checks
   again. **Exception:** when the app's live scope already names the managed group alone
-  (`targets::filter_names_only_group`), its members ARE the app's current reach, so nothing can
-  widen and the check is skipped — otherwise every re-run after an operator edited the managed
-  group was refused.
+  (`targets::filter_names_only_group` — a pure `MemberOfGroup` OR-chain every clause of which is
+  that group), its members ARE the app's current reach, so nothing can widen and the check is
+  skipped — otherwise every re-run after an operator edited the managed group was refused. A filter
+  naming the managed group *and* another condition is not that: its reach is not the group's
+  membership, so it gets the full check.
 - **Member reads are complete.** `list_group_members` sends `ResultSize: Unlimited`;
   `Get-DistributionGroupMember` otherwise stops at 1000 *silently*, which made a truncated source
   read look complete and the repoint narrow. No other list cmdlet the client sends takes
@@ -309,9 +314,10 @@ Invariants, each of which exists because its absence *narrows* access silently:
   "no mailboxes" would repoint the scope at an empty group and cut the app off from everything.
 - **Repointing is never a side effect.** `set_management_scope_filter` (`Set-ManagementScope`) is the
   only mutator of an existing scope's filter, and Exchange applies it to **every** role assignment
-  using that scope. `apply_exchange_mailbox_scope` therefore still only *warns* on a group-set
-  mismatch — a grant must not rewrite a scope other permissions depend on; the operator chooses the
-  move explicitly, from a dry-run plan listing the mailboxes.
+  using that scope. `apply_exchange_mailbox_scope` therefore *refuses* (`scope_group_mismatch`) when the existing
+  scope does not prove exactly the requested groups — a grant must not rewrite a scope other
+  permissions depend on; the operator chooses the move explicitly, from a dry-run plan listing the
+  mailboxes.
 - **Invalidation:** the repoint changes the resolved verdict's filter and group count but not the
   app/SP set ⇒ `invalidate_app_detail_state`, not `invalidate_app_lists`.
 
@@ -374,6 +380,20 @@ pure `MemberOfGroup` OR-chain; anything it cannot fully read is unrewritable.
 back: a scope that cannot be *proved* safe to narrow keeps its original groups,
 because an integration that silently stops seeing a mailbox reports "not found",
 not "denied" — the hardest kind of outage to trace to a permission change.
+
+The same proof decides *agreement*: every "does this existing scope already
+confine exactly these groups?" check (the grant's existing-scope guard, the
+migration's `scope_filter_agrees` and its dry-run warning,
+`filter_names_only_group`, the redundant-write check in `repoint_scope_if_stale`,
+and `set_management_scope_filter`'s pre- and post-write proofs) goes through
+`targets::exact_scope_dns`, which is `None` for anything but a pure OR-chain.
+Comparing group DN *sets* instead read `MemberOfGroup -eq 'G' -or
+RecipientTypeDetails -eq 'UserMailbox'` — and `-not (MemberOfGroup -eq 'G')` —
+as "confines exactly {G}", so the app's roles were bound to that scope and its
+org-wide grants stripped against a reach the report did not describe. The
+retire guard (`references_to_group`) keeps the lenient parse on purpose, and
+additionally reports "may reference" when the group's DN appears anywhere in
+the filter text — its only cost is a withheld delete.
 
 ## Transport: the InvokeCommand gateway
 

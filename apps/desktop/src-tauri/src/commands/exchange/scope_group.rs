@@ -76,31 +76,62 @@ pub async fn add_exchange_scope_group_members(
 ) -> Result<ExchangeMemberMutationResult, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let group_name = load_tenant_defaults(&tenant_id).group_name_for(&app_id);
-    let group_created = exo.get_distribution_group(&group_name).await?.is_none();
-    exo.ensure_security_group(&group_name, &sanitize_alias(&group_name))
+    let (_, group_created) = exo
+        .ensure_security_group_reporting(&group_name, &sanitize_alias(&group_name))
         .await?;
-
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
-    for mailbox in &mailboxes {
-        let mailbox = mailbox.trim();
-        if mailbox.is_empty() {
-            continue;
-        }
-        match exo.add_group_member(&group_name, mailbox).await {
-            Ok(()) => succeeded.push(mailbox.to_string()),
-            Err(err) => failed.push(ExchangeMemberFailure {
-                mailbox: mailbox.to_string(),
-                reason: err.to_string(),
-            }),
-        }
-    }
+    let (succeeded, failed) = mutate_members(&mailboxes, |mailbox| {
+        exo.add_group_member(&group_name, mailbox)
+    })
+    .await;
     Ok(ExchangeMemberMutationResult {
         group_name,
         group_created,
         succeeded,
         failed,
     })
+}
+
+/// Runs one membership cmdlet per non-blank mailbox, collecting the outcomes,
+/// and stops at the first sign the session is dead: every mailbox after that
+/// is reported "not attempted" rather than failed N identical times (the
+/// same latch `copy_members` uses). A pasted list is a bounded, operator-sized
+/// loop, so it carries no Cancel flag.
+async fn mutate_members<'a, F, Fut>(
+    mailboxes: &'a [String],
+    mut op: F,
+) -> (Vec<String>, Vec<ExchangeMemberFailure>)
+where
+    F: FnMut(&'a str) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ExchangeError>>,
+{
+    let session = SessionDead::new();
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for mailbox in mailboxes {
+        let mailbox = mailbox.trim();
+        if mailbox.is_empty() {
+            continue;
+        }
+        if session.is_dead() {
+            failed.push(ExchangeMemberFailure {
+                mailbox: mailbox.to_string(),
+                reason: "not attempted: the sign-in session ended; sign in again and retry"
+                    .to_string(),
+            });
+            continue;
+        }
+        match op(mailbox).await {
+            Ok(()) => succeeded.push(mailbox.to_string()),
+            Err(err) => {
+                session.note_code(err.ui_code());
+                failed.push(ExchangeMemberFailure {
+                    mailbox: mailbox.to_string(),
+                    reason: err.to_string(),
+                });
+            }
+        }
+    }
+    (succeeded, failed)
 }
 
 /// Removes one or more mailboxes from the managed scope group. Removing a
@@ -114,22 +145,10 @@ pub async fn remove_exchange_scope_group_members(
 ) -> Result<ExchangeMemberMutationResult, UiError> {
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     let group_name = load_tenant_defaults(&tenant_id).group_name_for(&app_id);
-
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
-    for mailbox in &mailboxes {
-        let mailbox = mailbox.trim();
-        if mailbox.is_empty() {
-            continue;
-        }
-        match exo.remove_group_member(&group_name, mailbox).await {
-            Ok(()) => succeeded.push(mailbox.to_string()),
-            Err(err) => failed.push(ExchangeMemberFailure {
-                mailbox: mailbox.to_string(),
-                reason: err.to_string(),
-            }),
-        }
-    }
+    let (succeeded, failed) = mutate_members(&mailboxes, |mailbox| {
+        exo.remove_group_member(&group_name, mailbox)
+    })
+    .await;
     Ok(ExchangeMemberMutationResult {
         group_name,
         group_created: false,
@@ -789,20 +808,23 @@ pub(super) fn scope_filter_decision(
 
 /// Whether `current` confines access to exactly the groups `wanted` names.
 ///
-/// Compares group DN **sets**, not raw strings: Exchange normalizes OPATH
+/// Compares what each filter PROVES, not raw strings: Exchange normalizes OPATH
 /// whitespace, quoting and parenthesization, so a byte comparison would call an
 /// identical filter divergent. A `current` this parser cannot fully read is
 /// NEVER agreement — an unstatable reach cannot be asserted equal to an intended
 /// one, and treating "cannot read" as "matches" is exactly how a stale scope
 /// would slip past the guard below.
 ///
-/// DNs are case-FOLDED (`ScopeGroups::same_groups_as`), like the post-write
-/// proof in `set_management_scope_filter`: Exchange echoes DNs in its own
-/// casing, so a raw comparison refused a scope that had just been repointed
-/// correctly. `wanted` must be fully readable too — `member_of_group_filter`
-/// output always is.
+/// DNs are case-FOLDED (`targets::exact_scope_dns`), like the post-write proof
+/// in `set_management_scope_filter`: Exchange echoes DNs in its own casing, so
+/// a raw comparison refused a scope that had just been repointed correctly.
+/// And it is a PROOF, not a DN-set comparison: a current filter that names the
+/// wanted groups but also carries an `-or`/`-and`/`-not` clause used to compare
+/// equal, and the migration then bound the app's roles to a scope reaching
+/// other mailboxes. `wanted` must be a pure OR-chain too —
+/// `member_of_group_filter` output always is.
 pub(super) fn scope_filter_agrees(current: &str, wanted: &str) -> bool {
-    scope_groups_in_filter(current).same_groups_as(&scope_groups_in_filter(wanted))
+    exact_scope_dns(current).is_some_and(|c| Some(c) == exact_scope_dns(wanted))
 }
 
 /// Establishes the recipient filter Exchange **actually has** on `scope_name`,
@@ -836,10 +858,11 @@ pub(super) async fn reconcile_scope_filter(
         return Ok(wanted_filter.to_string());
     };
 
-    // Compare the group DN SETS, not the raw strings: Exchange normalizes OPATH
-    // whitespace, quoting and parenthesization, so a byte comparison would call
-    // an identical filter divergent. An unreadable current filter is treated as
-    // divergent — we cannot claim it confines what we intend.
+    // Compare what the filters prove, not the raw strings: Exchange normalizes
+    // OPATH whitespace, quoting and parenthesization, so a byte comparison
+    // would call an identical filter divergent. An unreadable or compound
+    // current filter is treated as divergent — we cannot claim it confines
+    // what we intend.
     if scope_filter_agrees(current, wanted_filter) {
         return Ok(current.to_string());
     }
@@ -848,8 +871,9 @@ pub(super) async fn reconcile_scope_filter(
         return Err(UiError::validation(
             "scope_filter_mismatch",
             format!(
-                "a management scope “{scope_name}” already exists for this app and confines access \
-                 to a different set of groups than this migration computed. Exchange keeps the \
+                "a management scope “{scope_name}” already exists for this app and either confines a \
+                 different set of groups than this migration computed or has a filter that does more \
+                 than name groups. Exchange keeps the \
                  existing scope rather than replacing it, and this run is not permitted to repoint \
                  it — either the group consolidation could not be verified, or an explicit scope \
                  name was supplied that may be shared with other applications. Assigning roles \
@@ -876,8 +900,9 @@ pub(super) async fn reconcile_scope_filter(
         _ => Err(UiError::validation(
             "scope_filter_mismatch",
             format!(
-                "management scope “{scope_name}” still does not confine access to the groups this \
-                 migration computed after attempting to repoint it, so the app's roles were NOT \
+                "management scope “{scope_name}” does not confine access to exactly the groups this \
+                 migration computed (its filter could not be rewritten, or the rewrite did not \
+                 land), so the app's roles were NOT \
                  assigned and its org-wide grants were left in place. Nothing this app can reach \
                  has changed. Inspect the scope in Exchange."
             ),
@@ -920,13 +945,14 @@ pub(super) async fn repoint_scope_if_stale(
     };
     // Case-folded: a scope Exchange echoes in its own casing already names the
     // wanted groups, and a redundant `Set-ManagementScope` is a write to every
-    // role assignment on it. `current_dns` is proven rewritable, so complete.
-    if current_dns
-        .iter()
-        .map(|d| fold_dn(d))
-        .collect::<HashSet<_>>()
-        == scope_groups_in_filter(wanted_filter).folded_dns()
-    {
+    // role assignment on it. `current_dns` is proven rewritable; `wanted` must
+    // prove the same, or this is not agreement.
+    if exact_scope_dns(wanted_filter).is_some_and(|w| {
+        w == current_dns
+            .iter()
+            .map(|d| fold_dn(d))
+            .collect::<HashSet<_>>()
+    }) {
         return;
     }
     match exo

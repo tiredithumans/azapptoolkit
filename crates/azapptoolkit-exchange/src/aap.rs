@@ -212,11 +212,15 @@ pub fn unverified_members(intended: &[SourceMember], present_keys: &[String]) ->
 pub fn extra_members(intended: &[SourceMember], managed: &[ExoGroupMember]) -> Vec<String> {
     let source: std::collections::HashSet<&str> = intended.iter().map(|m| m.key.as_str()).collect();
     let mut extra: Vec<String> = Vec::new();
+    // Keys already reported, so a member EXO lists twice (or in two casings)
+    // is named once — a set, not a scan of the growing output, since #298
+    // made the member read unlimited.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut unidentifiable = 0_usize;
     for m in managed {
         match source_member(m) {
             Some(sm) if !source.contains(sm.key.as_str()) => {
-                if !extra.iter().any(|e| e.eq_ignore_ascii_case(&sm.identity)) {
+                if seen.insert(sm.key) {
                     extra.push(sm.identity);
                 }
             }
