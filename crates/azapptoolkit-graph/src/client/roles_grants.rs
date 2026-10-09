@@ -100,8 +100,14 @@ impl GraphClient {
         {
             return Ok(cached);
         }
+        // A multi-page walk: watched, so a grant written while it runs (every
+        // grant writer sweeps `grants:`) does not leave the pre-write matrix
+        // cached for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let all = self.list_app_role_assigned_to(service_principal_id).await?;
-        self.cache.put(CacheKind::Permissions, cache_key, &all);
+        self.cache.put_if_current(watch, &all);
         Ok(all)
     }
 
@@ -215,12 +221,15 @@ impl GraphClient {
         {
             return Ok(cached);
         }
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let params: [(&str, &str); 2] = [("$top", MAX_PAGE_SIZE), ("$select", OAUTH2_GRANT_SELECT)];
         let page: Paged<OAuth2PermissionGrant> = self
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
         let all = self.collect_all_pages(page, false).await?;
-        self.cache.put(CacheKind::Permissions, cache_key, &all);
+        self.cache.put_if_current(watch, &all);
         Ok(all)
     }
 

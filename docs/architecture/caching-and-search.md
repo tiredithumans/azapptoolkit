@@ -313,7 +313,15 @@ changed (description or notes alone take `invalidate_app_details`). The rules:
 - A patch that can't apply drops its key, so the worst case is the old cost. That covers a cold or
   expired key, a list at `APPS_MAX` / `SP_INDEX_MAX` (a truncated scan, where only a rescan knows
   which rows belong), and a delete whose `appId` no cached app entry can resolve (only `sp_index`
-  drops).
+  drops). The credential roll-up has one row per credential and cannot see the app cap itself, so
+  it follows the app list's verdict: whenever `apps_pairing` is not patched (at the cap, or cold or
+  expired), the roll-up drops too, and the same rescan rebuilds both
+  (`a_list_at_the_cap_is_dropped_not_patched`).
+- The "invalidate only on `Ok`" rule covers these call sites by construction:
+  `repo_invariants/cache.rs::invalidators` derives the set of invalidating helpers from the source
+  (every non-command fn under `commands/` that calls a cache mutator, or another such helper, to a
+  fixpoint), with the six tiered names as a floor it may never lose. A hand-kept list had left the
+  patch tier and six `invalidate_*` helpers unscanned.
 - A delete also removes the app's SP from `sp_index`, because Graph deletes an app's service
   principal in its home tenant along with it. A rename leaves `sp_index` alone: Graph syncs an SP's
   `displayName` from its app only eventually, so the Enterprise Apps row keeps what Graph returns
@@ -466,8 +474,24 @@ targeted single-key bust isn't possible without an extra lookup. So this kind in
 graph client, **not** via the command-side aggregators: `delete_service_principal`,
 `patch_service_principal`, and `set_service_principal_tags` call a private tenant-prefix sweep
 (`invalidate_sp_cache`) on `Ok` — the can't-miss option. `set_service_principal_app_roles` rides
-this via `patch_service_principal`. **`invalidate_app_lists` does not touch this kind** — don't
-rely on it for SP-field freshness.
+this via `patch_service_principal`. `delete_application` and `restore_deleted_item` sweep too
+(`invalidate_principal_caches`: the SP objects, the resource-SP definitions and the grant matrices):
+Graph deletes an app's home-tenant SP with it, and `restore_deleted_item` also restores service
+principals (the bulk restore brings the paired SP back with a second call); without the sweep the
+Security tab kept a deleted SP's application permissions live for the TTL. `graph_client_sp_mutators_sweep_the_sp_cache` pins every
+DELETE/PATCH of a service-principal object, every app DELETE and every restore to one of the two
+sweeps. **`invalidate_app_lists` does not touch this kind** — don't rely on it for SP-field
+freshness.
+
+The read-throughs are watched. `invalidate_prefix` bumps only the watches it finds, so a lookup
+that was in flight when a sweep landed used to store the pre-sweep object for the TTL — the two
+per-appId SP lookups, `resolve_resource_sp`, both grant matrices, the sign-in activity reads and
+the app-management policies. Each now captures `generation_for(kind, &key)` before its fetch and
+stores through `put_if_current`; `graph_client_read_throughs_store_through_a_watch` pins that no
+Graph client function `cache.put`s after an await, with the batch prewarm (`prewarm_sps`, which
+`prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
+`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects. (The audit's bulk
+lean-SP path is `seed_lean_sps_from_index`, a synchronous put from the already-fetched index.)
 
 Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk

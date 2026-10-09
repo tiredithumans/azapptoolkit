@@ -273,7 +273,7 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
     let created_ids: std::collections::HashSet<&str> =
         apps.iter().map(|(app, _)| app.id.as_str()).collect();
 
-    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+    let pairing_patched = cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
         CacheKind::Lists,
         &apps_pairing_key(tenant_id),
         |rows| {
@@ -298,24 +298,29 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
             (next.len() <= super::APPS_MAX).then_some(next)
         },
     );
-    cache.patch_typed_index::<Vec<CredentialRowDto>>(
-        CacheKind::Lists,
-        &credential_expirations_key(tenant_id),
-        |rows| {
-            let mut next: Vec<CredentialRowDto> = rows
-                .iter()
-                .filter(|r| !created_ids.contains(r.app_object_id.as_str()))
-                .cloned()
-                .collect();
-            let created_apps: Vec<Application> = apps.iter().map(|(app, _)| app.clone()).collect();
-            next.extend(crate::commands::credentials::credential_rows(
-                &created_apps,
-                now,
-            ));
-            crate::commands::credentials::sort_credential_rows(&mut next);
-            Some(next)
-        },
-    );
+    // The roll-up has one row per credential, so it cannot see the app cap
+    // itself: it follows the app list's verdict. A list that was not patched
+    // (at the cap, or cold) is rebuilt by the next scan, which rebuilds both.
+    if pairing_patched {
+        let created_apps: Vec<Application> = apps.iter().map(|(app, _)| app.clone()).collect();
+        let created_rows = crate::commands::credentials::credential_rows(&created_apps, now);
+        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+            CacheKind::Lists,
+            &credential_expirations_key(tenant_id),
+            |rows| {
+                let mut next: Vec<CredentialRowDto> = rows
+                    .iter()
+                    .filter(|r| !created_ids.contains(r.app_object_id.as_str()))
+                    .cloned()
+                    .collect();
+                next.extend(created_rows.iter().cloned());
+                crate::commands::credentials::sort_credential_rows(&mut next);
+                Some(next)
+            },
+        );
+    } else {
+        cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
+    }
     let sps: Vec<ServicePrincipal> = created
         .iter()
         .filter_map(|c| {
@@ -371,7 +376,7 @@ pub(crate) fn record_deleted_apps(cache: &Cache, tenant_id: &str, object_ids: &[
 
     // A truncated index loses a row here that a rescan would backfill from
     // past the cap, so a full index is dropped, not patched.
-    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+    let pairing_patched = cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
         CacheKind::Lists,
         &apps_pairing_key(tenant_id),
         |rows| {
@@ -395,18 +400,22 @@ pub(crate) fn record_deleted_apps(cache: &Cache, tenant_id: &str, object_ids: &[
             })
         },
     );
-    cache.patch_typed_index::<Vec<CredentialRowDto>>(
-        CacheKind::Lists,
-        &credential_expirations_key(tenant_id),
-        |rows| {
-            Some(
-                rows.iter()
-                    .filter(|r| !deleted.contains(r.app_object_id.as_str()))
-                    .cloned()
-                    .collect(),
-            )
-        },
-    );
+    if pairing_patched {
+        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+            CacheKind::Lists,
+            &credential_expirations_key(tenant_id),
+            |rows| {
+                Some(
+                    rows.iter()
+                        .filter(|r| !deleted.contains(r.app_object_id.as_str()))
+                        .cloned()
+                        .collect(),
+                )
+            },
+        );
+    } else {
+        cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
+    }
     match app_ids {
         Some(app_ids) => {
             cache.patch_typed_index::<Vec<ServicePrincipal>>(
@@ -1549,6 +1558,10 @@ mod patch_tier_tests {
             }],
         );
         assert!(apps_pairing_hit(&cache, T).is_none(), "create past the cap");
+        assert!(
+            credential_expirations_hit(&cache, T).is_none(),
+            "the roll-up follows the app list's verdict on a create"
+        );
 
         let cache = seeded(
             (0..APPS_MAX_FOR_TEST)
@@ -1563,6 +1576,10 @@ mod patch_tier_tests {
         assert!(
             apps_pairing_hit(&cache, T).is_none(),
             "delete from a full list"
+        );
+        assert!(
+            credential_expirations_hit(&cache, T).is_none(),
+            "the roll-up follows the app list's verdict on a delete"
         );
     }
 

@@ -628,6 +628,39 @@ async fn patch_service_principal_sends_sso_mode() {
         .unwrap();
 }
 
+/// A lookup in flight when a mutator sweeps the SP cache must not store the
+/// pre-mutation object afterwards: the second read goes back to Graph.
+#[tokio::test]
+async fn an_sp_lookup_that_raced_a_sweep_is_not_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Before" }]
+                }))
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let (first, ()) = tokio::join!(client.get_service_principal_by_app_id("app-1"), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client.invalidate_sp_cache();
+    });
+    first.unwrap();
+
+    // Not served from cache: the fetch lost the race with the sweep.
+    client
+        .get_service_principal_by_app_id("app-1")
+        .await
+        .unwrap();
+    server.verify().await;
+}
+
 /// Deleting a service principal must drop the tenant-wide **grant matrices**
 /// too, not just the SP objects.
 ///

@@ -197,12 +197,17 @@ impl GraphClient {
         }
         let token = self.policy_token()?;
         let url = format!("{}/policies/defaultAppManagementPolicy", self.base_url);
+        // Watched across the fetch, so a sweep that lands meanwhile is not
+        // undone by storing the pre-sweep read for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let policy = match self.scoped_get(token, &url).await {
             Ok(policy) => Some(policy),
             Err(GraphError::NotFound(_)) => None,
             Err(e) => return Err(e),
         };
-        self.cache.put(CacheKind::Permissions, cache_key, &policy);
+        self.cache.put_if_current(watch, &policy);
         Ok(policy)
     }
 
@@ -232,6 +237,11 @@ impl GraphClient {
             "{}/policies/appManagementPolicies?$expand=appliesTo&$top={MAX_PAGE_SIZE}",
             self.base_url
         );
+        // Watched across the fetch, so a sweep that lands meanwhile is not
+        // undone by storing the pre-sweep read for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let policies = match self.scoped_get(token, &url).await {
             Ok(page) => {
                 self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
@@ -240,7 +250,7 @@ impl GraphClient {
             Err(GraphError::NotFound(_)) => Vec::new(),
             Err(e) => return Err(e),
         };
-        self.cache.put(CacheKind::Permissions, cache_key, &policies);
+        self.cache.put_if_current(watch, &policies);
         Ok(policies)
     }
 
@@ -266,6 +276,11 @@ impl GraphClient {
             "{}/applications/{object_id}/appManagementPolicies?$top={MAX_PAGE_SIZE}",
             self.base_url
         );
+        // Watched across the fetch, so a sweep that lands meanwhile is not
+        // undone by storing the pre-sweep read for the TTL.
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
         let policies = match self.scoped_get(token, &url).await {
             Ok(page) => {
                 self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
@@ -274,7 +289,7 @@ impl GraphClient {
             Err(GraphError::NotFound(_)) => Vec::new(),
             Err(e) => return Err(e),
         };
-        self.cache.put(CacheKind::Permissions, cache_key, &policies);
+        self.cache.put_if_current(watch, &policies);
         Ok(policies)
     }
 
