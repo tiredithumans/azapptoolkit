@@ -16,11 +16,37 @@ pub fn Skeleton(
     view! { <span class=classes style=style></span> }
 }
 
+/// Every skeleton region is a `role="status"` with a visually-hidden
+/// "Loading…": a bare container with `aria-busy` (what these used to be) is
+/// silent to a screen reader, and it was unmounted on completion so the flag
+/// never even flipped. The shapes are textless `<span>`s, so they add nothing
+/// to the announcement. The region is inserted already filled, which not every
+/// reader announces, but it is at least discoverable — and the loaded content
+/// replaces it.
+#[component]
+fn SkeletonRegion(
+    #[prop(into)] class: String,
+    #[prop(optional, into)] style: String,
+    #[prop(optional, into, default = String::from("Loading…"))] label: String,
+    children: Children,
+) -> impl IntoView {
+    let style = (!style.is_empty()).then_some(style);
+    view! {
+        <div class=class style=style role="status">
+            <span class="visually-hidden">{label}</span>
+            {children()}
+        </div>
+    }
+}
+
 /// Stack of fake list rows shown while a list resource is loading.
 #[component]
-pub fn SkeletonList(#[prop(optional, default = 8)] rows: usize) -> impl IntoView {
+pub fn SkeletonList(
+    #[prop(optional, default = 8)] rows: usize,
+    #[prop(optional, into)] label: Option<String>,
+) -> impl IntoView {
     view! {
-        <div class="ui-skel-list" aria-busy="true">
+        <SkeletonRegion class="ui-skel-list" label=label.unwrap_or_else(|| "Loading…".into())>
             {(0..rows)
                 .map(|_| {
                     view! {
@@ -31,7 +57,7 @@ pub fn SkeletonList(#[prop(optional, default = 8)] rows: usize) -> impl IntoView
                     }
                 })
                 .collect_view()}
-        </div>
+        </SkeletonRegion>
     }
 }
 
@@ -40,14 +66,30 @@ pub fn SkeletonList(#[prop(optional, default = 8)] rows: usize) -> impl IntoView
 #[component]
 pub fn DetailSkeleton() -> impl IntoView {
     view! {
-        <div
+        <SkeletonRegion
+            class="ui-skel-detail"
             style="display:flex;flex-direction:column;gap:12px;padding:8px;"
-            aria-busy="true"
         >
             <Skeleton width="40%".to_string() height="20px".to_string() />
             <Skeleton width="90%".to_string() height="12px".to_string() />
             <Skeleton width="75%".to_string() height="12px".to_string() />
             <Skeleton width="85%".to_string() height="12px".to_string() />
-        </div>
+        </SkeletonRegion>
+    }
+}
+
+/// Placeholder for a dashboard card — a big number plus two lines. The Home
+/// dashboard used to hand-roll this one.
+#[component]
+pub fn SkeletonCard() -> impl IntoView {
+    view! {
+        <SkeletonRegion
+            class="ui-skel-card"
+            style="display:flex;flex-direction:column;gap:10px;"
+        >
+            <Skeleton width="64px".to_string() height="30px".to_string() />
+            <Skeleton width="80%".to_string() height="12px".to_string() />
+            <Skeleton width="60%".to_string() height="12px".to_string() />
+        </SkeletonRegion>
     }
 }

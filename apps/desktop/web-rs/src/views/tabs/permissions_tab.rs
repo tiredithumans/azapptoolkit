@@ -569,6 +569,7 @@ pub fn PermissionsTab(
             />
             {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <TabBar
+                label="Permission type"
                 items=vec![
                     TabBarItem {
                         value: "all",

@@ -196,6 +196,7 @@ pub fn ApplicationDetailPane(
                                         }}
                                     </DetailHeader>
                                     <TabBar
+                                        label="Application sections"
                                         items={
                                             AppTab::ALL
                                                 .iter()

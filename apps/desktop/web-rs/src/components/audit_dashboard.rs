@@ -254,6 +254,7 @@ where
             {move || banner.with_value(|b| rows.with(|all| b(all.as_slice())))}
 
             <TabBar
+                label="Filter"
                 items={
                     facets
                         .into_iter()

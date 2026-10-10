@@ -70,6 +70,7 @@ pub fn SecurityView() -> impl IntoView {
         <div class="security-view">
             <PostureStrip />
             <TabBar
+                label="Security sections"
                 selected=sub
                 items=vec![
                     TabBarItem { value: "findings", label: "Findings" },

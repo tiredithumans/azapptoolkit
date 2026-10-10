@@ -26,7 +26,9 @@ use crate::components::bulk_action_bar::{
     BulkAction, BulkActionBar, BulkFailure, BulkProgressRow, session_dead_error,
 };
 use crate::components::icon::IconName;
-use crate::components::ui::{Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{
+    Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem, tab_id,
+};
 use crate::state::use_session;
 use crate::util::count_noun;
 
@@ -210,13 +212,20 @@ pub fn BulkActionsView() -> impl IntoView {
                     .to_string()
             />
             <TabBar
+                label="Bulk actions sections"
+                panel_id="bulk-tab"
                 items=vec![
                     TabBarItem { value: "selected", label: "Selected apps" },
                     TabBarItem { value: "create", label: "Create apps" },
                 ]
                 selected=tab
             />
-            <div class="bulk-tab">
+            <div
+                class="bulk-tab"
+                id="bulk-tab"
+                role="tabpanel"
+                aria-labelledby=move || tab_id("bulk-tab", &tab.get())
+            >
                 {move || match tab.get().as_str() {
                     "create" => {
                         view! {

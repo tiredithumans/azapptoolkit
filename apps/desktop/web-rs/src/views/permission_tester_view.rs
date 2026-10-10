@@ -516,6 +516,7 @@ pub fn PermissionTesterView() -> impl IntoView {
             }}
 
             <TabBar
+                label="Resource type"
                 items=vec![
                     TabBarItem { value: "exchange", label: "Exchange mailbox" },
                     TabBarItem { value: "sharepoint", label: "SharePoint resource" },

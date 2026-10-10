@@ -305,6 +305,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
     view! {
         <div class="settings-editor">
             <TabBar
+                label="Settings sections"
                 items=vec![
                     TabBarItem { value: "app-reg", label: "App Registration Defaults" },
                     TabBarItem { value: "enterprise", label: "Enterprise Application Defaults" },

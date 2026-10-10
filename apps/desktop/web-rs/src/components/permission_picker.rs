@@ -216,7 +216,7 @@ pub fn PermissionPicker(
                 </label>
             </div>
             {(matches!(mode, PickerMode::AppAndDelegated))
-                .then(|| view! { <TabBar items=tabs.clone() selected=active_kind /> })}
+                .then(|| view! { <TabBar label="Permission type" items=tabs.clone() selected=active_kind /> })}
             <Suspense fallback=|| view! { <SkeletonList rows=6 /> }>
                 {move || {
                     let needle = filter_debounced.get().to_lowercase();

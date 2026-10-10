@@ -133,6 +133,7 @@ pub fn ManagedIdentityDetailPane(
         />
         // (managed identities can't be deleted from here — no on_delete passed)
         <TabBar
+            label="Managed identity sections"
             items=vec![
                 TabBarItem { value: "overview", label: "Overview" },
                 TabBarItem { value: "permissions", label: "Permissions" },

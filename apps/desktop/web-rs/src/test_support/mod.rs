@@ -344,23 +344,33 @@ pub fn select_picker_permission(value: &str) {
 /// Dispatch a bubbling `keydown` for `key` (e.g. "ArrowDown", "Enter", "Escape")
 /// on the element matching `selector`, as a keyboard user would.
 pub fn press_key(selector: &str, key: &str) {
-    press_key_with(selector, key, false);
+    press_key_with(selector, key, false, false);
 }
 
 /// [`press_key`] with the platform accelerator (Ctrl) held, for the global
 /// `Cmd/Ctrl-…` bindings. Ctrl rather than Meta because the handler accepts
 /// either and Ctrl is what a headless Linux CI browser reports.
 pub fn press_key_with_accel(selector: &str, key: &str) {
-    press_key_with(selector, key, true);
+    press_key_with(selector, key, true, false);
 }
 
-fn press_key_with(selector: &str, key: &str, accel: bool) {
+/// [`press_key`] with Shift held — `Shift+Tab` for a focus trap's backward
+/// edge. A synthetic Tab performs no default focus move; only what a handler
+/// does with it is observable.
+pub fn press_key_with_shift(selector: &str, key: &str) {
+    press_key_with(selector, key, false, true);
+}
+
+fn press_key_with(selector: &str, key: &str, accel: bool, shift: bool) {
     if let Some(el) = query(selector) {
         let init = web_sys::KeyboardEventInit::new();
         init.set_key(key);
         init.set_bubbles(true);
         if accel {
             init.set_ctrl_key(true);
+        }
+        if shift {
+            init.set_shift_key(true);
         }
         let event =
             web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
@@ -382,11 +392,18 @@ pub async fn tick() {
 /// Poll `predicate` every ~10ms until it holds, up to ~3s. Panics on timeout so
 /// a stuck resource fails the test instead of hanging.
 pub async fn wait_for<F: Fn() -> bool>(predicate: F) {
+    wait_until("condition", predicate).await;
+}
+
+/// [`wait_for`] that names the step it was stuck on and dumps the page: a
+/// bare "condition not met" said nothing about which of a test's dozen waits
+/// failed, so several tests grew their own copy of this loop for the label.
+pub async fn wait_until<F: Fn() -> bool>(what: &str, predicate: F) {
     for _ in 0..300 {
         if predicate() {
             return;
         }
         tick().await;
     }
-    panic!("wait_for: condition not met within timeout");
+    panic!("stuck waiting for {what}; body:\n{}", body_text());
 }

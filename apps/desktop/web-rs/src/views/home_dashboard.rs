@@ -13,7 +13,7 @@ use crate::bindings::{
     applications, audit, consent, credentials, enterprise_application, managed_identity,
 };
 use crate::components::icon::{Icon, IconName};
-use crate::components::ui::{BadgeTone, Callout, DetailLoadError, SectionHeader, Skeleton};
+use crate::components::ui::{BadgeTone, Callout, DetailLoadError, SectionHeader, SkeletonCard};
 use crate::state::{ActiveView, Session, use_session};
 use crate::util::{TimeAgo, time_ago};
 use crate::views::audit_view::ranked_actionable_findings;
@@ -624,13 +624,7 @@ pub fn HomeDashboard() -> impl IntoView {
 /// lines, matching the card's loaded geometry (skeletons for content regions;
 /// spinners are reserved for in-button busy affordances).
 fn card_skeleton() -> impl IntoView {
-    view! {
-        <div style="display:flex;flex-direction:column;gap:10px;" aria-busy="true">
-            <Skeleton width="64px".to_string() height="30px".to_string() />
-            <Skeleton width="80%".to_string() height="12px".to_string() />
-            <Skeleton width="60%".to_string() height="12px".to_string() />
-        </div>
-    }
+    view! { <SkeletonCard /> }
 }
 
 /// Whether the card lists a finding — `false` for the ones it doesn't drill
