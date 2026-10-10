@@ -188,7 +188,15 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 scanning.set(false);
                 return;
             };
-            match keyvault_rbac::sweep_key_vault_access(&t.tenant_id).await {
+            let res = keyvault_rbac::sweep_key_vault_access(&t.tenant_id).await;
+            // A sign-out mid-sweep answers not_signed_in; its lever must not
+            // surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                scanning.set(false);
+                progress.set(None);
+                return;
+            }
+            match res {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
@@ -196,7 +204,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     // A dead session gets the Re-authenticate lever instead of a
                     // dead-end line; consent and step-up keep this panel's own
                     // buttons.
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(if e.is_interaction_required() {
                             VERIFY_IDENTITY_MESSAGE.to_string()
                         } else {
@@ -227,7 +235,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             match res {
                 Ok(()) => do_run(),
                 Err(e) => {
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(e.message));
                     }
                 }

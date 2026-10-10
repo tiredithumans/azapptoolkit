@@ -61,12 +61,22 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                 busy.set(false);
                 return;
             };
-            match usage::get_app_graph_usage(&t.tenant_id, &app_id, 90).await {
+            let res = usage::get_app_graph_usage(&t.tenant_id, &app_id, 90).await;
+            // A sign-out mid-read answers not_signed_in; its lever must not
+            // surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_needed.set(e.is_consent_required());
                     step_up_needed.set(e.is_interaction_required());
                     unavailable.set(e.code == "usage_unavailable");
+                    // The panel's own buttons cover consent and step-up; a dead
+                    // session or rejected token needs the sink's lever.
+                    session.report_if_session_lost(&e);
                     error.set(Some(if e.is_interaction_required() {
                         VERIFY_IDENTITY_MESSAGE.to_string()
                     } else {
@@ -90,7 +100,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
             }
             match res {
                 Ok(()) => do_load(),
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "log_analytics", error),
             }
         });
     };

@@ -37,9 +37,15 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
         };
         consenting.set(true);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "sync").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "sync").await;
+            // The consent prompt is answered minutes later, perhaps after a
+            // sign-out: a toast then would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => reload.update(|n| *n += 1),
-                Err(e) => session.report_command_error(&e),
+                Err(e) => session.report_command_error_for(&e, "sync"),
             }
             consenting.set(false);
         });

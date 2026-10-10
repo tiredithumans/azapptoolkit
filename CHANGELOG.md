@@ -7,6 +7,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Every credential, owner, access, backup/restore, bulk-create, scoping and SSO action whose
+  session has expired, or whose token was rejected, now offers Re-authenticate or Refresh token
+  beside its error** — and a missing consent offers Grant consent — instead of the message alone.
+  The default-owner loops also stop at the first expired-session failure rather than failing every
+  remaining owner the same way.
+- **An action that finishes after you signed out no longer shows its toast at the next sign-in**
+  (owner, access and credential changes, backups, restores, scoping and SSO creates).
+- **Pressing Escape on the SSO wizard's final step no longer discards the one-time client secret**
+  of a just-created OIDC application; the Done button still closes it.
 - **Closing a pane, or signing out, while one of its consent prompts is still open in the browser
   no longer crashes the window** when the prompt completes — the Key Vault, SharePoint, usage and
   group-membership consents, and the managed-mailbox-group consent, all re-ran their action

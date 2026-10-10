@@ -122,7 +122,12 @@ fn RetiredGroupRow(
         error.set(None);
         let (app_id, identity) = target.get_value();
         leptos::task::spawn_local(async move {
-            match exchange::delete_exchange_scope_group(&t.tenant_id, &app_id, &identity).await {
+            let res = exchange::delete_exchange_scope_group(&t.tenant_id, &app_id, &identity).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     deleted.set(true);
                     armed.set(false);
@@ -131,7 +136,7 @@ fn RetiredGroupRow(
                         cb.try_run(());
                     }
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "exchange", error),
             }
             busy.set(false);
         });

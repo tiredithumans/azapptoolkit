@@ -205,14 +205,22 @@ fn EnterpriseAppPanel(
                 deleting.set(false);
                 return;
             };
-            match enterprise_application::delete_enterprise_application(&t.tenant_id, &id).await {
+            let res =
+                enterprise_application::delete_enterprise_application(&t.tenant_id, &id).await;
+            // Sign-out mid-delete: nothing to close, and the toast would
+            // surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                deleting.set(false);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     delete_open.set(false);
                     session.close_item_by_entity(OpenItemKind::Enterprise, &id);
                     session.bump_enterprise_apps_reload();
                     session.toast_success("Enterprise application deleted.");
                 }
-                Err(e) => delete_error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", delete_error),
             }
             deleting.set(false);
         });

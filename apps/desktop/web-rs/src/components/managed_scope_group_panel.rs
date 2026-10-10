@@ -87,8 +87,17 @@ pub fn ManagedScopeGroupPanel(
             if group_cmd.busy.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
                 return;
             }
-            if res.is_ok() {
-                load_group();
+            match res {
+                Ok(()) => load_group(),
+                // The panel's own consent button covers consent; a dead session
+                // or rejected token needs the sink's lever.
+                // The operator's own cancel of the browser prompt is not
+                // an error; anything else must not vanish.
+                Err(e) => {
+                    if !session.report_if_session_lost(&e) && e.code != "cancelled" {
+                        session.toast_error(format!("Couldn't grant consent: {}", e.message), None);
+                    }
+                }
             }
         });
     };

@@ -62,6 +62,11 @@ pub(super) fn OwnersContent(
                 )
                 .await
             };
+            // Sign-out mid-mutation: the toast would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(None);
+                return;
+            }
             match result {
                 Ok(()) => {
                     session.toast_success(if add {
@@ -74,7 +79,7 @@ pub(super) fn OwnersContent(
                     on_refresh.try_run(());
                 }
                 Err(e) => {
-                    error.set(Some(e.message));
+                    session.fail_inline(&e, "write", error);
                     busy.set(None);
                 }
             }
@@ -108,7 +113,7 @@ pub(super) fn OwnersContent(
                 return;
             }
             let mut added = 0usize;
-            let mut failures = Vec::new();
+            let mut failures: Vec<(String, azapptoolkit_dto::UiError)> = Vec::new();
             for p in owners {
                 if existing.contains(&p.id) {
                     continue;
@@ -118,15 +123,32 @@ pub(super) fn OwnersContent(
                 {
                     Ok(()) => added += 1,
                     Err(e) => {
-                        failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message))
+                        // A dead session fails every remaining owner the same
+                        // way: stop, and raise Re-authenticate once below.
+                        let fatal = e.is_reauth_fatal();
+                        failures.push((p.display_name.unwrap_or(p.id), e));
+                        if fatal {
+                            break;
+                        }
                     }
                 }
             }
+            if !session.is_active_tenant(&t.tenant_id) {
+                adding_defaults.set(false);
+                return;
+            }
             if !failures.is_empty() {
+                failures
+                    .iter()
+                    .any(|(_, e)| session.report_recovery_action(e, "write"));
                 error.set(Some(format!(
                     "{} failed — {}",
                     count_noun(failures.len(), "default owner", "default owners"),
-                    failures.join("; ")
+                    failures
+                        .iter()
+                        .map(|(who, e)| format!("{who}: {}", e.message))
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 )));
                 adding_defaults.set(false);
             } else {

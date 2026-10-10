@@ -89,20 +89,25 @@ pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl I
                 busy.set(None);
                 return;
             };
-            match enterprise_application::assign_enterprise_app_access(
+            let res = enterprise_application::assign_enterprise_app_access(
                 &t.tenant_id,
                 &sp,
                 &principal_id,
                 &role,
             )
-            .await
-            {
+            .await;
+            // Sign-out mid-assign: the toast would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(None);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     raw_query.set(String::new());
                     session.toast_success("Access granted.");
                     reload.update(|n| *n += 1);
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             busy.set(None);
         });
@@ -121,18 +126,22 @@ pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl I
                 busy.set(None);
                 return;
             };
-            match enterprise_application::remove_enterprise_app_access(
+            let res = enterprise_application::remove_enterprise_app_access(
                 &t.tenant_id,
                 &sp,
                 &assignment_id,
             )
-            .await
-            {
+            .await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(None);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     session.toast_success("Access removed.");
                     reload.update(|n| *n += 1);
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             busy.set(None);
         });
@@ -464,6 +473,10 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
             } else {
                 enterprise_application::remove_sp_from_group(&t.tenant_id, &group_id, &sp).await
             };
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
             match result {
                 Ok(()) => {
                     retry_op.set(None);
@@ -477,7 +490,12 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                 }
                 Err(e) => {
                     if e.is_consent_required() {
+                        // This section's own "Grant consent & retry" covers it.
                         retry_op.set(Some((add, group_id)));
+                    } else {
+                        // A dead session or rejected token needs the sink's
+                        // lever; the typed error below keeps the text.
+                        session.report_recovery_action(&e, "group_membership");
                     }
                     error.set(Some(e));
                 }

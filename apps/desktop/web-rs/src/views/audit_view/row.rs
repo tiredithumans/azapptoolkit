@@ -27,11 +27,10 @@ use super::groups::{GroupSpec, group_remediation_kinds};
 
 /// Lands a row Fix's failure: the recovery lever when one applies (a session
 /// that dies mid-Fix needs Re-authenticate, not a red line saying "sign in
-/// again") and the dialog's inline text — `CommandState::fail_inline`'s rule,
-/// for the three hand-spawned Fixes below.
+/// again") and the dialog's inline text — `Session::fail_inline`, for the
+/// three hand-spawned Fixes below.
 fn fail_fix(session: Session, error: RwSignal<Option<String>>, e: azapptoolkit_dto::UiError) {
-    session.report_recovery_action(&e, "write");
-    error.set(Some(e.message));
+    session.fail_inline(&e, "write", error);
 }
 
 /// Which detail-pane tab this row's "Open" deep-link lands on.

@@ -363,14 +363,16 @@ pub fn CredentialsTab(
     // One inline `error` signal shared by every credential mutation (rendered
     // once below). Each command keeps its own `bool` busy guard, so it gets a
     // dedicated `use_command` handle whose errors route into this shared signal
-    // via `run_with`. The per-row `removing`/`removing_cert` handlers track an
-    // in-flight key id (`Option<String>`), which doesn't fit `CommandState`'s
-    // `bool` busy, so they stay hand-rolled.
+    // via `run_with` + `fail_into` (the recovery lever, then the text). The
+    // per-row Removes also track WHICH key is in flight (`removing` /
+    // `removing_cert`, for the row's spinner) beside their handle's busy.
     let cmd_create = use_command();
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let revealed: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd_remove_secret = use_command();
     let removing: RwSignal<Option<String>> = RwSignal::new(None);
     let cert_open = RwSignal::new(false);
+    let cmd_remove_cert = use_command();
     let removing_cert: RwSignal<Option<String>> = RwSignal::new(None);
     let cmd_expire = use_command();
     let pending_secret: RwSignal<Option<String>> = RwSignal::new(None);
@@ -544,7 +546,7 @@ pub fn CredentialsTab(
                     }
                 }
             },
-            move |e| error.set(Some(e.message)),
+            cmd_create.fail_into(error),
             move |tenant_id| {
                 let input = AddPasswordInput {
                     display_name: dn.trim().to_string(),
@@ -563,23 +565,23 @@ pub fn CredentialsTab(
         }
         removing.set(Some(key_id.clone()));
         error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
+        let fail = cmd_remove_secret.fail_into(error);
+        cmd_remove_secret.run_with(
+            move |()| {
                 removing.set(None);
-                return;
-            };
-            match applications::remove_password(&t.tenant_id, &id, &key_id).await {
-                Ok(()) => {
-                    session.toast_success("Secret removed.");
-                    on_changed_cb.try_run(());
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            removing.set(None);
-        });
+                session.toast_success("Secret removed.");
+                on_changed_cb.try_run(());
+            },
+            move |e| {
+                removing.set(None);
+                fail(e);
+            },
+            move |tenant_id| async move {
+                applications::remove_password(&tenant_id, &id, &key_id).await
+            },
+        );
     };
 
     let remove_cert = move |key_id: String| {
@@ -588,23 +590,23 @@ pub fn CredentialsTab(
         }
         removing_cert.set(Some(key_id.clone()));
         error.set(None);
-        let tenant = session.active_tenant.get();
         let id = object_id.get();
         let on_changed_cb = on_changed;
-        leptos::task::spawn_local(async move {
-            let Some(t) = tenant else {
+        let fail = cmd_remove_cert.fail_into(error);
+        cmd_remove_cert.run_with(
+            move |()| {
                 removing_cert.set(None);
-                return;
-            };
-            match applications::remove_certificate_credential(&t.tenant_id, &id, &key_id).await {
-                Ok(()) => {
-                    session.toast_success("Certificate removed.");
-                    on_changed_cb.try_run(());
-                }
-                Err(e) => error.set(Some(e.message)),
-            }
-            removing_cert.set(None);
-        });
+                session.toast_success("Certificate removed.");
+                on_changed_cb.try_run(());
+            },
+            move |e| {
+                removing_cert.set(None);
+                fail(e);
+            },
+            move |tenant_id| async move {
+                applications::remove_certificate_credential(&tenant_id, &id, &key_id).await
+            },
+        );
     };
 
     let remove_expired = move |_| {
@@ -645,10 +647,7 @@ pub fn CredentialsTab(
                 }
                 on_changed_cb.try_run(());
             },
-            move |e| {
-                session.report_if_session_dead(&e);
-                error.set(Some(e.message));
-            },
+            cmd_expire.fail_into(error),
             move |tenant_id| async move {
                 applications::remove_expired_passwords(&tenant_id, &id).await
             },
@@ -722,7 +721,19 @@ pub fn CredentialsTab(
                 }
                 on_changed_cb.try_run(());
             },
-            move |e| error.set(Some(e.message)),
+            {
+                // A rotation writes on two planes — the Graph secret and the
+                // Key Vault version — and a `consent_required` names neither,
+                // so offer the Key Vault grant beside the Graph one the handle
+                // raises; the one that applies is the one that helps.
+                let fail = cmd_rotate.fail_into(error);
+                move |e: azapptoolkit_dto::UiError| {
+                    if e.is_consent_required() {
+                        session.report_consent_required(&e, "keyvault");
+                    }
+                    fail(e);
+                }
+            },
             move |tenant_id| {
                 let input = RotateCredentialInput {
                     object_id: id,
@@ -765,7 +776,7 @@ pub fn CredentialsTab(
                 // private key and then never got one.
                 gencert_result.set(Some(r));
             },
-            move |e| error.set(Some(e.message)),
+            cmd_gencert.fail_into(error),
             move |tenant_id| {
                 let input = GenerateCertificateInput {
                     object_id: id,

@@ -72,7 +72,15 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         captured.set(None);
         progress.set(None);
         leptos::task::spawn_local(async move {
-            match backup::backup_tenant(&tenant.tenant_id).await {
+            let res = backup::backup_tenant(&tenant.tenant_id).await;
+            // Sign-out mid-backup: the "save it to a file" toast would point at
+            // a backup that is gone, at the next sign-in.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                busy.set(false);
+                progress.set(None);
+                return;
+            }
+            match res {
                 Ok(b) => {
                     let (apps, ent, mis) = (
                         b.app_registrations.len(),
@@ -92,13 +100,11 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                 Err(e) if e.code == "cancelled" => {
                     session.toast_success("Backup cancelled.");
                 }
-                // A dead session mid-backup gets the Re-authenticate toast
-                // action (not a dead-end banner); other errors keep the banner.
-                Err(e) => {
-                    if !session.report_if_session_dead(&e) {
-                        error.set(Some(e.message));
-                    }
-                }
+                // The recovery lever when one applies (a dead session, a
+                // rejected token, a step-up), then the banner. A backup is
+                // Graph-only — the managed-identity pass reads Graph app-role
+                // assignments, never ARM — so the Graph key.
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             busy.set(false);
             progress.set(None);
@@ -136,26 +142,28 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         restore_error.set(None);
         report.set(None);
         leptos::task::spawn_local(async move {
-            match backup::load_backup_from_file().await {
-                Ok(Some(b)) => match backup::plan_restore(&tenant.tenant_id, &b).await {
-                    Ok(p) => {
-                        // A new file starts with nothing approved.
-                        approvals.set(BTreeSet::new());
-                        plan.set(Some(p));
-                        loaded.set(Some(b));
-                    }
-                    Err(e) => {
-                        if !session.report_if_session_dead(&e) {
-                            restore_error.set(Some(e.message));
-                        }
-                    }
-                },
-                Ok(None) => {} // dialog cancelled
+            let b = match backup::load_backup_from_file().await {
+                Ok(Some(b)) => b,
+                Ok(None) => return, // dialog cancelled
                 Err(e) => {
-                    if !session.report_if_session_dead(&e) {
-                        restore_error.set(Some(e.message));
-                    }
+                    session.fail_inline(&e, "write", restore_error);
+                    return;
                 }
+            };
+            let planned = backup::plan_restore(&tenant.tenant_id, &b).await;
+            // Sign-out while planning: another tenant's view must not show
+            // this file's plan.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match planned {
+                Ok(p) => {
+                    // A new file starts with nothing approved.
+                    approvals.set(BTreeSet::new());
+                    plan.set(Some(p));
+                    loaded.set(Some(b));
+                }
+                Err(e) => session.fail_inline(&e, "write", restore_error),
             }
         });
     };
@@ -170,7 +178,16 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         report.set(None);
         restore_progress.set(None);
         leptos::task::spawn_local(async move {
-            match backup::restore_tenant(&tenant.tenant_id, &b, &approved).await {
+            let res = backup::restore_tenant(&tenant.tenant_id, &b, &approved).await;
+            // Sign-out mid-restore: the report (and its one-time secrets) is
+            // view state and is gone with the shell either way; the "save the
+            // report" toast must not surface at the next sign-in.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                restoring.set(false);
+                restore_progress.set(None);
+                return;
+            }
+            match res {
                 Ok(r) => {
                     let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
                     session.toast_success(format!(
@@ -185,11 +202,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                     plan.set(None);
                     loaded.set(None);
                 }
-                Err(e) => {
-                    if !session.report_if_session_dead(&e) {
-                        restore_error.set(Some(e.message));
-                    }
-                }
+                Err(e) => session.fail_inline(&e, "write", restore_error),
             }
             restoring.set(false);
             restore_progress.set(None);
