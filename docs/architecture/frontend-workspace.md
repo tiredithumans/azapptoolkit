@@ -147,8 +147,20 @@ surfaces reuse it rather than re-implementing the markup.
   menu's focus return runs before the dialog's trap records and places focus. Never ship
   `role="menu"` without the hook — the role promises keys that would otherwise not exist.
 - **Modal** — `components::modal_shell::ModalShell` (backdrop, `role="dialog"`, focus trap,
-  Escape). It mints a per-instance title id (`modal-shell-title-{n}`): the shell alone mounts four
-  shells at once, so a fixed id labelled every one of them with the first. Global bare keys (`?`,
+  Escape) is the only dialog markup: every dialog — `ConfirmDialog`, `SecretRevealDialog`, the SSO
+  and Grant-access wizards, the gallery, the create/upload dialogs and the audit's remediation
+  modals included — passes just its content as children. `web-rs/tests/dialogs_use_modal_shell.rs`
+  fails on `role="dialog"` / `role="alertdialog"`, `aria-modal`, a `modal-backdrop` class (any
+  position, or a `class:` toggle) or a thaw `Dialog` — which would render `role="dialog"` without
+  the backdrop `hooks::modal_is_open` keys on — in any other `src/` file (comments excepted); if a
+  dialog needs something the shell lacks, extend the shell. It mints a per-instance title id
+  (`modal-shell-title-{n}`): the shell alone mounts four shells at once, and a confirmation left
+  open in a workspace pane switched away from stays mounted under the next one, so a fixed id
+  (`ConfirmDialog` had `confirm-dialog-title`) labelled the second with the first's title. Escape is refused while
+  `busy` and whenever `close_on_escape` is false — a signal, so a dialog can refuse it on one step
+  only (the SSO wizard while it shows the one-time OIDC client secret; the secret reveal always). A
+  dialog mounted only while visible passes `open=Signal::derive(|| true)`; children are a
+  `ChildrenFn`, so a non-`Copy` value they use goes in a `StoredValue`. Global bare keys (`?`,
   `/`) no-op while any `.modal-backdrop` is present (`hooks::modal_is_open`, which the workspace's
   Escape also gates on), so `?` can't stack the sheet over a dialog and `/` can't pull focus out of
   its trap; the one exception is `?` closing the sheet it opened.

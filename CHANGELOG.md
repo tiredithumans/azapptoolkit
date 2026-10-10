@@ -73,6 +73,9 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 - **A Fix whose row was rebuilt while it ran** (a scan finishing meanwhile) **still clears its Fix
   button** instead of offering the fix again.
 - **A cached scan that loads slowly no longer replaces a scan you ran in the meantime.**
+- **A confirmation dialog is announced by its own title even while another is still open in a
+  workspace pane you switched away from.** Every confirmation used to label itself with the same
+  heading id, so a screen reader read the hidden dialog's question for the one on screen.
 
 ## [0.33.2] - 2026-10-09
 

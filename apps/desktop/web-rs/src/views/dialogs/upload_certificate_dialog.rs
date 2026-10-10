@@ -1,17 +1,15 @@
 //! Upload a certificate (file picker or pasted PEM / base64-DER) onto an
 //! application.
 
-use leptos::html;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::applications::{self, AddCertificateInput, UploadedCertificate};
+use crate::components::modal_shell::ModalShell;
 use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::{cert_payload_from_bytes, fmt_day};
 
@@ -27,13 +25,6 @@ pub fn UploadCertificateDialog(
     let display_name = RwSignal::new(String::new());
     let pem = RwSignal::new(String::new());
     let file_name: RwSignal<Option<String>> = RwSignal::new(None);
-
-    use_escape(
-        move || open.get_untracked() && !cmd.busy.get_untracked(),
-        move || on_close.run(()),
-    );
-    let modal_ref: NodeRef<html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open);
 
     // Reads the chosen file (binary-safe: .cer/.crt may be raw DER) and fills
     // the paste box with the normalized payload, prefilling an empty display
@@ -107,67 +98,63 @@ pub fn UploadCertificateDialog(
     };
 
     view! {
-        <Show when=move || open.get() fallback=|| view! { <></> }>
-            <div
-                class="modal-backdrop"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="upload-cert-dialog-title"
-            >
-                <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="upload-cert-dialog-title">"Upload certificate"</h3>
-                    <Body1>
-                        "Choose a .cer, .pem, or .crt file — or paste a PEM block / base64-encoded DER. Graph derives the expiry from the certificate. Paste only the certificate — a private key is refused and never sent."
-                    </Body1>
-                    <Field label="Certificate file">
-                        <input
-                            type="file"
-                            accept=".cer,.pem,.crt"
-                            class="file-input"
-                            on:change=on_file_change
-                        />
-                    </Field>
+        <ModalShell
+            open=open
+            title="Upload certificate"
+            busy=Signal::derive(move || cmd.busy.get())
+            on_close=on_close
+            wide=true
+        >
+            <Body1>
+                "Choose a .cer, .pem, or .crt file — or paste a PEM block / base64-encoded DER. Graph derives the expiry from the certificate. Paste only the certificate — a private key is refused and never sent."
+            </Body1>
+            <Field label="Certificate file">
+                <input
+                    type="file"
+                    accept=".cer,.pem,.crt"
+                    class="file-input"
+                    on:change=on_file_change
+                />
+            </Field>
+            {move || {
+                file_name
+                    .get()
+                    .map(|n| view! { <Body1 class="hint mono">{format!("Loaded: {n}")}</Body1> })
+            }}
+            <Field label="Display name">
+                <Input value=display_name />
+            </Field>
+            <Field label="…or paste PEM / base64">
+                <Textarea value=pem />
+            </Field>
+            {move || {
+                cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
+            }}
+            <div class="actions-row">
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(move |_| on_close.run(()))
+                    disabled=Signal::derive(move || cmd.busy.get())
+                >
+                    "Cancel"
+                </Button>
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                    on_click=Box::new(upload)
+                    disabled=Signal::derive(move || cmd.busy.get())
+                >
                     {move || {
-                        file_name
-                            .get()
-                            .map(|n| view! { <Body1 class="hint mono">{format!("Loaded: {n}")}</Body1> })
+                        if cmd.busy.get() {
+                            view! {
+                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                            }
+                                .into_any()
+                        } else {
+                            view! { "Upload" }.into_any()
+                        }
                     }}
-                    <Field label="Display name">
-                        <Input value=display_name />
-                    </Field>
-                    <Field label="…or paste PEM / base64">
-                        <Textarea value=pem />
-                    </Field>
-                    {move || {
-                        cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })
-                    }}
-                    <div class="actions-row">
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                            on_click=Box::new(move |_| on_close.run(()))
-                            disabled=Signal::derive(move || cmd.busy.get())
-                        >
-                            "Cancel"
-                        </Button>
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            on_click=Box::new(upload)
-                            disabled=Signal::derive(move || cmd.busy.get())
-                        >
-                            {move || {
-                                if cmd.busy.get() {
-                                    view! {
-                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                    }
-                                        .into_any()
-                                } else {
-                                    view! { "Upload" }.into_any()
-                                }
-                            }}
-                        </Button>
-                    </div>
-                </div>
+                </Button>
             </div>
-        </Show>
+        </ModalShell>
     }
 }

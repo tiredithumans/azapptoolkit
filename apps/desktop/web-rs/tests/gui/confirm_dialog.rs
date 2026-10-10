@@ -84,3 +84,47 @@ async fn an_error_is_announced_as_an_alert() {
     })
     .await;
 }
+
+/// A pane mounts several `ConfirmDialog`s at once, and each must be labelled
+/// by its own title. They used to share a fixed `id="confirm-dialog-title"`,
+/// so `aria-labelledby` on a stacked confirmation resolved to whichever came
+/// first in the document and a screen reader announced the wrong question.
+#[wasm_bindgen_test]
+async fn stacked_confirmations_are_each_labelled_by_their_own_title() {
+    ts::reset();
+    let _m = ts::mount_view(|| {
+        view! {
+            <div>
+                <ConfirmDialog
+                    open=Signal::derive(|| true)
+                    title="Remove this owner?"
+                    body="First."
+                    on_confirm=Callback::new(|()| {})
+                    on_close=Callback::new(|()| {})
+                />
+                <ConfirmDialog
+                    open=Signal::derive(|| true)
+                    title="Delete this secret?"
+                    body="Second."
+                    on_confirm=Callback::new(|()| {})
+                    on_close=Callback::new(|()| {})
+                />
+            </div>
+        }
+    });
+    ts::wait_for(|| ts::query_all(".modal-backdrop").len() == 2).await;
+
+    let ids: Vec<String> = ts::query_all(".modal-backdrop")
+        .iter()
+        .map(|b| b.get_attribute("aria-labelledby").unwrap_or_default())
+        .collect();
+    assert_ne!(ids[0], ids[1], "each confirmation needs its own title id");
+    for (id, title) in ids
+        .iter()
+        .zip(["Remove this owner?", "Delete this secret?"])
+    {
+        let heading = ts::query(&format!("#{id}")).expect("aria-labelledby resolves");
+        assert_eq!(heading.tag_name(), "H3");
+        assert_eq!(heading.text_content().unwrap_or_default().trim(), title);
+    }
+}

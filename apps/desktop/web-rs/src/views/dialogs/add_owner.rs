@@ -15,10 +15,9 @@ use azapptoolkit_core::models::DirectoryObject;
 
 use crate::bindings::applications;
 use crate::components::directory_search::DirectorySearch;
+use crate::components::modal_shell::ModalShell;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::FormError;
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::{Session, use_session};
 use crate::util::count_noun;
 
@@ -226,13 +225,6 @@ pub fn AddOwnerButton(
         });
     });
 
-    use_escape(
-        move || open.get_untracked() && !busy.get_untracked() && !adding_defaults.get_untracked(),
-        move || open.set(false),
-    );
-    let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open.into());
-
     let label = action.label.clone();
     let detail = action.detail.clone();
     view! {
@@ -244,73 +236,68 @@ pub fn AddOwnerButton(
                 {label}
             </Button>
             <div class="audit-actions__preview">{detail}</div>
-            <Show when=move || open.get() fallback=|| view! { <></> }>
-                <div
-                    class="modal-backdrop"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="add-owner-dialog-title"
-                >
-                    <div class="modal" node_ref=modal_ref>
-                        <h3 id="add-owner-dialog-title">"Add an owner"</h3>
-                        <Body1>
-                            "Search the directory and add an owner so this application has clear accountability. Adding an owner is purely additive — it can't disrupt the app's sign-in or permissions."
-                        </Body1>
-                        <div class="actions-row">
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                disabled=Signal::derive(move || busy.get() || adding_defaults.get())
-                                on_click=Box::new(move |_| add_defaults.run(()))
-                            >
-                                "Add default owners"
-                            </Button>
-                            {move || {
-                                adding_defaults
-                                    .get()
-                                    .then(|| {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                    })
-                            }}
-                        </div>
-                        <Body1 class="muted">
-                            "Adds the owners configured for this tenant in Settings (additive — skips anyone already an owner). Or search below to add someone specific."
-                        </Body1>
-                        // Cleared by the add handler only on success, so a
-                        // failed add keeps the operator's query.
-                        <DirectorySearch
-                            on_pick=Callback::new(move |u: DirectoryObject| add.run(u.id))
-                            query=raw_query
-                            placeholder="Search users by name or UPN (min 2 chars)"
-                            action_appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                            clear_on_pick=false
-                            row_disabled=Callback::new(move |_: String| {
-                                busy.get() || adding_defaults.get()
+            <ModalShell
+                open=open
+                title="Add an owner"
+                busy=Signal::derive(move || busy.get() || adding_defaults.get())
+                on_close=Callback::new(move |()| open.set(false))
+            >
+                <Body1>
+                    "Search the directory and add an owner so this application has clear accountability. Adding an owner is purely additive — it can't disrupt the app's sign-in or permissions."
+                </Body1>
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        disabled=Signal::derive(move || busy.get() || adding_defaults.get())
+                        on_click=Box::new(move |_| add_defaults.run(()))
+                    >
+                        "Add default owners"
+                    </Button>
+                    {move || {
+                        adding_defaults
+                            .get()
+                            .then(|| {
+                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
                             })
-                        />
-                        {move || {
-                            error.get().map(|e| view! { <FormError>{e}</FormError> })
-                        }}
-                        <Show when=move || no_owner_defaults.get() fallback=|| ()>
-                            <OwnerDefaultsHint class="form-error" tab="app-reg" />
-                        </Show>
-                        <div class="actions-row">
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(move |_| open.set(false))
-                                disabled=Signal::derive(move || busy.get() || adding_defaults.get())
-                            >
-                                "Cancel"
-                            </Button>
-                            {move || {
-                                (busy.get() || adding_defaults.get())
-                                    .then(|| {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
-                                    })
-                            }}
-                        </div>
-                    </div>
+                    }}
                 </div>
-            </Show>
+                <Body1 class="muted">
+                    "Adds the owners configured for this tenant in Settings (additive — skips anyone already an owner). Or search below to add someone specific."
+                </Body1>
+                // Cleared by the add handler only on success, so a
+                // failed add keeps the operator's query.
+                <DirectorySearch
+                    on_pick=Callback::new(move |u: DirectoryObject| add.run(u.id))
+                    query=raw_query
+                    placeholder="Search users by name or UPN (min 2 chars)"
+                    action_appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    clear_on_pick=false
+                    row_disabled=Callback::new(move |_: String| {
+                        busy.get() || adding_defaults.get()
+                    })
+                />
+                {move || {
+                    error.get().map(|e| view! { <FormError>{e}</FormError> })
+                }}
+                <Show when=move || no_owner_defaults.get() fallback=|| ()>
+                    <OwnerDefaultsHint class="form-error" tab="app-reg" />
+                </Show>
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        on_click=Box::new(move |_| open.set(false))
+                        disabled=Signal::derive(move || busy.get() || adding_defaults.get())
+                    >
+                        "Cancel"
+                    </Button>
+                    {move || {
+                        (busy.get() || adding_defaults.get())
+                            .then(|| {
+                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                            })
+                    }}
+                </div>
+            </ModalShell>
         </div>
     }
     .into_any()
