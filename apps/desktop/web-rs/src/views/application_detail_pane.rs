@@ -111,7 +111,12 @@ pub fn ApplicationDetailPane(
         delete_cmd.run(
             move |()| {
                 delete_open.set(false);
-                session.close_item_by_entity(OpenItemKind::AppReg, &object_id.get_untracked());
+                let id = object_id.get_untracked();
+                // Out of every bulk selection: a deleted id left in one is a
+                // dangling one ("N selected" counts it; the Bulk Actions page
+                // shows it as a raw GUID once its name leaves the list).
+                session.deselect_object(&id);
+                session.close_item_by_entity(OpenItemKind::AppReg, &id);
                 // Graph deletes the app's service principal with it.
                 session.bump_app_and_enterprise_reload();
                 session.toast_success("Application deleted.");

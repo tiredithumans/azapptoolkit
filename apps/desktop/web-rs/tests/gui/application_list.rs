@@ -169,6 +169,80 @@ async fn arrow_keys_move_focus_between_rows() {
     assert!(ts::text(".app-list__row[tabindex='0']").contains("First App"));
 }
 
+/// Keyboard focus on a row used to die with the row's DOM when the window
+/// scrolled past it: focus fell to <body>, the arrows went dead and the tab
+/// stop jumped to the top of the window. The focused row now stays rendered
+/// until focus leaves the list.
+#[wasm_bindgen_test]
+async fn a_focused_row_survives_scrolling_out_of_the_window() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    // GUI tests load no `styles.css`: give the scroller a real viewport and the
+    // rows their absolute positioning (ROW_HEIGHT is 52px).
+    let _m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+    ts::wait_for(|| ts::query_all(".app-list__row[tabindex='0']").len() == 1).await;
+
+    ts::focus(".app-list__row");
+    assert!(ts::text(".app-list__row[tabindex='0']").contains("App 000"));
+
+    let scroller: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list scroller")
+        .unchecked_into();
+    let scroll_to = |rows: i32| {
+        scroller.set_scroll_top(rows * 52);
+        let scrolled = web_sys::Event::new("scroll").unwrap();
+        scroller.dispatch_event(&scrolled).unwrap();
+    };
+    let row_zero_keeps_focus = |step: &str| {
+        assert!(
+            ts::query_all(".app-list__row")
+                .iter()
+                .any(|r| r.text_content().unwrap_or_default().contains("App 000")),
+            "{step}: the focused row is still rendered"
+        );
+        assert!(
+            ts::focused_matches(".app-list__row"),
+            "{step}: and still focused"
+        );
+        assert!(
+            ts::text(".app-list__row[tabindex='0']").contains("App 000"),
+            "{step}: and still the tab stop"
+        );
+    };
+
+    // Nine rows down: the first step that pushes row 0 out of the window, so
+    // the window grows past it (a wheel scroll's shape) rather than replacing
+    // every row at once.
+    scroll_to(9);
+    ts::wait_for(|| ts::body_contains("App 021")).await;
+    row_zero_keeps_focus("nine rows down");
+
+    // Sixty rows down: nothing of the old window survives but the pinned row.
+    scroll_to(60);
+    ts::wait_for(|| ts::body_contains("App 060")).await;
+    row_zero_keeps_focus("sixty rows down");
+
+    // And back: the pinned row is inside the window again, with no move.
+    scroll_to(0);
+    ts::wait_for(|| !ts::body_contains("App 060")).await;
+    row_zero_keeps_focus("back at the top");
+}
+
 #[wasm_bindgen_test]
 async fn error_state_renders_message() {
     ts::reset();

@@ -216,6 +216,9 @@ fn EnterpriseAppPanel(
             match res {
                 Ok(()) => {
                     delete_open.set(false);
+                    // The SSO-certificate board selects by SP id: a deleted
+                    // one left there is a dangling "N selected".
+                    session.deselect_object(&id);
                     session.close_item_by_entity(OpenItemKind::Enterprise, &id);
                     session.bump_enterprise_apps_reload();
                     session.toast_success("Enterprise application deleted.");

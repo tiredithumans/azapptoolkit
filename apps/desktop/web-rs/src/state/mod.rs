@@ -592,6 +592,31 @@ mod tests {
     }
 
     #[test]
+    fn deselect_object_drops_the_id_from_every_selection() {
+        with_session(|session| {
+            session.toggle_app_selected("app-1".into());
+            session.toggle_app_selected("app-2".into());
+            session.toggle_audit_selected("app-1".into());
+            session.tenant_ui.selected_sso_cert_ids.update(|s| {
+                s.insert("sp-1".into());
+                s.insert("sp-2".into());
+            });
+            session.deselect_object("app-1");
+            session.deselect_object("sp-1");
+            assert!(!session.is_app_selected("app-1"));
+            assert!(
+                session.is_app_selected("app-2"),
+                "only the deleted id leaves"
+            );
+            assert!(!session.is_audit_selected("app-1"));
+            session.tenant_ui.selected_sso_cert_ids.with_untracked(|s| {
+                assert!(!s.contains("sp-1"));
+                assert!(s.contains("sp-2"));
+            });
+        });
+    }
+
+    #[test]
     fn open_item_dedupes_and_refocuses() {
         with_session(|session| {
             let a = session.open_item(OpenItemKind::AppReg, "app-1", "Contoso");
