@@ -11,9 +11,9 @@
 //! creates/drops the edge rows.
 //!
 //! Keyboard row navigation lives here rather than in the three list views
-//! because the element a Home/End has to move before an off-window row can
-//! exist — the scroller — is this component's, and so is the signal that says
-//! the window has caught up.
+//! because the element a Home/End — or an arrow from a row scrolled out of
+//! view — has to move before an off-window row can exist, the scroller, is
+//! this component's, and so is the signal that says the window has caught up.
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{Element, HtmlElement, ResizeObserver};
 
-use crate::hooks::use_grid_keynav::{RowSource, use_row_keynav};
+use crate::hooks::use_grid_keynav::{RowSource, reseed, use_row_keynav};
 
 /// The caller half of [`VirtualList`]'s `scroll_offset`: zero the carried
 /// offset whenever `items` changes, from a scope that outlives the list.
@@ -198,7 +198,9 @@ where
     // tab stop reseeded to the first rendered row. A row's absolute index is
     // its `top` over the row height — the positioning contract every
     // `render_row` keeps. Cleared when focus leaves the scroller altogether,
-    // and when the row set changes (the pin indexed the old one).
+    // and when the row set changes (the pin indexed the old one). An arrow key
+    // from the pinned row steps to its real neighbour, not the window's edge:
+    // the keynav finds rows by that same `top` (`RowSource::Windowed`).
     let focused_row: RwSignal<Option<usize>> = RwSignal::new(None);
 
     // Snap back to the top whenever the row set changes within this instance
@@ -261,11 +263,62 @@ where
             focused_row.set(idx);
         }
     };
+    // A render can still MOVE the focused row's node: the keyed diff is
+    // positional, so a jump that changes the row's place in the rendered list
+    // by more than the rows added and removed around it re-inserts it
+    // (`insertBefore`, which the DOM runs as remove + insert), and a removed
+    // node loses focus to <body>. So each render snapshots the focused element
+    // first and, once the diff has run, puts focus back on it if it fell —
+    // without scrolling, since the operator scrolled away on purpose. While
+    // that render is in flight, a focusout from the move is not the operator
+    // leaving the list, and keeps the pin.
+    let restoring: StoredValue<bool> = StoredValue::new(false);
+    let keep_focus_through_render = move || {
+        let Some(root) = scroll_ref.get_untracked() else {
+            return;
+        };
+        let Some(had) = document()
+            .active_element()
+            .filter(|a| !root.is_same_node(Some(a)) && root.contains(Some(a)))
+        else {
+            return;
+        };
+        restoring.set_value(true);
+        // Two hops, not one: the keynav's own post-render pass is queued from
+        // its effect, which can run after this render. When that pass is
+        // about to move focus to a parked goal's target (an arrow or Home
+        // that scrolled), it must land first — restoring the old row in
+        // between would make a screen reader start announcing it for nothing.
+        queue_microtask(move || {
+            queue_microtask(move || {
+                if restoring.try_set_value(false).is_some() {
+                    return; // the list is gone
+                }
+                let fell = document()
+                    .active_element()
+                    .is_none_or(|a| document().body().is_some_and(|b| b.is_same_node(Some(&a))));
+                if fell
+                    && had.is_connected()
+                    && let Ok(el) = had.dyn_into::<HtmlElement>()
+                {
+                    let opts = web_sys::FocusOptions::new();
+                    opts.set_prevent_scroll(true);
+                    let _ = el.focus_with_options(&opts);
+                    reseed(&root, row_selector);
+                }
+            });
+        });
+    };
+
     let on_focusout = move |ev: ev::FocusEvent| {
         // Alt-tab, a native dialog or the re-auth window blur the focused
         // element with no related target. The row is still the one to come
         // back to, so keep it rendered; focusin re-pins it on return anyway.
         if !leptos::prelude::document().has_focus().unwrap_or(true) {
+            return;
+        }
+        // A render moving the focused row (see `keep_focus_through_render`).
+        if restoring.try_get_value().unwrap_or(false) {
             return;
         }
         let stays_inside = ev
@@ -282,9 +335,10 @@ where
     };
 
     // Keyboard row navigation over the *rendered* window. `visible_range` is the
-    // rerender trigger the hook waits on: a Home/End scrolls first and can only
-    // take focus once the window has been rebuilt around the target row, and
-    // this is the signal that says it has. `items` is tracked too — a re-sort
+    // rerender trigger the hook waits on: a Home/End (or an arrow from a row
+    // scrolled out of view) scrolls first and can only take focus once the
+    // window has been rebuilt around the target row, and this is the signal
+    // that says it has. `items` is tracked too — a re-sort
     // leaves the range untouched while replacing every row in it.
     let on_keydown = use_row_keynav(
         move || scroll_ref.get().map(Element::from),
@@ -320,8 +374,11 @@ where
                         // to move it. A move is `insertBefore`, which the DOM
                         // runs as remove + insert, and a removed node loses
                         // focus. Appended last, a row pinned above the window
-                        // was moved on every scroll down.
+                        // was moved on every scroll down. Index order avoids
+                        // most moves, not all — a jump can still move it, so
+                        // focus is also carried through the render.
                         let pinned = focused_row.get().filter(|f| !(start..end).contains(f));
+                        keep_focus_through_render();
                         let above = pinned.filter(|f| *f < start);
                         let below = pinned.filter(|f| *f >= end);
                         items
