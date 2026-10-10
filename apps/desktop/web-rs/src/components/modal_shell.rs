@@ -1,15 +1,18 @@
-//! Shared scaffolding for hand-rolled modals: the backdrop + box markup plus the
-//! focus-trap, close-on-Escape, and ARIA wiring every modal needs. Form modals
-//! pass their fields + actions as children and get the focus contract for free,
-//! instead of each re-implementing `<Show>` + `modal-backdrop` and (as several
-//! did) silently omitting `use_focus_trap` / `use_escape`.
+//! The one dialog primitive: the backdrop + box markup plus the focus-trap,
+//! close-on-Escape, and ARIA wiring every modal needs. A dialog passes its
+//! fields + actions as children and gets the focus contract for free, instead
+//! of re-implementing `<Show>` + `modal-backdrop` and (as several did) silently
+//! omitting `use_focus_trap` / `use_escape`.
+//!
+//! Every dialog in the app renders through this — `ConfirmDialog`, the
+//! one-time reveals, the wizards and the remediation modals included — and
+//! `tests/dialogs_use_modal_shell.rs` fails on dialog markup (`role="dialog"`,
+//! `aria-modal`, the `modal-backdrop` class) spelled anywhere else in `src/`.
 //!
 //! Each instance mints its own title id (`modal-shell-title-{n}`) for
 //! `aria-labelledby`: several shells are mounted at once, so a fixed id would
-//! make every label resolve to whichever came first in the document.
-//!
-//! `ConfirmDialog` and the dedicated dialog components predate this and keep
-//! their own (equivalent) wiring, each with its own unique hard-coded title id.
+//! make every label resolve to whichever came first in the document — the bug
+//! `ConfirmDialog`'s fixed `confirm-dialog-title` had whenever two were open.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -46,13 +49,16 @@ pub fn ModalShell(
     #[prop(optional)]
     wide: bool,
     /// `false` for one-time reveals whose dismissal destroys unrecoverable
-    /// material; the caller's own button is then the only way out.
-    #[prop(default = true)]
-    close_on_escape: bool,
+    /// material; the caller's own button is then the only way out. A signal, so
+    /// a multi-step dialog can refuse Escape on just the step that shows such
+    /// material (the SSO wizard's OIDC client secret); a literal
+    /// `close_on_escape=false` converts as before. Defaults to `true`.
+    #[prop(into, default = Signal::stored(true))]
+    close_on_escape: Signal<bool>,
     children: ChildrenFn,
 ) -> impl IntoView {
     use_escape(
-        move || close_on_escape && open.get_untracked() && !busy.get_untracked(),
+        move || close_on_escape.get_untracked() && open.get_untracked() && !busy.get_untracked(),
         move || on_close.run(()),
     );
     let modal_ref: NodeRef<html::Div> = NodeRef::new();

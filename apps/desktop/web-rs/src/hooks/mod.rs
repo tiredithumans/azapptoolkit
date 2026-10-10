@@ -45,15 +45,18 @@ pub(crate) fn is_text_entry(ev: &leptos::ev::KeyboardEvent) -> bool {
     }
 }
 
-/// True while any modal dialog is shown.
+/// True while any modal dialog is open.
 ///
-/// Every dialog renders its `.modal-backdrop` only while it is shown —
-/// `ModalShell` and the hand-rolled dialogs are `<Show>`-gated, and
-/// `SecretReveal` is mounted only while shown — so the backdrop's presence is
-/// the one app-wide "a dialog owns the keyboard" signal. Window-level bindings
-/// (the workspace's Escape, the bare-key shortcuts) gate on it so a keystroke
-/// meant for the dialog doesn't also act on the page behind it, or stack a
-/// second dialog on top.
+/// Every dialog renders its `.modal-backdrop` only while it is open — each is
+/// a `ModalShell`, which is `<Show>`-gated (and `SecretRevealDialog`'s is
+/// mounted only while open) — so the backdrop's presence is the one app-wide
+/// "a dialog owns the keyboard" signal. Open is not always on screen: a
+/// dialog left open in a workspace pane or view that a Cmd/Ctrl shortcut then
+/// hid keeps its backdrop in the DOM (`display:none` above it), and this
+/// stays true until it closes. Window-level bindings (the workspace's
+/// Escape, the bare-key shortcuts) gate on it so a keystroke meant for the
+/// dialog doesn't also act on the page behind it, or stack a second dialog on
+/// top.
 pub(crate) fn modal_is_open() -> bool {
     leptos::prelude::document()
         .query_selector(".modal-backdrop")

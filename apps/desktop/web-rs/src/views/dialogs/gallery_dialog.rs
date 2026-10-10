@@ -12,18 +12,16 @@
 //! Mounted in the shell (like the SSO wizard) only while its open flag is set, so
 //! each open is a fresh component — no manual state reset needed.
 
-use leptos::html;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
 
 use crate::bindings::enterprise_application::{
     self, ApplicationTemplateDto, GalleryAppSummary, GallerySearchResultsDto,
 };
+use crate::components::modal_shell::ModalShell;
 use crate::components::ui::FormError;
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 
 /// Minimum query length before a search fires, in **characters** — mirrors the
@@ -46,13 +44,6 @@ pub fn GalleryDialog(
     // `Some(template)` switches from the browse stage to the confirm stage.
     let selected: RwSignal<Option<ApplicationTemplateDto>> = RwSignal::new(None);
     let name = RwSignal::new(String::new());
-
-    use_escape(
-        move || open.get_untracked() && !cmd.busy.get_untracked(),
-        move || on_close.run(()),
-    );
-    let modal_ref: NodeRef<html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open);
 
     // On open, warm the gallery corpus so the operator's first query is instant.
     // The whole-catalog fetch is a one-time cost that overlaps them typing;
@@ -130,211 +121,207 @@ pub fn GalleryDialog(
     };
 
     view! {
-        <Show when=move || open.get() fallback=|| view! { <></> }>
-            <div
-                class="modal-backdrop"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="gallery-dialog-title"
-            >
-                <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="gallery-dialog-title">"Browse the Entra gallery"</h3>
-                    {move || match selected.get() {
-                        // ---- Confirm stage: name the instance, then create. ----
-                        Some(tpl) => {
-                            view! {
-                                <div class="gallery-confirm">
-                                    <div class="gallery-result gallery-result--selected">
-                                        <span class="gallery-result__name">
-                                            {tpl.display_name.clone()}
-                                        </span>
-                                        {tpl
-                                            .publisher
-                                            .clone()
-                                            .map(|p| {
-                                                view! {
-                                                    <span class="gallery-result__publisher">{p}</span>
-                                                }
-                                            })}
-                                    </div>
-                                    <Field label="Name for this application">
-                                        <Input value=name />
-                                    </Field>
-                                    <Body1 class="hint">
-                                        "This creates the enterprise application from the gallery \
-                                         template. The new application then opens on its SSO tab \
-                                         to finish single sign-on."
-                                    </Body1>
-                                    {move || {
-                                        cmd.error
-                                            .get()
-                                            .map(|e| view! { <FormError>{e}</FormError> })
-                                    }}
-                                    <div class="actions-row">
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                            on_click=Box::new(move |_| selected.set(None))
-                                            disabled=Signal::derive(move || cmd.busy.get())
-                                        >
-                                            "Back"
-                                        </Button>
-                                        <Button
-                                            class="gallery-create"
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(create)
-                                            disabled=Signal::derive(move || {
-                                                cmd.busy.get() || name.with(|n| n.trim().is_empty())
-                                            })
-                                        >
-                                            {move || {
-                                                if cmd.busy.get() {
-                                                    view! {
-                                                        <Spinner size=Signal::derive(|| {
-                                                            SpinnerSize::Tiny
-                                                        }) />
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    view! { "Create" }.into_any()
-                                                }
-                                            }}
-                                        </Button>
-                                    </div>
-                                </div>
-                            }
-                                .into_any()
-                        }
-                        // ---- Browse stage: search the gallery, pick a template. ----
-                        None => {
-                            view! {
-                                <div class="gallery-browse">
-                                    <Field label="Search the gallery (2+ characters)">
-                                        <Input value=raw_query placeholder="Salesforce" />
-                                    </Field>
-                                    <Suspense fallback=move || {
+        <ModalShell
+            open=open
+            title="Browse the Entra gallery"
+            busy=Signal::derive(move || cmd.busy.get())
+            on_close=on_close
+            wide=true
+        >
+            {move || match selected.get() {
+                // ---- Confirm stage: name the instance, then create. ----
+                Some(tpl) => {
+                    view! {
+                        <div class="gallery-confirm">
+                            <div class="gallery-result gallery-result--selected">
+                                <span class="gallery-result__name">
+                                    {tpl.display_name.clone()}
+                                </span>
+                                {tpl
+                                    .publisher
+                                    .clone()
+                                    .map(|p| {
                                         view! {
-                                            <Spinner
-                                                size=Signal::derive(|| SpinnerSize::Tiny)
-                                                label="Searching…"
-                                            />
+                                            <span class="gallery-result__publisher">{p}</span>
                                         }
-                                    }>
-                                        {move || {
-                                            // Read the query synchronously, before the
-                                            // async block: a signal read *after* an await
-                                            // inside `Suspend` subscribes mid-flight and
-                                            // can drift from the result being rendered.
-                                            let asked = query.get().trim().to_string();
-                                            Suspend::new(async move {
-                                                let found = match candidates.await {
-                                                    Ok(f) => f,
-                                                    Err(msg) => {
-                                                        return view! {
-                                                            <FormError>
-                                                                {format!("Search failed: {msg}")}
-                                                            </FormError>
+                                    })}
+                            </div>
+                            <Field label="Name for this application">
+                                <Input value=name />
+                            </Field>
+                            <Body1 class="hint">
+                                "This creates the enterprise application from the gallery \
+                                 template. The new application then opens on its SSO tab \
+                                 to finish single sign-on."
+                            </Body1>
+                            {move || {
+                                cmd.error
+                                    .get()
+                                    .map(|e| view! { <FormError>{e}</FormError> })
+                            }}
+                            <div class="actions-row">
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                                    on_click=Box::new(move |_| selected.set(None))
+                                    disabled=Signal::derive(move || cmd.busy.get())
+                                >
+                                    "Back"
+                                </Button>
+                                <Button
+                                    class="gallery-create"
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(create)
+                                    disabled=Signal::derive(move || {
+                                        cmd.busy.get() || name.with(|n| n.trim().is_empty())
+                                    })
+                                >
+                                    {move || {
+                                        if cmd.busy.get() {
+                                            view! {
+                                                <Spinner size=Signal::derive(|| {
+                                                    SpinnerSize::Tiny
+                                                }) />
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! { "Create" }.into_any()
+                                        }
+                                    }}
+                                </Button>
+                            </div>
+                        </div>
+                    }
+                        .into_any()
+                }
+                // ---- Browse stage: search the gallery, pick a template. ----
+                None => {
+                    view! {
+                        <div class="gallery-browse">
+                            <Field label="Search the gallery (2+ characters)">
+                                <Input value=raw_query placeholder="Salesforce" />
+                            </Field>
+                            <Suspense fallback=move || {
+                                view! {
+                                    <Spinner
+                                        size=Signal::derive(|| SpinnerSize::Tiny)
+                                        label="Searching…"
+                                    />
+                                }
+                            }>
+                                {move || {
+                                    // Read the query synchronously, before the
+                                    // async block: a signal read *after* an await
+                                    // inside `Suspend` subscribes mid-flight and
+                                    // can drift from the result being rendered.
+                                    let asked = query.get().trim().to_string();
+                                    Suspend::new(async move {
+                                        let found = match candidates.await {
+                                            Ok(f) => f,
+                                            Err(msg) => {
+                                                return view! {
+                                                    <FormError>
+                                                        {format!("Search failed: {msg}")}
+                                                    </FormError>
+                                                }
+                                                    .into_any();
+                                            }
+                                        };
+                                        // No query yet — the only case that earns the
+                                        // "start typing" prompt.
+                                        let Some(found) = found else {
+                                            return view! {
+                                                <Body1 class="hint">
+                                                    "Type an app name to search the gallery."
+                                                </Body1>
+                                            }
+                                                .into_any();
+                                        };
+                                        if found.results.is_empty() {
+                                            // A real search that matched nothing says so.
+                                            let msg = format!(
+                                                "No gallery apps match \u{201c}{asked}\u{201d}.",
+                                            );
+                                            return view! { <Body1 class="hint">{msg}</Body1> }
+                                                .into_any();
+                                        }
+                                        let narrowed = found
+                                            .truncated
+                                            .then(|| {
+                                                format!(
+                                                    "Showing the closest {} of {} matches — \
+                                                     refine the search to narrow it.",
+                                                    found.results.len(),
+                                                    found.total_matches,
+                                                )
+                                            });
+                                        view! {
+                                            <ul class="gallery-results">
+                                                {found
+                                                    .results
+                                                    .into_iter()
+                                                    .map(|tpl| {
+                                                        let modes = tpl
+                                                            .supported_single_sign_on_modes
+                                                            .join(" · ");
+                                                        let publisher = tpl.publisher.clone();
+                                                        let display = tpl.display_name.clone();
+                                                        let tpl_for_pick = tpl.clone();
+                                                        view! {
+                                                            <li>
+                                                                <button
+                                                                    type="button"
+                                                                    class="gallery-result"
+                                                                    on:click=move |_| pick(tpl_for_pick.clone())
+                                                                >
+                                                                    <span class="gallery-result__name">
+                                                                        {display}
+                                                                    </span>
+                                                                    {publisher
+                                                                        .map(|p| {
+                                                                            view! {
+                                                                                <span class="gallery-result__publisher">
+                                                                                    {p}
+                                                                                </span>
+                                                                            }
+                                                                        })}
+                                                                    {(!modes.is_empty())
+                                                                        .then(|| {
+                                                                            view! {
+                                                                                <span class="gallery-result__modes">{modes}</span>
+                                                                            }
+                                                                        })}
+                                                                </button>
+                                                            </li>
                                                         }
-                                                            .into_any();
-                                                    }
-                                                };
-                                                // No query yet — the only case that earns the
-                                                // "start typing" prompt.
-                                                let Some(found) = found else {
-                                                    return view! {
-                                                        <Body1 class="hint">
-                                                            "Type an app name to search the gallery."
+                                                    })
+                                                    .collect_view()}
+                                            </ul>
+                                            {narrowed
+                                                .map(|n| {
+                                                    view! {
+                                                        <Body1 class="hint gallery-results__narrowed">
+                                                            {n}
                                                         </Body1>
                                                     }
-                                                        .into_any();
-                                                };
-                                                if found.results.is_empty() {
-                                                    // A real search that matched nothing says so.
-                                                    let msg = format!(
-                                                        "No gallery apps match \u{201c}{asked}\u{201d}.",
-                                                    );
-                                                    return view! { <Body1 class="hint">{msg}</Body1> }
-                                                        .into_any();
-                                                }
-                                                let narrowed = found
-                                                    .truncated
-                                                    .then(|| {
-                                                        format!(
-                                                            "Showing the closest {} of {} matches — \
-                                                             refine the search to narrow it.",
-                                                            found.results.len(),
-                                                            found.total_matches,
-                                                        )
-                                                    });
-                                                view! {
-                                                    <ul class="gallery-results">
-                                                        {found
-                                                            .results
-                                                            .into_iter()
-                                                            .map(|tpl| {
-                                                                let modes = tpl
-                                                                    .supported_single_sign_on_modes
-                                                                    .join(" · ");
-                                                                let publisher = tpl.publisher.clone();
-                                                                let display = tpl.display_name.clone();
-                                                                let tpl_for_pick = tpl.clone();
-                                                                view! {
-                                                                    <li>
-                                                                        <button
-                                                                            type="button"
-                                                                            class="gallery-result"
-                                                                            on:click=move |_| pick(tpl_for_pick.clone())
-                                                                        >
-                                                                            <span class="gallery-result__name">
-                                                                                {display}
-                                                                            </span>
-                                                                            {publisher
-                                                                                .map(|p| {
-                                                                                    view! {
-                                                                                        <span class="gallery-result__publisher">
-                                                                                            {p}
-                                                                                        </span>
-                                                                                    }
-                                                                                })}
-                                                                            {(!modes.is_empty())
-                                                                                .then(|| {
-                                                                                    view! {
-                                                                                        <span class="gallery-result__modes">{modes}</span>
-                                                                                    }
-                                                                                })}
-                                                                        </button>
-                                                                    </li>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </ul>
-                                                    {narrowed
-                                                        .map(|n| {
-                                                            view! {
-                                                                <Body1 class="hint gallery-results__narrowed">
-                                                                    {n}
-                                                                </Body1>
-                                                            }
-                                                        })}
-                                                }
-                                                    .into_any()
-                                            })
-                                        }}
-                                    </Suspense>
-                                    <div class="actions-row">
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| on_close.run(()))
-                                        >
-                                            "Cancel"
-                                        </Button>
-                                    </div>
-                                </div>
-                            }
-                                .into_any()
-                        }
-                    }}
-                </div>
-            </div>
-        </Show>
+                                                })}
+                                        }
+                                            .into_any()
+                                    })
+                                }}
+                            </Suspense>
+                            <div class="actions-row">
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    on_click=Box::new(move |_| on_close.run(()))
+                                >
+                                    "Cancel"
+                                </Button>
+                            </div>
+                        </div>
+                    }
+                        .into_any()
+                }
+            }}
+        </ModalShell>
     }
 }

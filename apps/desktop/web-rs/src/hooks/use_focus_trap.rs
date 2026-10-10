@@ -1,12 +1,14 @@
 //! Focus management for modal dialogs.
 //!
-//! Our dialogs are hand-rolled `<div role="dialog" aria-modal="true">`s gated
-//! by `<Show>`. `aria-modal="true"` *asserts* a focus trap, but nothing
+//! Our dialogs are lightweight `<Show>`-gated backdrop+box modals, all rendered
+//! by `components::modal_shell::ModalShell`, which declares them modal to
+//! assistive technology. That declaration *asserts* a focus trap, but nothing
 //! enforced it: focus stayed on the trigger behind the backdrop, Tab could walk
 //! out into the obscured page, and closing never restored focus. This hook
 //! makes the assertion true — focus the dialog on open, cycle Tab within it,
 //! and restore focus to the trigger on close. Pairs with [`super::use_escape`]
-//! (close-on-Escape) to complete the modal contract.
+//! (close-on-Escape) to complete the modal contract; `ModalShell` is the one
+//! caller that pairs them for a dialog.
 //!
 //! The record-and-restore half lives in [`super::use_focus_return`], because
 //! the open-items workspace needs it without the trap; this hook is that hook

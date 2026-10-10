@@ -45,12 +45,11 @@ use crate::bindings::{auth, managed_identity, permissions, sharepoint};
 use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
+use crate::components::modal_shell::ModalShell;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
 use crate::components::ui::{Callout, FormError};
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::scoping::{
@@ -536,13 +535,6 @@ pub fn ScopeWizard(
     // `scope_mode`; reads of what will run go through this.
     let active_mode = Signal::derive(move || effective_mode(mechanism.get(), scope_mode.get()));
 
-    use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
-        move || on_close.run(()),
-    );
-    let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open);
-
     let reset = move || {
         step.set(0);
         selected.set(Vec::new());
@@ -877,262 +869,252 @@ pub fn ScopeWizard(
     };
 
     view! {
-        <Show when=move || open.get() fallback=|| view! { <></> }>
-            <div
-                class="modal-backdrop"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="scope-wizard-title"
-            >
-                <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="scope-wizard-title">"Grant access"</h3>
-                    <div class="sso-wizard__steps">
-                        <Body1 class="hint">
-                            {move || match step.get() {
-                                0 => "Step 1 of 3 — Select permissions",
-                                1 => "Step 2 of 3 — Choose access",
-                                _ => "Step 3 of 3 — Review & grant",
-                            }}
-                        </Body1>
-                    </div>
-
-                    // ---- Step 0: select permissions (full catalog, multi-select) ----
-                    <Show when=move || step.get() == 0 fallback=|| ()>
-                        <SelectPermissionsStep
-                            tenant_id=tenant_for_picker
-                            mode=picker_mode
-                            selected=selected
-                            on_toggle=on_toggle
-                        />
-                    </Show>
-
-                    // ---- Step 1: choose access (dispatched on mechanism) ----
-                    <Show when=move || step.get() == 1 fallback=|| ()>
-                        // One radio per scoped mode the mechanism offers (from
-                        // `mode_options`, recommended first), each with its target
-                        // panel; then org-wide — a de-emphasized alternative when
-                        // the cart is scopable, reversible like every other choice.
-                        {move || {
-                            mechanism
-                                .get()
-                                .map(|k| {
-                                    view! {
-                                        {mode_options(k)
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(i, &(m, label))| {
-                                                view! {
-                                                    <label class="radio-row">
-                                                        <input
-                                                            type="radio"
-                                                            name="scope-mode"
-                                                            prop:checked=move || active_mode.get() == m
-                                                            on:change=move |_| scope_mode.set(m)
-                                                        />
-                                                        <span>
-                                                            <strong>{label}</strong>
-                                                            {(i == 0).then_some(" (recommended)")}
-                                                        </span>
-                                                    </label>
-                                                    <Show
-                                                        when=move || active_mode.get() == m
-                                                        fallback=|| ()
-                                                    >
-                                                        {mode_panel(m)}
-                                                    </Show>
-                                                }
-                                            })
-                                            .collect_view()}
-                                        <label class="radio-row">
-                                            <input
-                                                type="radio"
-                                                name="scope-mode"
-                                                prop:checked=move || {
-                                                    active_mode.get() == ScopeMode::OrgWide
-                                                }
-                                                on:change=move |_| scope_mode.set(ScopeMode::OrgWide)
-                                            />
-                                            <span class="muted">"Org-wide — no scoping (rare)"</span>
-                                        </label>
-                                    }
-                                })
-                        }}
-                        {move || {
-                            mechanism
-                                .get()
-                                .is_none()
-                                .then(|| {
-                                    view! {
-                                        <Body1 class="hint">
-                                            "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, only SharePoint site permissions, or only one Selected permission for libraries/folders/files, in one pass."
-                                        </Body1>
-                                    }
-                                })
-                        }}
-                        <Show when=move || active_mode.get() == ScopeMode::OrgWide fallback=|| ()>
-                            <Callout tone="warn">
-                                <Body1>
-                                    "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
-                                </Body1>
-                            </Callout>
-                        </Show>
-                        {move || {
-                            mechanism
-                                .get()
-                                .map(|k| view! { <RequiresRole capability_key=k.capability_key() /> })
-                        }}
-                    </Show>
-
-                    // ---- Step 2: review & grant ----
-                    <Show when=move || step.get() == 2 fallback=|| ()>
-                        // The facts of the operation, above the sentence that
-                        // characterises it. The sentence alone named neither the
-                        // principal nor the targets the operator typed two steps
-                        // back, so there was nothing here to check the grant
-                        // against — on the step whose whole job is that check.
-                        <dl class="read-field">
-                            <dt>"Application"</dt>
-                            <dd>
-                                {move || target.with(|t| t.display_name.clone())}
-                                " "
-                                <span class="mono">
-                                    {move || target.with(|t| t.app_id.clone())}
-                                </span>
-                            </dd>
-                            <dt>"Permissions"</dt>
-                            <dd class="mono">
-                                {move || selected.with(|s| perm_values(s).join(", "))}
-                            </dd>
-                            <dt>{targets_label}</dt>
-                            <dd>
-                                {move || {
-                                    let targets = review_targets();
-                                    match (active_mode.get(), targets.is_empty()) {
-                                        (ScopeMode::OrgWide, _) => {
-                                            view! { "Every resource in the tenant" }.into_any()
-                                        }
-                                        (_, true) => {
-                                            view! {
-                                                <span class="hint">
-                                                    "Nothing chosen yet — go back and pick a target."
-                                                </span>
-                                            }
-                                                .into_any()
-                                        }
-                                        _ => {
-                                            view! {
-                                                <ul class="member-list">
-                                                    {targets
-                                                        .into_iter()
-                                                        .map(|t| view! { <li class="mono">{t}</li> })
-                                                        .collect_view()}
-                                                </ul>
-                                            }
-                                                .into_any()
-                                        }
-                                    }
-                                }}
-                            </dd>
-                        </dl>
-                        <Body1>{review_line}</Body1>
-                        {move || {
-                            strip_warning()
-                                .map(|w| {
-                                    view! {
-                                        <Callout tone="warn">
-                                            <Body1>{w}</Body1>
-                                        </Callout>
-                                    }
-                                })
-                        }}
-                        {move || {
-                            needs_consent
-                                .get()
-                                .then(|| {
-                                    // An org-wide apply fails on the Graph WRITE
-                                    // scopes, not on a mechanism's admin scope —
-                                    // the same distinction `consent_and_retry`
-                                    // now keys on, said out loud.
-                                    let what = if active_mode.get() == ScopeMode::OrgWide {
-                                        "Granting these permissions needs an admin consent."
-                                    } else {
-                                        "Scoping needs an admin consent for this mechanism."
-                                    };
-                                    view! {
-                                        <Callout tone="warn">
-                                            {what}
-                                            <Button
-                                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                                on_click=Box::new(consent_and_retry)
-                                                disabled=Signal::derive(move || busy.get())
-                                            >
-                                                "Grant consent & retry"
-                                            </Button>
-                                        </Callout>
-                                    }
-                                })
-                        }}
-                    </Show>
-
-                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
-
-                    // Tell the user why "Next" is disabled on step 1 — the cart is
-                    // empty. The apply-time validation message is unreachable from
-                    // step 0, so without this the disabled button has no explanation.
-                    {move || {
-                        (step.get() == 0 && selected.with(|s| s.is_empty()))
-                            .then(|| {
-                                view! {
-                                    <Body1 class="hint">
-                                        "Select at least one permission to continue."
-                                    </Body1>
-                                }
-                            })
+        <ModalShell open=open title="Grant access" busy=busy on_close=on_close wide=true>
+            <div class="sso-wizard__steps">
+                <Body1 class="hint">
+                    {move || match step.get() {
+                        0 => "Step 1 of 3 — Select permissions",
+                        1 => "Step 2 of 3 — Choose access",
+                        _ => "Step 3 of 3 — Review & grant",
                     }}
+                </Body1>
+            </div>
 
-                    // ---- Footer ----
-                    <div class="actions-row">
+            // ---- Step 0: select permissions (full catalog, multi-select) ----
+            <Show when=move || step.get() == 0 fallback=|| ()>
+                <SelectPermissionsStep
+                    tenant_id=tenant_for_picker
+                    mode=picker_mode
+                    selected=selected
+                    on_toggle=on_toggle
+                />
+            </Show>
+
+            // ---- Step 1: choose access (dispatched on mechanism) ----
+            <Show when=move || step.get() == 1 fallback=|| ()>
+                // One radio per scoped mode the mechanism offers (from
+                // `mode_options`, recommended first), each with its target
+                // panel; then org-wide — a de-emphasized alternative when
+                // the cart is scopable, reversible like every other choice.
+                {move || {
+                    mechanism
+                        .get()
+                        .map(|k| {
+                            view! {
+                                {mode_options(k)
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &(m, label))| {
+                                        view! {
+                                            <label class="radio-row">
+                                                <input
+                                                    type="radio"
+                                                    name="scope-mode"
+                                                    prop:checked=move || active_mode.get() == m
+                                                    on:change=move |_| scope_mode.set(m)
+                                                />
+                                                <span>
+                                                    <strong>{label}</strong>
+                                                    {(i == 0).then_some(" (recommended)")}
+                                                </span>
+                                            </label>
+                                            <Show
+                                                when=move || active_mode.get() == m
+                                                fallback=|| ()
+                                            >
+                                                {mode_panel(m)}
+                                            </Show>
+                                        }
+                                    })
+                                    .collect_view()}
+                                <label class="radio-row">
+                                    <input
+                                        type="radio"
+                                        name="scope-mode"
+                                        prop:checked=move || {
+                                            active_mode.get() == ScopeMode::OrgWide
+                                        }
+                                        on:change=move |_| scope_mode.set(ScopeMode::OrgWide)
+                                    />
+                                    <span class="muted">"Org-wide — no scoping (rare)"</span>
+                                </label>
+                            }
+                        })
+                }}
+                {move || {
+                    mechanism
+                        .get()
+                        .is_none()
+                        .then(|| {
+                            view! {
+                                <Body1 class="hint">
+                                    "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, only SharePoint site permissions, or only one Selected permission for libraries/folders/files, in one pass."
+                                </Body1>
+                            }
+                        })
+                }}
+                <Show when=move || active_mode.get() == ScopeMode::OrgWide fallback=|| ()>
+                    <Callout tone="warn">
+                        <Body1>
+                            "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
+                        </Body1>
+                    </Callout>
+                </Show>
+                {move || {
+                    mechanism
+                        .get()
+                        .map(|k| view! { <RequiresRole capability_key=k.capability_key() /> })
+                }}
+            </Show>
+
+            // ---- Step 2: review & grant ----
+            <Show when=move || step.get() == 2 fallback=|| ()>
+                // The facts of the operation, above the sentence that
+                // characterises it. The sentence alone named neither the
+                // principal nor the targets the operator typed two steps
+                // back, so there was nothing here to check the grant
+                // against — on the step whose whole job is that check.
+                <dl class="read-field">
+                    <dt>"Application"</dt>
+                    <dd>
+                        {move || target.with(|t| t.display_name.clone())}
+                        " "
+                        <span class="mono">
+                            {move || target.with(|t| t.app_id.clone())}
+                        </span>
+                    </dd>
+                    <dt>"Permissions"</dt>
+                    <dd class="mono">
+                        {move || selected.with(|s| perm_values(s).join(", "))}
+                    </dd>
+                    <dt>{targets_label}</dt>
+                    <dd>
+                        {move || {
+                            let targets = review_targets();
+                            match (active_mode.get(), targets.is_empty()) {
+                                (ScopeMode::OrgWide, _) => {
+                                    view! { "Every resource in the tenant" }.into_any()
+                                }
+                                (_, true) => {
+                                    view! {
+                                        <span class="hint">
+                                            "Nothing chosen yet — go back and pick a target."
+                                        </span>
+                                    }
+                                        .into_any()
+                                }
+                                _ => {
+                                    view! {
+                                        <ul class="member-list">
+                                            {targets
+                                                .into_iter()
+                                                .map(|t| view! { <li class="mono">{t}</li> })
+                                                .collect_view()}
+                                        </ul>
+                                    }
+                                        .into_any()
+                                }
+                            }
+                        }}
+                    </dd>
+                </dl>
+                <Body1>{review_line}</Body1>
+                {move || {
+                    strip_warning()
+                        .map(|w| {
+                            view! {
+                                <Callout tone="warn">
+                                    <Body1>{w}</Body1>
+                                </Callout>
+                            }
+                        })
+                }}
+                {move || {
+                    needs_consent
+                        .get()
+                        .then(|| {
+                            // An org-wide apply fails on the Graph WRITE
+                            // scopes, not on a mechanism's admin scope —
+                            // the same distinction `consent_and_retry`
+                            // now keys on, said out loud.
+                            let what = if active_mode.get() == ScopeMode::OrgWide {
+                                "Granting these permissions needs an admin consent."
+                            } else {
+                                "Scoping needs an admin consent for this mechanism."
+                            };
+                            view! {
+                                <Callout tone="warn">
+                                    {what}
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(consent_and_retry)
+                                        disabled=Signal::derive(move || busy.get())
+                                    >
+                                        "Grant consent & retry"
+                                    </Button>
+                                </Callout>
+                            }
+                        })
+                }}
+            </Show>
+
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
+
+            // Tell the user why "Next" is disabled on step 1 — the cart is
+            // empty. The apply-time validation message is unreachable from
+            // step 0, so without this the disabled button has no explanation.
+            {move || {
+                (step.get() == 0 && selected.with(|s| s.is_empty()))
+                    .then(|| {
+                        view! {
+                            <Body1 class="hint">
+                                "Select at least one permission to continue."
+                            </Body1>
+                        }
+                    })
+            }}
+
+            // ---- Footer ----
+            <div class="actions-row">
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(move |_| {
+                        if step.get() == 0 { close() } else { step.update(|s| *s -= 1) }
+                    })
+                    disabled=Signal::derive(move || busy.get())
+                >
+                    {move || if step.get() == 0 { "Cancel" } else { "Back" }}
+                </Button>
+                <Show when=move || step.get() < 2 fallback=move || {
+                    view! {
                         <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                            on_click=Box::new(move |_| {
-                                if step.get() == 0 { close() } else { step.update(|s| *s -= 1) }
-                            })
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(move |_| run_apply())
                             disabled=Signal::derive(move || busy.get())
                         >
-                            {move || if step.get() == 0 { "Cancel" } else { "Back" }}
+                            {move || {
+                                if busy.get() {
+                                    view! {
+                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                    }
+                                        .into_any()
+                                } else {
+                                    view! { "Grant access" }.into_any()
+                                }
+                            }}
                         </Button>
-                        <Show when=move || step.get() < 2 fallback=move || {
-                            view! {
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| run_apply())
-                                    disabled=Signal::derive(move || busy.get())
-                                >
-                                    {move || {
-                                        if busy.get() {
-                                            view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                            }
-                                                .into_any()
-                                        } else {
-                                            view! { "Grant access" }.into_any()
-                                        }
-                                    }}
-                                </Button>
-                            }
-                        }>
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(move |_| step.update(|s| *s += 1))
-                                disabled=Signal::derive(move || step.get() == 0 && !step0_ready())
-                            >
-                                "Next"
-                            </Button>
-                        </Show>
-                    </div>
-                </div>
+                    }
+                }>
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        on_click=Box::new(move |_| step.update(|s| *s += 1))
+                        disabled=Signal::derive(move || step.get() == 0 && !step0_ready())
+                    >
+                        "Next"
+                    </Button>
+                </Show>
             </div>
-        </Show>
+        </ModalShell>
     }
 }
 

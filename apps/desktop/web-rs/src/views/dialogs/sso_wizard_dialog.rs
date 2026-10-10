@@ -4,8 +4,8 @@
 //!
 //! Steps: 0 = protocol + display name, 1 = protocol-specific config, 2 = review
 //! + create, 3 = output summary. Step state is a plain `RwSignal<u8>` matched in
-//!   the view (the codebase has no Thaw stepper). Mirrors `create_app_dialog.rs`
-//!   for the modal shell and `secret_reveal_dialog.rs` for show-once output.
+//!   the view (the codebase has no Thaw stepper). Renders through `ModalShell`
+//!   and, like `secret_reveal_dialog.rs`, refuses Escape on show-once output.
 //!
 //! Mounted in the shell only while its open flag is set, so each open is a
 //! fresh component — no manual state reset needed.
@@ -23,10 +23,9 @@ use crate::bindings::sso::{
     self, OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput, SamlSsoSummary,
 };
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
+use crate::components::modal_shell::ModalShell;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::ui::{Callout, FormError};
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 
 /// Splits a textarea (one URL per line) into a trimmed, non-empty Vec.
@@ -100,21 +99,13 @@ pub fn SsoWizardDialog(
     let saml_result: RwSignal<Option<SamlSsoSummary>> = RwSignal::new(None);
     let oidc_result: RwSignal<Option<OidcSsoSummary>> = RwSignal::new(None);
 
-    // Not on the final step of an OIDC create: it shows the client secret
-    // once ("can never be retrieved again"), and a reflex Escape there threw
-    // it away — the hazard SecretReveal and `close_on_escape=false` exist for.
-    // The explicit Done button remains.
-    use_escape(
-        move || {
-            open.get_untracked()
-                && !busy.get_untracked()
-                && !oidc_result
-                    .with_untracked(|r| r.as_ref().is_some_and(|s| s.client_secret.is_some()))
-        },
-        move || on_close.run(()),
-    );
-    let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open);
+    // Escape closes the wizard — but not on the final step of an OIDC create:
+    // it shows the client secret once ("can never be retrieved again"), and a
+    // reflex Escape there threw it away — the hazard SecretReveal and
+    // `close_on_escape=false` exist for. The explicit Done button remains.
+    let close_on_escape = Signal::derive(move || {
+        !oidc_result.with(|r| r.as_ref().is_some_and(|s| s.client_secret.is_some()))
+    });
 
     // Seed the SAML notification emails from the tenant default. One-shot at
     // construction: the shell mounts this dialog only while it is open, so each
@@ -334,226 +325,223 @@ pub fn SsoWizardDialog(
     };
 
     view! {
-        <Show when=move || open.get() fallback=|| view! { <></> }>
-            <div
-                class="modal-backdrop"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="sso-wizard-dialog-title"
-            >
-                <div class="modal modal--wide" node_ref=modal_ref>
-                    <h3 id="sso-wizard-dialog-title">"New application"</h3>
-                    <div class="sso-wizard__steps">
-                        <Body1 class="hint">
-                            {move || match step.get() {
-                                0 => "Step 1 of 3 — Protocol & name",
-                                1 => "Step 2 of 3 — Configuration",
-                                2 => "Step 3 of 3 — Review & create",
-                                _ => "Done — configuration summary",
-                            }}
-                        </Body1>
-                    </div>
+        <ModalShell
+            open=open
+            title="New application"
+            busy=busy
+            on_close=on_close
+            wide=true
+            close_on_escape=close_on_escape
+        >
+            <div class="sso-wizard__steps">
+                <Body1 class="hint">
+                    {move || match step.get() {
+                        0 => "Step 1 of 3 — Protocol & name",
+                        1 => "Step 2 of 3 — Configuration",
+                        2 => "Step 3 of 3 — Review & create",
+                        _ => "Done — configuration summary",
+                    }}
+                </Body1>
+            </div>
 
-                    // ---- Step 0: protocol + display name ----
-                    <Show when=move || step.get() == 0 fallback=|| ()>
-                        <Field label="Single sign-on protocol">
-                            <Select value=protocol>
-                                <option value="saml">"SAML"</option>
-                                <option value="oidc">"OpenID Connect (OIDC)"</option>
-                            </Select>
-                        </Field>
-                        <Field label="Display name">
-                            <Input value=display_name />
-                        </Field>
-                    </Show>
+            // ---- Step 0: protocol + display name ----
+            <Show when=move || step.get() == 0 fallback=|| ()>
+                <Field label="Single sign-on protocol">
+                    <Select value=protocol>
+                        <option value="saml">"SAML"</option>
+                        <option value="oidc">"OpenID Connect (OIDC)"</option>
+                    </Select>
+                </Field>
+                <Field label="Display name">
+                    <Input value=display_name />
+                </Field>
+            </Show>
 
-                    // ---- Step 1: protocol-specific config ----
-                    <Show when=move || step.get() == 1 && protocol.get() == "saml" fallback=|| ()>
-                        <Field label="Identifier (Entity ID)">
-                            <Input value=entity_id />
-                        </Field>
-                        <Field label="Reply URL (Assertion Consumer Service URL)">
-                            <Input value=reply_url />
-                        </Field>
-                        <Field label="Logout URL (optional)">
-                            <Input value=logout_url />
-                        </Field>
-                        <Field label="Signing certificate subject (optional)">
-                            <Input value=cert_subject />
-                        </Field>
-                        <Field label="Certificate lifetime (days)">
-                            <Input value=cert_days />
-                            {move || {
-                                let hint = lifetime_problem(
-                                    &cert_days.get(),
-                                    CERT_MAX_DAYS,
-                                    CERT_DEFAULT_DAYS,
-                                )
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "1-{CERT_MAX_DAYS} days; blank = the \
-                                         {CERT_DEFAULT_DAYS}-day default."
-                                    )
-                                });
-                                view! { <Body1 class="hint">{hint}</Body1> }
-                            }}
-                        </Field>
-                        <Field label="Notification emails (one per line, max 5 — optional)">
-                            <Textarea value=notification_emails />
-                        </Field>
-                        <div class="sso-claims">
-                            <span class="sso-field__label">"Attributes & claims (optional)"</span>
-                            <Body1 class="hint">
-                                "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All. Leave empty to use Entra's default claim set."
-                            </Body1>
-                            <ClaimsEditor state=claims_state />
-                        </div>
-                    </Show>
-                    <Show when=move || step.get() == 1 && protocol.get() == "oidc" fallback=|| ()>
-                        <Field label="Redirect URIs (web — one per line)">
-                            <Textarea value=redirect_uris />
-                        </Field>
-                        <Field label="Redirect URIs (single-page app — one per line)">
-                            <Textarea value=spa_uris />
-                        </Field>
-                        <Field label="Client secret name (optional — creates a secret)">
-                            <Input value=secret_name />
-                        </Field>
-                        <Field label="Secret lifetime (days)">
-                            <Input value=secret_days />
-                            {move || {
-                                let hint = lifetime_problem(
-                                    &secret_days.get(),
-                                    SECRET_MAX_DAYS,
-                                    SECRET_DEFAULT_DAYS,
-                                )
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "1-{SECRET_MAX_DAYS} days; blank = the \
-                                         {SECRET_DEFAULT_DAYS}-day default."
-                                    )
-                                });
-                                view! { <Body1 class="hint">{hint}</Body1> }
-                            }}
-                        </Field>
-                    </Show>
+            // ---- Step 1: protocol-specific config ----
+            <Show when=move || step.get() == 1 && protocol.get() == "saml" fallback=|| ()>
+                <Field label="Identifier (Entity ID)">
+                    <Input value=entity_id />
+                </Field>
+                <Field label="Reply URL (Assertion Consumer Service URL)">
+                    <Input value=reply_url />
+                </Field>
+                <Field label="Logout URL (optional)">
+                    <Input value=logout_url />
+                </Field>
+                <Field label="Signing certificate subject (optional)">
+                    <Input value=cert_subject />
+                </Field>
+                <Field label="Certificate lifetime (days)">
+                    <Input value=cert_days />
+                    {move || {
+                        let hint = lifetime_problem(
+                            &cert_days.get(),
+                            CERT_MAX_DAYS,
+                            CERT_DEFAULT_DAYS,
+                        )
+                        .unwrap_or_else(|| {
+                            format!(
+                                "1-{CERT_MAX_DAYS} days; blank = the \
+                                 {CERT_DEFAULT_DAYS}-day default."
+                            )
+                        });
+                        view! { <Body1 class="hint">{hint}</Body1> }
+                    }}
+                </Field>
+                <Field label="Notification emails (one per line, max 5 — optional)">
+                    <Textarea value=notification_emails />
+                </Field>
+                <div class="sso-claims">
+                    <span class="sso-field__label">"Attributes & claims (optional)"</span>
+                    <Body1 class="hint">
+                        "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All. Leave empty to use Entra's default claim set."
+                    </Body1>
+                    <ClaimsEditor state=claims_state />
+                </div>
+            </Show>
+            <Show when=move || step.get() == 1 && protocol.get() == "oidc" fallback=|| ()>
+                <Field label="Redirect URIs (web — one per line)">
+                    <Textarea value=redirect_uris />
+                </Field>
+                <Field label="Redirect URIs (single-page app — one per line)">
+                    <Textarea value=spa_uris />
+                </Field>
+                <Field label="Client secret name (optional — creates a secret)">
+                    <Input value=secret_name />
+                </Field>
+                <Field label="Secret lifetime (days)">
+                    <Input value=secret_days />
+                    {move || {
+                        let hint = lifetime_problem(
+                            &secret_days.get(),
+                            SECRET_MAX_DAYS,
+                            SECRET_DEFAULT_DAYS,
+                        )
+                        .unwrap_or_else(|| {
+                            format!(
+                                "1-{SECRET_MAX_DAYS} days; blank = the \
+                                 {SECRET_DEFAULT_DAYS}-day default."
+                            )
+                        });
+                        view! { <Body1 class="hint">{hint}</Body1> }
+                    }}
+                </Field>
+            </Show>
 
-                    // ---- Step 2: review ----
-                    <Show when=move || step.get() == 2 fallback=|| ()>
-                        <dl class="read-field">
-                            <dt>"Protocol"</dt>
-                            <dd>{move || protocol.get().to_uppercase()}</dd>
-                            <dt>"Display name"</dt>
-                            <dd>{move || display_name.get()}</dd>
-                            {move || {
-                                (protocol.get() == "saml")
-                                    .then(|| {
-                                        view! {
-                                            <>
-                                                <dt>"Entity ID"</dt>
-                                                <dd class="mono">{move || entity_id.get()}</dd>
-                                                <dt>"Reply URL"</dt>
-                                                <dd class="mono">{move || reply_url.get()}</dd>
-                                            </>
-                                        }
-                                    })
-                            }}
-                        </dl>
-                        {move || {
-                            needs_consent
-                                .get()
-                                .then(|| {
-                                    view! {
-                                        <Callout tone="warn">
-                                            "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
-                                            <Button
-                                                appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                                on_click=Box::new(grant_and_retry)
-                                                disabled=Signal::derive(move || busy.get())
-                                            >
-                                                "Grant admin consent & retry"
-                                            </Button>
-                                        </Callout>
-                                    }
-                                })
-                        }}
-                    </Show>
-
-                    // ---- Step 3: output summary ----
-                    <Show when=move || step.get() == 3 fallback=|| ()>
-                        {move || saml_result.get().map(|s| view! { <SamlSummaryView summary=s /> })}
-                        {move || oidc_result.get().map(|s| view! { <OidcSummaryView summary=s /> })}
-                    </Show>
-
-                    {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
-
-                    // ---- Footer actions ----
-                    <div class="actions-row">
-                        <Show when=move || step.get() == 3 fallback=move || {
+            // ---- Step 2: review ----
+            <Show when=move || step.get() == 2 fallback=|| ()>
+                <dl class="read-field">
+                    <dt>"Protocol"</dt>
+                    <dd>{move || protocol.get().to_uppercase()}</dd>
+                    <dt>"Display name"</dt>
+                    <dd>{move || display_name.get()}</dd>
+                    {move || {
+                        (protocol.get() == "saml")
+                            .then(|| {
+                                view! {
+                                    <>
+                                        <dt>"Entity ID"</dt>
+                                        <dd class="mono">{move || entity_id.get()}</dd>
+                                        <dt>"Reply URL"</dt>
+                                        <dd class="mono">{move || reply_url.get()}</dd>
+                                    </>
+                                }
+                            })
+                    }}
+                </dl>
+                {move || {
+                    needs_consent
+                        .get()
+                        .then(|| {
                             view! {
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                    on_click=Box::new(move |_| {
-                                        if step.get() == 0 { close() } else { step.update(|s| *s -= 1) }
-                                    })
-                                    disabled=Signal::derive(move || busy.get())
-                                >
-                                    {move || if step.get() == 0 { "Cancel" } else { "Back" }}
-                                </Button>
-                                <Show when=move || step.get() < 2 fallback=move || {
-                                    view! {
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(move |_| run_create())
-                                            disabled=Signal::derive(move || busy.get())
-                                        >
-                                            {move || {
-                                                if busy.get() {
-                                                    view! {
-                                                        <Spinner size=Signal::derive(|| {
-                                                            SpinnerSize::Tiny
-                                                        }) />
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    view! { "Create" }.into_any()
-                                                }
-                                            }}
-                                        </Button>
-                                    }
-                                }>
+                                <Callout tone="warn">
+                                    "Custom claims need admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All."
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                        on_click=Box::new(move |_| step.update(|s| *s += 1))
-                                        disabled=Signal::derive(move || {
-                                            (step.get() == 0
-                                                && display_name.with(|d| d.trim().is_empty()))
-                                                || (step.get() == 1 && !step1_ready())
-                                        })
+                                        on_click=Box::new(grant_and_retry)
+                                        disabled=Signal::derive(move || busy.get())
                                     >
-                                        "Next"
+                                        "Grant admin consent & retry"
                                     </Button>
-                                </Show>
+                                </Callout>
+                            }
+                        })
+                }}
+            </Show>
+
+            // ---- Step 3: output summary ----
+            <Show when=move || step.get() == 3 fallback=|| ()>
+                {move || saml_result.get().map(|s| view! { <SamlSummaryView summary=s /> })}
+                {move || oidc_result.get().map(|s| view! { <OidcSummaryView summary=s /> })}
+            </Show>
+
+            {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
+
+            // ---- Footer actions ----
+            <div class="actions-row">
+                <Show when=move || step.get() == 3 fallback=move || {
+                    view! {
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            on_click=Box::new(move |_| {
+                                if step.get() == 0 { close() } else { step.update(|s| *s -= 1) }
+                            })
+                            disabled=Signal::derive(move || busy.get())
+                        >
+                            {move || if step.get() == 0 { "Cancel" } else { "Back" }}
+                        </Button>
+                        <Show when=move || step.get() < 2 fallback=move || {
+                            view! {
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(move |_| run_create())
+                                    disabled=Signal::derive(move || busy.get())
+                                >
+                                    {move || {
+                                        if busy.get() {
+                                            view! {
+                                                <Spinner size=Signal::derive(|| {
+                                                    SpinnerSize::Tiny
+                                                }) />
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! { "Create" }.into_any()
+                                        }
+                                    }}
+                                </Button>
                             }
                         }>
                             <Button
-                                class="sso-wizard-open"
                                 appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                on_click=Box::new(open_created)
+                                on_click=Box::new(move |_| step.update(|s| *s += 1))
+                                disabled=Signal::derive(move || {
+                                    (step.get() == 0
+                                        && display_name.with(|d| d.trim().is_empty()))
+                                        || (step.get() == 1 && !step1_ready())
+                                })
                             >
-                                "Open application"
-                            </Button>
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(move |_| close())
-                            >
-                                "Done"
+                                "Next"
                             </Button>
                         </Show>
-                    </div>
-                </div>
+                    }
+                }>
+                    <Button
+                        class="sso-wizard-open"
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        on_click=Box::new(open_created)
+                    >
+                        "Open application"
+                    </Button>
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        on_click=Box::new(move |_| close())
+                    >
+                        "Done"
+                    </Button>
+                </Show>
             </div>
-        </Show>
+        </ModalShell>
     }
 }
 

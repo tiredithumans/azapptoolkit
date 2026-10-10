@@ -12,9 +12,8 @@ use azapptoolkit_core::audit::RemediationAction;
 use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::MailboxGroupsField;
+use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{Callout, FormError};
-use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 
@@ -190,13 +189,6 @@ pub fn ScopeMailboxButton(
         });
     });
 
-    use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
-        move || open.set(false),
-    );
-    let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open.into());
-
     let label = action.label.clone();
     let detail = action.detail.clone();
     view! {
@@ -211,89 +203,84 @@ pub fn ScopeMailboxButton(
                 {label}
             </Button>
             <div class="audit-actions__preview">{detail}</div>
-            <Show when=move || open.get() fallback=|| view! { <></> }>
-                <div
-                    class="modal-backdrop"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="scope-mailbox-dialog-title"
-                >
-                    <div class="modal" node_ref=modal_ref>
-                        <h3 id="scope-mailbox-dialog-title">"Scope mailbox access"</h3>
-                        <Body1>
-                            "Confine these permissions to members of specific mail-enabled groups via Exchange RBAC for Applications. The app keeps access only to those mailboxes; its org-wide grant is removed once the scoped roles are in place. You must be an Exchange administrator."
-                        </Body1>
-                        <p class="muted">{action.detail.clone()}</p>
-                        <MailboxGroupsField value=groups_text />
-                        {move || {
-                            warned
-                                .get()
-                                .map(|r| {
-                                    let summary = format!(
-                                        "Scope “{}”: removed {}, but some of what you asked for may not have been applied — read the notes below.",
-                                        r.scope_name,
-                                        count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
-                                    );
-                                    view! {
-                                        <Callout tone="warn" role="status">
-                                            <Body1>{summary}</Body1>
-                                            <ul class="warnings">
-                                                {r
-                                                    .warnings
-                                                    .into_iter()
-                                                    .map(|w| view! { <li>{w}</li> })
-                                                    .collect_view()}
-                                            </ul>
-                                        </Callout>
-                                    }
-                                })
-                        }}
-                        {move || {
-                            error.get().map(|e| view! { <FormError>{e}</FormError> })
-                        }}
-                        <div class="actions-row">
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(move |_| open.set(false))
-                                disabled=Signal::derive(move || busy.get())
-                            >
-                                "Cancel"
-                            </Button>
-                            <Show
-                                when=move || needs_consent.get()
-                                fallback=move || {
-                                    view! {
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(move |_| confirm.run(()))
-                                            disabled=Signal::derive(move || busy.get())
-                                        >
-                                            {move || {
-                                                if busy.get() {
-                                                    view! {
-                                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    view! { "Scope access" }.into_any()
-                                                }
-                                            }}
-                                        </Button>
-                                    }
-                                }
-                            >
+            <ModalShell
+                open=open
+                title="Scope mailbox access"
+                busy=busy
+                on_close=Callback::new(move |()| open.set(false))
+            >
+                <Body1>
+                    "Confine these permissions to members of specific mail-enabled groups via Exchange RBAC for Applications. The app keeps access only to those mailboxes; its org-wide grant is removed once the scoped roles are in place. You must be an Exchange administrator."
+                </Body1>
+                <p class="muted">{action.detail.clone()}</p>
+                <MailboxGroupsField value=groups_text />
+                {move || {
+                    warned
+                        .get()
+                        .map(|r| {
+                            let summary = format!(
+                                "Scope “{}”: removed {}, but some of what you asked for may not have been applied — read the notes below.",
+                                r.scope_name,
+                                count_noun(r.removed_entra_grants.len(), "org-wide grant", "org-wide grants"),
+                            );
+                            view! {
+                                <Callout tone="warn" role="status">
+                                    <Body1>{summary}</Body1>
+                                    <ul class="warnings">
+                                        {r
+                                            .warnings
+                                            .into_iter()
+                                            .map(|w| view! { <li>{w}</li> })
+                                            .collect_view()}
+                                    </ul>
+                                </Callout>
+                            }
+                        })
+                }}
+                {move || {
+                    error.get().map(|e| view! { <FormError>{e}</FormError> })
+                }}
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        on_click=Box::new(move |_| open.set(false))
+                        disabled=Signal::derive(move || busy.get())
+                    >
+                        "Cancel"
+                    </Button>
+                    <Show
+                        when=move || needs_consent.get()
+                        fallback=move || {
+                            view! {
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| grant_consent.run(()))
+                                    on_click=Box::new(move |_| confirm.run(()))
                                     disabled=Signal::derive(move || busy.get())
                                 >
-                                    "Grant consent"
+                                    {move || {
+                                        if busy.get() {
+                                            view! {
+                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! { "Scope access" }.into_any()
+                                        }
+                                    }}
                                 </Button>
-                            </Show>
-                        </div>
-                    </div>
+                            }
+                        }
+                    >
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(move |_| grant_consent.run(()))
+                            disabled=Signal::derive(move || busy.get())
+                        >
+                            "Grant consent"
+                        </Button>
+                    </Show>
                 </div>
-            </Show>
+            </ModalShell>
         </div>
     }
     .into_any()
@@ -423,13 +410,6 @@ pub fn ScopeSharePointButton(
         });
     });
 
-    use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
-        move || open.set(false),
-    );
-    let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open.into());
-
     let label = action.label.clone();
     let detail = action.detail.clone();
     view! {
@@ -441,83 +421,76 @@ pub fn ScopeSharePointButton(
                 {label}
             </Button>
             <div class="audit-actions__preview">{detail}</div>
-            <Show when=move || open.get() fallback=|| view! { <></> }>
-                <div
-                    class="modal-backdrop"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="scope-sharepoint-dialog-title"
-                >
-                    <div class="modal" node_ref=modal_ref>
-                        <h3 id="scope-sharepoint-dialog-title">
-                            "Restrict SharePoint access to selected sites"
-                        </h3>
-                        <Body1>
-                            "Convert this app's org-wide SharePoint access to the Sites.Selected model — access only to the sites you list below. The org-wide grant is removed once at least one site grant lands. You must be a SharePoint administrator or site owner."
-                        </Body1>
-                        <p class="muted">{action.detail.clone()}</p>
-                        <Textarea
-                            value=sites_text
-                            placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
-                        />
-                        {move || {
-                            error.get().map(|e| view! { <FormError>{e}</FormError> })
-                        }}
-                        <div class="actions-row">
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(move |_| open.set(false))
-                                disabled=Signal::derive(move || busy.get())
-                            >
-                                "Cancel"
-                            </Button>
-                            <Show
-                                when=move || needs_consent.get()
-                                fallback=move || {
-                                    // Read is the Primary (and, by this row's
-                                    // convention, last) button: this is a
-                                    // least-privilege remediation, so the
-                                    // emphasized default must not be the
-                                    // broader role. An operator working down a
-                                    // findings list at speed clicks the primary
-                                    // — which used to hand out write. The two
-                                    // equivalent paths already default to read
-                                    // (the wizard's `SiteSelectionPanel` starts
-                                    // `write=false`; the bulk bar's checkbox is
-                                    // labelled "default: read"; the SharePoint
-                                    // site access section's "Grant read" is its
-                                    // Primary), so this also stops the four
-                                    // surfaces disagreeing.
-                                    view! {
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                            on_click=Box::new(move |_| do_scope.run(true))
-                                            disabled=Signal::derive(move || busy.get())
-                                        >
-                                            "Grant write access"
-                                        </Button>
-                                        <Button
-                                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                            on_click=Box::new(move |_| do_scope.run(false))
-                                            disabled=Signal::derive(move || busy.get())
-                                        >
-                                            "Grant read access"
-                                        </Button>
-                                    }
-                                }
-                            >
+            <ModalShell
+                open=open
+                title="Restrict SharePoint access to selected sites"
+                busy=busy
+                on_close=Callback::new(move |()| open.set(false))
+            >
+                <Body1>
+                    "Convert this app's org-wide SharePoint access to the Sites.Selected model — access only to the sites you list below. The org-wide grant is removed once at least one site grant lands. You must be a SharePoint administrator or site owner."
+                </Body1>
+                <p class="muted">{action.detail.clone()}</p>
+                <Textarea
+                    value=sites_text
+                    placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
+                />
+                {move || {
+                    error.get().map(|e| view! { <FormError>{e}</FormError> })
+                }}
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        on_click=Box::new(move |_| open.set(false))
+                        disabled=Signal::derive(move || busy.get())
+                    >
+                        "Cancel"
+                    </Button>
+                    <Show
+                        when=move || needs_consent.get()
+                        fallback=move || {
+                            // Read is the Primary (and, by this row's
+                            // convention, last) button: this is a
+                            // least-privilege remediation, so the
+                            // emphasized default must not be the
+                            // broader role. An operator working down a
+                            // findings list at speed clicks the primary
+                            // — which used to hand out write. The two
+                            // equivalent paths already default to read
+                            // (the wizard's `SiteSelectionPanel` starts
+                            // `write=false`; the bulk bar's checkbox is
+                            // labelled "default: read"; the SharePoint
+                            // site access section's "Grant read" is its
+                            // Primary), so this also stops the four
+                            // surfaces disagreeing.
+                            view! {
                                 <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                    on_click=Box::new(move |_| grant_consent.run(()))
+                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                    on_click=Box::new(move |_| do_scope.run(true))
                                     disabled=Signal::derive(move || busy.get())
                                 >
-                                    "Grant consent"
+                                    "Grant write access"
                                 </Button>
-                            </Show>
-                        </div>
-                    </div>
+                                <Button
+                                    appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                    on_click=Box::new(move |_| do_scope.run(false))
+                                    disabled=Signal::derive(move || busy.get())
+                                >
+                                    "Grant read access"
+                                </Button>
+                            }
+                        }
+                    >
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(move |_| grant_consent.run(()))
+                            disabled=Signal::derive(move || busy.get())
+                        >
+                            "Grant consent"
+                        </Button>
+                    </Show>
                 </div>
-            </Show>
+            </ModalShell>
         </div>
     }
     .into_any()
