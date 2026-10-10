@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.33.3] - 2026-10-10
+
 ### Fixed
 
 - **End now reaches the last row of an App Registrations, Enterprise Applications or Managed
