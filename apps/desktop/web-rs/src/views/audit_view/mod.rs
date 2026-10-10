@@ -41,6 +41,12 @@ use filter::filter_indices;
 use row::AuditRowActions;
 use sort::SortCol;
 
+/// The All-apps pane's bulk set: the management actions only. Finding-paired
+/// fixes live on the Findings pane's per-group bars (`groups::group_bulk_actions`),
+/// and bulk admin consent is on no audit surface (pinned beside that catalog).
+pub(super) const ALL_APPS_BULK_ACTIONS: [BulkAction; 2] =
+    [BulkAction::RemoveExpired, BulkAction::Delete];
+
 /// The ranked per-app audit table. Reads the shared scan from the
 /// `AuditController` context; its one filter dimension is the severity
 /// TabBar (`Session.tenant_ui.audit_severity`, so Home's Critical/High/Medium drills
@@ -241,10 +247,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                         <BulkActionBar
                             names=names
                             selection=selection
-                            actions=Signal::derive(|| vec![
-                                BulkAction::RemoveExpired,
-                                BulkAction::Delete,
-                            ])
+                            actions=Signal::derive(|| ALL_APPS_BULK_ACTIONS.to_vec())
                             on_done=ctrl.on_bulk_done
                         />
                         // Tri-state select-all + result count. `visible_ids` is the
@@ -456,7 +459,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                     // application and offers every Fix it carries
                                                     // (the Findings pane scopes each section to its
                                                     // own rule instead).
-                                                    <AuditRowActions item=i.clone() on_done=ctrl.on_remediated />
+                                                    <AuditRowActions item=i.clone() />
                                                 </td>
                                             </tr>
                                         }

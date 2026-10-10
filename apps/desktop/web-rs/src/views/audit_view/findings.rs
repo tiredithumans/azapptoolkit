@@ -88,18 +88,24 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                 // means "nothing found YET". Qualify rather than
                                 // suppress: the pane must not go silently blank.
                                 //
-                                // TWO ways to be partial, with different remedies:
-                                // cancelled (re-run as-is) and truncated (the tenant
+                                // THREE ways to be partial, with different remedies:
+                                // cancelled (re-run as-is), truncated (the tenant
                                 // holds more apps than one run scores, so re-running
-                                // changes nothing).
-                                let (cancelled, truncated) = ctrl
-                                    .result
-                                    .with(|r| {
-                                        r.as_ref()
-                                            .map(|r| (r.cancelled, r.truncated))
-                                            .unwrap_or((false, false))
-                                    });
-                                if truncated {
+                                // changes nothing) and degraded (a tenant-wide read
+                                // failed, so whole categories of finding may be
+                                // missing). `coverage()` is the backend's own cache
+                                // guard, so "complete" here means what it means there.
+                                let coverage = ctrl.result.with(|r| {
+                                    r.as_ref().map(|r| r.coverage()).unwrap_or_default()
+                                });
+                                let (cancelled, truncated) = (coverage.cancelled, coverage.truncated);
+                                if coverage.is_complete() {
+                                    view! {
+                                        <Callout tone="ok">
+                                            "No actionable findings — nothing to fix right now."
+                                        </Callout>
+                                    }
+                                } else if truncated {
                                     view! {
                                         <Callout tone="warn">
                                             "No actionable findings among the applications this scan reached — but the tenant holds more app registrations than one run scores, so this is not an all-clear and re-running will not extend it."
@@ -112,9 +118,11 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                         </Callout>
                                     }
                                 } else {
+                                    // Degraded: the strip above lists what could
+                                    // not run; this must not contradict it.
                                     view! {
-                                        <Callout tone="ok">
-                                            "No actionable findings — nothing to fix right now."
+                                        <Callout tone="warn">
+                                            "No actionable findings among the checks that ran — but part of this scan could not run (see the notice above), so this is not an all-clear. Re-run once the cause is fixed."
                                         </Callout>
                                     }
                                 }
@@ -512,11 +520,7 @@ fn finding_group_view(
                                             {shows_last_sign_in
                                                 .then(|| view! { <td>{last_sign_in_cell(&i)}</td> })}
                                             <td>
-                                                <AuditRowActions
-                                                    item=i.clone()
-                                                    section=spec
-                                                    on_done=ctrl.on_remediated
-                                                />
+                                                <AuditRowActions item=i.clone() section=spec />
                                             </td>
                                         </tr>
                                     }

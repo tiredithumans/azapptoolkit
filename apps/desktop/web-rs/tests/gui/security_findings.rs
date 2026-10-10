@@ -347,6 +347,28 @@ async fn truncated_run_without_findings_is_not_an_all_clear() {
     assert!(strip_text().contains("arbitrary prefix"));
 }
 
+/// A degraded scan — a tenant-wide read failed, so whole categories of finding
+/// may be missing — has not earned an all-clear either. The pane used to check
+/// only cancelled and truncated and showed the green "nothing to fix" beside
+/// the strip's own warning.
+#[wasm_bindgen_test]
+async fn degraded_run_without_findings_is_not_an_all_clear() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            degraded: vec![AuditCoverageGap::PerPrincipalScoring],
+            items: vec![fixtures::audit_item("Clean App", RiskLevel::Low, &[])],
+            total_apps: 1,
+            ..cached_run()
+        },
+    );
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("No actionable findings among the checks that ran")).await;
+    assert!(!ts::body_contains("nothing to fix right now"));
+    assert!(strip_text().contains("could not run"));
+}
+
 /// Org-wide reach the toolkit can't confine is scored, so it must be visible
 /// on the findings-first pane: two advisory groups (the legacy-resource advice
 /// differs from the rest), no bulk Fix, and never folded into the fixable

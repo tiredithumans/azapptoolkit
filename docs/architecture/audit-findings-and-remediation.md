@@ -556,7 +556,10 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
   Redundant → RemoveRedundant, Ownership → AddOwner, Unused → DisableSignIn + Delete. Advisory
   groups (`high_risk_perms`, `high_risk_delegated`, `external_exposure`, `no_local_app`,
   `unscopable_legacy_mailbox`, `unconfinable_orgwide`) get none — the old Over-privileged → RemoveRedundant cross-rule mapping is retired; do
-  not reintroduce it. **No Grant consent on audit surfaces.** "Fix all N" only seeds
+  not reintroduce it. **No bulk admin consent (`BulkAction::Grant`) on audit surfaces** — the
+  operator's own AuditLog.Read.All consent on the strip is a different thing; pinned by
+  `groups.rs::no_audit_surface_offers_bulk_admin_consent` over the group catalog and the All-apps
+  set. "Fix all N" only seeds
   `selected_audit_ids` with the group's *eligible* (Application-kind) ids — the
   `BulkActionBar`'s typed-confirm / target forms still gate execution.
 

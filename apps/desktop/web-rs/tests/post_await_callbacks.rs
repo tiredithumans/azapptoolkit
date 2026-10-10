@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 const NOT_CALLBACKS: &[(&str, &str, &str)] = &[(
     "views/audit_view/controller.rs",
     "self",
-    "AuditController::run, a method on a Copy handle of session-owned signals",
+    "AuditController::run, a method on a Copy handle whose signals SecurityView owns; its one \
+     post-await call (grant_reports_consent) is gated on is_disposed and is_active_tenant",
 )];
 
 /// Drops whole-line `//` comments and cuts a trailing ` //` comment, keeping

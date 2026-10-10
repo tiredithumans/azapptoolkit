@@ -6,7 +6,7 @@
 //! pane), the App Registrations list, and the Bulk Actions page all mount this
 //! same component. The offered actions are configurable (the `actions` signal)
 //! so each host shows the right set — a Findings group offers exactly the fix
-//! paired with its rule (no Grant consent on audit surfaces), while the App
+//! paired with its rule (no bulk admin consent on audit surfaces), while the App
 //! Registrations list / Bulk Actions page show the management set.
 //!
 //! Each action arms an inline panel before running. The panel opens by naming

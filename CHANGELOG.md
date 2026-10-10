@@ -27,6 +27,18 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 - **A bulk delete or consent grant whose task ended without reporting now lists that app as
   "ended without reporting an outcome"** instead of counting it among the apps never attempted,
   since its write may have landed.
+- **A security scan with nothing actionable no longer shows a green all-clear when part of the
+  scan could not run.** The Findings pane now says so, as the notice above it already did.
+- **A session that expires during a security scan, during the sign-in-activity consent, or during
+  a row's Remove expired credentials, Remove redundant permissions or Disable sign-in Fix now
+  offers Re-authenticate** instead of only an inline error.
+- **Signing out while the sign-in-activity consent prompt is still open no longer crashes the
+  window** when the scan would have re-run afterwards.
+- **A one-click Fix no longer drops keyboard focus to the page when it lands**: focus returns to
+  the row's actions.
+- **A Fix whose row was rebuilt while it ran** (a scan finishing meanwhile) **still clears its Fix
+  button** instead of offering the fix again.
+- **A cached scan that loads slowly no longer replaces a scan you ran in the meantime.**
 
 ## [0.33.2] - 2026-10-09
 

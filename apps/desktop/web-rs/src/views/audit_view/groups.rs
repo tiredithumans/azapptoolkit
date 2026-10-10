@@ -863,4 +863,20 @@ mod tests {
         // key here must fall through to NO fixes, never to every fix.
         assert!(group_remediation_kinds("not-a-group").is_empty());
     }
+
+    /// "No bulk admin consent on audit surfaces": consent is a Permissions-tab
+    /// action, and offering it beside a finding invites granting the very
+    /// permission the finding is about. (The operator's own AuditLog.Read.All
+    /// consent on the posture strip is a different thing.)
+    #[test]
+    fn no_audit_surface_offers_bulk_admin_consent() {
+        for spec in GROUP_CATALOG.iter() {
+            assert!(
+                !group_bulk_actions(spec.key).contains(&BulkAction::Grant),
+                "{}",
+                spec.key
+            );
+        }
+        assert!(!super::super::ALL_APPS_BULK_ACTIONS.contains(&BulkAction::Grant));
+    }
 }
