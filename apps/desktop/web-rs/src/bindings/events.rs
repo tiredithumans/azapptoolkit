@@ -2,6 +2,7 @@
 //! helper returns a `futures::Stream` of payload values; the stream
 //! auto-cleans its underlying listener when dropped.
 
+use azapptoolkit_dto::events as names;
 use futures::{Stream, StreamExt};
 use tauri_sys::event::{Event, listen};
 
@@ -16,14 +17,14 @@ use super::updater::UpdateProgress;
 /// surrounding `Event` envelope is unwrapped internally since callers don't
 /// care about the listener id or event name).
 pub async fn audit_progress() -> Result<impl Stream<Item = AuditProgress>, JsErrString> {
-    let stream = listen::<AuditProgress>("audit-progress")
+    let stream = listen::<AuditProgress>(names::AUDIT_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<AuditProgress>| ev.payload))
 }
 
 pub async fn bulk_progress() -> Result<impl Stream<Item = BulkProgress>, JsErrString> {
-    let stream = listen::<BulkProgress>("bulk-progress")
+    let stream = listen::<BulkProgress>(names::BULK_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<BulkProgress>| ev.payload))
@@ -33,7 +34,7 @@ pub async fn bulk_progress() -> Result<impl Stream<Item = BulkProgress>, JsErrSt
 /// [`BulkProgress`] shape but on its own channel, so a backup's progress can't
 /// be confused with a concurrent bulk run's.
 pub async fn backup_progress() -> Result<impl Stream<Item = BulkProgress>, JsErrString> {
-    let stream = listen::<BulkProgress>("backup-progress")
+    let stream = listen::<BulkProgress>(names::BACKUP_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<BulkProgress>| ev.payload))
@@ -42,14 +43,14 @@ pub async fn backup_progress() -> Result<impl Stream<Item = BulkProgress>, JsErr
 /// Subscribes to `restore-progress` (the DR restore fan-out, [`BulkProgress`]
 /// shape on its own channel).
 pub async fn restore_progress() -> Result<impl Stream<Item = BulkProgress>, JsErrString> {
-    let stream = listen::<BulkProgress>("restore-progress")
+    let stream = listen::<BulkProgress>(names::RESTORE_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<BulkProgress>| ev.payload))
 }
 
 pub async fn site_sweep_progress() -> Result<impl Stream<Item = SiteSweepProgress>, JsErrString> {
-    let stream = listen::<SiteSweepProgress>("site-sweep-progress")
+    let stream = listen::<SiteSweepProgress>(names::SITE_SWEEP_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<SiteSweepProgress>| ev.payload))
@@ -57,7 +58,7 @@ pub async fn site_sweep_progress() -> Result<impl Stream<Item = SiteSweepProgres
 
 pub async fn keyvault_sweep_progress()
 -> Result<impl Stream<Item = KeyVaultSweepProgress>, JsErrString> {
-    let stream = listen::<KeyVaultSweepProgress>("keyvault-sweep-progress")
+    let stream = listen::<KeyVaultSweepProgress>(names::KEYVAULT_SWEEP_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<KeyVaultSweepProgress>| ev.payload))
@@ -65,7 +66,7 @@ pub async fn keyvault_sweep_progress()
 
 pub async fn mailbox_probe_progress()
 -> Result<impl Stream<Item = MailboxProbeProgress>, JsErrString> {
-    let stream = listen::<MailboxProbeProgress>("mailbox-probe-progress")
+    let stream = listen::<MailboxProbeProgress>(names::MAILBOX_PROBE_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<MailboxProbeProgress>| ev.payload))
@@ -74,7 +75,7 @@ pub async fn mailbox_probe_progress()
 /// Subscribes to `updater-progress` (download byte progress while an update
 /// installs).
 pub async fn updater_progress() -> Result<impl Stream<Item = UpdateProgress>, JsErrString> {
-    let stream = listen::<UpdateProgress>("updater-progress")
+    let stream = listen::<UpdateProgress>(names::UPDATER_PROGRESS)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<UpdateProgress>| ev.payload))
@@ -86,7 +87,7 @@ pub async fn updater_progress() -> Result<impl Stream<Item = UpdateProgress>, Js
 /// URL is single-use and only redeemable through this process's loopback
 /// listener.
 pub async fn auth_browser_fallback() -> Result<impl Stream<Item = Option<String>>, JsErrString> {
-    let stream = listen::<Option<String>>("auth-browser-fallback")
+    let stream = listen::<Option<String>>(names::AUTH_BROWSER_FALLBACK)
         .await
         .map_err(|e| JsErrString(format!("{e:?}")))?;
     Ok(stream.map(|ev: Event<Option<String>>| ev.payload))

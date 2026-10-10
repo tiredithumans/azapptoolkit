@@ -49,10 +49,12 @@ pub(crate) async fn add_password_core(
     Ok(cred)
 }
 
-/// Maximum client-secret lifetime — the portal's 24-month hard cap. Shared
-/// with the OIDC SSO create path (`sso::resolve_secret_lifetime_days`), so one
-/// concept has one bound.
-pub(crate) const MAX_SECRET_LIFETIME_DAYS: i64 = 730;
+/// Maximum client-secret lifetime — the portal's 24-month hard cap, as the
+/// `i64` the date arithmetic here wants. The number itself lives in the dto
+/// crate beside the frontend's, so one concept has one bound; the OIDC SSO
+/// create path (`sso::resolve_secret_lifetime_days`) shares this.
+pub(crate) const MAX_SECRET_LIFETIME_DAYS: i64 =
+    crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS as i64;
 
 /// Why [`resolve_password_window`] refused a custom secret window. Both causes
 /// cross IPC as the one `invalid_secret_window` code (no consumer branches on
@@ -115,7 +117,9 @@ pub(crate) fn preset_secret_end(
     lifetime_days: Option<u32>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
-    let days = i64::from(lifetime_days.unwrap_or(180)).clamp(1, MAX_SECRET_LIFETIME_DAYS);
+    let days =
+        i64::from(lifetime_days.unwrap_or(crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS))
+            .clamp(1, MAX_SECRET_LIFETIME_DAYS);
     now + chrono::Duration::days(days)
 }
 
@@ -187,7 +191,9 @@ pub async fn generate_self_signed_certificate(
     tenant_id: String,
     input: GenerateCertificateInput,
 ) -> Result<GeneratedCertificateResult, UiError> {
-    let validity = input.validity_days.unwrap_or(365);
+    let validity = input
+        .validity_days
+        .unwrap_or(crate::dto::credentials::DEFAULT_CERT_LIFETIME_DAYS);
     let mut generated = crate::cert::generate_self_signed(&input.subject, i64::from(validity))
         .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
 

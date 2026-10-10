@@ -44,9 +44,9 @@ impl<R: tauri::Runtime> ProgressSink for AppHandle<R> {
 
 /// Emits a progress event to `sink`, logging and continuing on failure.
 ///
-/// `event` is the channel the frontend's `use_progress_stream` subscribes to
-/// (`audit-progress`, `bulk-progress`, …); it is `&'static str` so the name is
-/// always a literal at the call site rather than a computed string.
+/// `event` is the channel the frontend's `use_progress_stream` subscribes to —
+/// always one of the `crate::dto::events` names, never a literal or a computed
+/// string (`repo_invariants/ipc.rs` fails either), hence `&'static str`.
 pub(crate) fn emit_progress<S: ProgressSink, P: Serialize + Clone>(
     sink: &S,
     event: &'static str,

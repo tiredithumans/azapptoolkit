@@ -60,9 +60,11 @@ pub async fn grant_admin_consent(tenant_id: &str, object_id: &str) -> Result<Gra
     .await
 }
 
+/// One permission on one app — what grant, declare and remove-declared all
+/// take.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GrantSinglePermissionArgs<'a> {
+struct PermissionRefArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
     resource_app_id: &'a str,
@@ -79,7 +81,7 @@ pub async fn grant_single_permission(
 ) -> Result<GrantResult, UiError> {
     invoke_result(
         "grant_single_permission",
-        GrantSinglePermissionArgs {
+        PermissionRefArgs {
             tenant_id,
             object_id,
             resource_app_id,
@@ -88,16 +90,6 @@ pub async fn grant_single_permission(
         },
     )
     .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeclareAppPermissionArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-    resource_app_id: &'a str,
-    permission_id: &'a str,
-    kind: PermissionKind,
 }
 
 /// Declares a permission in the app's `requiredResourceAccess` manifest
@@ -114,7 +106,7 @@ pub async fn declare_app_permission(
 ) -> Result<(), UiError> {
     invoke_result(
         "declare_app_permission",
-        DeclareAppPermissionArgs {
+        PermissionRefArgs {
             tenant_id,
             object_id,
             resource_app_id,
@@ -158,16 +150,6 @@ pub async fn downgrade_application_permission(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoveDeclaredPermissionArgs<'a> {
-    tenant_id: &'a str,
-    object_id: &'a str,
-    resource_app_id: &'a str,
-    permission_id: &'a str,
-    kind: PermissionKind,
-}
-
 /// Removes a single declared permission from the app's `requiredResourceAccess`
 /// manifest. Used for not-granted (declared-only) rows, where there is no
 /// runtime grant to revoke.
@@ -180,7 +162,7 @@ pub async fn remove_declared_permission(
 ) -> Result<(), UiError> {
     invoke_result(
         "remove_declared_permission",
-        RemoveDeclaredPermissionArgs {
+        PermissionRefArgs {
             tenant_id,
             object_id,
             resource_app_id,

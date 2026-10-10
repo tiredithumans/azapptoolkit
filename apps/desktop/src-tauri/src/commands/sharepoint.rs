@@ -1047,7 +1047,7 @@ pub async fn sweep_site_permissions(
     }
     emit_progress(
         &app_handle,
-        "site-sweep-progress",
+        crate::dto::events::SITE_SWEEP_PROGRESS,
         SiteSweepProgress {
             done: 0,
             total,
@@ -1139,7 +1139,7 @@ pub async fn sweep_site_permissions(
             done += chunk.len();
             emit_progress(
                 &app_handle,
-                "site-sweep-progress",
+                crate::dto::events::SITE_SWEEP_PROGRESS,
                 SiteSweepProgress {
                     done,
                     total,

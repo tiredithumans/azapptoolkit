@@ -147,7 +147,7 @@ pub async fn sweep_key_vault_access(
     let total = scoped_vaults.len();
     emit_progress(
         &app_handle,
-        "keyvault-sweep-progress",
+        crate::dto::events::KEYVAULT_SWEEP_PROGRESS,
         KeyVaultSweepProgress {
             done: 0,
             total,
@@ -188,7 +188,11 @@ pub async fn sweep_key_vault_access(
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
-                emit_progress(&app_handle, "keyvault-sweep-progress", progress);
+                emit_progress(
+                    &app_handle,
+                    crate::dto::events::KEYVAULT_SWEEP_PROGRESS,
+                    progress,
+                );
                 (vault, result)
             }))
         },

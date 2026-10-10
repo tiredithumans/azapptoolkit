@@ -14,7 +14,7 @@ use crate::bindings::{
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::ui::{BadgeTone, Callout, DetailLoadError, SectionHeader, SkeletonCard};
-use crate::state::{ActiveView, Session, use_session};
+use crate::state::{ActiveView, SecurityTab, Session, use_session};
 use crate::util::{TimeAgo, time_ago};
 use crate::views::audit_view::ranked_actionable_findings;
 
@@ -416,7 +416,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     ButtonAppearance::Secondary
                                                 })
                                                 on_click=Box::new(move |_| {
-                                                    session.open_security("credentials")
+                                                    session.open_security(SecurityTab::Credentials)
                                                 })
                                             >
                                                 "View credentials"
@@ -570,7 +570,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     ButtonAppearance::Secondary
                                                 })
                                                 on_click=Box::new(move |_| {
-                                                    session.open_security("findings")
+                                                    session.open_security(SecurityTab::Findings)
                                                 })
                                             >
                                                 "Open security audit"
@@ -602,7 +602,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                                     // left the operator to find
                                                     // and press "Run audit" again.
                                                     session.tenant_ui.pending_audit_run.set(true);
-                                                    session.open_security("findings");
+                                                    session.open_security(SecurityTab::Findings);
                                                 })
                                             >
                                                 "Run a security audit"

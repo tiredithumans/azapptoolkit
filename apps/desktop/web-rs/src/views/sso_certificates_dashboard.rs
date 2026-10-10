@@ -25,8 +25,7 @@ use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS;
-use crate::util::count_noun;
+use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, credential_status_badge};
 
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {
@@ -190,7 +189,10 @@ fn sso_cert_row(
     selection: RwSignal<std::collections::HashSet<String>>,
     r: SsoCertificateRowDto,
 ) -> impl IntoView {
-    let (status_label, status_tone) = status_badge(r.status, r.days_to_expiry);
+    // "Unknown", never "Active": an expiry we couldn't read is not evidence
+    // of health.
+    let (status_label, status_tone) =
+        credential_status_badge(r.status, r.days_to_expiry, "Unknown");
     // The payload carries RFC3339; the board only ever shows the date.
     let expires = r
         .end_date_time
@@ -289,32 +291,5 @@ fn matches_facet(r: &SsoCertificateRowDto, facet: &str) -> bool {
             !r.has_staged_replacement && matches!(r.days_to_expiry, Some(d) if d <= WARNING_DAYS)
         }
         _ => true,
-    }
-}
-
-/// Maps a signing certificate's status + days-left to a label and badge tone.
-/// Same `BadgeTone`s and thresholds as the credential-expiry board, so the two
-/// read identically at a glance.
-fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, BadgeTone) {
-    match status {
-        CredentialStatus::Expired => ("Expired".to_string(), BadgeTone::Danger),
-        CredentialStatus::ExpiringSoon => {
-            let tone = match days {
-                Some(d) if d <= CRITICAL_DAYS => BadgeTone::Danger,
-                _ => BadgeTone::Warning,
-            };
-            let label = days
-                .map(|d| format!("{d}d left"))
-                .unwrap_or_else(|| "Expiring".to_string());
-            (label, tone)
-        }
-        CredentialStatus::Active => {
-            let label = days
-                .map(|d| format!("{d}d left"))
-                .unwrap_or_else(|| "Active".to_string());
-            (label, BadgeTone::Ok)
-        }
-        // Never "Active": an expiry we couldn't read is not evidence of health.
-        CredentialStatus::Unknown => ("Unknown".to_string(), BadgeTone::Unknown),
     }
 }

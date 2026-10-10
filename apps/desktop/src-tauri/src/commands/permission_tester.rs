@@ -652,7 +652,7 @@ pub async fn find_mailbox_reachers(
     let total = candidates.len();
     emit_progress(
         &app_handle,
-        "mailbox-probe-progress",
+        crate::dto::events::MAILBOX_PROBE_PROGRESS,
         MailboxProbeProgress {
             done: 0,
             total,
@@ -709,7 +709,11 @@ pub async fn find_mailbox_reachers(
                     cancelled: cancel_for_task.is_cancelled(),
                 };
                 drop(guard);
-                emit_progress(&app_handle, "mailbox-probe-progress", progress);
+                emit_progress(
+                    &app_handle,
+                    crate::dto::events::MAILBOX_PROBE_PROGRESS,
+                    progress,
+                );
                 outcome
             }))
         },

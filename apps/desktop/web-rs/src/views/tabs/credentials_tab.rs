@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::{EXPIRY_WARNING_DAYS as WARN_DAYS, credential_over_cap, is_expired};
-use azapptoolkit_dto::credentials::CredentialUsageDto;
+use azapptoolkit_dto::credentials::{
+    CredentialUsageDto, DEFAULT_CERT_LIFETIME_DAYS, DEFAULT_SECRET_LIFETIME_DAYS,
+    MAX_CERT_LIFETIME_DAYS as MAX_CERT_VALIDITY_DAYS, MAX_SECRET_LIFETIME_DAYS,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
 use thaw::{
@@ -159,8 +162,10 @@ fn last_vault_key(tenant_id: &str) -> String {
 }
 
 /// The portal's "Expires" presets for a new client secret: label + lifetime in
-/// days, with "Custom" (start/end pickers) as the escape hatch. 180 days is
-/// the portal's recommended default; 730 (24 months) is the hard cap.
+/// days, with "Custom" (start/end pickers) as the escape hatch. The keys are
+/// the dropdown's values, so they stay literal; the first is the recommended
+/// default and the longest is the hard cap, both pinned to the dto constants
+/// by `presets_map_to_lifetime_days`.
 const EXPIRES_PRESETS: &[(&str, &str)] = &[
     ("180", "Recommended: 180 days (6 months)"),
     ("90", "90 days (3 months)"),
@@ -171,11 +176,6 @@ const EXPIRES_PRESETS: &[(&str, &str)] = &[
 ];
 
 const CUSTOM_PRESET: &str = "custom";
-const MAX_SECRET_LIFETIME_DAYS: u32 = 730;
-/// Longest validity the generate-certificate dialog accepts. Mirrors src-tauri
-/// `cert::MAX_VALIDITY_DAYS`, which rejects anything outside `1..=1095`; checked
-/// here so the operator is told before submitting.
-const MAX_CERT_VALIDITY_DAYS: u32 = 1095;
 
 /// Parses a typed lifetime in whole days, rejecting anything outside
 /// `min..=max` instead of coercing it. The rotate and generate-certificate
@@ -358,8 +358,9 @@ pub fn CredentialsTab(
     let expires_preset = RwSignal::new("180".to_string());
     let today = chrono::Utc::now().date_naive();
     let custom_start: RwSignal<Option<NaiveDate>> = RwSignal::new(Some(today));
-    let custom_end: RwSignal<Option<NaiveDate>> =
-        RwSignal::new(Some(today + chrono::Duration::days(180)));
+    let custom_end: RwSignal<Option<NaiveDate>> = RwSignal::new(Some(
+        today + chrono::Duration::days(i64::from(DEFAULT_SECRET_LIFETIME_DAYS)),
+    ));
     // One inline `error` signal shared by every credential mutation (rendered
     // once below). Each command keeps its own `bool` busy guard, so it gets a
     // dedicated `use_command` handle whose errors route into this shared signal
@@ -421,7 +422,7 @@ pub fn CredentialsTab(
     let rotate_open = RwSignal::new(false);
     let rotate_vault = RwSignal::new(String::new());
     let rotate_secret_name = RwSignal::new(String::new());
-    let rotate_lifetime = RwSignal::new("180".to_string());
+    let rotate_lifetime = RwSignal::new(DEFAULT_SECRET_LIFETIME_DAYS.to_string());
     let cmd_rotate = use_command();
 
     let app_name = Signal::derive(move || detail.with(|d| d.application.display_name.clone()));
@@ -491,7 +492,7 @@ pub fn CredentialsTab(
 
     let gencert_open = RwSignal::new(false);
     let gencert_subject = RwSignal::new(detail.with(|d| d.application.display_name.clone()));
-    let gencert_validity = RwSignal::new("365".to_string());
+    let gencert_validity = RwSignal::new(DEFAULT_CERT_LIFETIME_DAYS.to_string());
     let cmd_gencert = use_command();
     let gencert_result: RwSignal<Option<GeneratedCertificateResult>> = RwSignal::new(None);
     // Reported inside the reveal, not through the shared `error` banner (which
@@ -1638,11 +1639,23 @@ mod tests {
 
     #[test]
     fn presets_map_to_lifetime_days() {
+        let mut numeric = Vec::new();
         for (preset, _) in EXPIRES_PRESETS.iter().filter(|(p, _)| *p != CUSTOM_PRESET) {
             let (days, start, end) = resolve_expiry_fields(preset, None, None, d(TODAY)).unwrap();
             assert_eq!(days, Some(preset.parse::<u32>().unwrap()));
             assert!(start.is_none() && end.is_none());
+            numeric.push(preset.parse::<u32>().unwrap());
         }
+        // The two presets that carry policy restate the dto constants.
+        assert_eq!(
+            numeric[0], DEFAULT_SECRET_LIFETIME_DAYS,
+            "the first preset is the recommended default"
+        );
+        assert_eq!(
+            numeric.iter().copied().max(),
+            Some(MAX_SECRET_LIFETIME_DAYS),
+            "the longest preset is the cap"
+        );
     }
 
     #[test]

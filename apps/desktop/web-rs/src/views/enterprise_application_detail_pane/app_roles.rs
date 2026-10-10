@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
 
 use crate::bindings::enterprise_application::{
-    self, AppRoleInput, AppRolesView, EnterpriseApplicationDetail,
+    self, AppRoleInput, AppRoleTargetKind, AppRolesView, EnterpriseApplicationDetail,
 };
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
@@ -68,7 +68,7 @@ pub(super) fn AppRolesContent(
                     enterprise_application::list_enterprise_app_roles(&t.tenant_id, &sp, &app).await
                 }
                 None => Ok(AppRolesView {
-                    target_kind: "servicePrincipal".into(),
+                    target_kind: AppRoleTargetKind::ServicePrincipal,
                     roles: Vec::new(),
                 }),
             }
@@ -237,7 +237,7 @@ pub(super) fn AppRolesContent(
                                 .get()
                                 .and_then(|r| r.ok())
                                 .map(|v| {
-                                    if v.target_kind == "application" {
+                                    if v.target_kind == AppRoleTargetKind::Application {
                                         "Roles are defined on the linked app registration and apply to this enterprise application."
                                     } else {
                                         "Roles this app exposes for users and apps to be assigned to."

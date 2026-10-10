@@ -4,6 +4,8 @@
 
 use super::*;
 
+use crate::dto::exchange::AapItemStatus;
+
 // ---------------- Migrate legacy Application Access Policies ----------------
 
 /// Migrates legacy Application Access Policies to RBAC for Applications,
@@ -392,7 +394,7 @@ pub(super) async fn migrate_one(
                 removed_entra_grants: Vec::new(),
                 removed_policies: Vec::new(),
                 retired_groups: Vec::new(),
-                status: "partial".into(),
+                status: AapItemStatus::Partial,
                 warnings,
             },
             stopped: true,
@@ -486,7 +488,7 @@ pub(super) async fn migrate_one(
                 removed_policies: if removable { identities } else { Vec::new() },
                 // A plan repoints nothing, so no group is retired yet.
                 retired_groups: Vec::new(),
-                status: "planned".into(),
+                status: AapItemStatus::Planned,
                 warnings,
             },
         });
@@ -528,7 +530,7 @@ pub(super) async fn migrate_one(
     // 5. remove the legacy policies — ONLY once nothing they were constraining is
     //    still granted org-wide (see `policies_safe_to_remove`).
     let mut removed_policies = Vec::new();
-    let mut status = "migrated";
+    let mut status = AapItemStatus::Migrated;
     if policies_safe_to_remove(
         targets.len(),
         removed_entra_grants.len(),
@@ -539,7 +541,7 @@ pub(super) async fn migrate_one(
                 Ok(()) => removed_policies.push(identity.clone()),
                 Err(err) => {
                     warnings.push(format!("failed to remove legacy policy {identity}: {err}"));
-                    status = "partial";
+                    status = AapItemStatus::Partial;
                 }
             }
         }
@@ -564,7 +566,7 @@ pub(super) async fn migrate_one(
                 it_or_them(kept.len())
             ));
         }
-        status = "partial";
+        status = AapItemStatus::Partial;
     }
 
     // 6. Name the legacy group(s) the new scope no longer points at, so "the
@@ -606,7 +608,7 @@ pub(super) async fn migrate_one(
             removed_entra_grants,
             removed_policies,
             retired_groups,
-            status: status.into(),
+            status,
             warnings,
         },
     })

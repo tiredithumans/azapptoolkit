@@ -86,7 +86,7 @@ pub async fn run_audit(
     // render this as a phase label rather than a "0 / 0" fraction.
     emit_progress(
         &app_handle,
-        "audit-progress",
+        crate::dto::events::AUDIT_PROGRESS,
         AuditProgress {
             done: 0,
             total: 0,
@@ -257,7 +257,7 @@ pub async fn run_audit(
 
     emit_progress(
         &app_handle,
-        "audit-progress",
+        crate::dto::events::AUDIT_PROGRESS,
         AuditProgress {
             done: 0,
             total,
@@ -331,7 +331,7 @@ pub async fn run_audit(
                     in_flight_cap,
                     cancelled: cancel_for_task.is_cancelled(),
                 };
-                emit_progress(&app_handle, "audit-progress", progress);
+                emit_progress(&app_handle, crate::dto::events::AUDIT_PROGRESS, progress);
                 result
             }))
         },
@@ -399,7 +399,7 @@ pub async fn run_audit(
             let item = score_sp_only(&sp, &ctx, &delegated_scopes_by_client, now);
             emit_progress(
                 &app_handle,
-                "audit-progress",
+                crate::dto::events::AUDIT_PROGRESS,
                 AuditProgress {
                     done: done_count,
                     total,

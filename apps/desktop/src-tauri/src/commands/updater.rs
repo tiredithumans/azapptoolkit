@@ -133,7 +133,7 @@ pub async fn perform_update(app: AppHandle) -> Result<(), UiError> {
             move |chunk_len, content_len| {
                 downloaded += chunk_len as u64;
                 let _ = app_progress.emit(
-                    "updater-progress",
+                    crate::dto::events::UPDATER_PROGRESS,
                     UpdateProgress {
                         downloaded,
                         total: content_len,

@@ -134,7 +134,7 @@ fn checked_logout_url(url: Option<&str>, warnings: &mut Vec<String>) -> Option<S
 /// backup was taken ([`expired_at_backup`]). A secret already expired then
 /// cannot have been in use, and re-issuing it would only widen the restored
 /// app's live credential surface.
-const REGEN_SECRET_DAYS: u32 = 180;
+const REGEN_SECRET_DAYS: u32 = crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS;
 
 /// Whether a backed-up secret had already expired when the backup was taken.
 ///
@@ -2653,7 +2653,7 @@ fn emit(progress: &impl ProgressSink, done: usize, total: usize, current_app: Op
         cancelled: false,
         in_flight_cap: None,
     };
-    emit_progress(progress, "restore-progress", payload);
+    emit_progress(progress, crate::dto::events::RESTORE_PROGRESS, payload);
 }
 
 #[cfg(test)]

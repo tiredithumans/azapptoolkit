@@ -83,7 +83,7 @@ impl std::fmt::Debug for GeneratedCert {
 /// AAD app-credential rotation policies tighten that further. We enforce the
 /// upper bound here so a caller asking for "10 years" is told no rather than
 /// silently issued a 3-year cert.
-pub const MAX_VALIDITY_DAYS: i64 = 1095;
+pub const MAX_VALIDITY_DAYS: i64 = crate::dto::credentials::MAX_CERT_LIFETIME_DAYS as i64;
 
 /// Why [`generate_self_signed`] refused or failed. Every variant crosses IPC as
 /// the one `cert_generation_failed` code (no consumer branches on the cause);

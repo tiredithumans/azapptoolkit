@@ -25,9 +25,9 @@ use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto, TenantCon
 use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
 use azapptoolkit_dto::diagnostics::CacheStatsDto;
 use azapptoolkit_dto::enterprise_application::{
-    AppAssignmentDto, AppRolesView, ApplicationTemplateDto, EnterpriseApplicationDetail,
-    EnterpriseApplicationDto, GalleryAppSummary, GallerySearchResultsDto, GroupMembershipDto,
-    ProvisioningJobDto,
+    AppAssignmentDto, AppRoleTargetKind, AppRolesView, ApplicationTemplateDto,
+    EnterpriseApplicationDetail, EnterpriseApplicationDto, GalleryAppSummary,
+    GallerySearchResultsDto, GroupMembershipDto, ProvisioningJobDto,
 };
 use azapptoolkit_dto::exchange::{ExchangeAccessResult, MailScopeEntry};
 use azapptoolkit_dto::keyvault::{KeyVaultSweepProgress, KvSecretItemDto, KvSecretValueDto};
@@ -2129,7 +2129,7 @@ pub fn exposed_app_role(value: &str, display_name: &str, description: &str) -> A
 
 pub fn app_roles_view(roles: Vec<AppRole>) -> AppRolesView {
     AppRolesView {
-        target_kind: "servicePrincipal".to_string(),
+        target_kind: AppRoleTargetKind::ServicePrincipal,
         roles,
     }
 }

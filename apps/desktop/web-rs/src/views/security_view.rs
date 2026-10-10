@@ -25,7 +25,7 @@ use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
 
 use crate::components::export_menu::ExportMenu;
 use crate::components::ui::{Callout, FormError, SectionHeader, TabBar, TabBarItem};
-use crate::state::use_session;
+use crate::state::{SecurityTab, use_session};
 use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
 use crate::views::audit_view::{AuditAppsPane, AuditController, FindingsPane};
@@ -66,37 +66,36 @@ pub fn SecurityView() -> impl IntoView {
         });
     });
 
+    let tabs: Vec<TabBarItem> = SecurityTab::ALL
+        .iter()
+        .map(|t| TabBarItem {
+            value: t.value(),
+            label: t.label(),
+        })
+        .collect();
+    // One keep-alive pane per tab. The `match` is exhaustive on purpose: a
+    // new `SecurityTab` variant gets its tab from `ALL` and refuses to compile
+    // until it has a pane here too.
+    let panes: Vec<_> = SecurityTab::ALL
+        .iter()
+        .map(|tab| {
+            let tab = *tab;
+            keep_alive(sub, visited, tab.value(), move || match tab {
+                SecurityTab::Findings => view! { <FindingsPane /> }.into_any(),
+                SecurityTab::Apps => view! { <AuditAppsPane /> }.into_any(),
+                SecurityTab::Credentials => view! { <CredentialsDashboard /> }.into_any(),
+                SecurityTab::SsoCertificates => view! { <SsoCertificatesDashboard /> }.into_any(),
+                SecurityTab::Grants => view! { <ConsentGrantsView /> }.into_any(),
+                SecurityTab::AppPermissions => view! { <AppPermissionGrantsView /> }.into_any(),
+            })
+        })
+        .collect();
+
     view! {
         <div class="security-view">
             <PostureStrip />
-            <TabBar
-                label="Security sections"
-                selected=sub
-                items=vec![
-                    TabBarItem { value: "findings", label: "Findings" },
-                    TabBarItem { value: "apps", label: "All apps" },
-                    TabBarItem { value: "credentials", label: "Credential expiry" },
-                    TabBarItem { value: "sso-certificates", label: "SSO certificates" },
-                    TabBarItem { value: "grants", label: "Delegated grants" },
-                    TabBarItem { value: "app-permissions", label: "Application permissions" },
-                ]
-            />
-            {keep_alive(sub, visited, "findings", || view! { <FindingsPane /> })}
-            {keep_alive(sub, visited, "apps", || view! { <AuditAppsPane /> })}
-            {keep_alive(sub, visited, "credentials", || view! { <CredentialsDashboard /> })}
-            {keep_alive(
-                sub,
-                visited,
-                "sso-certificates",
-                || view! { <SsoCertificatesDashboard /> },
-            )}
-            {keep_alive(sub, visited, "grants", || view! { <ConsentGrantsView /> })}
-            {keep_alive(
-                sub,
-                visited,
-                "app-permissions",
-                || view! { <AppPermissionGrantsView /> },
-            )}
+            <TabBar label="Security sections" selected=sub items=tabs />
+            {panes}
         </div>
     }
 }

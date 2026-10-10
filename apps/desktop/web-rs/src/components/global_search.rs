@@ -52,7 +52,7 @@ use crate::components::ui::Callout;
 use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_deferred_blur::use_deferred_blur;
-use crate::state::{ActiveView, OpenItemKind, use_session};
+use crate::state::{ActiveView, OpenItemKind, SecurityTab, use_session};
 
 /// How many "Go to" rows the group renders before the footer takes over.
 ///
@@ -502,7 +502,7 @@ enum Route {
     /// A rail row or account-menu item.
     View(ActiveView),
     /// A Security workbench sub-tab.
-    Security(&'static str),
+    Security(SecurityTab),
     /// The Security workbench's Credential-expiry sub-tab, **unfiltered**. It
     /// is the one sub-tab that carries a facet across visits (Home's Credential
     /// Health metrics set it), and a destination reached by its name promises
@@ -517,10 +517,11 @@ enum Route {
 
 /// One named destination the operator can reach by typing its name.
 struct Destination {
-    /// The destination's on-screen label. Kept in step by hand: there is no
-    /// shared constant to read a rail row's or `TabBarItem`'s label from, and
-    /// drift here costs a missed match, never a wrong jump (the `route` is the
-    /// address). One deliberate departure — "Key Vault (secrets)" — carries a
+    /// The destination's on-screen label. The Security sub-tabs read theirs
+    /// from `SecurityTab::label`; the rest is kept in step by hand, since there
+    /// is no shared constant to read a rail row's label from, and drift here
+    /// costs a missed match, never a wrong jump (the `route` is the address).
+    /// One deliberate departure — "Key Vault (secrets)" — carries a
     /// disambiguating parenthetical the rail row itself has no room for.
     label: &'static str,
     /// The surface that contains it, or `""` for a top-level destination —
@@ -631,18 +632,18 @@ const DESTINATIONS: &[Destination] = &[
     },
     // Security workbench sub-tabs.
     Destination {
-        label: "Findings",
+        label: SecurityTab::Findings.label(),
         context: "Security",
         keywords: "audit issues remediation groups",
         icon: IconName::ShieldAlert,
-        route: Route::Security("findings"),
+        route: Route::Security(SecurityTab::Findings),
     },
     Destination {
-        label: "All apps",
+        label: SecurityTab::Apps.label(),
         context: "Security",
         keywords: "audit scores risk table every application",
         icon: IconName::ShieldCheck,
-        route: Route::Security("apps"),
+        route: Route::Security(SecurityTab::Apps),
     },
     Destination {
         label: "Credential expiry",
@@ -652,25 +653,25 @@ const DESTINATIONS: &[Destination] = &[
         route: Route::Credentials,
     },
     Destination {
-        label: "SSO certificates",
+        label: SecurityTab::SsoCertificates.label(),
         context: "Security",
         keywords: "saml signing certificate rollover",
         icon: IconName::Lock,
-        route: Route::Security("sso-certificates"),
+        route: Route::Security(SecurityTab::SsoCertificates),
     },
     Destination {
-        label: "Delegated grants",
+        label: SecurityTab::Grants.label(),
         context: "Security",
         keywords: "consent oauth2 permission grants on behalf of a user",
         icon: IconName::ShieldCheck,
-        route: Route::Security("grants"),
+        route: Route::Security(SecurityTab::Grants),
     },
     Destination {
-        label: "Application permissions",
+        label: SecurityTab::AppPermissions.label(),
         context: "Security",
         keywords: "app roles app only assignments granted",
         icon: IconName::ShieldCheck,
-        route: Route::Security("app-permissions"),
+        route: Route::Security(SecurityTab::AppPermissions),
     },
     // Resource Access tabs.
     Destination {
@@ -1270,8 +1271,8 @@ mod tests {
         // view's default tab and quietly answer the wrong question.
         for d in DESTINATIONS {
             match d.route {
-                Route::View(_) | Route::Credentials => {}
-                Route::Security(tab) | Route::ResourceAccess(tab) | Route::Settings(tab) => {
+                Route::View(_) | Route::Credentials | Route::Security(_) => {}
+                Route::ResourceAccess(tab) | Route::Settings(tab) => {
                     assert!(!tab.is_empty(), "{} routes to an unnamed tab", d.label);
                 }
             }

@@ -8,6 +8,7 @@
 use futures::StreamExt;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::events as names;
 use azapptoolkit_web_rs::bindings::events;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 
@@ -18,7 +19,7 @@ async fn bulk_progress_stream_delivers_emitted_events() {
         .await
         .expect("subscribe to bulk-progress");
 
-    ts::emit_event("bulk-progress", &fixtures::bulk_progress(3, 10));
+    ts::emit_event(names::BULK_PROGRESS, &fixtures::bulk_progress(3, 10));
 
     let item = stream.next().await.expect("one progress event");
     assert_eq!(item.done, 3);
@@ -36,8 +37,11 @@ async fn an_undecodable_event_is_dropped_and_the_stream_keeps_delivering() {
         .await
         .expect("subscribe to bulk-progress");
 
-    ts::emit_event("bulk-progress", &serde_json::json!({ "unexpected": true }));
-    ts::emit_event("bulk-progress", &fixtures::bulk_progress(3, 10));
+    ts::emit_event(
+        names::BULK_PROGRESS,
+        &serde_json::json!({ "unexpected": true }),
+    );
+    ts::emit_event(names::BULK_PROGRESS, &fixtures::bulk_progress(3, 10));
 
     let item = stream
         .next()
@@ -54,7 +58,10 @@ async fn site_sweep_stream_delivers_emitted_events() {
         .await
         .expect("subscribe to site-sweep-progress");
 
-    ts::emit_event("site-sweep-progress", &fixtures::site_sweep_progress(5, 20));
+    ts::emit_event(
+        names::SITE_SWEEP_PROGRESS,
+        &fixtures::site_sweep_progress(5, 20),
+    );
 
     let item = stream.next().await.expect("one progress event");
     assert_eq!(item.done, 5);
@@ -69,7 +76,7 @@ async fn keyvault_sweep_stream_delivers_emitted_events() {
         .expect("subscribe to keyvault-sweep-progress");
 
     ts::emit_event(
-        "keyvault-sweep-progress",
+        names::KEYVAULT_SWEEP_PROGRESS,
         &fixtures::keyvault_sweep_progress(4, 12),
     );
 

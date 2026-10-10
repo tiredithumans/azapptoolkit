@@ -317,8 +317,9 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
   scan. The strip also carries the run's coverage caveats (cancelled / truncated / degraded) as
   non-interactive callouts, above both audit panes and in the export's `coverage_sentences` wording;
   the Findings pane keeps only the empty-state qualification of a partial run.
-- **Sub-tabs** — `security_tab`: `"findings" | "apps" | "credentials" | "sso-certificates" |
-  "grants" | "app-permissions"`, keep-alive.
+- **Sub-tabs** — `security_tab` holds a `state::SecurityTab::value()` (`"findings" | "apps" |
+  "credentials" | "sso-certificates" | "grants" | "app-permissions"`); writers deep-link through
+  `open_security(SecurityTab)`, the strip and the panes iterate `SecurityTab::ALL`, keep-alive.
   **Findings** (default) renders the grouped accordion; expansion state is
   `Session.tenant_ui.audit_expanded_group`. **All apps** is the ranked table with ONE severity
   control (`audit_severity`) + search (`filter_indices(items, severity, "all", query)`).

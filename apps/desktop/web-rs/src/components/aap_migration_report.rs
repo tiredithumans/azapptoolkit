@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::exchange::{self, AapMigrationReport};
+use crate::bindings::exchange::{self, AapItemStatus, AapMigrationReport};
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::ui::{Callout, CopyableId};
 use crate::util::count_noun;
@@ -57,7 +57,11 @@ pub fn AapMigrationStop() -> impl IntoView {
 /// while the policy is still the only thing confining it.
 #[component]
 pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
-    let needs_attention = !report.dry_run && report.items.iter().any(|i| i.status != "migrated");
+    let needs_attention = !report.dry_run
+        && report
+            .items
+            .iter()
+            .any(|i| i.status != AapItemStatus::Migrated);
     let header = match (report.dry_run, needs_attention) {
         (true, _) => format!(
             "Plan: {} would be migrated. Nothing has changed yet.",
@@ -145,10 +149,14 @@ pub fn AapMigrationReportView(report: AapMigrationReport) -> impl IntoView {
                     let line = format!(
                         "{} — {}. Scoped roles: {scoped}. Org-wide grants removed: {stripped}. Legacy policies: {policies}.",
                         i.app_id,
-                        i.status,
+                        i.status.as_str(),
                     );
                     let warnings = i.warnings.clone();
-                    let row_class = if i.status == "migrated" { "" } else { "form-error" };
+                    let row_class = if i.status == AapItemStatus::Migrated {
+                        ""
+                    } else {
+                        "form-error"
+                    };
                     let retired_groups = i.retired_groups.clone();
                     let retired_app_id = i.app_id.clone();
                     view! {

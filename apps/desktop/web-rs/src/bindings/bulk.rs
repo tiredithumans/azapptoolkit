@@ -36,20 +36,13 @@ pub async fn bulk_remove_expired_credentials(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkDeleteArgs<'a> {
-    tenant_id: &'a str,
-    object_ids: &'a [String],
-}
-
 pub async fn bulk_delete_applications(
     tenant_id: &str,
     object_ids: &[String],
 ) -> Result<BulkDeleteResult, UiError> {
     invoke_result(
         "bulk_delete_applications",
-        BulkDeleteArgs {
+        BulkObjectIdsArgs {
             tenant_id,
             object_ids,
         },
@@ -65,19 +58,12 @@ pub async fn bulk_restore_deleted(
 ) -> Result<BulkRestoreResult, UiError> {
     invoke_result(
         "bulk_restore_deleted",
-        BulkDeleteArgs {
+        BulkObjectIdsArgs {
             tenant_id,
             object_ids,
         },
     )
     .await
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkGrantArgs<'a> {
-    tenant_id: &'a str,
-    object_ids: &'a [String],
 }
 
 pub async fn bulk_grant_permissions(
@@ -86,7 +72,7 @@ pub async fn bulk_grant_permissions(
 ) -> Result<BulkGrantResult, UiError> {
     invoke_result(
         "bulk_grant_permissions",
-        BulkGrantArgs {
+        BulkObjectIdsArgs {
             tenant_id,
             object_ids,
         },
@@ -124,6 +110,7 @@ pub async fn bulk_create_applications(
     .await
 }
 
+/// The `(tenant, object ids)` pair every selection-driven bulk command takes.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BulkObjectIdsArgs<'a> {
@@ -222,13 +209,6 @@ pub async fn bulk_add_owner(
     .await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkDisableSignInArgs<'a> {
-    tenant_id: &'a str,
-    object_ids: &'a [String],
-}
-
 /// Disables sign-in for each selected app (sets `accountEnabled: false` on its
 /// service principal) — reversible from the enterprise app's Overview toggle.
 pub async fn bulk_disable_sign_in(
@@ -237,7 +217,7 @@ pub async fn bulk_disable_sign_in(
 ) -> Result<BulkDisableSignInResult, UiError> {
     invoke_result(
         "bulk_disable_sign_in",
-        BulkDisableSignInArgs {
+        BulkObjectIdsArgs {
             tenant_id,
             object_ids,
         },
