@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.33.2] - 2026-10-09
+
 ### Fixed
 
 - **Signing out, or signing in as another account, now discards a token refresh that was still
