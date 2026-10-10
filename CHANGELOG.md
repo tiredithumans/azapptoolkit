@@ -7,12 +7,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **End now reaches the last row of an App Registrations, Enterprise Applications or Managed
+  Identities list too short to fill its view.** It used to do nothing there.
 - **Deleting an app registration or enterprise application from its pane removes it from every
   bulk selection** (App Registrations, Security and SSO certificates), and so does a bulk delete.
   A deleted id used to stay counted in "N selected" and appear on the Bulk Actions page as a raw id.
 - **Keyboard focus on an App Registrations, Enterprise Applications or Managed Identities row now
-  survives scrolling that row out of view**: the row keeps focus, so the arrow keys and Tab pick up
-  from it instead of from the page, and the tab stop no longer jumps to the top of the window.
+  survives scrolling that row out of view**, however far you scroll: the row keeps focus, so the
+  arrow keys step on to its neighbours (scrolling them back into view) and Tab picks up from it
+  instead of from the page, and the tab stop no longer jumps to the top of the window.
 - **Every tab strip now has a name for screen readers** ("Security sections", "Application
   sections", …); the Bulk Actions tabs also name the panel they switch.
 - **List and table filter boxes now have a real label** instead of being named only by a

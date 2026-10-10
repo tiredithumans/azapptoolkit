@@ -78,7 +78,7 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 # (tachys generates the `paste` event type, thaw pulls DataTransfer), so
 # declaring them is a no-op for the build — and the point: a thaw/tachys bump
 # that dropped either would otherwise silently break pasting a block of URLs.
-web-sys = { version = "0.3", features = ["MediaQueryList", "MediaQueryListEvent", "Window", "Document", "HtmlElement", "Element", "Node", "NodeList", "Clipboard", "ClipboardEvent", "DataTransfer", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
+web-sys = { version = "0.3", features = ["MediaQueryList", "MediaQueryListEvent", "Window", "Document", "HtmlElement", "Element", "DomRect", "FocusOptions", "Node", "NodeList", "Clipboard", "ClipboardEvent", "DataTransfer", "Navigator", "ResizeObserver", "ResizeObserverEntry", "Storage", "File", "FileList", "Blob", "HtmlInputElement", "Event"] }
 console_error_panic_hook = "0.1"
 futures = "0.3"
 

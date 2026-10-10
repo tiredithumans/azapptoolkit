@@ -243,6 +243,160 @@ async fn a_focused_row_survives_scrolling_out_of_the_window() {
     row_zero_keeps_focus("back at the top");
 }
 
+/// From a focused row the window has scrolled away from, the arrow keys step to
+/// that row's real neighbour — scrolling it into view — rather than to the
+/// window's edge row (the DOM neighbour of a row kept rendered outside the
+/// window), in both directions and from either side of the window; they stop
+/// at the list's ends; Home reaches the top from far down; and focus survives
+/// every jump in between (a jump can move the focused row's node, which drops
+/// focus unless the list carries it through).
+#[wasm_bindgen_test]
+async fn arrows_from_a_row_scrolled_out_of_view_step_to_its_neighbour() {
+    use wasm_bindgen::JsCast;
+
+    ts::reset();
+    let names: Vec<String> = (0..200).map(|i| format!("App {i:03}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    ts::mock_ok("list_applications_with_pairing", &fixtures::apps(&names));
+
+    // GUI tests load no `styles.css`: give the scroller a real viewport and the
+    // rows their absolute positioning (ROW_HEIGHT is 52px).
+    let _m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "200 app registrations").await;
+    ts::wait_for(|| ts::query_all(".app-list__row[tabindex='0']").len() == 1).await;
+
+    let scroller: web_sys::HtmlElement = ts::query(".app-list__scroller")
+        .expect("the list scroller")
+        .unchecked_into();
+    // The browser's own scroll event: a programmatic `scrollTop` change fires
+    // one asynchronously; dispatching it here as well keeps the test off the
+    // frame clock (the list's handler is idempotent).
+    let scrolled = || {
+        let ev = web_sys::Event::new("scroll").unwrap();
+        scroller.dispatch_event(&ev).unwrap();
+    };
+    let scroll_to = |rows: i32| {
+        scroller.set_scroll_top(rows * 52);
+        scrolled();
+    };
+    // The focused ROW's text — empty when focus is anywhere else (on <body>,
+    // whose text would contain every rendered row and pass any check).
+    let focused_row = || {
+        document()
+            .active_element()
+            .filter(|e| e.matches(".app-list__row").unwrap_or(false))
+            .and_then(|e| e.text_content())
+            .unwrap_or_default()
+    };
+    let focus_row = |name: &str| {
+        let row: web_sys::HtmlElement = ts::query_all(".app-list__row")
+            .into_iter()
+            .find(|r| r.text_content().unwrap_or_default().contains(name))
+            .unwrap_or_else(|| panic!("row {name} is rendered"))
+            .unchecked_into();
+        row.focus().unwrap();
+    };
+    const FOCUSED: &str = ".app-list__row[tabindex='0']";
+    let press = |key: &str| {
+        ts::press_key(FOCUSED, key);
+        scrolled();
+    };
+
+    // Row 0 focused, then scrolled sixty rows away: it stays rendered and
+    // focused, pinned above the window.
+    focus_row("App 000");
+    scroll_to(60);
+    ts::wait_for(|| ts::body_contains("App 060")).await;
+    ts::wait_until("App 000 keeps focus", || focused_row().contains("App 000")).await;
+
+    // ArrowUp: row 0 is the list's first row, so nothing moves.
+    press("ArrowUp");
+    ts::tick().await;
+    assert!(focused_row().contains("App 000"), "no row above the first");
+
+    // ArrowDown: row 1, scrolled back into view — not App 052, the window's
+    // first rendered row and row 0's DOM neighbour.
+    press("ArrowDown");
+    ts::wait_until("focus on App 001", || focused_row().contains("App 001")).await;
+    assert!(
+        ts::text(FOCUSED).contains("App 001"),
+        "and it is the tab stop"
+    );
+    assert!(
+        scroller.scroll_top() < 10 * 52,
+        "the list scrolled back to the neighbour (scrollTop {})",
+        scroller.scroll_top()
+    );
+
+    // A row pinned BELOW the window: both arrows step to its own neighbours.
+    scroll_to(100);
+    ts::wait_for(|| ts::body_contains("App 100")).await;
+    focus_row("App 100");
+    scroll_to(0);
+    ts::wait_for(|| ts::body_contains("App 005")).await;
+    ts::wait_until("App 100 keeps focus", || focused_row().contains("App 100")).await;
+    press("ArrowDown");
+    ts::wait_until("focus on App 101", || focused_row().contains("App 101")).await;
+    scroll_to(0);
+    ts::wait_for(|| ts::body_contains("App 005")).await;
+    ts::wait_until("App 101 keeps focus", || focused_row().contains("App 101")).await;
+    press("ArrowUp");
+    ts::wait_until("focus on App 100", || focused_row().contains("App 100")).await;
+
+    // A row pinned ABOVE the window, other than row 0: ArrowUp steps up.
+    scroll_to(150);
+    ts::wait_for(|| ts::body_contains("App 150")).await;
+    ts::wait_until("App 100 keeps focus", || focused_row().contains("App 100")).await;
+    press("ArrowUp");
+    ts::wait_until("focus on App 099", || focused_row().contains("App 099")).await;
+
+    // Home from far down: the top, focused.
+    press("Home");
+    ts::wait_until("focus on App 000", || focused_row().contains("App 000")).await;
+    assert_eq!(scroller.scroll_top(), 0);
+}
+
+/// On a list shorter than the view, End has nothing to scroll: the last row is
+/// already rendered, so it must be focused on the spot. It used to wait for a
+/// scroll that never came, and End did nothing.
+#[wasm_bindgen_test]
+async fn end_reaches_the_last_row_of_a_list_shorter_than_the_view() {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["First App", "Second App", "Third App"]),
+    );
+    // A 260px viewport over three 52px rows, as `styles.css` lays them out.
+    let _m = ts::mount_view(|| {
+        view! {
+            <style>
+                {".app-list__scroller{height:260px;overflow:auto;position:relative}\
+                  .app-list__sizer{position:relative}\
+                  .app-list__row{position:absolute;left:0;width:100%}"}
+            </style>
+            <ApplicationList />
+        }
+    });
+    ts::wait_for(|| ts::text(COUNT) == "3 app registrations").await;
+    ts::wait_for(|| ts::query_all(".app-list__row[tabindex='0']").len() == 1).await;
+
+    ts::focus(".app-list__row");
+    ts::press_key(".app-list__row[tabindex='0']", "End");
+    assert!(ts::text(".app-list__row[tabindex='0']").contains("Third App"));
+    assert!(ts::focused_matches(".app-list__row"));
+    ts::press_key(".app-list__row[tabindex='0']", "Home");
+    assert!(ts::text(".app-list__row[tabindex='0']").contains("First App"));
+}
+
 #[wasm_bindgen_test]
 async fn error_state_renders_message() {
     ts::reset();
