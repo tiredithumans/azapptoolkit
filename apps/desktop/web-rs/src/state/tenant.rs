@@ -64,6 +64,26 @@ impl Session {
         self.tenant_ui.selected_app_ids.update(HashSet::clear);
     }
 
+    /// Drop one directory object id from EVERY bulk-selection set (the two
+    /// application sets and the SSO-certificate set of service principals),
+    /// for an object that no longer exists. A deleted id left selected is a
+    /// dangling one: "N selected" counts it, and the Bulk Actions page shows
+    /// it as a raw GUID once its name is gone from the list. Every delete
+    /// path calls this — the panes' single deletes and the bulk bar's, per id
+    /// the backend confirmed gone. Object ids are tenant-unique, so removing
+    /// one from a set it was never in is a no-op, not a mistake.
+    pub fn deselect_object(&self, id: &str) {
+        self.tenant_ui.selected_app_ids.update(|ids| {
+            ids.remove(id);
+        });
+        self.tenant_ui.selected_audit_ids.update(|ids| {
+            ids.remove(id);
+        });
+        self.tenant_ui.selected_sso_cert_ids.update(|ids| {
+            ids.remove(id);
+        });
+    }
+
     /// Toggle an application object id in the audit-table selection set (the
     /// audit's inline bulk bar operates on this, kept separate from
     /// `selected_app_ids`).

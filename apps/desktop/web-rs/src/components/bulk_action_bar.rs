@@ -323,11 +323,15 @@ impl Landing {
                 // deleted, destroying the operator's work queue at the exact
                 // moment the summary was telling them to re-run. Not gated on
                 // the bar: the selection is the host's (usually the
-                // session's), and a deleted id left in it is a dangling one.
+                // session's), and a deleted id left in it is a dangling one —
+                // in the host's set and in every other session set alike.
                 if !p.deleted.is_empty() {
                     let gone: HashSet<String> = p.deleted.into_iter().collect();
                     self.selection
                         .try_update(|s| s.retain(|id| !gone.contains(id)));
+                    for id in &gone {
+                        self.session.deselect_object(id);
+                    }
                 }
                 self.done();
             }

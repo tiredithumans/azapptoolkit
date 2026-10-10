@@ -191,6 +191,16 @@ where
         }
     });
 
+    // The row that has keyboard focus, by absolute index, so the window keeps
+    // rendering it after it scrolls out of view. The keyed `<For>` used to
+    // drop that row's node with the rest of the overscan: focus fell to
+    // <body>, the arrow keys (bound on the scroller) went dead, and the roving
+    // tab stop reseeded to the first rendered row. A row's absolute index is
+    // its `top` over the row height — the positioning contract every
+    // `render_row` keeps. Cleared when focus leaves the scroller altogether,
+    // and when the row set changes (the pin indexed the old one).
+    let focused_row: RwSignal<Option<usize>> = RwSignal::new(None);
+
     // Snap back to the top whenever the row set changes within this instance
     // (search keystroke, facet click, sort) — skipping the first run, where
     // the scroller is at 0 or at the carried offset. A refetch never reaches
@@ -203,6 +213,11 @@ where
             // A carried offset pointed into the old row set too; don't let a
             // later visibility change jump back to it.
             pending_restore.set_value(false);
+            // Nor the pin: its node leaves with the old row set, and no
+            // focusout fires for a removed node, so a stale index would
+            // render whatever row now sits there — invisible, outside the
+            // window, and the arrow keys' next target.
+            focused_row.set(None);
             if let Some(el) = scroll_ref.get_untracked() {
                 el.set_scroll_top(0);
             }
@@ -224,14 +239,47 @@ where
 
     let visible_range = Memo::new(move |_| {
         let total = items.with(|all| all.len());
-        let st = scroll_top.get();
-        let vh = viewport_height.get();
-        let start = ((st / row_height).floor() as usize).saturating_sub(overscan);
-        let end = (((st + vh) / row_height).ceil() as usize + overscan).min(total);
-        // `start` can exceed `total` for one tick when a filter shrinks the
-        // list before the scroll reset lands; clamp so the slice stays valid.
-        (start.min(end), end)
+        visible_window(
+            scroll_top.get(),
+            viewport_height.get(),
+            row_height,
+            total,
+            overscan,
+        )
     });
+
+    let on_focusin = move |ev: ev::FocusEvent| {
+        let row = ev
+            .target()
+            .and_then(|t| t.dyn_into::<Element>().ok())
+            .and_then(|t| t.closest(row_selector).ok().flatten())
+            .and_then(|r| r.dyn_into::<HtmlElement>().ok());
+        let idx = row.map(|r| (f64::from(r.offset_top()) / row_height).round() as usize);
+        // Tab between a row's buttons re-fires this for the same row; an
+        // unchanged write would still re-run `each` (every rendered row cloned).
+        if focused_row.get_untracked() != idx {
+            focused_row.set(idx);
+        }
+    };
+    let on_focusout = move |ev: ev::FocusEvent| {
+        // Alt-tab, a native dialog or the re-auth window blur the focused
+        // element with no related target. The row is still the one to come
+        // back to, so keep it rendered; focusin re-pins it on return anyway.
+        if !leptos::prelude::document().has_focus().unwrap_or(true) {
+            return;
+        }
+        let stays_inside = ev
+            .related_target()
+            .and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+            .is_some_and(|n| {
+                scroll_ref
+                    .get_untracked()
+                    .is_some_and(|root| root.contains(Some(&n)))
+            });
+        if !stays_inside {
+            focused_row.set(None);
+        }
+    };
 
     // Keyboard row navigation over the *rendered* window. `visible_range` is the
     // rerender trigger the hook waits on: a Home/End scrolls first and can only
@@ -249,7 +297,14 @@ where
     );
 
     view! {
-        <div class=scroller_class node_ref=scroll_ref on:scroll=on_scroll on:keydown=on_keydown>
+        <div
+            class=scroller_class
+            node_ref=scroll_ref
+            on:scroll=on_scroll
+            on:keydown=on_keydown
+            on:focusin=on_focusin
+            on:focusout=on_focusout
+        >
             <div
                 class=sizer_class
                 style:height=move || {
@@ -259,9 +314,22 @@ where
                 <For
                     each=move || {
                         let (start, end) = visible_range.get();
+                        // The focused row rides along outside the window, IN
+                        // INDEX ORDER: its (index, key) is unchanged, so the
+                        // keyed diff keeps its node — but only if it never has
+                        // to move it. A move is `insertBefore`, which the DOM
+                        // runs as remove + insert, and a removed node loses
+                        // focus. Appended last, a row pinned above the window
+                        // was moved on every scroll down.
+                        let pinned = focused_row.get().filter(|f| !(start..end).contains(f));
+                        let above = pinned.filter(|f| *f < start);
+                        let below = pinned.filter(|f| *f >= end);
                         items
                             .with(|all| {
-                                (start..end)
+                                above
+                                    .into_iter()
+                                    .chain(start..end)
+                                    .chain(below)
                                     .filter_map(|i| all.get(i).cloned().map(|item| (i, item)))
                                     .collect::<Vec<_>>()
                             })
@@ -271,5 +339,55 @@ where
                 />
             </div>
         </div>
+    }
+}
+
+/// The `(start, end)` slice of rows to render for a scroller at `scroll_top`
+/// with `viewport_h` of visible height: the rows under the viewport plus
+/// `overscan` on each side, clamped to `total`. Pure, so the arithmetic every
+/// list's window rides on has tests of its own.
+pub(crate) fn visible_window(
+    scroll_top: f64,
+    viewport_h: f64,
+    row_h: f64,
+    total: usize,
+    overscan: usize,
+) -> (usize, usize) {
+    debug_assert!(row_h > 0.0, "a zero row height makes the window infinite");
+    // A rubber-band scroll reports a negative offset for a frame.
+    let st = scroll_top.max(0.0);
+    let start = ((st / row_h).floor() as usize).saturating_sub(overscan);
+    let end = (((st + viewport_h) / row_h).ceil() as usize)
+        .saturating_add(overscan)
+        .min(total);
+    // `start` can exceed `total` for one tick when a filter shrinks the list
+    // before the scroll reset lands; clamp so the slice stays valid.
+    (start.min(end), end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visible_window;
+
+    #[test]
+    fn the_window_covers_the_viewport_plus_overscan_and_clamps() {
+        assert_eq!(visible_window(0.0, 600.0, 52.0, 1000, 8), (0, 20));
+        assert_eq!(visible_window(5200.0, 600.0, 52.0, 1000, 8), (92, 120));
+        assert_eq!(
+            visible_window(5000.0, 600.0, 52.0, 100, 8),
+            (88, 100),
+            "the end clamps to the row count"
+        );
+        assert_eq!(
+            visible_window(5200.0, 600.0, 52.0, 3, 8),
+            (3, 3),
+            "a list that shrank under the scroll offset clamps the start too"
+        );
+        assert_eq!(visible_window(0.0, 600.0, 52.0, 0, 8), (0, 0));
+        assert_eq!(
+            visible_window(-40.0, 600.0, 52.0, 1000, 8),
+            (0, 20),
+            "a rubber-band offset reads as the top"
+        );
     }
 }
