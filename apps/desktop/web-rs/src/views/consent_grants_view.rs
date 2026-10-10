@@ -40,15 +40,10 @@ pub fn ConsentGrantsView() -> impl IntoView {
         posture.set(TenantConsentPostureDto::default());
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
-            if let Ok(p) = consent::get_tenant_consent_posture(&tenant_id).await {
-                let still_active = session
-                    .active_tenant
-                    .get_untracked()
-                    .map(|t| t.tenant_id == tenant_id)
-                    .unwrap_or(false);
-                if still_active {
-                    posture.set(p);
-                }
+            if let Ok(p) = consent::get_tenant_consent_posture(&tenant_id).await
+                && session.is_active_tenant(&tenant_id)
+            {
+                posture.set(p);
             }
         });
     });

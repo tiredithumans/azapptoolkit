@@ -82,7 +82,13 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
         let Some(t) = tenant.get() else { return };
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "log_analytics").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "log_analytics").await;
+            // The consent prompt is answered minutes later, perhaps after the
+            // pane closed: `do_load` reads `busy`, which panics once disposed.
+            if busy.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => do_load(),
                 Err(e) => error.set(Some(e.message)),
             }

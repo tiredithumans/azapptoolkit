@@ -68,15 +68,6 @@ pub fn KeyVaultView() -> impl IntoView {
         error.set(None);
     });
 
-    // Whether `tenant_id` is still the active tenant — a response that resolves
-    // after a switch belongs to the previous tenant and must not be shown.
-    let still_active = move |tenant_id: &str| {
-        session
-            .active_tenant
-            .get_untracked()
-            .is_some_and(|c| c.tenant_id == tenant_id)
-    };
-
     let load = move |_| {
         if busy.get() {
             return;
@@ -91,7 +82,7 @@ pub fn KeyVaultView() -> impl IntoView {
                 return;
             };
             let result = keyvault::kv_list_secrets(&t.tenant_id, v.trim()).await;
-            if still_active(&t.tenant_id) {
+            if session.is_active_tenant(&t.tenant_id) {
                 match result {
                     Ok(items) => {
                         listed.set(items);
@@ -127,7 +118,7 @@ pub fn KeyVaultView() -> impl IntoView {
                 return;
             };
             let result = keyvault::kv_get_secret(&t.tenant_id, v.trim(), &secret_name).await;
-            if still_active(&t.tenant_id) {
+            if session.is_active_tenant(&t.tenant_id) {
                 match result {
                     Ok(value) => revealed.set(Some(value)),
                     Err(e) => {
