@@ -51,18 +51,44 @@ pub(crate) struct AuditController {
     /// Exchange mailbox scoping — the org-wide mailbox group then says its
     /// findings may already be confined. `true` with no run (nothing to caveat).
     pub mailbox_scoping_resolved: Memo<bool>,
-    /// When a row's remediation succeeds, drops **that one kind** from the
-    /// item so its "Fix" button is gone for good (the audit cache is already
-    /// busted server-side; scores refresh on the next manual re-run). Only that
-    /// kind: an item scored under several rules carries a Fix per rule, and
-    /// clearing the whole set made one section's success erase another
-    /// section's still-unfixed button.
-    pub on_remediated: Callback<(String, RemediationKind)>,
+    /// The per-kind `Callback<String>` wrappers the row Fixes report through
+    /// (see [`Self::done_for`]). When a row's remediation succeeds, the wrapper
+    /// drops **that one kind** from the item so its "Fix" button is gone for
+    /// good (the audit cache is already busted server-side; scores refresh on
+    /// the next manual re-run). Only that kind: an item scored under several
+    /// rules carries a Fix per rule, and clearing the whole set made one
+    /// section's success erase another section's still-unfixed button.
+    ///
+    /// Built ONCE here (SecurityView's ownership) rather than per row: a
+    /// wrapper the row owned died with the row, and a Fix whose row was
+    /// rebuilt mid-flight — a scan landing re-groups every row — then found
+    /// `try_run` a no-op, so the result was never patched and the Fix button
+    /// came back for a finding already fixed.
+    row_done: RowDone,
+    /// The row to hand keyboard focus to once a Fix lands. A landed Fix
+    /// re-keys its row (the key carries the remediation count), so the `<tr>`
+    /// is rebuilt and the focus that was on its Fix button fell to `<body>`.
+    /// Set by `on_remediated`; the rebuilt row's action stack claims it from
+    /// its own effect and clears it (the `UriListEditor` `focus_key` hand-over).
+    pub focus_row: RwSignal<Option<String>>,
     /// After a successful inline bulk run, refetch the App Registrations list
     /// (a delete / remove-expired sweep busts its backend cache). The audit's
     /// own scan is a point-in-time snapshot — deleted rows linger until the
     /// next manual re-run, matching how the audit cache already works.
     pub on_bulk_done: Callback<()>,
+}
+
+/// One `Callback<String>` per remediation kind, each reporting `(row, kind)`
+/// to `on_remediated`. See [`AuditController::row_done`].
+#[derive(Clone, Copy)]
+struct RowDone {
+    expired: Callback<String>,
+    redundant: Callback<String>,
+    mailbox: Callback<String>,
+    migrate: Callback<String>,
+    sharepoint: Callback<String>,
+    add_owner: Callback<String>,
+    disable: Callback<String>,
 }
 
 impl AuditController {
@@ -106,15 +132,36 @@ impl AuditController {
             result.with(|r| r.as_ref().is_none_or(|r| r.mailbox_scoping_resolved))
         });
 
+        let focus_row: RwSignal<Option<String>> = RwSignal::new(None);
         let on_remediated = Callback::new(move |(object_id, kind): (String, RemediationKind)| {
+            let mut rekeyed = false;
             result.update(|opt| {
                 if let Some(r) = opt.as_mut()
                     && let Some(item) = r.items.iter_mut().find(|i| i.object_id == object_id)
                 {
+                    let before = item.remediations.len();
                     item.remediations.retain(|a| a.kind != kind);
+                    rekeyed = item.remediations.len() != before;
                 }
             });
+            // Only a row whose key changed is rebuilt and loses focus; a
+            // no-op (the scan that landed mid-Fix already lacked this kind, or
+            // the item is gone) hands over nothing — and clears a stale one,
+            // so a later remount of that app's row can't steal focus.
+            focus_row.set(rekeyed.then_some(object_id));
         });
+        let done = |kind: RemediationKind| {
+            Callback::new(move |row_id: String| on_remediated.run((row_id, kind)))
+        };
+        let row_done = RowDone {
+            expired: done(RemediationKind::RemoveExpiredCredentials),
+            redundant: done(RemediationKind::RemoveRedundantPermissions),
+            mailbox: done(RemediationKind::ScopeMailboxAccess),
+            migrate: done(RemediationKind::MigrateApplicationAccessPolicy),
+            sharepoint: done(RemediationKind::ScopeSharePointAccess),
+            add_owner: done(RemediationKind::AddOwner),
+            disable: done(RemediationKind::DisableSignIn),
+        };
         let on_bulk_done = Callback::new(move |_| session.bump_apps_reload());
 
         // Subscribe to audit-progress events for the owner's lifetime; the
@@ -149,11 +196,15 @@ impl AuditController {
                         None
                     }
                 };
-                let still_active = tenant
-                    .get_untracked()
-                    .map(|t| t.tenant_id == tenant_id)
-                    .unwrap_or(false);
-                if still_active {
+                // Only onto an empty slot: a Run that finished while this
+                // read was in flight (Home's call to action starts one at
+                // construction) is fresher than the cache, and a cancelled
+                // or partial run must not be replaced by an older complete
+                // one wearing no caveats.
+                if session.is_active_tenant(&tenant_id)
+                    && result.try_with_untracked(Option::is_none).unwrap_or(false)
+                {
+                    focus_row.set(None);
                     result.set(cached);
                 }
             });
@@ -173,7 +224,8 @@ impl AuditController {
             names,
             report_available,
             mailbox_scoping_resolved,
-            on_remediated,
+            row_done,
+            focus_row,
             on_bulk_done,
         };
 
@@ -222,19 +274,42 @@ impl AuditController {
                 self.scanning.set(false);
                 return;
             };
-            match audit::run_audit(&t.tenant_id).await {
+            let res = audit::run_audit(&t.tenant_id).await;
+            // Sign-out disposes this controller with the shell: the result
+            // then belongs to nobody on screen, and the Home tile's bump
+            // would refetch for the next sign-in. `is_disposed` covers a
+            // sign-out and sign-in back to the same tenant mid-scan, where
+            // the tenant check alone would land this on a rebuilt shell.
+            if self.scanning.is_disposed() || !self.session.is_active_tenant(&t.tenant_id) {
+                self.scanning.set(false);
+                self.progress.set(None);
+                return;
+            }
+            match res {
                 Ok(r) => {
+                    // A new run re-keys nothing in particular; a pending
+                    // focus hand-over from a Fix is stale against it.
+                    self.focus_row.set(None);
                     self.result.set(Some(r));
                     // Refresh the Home dashboard's "Security Posture" tile: it
                     // keeps its cached-audit resource alive across view
                     // switches, so it only refetches when this bumps.
                     self.session.bump_audit_reload();
                 }
-                Err(e) => self.scan_error.set(Some(e.message)),
+                Err(e) => self.fail(e),
             }
             self.scanning.set(false);
             self.progress.set(None);
         });
+    }
+
+    /// The strip's inline error is this surface's message — plus the recovery
+    /// lever when one applies (`CommandState::fail_inline`'s rule): a session
+    /// that dies mid-scan needs Re-authenticate, not a red line saying "sign
+    /// in again", which here means a sign-out that drops every cache.
+    fn fail(self, e: azapptoolkit_dto::UiError) {
+        self.session.report_recovery_action(&e, "audit_log");
+        self.scan_error.set(Some(e.message));
     }
 
     /// Receiver-shaped with the rest of the controller surface; the cancel
@@ -257,11 +332,33 @@ impl AuditController {
         };
         self.scan_error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "audit_log").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "audit_log").await;
+            // The consent round trip is a browser prompt answered minutes
+            // later, perhaps after a sign-out: the shell is gone by then and
+            // so is this controller — `run` reads `scanning`, which panics
+            // once disposed — and a toast would surface at the next sign-in.
+            if self.scanning.is_disposed() || !self.session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => self.run(),
-                Err(e) => self.scan_error.set(Some(e.message)),
+                Err(e) => self.fail(e),
             }
         });
+    }
+
+    /// The `Callback<String>` a row Fix of `kind` reports through; see
+    /// [`Self::row_done`].
+    pub(crate) fn done_for(self, kind: RemediationKind) -> Callback<String> {
+        match kind {
+            RemediationKind::RemoveExpiredCredentials => self.row_done.expired,
+            RemediationKind::RemoveRedundantPermissions => self.row_done.redundant,
+            RemediationKind::ScopeMailboxAccess => self.row_done.mailbox,
+            RemediationKind::MigrateApplicationAccessPolicy => self.row_done.migrate,
+            RemediationKind::ScopeSharePointAccess => self.row_done.sharepoint,
+            RemediationKind::AddOwner => self.row_done.add_owner,
+            RemediationKind::DisableSignIn => self.row_done.disable,
+        }
     }
 
     /// Exports by reference: the backend serves its own cached run, so the

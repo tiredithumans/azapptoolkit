@@ -313,7 +313,11 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
 - **One bulk-action home** — `components/bulk_action_bar.rs::BulkActionBar` owns all
   selection-driven bulk command-calling logic. It mounts per expanded Findings group (actions
   from the finding catalog), on the All-apps pane (`[RemoveExpired, Delete]`), on the App
-  Registrations list, and on the Bulk Actions page. **No Grant consent on audit surfaces.**
+  Registrations list, and on the Bulk Actions page. **No bulk admin consent (`BulkAction::Grant`)
+  on audit surfaces** — consent is a Permissions-tab action, and offering it beside a finding
+  invites granting the very permission the finding is about; the operator's own AuditLog.Read.All
+  consent on the posture strip (`grant_reports_consent`) is not that. Pinned by
+  `groups.rs::no_audit_surface_offers_bulk_admin_consent`.
   "Fix all N" only seeds `selected_audit_ids` with the group's *eligible* (Application-kind) ids —
   the bar's typed-confirm / target forms still gate execution.
   **One run at a time:** `TenantScopedUi.bulk_running` is set by every bar's run and Undo and by

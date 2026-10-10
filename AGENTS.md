@@ -142,7 +142,7 @@ Deep-dive: frontend-workspace.md
 - **One primitive per UI pattern** (`SectionHeader`, skeletons, `DetailLoadError`, `Callout`, `ShowMore`) — reuse, never re-implement.
 - **Open-items workspace:** `session.open_item(...)` fills ONE shared `Session.open_items`; dock + workspace mount once in `shell.rs`; `open_items` + `shown_items` reset in `set_active_tenant`; no `selected_*_id` signals.
 - **Per-list filter state lives on `Session.tenant_ui`** and resets by structure — a new field goes in the substruct with a `reset()` line + the pinning test.
-- **Security tab is a findings-first workbench:** filtering has exactly two homes, `BulkActionBar` is the only bulk caller, no Grant consent on audit surfaces.
+- **Security tab is a findings-first workbench:** filtering has exactly two homes, `BulkActionBar` is the only bulk caller, no bulk admin consent (`BulkAction::Grant`) on audit surfaces.
 - **WASM gating:** server deps are `#[cfg(not(target_arch = "wasm32"))]` in shared crates; `web-rs` restates `unsafe_code = "deny"`.
 
 ### Release, updater & dependencies

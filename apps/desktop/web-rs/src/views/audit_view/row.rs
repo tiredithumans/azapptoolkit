@@ -8,10 +8,12 @@ use azapptoolkit_core::audit::{
 };
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
+use wasm_bindgen::JsCast;
+use web_sys::HtmlElement;
 
 use crate::bindings::remediation;
 use crate::bindings::remediation::RedundantPermissionsOutcome;
-use crate::state::use_session;
+use crate::state::{Session, use_session};
 use crate::util::plural;
 use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -20,7 +22,17 @@ use crate::views::dialogs::scope_remediation::{
     ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
 };
 
+use super::controller::AuditController;
 use super::groups::{GroupSpec, group_remediation_kinds};
+
+/// Lands a row Fix's failure: the recovery lever when one applies (a session
+/// that dies mid-Fix needs Re-authenticate, not a red line saying "sign in
+/// again") and the dialog's inline text — `CommandState::fail_inline`'s rule,
+/// for the three hand-spawned Fixes below.
+fn fail_fix(session: Session, error: RwSignal<Option<String>>, e: azapptoolkit_dto::UiError) {
+    session.report_recovery_action(&e, "write");
+    error.set(Some(e.message));
+}
 
 /// Which detail-pane tab this row's "Open" deep-link lands on.
 ///
@@ -112,11 +124,12 @@ fn pick(
 /// launchpad), followed by the one-click remediations the scorer attached that
 /// this surface owns: remove-expired-credentials (a confirm dialog naming the
 /// credentials) and the scoping fixes (guided group/site modals). On success
-/// each fires `on_done` with its OWN kind, so the parent drops just that
-/// remediation — the
-/// button disappears for good (surviving facet/search changes) while the row's
-/// other Fixes, which nothing has fixed yet, stay put. The audit cache is
-/// busted server-side, so a re-run reflects the new scores.
+/// each reports through the controller's wrapper for its OWN kind
+/// (`AuditController::done_for`), so the controller drops just that
+/// remediation — the button disappears for good (surviving facet/search
+/// changes) while the row's other Fixes, which nothing has fixed yet, stay
+/// put. The audit cache is busted server-side, so a re-run reflects the new
+/// scores.
 #[component]
 pub(super) fn AuditRowActions(
     item: AuditItem,
@@ -127,14 +140,14 @@ pub(super) fn AuditRowActions(
     /// row stands for the whole app and offers everything it carries.
     #[prop(optional)]
     section: Option<&'static GroupSpec>,
-    #[prop(into)] on_done: Callback<(String, RemediationKind)>,
 ) -> impl IntoView {
     let session = use_session();
-    // Each button reports the kind it fixed, so `on_done` can clear that one
-    // remediation instead of the row's whole set.
-    let done = move |kind: RemediationKind| {
-        Callback::new(move |row_id: String| on_done.run((row_id, kind)))
-    };
+    let ctrl = expect_context::<AuditController>();
+    // Each button reports the kind it fixed, so the controller clears that one
+    // remediation instead of the row's whole set. The wrappers are the
+    // controller's, not this row's: a wrapper owned here died with the row,
+    // and a Fix whose row was rebuilt mid-flight then reported to nobody.
+    let done = move |kind: RemediationKind| ctrl.done_for(kind);
     let kinds = section.map(|s| group_remediation_kinds(s.key));
     let find = |k: RemediationKind| pick(&item, kinds, k);
     let expired = find(RemediationKind::RemoveExpiredCredentials);
@@ -178,8 +191,44 @@ pub(super) fn AuditRowActions(
     let app_name_disable = item.application_name.clone();
     let target_m = scope_target.clone();
     let target_s = scope_target;
+
+    // A landed Fix re-keys this row, so the stack is rebuilt and the focus
+    // that was on its Fix button fell to <body>. The controller names the row
+    // to re-focus; the rebuilt stack claims it from its own effect (never a
+    // rAF — it does not fire in a hidden tab). Claimed only when focus truly
+    // moved: the same app may sit in the keep-alive All-apps pane too, whose
+    // hidden copy must not consume the hand-over.
+    let stack_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let focus_oid = object_id.clone();
+    Effect::new(move |_| {
+        if ctrl.focus_row.get().as_deref() != Some(focus_oid.as_str()) {
+            return;
+        }
+        // Only a focus that was actually lost is restored: if the operator
+        // has moved on (typing in the search box, say), the hand-over is
+        // stale and is dropped rather than pulling focus away.
+        let lost = document()
+            .active_element()
+            .is_none_or(|a| a.tag_name().eq_ignore_ascii_case("body"));
+        if !lost {
+            ctrl.focus_row.set(None);
+            return;
+        }
+        if let Some(stack) = stack_ref.get()
+            && let Ok(Some(btn)) = stack.query_selector("button")
+            && let Some(btn) = btn.dyn_ref::<HtmlElement>()
+        {
+            let _ = btn.focus();
+            let placed = document()
+                .active_element()
+                .is_some_and(|a| &a == btn.unchecked_ref::<web_sys::Element>());
+            if placed {
+                ctrl.focus_row.set(None);
+            }
+        }
+    });
     view! {
-        <div class="audit-actions-stack">
+        <div class="audit-actions-stack" node_ref=stack_ref>
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                 on_click=Box::new(move |_| match kind {
@@ -308,7 +357,13 @@ fn DisableSignInAction(
                 busy.set(false);
                 return;
             };
-            match remediation::remediate_disable_sign_in(&t.tenant_id, &object_id).await {
+            let res = remediation::remediate_disable_sign_in(&t.tenant_id, &object_id).await;
+            // Sign-out mid-Fix: the toast would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     open.set(false);
                     session.toast_success(
@@ -316,7 +371,7 @@ fn DisableSignInAction(
                     );
                     on_done.try_run(object_id);
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => fail_fix(session, error, e),
             }
             busy.set(false);
         });
@@ -406,9 +461,13 @@ fn RedundantPermsAction(
                 busy.set(false);
                 return;
             };
-            match remediation::remediate_remove_redundant_permissions(&t.tenant_id, &object_id)
-                .await
-            {
+            let res =
+                remediation::remediate_remove_redundant_permissions(&t.tenant_id, &object_id).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(outcome) => {
                     open.set(false);
                     let (msg, fixed) = redundant_outcome_report(&outcome);
@@ -423,7 +482,7 @@ fn RedundantPermsAction(
                         session.toast_error(msg, None);
                     }
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => fail_fix(session, error, e),
             }
             busy.set(false);
         });
@@ -489,8 +548,13 @@ fn ExpiredCredsAction(
                 busy.set(false);
                 return;
             };
-            match remediation::remediate_remove_expired_credentials(&t.tenant_id, &object_id).await
-            {
+            let res =
+                remediation::remediate_remove_expired_credentials(&t.tenant_id, &object_id).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(outcome) => {
                     open.set(false);
                     let n = outcome.removed_secrets + outcome.removed_certificates;
@@ -505,7 +569,7 @@ fn ExpiredCredsAction(
                     // "—", and the state can't be lost by a re-render.
                     on_done.try_run(object_id);
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => fail_fix(session, error, e),
             }
             busy.set(false);
         });
