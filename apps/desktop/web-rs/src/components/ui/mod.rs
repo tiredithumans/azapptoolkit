@@ -33,5 +33,5 @@ pub use icon_button::IconButton;
 pub use search_input::SearchInput;
 pub use section_header::SectionHeader;
 pub use show_more::ShowMore;
-pub use skeleton::{DetailSkeleton, Skeleton, SkeletonList};
-pub use tab_bar::{TabBar, TabBarItem};
+pub use skeleton::{DetailSkeleton, Skeleton, SkeletonCard, SkeletonList};
+pub use tab_bar::{TabBar, TabBarItem, tab_id};

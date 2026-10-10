@@ -220,6 +220,7 @@ pub fn AuditAppsPane() -> impl IntoView {
             // The ONE severity filter control (the old scorecard-as-filter and
             // finding-chip drawer are gone — findings live in their own pane).
             <TabBar
+                label="Severity"
                 selected=severity
                 items=vec![
                     TabBarItem { value: "all", label: "All" },

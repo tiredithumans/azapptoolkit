@@ -50,6 +50,7 @@ pub fn ResourceAccessView() -> impl IntoView {
                 "Reverse lookups: pick a resource plane and see which applications and identities can reach what."
             </Body1>
             <TabBar
+                label="Resource type"
                 items=vec![
                     TabBarItem { value: "mailboxes", label: "Mailboxes" },
                     TabBarItem { value: "sites", label: "Sites" },

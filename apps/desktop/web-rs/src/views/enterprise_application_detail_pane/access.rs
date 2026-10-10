@@ -310,6 +310,7 @@ pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl I
             // the same primitive rather than a second hand-rolled pair of
             // buttons whose "selected" state was a Primary appearance.
             <TabBar
+                label="Principal type"
                 items=vec![
                     TabBarItem { value: "users", label: "Users" },
                     TabBarItem { value: "groups", label: "Groups" },

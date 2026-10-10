@@ -278,6 +278,7 @@ fn EnterpriseAppPanel(
                 }}
             </DetailHeader>
             <TabBar
+                label="Enterprise application sections"
                 items={
                     EnterpriseTab::ALL
                         .iter()

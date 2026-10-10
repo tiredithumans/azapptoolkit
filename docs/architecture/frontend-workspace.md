@@ -44,8 +44,9 @@ surfaces reuse it rather than re-implementing the markup.
   There is no `.view-header` class. The two list views own their `SectionHeader` above a titleless
   `ListScaffold` — `ListScaffold` takes no `title`/`actions` props; the card starts at its search
   box.
-- **Loading** — skeletons for content regions (`SkeletonList` / `DetailSkeleton`); spinners are
-  reserved for in-button / inline busy states only.
+- **Loading** — skeletons for content regions (`SkeletonList` / `DetailSkeleton` /
+  `SkeletonCard`), each a `role="status"` region with a hidden "Loading…"; spinners are reserved
+  for in-button / inline busy states only.
 - **Load failure** — `DetailLoadError`, the universal "message + Retry" block (detail panes and
   their tabs/sections, all three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a
   context `class`. A `Suspend` `Err` arm never renders `form-error` / `FormError` directly — pinned
@@ -107,7 +108,13 @@ surfaces reuse it rather than re-implementing the markup.
   sets `color-scheme`, which is the only thing that reaches the OS-drawn popup list and the
   scrollbars; without it they render light on a dark page.
 - **Pick-one-of-N (tabs and segmented choice)** — `components::ui::TabBar` + `TabBarItem`, bound
-  to one `RwSignal<String>`. **The** tab implementation: both detail panes, Security / Settings /
+  to one `RwSignal<String>`, with a required `label` (the tablist's accessible name — every strip
+  used to be an unnamed "tab list") and an opt-in `panel_id` that links the tabs (`aria-controls`,
+  ids from `tab_id`) to the one `role="tabpanel"` region the caller renders (Bulk Actions is the
+  worked example; strips over keep-alive sibling panes stay unlinked). `SearchInput` likewise names
+  its field with a hidden `<label for>` (default: the placeholder text) — a placeholder alone is
+  not an accessible name, and `attr:aria-label` on a thaw `Input` lands on the wrapper.
+  **The** tab implementation: both detail panes, Security / Settings /
   Bulk Actions sub-tabs, the audit dashboard's facet bar, Resource Access, the permission picker's
   Application/Delegated choice, and the Access tab's Users/Groups. Do **not** reach for thaw's
   `TabList` — it was removed app-wide because `thaw::Tab` has no roving `tabindex` and no keydown

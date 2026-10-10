@@ -61,13 +61,7 @@ fn mount_dialog(dto: &DeletedAppsDto) -> ts::Mounted {
 
 /// Like `ts::wait_for`, but names the step and dumps the body on timeout.
 async fn settle(step: &str, f: impl Fn() -> bool) {
-    for _ in 0..300 {
-        if f() {
-            return;
-        }
-        ts::tick().await;
-    }
-    panic!("stuck at {step}; body:\n{}", ts::body_text());
+    ts::wait_until(step, f).await;
 }
 
 #[wasm_bindgen_test]

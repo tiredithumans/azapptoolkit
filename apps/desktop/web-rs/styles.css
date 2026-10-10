@@ -193,6 +193,25 @@ textarea:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
+/* Every focus ring in this sheet is a box-shadow, and forced-colors mode
+ * (Windows contrast themes, which WebView2 honours) drops box-shadow — so
+ * keyboard focus vanished there. A system-colour outline survives it.
+ * `!important` because the 29 ring rules each set `outline: none` at a higher
+ * specificity than a bare `:focus-visible`, and source order breaks only
+ * ties; the four scroll-clipped controls keep their ring inset, as their
+ * box-shadow rings are, so a scrolling container cannot cut it off. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid CanvasText !important;
+    outline-offset: 2px;
+  }
+  .ui-tabs__btn:focus-visible,
+  .data-table tbody tr:focus-visible,
+  .app-list__row:focus-visible,
+  .app-list__row-btn:focus-visible {
+    outline-offset: -2px;
+  }
+}
 /* Custom transparent-background buttons (pairing links, saved-view chips,
  * claims-editor row actions) — same ring instead of the UA default outline. */
 .saved-views__add:focus-visible,

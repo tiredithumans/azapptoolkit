@@ -7,6 +7,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Every tab strip now has a name for screen readers** ("Security sections", "Application
+  sections", …); the Bulk Actions tabs also name the panel they switch.
+- **List and table filter boxes now have a real label** instead of being named only by a
+  placeholder that disappears as you type.
+- **Loading placeholders announce "Loading…"** to assistive technology instead of appearing as
+  silent blocks.
+- **Keyboard focus stays visible in Windows high-contrast (forced-colors) mode**, which drops the
+  shadow-drawn focus rings the app used everywhere.
 - **Every credential, owner, access, backup/restore, bulk-create, scoping and SSO action whose
   session has expired, or whose token was rejected, now offers Re-authenticate or Refresh token
   beside its error** — and a missing consent offers Grant consent — instead of the message alone.

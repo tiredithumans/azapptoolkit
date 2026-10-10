@@ -124,13 +124,7 @@ async fn deleting_from_the_detail_pane_refreshes_both_lists() {
 
 /// [`ts::wait_for`] that names the step it was stuck on and dumps the page.
 async fn settle(step: &str, f: impl Fn() -> bool) {
-    for _ in 0..300 {
-        if f() {
-            return;
-        }
-        ts::tick().await;
-    }
-    panic!("stuck at {step}; body:\n{}", ts::body_text());
+    ts::wait_until(step, f).await;
 }
 
 /// A rename refreshes the App Registrations list, whose rows show the name.

@@ -31,6 +31,8 @@ mod harness;
 mod ipc_wire;
 #[path = "gui/key_vault.rs"]
 mod key_vault;
+#[path = "gui/primitives.rs"]
+mod primitives;
 #[path = "gui/reauth.rs"]
 mod reauth;
 #[path = "gui/settings.rs"]
