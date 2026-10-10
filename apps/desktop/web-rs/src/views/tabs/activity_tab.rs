@@ -144,12 +144,18 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                     let Some(t) = session.active_tenant.get_untracked() else {
                                         return;
                                     };
-                                    match auth::request_scope_consent(&t.tenant_id, "audit_log")
-                                        .await
-                                    {
+                                    let res =
+                                        auth::request_scope_consent(&t.tenant_id, "audit_log")
+                                            .await;
+                                    // Answered minutes later, perhaps after a
+                                    // sign-out: no toast for the next sign-in.
+                                    if !session.is_active_tenant(&t.tenant_id) {
+                                        return;
+                                    }
+                                    match res {
                                         Ok(()) => reload.update(|n| *n += 1),
                                         Err(e) => {
-                                            session.report_command_error(&e);
+                                            session.report_command_error_for(&e, "audit_log");
                                         }
                                     }
                                 });

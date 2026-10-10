@@ -73,14 +73,20 @@ pub fn OwnersTab(
                 adding.set(None);
                 return;
             };
-            match applications::add_application_owner(&t.tenant_id, &object_id, &principal_id).await
-            {
+            let res =
+                applications::add_application_owner(&t.tenant_id, &object_id, &principal_id).await;
+            // Sign-out mid-add: the toast would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                adding.set(None);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     raw_query.set(String::new());
                     session.toast_success("Owner added.");
                     on_changed_cb.try_run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             adding.set(None);
         });
@@ -110,16 +116,21 @@ pub fn OwnersTab(
                 adding_defaults.set(false);
                 return;
             };
-            let (added, failures) =
-                match add_default_owners(&t.tenant_id, &object_id, Some(existing)).await {
-                    DefaultOwnersOutcome::NoneConfigured => {
-                        no_owner_defaults.set(true);
-                        adding_defaults.set(false);
-                        return;
-                    }
-                    DefaultOwnersOutcome::Done { added, failures } => (added, failures),
-                };
+            let outcome = add_default_owners(&t.tenant_id, &object_id, Some(existing)).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                adding_defaults.set(false);
+                return;
+            }
+            let (added, failures) = match outcome {
+                DefaultOwnersOutcome::NoneConfigured => {
+                    no_owner_defaults.set(true);
+                    adding_defaults.set(false);
+                    return;
+                }
+                DefaultOwnersOutcome::Done { added, failures } => (added, failures),
+            };
             if let Some(msg) = DefaultOwnersOutcome::failure_message(&failures) {
+                DefaultOwnersOutcome::report_recovery(session, &failures);
                 error.set(Some(msg));
             } else if added > 0 {
                 session.toast_success(format!(
@@ -148,14 +159,19 @@ pub fn OwnersTab(
                 removing.set(None);
                 return;
             };
-            match applications::remove_application_owner(&t.tenant_id, &object_id, &principal_id)
-                .await
-            {
+            let res =
+                applications::remove_application_owner(&t.tenant_id, &object_id, &principal_id)
+                    .await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                removing.set(None);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     session.toast_success("Owner removed.");
                     on_changed_cb.try_run(());
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             removing.set(None);
         });
@@ -220,7 +236,12 @@ pub fn OwnersTab(
                 applying.set(false);
                 return;
             };
-            match applications::set_application_owners(&t.tenant_id, &object_id, &ids).await {
+            let res = applications::set_application_owners(&t.tenant_id, &object_id, &ids).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                applying.set(false);
+                return;
+            }
+            match res {
                 Ok(res) => {
                     replacing.set(false);
                     staged.set(Vec::new());
@@ -255,10 +276,7 @@ pub fn OwnersTab(
                     }
                     on_changed_cb.try_run(());
                 }
-                Err(e) => {
-                    session.report_if_session_dead(&e);
-                    error.set(Some(e.message));
-                }
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             applying.set(false);
         });

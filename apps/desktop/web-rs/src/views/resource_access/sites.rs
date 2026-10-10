@@ -165,13 +165,19 @@ pub(super) fn SitesPanel() -> impl IntoView {
                 scanning.set(false);
                 return;
             };
-            match sharepoint::sweep_site_permissions(&t.tenant_id).await {
+            let res = sharepoint::sweep_site_permissions(&t.tenant_id).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                scanning.set(false);
+                progress.set(None);
+                return;
+            }
+            match res {
                 Ok(r) => result.set(Some(r)),
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
                     // A dead session gets the Re-authenticate lever instead of a
                     // dead-end line; consent keeps this panel's own button.
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(e.message));
                     }
                 }
@@ -198,7 +204,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
             match res {
                 Ok(()) => do_run(),
                 Err(e) => {
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(e.message));
                     }
                 }

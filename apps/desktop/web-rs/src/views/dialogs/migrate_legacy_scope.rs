@@ -67,14 +67,19 @@ pub fn MigrateLegacyScopeButton(
                 // pattern (default `app_scope_<appId>`), the same name a fresh
                 // scoped grant would use. An override belongs to the deliberate
                 // per-app flow on the Permissions tab, not to a one-click fix.
-                match exchange::migrate_application_access_policies(
+                let res = exchange::migrate_application_access_policies(
                     &t.tenant_id,
                     Some(&app_id),
                     None,
                     dry_run,
                 )
-                .await
-                {
+                .await;
+                // Sign-out mid-run: the toast would surface at the next sign-in.
+                if !session.is_active_tenant(&t.tenant_id) {
+                    busy.set(false);
+                    return;
+                }
+                match res {
                     Ok(r) => {
                         // A clean run is the only one that closes: `partial`
                         // means the fail-closed guards held something back, and
@@ -94,7 +99,7 @@ pub fn MigrateLegacyScopeButton(
                             report.set(Some(r));
                         }
                     }
-                    Err(e) => error.set(Some(e.message)),
+                    Err(e) => session.fail_inline(&e, "exchange", error),
                 }
                 busy.set(false);
             });

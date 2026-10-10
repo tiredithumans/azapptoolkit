@@ -109,13 +109,24 @@ pub fn AppSiteAccessPanel(
             cancelled: false,
         }));
         leptos::task::spawn_local(async move {
-            match sharepoint::sweep_site_permissions(&t.tenant_id).await {
+            let res = sharepoint::sweep_site_permissions(&t.tenant_id).await;
+            // A sign-out mid-sweep answers not_signed_in; its lever must not
+            // surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                scanning.set(false);
+                progress.set(None);
+                return;
+            }
+            match res {
                 Ok(sweep) => {
                     access.set(Some(AppSiteAccessDto::from_sweep(&sweep, &app)));
                     checked.set(true);
                 }
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
+                    // The panel's own button covers consent; a dead session or
+                    // rejected token needs the sink's lever.
+                    session.report_if_session_lost(&e);
                     error.set(Some(e.message));
                 }
             }

@@ -22,7 +22,9 @@ use thaw::{Body1, Button, ButtonAppearance, Textarea};
 use crate::bindings::bulk;
 use crate::bindings::bulk::BulkCreateStatus;
 use crate::bindings::events;
-use crate::components::bulk_action_bar::{BulkAction, BulkActionBar, BulkFailure, BulkProgressRow};
+use crate::components::bulk_action_bar::{
+    BulkAction, BulkActionBar, BulkFailure, BulkProgressRow, session_dead_error,
+};
 use crate::components::icon::IconName;
 use crate::components::ui::{Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem};
 use crate::state::use_session;
@@ -182,12 +184,18 @@ pub fn BulkActionsView() -> impl IntoView {
                         count_noun(fails.len(), "problem", "problems"),
                         if r.cancelled { " (cancelled)" } else { "" }
                     )));
+                    // A row that failed because the session died is the
+                    // run stopping, not that app being broken: offer
+                    // Re-authenticate like the bulk bar does.
+                    if let Some(dead) = session_dead_error(&fails) {
+                        session.report_if_session_dead(&dead);
+                    }
                     failures.set(fails);
                     if !r.validate_only && !r.cancelled {
                         session.bump_apps_reload();
                     }
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             busy.set(false);
             bulk_running.set(false);

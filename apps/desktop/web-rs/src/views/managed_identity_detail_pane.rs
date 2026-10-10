@@ -368,14 +368,22 @@ pub fn ManagedIdentityDetailPane(
                                 consenting.set(true);
                                 consent_error.set(None);
                                 leptos::task::spawn_local(async move {
-                                    match auth_bindings::request_scope_consent(
-                                            &t.tenant_id,
-                                            "arm",
-                                        )
-                                        .await
+                                    let res = auth_bindings::request_scope_consent(
+                                        &t.tenant_id,
+                                        "arm",
+                                    )
+                                    .await;
+                                    // Answered minutes later, perhaps after the
+                                    // pane closed or a sign-out: no toast for the
+                                    // next sign-in.
+                                    if consenting.is_disposed()
+                                        || !session.is_active_tenant(&t.tenant_id)
                                     {
+                                        return;
+                                    }
+                                    match res {
                                         Ok(()) => arm_reload.update(|n| *n += 1),
-                                        Err(e) => consent_error.set(Some(e.message)),
+                                        Err(e) => session.fail_inline(&e, "arm", consent_error),
                                     }
                                     consenting.set(false);
                                 });

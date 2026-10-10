@@ -293,7 +293,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                                 if e.is_consent_required() {
                                     needs_consent.set(true);
                                 }
-                                if !session.report_if_session_dead(&e) {
+                                if !session.report_if_session_lost(&e) {
                                     error.set(Some(format!(
                                         "The verdict above is complete, but the permission entries on this resource could not be read: {}",
                                         e.message
@@ -309,7 +309,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                     }
                     // A dead session gets the Re-authenticate lever, not a
                     // dead-end line; consent keeps this view's own button.
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(e.message));
                     }
                 }
@@ -327,7 +327,13 @@ pub fn PermissionTesterView() -> impl IntoView {
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "sharepoint").await;
+            // The consent prompt is answered minutes later, perhaps after a
+            // sign-out: a toast then would surface at the next sign-in.
+            if busy.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => {
                     needs_consent.set(false);
                     // Clear `busy` first — `do_test` early-returns while it's set,
@@ -337,7 +343,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 }
                 Err(e) => {
                     busy.set(false);
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(e.message));
                     }
                 }
@@ -371,7 +377,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                     if e.is_consent_required() {
                         needs_consent.set(true);
                     }
-                    if !session.report_if_session_dead(&e) {
+                    if !session.report_if_session_lost(&e) {
                         error.set(Some(format!("Revoke failed: {}", e.message)));
                     }
                 }

@@ -16,6 +16,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::sso::OidcSsoSummary;
 use azapptoolkit_web_rs::components::sso_summary::SamlSummaryView;
 use azapptoolkit_web_rs::state::OpenItemKind;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
@@ -131,6 +132,63 @@ async fn an_invalid_certificate_lifetime_blocks_next_until_fixed() {
     ts::wait_for(|| ts::body_contains("Step 3 of 3")).await;
     click_button("Create").await;
     ts::wait_for(|| ts::call_count("create_saml_sso_application") == 1).await;
+}
+
+/// The OIDC create's final step shows the client secret once ("can never be
+/// retrieved again"). Escape used to close the wizard from there — and the
+/// secret with it; now it does nothing on that step, like the SecretReveal
+/// dialog (`certificate_reveal.rs`). The explicit Done button still closes it.
+#[wasm_bindgen_test]
+async fn escape_does_not_dismiss_the_one_time_client_secret() {
+    ts::reset();
+    ts::mock_ok("get_tenant_defaults", &fixtures::tenant_defaults());
+    ts::mock_ok(
+        "create_oidc_sso_application",
+        &OidcSsoSummary {
+            object_id: "obj-demo".into(),
+            service_principal_id: "sp-demo".into(),
+            client_id: "app-demo".into(),
+            client_secret: Some("ONETIMECLIENTSECRET".into()),
+            ..Default::default()
+        },
+    );
+    let closes = RwSignal::new(0u32);
+    let _m = ts::mount_view(move || {
+        view! {
+            <SsoWizardDialog
+                open=Signal::derive(|| true)
+                on_close=Callback::new(move |()| closes.update(|n| *n += 1))
+                on_created=Callback::new(|()| {})
+            />
+        }
+    });
+
+    ts::wait_for(|| ts::body_contains("Step 1 of 3")).await;
+    // Protocol is a `<select>`: pick OIDC the way an operator would.
+    let select: web_sys::HtmlSelectElement = ts::query(".modal select")
+        .expect("the protocol select")
+        .unchecked_into();
+    select.set_value("oidc");
+    let change = web_sys::Event::new("change").unwrap();
+    select.dispatch_event(&change).unwrap();
+    set_nth_input(0, "Contoso OIDC");
+    click_button("Next").await;
+    ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
+    ts::set_textarea_value(".modal textarea", "https://app.contoso.com/auth/callback");
+    click_button("Next").await;
+    ts::wait_for(|| ts::body_contains("Step 3 of 3")).await;
+    click_button("Create").await;
+    ts::wait_for(|| ts::body_contains("ONETIMECLIENTSECRET")).await;
+
+    ts::press_key("body", "Escape");
+    ts::tick().await;
+    assert_eq!(
+        closes.get_untracked(),
+        0,
+        "Escape must not close the secret away"
+    );
+    click_button("Done").await;
+    assert_eq!(closes.get_untracked(), 1, "Done still closes the wizard");
 }
 
 #[wasm_bindgen_test]

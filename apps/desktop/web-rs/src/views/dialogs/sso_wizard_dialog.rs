@@ -100,8 +100,17 @@ pub fn SsoWizardDialog(
     let saml_result: RwSignal<Option<SamlSsoSummary>> = RwSignal::new(None);
     let oidc_result: RwSignal<Option<OidcSsoSummary>> = RwSignal::new(None);
 
+    // Not on the final step of an OIDC create: it shows the client secret
+    // once ("can never be retrieved again"), and a reflex Escape there threw
+    // it away — the hazard SecretReveal and `close_on_escape=false` exist for.
+    // The explicit Done button remains.
     use_escape(
-        move || open.get_untracked() && !busy.get_untracked(),
+        move || {
+            open.get_untracked()
+                && !busy.get_untracked()
+                && !oidc_result
+                    .with_untracked(|r| r.as_ref().is_some_and(|s| s.client_secret.is_some()))
+        },
         move || on_close.run(()),
     );
     let modal_ref: NodeRef<leptos::html::Div> = NodeRef::new();
@@ -201,7 +210,13 @@ pub fn SsoWizardDialog(
                 notification_emails: emails,
             };
             leptos::task::spawn_local(async move {
-                match sso::create_saml_sso_application(&tenant_id, &input).await {
+                let res = sso::create_saml_sso_application(&tenant_id, &input).await;
+                // Sign-out mid-create: the summary belongs to nobody on screen.
+                if !session.is_active_tenant(&tenant_id) {
+                    busy.set(false);
+                    return;
+                }
+                match res {
                     Ok(summary) => {
                         saml_result.set(Some(summary));
                         step.set(3);
@@ -209,7 +224,10 @@ pub fn SsoWizardDialog(
                     }
                     Err(e) => {
                         if e.is_consent_required() {
+                            // The wizard's own "Grant consent & retry" covers it.
                             needs_consent.set(true);
+                        } else {
+                            session.report_recovery_action(&e, "policy_write");
                         }
                         error.set(Some(e.message));
                     }
@@ -228,13 +246,18 @@ pub fn SsoWizardDialog(
                 secret_lifetime_days: secret_days.get_untracked().trim().parse().ok(),
             };
             leptos::task::spawn_local(async move {
-                match sso::create_oidc_sso_application(&tenant_id, &input).await {
+                let res = sso::create_oidc_sso_application(&tenant_id, &input).await;
+                if !session.is_active_tenant(&tenant_id) {
+                    busy.set(false);
+                    return;
+                }
+                match res {
                     Ok(summary) => {
                         oidc_result.set(Some(summary));
                         step.set(3);
                         on_created.try_run(());
                     }
-                    Err(e) => error.set(Some(e.message)),
+                    Err(e) => session.fail_inline(&e, "write", error),
                 }
                 busy.set(false);
             });

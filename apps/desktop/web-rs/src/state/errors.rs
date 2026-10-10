@@ -243,6 +243,34 @@ impl Session {
         true
     }
 
+    /// The two failures that mean the session itself needs attention — dead
+    /// ([`Self::report_if_session_dead`]) or a rejected token
+    /// ([`Self::report_if_token_rejected`]) — for a surface that keeps its OWN
+    /// consent / step-up affordance and must not get a second one from the
+    /// sink. Returns `true` when a lever was raised.
+    pub fn report_if_session_lost(&self, e: &azapptoolkit_dto::UiError) -> bool {
+        self.report_if_session_dead(e) || self.report_if_token_rejected(e)
+    }
+
+    /// Lands a hand-spawned task's failure the way `CommandState::fail_inline`
+    /// does: the recovery lever when one applies, then the inline text in
+    /// `sink`. A sink whose owner is gone has nowhere to show the text, so the
+    /// failure goes to the full sink instead (a plain toast when no lever
+    /// applies) — a write that failed is never silent.
+    pub fn fail_inline(
+        &self,
+        e: &azapptoolkit_dto::UiError,
+        consent_feature: &'static str,
+        sink: RwSignal<Option<String>>,
+    ) {
+        if sink.is_disposed() {
+            self.report_command_error_for(e, consent_feature);
+            return;
+        }
+        self.report_recovery_action(e, consent_feature);
+        sink.set(Some(e.message.clone()));
+    }
+
     /// When `e` means the tenant has never consented to the scopes the command
     /// needed (`consent_required`), show the persistent error toast whose action
     /// grants them (see [`Self::spawn_scope_consent`]) and return `true`;
@@ -393,6 +421,66 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_lost_raises_only_the_session_levers() {
+        // A surface with its own consent / step-up button asks for the two
+        // session levers only: consent and step-up must not get a second,
+        // competing toast from the sink.
+        for (code, lever) in [
+            ("refresh_missing", Some("Re-authenticate")),
+            ("unauthorized", Some("Refresh token")),
+            ("consent_required", None),
+            ("interaction_required", None),
+            ("forbidden", None),
+        ] {
+            Owner::new().with(|| {
+                provide_session();
+                let session = use_session();
+                let raised = session
+                    .report_if_session_lost(&azapptoolkit_dto::UiError::new(code, "x", false));
+                let labels: Vec<Option<String>> = session
+                    .toasts
+                    .with_untracked(|l| l.iter().map(|t| t.action_label.clone()).collect());
+                assert_eq!(raised, lever.is_some(), "{code}");
+                assert_eq!(
+                    labels,
+                    lever.map(|l| vec![Some(l.to_string())]).unwrap_or_default(),
+                    "{code}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn fail_inline_keeps_the_text_while_the_sink_lives_and_toasts_once_it_is_gone() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            let owner = Owner::new();
+            let sink: RwSignal<Option<String>> = owner.with(|| RwSignal::new(None));
+            // Live sink: the lever (if any) plus the inline text, no plain toast.
+            session.fail_inline(
+                &azapptoolkit_dto::UiError::new("forbidden", "no rights", false),
+                "write",
+                sink,
+            );
+            assert_eq!(sink.get_untracked().as_deref(), Some("no rights"));
+            assert_eq!(session.toasts.with_untracked(Vec::len), 0, "inline only");
+            // Disposed sink: the text has nowhere to show, so the full sink —
+            // a plain toast here — speaks for it.
+            owner.cleanup();
+            session.fail_inline(
+                &azapptoolkit_dto::UiError::new("forbidden", "gone", false),
+                "write",
+                sink,
+            );
+            let messages: Vec<String> = session
+                .toasts
+                .with_untracked(|l| l.iter().map(|t| t.message.clone()).collect());
+            assert_eq!(messages, vec!["gone".to_string()]);
+        });
+    }
+
     use super::*;
     use azapptoolkit_dto::UiError;
 

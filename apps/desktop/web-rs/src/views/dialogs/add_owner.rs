@@ -19,7 +19,7 @@ use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
 use crate::components::ui::FormError;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_focus_trap::use_focus_trap;
-use crate::state::use_session;
+use crate::state::{Session, use_session};
 use crate::util::count_noun;
 
 /// Outcome of [`add_default_owners`].
@@ -28,21 +28,41 @@ pub(crate) enum DefaultOwnersOutcome {
     NoneConfigured,
     Done {
         added: usize,
-        failures: Vec<String>,
+        /// `(who, why)` per owner that could not be added. The typed error is
+        /// kept (not flattened to text) so a dead session or missing consent
+        /// among them can still raise its lever.
+        failures: Vec<(String, azapptoolkit_dto::UiError)>,
     },
 }
 
 impl DefaultOwnersOutcome {
     /// The per-owner failure line both callers render, or `None` when nothing
     /// failed.
-    pub(crate) fn failure_message(failures: &[String]) -> Option<String> {
+    pub(crate) fn failure_message(
+        failures: &[(String, azapptoolkit_dto::UiError)],
+    ) -> Option<String> {
         (!failures.is_empty()).then(|| {
             format!(
                 "{} failed — {}",
                 count_noun(failures.len(), "default owner", "default owners"),
-                failures.join("; ")
+                failures
+                    .iter()
+                    .map(|(who, e)| format!("{who}: {}", e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             )
         })
+    }
+
+    /// Raises the recovery lever for the first failure that needs one (a dead
+    /// session ends the loop, so it is also the last). Returns whether one was.
+    pub(crate) fn report_recovery(
+        session: Session,
+        failures: &[(String, azapptoolkit_dto::UiError)],
+    ) -> bool {
+        failures
+            .iter()
+            .any(|(_, e)| session.report_recovery_action(e, "write"))
     }
 }
 
@@ -78,7 +98,15 @@ pub(crate) async fn add_default_owners(
         }
         match applications::add_application_owner(tenant_id, object_id, &p.id).await {
             Ok(()) => added += 1,
-            Err(e) => failures.push(format!("{}: {}", p.display_name.unwrap_or(p.id), e.message)),
+            Err(e) => {
+                // A dead session fails every remaining owner identically:
+                // stop, and let the caller raise Re-authenticate once.
+                let fatal = e.is_reauth_fatal();
+                failures.push((p.display_name.unwrap_or(p.id), e));
+                if fatal {
+                    break;
+                }
+            }
         }
     }
     DefaultOwnersOutcome::Done { added, failures }
@@ -122,8 +150,14 @@ pub fn AddOwnerButton(
         error.set(None);
         let object_id = object_id_row.clone();
         leptos::task::spawn_local(async move {
-            match applications::add_application_owner(&t.tenant_id, &object_id, &principal_id).await
-            {
+            let res =
+                applications::add_application_owner(&t.tenant_id, &object_id, &principal_id).await;
+            // Sign-out mid-add: the toast would surface at the next sign-in.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(()) => {
                     open.set(false);
                     raw_query.set(String::new());
@@ -132,7 +166,7 @@ pub fn AddOwnerButton(
                     );
                     on_done.try_run(object_id);
                 }
-                Err(e) => error.set(Some(e.message)),
+                Err(e) => session.fail_inline(&e, "write", error),
             }
             busy.set(false);
         });
@@ -154,7 +188,12 @@ pub fn AddOwnerButton(
         no_owner_defaults.set(false);
         let object_id = object_id.clone();
         leptos::task::spawn_local(async move {
-            let (added, failures) = match add_default_owners(&t.tenant_id, &object_id, None).await {
+            let outcome = add_default_owners(&t.tenant_id, &object_id, None).await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                adding_defaults.set(false);
+                return;
+            }
+            let (added, failures) = match outcome {
                 DefaultOwnersOutcome::NoneConfigured => {
                     no_owner_defaults.set(true);
                     adding_defaults.set(false);
@@ -165,7 +204,9 @@ pub fn AddOwnerButton(
             adding_defaults.set(false);
             if let Some(msg) = DefaultOwnersOutcome::failure_message(&failures) {
                 // Leave the modal open with the error so the operator can retry;
-                // don't clear the Fix button.
+                // don't clear the Fix button. A dead session or missing consent
+                // among the failures gets its lever as well.
+                DefaultOwnersOutcome::report_recovery(session, &failures);
                 error.set(Some(msg));
                 return;
             }

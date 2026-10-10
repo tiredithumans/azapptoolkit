@@ -182,11 +182,21 @@ pub fn ExchangeScopingSection(
             return;
         };
         leptos::task::spawn_local(async move {
-            if auth::request_scope_consent(&t.tenant_id, "exchange")
-                .await
-                .is_ok()
-            {
-                reload.update(|n| *n += 1);
+            let res = auth::request_scope_consent(&t.tenant_id, "exchange").await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
+                Ok(()) => reload.update(|n| *n += 1),
+                // The section's own consent button covers consent; a dead
+                // session or rejected token needs the sink's lever.
+                // The operator's own cancel of the browser prompt is not
+                // an error; anything else must not vanish.
+                Err(e) => {
+                    if !session.report_if_session_lost(&e) && e.code != "cancelled" {
+                        session.toast_error(format!("Couldn't grant consent: {}", e.message), None);
+                    }
+                }
             }
         });
     };

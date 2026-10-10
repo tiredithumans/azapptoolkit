@@ -239,6 +239,19 @@ impl CommandState {
         session.report_command_error_with_retry(&e, self.consent_feature, Some(retry));
     }
 
+    /// The `on_err` for a [`run_with`](Self::run_with) whose inline text lives
+    /// in a signal the component shares across several handles (the
+    /// credentials tab's one `error`): the recovery lever when one applies,
+    /// then the text — `fail_inline` (the [`run`](Self::run) path) pointed at `sink`
+    /// instead of this handle's own `error`. `land` already skips `on_err` for
+    /// a disposed owner, and `set` on a disposed sink is a no-op.
+    pub fn fail_into(
+        self,
+        sink: RwSignal<Option<String>>,
+    ) -> impl FnOnce(azapptoolkit_dto::UiError) + 'static {
+        move |e| self.session.fail_inline(&e, self.consent_feature, sink)
+    }
+
     /// Point this handle's consent recovery at a feature other than the Graph
     /// write scopes — `"exchange"`, `"sharepoint"`, `"arm"`, … (the keys the
     /// backend's `AppState::consent_scopes_for` accepts).
