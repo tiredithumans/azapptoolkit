@@ -29,7 +29,7 @@ const ERROR_TIMEOUT_MS: i32 = 10000;
 /// `Rc`, which is cheap.
 pub type ToastAction = Rc<dyn Fn()>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
     Success,
     Error,

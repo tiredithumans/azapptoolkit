@@ -639,9 +639,16 @@ stays empty.
   "re-authenticate" into a wall of N indistinguishable failures.
 - **Flag the result incomplete.** A cancelled or session-dead run is never cached and never renders
   as an all-clear; failures are fed in through `note` / `note_code` / `note_fatal`.
-- **Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()`** and return `session.err(..)` rather
-  than a partial result. Sequential flows that have already mutated (restore, AAP migration) instead
-  break each pass and flag the report — stopping is not enough once writes have landed.
+- **Fan-outs gate `dispatch_capped`'s `spawn` on `is_dead()`.** A **read** fan-out (the site / Key
+  Vault sweeps, a backup; the audit with its own captured fatal error) then returns the dead-session
+  error rather than a partial result, because a partial read presented as complete is a wrong answer. A **mutating** fan-out (the bulk
+  delete, consent grant and expired-secret sweep) returns what landed instead: the ids it deleted,
+  the outcomes it has, and the failure that latched the dead session carrying its wire code
+  (`BulkError.code`, `BulkDeleteFailure.code`), with `cancelled` reserved for the operator's Cancel.
+  The bar reads that code (`session_dead_error`) to prompt re-authentication, prunes the deleted ids
+  from the selection and offers Undo — an error there used to throw the landed deletes away, leaving
+  them selected with no Undo. Sequential flows that have already mutated (restore, AAP migration)
+  likewise break each pass and flag the report — stopping is not enough once writes have landed.
 
 **One flag per run kind, each with exactly one Cancel command.** `audit_cancel` (`run_audit`,
 `cancel_audit`), `bulk_cancel` (every `bulk_*`, `cancel_bulk`), `migration_cancel` (the AAP
@@ -654,6 +661,7 @@ Why per kind: `CancelFlag::cancel` stamps the flag's current generation, so it s
 the flag, and the views that start these runs stay mounted (keep-alive views, display-toggled
 panels), so runs of different kinds overlap — a shared flag let cancelling a read-only audit halt a
 bulk delete, or a mailbox probe's Cancel throw away a site sweep. The one remaining same-kind
-overlap: two bulk runs started from different bulk action bars share `bulk_cancel`, so one Cancel
-stops both (separating them needs a per-run id). Pinned by `repo_invariants/cancel.rs`
+overlap: a bulk run and a Recently-deleted restore share `bulk_cancel`, so one Cancel stops both
+(separating them needs a per-run id). The bars themselves no longer overlap — the frontend admits
+one bar run at a time (`TenantScopedUi::bulk_running`, frontend-workspace.md). Pinned by `repo_invariants/cancel.rs`
 (`every_cancel_flag_belongs_to_one_run_kind_and_one_cancel_command`).

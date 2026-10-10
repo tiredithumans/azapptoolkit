@@ -144,18 +144,29 @@ struct Parsed {
     /// Object ids that no longer exist and must leave the selection. Delete
     /// only, and only the ids Graph confirmed gone.
     deleted: Vec<String>,
+    /// Stopped by the operator's Cancel (the summary already says so).
+    cancelled: bool,
 }
 
 impl Parsed {
     /// A run whose outcome count *is* its reach — every command but the
     /// credential sweep — and which strands no ids.
-    fn new(summary: String, failures: Vec<BulkFailure>, reached: usize) -> Self {
+    fn new(summary: String, failures: Vec<BulkFailure>, reached: usize, cancelled: bool) -> Self {
         Parsed {
             summary,
             failures,
             reached: Some(reached),
             deleted: Vec::new(),
+            cancelled,
         }
+    }
+
+    /// Whether the run did everything it was asked: nothing failed, nothing
+    /// was cancelled, and it reached every one of the `attempted` ids (a reach
+    /// that is not knowable counts as complete — a note that guesses is worse
+    /// than none).
+    fn is_clean(&self, attempted: usize) -> bool {
+        self.failures.is_empty() && !self.cancelled && self.reached.is_none_or(|r| r >= attempted)
     }
 }
 
@@ -168,11 +179,23 @@ impl Parsed {
 /// the AAP migration report's `unattempted` disclosure. Empty when the run
 /// reached everything, or when its reach is not knowable — a note that guesses
 /// is worse than none.
-fn unattempted_note(attempted: usize, reached: Option<usize>) -> String {
-    match reached.map_or(0, |r| attempted.saturating_sub(r)) {
-        0 => String::new(),
-        1 => " — 1 app was never attempted and is still selected; re-run to finish.".to_string(),
-        n => format!(" — {n} apps were never attempted and are still selected; re-run to finish."),
+///
+/// `still_selected`: the mounted bar can promise the tail is still checked
+/// (the selection is the host's and the run touched only the deleted ids); a
+/// bar that is gone cannot — collapsing a Findings group clears that
+/// selection — so its toast says only what was not attempted.
+fn unattempted_note(attempted: usize, reached: Option<usize>, still_selected: bool) -> String {
+    match (
+        reached.map_or(0, |r| attempted.saturating_sub(r)),
+        still_selected,
+    ) {
+        (0, _) => String::new(),
+        (1, true) => " — 1 app was never attempted and is still selected; re-run to finish.".into(),
+        (1, false) => " — 1 app was never attempted; select it again to finish.".into(),
+        (n, true) => {
+            format!(" — {n} apps were never attempted and are still selected; re-run to finish.")
+        }
+        (n, false) => format!(" — {n} apps were never attempted; select them again to finish."),
     }
 }
 
@@ -267,7 +290,7 @@ impl Landing {
                     self.summary.set(Some(format!(
                         "{}{}",
                         p.summary,
-                        unattempted_note(attempted, p.reached)
+                        unattempted_note(attempted, p.reached, true)
                     )));
                     self.failures.set(p.failures);
                     self.armed.set(None);
@@ -275,6 +298,22 @@ impl Landing {
                     // for one Undo run (recycle-bin restore).
                     if matches!(action, BulkAction::Delete) {
                         self.undo_ids.set(p.deleted.clone());
+                    }
+                } else {
+                    // The bar is gone (a Findings group collapsed, the Bulk
+                    // Actions tab switched) but the run's outcome is not: a
+                    // failure or a stopped run nobody sees is one the operator
+                    // rediscovers on the next scan. The summary lands as a
+                    // toast — red unless the run did everything it was asked.
+                    let summary = format!(
+                        "{}{}",
+                        p.summary,
+                        unattempted_note(attempted, p.reached, false)
+                    );
+                    if p.is_clean(attempted) {
+                        self.session.toast_success(summary);
+                    } else {
+                        self.session.toast_error(summary, None);
                     }
                 }
                 // ONLY the ids the backend confirmed gone leave the
@@ -292,12 +331,24 @@ impl Landing {
                 }
                 self.done();
             }
-            // The bar's inline error is this surface's message; with the bar
-            // gone, the session's sink is the only place it can still be read.
-            Err(e) if mounted => self.error.set(Some(e.message)),
-            Err(e) => self.session.report_command_error(&e),
+            // The bar's inline error is this surface's message — plus the
+            // recovery lever (Re-authenticate / Refresh token / Grant consent)
+            // when the failure needs one, exactly as `CommandState::fail_inline`
+            // does. A dead session mid-run used to be a red line saying "sign
+            // in again", which here means a sign-out that drops every cache.
+            // With the bar gone, the session's sink is the only place it can
+            // still be read.
+            Err(e) if mounted => {
+                self.session
+                    .report_recovery_action(&e, action.consent_feature());
+                self.error.set(Some(e.message));
+            }
+            Err(e) => self
+                .session
+                .report_command_error_for(&e, action.consent_feature()),
         }
         self.busy.set(false);
+        self.session.tenant_ui.bulk_running.set(false);
     }
 
     /// Land an Undo (recycle-bin restore) result.
@@ -322,28 +373,36 @@ impl Landing {
                 }
                 // Read before `failures.set(fails)` moves the vec.
                 let clean = fails.is_empty();
+                let summary = format!(
+                    "Restored {restored} of {}.{}",
+                    count_noun(attempted, "deleted app", "deleted apps"),
+                    unattempted_note(attempted, Some(reached), mounted)
+                );
                 if mounted {
-                    self.summary.set(Some(format!(
-                        "Restored {restored} of {}.{}",
-                        count_noun(attempted, "deleted app", "deleted apps"),
-                        unattempted_note(attempted, Some(reached))
-                    )));
+                    self.summary.set(Some(summary.clone()));
                     self.failures.set(fails);
                 }
                 if !r.cancelled && restored > 0 && clean {
                     self.session
                         .toast_success(format!("Restored {restored} of {attempted} deleted apps."));
+                } else if !mounted {
+                    // Same rule as `finish_action`: a restore that failed or
+                    // stopped while its bar was gone is not silent.
+                    self.session.toast_error(summary, None);
                 }
                 self.done();
             }
-            Err(e) => {
-                self.session.report_command_error(&e);
-                if mounted {
-                    self.error.set(Some(e.message));
-                }
+            // The lever when one applies, and the inline text as the message;
+            // the full sink (which also toasts an ordinary failure) only when
+            // the bar is gone and the inline text has nowhere to show.
+            Err(e) if mounted => {
+                self.session.report_recovery_action(&e, "write");
+                self.error.set(Some(e.message));
             }
+            Err(e) => self.session.report_command_error(&e),
         }
         self.busy.set(false);
+        self.session.tenant_ui.bulk_running.set(false);
     }
 }
 
@@ -632,6 +691,18 @@ impl BulkAction {
         }
     }
 
+    /// Which consent set a `consent_required` failure of this action can be
+    /// fixed by — the key `AppState::consent_scopes_for` accepts. The scoping
+    /// actions ride their resource's on-demand scopes; everything else is a
+    /// Graph write.
+    fn consent_feature(self) -> &'static str {
+        match self {
+            BulkAction::ScopeMailbox => "exchange",
+            BulkAction::ScopeSharePoint => "sharepoint",
+            _ => "write",
+        }
+    }
+
     fn label(self) -> &'static str {
         self.spec().label
     }
@@ -672,6 +743,12 @@ pub fn BulkActionBar(
     let label_for = move |object_id: &str| -> String { label_with(names, object_id) };
 
     let busy = RwSignal::new(false);
+    // A run started from ANY bar (or the Bulk Actions page's Create) blocks
+    // this one: the bars share their selection and the backend's one cancel
+    // flag, and the App Registrations list and the Bulk Actions page both stay
+    // mounted, so a second Delete on the very same ids was one click away.
+    let bulk_running = session.tenant_ui.bulk_running;
+    let blocked = Memo::new(move |_| busy.get() || bulk_running.get());
     let summary: RwSignal<Option<String>> = RwSignal::new(None);
     let failures: RwSignal<Vec<BulkFailure>> = RwSignal::new(Vec::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -702,11 +779,12 @@ pub fn BulkActionBar(
     // toast because the host's `on_done` refetch may re-mount the bar before
     // the summary is read.
     let undo = Callback::new(move |ids: Vec<String>| {
-        if busy.get() || ids.is_empty() {
+        if blocked.get() || ids.is_empty() {
             return;
         }
         undo_ids.set(Vec::new());
         busy.set(true);
+        bulk_running.set(true);
         summary.set(None);
         failures.set(Vec::new());
         error.set(None);
@@ -716,6 +794,7 @@ pub fn BulkActionBar(
         leptos::task::spawn_local(async move {
             let Some(t) = tenant else {
                 busy.set(false);
+                bulk_running.set(false);
                 return;
             };
             let tid = &t.tenant_id;
@@ -787,7 +866,7 @@ pub fn BulkActionBar(
     // per-item failures, and on success clears the armed panel (Delete also
     // drops the ids it deleted from the selection) and fires `on_done`.
     let run = move |action: BulkAction| {
-        if busy.get() {
+        if blocked.get() {
             return;
         }
         let ids: Vec<String> = selection.get().into_iter().collect();
@@ -820,6 +899,7 @@ pub fn BulkActionBar(
             return;
         }
         busy.set(true);
+        bulk_running.set(true);
         summary.set(None);
         failures.set(Vec::new());
         error.set(None);
@@ -831,6 +911,7 @@ pub fn BulkActionBar(
         leptos::task::spawn_local(async move {
             let Some(t) = tenant else {
                 busy.set(false);
+                bulk_running.set(false);
                 return;
             };
             let tid = &t.tenant_id;
@@ -906,13 +987,23 @@ pub fn BulkActionBar(
                                             class=cls
                                             appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                             on_click=Box::new(move |_| armed.set(Some(a)))
-                                            disabled=Signal::derive(move || busy.get())
+                                            disabled=Signal::derive(move || blocked.get())
                                         >
                                             {a.label()}
                                         </Button>
                                     }
                                 })
                                 .collect_view()
+                        }}
+                        {move || {
+                            (!busy.get() && bulk_running.get())
+                                .then(|| {
+                                    view! {
+                                        <Body1 class="muted">
+                                            "Another bulk action is still running — wait for it to finish."
+                                        </Body1>
+                                    }
+                                })
                         }}
                     </div>
                 </Show>
@@ -930,6 +1021,7 @@ pub fn BulkActionBar(
                     confirm_ok,
                     armed,
                     busy,
+                    blocked,
                     run,
                 }))}
                 {move || {
@@ -1015,6 +1107,7 @@ pub fn BulkActionBar(
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         on_click=Box::new(move |_| undo.run(ids.clone()))
+                                        disabled=Signal::derive(move || blocked.get())
                                     >
                                         {format!("Undo (restore {n} deleted)")}
                                     </Button>
@@ -1044,6 +1137,9 @@ struct ArmedPanel<R: Fn(BulkAction) + Copy + Send + Sync + 'static> {
     confirm_ok: Memo<bool>,
     armed: RwSignal<Option<BulkAction>>,
     busy: RwSignal<bool>,
+    /// `busy` OR a run in flight from another bar: the point-of-no-return
+    /// button waits on both, while Cancel (un-arming) waits only on this bar.
+    blocked: Memo<bool>,
     run: R,
 }
 
@@ -1068,6 +1164,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
         confirm_ok,
         armed,
         busy,
+        blocked,
         run,
         ..
     } = p;
@@ -1249,7 +1346,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                     class=confirm_cls
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(move |_| run(action))
-                    disabled=Signal::derive(move || busy.get() || !confirm_ok.get())
+                    disabled=Signal::derive(move || blocked.get() || !confirm_ok.get())
                 >
                     {confirm_label}
                 </Button>
@@ -1273,15 +1370,21 @@ fn cancelled_suffix(cancelled: bool) -> &'static str {
 fn parse_grant(r: bulk::BulkGrantResult, label_for: impl Fn(&str) -> String) -> Parsed {
     let fails = failures_of(&r.outcomes, label_for);
     let reached = r.outcomes.len();
+    // Successes by subtraction, like every sibling summary: an outcome with an
+    // error (a failed OR partial grant) was not "granted consent". Counting
+    // every reached app read "Granted consent to 5 apps; 5 with errors" for a
+    // run that consented nothing.
+    let granted = reached - fails.len();
     Parsed::new(
         format!(
             "Granted consent to {}; {} with errors{}.",
-            count_noun(reached, "app", "apps"),
+            count_noun(granted, "app", "apps"),
             fails.len(),
             cancelled_suffix(r.cancelled)
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1290,7 +1393,8 @@ fn parse_grant(r: bulk::BulkGrantResult, label_for: impl Fn(&str) -> String) -> 
 /// so a short list is the healthy case ("nothing expired"), not a stopped run —
 /// and `apps_scanned` is the whole filtered set whether or not the fan-out
 /// dispatched it. Claiming an unattempted tail from those two numbers would be
-/// a guess, so this leans on `(cancelled)` alone until the backend reports what
+/// a guess, so this leans on `(cancelled)` and, for a run the session killed,
+/// on the fatal code the failure list carries, until the backend reports what
 /// it dispatched.
 fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
     let fails: Vec<BulkFailure> = r
@@ -1322,9 +1426,17 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
         .iter()
         .filter(|s| !s.removed_key_ids.is_empty())
         .count();
+    // With no reach to count, a run the session killed would otherwise read
+    // as a complete sweep: say it stopped, beside the re-auth prompt the
+    // failure's code raises.
+    let stopped = if session_dead_error(&fails).is_some() {
+        " Stopped when the session expired; the remaining apps were not checked."
+    } else {
+        ""
+    };
     Parsed {
         summary: format!(
-            "Scanned {}; {} had expired creds removed{}.",
+            "Scanned {}; {} had expired creds removed{}.{stopped}",
             count_noun(r.apps_scanned, "app", "apps"),
             removed,
             cancelled_suffix(r.cancelled)
@@ -1332,6 +1444,7 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
         failures: fails,
         reached: None,
         deleted: Vec::new(),
+        cancelled: r.cancelled,
     }
 }
 
@@ -1357,6 +1470,7 @@ fn parse_redundant(
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1373,6 +1487,7 @@ fn parse_scope(noun: &str, r: bulk::BulkScopeResult, label_for: impl Fn(&str) ->
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1390,6 +1505,7 @@ fn parse_add_owner(r: bulk::BulkAddOwnerResult, label_for: impl Fn(&str) -> Stri
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1406,6 +1522,7 @@ fn parse_disable(r: bulk::BulkDisableSignInResult, label_for: impl Fn(&str) -> S
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1435,6 +1552,7 @@ fn parse_stage_certs(r: bulk::BulkStageCertResult, label_for: impl Fn(&str) -> S
         ),
         fails,
         reached,
+        r.cancelled,
     )
 }
 
@@ -1451,10 +1569,11 @@ fn parse_delete(r: bulk::BulkDeleteResult, label_for: impl Fn(&str) -> String) -
             label: label_for(&f.object_id),
             reason: f.message.clone(),
             object_id: Some(f.object_id.clone()),
-            // BulkDeleteFailure predates the structured error and carries only
-            // a message; delete failures are per-object (not-found, insufficient
-            // privileges), never session-level.
-            code: None,
+            // The wire code when the backend had one: a delete that failed
+            // because the session died carries `refresh_missing`, and that is
+            // what `session_dead_error` reads to prompt re-authentication
+            // instead of listing the stopped run as app-level failures.
+            code: f.code.clone(),
         })
         .collect();
     // The fan-out never dispatches the tail of a cancelled run, so what it
@@ -1470,12 +1589,14 @@ fn parse_delete(r: bulk::BulkDeleteResult, label_for: impl Fn(&str) -> String) -
         failures: fails,
         reached: Some(reached),
         deleted: r.deleted,
+        cancelled: r.cancelled,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::toast::ToastKind;
     use crate::state::provide_session;
 
     fn tenant(id: &str) -> crate::bindings::TenantContext {
@@ -1538,19 +1659,199 @@ mod tests {
             .with_untracked(|l| l.iter().map(|t| t.message.clone()).collect())
     }
 
-    /// A delete of a,b out of a,b,c whose run also hit a dead session.
+    /// A delete of a,b out of a,b,c whose run also hit a dead session — the
+    /// shape the backend returns for it (the deletes that landed, plus the
+    /// failure that latched the dead session, carrying its code), read through
+    /// the real parser so the test cannot drift from the wire.
     fn a_dead_delete() -> Parsed {
-        Parsed {
-            summary: "Deleted 2".to_string(),
-            failures: vec![BulkFailure {
+        parse_delete(
+            bulk::BulkDeleteResult {
+                deleted: vec!["a".into(), "b".into()],
+                failed: vec![bulk::BulkDeleteFailure {
+                    object_id: "c".into(),
+                    message: "session expired".into(),
+                    code: Some("refresh_missing".into()),
+                }],
+                cancelled: false,
+            },
+            |id| id.to_string(),
+        )
+    }
+
+    fn toast_action_labels(session: Session) -> Vec<Option<String>> {
+        session
+            .toasts
+            .with_untracked(|l| l.iter().map(|t| t.action_label.clone()).collect())
+    }
+
+    /// A whole-command failure on a mounted bar keeps the inline message AND
+    /// raises the recovery lever when one applies: a dead session mid-run used
+    /// to be a red line saying "sign in again", which here means a sign-out
+    /// that drops every cache. An ordinary failure is the inline text alone —
+    /// no second toast, for a run or for an Undo.
+    #[test]
+    fn a_mounted_bar_offers_recovery_for_a_dead_session_error() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let bar = Owner::new();
+            let (l, done) = landing_in(&bar);
+            let dead = || azapptoolkit_dto::UiError::new("refresh_missing", "gone", false);
+            let plain = || azapptoolkit_dto::UiError::new("forbidden", "no rights", false);
+            l.finish_action("tenant-a", BulkAction::Delete, 3, Err(dead()));
+            assert_eq!(l.error.get_untracked().as_deref(), Some("gone"));
+            assert_eq!(
+                toast_action_labels(session),
+                vec![Some("Re-authenticate".to_string())]
+            );
+            assert_eq!(done.get_untracked(), 0, "a failed run refetches nothing");
+            l.finish_action("tenant-a", BulkAction::Grant, 3, Err(plain()));
+            assert_eq!(l.error.get_untracked().as_deref(), Some("no rights"));
+            assert_eq!(session.toasts.with_untracked(Vec::len), 1, "inline only");
+            l.finish_undo("tenant-a", 1, Err(plain()));
+            assert_eq!(l.error.get_untracked().as_deref(), Some("no rights"));
+            assert_eq!(session.toasts.with_untracked(Vec::len), 1, "inline only");
+        });
+    }
+
+    /// A bar unmounted mid-run (navigation, a collapsed Findings group) still
+    /// reports how the run ended: the summary arrives as a toast, an error
+    /// one when anything failed or was never reached.
+    #[test]
+    fn a_run_whose_bar_unmounted_toasts_its_summary() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let bar = Owner::new();
+            let (l, _) = landing_in(&bar);
+            bar.cleanup();
+            let failure = BulkFailure {
                 label: "c".into(),
-                reason: "session expired".into(),
+                reason: "no rights".into(),
                 object_id: Some("c".into()),
-                code: Some("refresh_missing".into()),
-            }],
-            reached: Some(3),
-            deleted: vec!["a".into(), "b".into()],
-        }
+                code: Some("forbidden".into()),
+            };
+            l.finish_action(
+                "tenant-a",
+                BulkAction::Grant,
+                3,
+                Ok(Parsed::new(
+                    "Granted 2; 1 failed.".into(),
+                    vec![failure],
+                    3,
+                    false,
+                )),
+            );
+            l.finish_action(
+                "tenant-a",
+                BulkAction::Grant,
+                3,
+                Ok(Parsed::new(
+                    "Granted 2; 0 failed (cancelled).".into(),
+                    vec![],
+                    2,
+                    true,
+                )),
+            );
+            l.finish_action(
+                "tenant-a",
+                BulkAction::Grant,
+                2,
+                Ok(Parsed::new("Granted 2; 0 failed.".into(), vec![], 2, false)),
+            );
+            let toasts: Vec<(ToastKind, String)> = session
+                .toasts
+                .with_untracked(|l| l.iter().map(|t| (t.kind, t.message.clone())).collect());
+            assert_eq!(toasts.len(), 3, "{toasts:?}");
+            assert_eq!(toasts[0].0, ToastKind::Error);
+            assert!(
+                toasts[0].1.starts_with("Granted 2; 1 failed."),
+                "{toasts:?}"
+            );
+            assert_eq!(toasts[1].0, ToastKind::Error, "a stopped run is not clean");
+            assert!(
+                toasts[1].1.contains("never attempted; select"),
+                "{toasts:?}"
+            );
+            assert_eq!(
+                toasts[2],
+                (ToastKind::Success, "Granted 2; 0 failed.".into())
+            );
+        });
+    }
+
+    /// A landed run or Undo releases the session-wide "a bulk action is
+    /// running" flag that keeps a second bar from starting one on the same
+    /// ids — on every exit, a failure included.
+    #[test]
+    fn a_landed_run_releases_the_session_bulk_flag() {
+        Owner::new().with(|| {
+            provide_session();
+            let session = use_session();
+            session.set_active_tenant(Some(tenant("tenant-a")));
+            let bar = Owner::new();
+            let (l, _) = landing_in(&bar);
+            let flag = session.tenant_ui.bulk_running;
+            flag.set(true);
+            l.finish_action(
+                "tenant-a",
+                BulkAction::Grant,
+                1,
+                Ok(Parsed::new("ok".into(), vec![], 1, false)),
+            );
+            assert!(!flag.get_untracked());
+            flag.set(true);
+            l.finish_undo(
+                "tenant-a",
+                1,
+                Err(azapptoolkit_dto::UiError::new("forbidden", "no", false)),
+            );
+            assert!(!flag.get_untracked());
+        });
+    }
+
+    /// The consent summary counts successes by subtraction like its siblings:
+    /// an app whose grant errored was not "granted consent".
+    #[test]
+    fn the_grant_summary_counts_successes_by_subtraction() {
+        let outcome = |id: &str, error: Option<bulk::BulkError>| bulk::BulkGrantOutcome {
+            object_id: id.into(),
+            granted: 0,
+            skipped: 0,
+            failed: 0,
+            error,
+        };
+        let p = parse_grant(
+            bulk::BulkGrantResult {
+                outcomes: vec![
+                    outcome("a", None),
+                    outcome("b", Some(err("forbidden"))),
+                    outcome("c", Some(err("forbidden"))),
+                ],
+                cancelled: false,
+            },
+            upper,
+        );
+        assert!(
+            p.summary
+                .starts_with("Granted consent to 1 app; 2 with errors"),
+            "{}",
+            p.summary
+        );
+        assert_eq!(p.reached, Some(3));
+    }
+
+    /// A delete failure keeps its wire code, so a run the session killed is
+    /// recognised as one (and prompts re-auth) rather than read as N apps
+    /// that happened to fail.
+    #[test]
+    fn a_delete_failure_keeps_its_wire_code() {
+        let p = a_dead_delete();
+        assert_eq!(p.failures[0].code.as_deref(), Some("refresh_missing"));
+        assert!(session_dead_error(&p.failures).is_some());
+        assert_eq!(p.deleted, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -1597,10 +1898,15 @@ mod tests {
                 vec!["c".to_string()],
                 "deleted ids dangle"
             );
+            // The re-auth prompt, plus the summary the bar can no longer show.
             assert_eq!(
-                session.toasts.with_untracked(Vec::len),
-                1,
-                "the re-auth prompt"
+                toast_action_labels(session),
+                vec![Some("Re-authenticate".to_string()), None]
+            );
+            assert!(
+                toast_messages(session)[1].starts_with("Deleted 2 apps; 1 failed."),
+                "{:?}",
+                toast_messages(session)
             );
             assert_eq!(done.get_untracked(), 1, "the host outlives its bar");
             // A failure with no inline error left to show goes to the sink.
@@ -2037,7 +2343,7 @@ mod tests {
             },
             upper,
         );
-        let note = unattempted_note(40, p.reached);
+        let note = unattempted_note(40, p.reached, true);
         assert!(note.contains("28 apps were never attempted"), "{note}");
         assert!(
             note.contains("still selected"),
@@ -2048,7 +2354,7 @@ mod tests {
 
     #[test]
     fn a_single_unattempted_app_reads_in_the_singular() {
-        let note = unattempted_note(2, Some(1));
+        let note = unattempted_note(2, Some(1), true);
         assert!(
             note.contains("1 app was never attempted and is still selected"),
             "{note}"
@@ -2057,10 +2363,10 @@ mod tests {
 
     #[test]
     fn a_run_that_reached_everything_adds_no_note() {
-        assert_eq!(unattempted_note(40, Some(40)), "");
+        assert_eq!(unattempted_note(40, Some(40), true), "");
         // A backend that somehow reports more outcomes than were attempted must
         // not underflow into a nonsense count.
-        assert_eq!(unattempted_note(40, Some(41)), "");
+        assert_eq!(unattempted_note(40, Some(41), true), "");
     }
 
     /// The credential sweep reports only the apps that HAD expired credentials,
@@ -2074,7 +2380,7 @@ mod tests {
             cancelled: true,
         });
         assert_eq!(p.reached, None);
-        assert_eq!(unattempted_note(40, p.reached), "");
+        assert_eq!(unattempted_note(40, p.reached, true), "");
         assert!(
             p.summary.contains(cancelled_suffix(true).trim()),
             "the cancel suffix is the only partial-run signal this shape \
@@ -2094,6 +2400,7 @@ mod tests {
                 failed: vec![bulk::BulkDeleteFailure {
                     object_id: "c".into(),
                     message: "insufficient privileges".into(),
+                    code: Some("forbidden".into()),
                 }],
                 cancelled: true,
             },
@@ -2105,8 +2412,16 @@ mod tests {
             Some(3),
             "deleted + failed is exactly what the fan-out dispatched"
         );
-        let note = unattempted_note(10, p.reached);
-        assert!(note.contains("7 apps were never attempted"), "{note}");
+        let note = unattempted_note(10, p.reached, true);
+        assert!(
+            note.contains("7 apps were never attempted and are still selected"),
+            "{note}"
+        );
+        let note = unattempted_note(10, p.reached, false);
+        assert!(
+            note.contains("7 apps were never attempted; select them again"),
+            "{note}"
+        );
         assert_eq!(
             p.failures[0].object_id.as_deref(),
             Some("c"),

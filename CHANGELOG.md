@@ -5,6 +5,29 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bulk delete, consent grant or expired-secret sweep whose session expires partway now
+  reports what it did.** The apps it deleted leave the selection and can be restored with Undo,
+  the failures it hit are listed, and a Re-authenticate prompt appears; it used to come back as
+  one inline error that lost the result, leaving the deleted apps selected with no Undo.
+- **A bulk action's whole-run error offers the same recovery as every other action** — a
+  Re-authenticate, Refresh token, Grant consent or Verify identity prompt beside the message,
+  instead of the message alone telling you to sign in again (which in this app drops every cache).
+- **Collapsing a Findings group, or switching the Bulk Actions tab, while a bulk action runs no
+  longer drops its result**: the summary arrives as a toast, in red when anything failed, was
+  cancelled or was never reached.
+- **The bulk consent summary no longer counts failed apps as granted** ("Granted consent to 5 apps;
+  5 with errors" for a run that consented nothing).
+- **Only one bulk action runs at a time across the App Registrations list, the Security tab, the
+  SSO certificates board and the Bulk Actions page.** The list and the page stay mounted and share
+  the selection, so a Delete started in one left the other's buttons live over the very same apps;
+  every bulk bar's buttons now wait, with a note, until the run lands, and so do Validate and
+  Create apps.
+- **A bulk delete or consent grant whose task ended without reporting now lists that app as
+  "ended without reporting an outcome"** instead of counting it among the apps never attempted,
+  since its write may have landed.
+
 ## [0.33.2] - 2026-10-09
 
 ### Fixed

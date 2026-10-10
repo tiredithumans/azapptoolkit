@@ -726,6 +726,7 @@ async fn bulk_delete_fires_only_after_the_exact_keyword() {
             failed: vec![BulkDeleteFailure {
                 object_id: "obj-Idle App".to_string(),
                 message: "Insufficient privileges to complete the operation.".to_string(),
+                code: Some("forbidden".to_string()),
             }],
             cancelled: false,
         },
