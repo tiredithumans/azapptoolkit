@@ -239,8 +239,10 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         missing.is_empty(),
         "fan-out call site(s) with no dead-session gate: {missing:?}\n\
          A dead session makes every remaining item fail identically — gate the spawn closure \
-         on `SessionDead::is_dead()`, note failures through it in the collect arm, and return \
-         `session.err(..)` rather than a partial result. See commands/backup.rs for the shape."
+         on `SessionDead::is_dead()`, note failures through it in the collect arm, and then: a \
+         read fan-out returns `session.err(..)` rather than a partial result (commands/backup.rs \
+         has the shape); a mutating one returns what landed with the fatal code on its failures \
+         (commands/bulk.rs). Never a partial read presented as complete."
     );
     // AGENTS.md: KNOWN_GAPS "is empty and must stay so". It was empty, and the
     // test above tolerated entries being ADDED to it — a new fan-out with no

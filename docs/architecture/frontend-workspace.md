@@ -316,6 +316,11 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
   Registrations list, and on the Bulk Actions page. **No Grant consent on audit surfaces.**
   "Fix all N" only seeds `selected_audit_ids` with the group's *eligible* (Application-kind) ids —
   the bar's typed-confirm / target forms still gate execution.
+  **One run at a time:** `TenantScopedUi.bulk_running` is set by every bar's run and Undo and by
+  the Bulk Actions Create, and cleared by the landing on every exit; every bar's chips, confirm and
+  Undo wait on it (`blocked = busy || bulk_running`) and the Create buttons disable. The bars share
+  their selection and the backend's single `bulk_cancel` flag, and the App Registrations list and
+  the Bulk Actions page both stay mounted, so a second run on the very same ids was one click away.
   **Footgun (App Registrations list):** the bar mounts in `ApplicationList` *above* the
   `<Suspense>` body, not inside `LoadedApps`. The bar's own `on_done` bumps `apps_reload`, whose
   refetch remounts the whole Suspense body — a bar mounted inside it wipes its run summary (and

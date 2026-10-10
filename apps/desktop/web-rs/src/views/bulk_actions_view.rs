@@ -41,6 +41,10 @@ pub fn BulkActionsView() -> impl IntoView {
 
     // ---- Create-apps flow state (the only non-selection action) -------------
     let busy = RwSignal::new(false);
+    // Shared with every `BulkActionBar`: a create shares the backend's one
+    // bulk cancel flag with the bars' runs, so only one bulk run is in flight
+    // at a time (see `TenantScopedUi::bulk_running`).
+    let bulk_running = session.tenant_ui.bulk_running;
     let summary: RwSignal<Option<String>> = RwSignal::new(None);
     let failures: RwSignal<Vec<BulkFailure>> = RwSignal::new(Vec::new());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -90,7 +94,7 @@ pub fn BulkActionsView() -> impl IntoView {
     };
 
     let do_create = move |validate_only: bool| {
-        if busy.get() || loading.get() {
+        if busy.get() || loading.get() || bulk_running.get() {
             return;
         }
         let specs: Vec<bulk::BulkCreateSpec> = match serde_json::from_str(&create_json.get()) {
@@ -108,6 +112,7 @@ pub fn BulkActionsView() -> impl IntoView {
         // that declared any, so nobody reads "created" as "has access".
         let declares = specs.iter().any(|s| !s.permissions.is_empty());
         busy.set(true);
+        bulk_running.set(true);
         summary.set(None);
         failures.set(Vec::new());
         error.set(None);
@@ -115,9 +120,18 @@ pub fn BulkActionsView() -> impl IntoView {
         leptos::task::spawn_local(async move {
             let Some(t) = tenant else {
                 busy.set(false);
+                bulk_running.set(false);
                 return;
             };
-            match bulk::bulk_create_applications(&t.tenant_id, &specs, validate_only).await {
+            let res = bulk::bulk_create_applications(&t.tenant_id, &specs, validate_only).await;
+            // Land nothing for a tenant that is no longer active: the page
+            // shows another tenant (or none), and the in-flight flag this run
+            // would clear is that tenant's.
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
                 Ok(r) => {
                     let fails: Vec<BulkFailure> = r
                         .outcomes
@@ -176,6 +190,7 @@ pub fn BulkActionsView() -> impl IntoView {
                 Err(e) => error.set(Some(e.message)),
             }
             busy.set(false);
+            bulk_running.set(false);
         });
     };
 
@@ -213,14 +228,18 @@ pub fn BulkActionsView() -> impl IntoView {
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         on_click=Box::new(move |_| do_create(true))
-                                        disabled=Signal::derive(move || busy.get() || loading.get())
+                                        disabled=Signal::derive(move || {
+                                            busy.get() || loading.get() || bulk_running.get()
+                                        })
                                     >
                                         "Validate"
                                     </Button>
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(move |_| do_create(false))
-                                        disabled=Signal::derive(move || busy.get() || loading.get())
+                                        disabled=Signal::derive(move || {
+                                            busy.get() || loading.get() || bulk_running.get()
+                                        })
                                     >
                                         "Create apps"
                                     </Button>

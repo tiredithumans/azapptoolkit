@@ -12,7 +12,7 @@
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 use tauri::{AppHandle, State};
@@ -257,10 +257,12 @@ const VALID_AUDIENCES: &[&str] = &[
 ];
 
 /// Signals every in-flight bulk action (delete / grant / create / expired-secret
-/// sweep / scoping / owner / sign-in) to stop at the next item boundary. Runs
-/// started from different bulk action bars share the kind flag
-/// [`AppState::bulk_cancel`], so one Cancel stops all of them; it never touches
-/// the security audit or the AAP migration, which have flags of their own.
+/// sweep / scoping / owner / sign-in) to stop at the next item boundary. Every
+/// bulk run shares the kind flag [`AppState::bulk_cancel`]: the frontend admits
+/// one bar run at a time (`TenantScopedUi::bulk_running`), so in practice the
+/// flag holds one run plus any Recently-deleted restore started beside it, and
+/// one Cancel stops both. It never touches the security audit or the AAP
+/// migration, which have flags of their own.
 /// Already in-flight per-item work finishes so partial results stay clean.
 #[tauri::command]
 pub fn cancel_bulk(state: State<'_, AppState>) {
@@ -326,8 +328,8 @@ pub async fn bulk_remove_expired_credentials(
                         // row (the frontend lists it under its id), not a
                         // silent thinning of the operator's selection. A
                         // re-auth-fatal code latches the session so the
-                        // dispatch below spawns nothing and the command returns
-                        // the dead-session error instead of a partial result.
+                        // dispatch below spawns nothing, and this row's code
+                        // tells the bar why the run stopped.
                         let ui = UiError::from(err);
                         session.note_code(&ui.code);
                         summaries.push(AppRemovalSummary {
@@ -416,7 +418,13 @@ pub async fn bulk_remove_expired_credentials(
                                 // app fails identically, so this app's own loop
                                 // stops too, not just the dispatch.
                                 let fatal = session.note_code(&ui.code);
-                                if error.is_none() {
+                                // The app's one error slot keeps the first
+                                // failure — unless a later one is fatal: that
+                                // code is what the bar reads to prompt
+                                // re-authentication, and an earlier
+                                // `not_found` in its place would hide a run
+                                // the session killed.
+                                if fatal || error.is_none() {
                                     error = Some(ui.into());
                                 }
                                 if fatal {
@@ -469,15 +477,14 @@ pub async fn bulk_remove_expired_credentials(
             done: meter.done(),
             total,
             current_app: None,
-            cancelled: cancelled_early || cancel.is_cancelled(),
+            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
             in_flight_cap: Some(meter.limit()),
         },
     );
 
-    // Invalidate BEFORE the dead-session check: the removals that already
-    // landed are real, so the caches are stale either way. Returning the error
-    // without busting them would leave the UI showing credentials this run
-    // deleted. The only mutation here is `remove_password` — a credential-only
+    // Invalidate however the run ended: the removals that already landed are
+    // real, so the caches are stale either way. The only mutation here is
+    // `remove_password` — a credential-only
     // change — so each mutated app takes the credential tier, which keeps the
     // shared SP/app-name indexes, the enterprise list and every mailbox-scope
     // verdict intact (`applications::cache::invalidate_app_credentials` explains
@@ -490,16 +497,27 @@ pub async fn bulk_remove_expired_credentials(
             &mutated.object_id,
         );
     }
-    // A partial sweep reads as a complete one — the caller cannot tell "no
-    // expired credentials left" from "the session died on app 40 of 900".
-    if session.is_dead() {
-        return Err(session.err("the expired-credential sweep"));
-    }
+    // A run the session killed partway still returns what it did: the summary
+    // that latched the dead session carries the fatal code, which is what the
+    // bar reads to prompt re-authentication and to say the sweep stopped,
+    // instead of presenting it as complete. An error here used to throw that
+    // summary away along with the removals that had landed.
     Ok(BulkRemoveExpiredResult {
         apps_scanned: total,
         summaries,
-        cancelled: cancelled_early || cancel.is_cancelled(),
+        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
     })
+}
+
+/// Whether a fan-out stopped because the operator pressed Cancel. A run the
+/// dead session stopped reports `cancelled: false`: its failure list carries
+/// the fatal code, and "(cancelled)" beside a re-authenticate prompt would
+/// describe one stop two ways. `cancelled_early` is the dispatch latch
+/// (`dispatch_capped` returned early), which covers both stops; the flag is
+/// re-read because a cancel that landed after the last dispatch is still a
+/// cancel.
+fn stopped_by_cancel(cancelled_early: bool, cancel: &CancelToken, session: &SessionDead) -> bool {
+    cancel.is_cancelled() || (cancelled_early && !session.is_dead())
 }
 
 /// Deletes every application in `object_ids`, fanning out through
@@ -530,8 +548,11 @@ pub async fn bulk_delete_applications(
 
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-    // A task that never reported back may still have landed its DELETE.
-    let mut lost_task = false;
+    // Every id a task was spawned for. A task that never reported back (a
+    // panic or abort) may still have landed its DELETE, and the only way to
+    // name that app afterwards is to remember what was dispatched: a join
+    // error carries no id.
+    let mut dispatched: Vec<String> = Vec::new();
     let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         object_ids,
@@ -540,6 +561,7 @@ pub async fn bulk_delete_applications(
             if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
+            dispatched.push(id.clone());
             let client = client.clone();
             let app_handle = app_handle.clone();
             let ticker = meter.ticker();
@@ -559,14 +581,15 @@ pub async fn bulk_delete_applications(
                 match result {
                     Ok(()) => Ok(id),
                     Err(err) => {
-                        // `BulkDeleteFailure` carries no wire code, so the
-                        // classification has to happen here, while the typed
-                        // error still exists.
+                        // Classified here, while the typed error still
+                        // exists; the code also rides the failure so the bar
+                        // can tell a dead session from an app-level failure.
                         let ui = UiError::from(err);
                         session.note_code(&ui.code);
                         Err(BulkDeleteFailure {
                             object_id: id,
                             message: ui.message,
+                            code: Some(ui.code),
                         })
                     }
                 }
@@ -575,13 +598,34 @@ pub async fn bulk_delete_applications(
         |joined| match joined {
             Ok(Ok(id)) => deleted.push(id),
             Ok(Err(f)) => failed.push(f),
-            Err(err) => {
-                lost_task = true;
-                tracing::warn!(?err, "bulk delete join error");
-            }
+            Err(err) => tracing::warn!(?err, "bulk delete join error"),
         },
     )
     .await;
+
+    // A dispatched app that is in neither list lost its task. Reporting it as
+    // a failure (rather than leaving it out) keeps the bar's "N were never
+    // attempted" note honest: that app WAS attempted, and its DELETE may have
+    // landed, so the operator is told to look rather than to re-run blind.
+    let reported: HashSet<&str> = deleted
+        .iter()
+        .map(String::as_str)
+        .chain(failed.iter().map(|f| f.object_id.as_str()))
+        .collect();
+    let lost: Vec<String> = dispatched
+        .into_iter()
+        .filter(|id| !reported.contains(id.as_str()))
+        .collect();
+    drop(reported);
+    failed.extend(lost.into_iter().map(|object_id| {
+        BulkDeleteFailure {
+            object_id,
+            message: "its delete ended without reporting an outcome; check Recently deleted \
+                  before re-running"
+                .into(),
+            code: None,
+        }
+    }));
 
     emit_progress(
         &app_handle,
@@ -593,29 +637,32 @@ pub async fn bulk_delete_applications(
             done: meter.done(),
             total,
             current_app: None,
-            cancelled: cancelled_early || cancel.is_cancelled(),
+            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
             in_flight_cap: Some(meter.limit()),
         },
     );
 
     // Update the caches first: the deletions that landed are real regardless of
     // how the run ended (see the sweep above). A clean run removes exactly the
-    // deleted rows. A failed or lost DELETE may still have landed, and only a
-    // rescan can tell, so that run busts the list tier.
+    // deleted rows. A failed DELETE — a lost task is listed as one — may still
+    // have landed, and only a rescan can tell, so that run busts the list tier.
     if !deleted.is_empty() {
-        if failed.is_empty() && !lost_task {
+        if failed.is_empty() {
             super::applications::record_deleted_apps(&state.cache, &tenant_id, &deleted);
         } else {
             super::applications::invalidate_app_lists(&state.cache, &tenant_id);
         }
     }
-    if session.is_dead() {
-        return Err(session.err("the bulk delete"));
-    }
+    // Writes have landed, so the result is returned however the run ended: a
+    // run the session killed partway reports the ids it deleted (they leave
+    // the selection and can be restored) beside the failure that carries the
+    // fatal code, which is what the bar reads to prompt re-authentication. An
+    // error here used to drop `deleted` on the floor — the apps were gone,
+    // the selection still held them, and there was no Undo.
     Ok(BulkDeleteResult {
         deleted,
         failed,
-        cancelled: cancelled_early || cancel.is_cancelled(),
+        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
     })
 }
 
@@ -645,6 +692,9 @@ pub async fn bulk_grant_permissions(
     // True if any app's grant created a brand-new SP — that adds Enterprise App
     // rows / search-index entries, so the run must bust the full list caches.
     let mut any_sp_created = false;
+    // Every id a task was spawned for, so a task that ended without reporting
+    // (a join error carries no id) can still be named below.
+    let mut dispatched: Vec<String> = Vec::new();
     let session = SessionDead::new();
     let cancelled_early = dispatch_capped(
         object_ids,
@@ -653,6 +703,7 @@ pub async fn bulk_grant_permissions(
             if cancel.is_cancelled() || session.is_dead() {
                 return None;
             }
+            dispatched.push(id.clone());
             let client = client.clone();
             let app_handle = app_handle.clone();
             let ticker = meter.ticker();
@@ -734,6 +785,32 @@ pub async fn bulk_grant_permissions(
     )
     .await;
 
+    // A dispatched app with no outcome lost its task; some of its grant writes
+    // may have landed — the client SP included, so the list tier is busted as
+    // if one had been created. Reported as a failure so the bar's "never
+    // attempted" note stays honest and the operator re-checks the app rather
+    // than re-running blind.
+    let reported: HashSet<String> = outcomes.iter().map(|o| o.object_id.clone()).collect();
+    for object_id in dispatched {
+        if reported.contains(&object_id) {
+            continue;
+        }
+        any_sp_created = true;
+        outcomes.push(BulkGrantOutcome {
+            object_id,
+            granted: 0,
+            skipped: 0,
+            failed: 0,
+            error: Some(BulkError {
+                code: "lost_task".into(),
+                message: "its consent grant ended without reporting an outcome; check the app's \
+                          permissions before re-running"
+                    .into(),
+                retryable: false,
+            }),
+        });
+    }
+
     emit_progress(
         &app_handle,
         "bulk-progress",
@@ -744,7 +821,7 @@ pub async fn bulk_grant_permissions(
             done: meter.done(),
             total,
             current_app: None,
-            cancelled: cancelled_early || cancel.is_cancelled(),
+            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
             in_flight_cap: Some(meter.limit()),
         },
     );
@@ -759,15 +836,13 @@ pub async fn bulk_grant_permissions(
     } else if outcomes.iter().any(|o| o.granted > 0) {
         super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
     }
-    // Bust first (the grants that landed are real), then refuse to present the
-    // remainder as consented.
-    if session.is_dead() {
-        return Err(session.err("the bulk consent grant"));
-    }
-
+    // Bust first (the grants that landed are real), then return what landed
+    // however the run ended: the outcome that latched the dead session carries
+    // the fatal code, which is what the bar reads to prompt re-authentication
+    // instead of presenting the remainder as consented.
     Ok(BulkGrantResult {
         outcomes,
-        cancelled: cancelled_early || cancel.is_cancelled(),
+        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
     })
 }
 
@@ -1742,6 +1817,32 @@ mod tests {
             events(&rec).last(),
             Some(&(2, None)),
             "the terminal event reports how far the run got"
+        );
+    }
+
+    /// A fan-out stopped by the dead session reports `cancelled: false` —
+    /// its failure list says why — while the operator's Cancel is reported
+    /// whether or not the session also died.
+    #[test]
+    fn a_dead_session_stop_is_not_a_cancel() {
+        let flag = CancelFlag::new();
+        let cancel = flag.claim();
+        let live = SessionDead::new();
+        let dead = SessionDead::new();
+        dead.note_code("refresh_missing");
+        assert!(!stopped_by_cancel(false, &cancel, &live), "ran to the end");
+        assert!(
+            stopped_by_cancel(true, &cancel, &live),
+            "dispatch stopped with the session alive"
+        );
+        assert!(
+            !stopped_by_cancel(true, &cancel, &dead),
+            "dispatch stopped by the dead session"
+        );
+        flag.cancel();
+        assert!(
+            stopped_by_cancel(true, &cancel, &dead),
+            "an explicit Cancel is still a cancel"
         );
     }
 

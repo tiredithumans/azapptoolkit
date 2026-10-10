@@ -78,16 +78,33 @@ pub struct BulkRemoveExpiredResult {
     pub cancelled: bool,
 }
 
+/// One app a bulk delete could not remove.
+///
+/// `code` is the failure's wire code (`UiError::code`) when the backend had
+/// one: it is what lets the bar tell "this app failed" from "the session died
+/// on this app and the run stopped" (`is_reauth_fatal`), the same way the
+/// other bulk outcomes carry a [`BulkError`]. `None` for a failure the backend
+/// synthesised without a code (a task that ended without reporting). Additive
+/// and skipped when absent, so older payloads still decode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeleteFailure {
     pub object_id: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
+/// A bulk delete's outcome. Returned — never replaced by an error — once any
+/// DELETE has landed: a run the session killed partway reports the ids it
+/// deleted (so they leave the selection and can be restored) beside a failure
+/// carrying the fatal code, and the tail it never dispatched is simply absent
+/// from both lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeleteResult {
     pub deleted: Vec<String>,
     pub failed: Vec<BulkDeleteFailure>,
+    /// Stopped by the operator's Cancel. A run the dead session stopped is
+    /// NOT cancelled: its failure list says why it stopped.
     pub cancelled: bool,
 }
 
