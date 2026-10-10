@@ -6,11 +6,6 @@ use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
 use crate::state::AppState;
 
-/// The event the sign-in link rides when the system browser can't be launched:
-/// `Some(authorize_url)` while that browser leg is live, `None` once the flow
-/// ended (however it ended). Consumed by the webview's `BrowserFallbackNotice`.
-const BROWSER_FALLBACK_EVENT: &str = "auth-browser-fallback";
-
 /// Hands the auth service a way to offer the sign-in link in the app's own
 /// window when the system browser won't open (no default handler, a confined
 /// `xdg-open`, a policy blocking the handler) — sign-in, consent, step-up and
@@ -20,12 +15,20 @@ const BROWSER_FALLBACK_EVENT: &str = "auth-browser-fallback";
 /// Safe to hand to the operator's own webview: the URL is single-use, bound to
 /// this flow's PKCE verifier and `state`, and only redeemable through this
 /// process's 127.0.0.1 listener. It is never logged.
+///
+/// The payload is `Some(authorize_url)` while that browser leg is live and
+/// `None` once the flow ended (however it ended); the webview's
+/// `BrowserFallbackNotice` consumes it.
 pub(crate) fn offer_sign_in_link_in_the_webview<S>(sink: S, auth: &EntraAuthService)
 where
     S: ProgressSink + Send + Sync + 'static,
 {
     auth.set_browser_fallback(move |url| {
-        emit_progress(&sink, BROWSER_FALLBACK_EVENT, url.map(str::to_owned));
+        emit_progress(
+            &sink,
+            crate::dto::events::AUTH_BROWSER_FALLBACK,
+            url.map(str::to_owned),
+        );
     });
 }
 

@@ -941,3 +941,113 @@ fn the_throttled_gui_fixture_is_the_backend_message() {
         ui.message
     );
 }
+
+/// Every Tauri event name comes from `azapptoolkit_dto::events`, on every
+/// side: the backend emitters, the frontend listeners and the GUI tests that
+/// feed the mock bridge. They used to spell nine names by hand with nothing
+/// pinning them equal; a rename on one side ended the stream in silence, and a
+/// test holding a stale copy would have kept passing.
+#[test]
+fn event_names_are_never_spelled_by_hand() {
+    let read = |p: &std::path::Path| {
+        std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+    };
+    let backend = sources::command_modules();
+    let web_events = (
+        "web-rs/src/bindings/events.rs".to_string(),
+        read(&web_src().join("bindings/events.rs")),
+    );
+    let gui_dir = web_src().parent().expect("web-rs").join("tests/gui");
+    let mut gui: Vec<(String, String)> = std::fs::read_dir(&gui_dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", gui_dir.display()))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .map(|p| {
+            let name = format!(
+                "web-rs/tests/gui/{}",
+                p.file_name().unwrap().to_string_lossy()
+            );
+            (name, read(&p))
+        })
+        .collect();
+    gui.sort();
+    assert!(
+        !gui.is_empty(),
+        "no GUI test modules under {}",
+        gui_dir.display()
+    );
+
+    // 1. No name is a literal anywhere.
+    let mut offenders = Vec::new();
+    for (name, src) in backend
+        .iter()
+        .chain(std::iter::once(&web_events))
+        .chain(gui.iter())
+    {
+        for (i, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for event in azapptoolkit_dto::events::ALL {
+                if line.contains(&format!("\"{event}\"")) {
+                    offenders.push(format!("{name}:{}: \"{event}\"", i + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "event name(s) spelled by hand — import the constant from `azapptoolkit_dto::events` \
+         (`crate::dto::events::…` in commands/, `names::…` in bindings/events.rs and the GUI \
+         tests):\n{}",
+        offenders.join("\n")
+    );
+
+    // 2. Every emitter names its event through the table, so a TENTH event,
+    //    spelled by hand on both sides, cannot slip past the list above.
+    let mut untabled = Vec::new();
+    for (name, src) in &backend {
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for call in ["emit_progress(", ".emit("] {
+            for (at, _) in code.match_indices(call) {
+                // A char-based window: a byte slice can land inside a `…`.
+                let args: String = code[at + call.len()..].chars().take(200).collect();
+                if !args.contains("dto::events::") {
+                    let snippet: String = args.chars().take(60).collect();
+                    untabled.push(format!("{name}: `{call}{snippet}`"));
+                }
+            }
+        }
+    }
+    assert!(
+        untabled.is_empty(),
+        "emitter(s) whose event is not a `crate::dto::events` name:\n{}",
+        untabled.join("\n")
+    );
+
+    // 3. The table is what the frontend listens to and what the backend
+    //    emits, one of each per name: a name nobody listens to is dead, one
+    //    nobody emits is deaf.
+    let emitters: String = backend
+        .iter()
+        .map(|(_, s)| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for event in azapptoolkit_dto::events::ALL {
+        let const_name = event.to_uppercase().replace('-', "_");
+        assert!(
+            web_events.1.contains(&format!("names::{const_name}")),
+            "{} has no listener for `{event}` (`names::{const_name}`)",
+            web_events.0
+        );
+        assert!(
+            emitters.contains(&format!("events::{const_name}")),
+            "no command emits `{event}` (`crate::dto::events::{const_name}`)"
+        );
+    }
+}

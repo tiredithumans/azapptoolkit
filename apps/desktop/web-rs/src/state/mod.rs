@@ -28,6 +28,8 @@ mod open_items;
 mod tenant;
 mod toasts;
 
+pub use navigation::SecurityTab;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveView {
     Home,
@@ -394,8 +396,8 @@ pub struct Session {
     // straight to the tab that holds it, rather than dropping them on Settings'
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
-    // Active sub-tab of the Security workbench ("findings" | "apps" |
-    // "credentials" | "sso-certificates" | "grants" | "app-permissions").
+    // Active sub-tab of the Security workbench (`SecurityTab::value`; typed
+    // writers go through `open_security`).
     // Lifted to the session so the Home cards and command palette can
     // deep-link straight to a sub-tab, and so the choice survives navigating
     // away and back.
@@ -429,7 +431,7 @@ pub fn provide_session() {
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
         settings_tab: RwSignal::new(String::from("app-reg")),
-        security_tab: RwSignal::new(String::from("findings")),
+        security_tab: RwSignal::new(SecurityTab::Findings.value().to_string()),
         resource_access_tab: RwSignal::new(String::from("mailboxes")),
         enterprise_apps_reload: RwSignal::new(0),
         audit_reload: RwSignal::new(0),

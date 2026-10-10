@@ -10,6 +10,11 @@
 //! Mounted in the shell only while its open flag is set, so each open is a
 //! fresh component — no manual state reset needed.
 
+use azapptoolkit_dto::credentials::{
+    DEFAULT_CERT_LIFETIME_DAYS as CERT_DEFAULT_DAYS,
+    DEFAULT_SECRET_LIFETIME_DAYS as SECRET_DEFAULT_DAYS, MAX_CERT_LIFETIME_DAYS as CERT_MAX_DAYS,
+    MAX_SECRET_LIFETIME_DAYS as SECRET_MAX_DAYS,
+};
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
 
@@ -33,16 +38,11 @@ fn lines_to_vec(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Lifetime bounds mirrored from the backend (`commands/sso/mod.rs`:
-/// `MAX_CERT_LIFETIME_DAYS`/`DEFAULT_CERT_LIFETIME_DAYS` and the secret pair).
-/// The frontend gate exists to stop the old silent fallback, where a mistyped
-/// "3650" or "abc" fell through `parse().ok()` to `None` and quietly created
-/// the app with the default lifetime the operator did not type.
-const CERT_MAX_DAYS: u32 = 1095;
-const CERT_DEFAULT_DAYS: u32 = 365;
-const SECRET_MAX_DAYS: u32 = 730;
-const SECRET_DEFAULT_DAYS: u32 = 180;
-
+// The lifetime bounds are the one definition both trees enforce
+// (`azapptoolkit_dto::credentials`). This frontend gate exists to stop the old
+// silent fallback, where a mistyped "3650" or "abc" fell through
+// `parse().ok()` to `None` and quietly created the app with the default
+// lifetime the operator did not type.
 /// `None` when the typed lifetime may be sent: blank (an explicit "use the
 /// default", which the field hint states) or a number inside `1..=max`.
 /// Pure so the ladder is table-testable; only consulted while the field is
@@ -82,7 +82,7 @@ pub fn SsoWizardDialog(
     let reply_url = RwSignal::new(String::new());
     let logout_url = RwSignal::new(String::new());
     let cert_subject = RwSignal::new(String::new());
-    let cert_days = RwSignal::new("365".to_string());
+    let cert_days = RwSignal::new(CERT_DEFAULT_DAYS.to_string());
     let notification_emails = RwSignal::new(String::new());
     let claims_state = ClaimsEditorState::empty();
 
@@ -90,7 +90,7 @@ pub fn SsoWizardDialog(
     let redirect_uris = RwSignal::new(String::new());
     let spa_uris = RwSignal::new(String::new());
     let secret_name = RwSignal::new(String::new());
-    let secret_days = RwSignal::new("180".to_string());
+    let secret_days = RwSignal::new(SECRET_DEFAULT_DAYS.to_string());
 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);

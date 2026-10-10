@@ -7,6 +7,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::events as names;
 use azapptoolkit_web_rs::bindings::TenantContext;
 use azapptoolkit_web_rs::components::browser_fallback_notice::BrowserFallbackNotice;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
@@ -93,13 +94,13 @@ async fn a_browser_that_would_not_open_shows_the_sign_in_link_until_the_flow_end
     ts::tick().await;
 
     ts::emit_event(
-        "auth-browser-fallback",
+        names::AUTH_BROWSER_FALLBACK,
         &Some("https://login.microsoftonline.com/t/oauth2/v2.0/authorize?state=abc"),
     );
     ts::wait_for(|| ts::body_contains("Couldn't open your browser")).await;
     assert!(ts::body_contains("state=abc"));
     assert!(ts::query(".browser-fallback .copy-block").is_some());
 
-    ts::emit_event("auth-browser-fallback", &None::<String>);
+    ts::emit_event(names::AUTH_BROWSER_FALLBACK, &None::<String>);
     ts::wait_for(|| ts::query(".browser-fallback").is_none()).await;
 }

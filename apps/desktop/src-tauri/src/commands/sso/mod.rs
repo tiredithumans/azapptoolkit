@@ -246,17 +246,13 @@ fn validate_cert_subject(subject: &str) -> Result<(), UiError> {
 /// Graph's ceiling on a token-signing certificate: `endDateTime` "can be up to
 /// 3 years from the date the certificate is created". 1095 days is three years
 /// even across a leap day.
-const MAX_CERT_LIFETIME_DAYS: u32 = 1095;
+const MAX_CERT_LIFETIME_DAYS: u32 = crate::dto::credentials::MAX_CERT_LIFETIME_DAYS;
 
-/// Default when the caller supplies none.
-///
-/// Deliberately ONE year, not the three that Graph and the portal default to: a
-/// signing certificate's lifetime is the window a stolen key stays useful, and
-/// the staged rollover makes renewing cheap enough that three years of exposure
-/// isn't worth the saved effort. (An earlier version of this comment claimed it
-/// matched Graph's three-year default, which invited "correcting" the value
-/// upward.)
-const DEFAULT_CERT_LIFETIME_DAYS: u32 = 365;
+/// Default when the caller supplies none: deliberately one year, not Graph's
+/// three (the reasoning is on the constant). An earlier version of this
+/// comment claimed it matched Graph's three-year default, which invited
+/// "correcting" the value upward.
+const DEFAULT_CERT_LIFETIME_DAYS: u32 = crate::dto::credentials::DEFAULT_CERT_LIFETIME_DAYS;
 
 /// Bounds a caller-supplied signing-certificate lifetime.
 ///
@@ -281,8 +277,8 @@ fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
 }
 
 /// Default OIDC client-secret lifetime when the caller supplies none — the
-/// portal's recommended preset.
-const DEFAULT_SECRET_LIFETIME_DAYS: u32 = 180;
+/// portal's recommended preset, the same one the Credentials tab seeds.
+const DEFAULT_SECRET_LIFETIME_DAYS: u32 = crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS;
 
 /// Bounds a caller-supplied OIDC client-secret lifetime to
 /// `1..=`[`MAX_SECRET_LIFETIME_DAYS`] (the portal's 24-month cap, the same

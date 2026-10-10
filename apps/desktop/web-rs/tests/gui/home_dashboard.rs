@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::audit::CachedAuditSummary;
-use azapptoolkit_web_rs::state::ActiveView;
+use azapptoolkit_web_rs::state::{ActiveView, SecurityTab};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::home_dashboard::HomeDashboard;
 
@@ -109,7 +109,10 @@ async fn no_cached_run_trips_pending_audit_run_in_one_click() {
         "one click must start the scan on arrival, not just navigate"
     );
     assert_eq!(m.session.view.get_untracked(), ActiveView::Security);
-    assert_eq!(m.session.security_tab.get_untracked(), "findings");
+    assert_eq!(
+        m.session.security_tab.get_untracked(),
+        SecurityTab::Findings.value()
+    );
 }
 
 /// "With secrets" was the one number on Home you couldn't click; it now drills

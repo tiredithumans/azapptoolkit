@@ -21,8 +21,9 @@ use azapptoolkit_dto::bulk::{
     BulkAddOwnerResult, BulkDeleteFailure, BulkDeleteResult, BulkDisableOutcome,
     BulkDisableSignInResult, BulkOwnerOutcome,
 };
-use azapptoolkit_dto::exchange::{AapMigrationItem, AapMigrationReport};
+use azapptoolkit_dto::exchange::{AapItemStatus, AapMigrationItem, AapMigrationReport};
 use azapptoolkit_dto::remediation::RemediationOutcome;
+use azapptoolkit_web_rs::state::SecurityTab;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -317,7 +318,7 @@ async fn partial_runs_are_marked_on_the_strip_above_both_panes() {
 
     // The strip sits above the tab bar, so the All-apps pane carries the same
     // caveats (it rendered none of them before).
-    m.session.open_security("apps");
+    m.session.open_security(SecurityTab::Apps);
     ts::wait_for(|| ts::query(".audit-apps-pane").is_some()).await;
     let strip = strip_text();
     assert!(strip.contains("arbitrary prefix"), "{strip}");
@@ -830,7 +831,7 @@ async fn legacy_policy_fix_plans_before_it_migrates() {
                 removed_entra_grants: vec!["Mail.Read".to_string()],
                 removed_policies: vec!["policy-1".to_string()],
                 retired_groups: Vec::new(),
-                status: "planned".to_string(),
+                status: AapItemStatus::Planned,
                 warnings: Vec::new(),
             }],
             failures: Vec::new(),
@@ -989,7 +990,10 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
     let m = mount_security().await;
     // Finding drill → Findings pane with the group expanded.
     m.session.open_posture_with_facet("ownership");
-    assert_eq!(m.session.security_tab.get_untracked(), "findings");
+    assert_eq!(
+        m.session.security_tab.get_untracked(),
+        SecurityTab::Findings.value()
+    );
     assert_eq!(
         m.session
             .tenant_ui
@@ -1004,7 +1008,10 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
     // queries to the apps pane — the findings pane stays keep-alive-mounted
     // (display:none) with its own tables still in the DOM.
     m.session.open_posture_with_facet("critical");
-    assert_eq!(m.session.security_tab.get_untracked(), "apps");
+    assert_eq!(
+        m.session.security_tab.get_untracked(),
+        SecurityTab::Apps.value()
+    );
     assert_eq!(
         m.session.tenant_ui.audit_severity.get_untracked(),
         "critical"

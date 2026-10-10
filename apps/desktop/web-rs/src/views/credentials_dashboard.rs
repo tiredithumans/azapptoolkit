@@ -17,9 +17,11 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::credentials::{self, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
-use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
+use crate::components::ui::{Badge, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date};
+use crate::util::{
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, credential_status_badge, fmt_date,
+};
 
 #[component]
 pub fn CredentialsDashboard() -> impl IntoView {
@@ -89,7 +91,9 @@ pub fn CredentialsDashboard() -> impl IntoView {
 }
 
 fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl IntoView {
-    let (status_label, status_tone) = status_badge(r.status, r.days_to_expiry);
+    // "No expiry": a credential's Unknown is one with no end date.
+    let (status_label, status_tone) =
+        credential_status_badge(r.status, r.days_to_expiry, "No expiry");
     let expires = fmt_date(r.end_date_time);
     let object_id = r.app_object_id.clone();
     view! {
@@ -127,30 +131,5 @@ fn matches_facet(r: &CredentialRowDto, facet: &str) -> bool {
         "7" => matches!(r.days_to_expiry, Some(d) if (0..=CRITICAL_DAYS).contains(&d)),
         "30" => matches!(r.days_to_expiry, Some(d) if (0..=WARNING_DAYS).contains(&d)),
         _ => true,
-    }
-}
-
-/// Maps a credential's status + days-left to a label and badge tone. Reuses
-/// the same `BadgeTone`s as the per-app Credentials tab.
-fn status_badge(status: CredentialStatus, days: Option<i64>) -> (String, BadgeTone) {
-    match status {
-        CredentialStatus::Expired => ("Expired".to_string(), BadgeTone::Danger),
-        CredentialStatus::ExpiringSoon => {
-            let tone = match days {
-                Some(d) if d <= CRITICAL_DAYS => BadgeTone::Danger,
-                _ => BadgeTone::Warning,
-            };
-            let label = days
-                .map(|d| format!("{d}d left"))
-                .unwrap_or_else(|| "Expiring".to_string());
-            (label, tone)
-        }
-        CredentialStatus::Active => {
-            let label = days
-                .map(|d| format!("{d}d left"))
-                .unwrap_or_else(|| "Active".to_string());
-            (label, BadgeTone::Ok)
-        }
-        CredentialStatus::Unknown => ("No expiry".to_string(), BadgeTone::Unknown),
     }
 }

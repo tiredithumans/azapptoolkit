@@ -46,6 +46,7 @@ pub mod consent;
 pub mod credentials;
 pub mod diagnostics;
 pub mod enterprise_application;
+pub mod events;
 pub mod exchange;
 pub mod expose_api;
 pub mod keyvault;

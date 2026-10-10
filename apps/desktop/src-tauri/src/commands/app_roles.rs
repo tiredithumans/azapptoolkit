@@ -22,7 +22,7 @@ use tauri::State;
 use azapptoolkit_core::models::AppRole;
 
 use crate::dto::UiError;
-use crate::dto::enterprise_application::{AppRoleInput, AppRolesView};
+use crate::dto::enterprise_application::{AppRoleInput, AppRoleTargetKind, AppRolesView};
 use crate::state::AppState;
 
 use super::applications::{invalidate_app_details, invalidate_app_role_resources};
@@ -36,10 +36,10 @@ enum RoleTarget {
 }
 
 impl RoleTarget {
-    fn kind_str(&self) -> &'static str {
+    fn kind(&self) -> AppRoleTargetKind {
         match self {
-            Self::Application(_) => "application",
-            Self::ServicePrincipal(_) => "servicePrincipal",
+            Self::Application(_) => AppRoleTargetKind::Application,
+            Self::ServicePrincipal(_) => AppRoleTargetKind::ServicePrincipal,
         }
     }
 }
@@ -313,7 +313,7 @@ pub async fn list_enterprise_app_roles(
     let raw = read_roles(&client, &target).await?;
     let roles: Vec<AppRole> = serde_json::from_value(Value::Array(raw)).unwrap_or_default();
     Ok(AppRolesView {
-        target_kind: target.kind_str().to_string(),
+        target_kind: target.kind(),
         roles,
     })
 }

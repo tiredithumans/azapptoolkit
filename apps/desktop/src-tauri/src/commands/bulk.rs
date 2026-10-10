@@ -371,7 +371,7 @@ pub async fn bulk_remove_expired_credentials(
 
     emit_progress(
         &app_handle,
-        "bulk-progress",
+        crate::dto::events::BULK_PROGRESS,
         BulkProgress {
             done: 0,
             total,
@@ -443,7 +443,7 @@ pub async fn bulk_remove_expired_credentials(
                     cancelled: cancel.is_cancelled(),
                     in_flight_cap: Some(in_flight_cap),
                 };
-                emit_progress(&app_handle, "bulk-progress", progress);
+                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
 
                 AppRemovalSummary {
                     object_id: app_obj_id,
@@ -472,7 +472,7 @@ pub async fn bulk_remove_expired_credentials(
     // number of apps actually processed (every spawned task has joined).
     emit_progress(
         &app_handle,
-        "bulk-progress",
+        crate::dto::events::BULK_PROGRESS,
         BulkProgress {
             done: meter.done(),
             total,
@@ -577,7 +577,7 @@ pub async fn bulk_delete_applications(
                     cancelled: cancel.is_cancelled(),
                     in_flight_cap: Some(in_flight_cap),
                 };
-                emit_progress(&app_handle, "bulk-progress", progress);
+                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
                 match result {
                     Ok(()) => Ok(id),
                     Err(err) => {
@@ -629,7 +629,7 @@ pub async fn bulk_delete_applications(
 
     emit_progress(
         &app_handle,
-        "bulk-progress",
+        crate::dto::events::BULK_PROGRESS,
         BulkProgress {
             // Items actually processed: `dispatch_capped` has joined every
             // spawned task, so the meter's count is final. Equal to `total`
@@ -719,7 +719,7 @@ pub async fn bulk_grant_permissions(
                     cancelled: cancel.is_cancelled(),
                     in_flight_cap: Some(in_flight_cap),
                 };
-                emit_progress(&app_handle, "bulk-progress", progress);
+                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
                 match res {
                     // The client SP was created and a later step failed: the
                     // row reports the error, and `sp_created` still reaches
@@ -813,7 +813,7 @@ pub async fn bulk_grant_permissions(
 
     emit_progress(
         &app_handle,
-        "bulk-progress",
+        crate::dto::events::BULK_PROGRESS,
         BulkProgress {
             // Items actually processed: `dispatch_capped` has joined every
             // spawned task, so the meter's count is final. Equal to `total`
@@ -1537,7 +1537,7 @@ where
         }
         emit_progress(
             progress,
-            "bulk-progress",
+            crate::dto::events::BULK_PROGRESS,
             BulkProgress {
                 done: i,
                 total,
@@ -1562,7 +1562,7 @@ where
     }
     emit_progress(
         progress,
-        "bulk-progress",
+        crate::dto::events::BULK_PROGRESS,
         BulkProgress {
             done: outcomes.len(),
             total,
@@ -1642,7 +1642,7 @@ mod tests {
 
     /// `(done, current_app)` per `bulk-progress` event, in order.
     fn events(rec: &Recorder) -> Vec<(usize, Option<String>)> {
-        rec.payloads::<BulkProgress>("bulk-progress")
+        rec.payloads::<BulkProgress>(crate::dto::events::BULK_PROGRESS)
             .into_iter()
             .map(|p| (p.done, p.current_app))
             .collect()
@@ -1700,7 +1700,11 @@ mod tests {
         );
         // The channel name lives in the driver now, not in a per-sink impl:
         // every event it emits rides the one `bulk-progress` channel.
-        assert!(rec.names().iter().all(|n| *n == "bulk-progress"));
+        assert!(
+            rec.names()
+                .iter()
+                .all(|n| *n == crate::dto::events::BULK_PROGRESS)
+        );
         assert_eq!(rec.names().len(), 4);
     }
 
@@ -1719,7 +1723,7 @@ mod tests {
         // Only the terminal event: it reports nothing processed, and the
         // cancellation.
         assert_eq!(events(&rec), vec![(0, None)]);
-        assert!(rec.payloads::<BulkProgress>("bulk-progress")[0].cancelled);
+        assert!(rec.payloads::<BulkProgress>(crate::dto::events::BULK_PROGRESS)[0].cancelled);
     }
 
     #[tokio::test]
@@ -1758,7 +1762,7 @@ mod tests {
             vec![(0, Some("a".into())), (1, Some("b".into())), (2, None)]
         );
         assert!(
-            rec.payloads::<BulkProgress>("bulk-progress")
+            rec.payloads::<BulkProgress>(crate::dto::events::BULK_PROGRESS)
                 .last()
                 .unwrap()
                 .cancelled

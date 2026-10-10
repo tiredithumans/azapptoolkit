@@ -10,6 +10,8 @@ use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID,
 };
 
+use crate::dto::exchange::AapItemStatus;
+
 /// A Microsoft Graph permission as the resolver receives it.
 fn graph_perm(value: &str) -> ScopableMailPermission {
     ScopableMailPermission::on_resource(MICROSOFT_GRAPH_APP_ID, value)
@@ -1278,7 +1280,7 @@ async fn a_cancel_during_the_copy_stops_the_app_before_any_scope_write() {
     };
     let out = migrate_one(ctx, UPPER_APP, &[policy()]).await.unwrap();
     assert!(out.stopped);
-    assert_eq!(out.item.status, "partial");
+    assert_eq!(out.item.status, AapItemStatus::Partial);
     assert!(out.item.removed_policies.is_empty() && out.item.roles_assigned.is_empty());
     for write in [
         "New-ManagementScope",
@@ -1322,7 +1324,7 @@ fn item(app_id: &str) -> AapMigrationItem {
         removed_entra_grants: Vec::new(),
         removed_policies: Vec::new(),
         retired_groups: Vec::new(),
-        status: "migrated".into(),
+        status: AapItemStatus::Migrated,
         warnings: Vec::new(),
     }
 }

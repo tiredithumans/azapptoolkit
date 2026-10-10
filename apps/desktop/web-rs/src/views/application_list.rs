@@ -122,7 +122,7 @@ fn sort_rows(rows: &mut [ApplicationListRowDto], col: AppSortCol, desc: bool) {
 /// One row's credential cell: the state badge plus the relative expiry beside
 /// it.
 ///
-/// Tones are the Credential-expiry dashboard's `status_badge` vocabulary
+/// Tones are `util::credential_status_badge`'s vocabulary
 /// (`BadgeTone::Danger` / `Warning` / `Ok` / `Unknown`), because a row and that dashboard
 /// describe the same credential — two colour languages for one fact is how an
 /// operator learns to trust neither.

@@ -4,6 +4,26 @@ use azapptoolkit_core::audit::{CredentialKind, CredentialStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// The lifetime ceilings the app enforces on the credentials it creates, and
+/// the defaults it applies when a form or a caller leaves the lifetime blank,
+/// in days. One home for both trees: the backend (`commands/applications/
+/// credentials.rs`, `cert.rs`, the SSO create path, the Key Vault rotation,
+/// the DR restore's re-issued secrets) and the frontend forms (the
+/// Credentials tab, the SSO wizard) each restated these by hand, with nothing
+/// pinning them equal.
+///
+/// The secret cap is the portal's 24-month hard cap; the certificate cap is
+/// Graph's three years, even across a leap day. The secret default is the
+/// portal's recommended preset. The certificate default is deliberately ONE
+/// year, not the three that Graph and the portal default to: a signing
+/// certificate's lifetime is the window a stolen key stays useful, and the
+/// staged rollover makes renewing cheap enough that three years of exposure
+/// isn't worth the saved effort.
+pub const MAX_SECRET_LIFETIME_DAYS: u32 = 730;
+pub const MAX_CERT_LIFETIME_DAYS: u32 = 1095;
+pub const DEFAULT_SECRET_LIFETIME_DAYS: u32 = 180;
+pub const DEFAULT_CERT_LIFETIME_DAYS: u32 = 365;
+
 /// One credential (client secret or certificate) belonging to an app
 /// registration, flattened for the tenant-wide credential-expiry dashboard.
 /// `days_to_expiry`/`status` are computed server-side via

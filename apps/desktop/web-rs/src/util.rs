@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS;
+use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
 use leptos::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -592,6 +592,92 @@ mod contains_ignore_case_tests {
         assert_eq!(
             contains_ignore_case("Contoso", "ü"),
             "Contoso".to_lowercase().contains("ü"),
+        );
+    }
+}
+
+/// The badge for a credential's expiry status, shared by the credential-expiry
+/// and SSO-certificate boards so the two read identically at a glance. `unknown`
+/// is the one word they differ on: a credential with no end date is "No
+/// expiry", a certificate whose expiry could not be read is "Unknown" — never
+/// "Active", since an unread expiry is not evidence of health.
+pub fn credential_status_badge(
+    status: CredentialStatus,
+    days: Option<i64>,
+    unknown: &str,
+) -> (String, BadgeTone) {
+    match status {
+        CredentialStatus::Expired => ("Expired".to_string(), BadgeTone::Danger),
+        CredentialStatus::ExpiringSoon => {
+            let tone = match days {
+                Some(d) if d <= EXPIRY_CRITICAL_DAYS => BadgeTone::Danger,
+                _ => BadgeTone::Warning,
+            };
+            let label = days
+                .map(|d| format!("{d}d left"))
+                .unwrap_or_else(|| "Expiring".to_string());
+            (label, tone)
+        }
+        CredentialStatus::Active => {
+            let label = days
+                .map(|d| format!("{d}d left"))
+                .unwrap_or_else(|| "Active".to_string());
+            (label, BadgeTone::Ok)
+        }
+        CredentialStatus::Unknown => (unknown.to_string(), BadgeTone::Unknown),
+    }
+}
+
+#[cfg(test)]
+mod credential_status_badge_tests {
+    use azapptoolkit_core::audit::CredentialStatus;
+
+    use super::{EXPIRY_CRITICAL_DAYS, credential_status_badge};
+    use crate::components::ui::BadgeTone;
+
+    #[test]
+    fn every_status_maps_to_its_label_and_tone() {
+        let badge = |s, d| credential_status_badge(s, d, "No expiry");
+        assert_eq!(
+            badge(CredentialStatus::Expired, Some(-3)),
+            ("Expired".to_string(), BadgeTone::Danger)
+        );
+        assert_eq!(
+            badge(CredentialStatus::ExpiringSoon, Some(EXPIRY_CRITICAL_DAYS)),
+            (format!("{EXPIRY_CRITICAL_DAYS}d left"), BadgeTone::Danger),
+            "at the critical threshold the tone is Danger"
+        );
+        assert_eq!(
+            badge(
+                CredentialStatus::ExpiringSoon,
+                Some(EXPIRY_CRITICAL_DAYS + 1)
+            ),
+            (
+                format!("{}d left", EXPIRY_CRITICAL_DAYS + 1),
+                BadgeTone::Warning
+            )
+        );
+        assert_eq!(
+            badge(CredentialStatus::ExpiringSoon, None),
+            ("Expiring".to_string(), BadgeTone::Warning)
+        );
+        assert_eq!(
+            badge(CredentialStatus::Active, Some(40)),
+            ("40d left".to_string(), BadgeTone::Ok)
+        );
+        assert_eq!(
+            badge(CredentialStatus::Active, None),
+            ("Active".to_string(), BadgeTone::Ok)
+        );
+        assert_eq!(
+            badge(CredentialStatus::Unknown, None),
+            ("No expiry".to_string(), BadgeTone::Unknown),
+            "Unknown is the caller's word"
+        );
+        assert_eq!(
+            credential_status_badge(CredentialStatus::Unknown, Some(3), "Unknown").0,
+            "Unknown",
+            "and never Active, whatever the day count says"
         );
     }
 }

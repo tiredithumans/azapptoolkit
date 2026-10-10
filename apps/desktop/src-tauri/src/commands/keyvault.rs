@@ -162,7 +162,10 @@ pub async fn rotate_app_credential(
         }
     }
 
-    let days = input.lifetime_days.unwrap_or(180).clamp(1, 730);
+    let days = input
+        .lifetime_days
+        .unwrap_or(crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS)
+        .clamp(1, crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS);
     let lifetime = std::time::Duration::from_secs(u64::from(days) * 86_400);
     let display_name = format!("rotated-{}", chrono::Utc::now().format("%Y%m%d"));
 

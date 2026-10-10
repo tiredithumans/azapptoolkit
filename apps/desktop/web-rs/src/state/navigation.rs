@@ -14,6 +14,56 @@
 
 use super::*;
 
+/// The Security workbench's sub-tabs — the one vocabulary `security_tab`
+/// carries, which the strip, the Home cards, Global Search and the GUI tests
+/// all used to spell by hand. Typed so a deep-link to a tab that does not
+/// exist fails to compile instead of selecting nothing: the strip renders no
+/// pane for an unknown value. The signal itself stays a `String` (what
+/// `TabBar` binds); `value` is the bridge, and `ALL` is what the strip and
+/// the panes iterate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecurityTab {
+    Findings,
+    Apps,
+    Credentials,
+    SsoCertificates,
+    Grants,
+    AppPermissions,
+}
+
+impl SecurityTab {
+    pub const ALL: &'static [Self] = &[
+        Self::Findings,
+        Self::Apps,
+        Self::Credentials,
+        Self::SsoCertificates,
+        Self::Grants,
+        Self::AppPermissions,
+    ];
+
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::Findings => "findings",
+            Self::Apps => "apps",
+            Self::Credentials => "credentials",
+            Self::SsoCertificates => "sso-certificates",
+            Self::Grants => "grants",
+            Self::AppPermissions => "app-permissions",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Findings => "Findings",
+            Self::Apps => "All apps",
+            Self::Credentials => "Credential expiry",
+            Self::SsoCertificates => "SSO certificates",
+            Self::Grants => "Delegated grants",
+            Self::AppPermissions => "Application permissions",
+        }
+    }
+}
+
 impl Session {
     /// Navigate to `view`. Collapses the open-items workspace overlay back to the
     /// dock — the open items stay as chips, only the on-top detail panes are
@@ -25,17 +75,16 @@ impl Session {
         self.view.set(view);
     }
 
-    /// Navigate to the Security workbench on a specific sub-tab (`"findings"`
-    /// | `"apps"` | `"credentials"` | `"sso-certificates"` | `"grants"` |
-    /// `"app-permissions"`). Used by the Home cards and
-    /// command palette to deep-link past the default Findings tab.
+    /// Navigate to the Security workbench on a specific sub-tab. Used by the
+    /// Home cards and command palette to deep-link past the default Findings
+    /// tab.
     /// Goes through [`Session::set_view`] rather than poking `view` directly:
     /// every caller today is the Home dashboard, which is `inert` while the
     /// workspace overlay is up, so the difference is currently unobservable —
     /// but the first caller from anywhere else would otherwise land the drill
     /// *behind* an opaque detail pane.
-    pub fn open_security(&self, tab: &str) {
-        self.security_tab.set(tab.to_string());
+    pub fn open_security(&self, tab: SecurityTab) {
+        self.security_tab.set(tab.value().to_string());
         self.set_view(ActiveView::Security);
     }
 
@@ -207,11 +256,11 @@ impl Session {
         match facet {
             "critical" | "high" | "medium" | "low" => {
                 self.tenant_ui.audit_severity.set(facet.to_string());
-                self.open_security("apps");
+                self.open_security(SecurityTab::Apps);
             }
             "all" => {
                 self.tenant_ui.audit_expanded_group.set(None);
-                self.open_security("findings");
+                self.open_security(SecurityTab::Findings);
             }
             // Any other value is a finding-group key (unused, ownership,
             // orgwide_mailbox, …).
@@ -219,7 +268,7 @@ impl Session {
                 self.tenant_ui
                     .audit_expanded_group
                     .set(Some(facet.to_string()));
-                self.open_security("findings");
+                self.open_security(SecurityTab::Findings);
             }
         }
     }
@@ -231,6 +280,22 @@ impl Session {
     /// per-app App Registrations credential facet.
     pub fn open_credentials_with_facet(&self, facet: &str) {
         self.tenant_ui.credentials_facet.set(facet.to_string());
-        self.open_security("credentials");
+        self.open_security(SecurityTab::Credentials);
+    }
+}
+
+#[cfg(test)]
+mod security_tab_tests {
+    use super::SecurityTab;
+
+    #[test]
+    fn every_tab_has_a_distinct_value_and_label() {
+        let values: std::collections::HashSet<_> =
+            SecurityTab::ALL.iter().map(|t| t.value()).collect();
+        let labels: std::collections::HashSet<_> =
+            SecurityTab::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(values.len(), SecurityTab::ALL.len());
+        assert_eq!(labels.len(), SecurityTab::ALL.len());
+        assert_eq!(SecurityTab::ALL.len(), 6);
     }
 }

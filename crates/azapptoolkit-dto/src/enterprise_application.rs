@@ -112,8 +112,39 @@ pub struct AppRoleInput {
 /// `servicePrincipal` (gallery / foreign-tenant apps).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRolesView {
-    pub target_kind: String,
+    pub target_kind: AppRoleTargetKind,
     pub roles: Vec<azapptoolkit_core::models::AppRole>,
+}
+
+/// Where an enterprise app's exposed roles are defined. On the wire as the
+/// camelCase Graph object name, which both sides used to spell by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppRoleTargetKind {
+    /// A local app registration backs the service principal (the canonical
+    /// home — Entra mirrors edits onto the SP).
+    Application,
+    /// A gallery / foreign-tenant app: the service principal is the only copy.
+    ServicePrincipal,
+}
+
+#[cfg(test)]
+mod app_role_target_kind_tests {
+    use super::AppRoleTargetKind;
+
+    #[test]
+    fn the_target_kind_keeps_its_wire_words() {
+        for (kind, word) in [
+            (AppRoleTargetKind::Application, "\"application\""),
+            (AppRoleTargetKind::ServicePrincipal, "\"servicePrincipal\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), word);
+            assert_eq!(
+                serde_json::from_str::<AppRoleTargetKind>(word).unwrap(),
+                kind
+            );
+        }
+    }
 }
 
 /// One principal (user/group/service principal) assigned to an enterprise

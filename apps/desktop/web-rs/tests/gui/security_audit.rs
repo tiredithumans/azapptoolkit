@@ -15,7 +15,9 @@ use azapptoolkit_core::audit::{
     AuditPrincipalKind, RemediationAction, RemediationKind, RiskLevel, issue,
 };
 use azapptoolkit_dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
+use azapptoolkit_dto::events as names;
 use azapptoolkit_dto::exchange::ExchangeAccessResult;
+use azapptoolkit_web_rs::state::SecurityTab;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
 
@@ -67,7 +69,9 @@ async fn mount_security() -> ts::Mounted {
 #[wasm_bindgen_test]
 async fn sp_rows_are_excluded_from_selection_on_the_apps_pane() {
     let m = mount_security().await;
-    m.session.security_tab.set("apps".to_string());
+    m.session
+        .security_tab
+        .set(SecurityTab::Apps.value().to_string());
     ts::wait_for(|| !ts::query_all("tbody tr").is_empty()).await;
     // Only the app-registration row renders a checkbox; the SP row shows the
     // explanatory dash instead.
@@ -270,7 +274,7 @@ async fn audit_progress_reads_as_a_phase_until_the_app_count_is_known() {
     ts::tick().await;
 
     ts::emit_event(
-        "audit-progress",
+        names::AUDIT_PROGRESS,
         &audit_progress(0, 0, "Reading tenant-wide directory data…", 8),
     );
     ts::wait_for(|| ts::body_contains("Reading tenant-wide directory data")).await;
@@ -279,7 +283,7 @@ async fn audit_progress_reads_as_a_phase_until_the_app_count_is_known() {
         "the preparation phase must not read as a stalled 0 / 0 fraction"
     );
 
-    ts::emit_event("audit-progress", &audit_progress(3, 10, "App X", 8));
+    ts::emit_event(names::AUDIT_PROGRESS, &audit_progress(3, 10, "App X", 8));
     ts::wait_for(|| ts::body_contains("3 / 10 apps")).await;
     assert!(ts::body_contains("App X"));
     assert!(
@@ -291,7 +295,7 @@ async fn audit_progress_reads_as_a_phase_until_the_app_count_is_known() {
         "no back-off notice while the cap is at its peak"
     );
 
-    ts::emit_event("audit-progress", &audit_progress(4, 10, "App Y", 4));
+    ts::emit_event(names::AUDIT_PROGRESS, &audit_progress(4, 10, "App Y", 4));
     ts::wait_for(|| ts::query(".audit-progress__notice").is_some()).await;
 }
 

@@ -1004,7 +1004,7 @@ fn emit(
         cancelled: false,
         in_flight_cap,
     };
-    emit_progress(sink, "backup-progress", progress);
+    emit_progress(sink, crate::dto::events::BACKUP_PROGRESS, progress);
 }
 
 #[cfg(test)]
@@ -1192,7 +1192,7 @@ mod tests {
         assert_eq!(fan.done(), 2);
         // ...one `backup-progress` event per object, each carrying the live cap.
         // The app pass names no current app.
-        let events = rec.payloads::<BulkProgress>("backup-progress");
+        let events = rec.payloads::<BulkProgress>(crate::dto::events::BACKUP_PROGRESS);
         assert_eq!(events.iter().map(|e| e.done).collect::<Vec<_>>(), [1, 2]);
         assert!(events.iter().all(|e| e.total == 2
             && e.current_app.is_none()
@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(fan.done(), 2);
         // One event per MI, in input order, naming the MI — the unreadable one
         // included, since it is still captured.
-        let events = rec.payloads::<BulkProgress>("backup-progress");
+        let events = rec.payloads::<BulkProgress>(crate::dto::events::BACKUP_PROGRESS);
         assert_eq!(
             events
                 .iter()
