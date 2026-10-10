@@ -431,34 +431,28 @@ pub fn CredentialsTab(
     let open_rotate = move || {
         error.set(None);
         rotate_open.set(true);
-        let tid = session
-            .active_tenant
-            .get()
-            .map(|t| t.tenant_id)
-            .unwrap_or_default();
+        // The tab mounts only inside the authed shell, so a tenant is always
+        // active here; the dialog simply opens unseeded if that ever changes.
+        let Some(tid) = session.active_tenant.get().map(|t| t.tenant_id) else {
+            return;
+        };
         let app = app_id.get_untracked();
         let app_name_val = app_name.get_untracked();
         leptos::task::spawn_local(async move {
-            let d = if tid.is_empty() {
-                None
-            } else {
-                Some(crate::bindings::defaults::get_tenant_defaults(&tid).await)
-            };
+            let d = crate::bindings::defaults::get_tenant_defaults(&tid).await;
 
             // Vault: this app's remembered binding → tenant default → last-used.
             let mut vault: Option<String> = None;
             let mut secret: Option<String> = None;
-            if let Some(d) = &d {
-                if !app.is_empty()
-                    && let Some(b) = d.app_vaults.get(&app)
-                {
-                    vault = Some(b.vault_name.clone());
-                    secret = b.secret_name.clone();
-                } else if let Some(dv) = &d.default_vault {
-                    vault = Some(dv.clone());
-                }
+            if !app.is_empty()
+                && let Some(b) = d.app_vaults.get(&app)
+            {
+                vault = Some(b.vault_name.clone());
+                secret = b.secret_name.clone();
+            } else if let Some(dv) = &d.default_vault {
+                vault = Some(dv.clone());
             }
-            if vault.is_none() && !tid.is_empty() {
+            if vault.is_none() {
                 vault = ls_get(&last_vault_key(&tid));
             }
 
@@ -467,21 +461,27 @@ pub fn CredentialsTab(
             let secret_default = if app.is_empty() {
                 sanitize_secret_name(&app_name_val)
             } else {
-                let resolved = d
-                    .as_ref()
-                    .map(|d| d.secret_name_for(&app))
-                    .unwrap_or_else(|| {
-                        crate::bindings::defaults::TenantDefaults::default().secret_name_for(&app)
-                    });
-                sanitize_secret_name(&resolved)
+                sanitize_secret_name(&d.secret_name_for(&app))
             };
 
-            if rotate_vault.get_untracked().trim().is_empty()
+            // The pane can close (or the tab be rebuilt by another credential
+            // mutation landing) before this read returns, and reading a
+            // disposed signal panics the window; another tenant's defaults
+            // are not this one's.
+            if rotate_vault.is_disposed() || !session.is_active_tenant(&tid) {
+                return;
+            }
+            if rotate_vault
+                .try_get_untracked()
+                .is_some_and(|v| v.trim().is_empty())
                 && let Some(v) = vault
             {
                 rotate_vault.set(v);
             }
-            if rotate_secret_name.get_untracked().trim().is_empty() {
+            if rotate_secret_name
+                .try_get_untracked()
+                .is_some_and(|v| v.trim().is_empty())
+            {
                 rotate_secret_name.set(secret.unwrap_or(secret_default));
             }
         });

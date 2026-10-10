@@ -7,6 +7,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Closing a pane, or signing out, while one of its consent prompts is still open in the browser
+  no longer crashes the window** when the prompt completes — the Key Vault, SharePoint, usage and
+  group-membership consents, and the managed-mailbox-group consent, all re-ran their action
+  afterwards.
+- **Closing an app's pane while its Rotate dialog is still reading the tenant's Key Vault defaults,
+  or while a certificate file is still being read, no longer crashes the window.**
+- **A consent grant's "Retry" toast clicked after its tab was closed, or after you switched tenant,
+  now says so** instead of crashing the window or sending the retry to the other tenant.
 - **A bulk delete, consent grant or expired-secret sweep whose session expires partway now
   reports what it did.** The apps it deleted leave the selection and can be restored with Undo,
   the failures it hit are listed, and a Re-authenticate prompt appears; it used to come back as

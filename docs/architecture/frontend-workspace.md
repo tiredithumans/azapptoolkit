@@ -22,10 +22,18 @@ unmounts the whole authed shell; closing a pane disposes its tabs. Reading a dis
 started for (`Session::is_active_tenant`) and land nothing if it changed, since a toast would
 otherwise carry into the next sign-in; on the same tenant, skip the component-local writes once
 it is disposed but keep the session-level effects (toasts, re-auth prompts, a session-owned
-selection), and call callbacks with `try_run`. `CommandState::land` does this for every
-`use_command` runner (an `on_err` whose view is gone goes to the session's sink); the bulk bar's
-`Landing` does it for its runs. Hand-spawned tasks use `.try_run(` after an await, pinned by
-`web-rs/tests/post_await_callbacks.rs`.
+selection), call callbacks with `try_run`, and read signals with their `try_` twins (a plain
+`get`/`get_untracked`/`with` panics once the signal is disposed; `.set` is a silent no-op).
+`CommandState::land` does this for every `use_command` runner (an `on_err` whose view is gone goes
+to the session's sink); the bulk bar's `Landing` does it for its runs. Hand-spawned tasks use
+`.try_run(` and `try_get_untracked` after an await, both pinned by
+`web-rs/tests/post_await_callbacks.rs` (textually, so an `is_disposed()` return does not excuse a
+plain read after it). A consent-then-replay — `do_run()` after the consent round trip, which is a
+browser prompt answered minutes later — reads signals indirectly, so it is gated on
+`is_disposed()` + `is_active_tenant` by hand: at the call site (the resource-access lenses, the
+usage panel, the app site panel, the managed scope group panel, the Access tab, the audit
+controller) or at the top of the replay itself (`ScopeWizard::run_apply`, `SsoWizard::run_create`),
+which every caller then inherits.
 
 ## One primitive per UI pattern
 

@@ -65,12 +65,7 @@ pub fn DeletedAppsDialog(
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
             let result = applications::list_recently_deleted(&tenant_id).await;
-            let still_active = session
-                .active_tenant
-                .get_untracked()
-                .map(|t| t.tenant_id == tenant_id)
-                .unwrap_or(false);
-            if still_active {
+            if session.is_active_tenant(&tenant_id) {
                 match result {
                     Ok(d) => rows.set(Some(d)),
                     Err(e) => error.set(Some(e)),

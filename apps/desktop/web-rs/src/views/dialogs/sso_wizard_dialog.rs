@@ -120,7 +120,11 @@ pub fn SsoWizardDialog(
                 return;
             }
             let emails = d.enterprise_application.default_notification_emails;
-            if !emails.is_empty() && notification_emails.get_untracked().trim().is_empty() {
+            if !emails.is_empty()
+                && notification_emails
+                    .try_get_untracked()
+                    .is_some_and(|v| v.trim().is_empty())
+            {
                 notification_emails.set(emails.join("\n"));
             }
         });

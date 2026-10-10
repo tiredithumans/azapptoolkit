@@ -80,10 +80,14 @@ pub fn ManagedScopeGroupPanel(
             return;
         };
         leptos::task::spawn_local(async move {
-            if auth::request_scope_consent(&t.tenant_id, "exchange")
-                .await
-                .is_ok()
-            {
+            let res = auth::request_scope_consent(&t.tenant_id, "exchange").await;
+            // The consent prompt is answered minutes later, perhaps after the
+            // panel closed: `load_group` reads `app_id`, which panics once
+            // disposed, and would load for another session.
+            if group_cmd.busy.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            if res.is_ok() {
                 load_group();
             }
         });

@@ -75,11 +75,11 @@ pub fn AppSiteAccessPanel(
                 .await
                 .ok()
                 .flatten();
-            let still_active = tenant
-                .get_untracked()
-                .map(|t| t.tenant_id == tenant_id)
-                .unwrap_or(false)
-                && app_id.get_untracked() == app;
+            // Same tenant AND still the same app: the panel is keep-alive
+            // under a pane that can switch apps, and `try_` because the pane
+            // can be gone by now.
+            let still_active = session.is_active_tenant(&tenant_id)
+                && app_id.try_get_untracked().as_deref() == Some(app.as_str());
             if still_active {
                 access.set(found);
                 checked.set(true);
@@ -130,7 +130,14 @@ pub fn AppSiteAccessPanel(
         };
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth_consent(&t.tenant_id).await {
+            let res = auth_consent(&t.tenant_id).await;
+            // The consent prompt is answered minutes later, perhaps after the
+            // pane closed: `do_scan` reads `scanning`, which panics once
+            // disposed, and a scan for another session would be wrong.
+            if scanning.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => do_scan(),
                 Err(msg) => error.set(Some(msg)),
             }

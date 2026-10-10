@@ -139,11 +139,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
                 .await
                 .ok()
                 .flatten();
-            let still_active = tenant
-                .get_untracked()
-                .map(|t| t.tenant_id == tenant_id)
-                .unwrap_or(false);
-            if still_active {
+            if session.is_active_tenant(&tenant_id) {
                 result.set(cached);
             }
         });
@@ -193,7 +189,13 @@ pub(super) fn SitesPanel() -> impl IntoView {
         let Some(t) = tenant.get() else { return };
         error.set(None);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "sharepoint").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "sharepoint").await;
+            // The consent prompt is answered minutes later, perhaps after a
+            // sign-out: `do_run` reads `scanning`, which panics once disposed.
+            if scanning.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => do_run(),
                 Err(e) => {
                     if !session.report_if_session_dead(&e) {

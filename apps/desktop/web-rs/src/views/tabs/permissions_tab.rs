@@ -28,7 +28,7 @@ use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSection;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
-use crate::components::toast::ToastAction;
+use crate::components::toast::{ToastAction, ToastKind};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
     Badge, BadgeTone, Callout, EmptyState, FormError, IconButton, TabBar, TabBarItem,
@@ -161,9 +161,27 @@ fn run_grant(
             }
             Err(e) => {
                 // Offer Retry only when the backend says the failure is transient.
+                // The toast outlives this tab (it is sticky; closing the pane or
+                // a sign-out disposes the tab) and `run_grant` reads the tab's
+                // signals first, which panic once disposed — so a Retry clicked
+                // then says so instead, the way `CommandState::fail_toast` does,
+                // and one clicked after a tenant switch sends nothing to the
+                // other tenant.
+                let started_for = t.tenant_id.clone();
                 let retry: Option<ToastAction> = e.retryable.then(|| {
                     Rc::new(move || {
-                        run_grant(session, detail, consenting, consent_error, on_changed)
+                        let not_retried = if consenting.is_disposed() {
+                            "That view was closed, so the action wasn't retried."
+                        } else if !session.is_active_tenant(&started_for) {
+                            "You switched tenants, so that action wasn't retried."
+                        } else if consenting.try_get_untracked().unwrap_or(true) {
+                            "Another consent is still running there, so that one wasn't retried. \
+                             Try again when it finishes."
+                        } else {
+                            run_grant(session, detail, consenting, consent_error, on_changed);
+                            return;
+                        };
+                        session.push_toast(ToastKind::Info, not_retried, None, None);
                     }) as ToastAction
                 });
                 session.toast_error(e.message.clone(), retry);

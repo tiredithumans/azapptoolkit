@@ -54,7 +54,13 @@ pub fn UploadCertificateDialog(
                 Ok(buf) => {
                     let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                     pem.set(cert_payload_from_bytes(&bytes));
-                    if display_name.get_untracked().trim().is_empty() {
+                    // The pane can close (or the tab be rebuilt by another
+                    // credential mutation landing) before the file is read; a
+                    // read of a disposed signal panics the window.
+                    let Some(current) = display_name.try_get_untracked() else {
+                        return;
+                    };
+                    if current.trim().is_empty() {
                         let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
                         display_name.set(stem.to_string());
                     }

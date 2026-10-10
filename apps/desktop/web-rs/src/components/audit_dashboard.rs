@@ -135,11 +135,7 @@ where
         let tenant_id = t.tenant_id.clone();
         leptos::task::spawn_local(async move {
             let result = fetch.with_value(|f| f(tenant_id.clone())).await;
-            let still_active = tenant
-                .get_untracked()
-                .map(|t| t.tenant_id == tenant_id)
-                .unwrap_or(false);
-            if still_active {
+            if session.is_active_tenant(&tenant_id) {
                 match result {
                     Ok(r) => rows.set(r),
                     Err(e) => error.set(Some(e)),

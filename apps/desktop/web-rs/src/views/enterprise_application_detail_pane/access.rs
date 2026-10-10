@@ -495,10 +495,18 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
         };
         consenting.set(true);
         leptos::task::spawn_local(async move {
-            match auth::request_scope_consent(&t.tenant_id, "group_membership").await {
+            let res = auth::request_scope_consent(&t.tenant_id, "group_membership").await;
+            // The consent round trip is a browser prompt answered minutes
+            // later, perhaps after the pane closed or a sign-out: `retry_op`
+            // is disposed then, and `mutate` reads `busy` — both panic once
+            // disposed — and the replay would run for another session.
+            if consenting.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(()) => {
                     error.set(None);
-                    if let Some((add, group_id)) = retry_op.get_untracked() {
+                    if let Some((add, group_id)) = retry_op.try_get_untracked().flatten() {
                         retry_op.set(None);
                         mutate(add, group_id);
                     }
