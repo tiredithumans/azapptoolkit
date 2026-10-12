@@ -639,7 +639,6 @@ pub(crate) fn app_name_index_store_if_current(
 /// knows about apps another does not.
 pub(crate) async fn app_name_index_cached(
     state: &AppState,
-    client: &GraphClient,
     tenant_id: &str,
 ) -> Result<Arc<Vec<Application>>, GraphError> {
     if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
@@ -650,9 +649,7 @@ pub(crate) async fn app_name_index_cached(
     // `/applications` scan per concurrent reader. The gate is the SHARED
     // [`app_scan_gate`], not one of its own: a cold reader here queues behind
     // an in-flight App Registrations scan, which seeds this index, and the
-    // re-check below then hits. Worst case (this reader wins the race) is one
-    // lean scan, then one full scan, serially — down from three concurrent ones.
-    let key = app_name_index_key(tenant_id);
+    // re-check below then hits.
     let gate = app_scan_gate(state, tenant_id);
     let waiting = std::time::Instant::now();
     let _held = gate.lock().await;
@@ -660,13 +657,16 @@ pub(crate) async fn app_name_index_cached(
         served_after_wait("app_name_index", waiting);
         return Ok(cached);
     }
-    // Captured BEFORE the scan — see `sp_index_cached`.
-    let watch = state.cache.generation_for(CacheKind::Lists, &key);
-    // `?` drops `watch` — see `sp_index_cached`.
-    let apps = client
-        .list_application_index_named(Some(super::APPS_MAX))
-        .await?;
-    Ok(app_name_index_store_if_current(&state.cache, apps, watch))
+    // The FULL list scan, not a lean `id,appId,displayName` one. When this
+    // reader won the gate on a cold Home (the Enterprise card), its lean scan
+    // used to run first and the App Registrations card's full scan then paged
+    // `/applications` again, serially. The full scan seeds this index, the
+    // pairing rows and the credential roll-up at once. Tradeoff: a cold
+    // standalone Enterprise, search, backup or permission-tester visit now
+    // selects the credential arrays (heavier pages, `keyCredentials`' 150/min
+    // budget) and joins the SP index, and in exchange warms App Registrations
+    // and Credentials.
+    Ok(super::scan_app_list(state, tenant_id).await?.names)
 }
 
 /// Logs a cold reader that queued behind another reader's scan and was served
@@ -739,7 +739,7 @@ pub(crate) async fn apps_pairing_cached(
         served_after_wait("apps_pairing", waiting);
         return Ok(cached);
     }
-    Ok(super::scan_app_list(state, tenant_id).await?.rows)
+    super::scan_app_list(state, tenant_id).await?.rows
 }
 
 /// The tenant-wide credential-expiry roll-up, read through
@@ -784,7 +784,7 @@ pub(crate) async fn indexes_cached(
     // collapse.
     futures::future::try_join(
         sp_index_cached(state, client, tenant_id),
-        app_name_index_cached(state, client, tenant_id),
+        app_name_index_cached(state, tenant_id),
     )
     .await
 }

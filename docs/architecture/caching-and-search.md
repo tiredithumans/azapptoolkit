@@ -59,7 +59,7 @@ There are exactly **two** cached tenant-wide directory enumerations, and no surf
 | Index | Key | Fetched by | Projection |
 |---|---|---|---|
 | Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus` |
-| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named`, or seeded (stripped to `id,appId,displayName`) by the App Registrations scan | `id,appId,displayName` |
+| App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | seeded (stripped to `id,appId,displayName`) by the one `/applications` list scan, `scan_app_list` | `id,appId,displayName` |
 
 Readers: both entity lists, global search, the security audit, the consent audit, the DR backup, the
 managed-identity list, and the mailbox probe. A tab switch, a search keystroke, or a backup run right
@@ -97,17 +97,24 @@ into an index six surfaces hold an `Arc` to). Readers go through `apps_pairing_c
 `app_scan_gate`, keyed on `apps_pairing_key`. Each store has its own per-key watch captured before
 the scan, so a credential write landing mid-scan refuses the two credential-bearing stores and
 leaves the name index. The SP side of the pairing join goes through `sp_index_cached`, never the
-client directly.
+client directly, and is joined rather than required: an unreadable SP index fails only the pairing
+rows (`AppListScan::rows` is a `Result`), so the roll-up and the name index still land and global
+search keeps its application half.
 
 - **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
   `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.
 - The audit (`$expand=owners`) and the bulk expired-credential sweep are the only other
   `list_applications_all` callers, pinned by `repo_invariants::the_full_application_list_scan_has_one_home`.
 - A cold Home launch used to run three concurrent scans (the App Registrations, Enterprise Apps and
-  Credential health cards): 3 × ceil(N/999) serial round trips, 18 → 6 at 5,000 apps. If the
-  Enterprise card wins the gate it runs its lean scan and the list scan follows serially.
-- Tradeoff: a cold standalone Credential Expiry visit now also reads the SP index (gated,
-  concurrent with the app scan, and shared with every other reader).
+  Credential health cards): 3 × ceil(N/999) serial round trips, 18 → 6 at 5,000 apps. A cold
+  `app_name_index_cached` runs `scan_app_list` too: it used to run a lean `id,appId,displayName`
+  scan, and when the Enterprise card won the gate the full scan then paged `/applications` again,
+  serially.
+- Tradeoffs: a cold standalone Credential Expiry visit also reads the SP index (gated, concurrent
+  with the app scan, and shared with every other reader); a cold standalone Enterprise Apps,
+  global search, backup or permission-tester visit selects the credential arrays (heavier pages,
+  `keyCredentials`' 150-requests-a-minute budget) and joins the SP index, and in exchange warms App
+  Registrations and Credentials.
 
 ### Every pinned entry is typed
 

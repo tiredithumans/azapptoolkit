@@ -258,7 +258,7 @@ impl GraphClient {
         //     handling for a value that is then discarded.
         //   * `$orderby` — sorting is done in the frontend over the cached rows (see
         //     `web-rs/src/views/`), so a server-side sort is wasted work that additionally
-        //     conflicts with `$expand`. `list_application_index` omits both for the same reason.
+        //     conflicts with `$expand`.
         //
         // This also removes an officially UNSUPPORTED combination on the audit's expanding
         // call: `$expand` is not supported together with advanced queries, and such combinations
@@ -379,33 +379,6 @@ impl GraphClient {
             truncated,
         );
         Ok((items, truncated))
-    }
-
-    /// The tenant's app-registration index: `id`, `appId`, `displayName` for every
-    /// registration, paged to exhaustion.
-    ///
-    /// One projection serves every reader — the pairing joins want `appId -> id`, and the
-    /// global search additionally substring-matches the name client-side (Graph OData has no
-    /// `contains()` for directory objects, so "match anywhere in the name / a partial GUID" can
-    /// only be done in memory over an enumeration like this). One shape is what lets the command
-    /// layer cache a single shared entry (`applications::app_name_index_cached`) instead of
-    /// re-scanning `/applications` once per surface.
-    ///
-    /// A bare `$select`, no `$orderby`/`$count`: the result feeds a `HashMap` / in-memory ranker,
-    /// so a server-side sort (and the `ConsistencyLevel: eventual` it would require) is wasted
-    /// work. `cap` bounds memory in pathological tenants; `None` disables it.
-    pub async fn list_application_index_named(
-        &self,
-        cap: Option<usize>,
-    ) -> Result<Vec<Application>> {
-        let params: [(&str, &str); 2] =
-            [("$select", "id,appId,displayName"), ("$top", MAX_PAGE_SIZE)];
-        let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
-        // A bare `$select` — not an advanced query, as the `false` above says.
-        let (items, _truncated) = self
-            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), false)
-            .await?;
-        Ok(items)
     }
 
     pub async fn list_owners(&self, object_id: &str) -> Result<Vec<DirectoryObject>> {

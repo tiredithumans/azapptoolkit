@@ -632,9 +632,7 @@ pub async fn find_mailbox_reachers(
     // Enterprise Apps join use) rather than running a `/applications` scan of
     // its own on every probe.
     let app_reg_index: Arc<HashMap<String, String>> = Arc::new(
-        match crate::commands::applications::app_name_index_cached(&state, &client, &tenant_id)
-            .await
-        {
+        match crate::commands::applications::app_name_index_cached(&state, &tenant_id).await {
             Ok(apps) => apps
                 .iter()
                 .map(|a| (a.app_id.clone(), a.id.clone()))

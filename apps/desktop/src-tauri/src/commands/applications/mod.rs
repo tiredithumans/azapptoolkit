@@ -100,10 +100,15 @@ pub async fn get_directory_index_status(
 /// [`scan_app_list`].
 pub(crate) struct AppListScan {
     /// The App Registrations list rows (`apps_pairing`) — the same `Arc` the
-    /// typed cache entry holds.
-    pub(crate) rows: Arc<Vec<ApplicationListRowDto>>,
+    /// typed cache entry holds. The only projection that needs the SP index
+    /// (the paired-Enterprise-App join), so the only one an unreadable index
+    /// fails: the two below still landed.
+    pub(crate) rows: Result<Arc<Vec<ApplicationListRowDto>>, GraphError>,
     /// The tenant-wide credential-expiry roll-up (`credential_expirations`).
     pub(crate) credentials: Arc<Vec<CredentialRowDto>>,
+    /// The app-name index (`app_name_index`), stripped to
+    /// `id,appId,displayName`.
+    pub(crate) names: Arc<Vec<Application>>,
 }
 
 /// The ONE full `/applications` list scan behind the App Registrations list,
@@ -114,7 +119,13 @@ pub(crate) struct AppListScan {
 /// seeds all three. Launch used to run three concurrent scans of the same
 /// collection (the Home App Registrations, Enterprise Apps and Credential
 /// health cards) — 18 serial round trips at 5,000 apps, two of them selecting
-/// the throttled `keyCredentials`.
+/// the throttled `keyCredentials`. A cold name-index reader runs THIS scan too
+/// (it used to run a lean one, and when it won the gate on a cold Home the
+/// full scan then followed it serially: `/applications` paged twice).
+///
+/// The SP index is joined, not required: an unreadable one fails only
+/// [`AppListScan::rows`], so global search's "one unreadable index degrades
+/// only its own half" still holds for the name index produced here.
 ///
 /// Caller contract:
 /// - Hold [`app_scan_gate`] and re-check your own key before calling, so a
@@ -161,19 +172,23 @@ pub(crate) async fn scan_app_list(
     // understates expiries — acceptable only because the same cap governs every
     // other tenant-wide view, so the numbers shown are consistent with them
     // rather than silently different.
-    let (((apps, _truncated), apps_took), (sps, sp_took)) = futures::future::try_join(
+    //
+    // `join`, not `try_join`: the credential roll-up and the name index need no
+    // SP, so an unreadable SP index must fail only the pairing rows.
+    let (apps, sps) = futures::future::join(
         timed(client.list_applications_all(query, Some(APPS_MAX))),
         timed(cache::sp_index_cached(state, &client, tenant_id)),
     )
-    .await?;
+    .await;
+    let ((apps, _truncated), apps_took) = apps?;
     // Which side of the join a cold launch waited on: the slower one gates
     // every list built from this scan.
     tracing::debug!(
         target: "azapptoolkit::cache",
         apps = apps.len(),
         apps_ms = millis(apps_took),
-        sps = sps.len(),
-        sp_ms = millis(sp_took),
+        sps = sps.as_ref().ok().map(|(sps, _)| sps.len()),
+        sp_ms = sps.as_ref().ok().map(|(_, took)| millis(*took)),
         "app list scan joined"
     );
 
@@ -195,33 +210,40 @@ pub(crate) async fn scan_app_list(
     // into it. Stored every time; the store is guarded, so a warm index is
     // simply left as it is.
     let lean: Vec<Application> = apps.iter().map(cache::app_name_index_row).collect();
-    cache::app_name_index_store_if_current(&state.cache, lean, name_watch);
+    let names = cache::app_name_index_store_if_current(&state.cache, lean, name_watch);
 
-    let by_app_id: HashMap<&str, &str> = sps
-        .iter()
-        .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
-        .collect();
-    let rows: Arc<Vec<ApplicationListRowDto>> = Arc::new(
-        apps.into_iter()
-            .map(|application| {
-                let paired = by_app_id
-                    .get(application.app_id.as_str())
-                    .map(|id| (*id).to_string());
-                ApplicationListRowDto::from_application(application, paired, now)
-            })
-            .collect(),
-    );
+    let rows = sps.map(|(sps, _)| {
+        let by_app_id: HashMap<&str, &str> = sps
+            .iter()
+            .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
+            .collect();
+        let rows: Arc<Vec<ApplicationListRowDto>> = Arc::new(
+            apps.into_iter()
+                .map(|application| {
+                    let paired = by_app_id
+                        .get(application.app_id.as_str())
+                        .map(|id| (*id).to_string());
+                    ApplicationListRowDto::from_application(application, paired, now)
+                })
+                .collect(),
+        );
 
-    // Pinned: a tenant-wide index (one paginated scan over every app
-    // registration), not a per-object entry — it must not be evictable by the
-    // thousands of `app_detail|…` writes that share this bucket. The caller
-    // still gets these rows; only the caching of a snapshot that lost the race
-    // is skipped. Typed, like the roll-up above.
-    state
-        .cache
-        .put_typed_index_if_current(rows_watch, Arc::clone(&rows));
+        // Pinned: a tenant-wide index (one paginated scan over every app
+        // registration), not a per-object entry — it must not be evictable by
+        // the thousands of `app_detail|…` writes that share this bucket. The
+        // caller still gets these rows; only the caching of a snapshot that
+        // lost the race is skipped. Typed, like the roll-up above.
+        state
+            .cache
+            .put_typed_index_if_current(rows_watch, Arc::clone(&rows));
+        rows
+    });
 
-    Ok(AppListScan { rows, credentials })
+    Ok(AppListScan {
+        rows,
+        credentials,
+        names,
+    })
 }
 
 /// Runs `fut`, pairing its value with how long it took (for the scan log).
@@ -773,12 +795,11 @@ mod handler_tests {
             .mount(&server)
             .await;
         mount_sp_index(&server, 1).await;
-        let client = state.graph_for(TENANT);
 
         let (rows, creds, names) = tokio::join!(
             apps_pairing_cached(&state, TENANT),
             credential_expirations_cached(&state, TENANT),
-            app_name_index_cached(&state, &client, TENANT),
+            app_name_index_cached(&state, TENANT),
         );
         let rows = rows.expect("pairing rows");
         let creds = creds.expect("credential roll-up");
@@ -794,6 +815,78 @@ mod handler_tests {
         assert!(indexed[0].password_credentials.is_empty());
         assert!(indexed[0].key_credentials.is_empty());
         server.verify().await;
+    }
+
+    /// The Enterprise card winning the gate on a cold Home: the name-index
+    /// reader runs first, and it runs the FULL list scan (the list-row
+    /// `$select`), so the App Registrations and Credential health cards queued
+    /// behind it are served without `/applications` being paged a second time.
+    #[tokio::test]
+    async fn a_cold_name_index_reader_runs_the_one_full_list_scan() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .and(query_param("$select", list_row_select().join(",")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_sp_index(&server, 1).await;
+
+        let (names, rows, creds) = tokio::join!(
+            app_name_index_cached(&state, TENANT),
+            apps_pairing_cached(&state, TENANT),
+            credential_expirations_cached(&state, TENANT),
+        );
+
+        assert_eq!(names.expect("name index").len(), 1);
+        let rows = rows.expect("pairing rows");
+        assert_eq!(rows[0].paired_service_principal_id.as_deref(), Some("sp-1"));
+        assert_eq!(creds.expect("credential roll-up").len(), 1);
+        let indexed = app_name_index_hit(&state.cache, TENANT).expect("name index seeded");
+        assert!(
+            indexed[0].password_credentials.is_empty(),
+            "the name index must stay stripped to id/appId/displayName"
+        );
+        server.verify().await;
+    }
+
+    /// An unreadable SP index fails only the pairing rows: the credential
+    /// roll-up and the name index need no SP, so they land (and global search
+    /// keeps its application half) while the App Registrations list errors.
+    #[tokio::test]
+    async fn an_unreadable_sp_index_fails_only_the_pairing_rows() {
+        let (server, state) = mock_state(TENANT).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+            .mount(&server)
+            .await;
+
+        let scan = scan_app_list(&state, TENANT)
+            .await
+            .expect("the app side read");
+
+        assert!(scan.rows.is_err(), "rows need the SP join");
+        assert_eq!(scan.credentials.len(), 1);
+        assert_eq!(scan.names.len(), 1);
+        assert!(credential_expirations_hit(&state.cache, TENANT).is_some());
+        assert!(app_name_index_hit(&state.cache, TENANT).is_some());
+        assert!(apps_pairing_hit(&state.cache, TENANT).is_none());
+        // Served from the entry the failed join still stored.
+        assert_eq!(
+            app_name_index_cached(&state, TENANT)
+                .await
+                .expect("hit")
+                .len(),
+            1
+        );
     }
 
     /// Answers the `/applications` page after running a credential-only
@@ -823,7 +916,11 @@ mod handler_tests {
 
         let scan = scan_app_list(&state, TENANT).await.expect("scan");
 
-        assert_eq!(scan.rows.len(), 1, "the caller still gets its rows");
+        assert_eq!(
+            scan.rows.expect("rows").len(),
+            1,
+            "the caller still gets its rows"
+        );
         // Through the typed accessors: an untyped `get` on these entries
         // always misses, which would make both assertions pass vacuously.
         assert!(
