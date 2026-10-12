@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.33.4] - 2026-10-12
+
 ### Changed
 
 - **Large tenants load much faster.** The app registrations and enterprise applications are now
