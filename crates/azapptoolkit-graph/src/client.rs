@@ -41,9 +41,8 @@ pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 /// fanned-out read — dominated by `appRoleAssignedTo` on the Microsoft Graph service principal,
 /// a tenant-wide collection the audit and the consent view both walk end-to-end before scoring.
 ///
-/// Graph's real per-endpoint caps are not always what the reference pages claim (see
-/// [`GraphClient::list_service_principals_index`], which logs its effective first-page size for
-/// exactly this reason). Asking for more than an endpoint allows is harmless — Graph silently
+/// Graph's real per-endpoint caps are not always what the reference pages claim, so the
+/// tenant-wide scans log their effective first-page size ([`log_directory_scan`]). Asking for more than an endpoint allows is harmless — Graph silently
 /// clamps to its own maximum — so this is the safe request everywhere.
 pub(crate) const MAX_PAGE_SIZE: &str = "999";
 
@@ -94,7 +93,9 @@ pub use service_principals::{
     ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch, sp_index_row,
 };
 pub use sharepoint::SelectedTarget;
-pub(crate) use transport::{batch_sub_url, escape_odata, not_found_as_none, search_phrase};
+pub(crate) use transport::{
+    batch_sub_url, escape_odata, log_directory_scan, not_found_as_none, search_phrase,
+};
 
 pub struct GraphClient {
     http: reqwest::Client,

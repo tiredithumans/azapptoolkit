@@ -566,9 +566,11 @@ pub(crate) async fn sp_index_cached(
     // pinned key.
     let key = sp_index_key(tenant_id);
     let gate = state.single_flight(&key);
+    let waiting = std::time::Instant::now();
     let _held = gate.lock().await;
     // Re-check: the fetch we queued behind has already populated the cache.
     if let Some(cached) = sp_index_hit(&state.cache, tenant_id) {
+        served_after_wait("sp_index", waiting);
         return Ok(cached);
     }
     // Captured BEFORE the multi-second scan: a mutation landing mid-flight
@@ -652,8 +654,10 @@ pub(crate) async fn app_name_index_cached(
     // lean scan, then one full scan, serially — down from three concurrent ones.
     let key = app_name_index_key(tenant_id);
     let gate = app_scan_gate(state, tenant_id);
+    let waiting = std::time::Instant::now();
     let _held = gate.lock().await;
     if let Some(cached) = app_name_index_hit(&state.cache, tenant_id) {
+        served_after_wait("app_name_index", waiting);
         return Ok(cached);
     }
     // Captured BEFORE the scan — see `sp_index_cached`.
@@ -663,6 +667,19 @@ pub(crate) async fn app_name_index_cached(
         .list_application_index_named(Some(super::APPS_MAX))
         .await?;
     Ok(app_name_index_store_if_current(&state.cache, apps, watch))
+}
+
+/// Logs a cold reader that queued behind another reader's scan and was served
+/// by it: `waited_ms` is how long a Home card sat on a sibling card's scan
+/// instead of starting its own.
+fn served_after_wait(key: &'static str, waiting: std::time::Instant) {
+    tracing::debug!(
+        target: "azapptoolkit::cache",
+        kind = "Lists",
+        key,
+        waited_ms = u64::try_from(waiting.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "served by the scan it queued behind"
+    );
 }
 
 /// The ONE single-flight gate for every full `/applications` list read: the
@@ -715,9 +732,11 @@ pub(crate) async fn apps_pairing_cached(
     }
     tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "apps_pairing", "miss");
     let gate = app_scan_gate(state, tenant_id);
+    let waiting = std::time::Instant::now();
     let _held = gate.lock().await;
     // Re-check: the scan we queued behind has already populated the cache.
     if let Some(cached) = apps_pairing_hit(&state.cache, tenant_id) {
+        served_after_wait("apps_pairing", waiting);
         return Ok(cached);
     }
     Ok(super::scan_app_list(state, tenant_id).await?.rows)
@@ -736,9 +755,11 @@ pub(crate) async fn credential_expirations_cached(
     }
     tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "credential_expirations", "miss");
     let gate = app_scan_gate(state, tenant_id);
+    let waiting = std::time::Instant::now();
     let _held = gate.lock().await;
     // Re-check: the scan we queued behind has already populated the cache.
     if let Some(cached) = credential_expirations_hit(&state.cache, tenant_id) {
+        served_after_wait("credential_expirations", waiting);
         return Ok(cached);
     }
     Ok(super::scan_app_list(state, tenant_id).await?.credentials)

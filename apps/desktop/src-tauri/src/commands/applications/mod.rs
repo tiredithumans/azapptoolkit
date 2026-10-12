@@ -161,11 +161,21 @@ pub(crate) async fn scan_app_list(
     // understates expiries — acceptable only because the same cap governs every
     // other tenant-wide view, so the numbers shown are consistent with them
     // rather than silently different.
-    let ((apps, _truncated), sps) = futures::future::try_join(
-        client.list_applications_all(query, Some(APPS_MAX)),
-        cache::sp_index_cached(state, &client, tenant_id),
+    let (((apps, _truncated), apps_took), (sps, sp_took)) = futures::future::try_join(
+        timed(client.list_applications_all(query, Some(APPS_MAX))),
+        timed(cache::sp_index_cached(state, &client, tenant_id)),
     )
     .await?;
+    // Which side of the join a cold launch waited on: the slower one gates
+    // every list built from this scan.
+    tracing::debug!(
+        target: "azapptoolkit::cache",
+        apps = apps.len(),
+        apps_ms = millis(apps_took),
+        sps = sps.len(),
+        sp_ms = millis(sp_took),
+        "app list scan joined"
+    );
 
     let now = chrono::Utc::now();
 
@@ -212,6 +222,20 @@ pub(crate) async fn scan_app_list(
         .put_typed_index_if_current(rows_watch, Arc::clone(&rows));
 
     Ok(AppListScan { rows, credentials })
+}
+
+/// Runs `fut`, pairing its value with how long it took (for the scan log).
+async fn timed<T, E>(
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<(T, std::time::Duration), E> {
+    let started = std::time::Instant::now();
+    let value = fut.await?;
+    Ok((value, started.elapsed()))
+}
+
+/// A duration as whole milliseconds for a log field, saturating.
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Lean list-row variant of [`list_applications`]: each row is flattened to

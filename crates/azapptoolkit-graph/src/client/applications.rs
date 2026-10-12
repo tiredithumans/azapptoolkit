@@ -361,12 +361,24 @@ impl GraphClient {
         // losing `owners` from page two onward (Graph answers an advanced query that also
         // expands with a 200 and the expanded property simply missing).
         let eventual = is_advanced_query(&q);
+        let started = std::time::Instant::now();
         let page = self.list_applications(q).await?;
+        let first_page = (page.items.len(), started.elapsed());
         // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX` paginates to
         // exhaustion without the hard-error past page limit that `collect_all_pages` raises —
         // the right degradation for a tenant-wide scan.
-        self.collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), eventual)
-            .await
+        let (items, truncated) = self
+            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), eventual)
+            .await?;
+        log_directory_scan(
+            "applications",
+            "serial",
+            started,
+            first_page,
+            items.len(),
+            truncated,
+        );
+        Ok((items, truncated))
     }
 
     /// The tenant's app-registration index: `id`, `appId`, `displayName` for every

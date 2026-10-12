@@ -58,7 +58,7 @@ There are exactly **two** cached tenant-wide directory enumerations, and no surf
 
 | Index | Key | Fetched by | Projection |
 |---|---|---|---|
-| Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames` |
+| Service principals | `sp_index_key` → `"{tenant}\|sp_index"` | `list_service_principals_index` | `id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus` |
 | App registrations | `app_name_index_key` → `"{tenant}\|app_name_index"` | `list_application_index_named`, or seeded (stripped to `id,appId,displayName`) by the App Registrations scan | `id,appId,displayName` |
 
 Readers: both entity lists, global search, the security audit, the consent audit, the DR backup, the
@@ -537,8 +537,8 @@ to a request that expands.
 
 Every paging helper (`collect_all_pages`, `collect_all_pages_capped`, `finish_paged_batch`) takes
 the consistency flag page 1 was issued with — there is no default. Graph does not carry
-`ConsistencyLevel` into the `nextLink` request, so an advanced query (the SP index, the `memberOf`
-casts) restates it on every continuation, and a plain read never adds it: page 2 of an `$expand`
+`ConsistencyLevel` into the `nextLink` request, so an advanced query (the `memberOf` casts)
+restates it on every continuation, and a plain read never adds it: page 2 of an `$expand`
 scan would lose the expansion, and page 2 of any other plain read would come from the
 eventually-consistent index while page 1 came from the directory. The scoped helpers
 (`collect_pages_from`, `collect_pages_from_capped`) take a fetch closure instead of a consistency flag,
@@ -554,9 +554,25 @@ omitted `$top` is a 10× round-trip multiplier on any collection that pages.
 Every paged read in `azapptoolkit-graph` therefore sends `client::MAX_PAGE_SIZE` (999), the
 documented maximum for these directory collections; `/applications` enumerations use the equivalent
 public `DEFAULT_APP_PAGE_SIZE`. Asking above an endpoint's real cap is harmless (Graph clamps
-silently), and per-endpoint caps are **not reliably documented** — `list_service_principals_index`
-logs its effective first-page size for exactly that reason. Batched sub-requests carry it too, so a
-`$batch` sub-response rarely overflows into `finish_paged_batch`'s serial continuation.
+silently), and per-endpoint caps are **not reliably documented**: `/servicePrincipals` is documented
+at 100 a page whatever `$top` asks for. Batched sub-requests carry it too, so a `$batch`
+sub-response rarely overflows into `finish_paged_batch`'s serial continuation.
+
+The SP index is a **plain** read (no `$count`, no `ConsistencyLevel`). It used to be an advanced
+query for an `@odata.count` nothing read, which served its pages from the eventually-consistent
+index while the `/applications` scan it is joined with read the directory.
+
+### Reading a slow scan off the log
+
+Every multi-page read logs one `debug` line per continuation page and a `paged read` summary
+(target `azapptoolkit::graph::paging`: endpoint family, page, rows, `elapsed_ms`; never the
+nextLink, whose `$skiptoken` must not reach the log). The two tenant-wide scans each add one `info`
+line (target `azapptoolkit::graph::scan`, via `client::log_directory_scan`): `scan`, `strategy`,
+`rows`, `page_size` (page one's row count, i.e. what Graph actually granted), `first_page_ms`,
+`elapsed_ms`, `truncated`. `scan_app_list` logs `apps_ms` / `sp_ms` (target
+`azapptoolkit::cache`), so the side of the join a cold launch waited on is visible, and a cold
+reader served by a sibling's in-flight scan logs its `waited_ms`. All of it reaches the file log
+under the default filter (`azapptoolkit=debug`).
 
 The rule is pinned by `repo_invariants/fanout.rs::every_paged_graph_read_sends_a_page_size`: every
 function in `graph/src/client/` that calls a paging helper must send `$top` (as a query pair or

@@ -5,6 +5,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **Large tenants load faster.** Microsoft Graph responses now arrive compressed, so the paged
+  directory reads behind every list (megabytes of JSON in a large tenant) move a fraction of the
+  bytes. The enterprise-applications read now comes straight from the directory rather than from
+  a search index that can lag behind recent changes. The log file now records how long each
+  tenant-wide read took and how many pages it needed.
+
 ## [0.33.3] - 2026-10-10
 
 ### Fixed
