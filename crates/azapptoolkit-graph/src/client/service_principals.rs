@@ -227,17 +227,15 @@ impl GraphClient {
     /// nothing read. Every continuation therefore pages with
     /// `consistency_eventual = false`, matching page one.
     ///
-    /// Pagination follows `@odata.nextLink` up to [`SP_INDEX_MAX`]. Graph
-    /// documents `/servicePrincipals` at a page size of 100 whatever `$top`
-    /// asks for, so this is the longest serial chain a cold launch waits on;
-    /// the `azapptoolkit::graph::scan` line records the size Graph granted.
+    /// Reads up to [`SP_INDEX_MAX`] rows. Graph documents `/servicePrincipals`
+    /// at a page size of 100 whatever `$top` asks for, so serially this is the
+    /// longest chain a cold launch waits on; a large tenant is therefore read
+    /// as 16 concurrent `appId` slices (`partition.rs`). The
+    /// `azapptoolkit::graph::scan` line records the strategy and the page size
+    /// Graph granted.
     pub async fn list_service_principals_index(&self) -> Result<Vec<ServicePrincipal>> {
         let select = SP_INDEX_SELECT.join(",");
         let params: [(&str, &str); 2] = [("$select", select.as_str()), ("$top", MAX_PAGE_SIZE)];
-        let started = std::time::Instant::now();
-        let page: Paged<ServicePrincipal> =
-            self.get_json("/servicePrincipals", &params, false).await?;
-        let first_page = (page.items.len(), started.elapsed());
         // A tenant with more than SP_INDEX_MAX service principals degrades to
         // the first SP_INDEX_MAX rows instead of failing the Enterprise Apps
         // list, the App Registrations pairing join, and global search outright
@@ -249,8 +247,16 @@ impl GraphClient {
         // this index. Their row counts sit below the cap even when the index
         // truncated, so neither can detect truncation from its own length; they
         // must ask about the index itself (`sp_index_truncated`).
+        //
+        // Read as concurrent `appId` slices when the tenant is large enough to pay
+        // (`partition.rs`), which also writes the scan's log line.
         let (all, truncated) = self
-            .collect_all_pages_capped(page, SP_INDEX_MAX, false)
+            .scan_directory_capped::<ServicePrincipal>(
+                "service_principals",
+                "/servicePrincipals",
+                &params,
+                SP_INDEX_MAX,
+            )
             .await?;
         if truncated {
             tracing::warn!(
@@ -260,14 +266,6 @@ impl GraphClient {
                  — lists/search cover this subset",
             );
         }
-        log_directory_scan(
-            "service_principals",
-            "serial",
-            started,
-            first_page,
-            all.len(),
-            truncated,
-        );
         Ok(all)
     }
 

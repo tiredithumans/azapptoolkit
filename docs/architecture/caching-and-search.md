@@ -554,9 +554,10 @@ page cap with the rest.
 
 ## Page size is a wall-clock divisor, not a tuning knob
 
-Paging is strictly **serial** — each request needs the prior response's `@odata.nextLink` — so the
-`$top` on a paged read divides its round-trip count directly. Graph's default is **100**, so an
-omitted `$top` is a 10× round-trip multiplier on any collection that pages.
+Paging is strictly **serial** within one chain — each request needs the prior response's
+`@odata.nextLink` — so the `$top` on a paged read divides its round-trip count directly. Graph's
+default is **100**, so an omitted `$top` is a 10× round-trip multiplier on any collection that
+pages.
 
 Every paged read in `azapptoolkit-graph` therefore sends `client::MAX_PAGE_SIZE` (999), the
 documented maximum for these directory collections; `/applications` enumerations use the equivalent
@@ -569,25 +570,57 @@ The SP index is a **plain** read (no `$count`, no `ConsistencyLevel`). It used t
 query for an `@odata.count` nothing read, which served its pages from the eventually-consistent
 index while the `/applications` scan it is joined with read the directory.
 
+The rule is pinned by `repo_invariants/fanout.rs::every_paged_graph_read_sends_a_page_size`: every
+function in `graph/src/client/` that calls a paging helper (`scan_directory_capped` included) must
+send `$top` (as a query pair or inline, `MAX_PAGE_SIZE` / `DEFAULT_APP_PAGE_SIZE`) or, where an
+endpoint's `$top` ceiling is too low, `Prefer: odata.maxpagesize` (the application gallery, 2800 a
+page). Two exemptions are justified in its table: `list_applications_all` (its params come from
+`app_list_params`, shared with `list_applications`, which sends `DEFAULT_APP_PAGE_SIZE`) and
+`list_federated_credentials` (Graph caps them at 20 per app). A stale exemption fails the rule.
+
+### The two tenant-wide scans are partitioned
+
+A serial chain cannot be shortened, but it can be split. `GraphClient::scan_directory_capped`
+(`graph/src/client/partition.rs`) reads the SP index and the `/applications` list scan (and the
+bulk sweep's; never the audit's `$expand=owners` scan) as 16 concurrent `startswith(appId,'h')`
+slices: every `appId` is a GUID, so its first hex digit puts each row in exactly one slice.
+
+1. Page one and `GET {path}/$count` go out together, so the size costs no round trip.
+2. A collection of fewer than four pages, one with no count (B2C), or one past twice the cap reads
+   serially from page one (`serial_small` / `serial_no_count` / `serial_over_cap`).
+3. Otherwise the 16 slices run under `try_join_all` (never `stream::buffered`: Send inference),
+   each paging serially with its own consistency flag. Graph documents `startswith` on `appId` for
+   `/servicePrincipals` but not `/applications`, so support is learned at runtime: a 400 in plain
+   mode retries once as an advanced query, a 400 there falls back to serial. The mode that worked
+   (or `Serial`) is remembered per collection on the per-tenant `GraphClient`, which the sign-out
+   sweep drops.
+4. **Fail closed.** `merge_slices` de-duplicates by object id in prefix order and refuses the merge
+   when a row sits outside its slice's prefix, a row of the unfiltered page one is in no slice, the
+   union is short of `/$count` by more than `max(2, count / 1000)` (the index lags), or a slice
+   stopped at the page limit under the cap. A refused merge logs a `warn`, reads serially from page
+   one's `nextLink`, and pins the collection serial: a security inventory must never come back short
+   because a filter misbehaved.
+5. The cap is applied to the merged rows in prefix order, so truncation is deterministic and keeps
+   the `len == cap` contract the cap notices read.
+
+A service principal without an `appId` (Graph omits it for some principal kinds) reads as `""`
+rather than failing the whole index; it is in no slice, so such a tenant fails the count check and
+reads serially.
+
 ### Reading a slow scan off the log
 
 Every multi-page read logs one `debug` line per continuation page and a `paged read` summary
 (target `azapptoolkit::graph::paging`: endpoint family, page, rows, `elapsed_ms`; never the
 nextLink, whose `$skiptoken` must not reach the log). The two tenant-wide scans each add one `info`
-line (target `azapptoolkit::graph::scan`, via `client::log_directory_scan`): `scan`, `strategy`,
-`rows`, `page_size` (page one's row count, i.e. what Graph actually granted), `first_page_ms`,
-`elapsed_ms`, `truncated`. `scan_app_list` logs `apps_ms` / `sp_ms` (target
-`azapptoolkit::cache`), so the side of the join a cold launch waited on is visible, and a cold
-reader served by a sibling's in-flight scan logs its `waited_ms`. All of it reaches the file log
-under the default filter (`azapptoolkit=debug`).
+line (target `azapptoolkit::graph::scan`, via `client::log_directory_scan`): `scan`, `strategy`
+(`single_page`, `partitioned`, `partitioned_advanced`, `serial`, `serial_small`, `serial_no_count`,
+`serial_over_cap`, `serial_fallback`), `rows`, `page_size` (page one's row count, i.e. what Graph
+actually granted), `first_page_ms`, `elapsed_ms`, `truncated`. `scan_app_list` logs `apps_ms` /
+`sp_ms` (target `azapptoolkit::cache`), so the side of the join a cold launch waited on is visible,
+and a cold reader served by a sibling's in-flight scan logs its `waited_ms`. All of it reaches the
+file log under the default filter (`azapptoolkit=debug`).
 
-The rule is pinned by `repo_invariants/fanout.rs::every_paged_graph_read_sends_a_page_size`: every
-function in `graph/src/client/` that calls a paging helper must send `$top` (as a query pair or
-inline, `MAX_PAGE_SIZE` / `DEFAULT_APP_PAGE_SIZE`) or, where an endpoint's `$top` ceiling is too
-low, `Prefer: odata.maxpagesize` (the application gallery, 2800 a page). Two exemptions are
-justified in its table: `list_applications_all` (page 1 is `list_applications`, which sends
-`DEFAULT_APP_PAGE_SIZE`) and `list_federated_credentials` (Graph caps them at 20 per app). A stale
-exemption fails the rule.
+### The heaviest reads and the write fan-outs
 
 The read that dominates is `appRoleAssignedTo` **on the Microsoft Graph service principal**: it holds
 every application-permission grant in the tenant, and both the security audit

@@ -9,6 +9,7 @@ mod batch;
 mod credentials;
 mod directory;
 mod grants;
+mod partition;
 mod policies;
 mod serialization;
 mod service_principals;

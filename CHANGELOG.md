@@ -7,11 +7,16 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Changed
 
-- **Large tenants load faster.** Microsoft Graph responses now arrive compressed, so the paged
-  directory reads behind every list (megabytes of JSON in a large tenant) move a fraction of the
-  bytes. The enterprise-applications read now comes straight from the directory rather than from
-  a search index that can lag behind recent changes. The log file now records how long each
-  tenant-wide read took and how many pages it needed.
+- **Large tenants load much faster.** The app registrations and enterprise applications are now
+  read as 16 parallel slices instead of one long page-by-page chain (Microsoft Graph serves
+  enterprise applications only 100 to a page), so a cold start waits on a handful of round trips
+  instead of dozens. The result is checked against the tenant's own count before it is used;
+  anything that doesn't add up falls back to the old page-by-page read.
+- **Microsoft Graph responses now arrive compressed**, so the directory reads behind every list
+  (megabytes of JSON in a large tenant) move a fraction of the bytes. The enterprise-applications
+  read now comes straight from the directory rather than from a search index that can lag behind
+  recent changes, and the log file records how long each tenant-wide read took and how many pages
+  it needed.
 - **Home no longer reads the app registrations twice on a cold start.** When the Enterprise
   Applications card started first, it read a short list of every app registration and the App
   Registrations card then read them all again; one read now serves every card. If the

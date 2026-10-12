@@ -70,6 +70,7 @@ mod applications;
 mod batch;
 mod credentials;
 mod directory;
+mod partition;
 mod policies;
 mod roles_grants;
 mod service_principals;
@@ -148,6 +149,10 @@ pub struct GraphClient {
     /// admin-consent pair, so it's acquired on demand (incremental consent).
     group_member_token: Option<Arc<dyn BearerProvider>>,
     throttle_observer: parking_lot::RwLock<Option<Arc<dyn ThrottleObserver>>>,
+    /// Per collection path, whether the tenant-wide scan can be read as
+    /// `appId` slices (`partition.rs`), learned on first use. Lives as long as
+    /// this per-tenant client, which the sign-out sweep drops.
+    slice_modes: parking_lot::Mutex<std::collections::HashMap<&'static str, partition::SliceMode>>,
 }
 
 impl GraphClient {
@@ -196,6 +201,7 @@ impl GraphClient {
             sharepoint_token: None,
             group_member_token: None,
             throttle_observer: parking_lot::RwLock::new(None),
+            slice_modes: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
