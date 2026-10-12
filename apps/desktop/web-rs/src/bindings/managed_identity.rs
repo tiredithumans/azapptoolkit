@@ -13,6 +13,13 @@ pub async fn list_managed_identities(tenant_id: &str) -> Result<Vec<ManagedIdent
     invoke_result("list_managed_identities", TenantArg { tenant_id }).await
 }
 
+/// Home's Managed Identities card: the counts, not the rows.
+pub async fn get_managed_identity_counts(
+    tenant_id: &str,
+) -> Result<ManagedIdentityCounts, UiError> {
+    invoke_result("get_managed_identity_counts", TenantArg { tenant_id }).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GrantArgs<'a> {

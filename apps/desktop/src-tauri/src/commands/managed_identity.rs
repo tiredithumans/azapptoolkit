@@ -23,7 +23,8 @@ use crate::commands::graph_err::forbidden_remediation;
 use crate::commands::guid::new_v4_guid;
 use crate::dto::UiError;
 use crate::dto::managed_identity::{
-    AzureRoleDto, AzureRolesResult, GrantManagedIdentityResult, ManagedIdentityDto, MiSubtype,
+    AzureRoleDto, AzureRolesResult, GrantManagedIdentityResult, ManagedIdentityCounts,
+    ManagedIdentityDto, MiSubtype,
 };
 use crate::state::AppState;
 
@@ -37,10 +38,32 @@ pub async fn list_managed_identities(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Arc<Vec<ManagedIdentityDto>>, UiError> {
-    // The cache-HIT path below returns before any client is built, so the
+    // The cache-HIT path returns before any client is built, so the
     // `graph_for` on the miss path is not a session proof for it.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let key = mi_key(&tenant_id);
+    managed_identity_rows_cached(&state, &tenant_id).await
+}
+
+/// Home's Managed Identities card: the three numbers, reduced here from the
+/// same cached rows [`list_managed_identities`] returns.
+#[tauri::command]
+pub async fn get_managed_identity_counts(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<ManagedIdentityCounts, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let rows = managed_identity_rows_cached(&state, &tenant_id).await?;
+    Ok(ManagedIdentityCounts::of(&rows))
+}
+
+/// The Managed Identities rows, read through their typed, pinned cache entry
+/// and filtered from the shared SP index on a miss. A cache read: every caller
+/// proves the session first (listed in `repo_invariants`' `CACHED_ACCESSORS`).
+pub(crate) async fn managed_identity_rows_cached(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Arc<Vec<ManagedIdentityDto>>, UiError> {
+    let key = mi_key(tenant_id);
     // Typed + pinned: read only through `get_typed` (an untyped `get` misses).
     if let Some(cached) = state
         .cache
@@ -57,12 +80,12 @@ pub async fn list_managed_identities(
     // carries `servicePrincipalType` and `alternativeNames`, and is read by five
     // other surfaces — so on a warm tenant this list now costs nothing, and on a
     // cold one it seeds the index everything else then reuses.
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
     // Captured BEFORE the scan the index accessor may run — this list is
     // PINNED, so a snapshot that loses the race to a mutation would sit out of
     // LRU's reach for the full TTL.
     let watch = state.cache.generation_for(CacheKind::Lists, &key);
-    let sps = crate::commands::applications::sp_index_cached(&state, &client, &tenant_id).await?;
+    let sps = crate::commands::applications::sp_index_cached(state, &client, tenant_id).await?;
     let rows: Arc<Vec<ManagedIdentityDto>> = Arc::new(
         sps.iter()
             .filter(|sp| sp.service_principal_type.as_deref() == Some("ManagedIdentity"))

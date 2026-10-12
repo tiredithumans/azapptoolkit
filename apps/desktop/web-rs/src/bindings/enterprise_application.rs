@@ -13,6 +13,11 @@ pub async fn list_enterprise_applications(
     invoke_result("list_enterprise_applications", TenantArg { tenant_id }).await
 }
 
+/// Home's Enterprise Applications card: the counts, not the rows.
+pub async fn get_enterprise_app_counts(tenant_id: &str) -> Result<EnterpriseAppCounts, UiError> {
+    invoke_result("get_enterprise_app_counts", TenantArg { tenant_id }).await
+}
+
 pub async fn get_enterprise_application_detail(
     tenant_id: &str,
     service_principal_id: &str,

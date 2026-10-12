@@ -9,11 +9,18 @@
 //! as a `UiError`, that string failed the `unwrap`, and the panic hook aborted
 //! the whole WASM instance — the window froze with no toast.
 //!
-//! This wrapper asks upstream for `serde_json::Value` on both sides, which
-//! decodes any shape Tauri produces (numbers, strings, arrays, objects), then
-//! decodes the real types itself: a rejection that is not a `UiError`, or a
-//! reply that does not match the binding's type, becomes
-//! `UiError { code: "ipc", .. }` on the action that caused it. A reply or
+//! This wrapper asks upstream for shapes that decode anything Tauri produces
+//! (numbers, strings, arrays, objects) — the reply as raw JSON text
+//! ([`RawValue`]), the rejection as a `serde_json::Value` — then decodes the
+//! real types itself: a rejection that is not a `UiError`, or a reply that does
+//! not match the binding's type, becomes `UiError { code: "ipc", .. }` on the
+//! action that caused it.
+//!
+//! The reply is raw text, not a `Value`, for cost: upstream already re-encodes
+//! it (`JSON.stringify`), and a `Value` would then build the whole document as
+//! a tree — every row of a tenant-wide list an allocated map — only to walk it
+//! again into the binding's type. From raw text the typed decode allocates
+//! only the binding's own values. A reply or
 //! rejection `JSON.stringify` cannot render (`undefined`, a function, a
 //! `Symbol`, a `BigInt`) still panics upstream, but Tauri never produces one:
 //! its replies are `JSON.parse` output. `repo_invariants/ipc.rs` pins that no
@@ -23,6 +30,7 @@
 use azapptoolkit_dto::UiError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 /// The infallible call, re-exported unwrapped, for commands whose backend
 /// signature has no `Result` (cache stats, cancel flags, the auth config
@@ -42,15 +50,16 @@ pub(crate) async fn invoke_result<T: DeserializeOwned>(
     cmd: &str,
     args: impl Serialize,
 ) -> Result<T, UiError> {
-    match tauri_sys::core::invoke_result::<Value, Value>(cmd, args).await {
-        Ok(value) => decode_ok(cmd, value),
+    match tauri_sys::core::invoke_result::<Box<RawValue>, Value>(cmd, args).await {
+        Ok(reply) => decode_ok(cmd, reply.get()),
         Err(value) => Err(ui_error_from_rejection(cmd, value)),
     }
 }
 
-/// Decodes a command's reply as the binding's type, or names the mismatch.
-fn decode_ok<T: DeserializeOwned>(cmd: &str, value: Value) -> Result<T, UiError> {
-    serde_json::from_value(value).map_err(|e| {
+/// Decodes a command's reply (raw JSON text) as the binding's type, or names
+/// the mismatch.
+fn decode_ok<T: DeserializeOwned>(cmd: &str, json: &str) -> Result<T, UiError> {
+    serde_json::from_str(json).map_err(|e| {
         UiError::new(
             "ipc",
             format!("`{cmd}` returned a reply this window could not read: {e}"),
@@ -133,12 +142,9 @@ mod tests {
 
     #[test]
     fn replies_decode_as_the_binding_type_or_name_the_mismatch() {
-        assert!(decode_ok::<()>("cancel_audit", Value::Null).is_ok());
-        assert_eq!(decode_ok::<Option<u32>>("x", Value::Null).unwrap(), None);
-        assert_eq!(
-            decode_ok::<Vec<u32>>("x", json!([1, 2])).unwrap(),
-            vec![1, 2]
-        );
+        assert!(decode_ok::<()>("cancel_audit", "null").is_ok());
+        assert_eq!(decode_ok::<Option<u32>>("x", "null").unwrap(), None);
+        assert_eq!(decode_ok::<Vec<u32>>("x", "[1, 2]").unwrap(), vec![1, 2]);
 
         #[derive(Debug, Deserialize)]
         #[allow(dead_code)]
@@ -147,7 +153,7 @@ mod tests {
         }
         let e = decode_ok::<Status>(
             "get_directory_index_status",
-            json!({ "spIndexTruncated": false }),
+            &json!({ "spIndexTruncated": false }).to_string(),
         )
         .unwrap_err();
         assert_eq!(e.code, "ipc");
@@ -155,6 +161,38 @@ mod tests {
             e.message.contains("get_directory_index_status"),
             "{}",
             e.message
+        );
+    }
+
+    /// The reply arrives as raw text: any JSON upstream can hand over is
+    /// accepted as a `RawValue` (so nothing panics before the binding's own
+    /// decode), and a row list decodes straight into its type.
+    #[test]
+    fn any_reply_shape_arrives_as_raw_text_and_decodes_in_one_pass() {
+        for text in ["null", "7", "\"s\"", "[1,2]", "{\"a\":{\"b\":[true]}}"] {
+            let raw: Box<RawValue> = serde_json::from_str(text).expect("raw value");
+            assert_eq!(raw.get(), text);
+        }
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Row {
+            id: String,
+            count: usize,
+        }
+        let raw: Box<RawValue> =
+            serde_json::from_str(r#"[{"id":"a","count":1},{"id":"b","count":2}]"#).unwrap();
+        let rows: Vec<Row> = decode_ok("list_rows", raw.get()).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                Row {
+                    id: "a".into(),
+                    count: 1
+                },
+                Row {
+                    id: "b".into(),
+                    count: 2
+                },
+            ]
         );
     }
 }

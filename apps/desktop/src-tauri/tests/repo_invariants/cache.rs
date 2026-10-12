@@ -1868,7 +1868,7 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // index accessors ([`CACHED_ACCESSORS`]) started counting: search, the
     // directory-status probe and eight other tenant-wide scans read the cache
     // one call away from the command body, where a `cache.get` scan cannot see.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 27;
+    const KNOWN_CACHE_READING_COMMANDS: usize = 31;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \
@@ -1930,7 +1930,7 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 13] = [
+const CACHED_ACCESSORS: [&str; 15] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
@@ -1946,6 +1946,11 @@ const CACHED_ACCESSORS: [&str; 13] = [
     // Lives in `commands/arm_roles.rs`, not `applications/cache.rs`: the ARM
     // role-name lookup the MI Azure-roles view and the Key Vault sweep share.
     "resolve_role_names_cached(",
+    // The Enterprise Apps and Managed Identities rows, shared by each list
+    // command and its Home counts command (`enterprise_application.rs`,
+    // `managed_identity.rs`).
+    "enterprise_rows_cached(",
+    "managed_identity_rows_cached(",
 ];
 
 /// First cache read in flattened text: a direct `…cache.get(`,

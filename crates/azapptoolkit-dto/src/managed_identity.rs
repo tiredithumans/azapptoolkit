@@ -40,6 +40,32 @@ impl MiSubtype {
     }
 }
 
+/// Home's Managed Identities card: the counts, not the rows.
+/// `get_managed_identity_counts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedIdentityCounts {
+    pub total: usize,
+    pub system_assigned: usize,
+    pub user_assigned: usize,
+}
+
+impl ManagedIdentityCounts {
+    /// Counts `rows` by subtype, as the list's "system" / "user" chips do.
+    pub fn of(rows: &[ManagedIdentityDto]) -> Self {
+        Self {
+            total: rows.len(),
+            system_assigned: rows
+                .iter()
+                .filter(|r| r.mi_subtype == MiSubtype::SystemAssigned)
+                .count(),
+            user_assigned: rows
+                .iter()
+                .filter(|r| r.mi_subtype == MiSubtype::UserAssigned)
+                .count(),
+        }
+    }
+}
+
 /// A managed-identity service principal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedIdentityDto {
@@ -122,6 +148,31 @@ pub struct GrantManagedIdentityResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_identity_counts_split_by_subtype() {
+        let mi = |mi_subtype| ManagedIdentityDto {
+            id: "sp".into(),
+            app_id: "app".into(),
+            display_name: "mi".into(),
+            account_enabled: Some(true),
+            mi_subtype,
+        };
+        let rows = [
+            mi(MiSubtype::SystemAssigned),
+            mi(MiSubtype::UserAssigned),
+            mi(MiSubtype::UserAssigned),
+            mi(MiSubtype::Unknown),
+        ];
+        assert_eq!(
+            ManagedIdentityCounts::of(&rows),
+            ManagedIdentityCounts {
+                total: 4,
+                system_assigned: 1,
+                user_assigned: 2,
+            }
+        );
+    }
 
     #[test]
     fn empty_alternative_names_yields_unknown() {

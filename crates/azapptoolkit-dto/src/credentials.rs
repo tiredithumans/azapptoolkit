@@ -77,6 +77,43 @@ pub struct AppCredentialPolicyDto {
     pub custom_policy_names: Vec<String>,
 }
 
+/// Display-only "critical" expiry tier (the legacy `Constants.ps1:203` 7-day
+/// tier). The audit's `CredentialStatus` has no such bucket
+/// (`core/audit/permissions.rs:15-18`), so it lives with the rows it is
+/// applied to, beside the shared warning threshold
+/// (`azapptoolkit_core::audit::EXPIRY_WARNING_DAYS`).
+pub const EXPIRY_CRITICAL_DAYS: i64 = 7;
+
+/// Home's Credential Health card: the counts, not the rows (one row per
+/// credential, so usually more than there are apps).
+/// `get_credential_health_counts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialHealthCounts {
+    /// [`CredentialRowDto::is_expired`], the "Expired" chip.
+    pub expired: usize,
+    /// Expiring within [`EXPIRY_CRITICAL_DAYS`], the "≤ 7 days" chip.
+    pub within_critical: usize,
+    /// Expiring within `EXPIRY_WARNING_DAYS`, the "≤ 30 days" chip.
+    pub within_warning: usize,
+}
+
+impl CredentialHealthCounts {
+    /// Counts `rows` with the Credentials tab's own facet predicates.
+    pub fn of(rows: &[CredentialRowDto]) -> Self {
+        Self {
+            expired: rows.iter().filter(|r| r.is_expired()).count(),
+            within_critical: rows
+                .iter()
+                .filter(|r| r.expires_within(EXPIRY_CRITICAL_DAYS))
+                .count(),
+            within_warning: rows
+                .iter()
+                .filter(|r| r.expires_within(azapptoolkit_core::audit::EXPIRY_WARNING_DAYS))
+                .count(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRowDto {
     /// The app registration's object id — used to deep-link into its detail.
@@ -90,4 +127,67 @@ pub struct CredentialRowDto {
     pub end_date_time: Option<DateTime<Utc>>,
     pub days_to_expiry: Option<i64>,
     pub status: CredentialStatus,
+}
+
+impl CredentialRowDto {
+    /// Already expired — the "Expired" facet and count.
+    pub fn is_expired(&self) -> bool {
+        matches!(self.status, CredentialStatus::Expired)
+    }
+
+    /// Not yet expired and ending within `days` days (inclusive) — the
+    /// "≤ 7 days" / "≤ 30 days" facets and counts.
+    pub fn expires_within(&self, days: i64) -> bool {
+        matches!(self.days_to_expiry, Some(d) if (0..=days).contains(&d))
+    }
+}
+
+#[cfg(test)]
+mod counts_tests {
+    use super::*;
+    use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS;
+
+    fn row(status: CredentialStatus, days: Option<i64>) -> CredentialRowDto {
+        CredentialRowDto {
+            app_object_id: "obj".into(),
+            app_id: "app".into(),
+            app_display_name: "App".into(),
+            credential_name: "cred".into(),
+            kind: CredentialKind::Secret,
+            start_date_time: None,
+            end_date_time: None,
+            days_to_expiry: days,
+            status,
+        }
+    }
+
+    /// Home's Credential Health numbers are the Credentials tab's facets: the
+    /// two tiers are inclusive, nest (≤ 7 is inside ≤ 30), and an expired
+    /// credential (negative days) counts only as expired.
+    #[test]
+    fn health_counts_use_the_facet_predicates() {
+        let rows = vec![
+            row(CredentialStatus::Expired, Some(-3)),
+            row(CredentialStatus::ExpiringSoon, Some(0)),
+            row(CredentialStatus::ExpiringSoon, Some(EXPIRY_CRITICAL_DAYS)),
+            row(CredentialStatus::ExpiringSoon, Some(EXPIRY_WARNING_DAYS)),
+            row(CredentialStatus::Active, Some(EXPIRY_WARNING_DAYS + 1)),
+            row(CredentialStatus::Active, None),
+        ];
+        let counts = CredentialHealthCounts::of(&rows);
+        assert_eq!(
+            counts,
+            CredentialHealthCounts {
+                expired: 1,
+                within_critical: 2,
+                within_warning: 3,
+            }
+        );
+        assert_eq!(
+            counts.within_critical,
+            rows.iter()
+                .filter(|r| r.expires_within(EXPIRY_CRITICAL_DAYS))
+                .count()
+        );
+    }
 }

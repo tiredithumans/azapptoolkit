@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use crate::bindings::{ObjectIdArgs, TenantArg};
 pub use azapptoolkit_dto::credentials::{
-    AppCredentialPolicyDto, CredentialRowDto, CredentialUsageDto,
+    AppCredentialPolicyDto, CredentialHealthCounts, CredentialRowDto, CredentialUsageDto,
+    EXPIRY_CRITICAL_DAYS,
 };
 
 /// Lists every app-registration credential in the tenant, soonest-to-expire
@@ -18,6 +19,13 @@ pub async fn list_credential_expirations(
     tenant_id: &str,
 ) -> Result<Vec<CredentialRowDto>, UiError> {
     invoke_result("list_credential_expirations", TenantArg { tenant_id }).await
+}
+
+/// Home's Credential Health card: the counts, not the per-credential rows.
+pub async fn get_credential_health_counts(
+    tenant_id: &str,
+) -> Result<CredentialHealthCounts, UiError> {
+    invoke_result("get_credential_health_counts", TenantArg { tenant_id }).await
 }
 
 /// Tenant-wide per-credential last-used map from the beta
