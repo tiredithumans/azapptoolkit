@@ -12,6 +12,11 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   bytes. The enterprise-applications read now comes straight from the directory rather than from
   a search index that can lag behind recent changes. The log file now records how long each
   tenant-wide read took and how many pages it needed.
+- **Home no longer reads the app registrations twice on a cold start.** When the Enterprise
+  Applications card started first, it read a short list of every app registration and the App
+  Registrations card then read them all again; one read now serves every card. If the
+  enterprise applications can't be read, the Credential Health card still loads instead of
+  failing with them.
 
 ## [0.33.3] - 2026-10-10
 

@@ -165,7 +165,7 @@ async fn search_corpus(
     // an error.
     let (sps, apps) = futures::future::join(
         crate::commands::applications::sp_index_cached(state, client, tenant_id),
-        crate::commands::applications::app_name_index_cached(state, client, tenant_id),
+        crate::commands::applications::app_name_index_cached(state, tenant_id),
     )
     .await;
     let (sps, sps_ok) = corpus_half(sps, "service_principals");

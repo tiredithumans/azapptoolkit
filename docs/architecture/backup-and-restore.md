@@ -110,9 +110,10 @@ Three object classes:
 ## Backup (`commands/backup.rs`) — shipped
 
 `backup_tenant` is read-only (never invalidates a cache) and runs three passes
-over the estate. The estate is enumerated up front from `list_application_index`
-+ the cached `sp_index` (reused from the Enterprise Apps list — same per-tenant
-scan, not re-pulled) + `list_managed_identities`.
+over the estate. The estate is enumerated up front from the two shared
+tenant-wide indexes (`indexes_cached`: the cached `app_name_index` and
+`sp_index`, reused from the lists — same per-tenant scans, not re-pulled) +
+`list_managed_identities`.
 
 The per-object reads are **batched** via Graph JSON batching to keep round-trips
 (and the throttling they trigger) low. Each pass chunks its objects into groups
