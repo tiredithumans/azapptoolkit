@@ -44,7 +44,14 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 # before/after connection count (RUST_LOG=hyper_util=debug on a large-tenant audit
 # or site sweep) is still owed; revert to no-http2 if it loses. The auth crate's
 # TLS-intercepting-proxy special case checks ALPN-independent behavior only.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy", "http2"] }
+# `gzip` (2026-10-12): every Graph page arrived as raw JSON — a 999-row
+# `/applications` page selecting the credential arrays is megabytes, and a cold
+# launch pages the whole tenant. reqwest now sends `Accept-Encoding: gzip` and
+# inflates transparently. Two clients opt out with `.no_gzip()`: the `/token`
+# client (tokens read into a `Zeroizing` buffer) and Key Vault (secret values);
+# an inflate buffer is one more un-wiped plaintext copy, for replies of a few
+# KiB (pinned in `repo_invariants/trust.rs`).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy", "http2", "gzip"] }
 bytes = "1"
 # Auth
 #

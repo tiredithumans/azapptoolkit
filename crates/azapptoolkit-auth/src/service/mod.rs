@@ -419,12 +419,18 @@ const TOKEN_RETRY_AFTER_MAX_SECS: u64 = 30;
 /// replay the POST body — the authorization code + PKCE verifier, or the
 /// refresh token — to whatever host the `Location` names. A 3xx instead lands
 /// in `token_attempt`'s non-success branch as a terminal `TokenExchange`.
+///
+/// No response compression (`.no_gzip()`): the body carries the access and
+/// refresh tokens, read into a `Zeroizing` buffer; an inflate buffer would hold
+/// a plaintext copy that is never wiped. A token reply is a few KiB, so there
+/// is nothing to save.
 fn token_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+        .no_gzip()
         .build()
         .expect("reqwest client builds")
 }

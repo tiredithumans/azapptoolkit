@@ -218,30 +218,26 @@ impl GraphClient {
     /// Returning *every* SP — rather than a server-side
     /// `servicePrincipalType ne 'ManagedIdentity'` slice — is deliberate: the
     /// App Registrations join needs all SPs, and a single unfiltered result is
-    /// what lets both views reuse one cache entry. `$count=true` with
-    /// `ConsistencyLevel: eventual` makes this an *advanced query*, and Graph
-    /// does not carry the `ConsistencyLevel` header into the `nextLink`
-    /// request (learn.microsoft.com/graph/paging), so every continuation
-    /// restates it — page 1 and pages 2+ are served by the same store.
-    /// Pagination follows `@odata.nextLink` up to [`SP_INDEX_MAX`].
+    /// what lets both views reuse one cache entry.
+    ///
+    /// A **plain** read: no `$count`, no `ConsistencyLevel`. It used to send
+    /// both, which made every page an *advanced query* served from the
+    /// eventually-consistent index (lagging a just-created SP) while the app
+    /// scan it is joined with reads the directory — for an `@odata.count`
+    /// nothing read. Every continuation therefore pages with
+    /// `consistency_eventual = false`, matching page one.
+    ///
+    /// Pagination follows `@odata.nextLink` up to [`SP_INDEX_MAX`]. Graph
+    /// documents `/servicePrincipals` at a page size of 100 whatever `$top`
+    /// asks for, so this is the longest serial chain a cold launch waits on;
+    /// the `azapptoolkit::graph::scan` line records the size Graph granted.
     pub async fn list_service_principals_index(&self) -> Result<Vec<ServicePrincipal>> {
         let select = SP_INDEX_SELECT.join(",");
-        let params: [(&str, &str); 3] = [
-            ("$select", select.as_str()),
-            ("$count", "true"),
-            ("$top", MAX_PAGE_SIZE),
-        ];
+        let params: [(&str, &str); 2] = [("$select", select.as_str()), ("$top", MAX_PAGE_SIZE)];
+        let started = std::time::Instant::now();
         let page: Paged<ServicePrincipal> =
-            self.get_json("/servicePrincipals", &params, true).await?;
-        // The effective first-page size reveals Graph's real `$top` cap for
-        // `/servicePrincipals` (documented as 100 in some references, 999 in
-        // others): if `first_page` saturates well below 999 while more pages
-        // follow, the cap is the smaller value and raising `$top` is a no-op.
-        tracing::debug!(
-            target: "azapptoolkit::graph",
-            first_page = page.items.len(),
-            "service-principal index first page"
-        );
+            self.get_json("/servicePrincipals", &params, false).await?;
+        let first_page = (page.items.len(), started.elapsed());
         // A tenant with more than SP_INDEX_MAX service principals degrades to
         // the first SP_INDEX_MAX rows instead of failing the Enterprise Apps
         // list, the App Registrations pairing join, and global search outright
@@ -254,7 +250,7 @@ impl GraphClient {
         // truncated, so neither can detect truncation from its own length; they
         // must ask about the index itself (`sp_index_truncated`).
         let (all, truncated) = self
-            .collect_all_pages_capped(page, SP_INDEX_MAX, true)
+            .collect_all_pages_capped(page, SP_INDEX_MAX, false)
             .await?;
         if truncated {
             tracing::warn!(
@@ -264,11 +260,13 @@ impl GraphClient {
                  — lists/search cover this subset",
             );
         }
-        tracing::debug!(
-            target: "azapptoolkit::graph",
-            total = all.len(),
+        log_directory_scan(
+            "service_principals",
+            "serial",
+            started,
+            first_page,
+            all.len(),
             truncated,
-            "service-principal index total"
         );
         Ok(all)
     }

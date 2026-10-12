@@ -179,6 +179,7 @@ impl GraphClient {
         // Bound a pathological/cyclic nextLink; legitimate paging is far under
         // this. (Origin safety is enforced by `get_json_absolute_with`'s
         // same-origin check.)
+        let mut log = PagingLog::start(page.items.len());
         let mut out = Vec::new();
         out.append(&mut page.items);
         let mut pages = 1;
@@ -188,12 +189,16 @@ impl GraphClient {
                     "paging exceeded the page limit".into(),
                 ));
             }
+            let fetch = log.follow(&next);
             page = self
                 .get_json_absolute_with(&next, consistency_eventual)
                 .await?;
+            let rows = page.items.len();
             out.append(&mut page.items);
+            log.fetched(fetch, rows, out.len());
             pages += 1;
         }
+        log.finish(out.len(), false);
         Ok(out)
     }
 
@@ -225,29 +230,36 @@ impl GraphClient {
         max_items: usize,
         consistency_eventual: bool,
     ) -> Result<(Vec<T>, bool)> {
+        let mut log = PagingLog::start(page.items.len());
         let mut out = Vec::new();
         out.append(&mut page.items);
         let mut pages = 1usize;
         while out.len() < max_items {
             let Some(next) = page.next_link.take() else {
                 // Exhausted within the cap — full coverage.
+                log.finish(out.len(), false);
                 return Ok((out, false));
             };
             if pages >= MAX_PAGES {
                 // Cyclic or pathologically empty paging. Degrade, don't hang.
                 out.truncate(max_items);
+                log.finish(out.len(), true);
                 return Ok((out, true));
             }
+            let fetch = log.follow(&next);
             page = self
                 .get_json_absolute_with(&next, consistency_eventual)
                 .await?;
+            let rows = page.items.len();
             out.append(&mut page.items);
+            log.fetched(fetch, rows, out.len());
             pages += 1;
         }
         // Reached the cap. More rows remain iff we overshot the last page or a
         // further nextLink is still pending.
         let truncated = out.len() > max_items || page.next_link.is_some();
         out.truncate(max_items);
+        log.finish(out.len(), truncated);
         Ok((out, truncated))
     }
 
@@ -293,6 +305,7 @@ impl GraphClient {
         Fut: std::future::Future<Output = Result<Paged<T>>> + Send,
         T: DeserializeOwned + Send,
     {
+        let mut log = PagingLog::start(first_page.items.len());
         let mut out = Vec::new();
         out.append(&mut first_page.items);
         let mut page: Paged<T> = first_page;
@@ -300,6 +313,7 @@ impl GraphClient {
         while out.len() < max_items {
             let Some(next) = page.next_link.take() else {
                 // Exhausted within the cap — full coverage.
+                log.finish(out.len(), false);
                 return Ok((out, false));
             };
             if !same_origin(&self.base_url, &next) {
@@ -312,14 +326,18 @@ impl GraphClient {
                     "paging exceeded the page limit".into(),
                 ));
             }
+            let fetch = log.follow(&next);
             page = fetch_page(next).await?;
+            let rows = page.items.len();
             out.append(&mut page.items);
+            log.fetched(fetch, rows, out.len());
             pages += 1;
         }
         // Reached the cap. More rows remain iff the last page overshot it or a
         // further nextLink is still pending — an exact fit is NOT truncation.
         let truncated = out.len() > max_items || page.next_link.is_some();
         out.truncate(max_items);
+        log.finish(out.len(), truncated);
         Ok((out, truncated))
     }
 
@@ -722,6 +740,106 @@ impl GraphClient {
 /// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
 /// stays an error. One definition, so the single-object readers and the
 /// batched ones cannot drift.
+/// Wall-clock and row accounting for one multi-page read, so a slow
+/// tenant-wide scan can be read straight off the log file: one `debug` line
+/// per continuation page, and one summary once the read has followed at least
+/// one `nextLink`. A single-page read — the large majority — logs nothing.
+///
+/// The endpoint is the continuation link's [`endpoint_family`], never the link
+/// itself: its `$skiptoken` and query string must not reach the log. Page one
+/// was fetched by the caller before the helper ran, so `follow_ms` covers the
+/// continuations only; the tenant-wide scans log their whole duration through
+/// [`log_directory_scan`].
+struct PagingLog {
+    started: std::time::Instant,
+    first_page_rows: usize,
+    pages: usize,
+    endpoint: Option<String>,
+}
+
+impl PagingLog {
+    fn start(first_page_rows: usize) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            first_page_rows,
+            pages: 1,
+            endpoint: None,
+        }
+    }
+
+    /// Notes the link about to be followed; returns when that fetch started.
+    fn follow(&mut self, next: &str) -> std::time::Instant {
+        if self.endpoint.is_none() {
+            self.endpoint = Some(endpoint_family(next));
+        }
+        std::time::Instant::now()
+    }
+
+    /// Records one continuation page of `rows` rows, `total_rows` so far.
+    fn fetched(&mut self, fetch: std::time::Instant, rows: usize, total_rows: usize) {
+        self.pages += 1;
+        tracing::debug!(
+            target: "azapptoolkit::graph::paging",
+            endpoint = self.endpoint.as_deref().unwrap_or_default(),
+            page = self.pages,
+            rows,
+            total_rows,
+            elapsed_ms = millis(fetch.elapsed()),
+            "page"
+        );
+    }
+
+    /// The summary line, for a read that followed at least one `nextLink`.
+    fn finish(&self, rows: usize, truncated: bool) {
+        let Some(endpoint) = self.endpoint.as_deref() else {
+            return;
+        };
+        tracing::debug!(
+            target: "azapptoolkit::graph::paging",
+            endpoint,
+            pages = self.pages,
+            rows,
+            page_size = self.first_page_rows,
+            follow_ms = millis(self.started.elapsed()),
+            truncated,
+            "paged read"
+        );
+    }
+}
+
+/// The one `info` line a tenant-wide directory scan writes when it completes:
+/// which scan, how it ran (`strategy`), the effective page size Graph granted
+/// (page one's row count — the evidence for an endpoint's real `$top` cap),
+/// and the wall-clock of page one and of the whole scan. Read together with
+/// the `azapptoolkit::graph::paging` lines, it says where a slow launch spent
+/// its time.
+pub(crate) fn log_directory_scan(
+    scan: &'static str,
+    strategy: &'static str,
+    started: std::time::Instant,
+    first_page: (usize, std::time::Duration),
+    rows: usize,
+    truncated: bool,
+) {
+    tracing::info!(
+        target: "azapptoolkit::graph::scan",
+        scan,
+        strategy,
+        rows,
+        page_size = first_page.0,
+        first_page_ms = millis(first_page.1),
+        elapsed_ms = millis(started.elapsed()),
+        truncated,
+        "directory scan"
+    );
+}
+
+/// A duration as whole milliseconds for a log field, saturating rather than
+/// truncating.
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub(crate) fn not_found_as_none<T>(r: Result<T>) -> Result<Option<T>> {
     match r {
         Ok(v) => Ok(Some(v)),

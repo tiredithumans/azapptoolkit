@@ -757,6 +757,43 @@ fn the_connect_budget_rule_fires_on_an_unbudgeted_client() {
     );
 }
 
+/// The two HTTP clients whose replies carry secrets never ask for a compressed
+/// body.
+///
+/// The workspace `reqwest` has the `gzip` feature for Graph's megabyte list
+/// pages, and a feature is on for every client in the build. The `/token`
+/// client reads the access and refresh tokens into a `Zeroizing` buffer, and a
+/// Key Vault secret read returns the secret value: an inflate buffer would be
+/// one more plaintext copy nobody wipes, for replies of a few KiB. Pinned per
+/// builder function, so moving the builder without the opt-out fails here.
+#[test]
+fn secret_bearing_http_clients_never_inflate() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../crates");
+    for (file, function) in [
+        ("azapptoolkit-auth/src/service/mod.rs", "token_http_client"),
+        ("azapptoolkit-keyvault/src/client.rs", "with_base_url"),
+    ] {
+        let src = std::fs::read_to_string(crates.join(file))
+            .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        let found = functions_in(&src);
+        let builder = found
+            .iter()
+            .find(|f| f.name == function)
+            .unwrap_or_else(|| panic!("`fn {function}` not found in {file} — update this rule"));
+        assert!(
+            builder.body.contains("Client::builder()"),
+            "`{file}::{function}` no longer builds the HTTP client — point this rule at the \
+             function that does"
+        );
+        assert!(
+            builder.body.contains(".no_gzip()"),
+            "`{file}::{function}` builds a client without `.no_gzip()`: its replies carry \
+             secrets, and the workspace `gzip` feature would inflate them into a buffer nobody \
+             wipes"
+        );
+    }
+}
+
 /// Every Rust source the retry and client-budget rules scan, paired with the root it was
 /// found under (for readable offender paths): the shared crates AND the
 /// desktop backend, which hosts HTTP code of its own (`cert.rs`, the SSO

@@ -62,10 +62,14 @@ impl KeyVaultClient {
     }
 
     pub fn with_base_url(token: Arc<dyn BearerProvider>, base_url: impl Into<String>) -> Self {
+        // No response compression (`.no_gzip()`): a secret read's body is the
+        // secret value, and every inflate buffer is one more plaintext copy
+        // nobody wipes. Vault replies are a few KiB, so nothing is lost.
         let http = reqwest::Client::builder()
             .user_agent(concat!("azapptoolkit/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
             .connect_timeout(azapptoolkit_core::http_retry::CONNECT_TIMEOUT)
+            .no_gzip()
             .build()
             .expect("reqwest client builds");
         Self {
