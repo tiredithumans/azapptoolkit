@@ -238,40 +238,58 @@ fn is_advanced_query(q: &AppListQuery) -> bool {
     q.search.is_some()
 }
 
+/// Whether [`GraphClient::list_applications_all`] may read the collection as
+/// `appId` slices (`partition.rs`): only a plain enumeration. A `$search` is
+/// its own filter, and an `$expand` must never become the advanced query a
+/// slice can fall back to (Graph answers that with the expansion silently
+/// missing) — which keeps the audit's `$expand=owners` scan serial.
+fn is_partitionable(q: &AppListQuery) -> bool {
+    q.search.is_none() && q.expand.is_none()
+}
+
+/// The `$select` / `$top` (and, for a search, `$search` / `$count`; for the
+/// audit, `$expand`) of an `/applications` enumeration. One builder, so page
+/// one of a serial read and every slice of a partitioned one ask for the same
+/// projection and page size.
+fn app_list_params(q: AppListQuery) -> Vec<(&'static str, String)> {
+    let select = q
+        .select
+        .unwrap_or_else(|| default_application_select().to_vec())
+        .join(",");
+    let top = q.top.unwrap_or(DEFAULT_APP_PAGE_SIZE).to_string();
+
+    let mut params: Vec<(&'static str, String)> = vec![("$select", select), ("$top", top)];
+    // `$search` on `/applications` is an ADVANCED query: it requires both `$count=true` and
+    // `ConsistencyLevel: eventual`. Nothing else here does — so advanced-query mode is
+    // scoped to the search path alone.
+    //
+    // The plain enumerations deliberately send neither:
+    //   * `$count` — the `@odata.count` has no reader on this path (the lists report their
+    //     own materialized row counts), and it forces every page into advanced-query
+    //     handling for a value that is then discarded.
+    //   * `$orderby` — sorting is done in the frontend over the cached rows (see
+    //     `web-rs/src/views/`), so a server-side sort is wasted work that additionally
+    //     conflicts with `$expand`.
+    //
+    // This also removes an officially UNSUPPORTED combination on the audit's expanding
+    // call: `$expand` is not supported together with advanced queries, and such combinations
+    // "might fail silently" rather than erroring.
+    if let Some(s) = &q.search {
+        // Neutralize double quotes so a term like `Test"App` can't break the
+        // `$search` phrase (matches search_applications_by_name).
+        params.push(("$search", search_phrase("displayName", s)));
+        params.push(("$count", "true".into()));
+    }
+    if let Some(expand) = q.expand {
+        params.push(("$expand", expand.to_string()));
+    }
+    params
+}
+
 impl GraphClient {
     pub async fn list_applications(&self, q: AppListQuery) -> Result<Paged<Application>> {
         let eventual = is_advanced_query(&q);
-        let select = q
-            .select
-            .unwrap_or_else(|| default_application_select().to_vec())
-            .join(",");
-        let top = q.top.unwrap_or(DEFAULT_APP_PAGE_SIZE).to_string();
-
-        let mut params: Vec<(&str, String)> = vec![("$select", select), ("$top", top)];
-        // `$search` on `/applications` is an ADVANCED query: it requires both `$count=true` and
-        // `ConsistencyLevel: eventual`. Nothing else here does — so advanced-query mode is
-        // scoped to the search path alone.
-        //
-        // The plain enumerations deliberately send neither:
-        //   * `$count` — the `@odata.count` has no reader on this path (the lists report their
-        //     own materialized row counts), and it forces every page into advanced-query
-        //     handling for a value that is then discarded.
-        //   * `$orderby` — sorting is done in the frontend over the cached rows (see
-        //     `web-rs/src/views/`), so a server-side sort is wasted work that additionally
-        //     conflicts with `$expand`.
-        //
-        // This also removes an officially UNSUPPORTED combination on the audit's expanding
-        // call: `$expand` is not supported together with advanced queries, and such combinations
-        // "might fail silently" rather than erroring.
-        if let Some(s) = &q.search {
-            // Neutralize double quotes so a term like `Test"App` can't break the
-            // `$search` phrase (matches search_applications_by_name).
-            params.push(("$search", search_phrase("displayName", s)));
-            params.push(("$count", "true".into()));
-        }
-        if let Some(expand) = q.expand {
-            params.push(("$expand", expand.to_string()));
-        }
+        let params = app_list_params(q);
         let params_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
         self.get_json("/applications", &params_ref, eventual).await
     }
@@ -361,15 +379,25 @@ impl GraphClient {
         // losing `owners` from page two onward (Graph answers an advanced query that also
         // expands with a 200 and the expanded property simply missing).
         let eventual = is_advanced_query(&q);
+        // `None` disables the cap: paging to exhaustion without the hard-error past page limit
+        // that `collect_all_pages` raises — the right degradation for a tenant-wide scan.
+        let cap = cap.unwrap_or(usize::MAX);
+        if is_partitionable(&q) {
+            // The list scan and the bulk sweep: page one and `/$count` together, then the
+            // rest as concurrent `appId` slices when the tenant is large enough to pay
+            // (`partition.rs`). Page size and projection come from `app_list_params`, the
+            // builder `list_applications` uses.
+            let params = app_list_params(q);
+            let params_ref: Vec<(&str, &str)> =
+                params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            return self
+                .scan_directory_capped("applications", "/applications", &params_ref, cap)
+                .await;
+        }
         let started = std::time::Instant::now();
         let page = self.list_applications(q).await?;
         let first_page = (page.items.len(), started.elapsed());
-        // `None` disables the cap: `collect_all_pages_capped` with `usize::MAX` paginates to
-        // exhaustion without the hard-error past page limit that `collect_all_pages` raises —
-        // the right degradation for a tenant-wide scan.
-        let (items, truncated) = self
-            .collect_all_pages_capped(page, cap.unwrap_or(usize::MAX), eventual)
-            .await?;
+        let (items, truncated) = self.collect_all_pages_capped(page, cap, eventual).await?;
         log_directory_scan(
             "applications",
             "serial",

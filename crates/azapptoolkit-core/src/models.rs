@@ -141,6 +141,12 @@ impl ServicePrincipalLockConfiguration {
 #[serde(rename_all = "camelCase")]
 pub struct ServicePrincipal {
     pub id: String,
+    /// Null-tolerant: one service principal without an `appId` (Graph does not
+    /// list it for every principal kind) must not fail the whole tenant-wide
+    /// index it arrives in. Such a row reads as `""`, joins nothing, and is in
+    /// no `appId` slice, so a partitioned scan's count check sends that tenant
+    /// to the serial read.
+    #[serde(default, deserialize_with = "null_to_default")]
     pub app_id: String,
     #[serde(default, deserialize_with = "null_to_default")]
     pub display_name: String,

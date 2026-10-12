@@ -368,6 +368,9 @@ const PAGING_HELPERS: &[&str] = &[
     "collect_all_pages_capped(",
     "collect_pages_from(",
     "collect_pages_from_capped(",
+    // The partitioned tenant-wide scan (`partition.rs`): its caller's params
+    // are page one AND every slice, so they must carry the page size.
+    "scan_directory_capped(",
 ];
 
 /// What counts as asking for a page size: `$top` as a query pair or inline in
@@ -388,8 +391,10 @@ const PAGE_SIZE_EXEMPT: &[(&str, &str, &str)] = &[
     (
         "applications.rs",
         "list_applications_all",
-        "page 1 is list_applications, which sends DEFAULT_APP_PAGE_SIZE — pinned by \
-         list_applications_pages_at_the_graph_maximum",
+        "its params come from app_list_params (shared with list_applications), which sends \
+         DEFAULT_APP_PAGE_SIZE on page 1 and on every appId slice — pinned by \
+         list_applications_pages_at_the_graph_maximum and \
+         a_large_application_scan_slices_with_its_projection",
     ),
     (
         "credentials.rs",
@@ -428,9 +433,9 @@ fn paged_read_sites(src: &str) -> Vec<(String, bool)> {
 }
 
 /// AGENTS.md: "Every paged read sends `$top`". Scans the Graph client's domain
-/// modules (not `tests/`), skipping `transport.rs`, where the helpers are
-/// defined, and `batch.rs`, whose continuations follow sub-URLs its callers
-/// built.
+/// modules (not `tests/`), skipping `transport.rs` and `partition.rs`, where
+/// the helpers are defined, and `batch.rs`, whose continuations follow
+/// sub-URLs its callers built.
 #[test]
 fn every_paged_graph_read_sends_a_page_size() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -454,7 +459,9 @@ fn every_paged_graph_read_sends_a_page_size() {
             .and_then(|f| f.to_str())
             .unwrap_or_default()
             .to_string();
-        if file == "transport.rs" || file == "batch.rs" {
+        // `partition.rs` defines `scan_directory_capped`, which pages each slice
+        // with the params its caller passed in.
+        if file == "transport.rs" || file == "batch.rs" || file == "partition.rs" {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("read graph client source");
@@ -543,6 +550,18 @@ fn the_page_size_rule_fires_on_a_read_without_top() {
     assert_eq!(
         paged_read_sites(comment_top),
         vec![("list_capped".to_string(), false)]
+    );
+
+    // The partitioned scan is a paging helper: its caller must size the read.
+    let partitioned = r#"
+    pub async fn list_index(&self) -> Result<Vec<Thing>> {
+        let params = [("$select", "id")];
+        Ok(self.scan_directory_capped("things", "/things", &params, 10).await?.0)
+    }
+"#;
+    assert_eq!(
+        paged_read_sites(partitioned),
+        vec![("list_index".to_string(), false)]
     );
 }
 
