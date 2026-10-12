@@ -754,3 +754,44 @@ async fn a_scoped_delete_is_replayed_after_a_503() {
         .await
         .expect("the scoped DELETE is replayed after a 503");
 }
+
+/// `{"value":[{"id":"sp-1","appId":"app-1","displayName":"one"}]}`, gzipped
+/// (`mtime = 0`, so the bytes are stable).
+const GZIPPED_ONE_SP_PAGE: [u8; 73] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xab, 0x56, 0x2a, 0x4b, 0xcc, 0x29,
+    0x4d, 0x55, 0xb2, 0x8a, 0xae, 0x56, 0xca, 0x4c, 0x51, 0xb2, 0x52, 0x2a, 0x2e, 0xd0, 0x35, 0x54,
+    0xd2, 0x51, 0x4a, 0x2c, 0x28, 0xf0, 0x04, 0x71, 0x81, 0x34, 0x98, 0x9f, 0x92, 0x59, 0x5c, 0x90,
+    0x93, 0x58, 0xe9, 0x97, 0x98, 0x0b, 0x54, 0xab, 0x94, 0x9f, 0x97, 0xaa, 0x54, 0x1b, 0x5b, 0x0b,
+    0x00, 0xd0, 0x88, 0x1a, 0x9f, 0x3d, 0x00, 0x00, 0x00,
+];
+
+/// Graph reads ask for a compressed body and inflate it transparently. A cold
+/// launch pages the whole tenant, and a 999-row `/applications` page selecting
+/// the credential arrays is megabytes of raw JSON; without the workspace
+/// `gzip` feature every byte of it crossed the wire uncompressed.
+#[tokio::test]
+async fn graph_reads_ask_for_and_inflate_a_gzipped_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(|req: &wiremock::Request| {
+            req.headers
+                .get("accept-encoding")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(',').any(|enc| enc.trim() == "gzip"))
+        })
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .insert_header("content-type", "application/json")
+                .set_body_bytes(GZIPPED_ONE_SP_PAGE.to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let sps = client.list_service_principals_index().await.unwrap();
+    assert_eq!(sps.len(), 1, "the gzipped page did not decode");
+    assert_eq!(sps[0].app_id, "app-1");
+}
