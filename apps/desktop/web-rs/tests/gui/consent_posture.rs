@@ -17,8 +17,12 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::applications::AppRegistrationCounts;
 use azapptoolkit_dto::audit::CachedAuditSummary;
 use azapptoolkit_dto::consent::TenantConsentPostureDto;
+use azapptoolkit_dto::credentials::CredentialHealthCounts;
+use azapptoolkit_dto::enterprise_application::EnterpriseAppCounts;
+use azapptoolkit_dto::managed_identity::ManagedIdentityCounts;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::consent_grants_view::ConsentGrantsView;
 use azapptoolkit_web_rs::views::home_dashboard::HomeDashboard;
@@ -60,20 +64,20 @@ fn mount_grants(p: TenantConsentPostureDto) -> ts::Mounted {
 /// island; these tests read it, not the counts.
 fn mount_home(p: TenantConsentPostureDto) -> ts::Mounted {
     ts::mock_ok(
-        "list_applications_with_pairing",
-        &fixtures::apps(&["Payroll API", "HR Sync"]),
+        "get_app_registration_counts",
+        &AppRegistrationCounts::of(&fixtures::apps(&["Payroll API", "HR Sync"])),
     );
     ts::mock_ok(
-        "list_enterprise_applications",
-        &fixtures::enterprise_apps(&["Contoso CRM"]),
+        "get_enterprise_app_counts",
+        &EnterpriseAppCounts::of(&fixtures::enterprise_apps(&["Contoso CRM"])),
     );
     ts::mock_ok(
-        "list_managed_identities",
-        &fixtures::managed_identities(&["mi-build"]),
+        "get_managed_identity_counts",
+        &ManagedIdentityCounts::of(&fixtures::managed_identities(&["mi-build"])),
     );
     ts::mock_ok(
-        "list_credential_expirations",
-        &fixtures::credential_expirations(),
+        "get_credential_health_counts",
+        &CredentialHealthCounts::of(&fixtures::credential_expirations()),
     );
     let summary = CachedAuditSummary::from_items(
         &fixtures::audit_run_result().items,

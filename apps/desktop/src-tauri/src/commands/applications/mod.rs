@@ -10,8 +10,8 @@ use azapptoolkit_graph::client::{AppListQuery, AppPatch, CreateApplicationReques
 
 use crate::dto::UiError;
 use crate::dto::applications::{
-    ApplicationDetail, ApplicationListRowDto, CreateApplicationInput, CreateApplicationResult,
-    DirectoryIndexStatus, UpdateApplicationInput,
+    AppRegistrationCounts, ApplicationDetail, ApplicationListRowDto, CreateApplicationInput,
+    CreateApplicationResult, DirectoryIndexStatus, UpdateApplicationInput,
 };
 use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
@@ -282,6 +282,19 @@ pub async fn list_applications_with_pairing(
     // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     Ok(cache::apps_pairing_cached(&state, &tenant_id).await?)
+}
+
+/// Home's App Registrations card: the three numbers, reduced here from the
+/// same cached rows [`list_applications_with_pairing`] returns, so the webview
+/// never decodes the whole list to count it.
+#[tauri::command]
+pub async fn get_app_registration_counts(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<AppRegistrationCounts, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let rows = cache::apps_pairing_cached(&state, &tenant_id).await?;
+    Ok(AppRegistrationCounts::of(&rows))
 }
 
 #[tauri::command]

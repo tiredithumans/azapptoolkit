@@ -172,6 +172,21 @@ credential status/counts/soonest-expiry computed by `list_applications_with_pair
 credential arrays) — don't re-fatten the list row; the detail pane re-fetches the full
 `Application`.
 
+**Home asks for counts, not rows.** Its four inventory cards call `get_app_registration_counts`,
+`get_enterprise_app_counts`, `get_managed_identity_counts` and `get_credential_health_counts`,
+which reduce the same cached rows the list commands return (`apps_pairing_cached`,
+`enterprise_rows_cached`, `managed_identity_rows_cached`, `credential_expirations_cached`) to a few
+numbers in the backend. Shipping four tenant-wide row sets to the webview to count them was the
+launch's heaviest frontend work, repeated on every reload bump because Home stays mounted. Each
+reducer (`AppRegistrationCounts::of` and its siblings in `azapptoolkit-dto`) counts with the dto
+predicates the matching list chip filters with (`has_secrets`, `is_disabled`, `is_expired`,
+`expires_within`, …), so the number on Home and the rows its drill opens cannot disagree. The
+list views still load their rows when first opened, from the backend cache the counts warmed.
+
+IPC replies are decoded from raw JSON text (`bindings/ipc.rs`, serde_json `raw_value`) straight
+into the binding's type; the `serde_json::Value` tree a tenant-wide list used to be built into
+first is gone.
+
 ## `global_search` semantics
 
 `global_search` does **substring** matching ("contains anywhere" on display name / appId / object

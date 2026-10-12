@@ -150,6 +150,30 @@ impl ApplicationListRowDto {
     }
 }
 
+/// Home's App Registrations card: the counts, not the rows. The card shows
+/// three numbers, and shipping every row over IPC to count them cost a full
+/// list decode in the webview on every launch and every reload.
+/// `get_app_registration_counts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRegistrationCounts {
+    pub total: usize,
+    /// [`ApplicationListRowDto::has_secrets`], the "With secrets" chip.
+    pub with_secrets: usize,
+    /// [`ApplicationListRowDto::has_certs`], the "With certs" chip.
+    pub with_certs: usize,
+}
+
+impl AppRegistrationCounts {
+    /// Counts `rows` with the list chips' own predicates.
+    pub fn of(rows: &[ApplicationListRowDto]) -> Self {
+        Self {
+            total: rows.len(),
+            with_secrets: rows.iter().filter(|r| r.has_secrets()).count(),
+            with_certs: rows.iter().filter(|r| r.has_certs()).count(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApplicationInput {
@@ -410,6 +434,41 @@ pub struct RemoveExpiredResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn list_row(secrets: usize, certs: usize) -> ApplicationListRowDto {
+        ApplicationListRowDto {
+            id: "obj".into(),
+            app_id: "app".into(),
+            display_name: "App".into(),
+            sign_in_audience: None,
+            publisher_domain: None,
+            created_date_time: None,
+            password_credential_count: secrets,
+            key_credential_count: certs,
+            soonest_credential_expiry: None,
+            credential_status: ListCredentialStatus::None,
+            paired_service_principal_id: None,
+        }
+    }
+
+    /// Home's App Registrations numbers are the list chips' predicates.
+    #[test]
+    fn app_registration_counts_use_the_chip_predicates() {
+        let rows = [
+            list_row(1, 0),
+            list_row(2, 1),
+            list_row(0, 3),
+            list_row(0, 0),
+        ];
+        assert_eq!(
+            AppRegistrationCounts::of(&rows),
+            AppRegistrationCounts {
+                total: 4,
+                with_secrets: 2,
+                with_certs: 2,
+            }
+        );
+    }
 
     /// A plaintext RSA private key must never reach a `Debug` string; the
     /// daily rolling log appender writes whatever a `?dto` produces. The .pfx

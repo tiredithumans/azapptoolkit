@@ -6,6 +6,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Home's Enterprise Applications card: the counts, not the rows.
+/// `get_enterprise_app_counts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseAppCounts {
+    pub total: usize,
+    /// [`EnterpriseApplicationDto::is_disabled`], the "Disabled" chip.
+    pub disabled: usize,
+    /// `is_foreign_tenant`, the "Foreign" chip.
+    pub foreign: usize,
+}
+
+impl EnterpriseAppCounts {
+    /// Counts `rows` with the list chips' own predicates.
+    pub fn of(rows: &[EnterpriseApplicationDto]) -> Self {
+        Self {
+            total: rows.len(),
+            disabled: rows.iter().filter(|r| r.is_disabled()).count(),
+            foreign: rows.iter().filter(|r| r.is_foreign_tenant).count(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnterpriseApplicationDto {
     /// Service principal object id.
@@ -48,6 +70,15 @@ pub struct EnterpriseApplicationDto {
     /// (the list index doesn't `$select` it); the Overview tab edits it.
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+impl EnterpriseApplicationDto {
+    /// Sign-in explicitly disabled (`accountEnabled == false`; unknown is not
+    /// disabled). The one predicate behind Home's "Disabled" count and the
+    /// list's matching chip.
+    pub fn is_disabled(&self) -> bool {
+        self.account_enabled == Some(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,4 +235,46 @@ pub struct GalleryAppSummary {
     pub service_principal_id: String,
     pub app_id: String,
     pub display_name: String,
+}
+
+#[cfg(test)]
+mod counts_tests {
+    use super::*;
+
+    fn sp(account_enabled: Option<bool>, is_foreign_tenant: bool) -> EnterpriseApplicationDto {
+        EnterpriseApplicationDto {
+            id: "sp".into(),
+            app_id: "app".into(),
+            display_name: "SP".into(),
+            account_enabled,
+            app_role_assignment_required: None,
+            service_principal_type: Some("Application".into()),
+            app_owner_organization_id: None,
+            is_foreign_tenant,
+            paired_app_registration_id: None,
+            password_credentials: vec![],
+            key_credentials: vec![],
+            app_roles: vec![],
+            oauth2_permission_scopes: vec![],
+            created_date_time: None,
+            tags: vec![],
+            disabled_by_microsoft_status: None,
+            notes: None,
+        }
+    }
+
+    /// Home's Enterprise numbers are the list chips' predicates; an unknown
+    /// `accountEnabled` is not "disabled".
+    #[test]
+    fn enterprise_counts_use_the_chip_predicates() {
+        let rows = [sp(Some(false), false), sp(None, true), sp(Some(true), true)];
+        assert_eq!(
+            EnterpriseAppCounts::of(&rows),
+            EnterpriseAppCounts {
+                total: 3,
+                disabled: 1,
+                foreign: 2,
+            }
+        );
+    }
 }

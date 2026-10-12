@@ -11,7 +11,7 @@
 //! (fetch, filters, export, keyboard-navigable table) lives in
 //! [`AuditDashboard`]; this view supplies the credential-specific bits.
 
-use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
+use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARNING_DAYS;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -57,15 +57,10 @@ pub fn CredentialsDashboard() -> impl IntoView {
             fetch=fetch
             export=export
             banner=move |all: &[CredentialRowDto]| {
-                let expired = all
-                    .iter()
-                    .filter(|r| matches!(r.status, CredentialStatus::Expired))
-                    .count();
+                let expired = all.iter().filter(|r| r.is_expired()).count();
                 let soon = all
                     .iter()
-                    .filter(|r| {
-                        matches!(r.days_to_expiry, Some(d) if (0..=CRITICAL_DAYS).contains(&d))
-                    })
+                    .filter(|r| r.expires_within(CRITICAL_DAYS))
                     .count();
                 (expired + soon > 0)
                     .then(|| {
@@ -124,12 +119,15 @@ fn credential_row(session: crate::state::Session, r: CredentialRowDto) -> impl I
     }
 }
 
+/// The facet predicates are the dto's own, the ones Home's Credential Health
+/// counts are reduced with in the backend, so a count and the rows its chip
+/// opens cannot disagree.
 fn matches_facet(r: &CredentialRowDto, facet: &str) -> bool {
     match facet {
         "all" => true,
-        "expired" => matches!(r.status, CredentialStatus::Expired),
-        "7" => matches!(r.days_to_expiry, Some(d) if (0..=CRITICAL_DAYS).contains(&d)),
-        "30" => matches!(r.days_to_expiry, Some(d) if (0..=WARNING_DAYS).contains(&d)),
+        "expired" => r.is_expired(),
+        "7" => r.expires_within(CRITICAL_DAYS),
+        "30" => r.expires_within(WARNING_DAYS),
         _ => true,
     }
 }

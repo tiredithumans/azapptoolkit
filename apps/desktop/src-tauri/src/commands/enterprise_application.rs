@@ -19,8 +19,8 @@ use crate::commands::applications::{enterprise_key, invalidate_app_lists};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
-    AppAssignmentDto, EnterpriseApplicationDetail, EnterpriseApplicationDto, GroupMembershipDto,
-    ProvisioningJobDto,
+    AppAssignmentDto, EnterpriseAppCounts, EnterpriseApplicationDetail, EnterpriseApplicationDto,
+    GroupMembershipDto, ProvisioningJobDto,
 };
 use crate::state::AppState;
 
@@ -65,10 +65,33 @@ pub async fn list_enterprise_applications(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Arc<Vec<EnterpriseApplicationDto>>, UiError> {
-    // The cache-HIT path below returns before any client is built, so the
+    // The cache-HIT path returns before any client is built, so the
     // `graph_for` on the miss path is not a session proof for it.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let key = enterprise_key(&tenant_id);
+    enterprise_rows_cached(&state, &tenant_id).await
+}
+
+/// Home's Enterprise Applications card: the three numbers, reduced here from
+/// the same cached rows [`list_enterprise_applications`] returns.
+#[tauri::command]
+pub async fn get_enterprise_app_counts(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<EnterpriseAppCounts, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let rows = enterprise_rows_cached(&state, &tenant_id).await?;
+    Ok(EnterpriseAppCounts::of(&rows))
+}
+
+/// The Enterprise Applications rows, read through their typed, pinned cache
+/// entry and built from the two shared indexes on a miss. A cache read: every
+/// caller proves the session first (listed in `repo_invariants`'
+/// `CACHED_ACCESSORS`).
+pub(crate) async fn enterprise_rows_cached(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Arc<Vec<EnterpriseApplicationDto>>, UiError> {
+    let key = enterprise_key(tenant_id);
     // Typed + pinned: a warm visit is a refcount clone, not a JSON decode of
     // every row. An untyped `get` here would miss and rescan.
     if let Some(cached) = state
@@ -80,7 +103,7 @@ pub async fn list_enterprise_applications(
     }
     tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = %key, "miss");
 
-    let client = state.graph_for(&tenant_id);
+    let client = state.graph_for(tenant_id);
 
     // Captured BEFORE the scans — this list is PINNED, so a snapshot that loses
     // the race to a mutation would sit out of LRU's reach for the full TTL.
@@ -95,7 +118,7 @@ pub async fn list_enterprise_applications(
     // with the App Registrations join), so filter managed identities out below —
     // matching the prior server-side `servicePrincipalType ne 'ManagedIdentity'`.
     let (sps, app_index) =
-        crate::commands::applications::indexes_cached(&state, &client, &tenant_id).await?;
+        crate::commands::applications::indexes_cached(state, &client, tenant_id).await?;
 
     let by_app_id: HashMap<&str, &str> = app_index
         .iter()
@@ -109,7 +132,7 @@ pub async fn list_enterprise_applications(
                 let paired = by_app_id
                     .get(sp.app_id.as_str())
                     .map(|id| (*id).to_string());
-                sp_to_enterprise_dto(sp.clone(), &tenant_id, paired)
+                sp_to_enterprise_dto(sp.clone(), tenant_id, paired)
             })
             .collect(),
     );

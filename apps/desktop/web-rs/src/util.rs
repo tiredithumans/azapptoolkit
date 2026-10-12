@@ -228,10 +228,10 @@ pub fn time_ago(rfc3339: &str) -> Option<TimeAgo> {
 }
 
 /// Display-only "critical" expiry tier (the legacy `Constants.ps1:203` 7-day
-/// tier). The audit's `CredentialStatus` has no such bucket
-/// (`core/audit/permissions.rs:15-18`), so it lives here, beside the one shared
-/// warning threshold ([`EXPIRY_WARNING_DAYS`]).
-pub const EXPIRY_CRITICAL_DAYS: i64 = 7;
+/// tier), defined beside the credential rows it applies to so Home's
+/// "≤ 7 days" count (reduced in the backend) and the Credentials tab's chip
+/// use one value.
+pub use azapptoolkit_dto::credentials::EXPIRY_CRITICAL_DAYS;
 
 /// Whole days until `end`, **floored** (`div_euclid`) — the rule the SSO
 /// certificate backend uses (`commands/sso/mod.rs` "Floored, not truncated";

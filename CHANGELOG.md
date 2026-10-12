@@ -17,6 +17,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   read now comes straight from the directory rather than from a search index that can lag behind
   recent changes, and the log file records how long each tenant-wide read took and how many pages
   it needed.
+- **Home appears sooner and stays responsive.** Its inventory and credential cards now ask for
+  their numbers instead of downloading every app registration, enterprise application, managed
+  identity and credential to count them in the window, and every list the window loads is
+  decoded without first building a throwaway copy of it.
 - **Home no longer reads the app registrations twice on a cold start.** When the Enterprise
   Applications card started first, it read a short list of every app registration and the App
   Registrations card then read them all again; one read now serves every card. If the

@@ -260,9 +260,11 @@ fn LoadedEnterpriseApps(
             Facet::new("Enabled", "enabled", |sp: &EnterpriseApplicationDto| {
                 sp.account_enabled == Some(true)
             }),
-            Facet::new("Disabled", "disabled", |sp: &EnterpriseApplicationDto| {
-                sp.account_enabled == Some(false)
-            }),
+            Facet::new(
+                "Disabled",
+                "disabled",
+                EnterpriseApplicationDto::is_disabled,
+            ),
             Facet::new("Foreign", "foreign", |sp: &EnterpriseApplicationDto| {
                 sp.is_foreign_tenant
             }),

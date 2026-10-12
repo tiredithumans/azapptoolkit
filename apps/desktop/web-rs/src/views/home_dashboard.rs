@@ -1,14 +1,16 @@
 //! Home dashboard — the post-sign-in landing surface. A tenant inventory
 //! (App Registrations, Enterprise apps, Managed identities) plus tenant health
 //! at a glance (credential expiry + security posture). Each card loads
-//! independently so the page renders immediately.
+//! independently so the page renders immediately, and each asks the backend
+//! for its counts rather than the rows behind them: the cards show a dozen
+//! numbers, and decoding four tenant-wide lists in the webview to count them
+//! (again on every reload bump, since Home stays mounted) was the launch's
+//! heaviest frontend work.
 
-use azapptoolkit_core::audit::CredentialStatus;
 use leptos::prelude::*;
 use thaw::{Body1, Button, ButtonAppearance};
 
 use crate::bindings::consent::TenantConsentPostureDto;
-use crate::bindings::managed_identity::MiSubtype;
 use crate::bindings::{
     applications, audit, consent, credentials, enterprise_application, managed_identity,
 };
@@ -37,7 +39,7 @@ pub fn HomeDashboard() -> impl IntoView {
         let _ = session.apps_reload.get();
         async move {
             match tenant {
-                Some(t) => Some(applications::list_applications_with_pairing(&t.tenant_id).await),
+                Some(t) => Some(applications::get_app_registration_counts(&t.tenant_id).await),
                 None => None,
             }
         }
@@ -50,7 +52,7 @@ pub fn HomeDashboard() -> impl IntoView {
         async move {
             match tenant {
                 Some(t) => {
-                    Some(enterprise_application::list_enterprise_applications(&t.tenant_id).await)
+                    Some(enterprise_application::get_enterprise_app_counts(&t.tenant_id).await)
                 }
                 None => None,
             }
@@ -62,7 +64,7 @@ pub fn HomeDashboard() -> impl IntoView {
         let _ = reload.get();
         async move {
             match tenant {
-                Some(t) => Some(managed_identity::list_managed_identities(&t.tenant_id).await),
+                Some(t) => Some(managed_identity::get_managed_identity_counts(&t.tenant_id).await),
                 None => None,
             }
         }
@@ -77,7 +79,7 @@ pub fn HomeDashboard() -> impl IntoView {
         let _ = session.apps_reload.get();
         async move {
             match tenant {
-                Some(t) => Some(credentials::list_credential_expirations(&t.tenant_id).await),
+                Some(t) => Some(credentials::get_credential_health_counts(&t.tenant_id).await),
                 None => None,
             }
         }
@@ -140,12 +142,12 @@ pub fn HomeDashboard() -> impl IntoView {
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match apps.await {
-                                Some(Ok(rows)) => {
-                                    let total = rows.len();
-                                    let with_secrets =
-                                        rows.iter().filter(|r| r.has_secrets()).count();
-                                    let with_certs =
-                                        rows.iter().filter(|r| r.has_certs()).count();
+                                Some(Ok(counts)) => {
+                                    let applications::AppRegistrationCounts {
+                                        total,
+                                        with_secrets,
+                                        with_certs,
+                                    } = counts;
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
@@ -220,16 +222,12 @@ pub fn HomeDashboard() -> impl IntoView {
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match enterprise.await {
-                                Some(Ok(items)) => {
-                                    let total = items.len();
-                                    let disabled = items
-                                        .iter()
-                                        .filter(|i| i.account_enabled == Some(false))
-                                        .count();
-                                    let foreign = items
-                                        .iter()
-                                        .filter(|i| i.is_foreign_tenant)
-                                        .count();
+                                Some(Ok(counts)) => {
+                                    let enterprise_application::EnterpriseAppCounts {
+                                        total,
+                                        disabled,
+                                        foreign,
+                                    } = counts;
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
@@ -302,16 +300,12 @@ pub fn HomeDashboard() -> impl IntoView {
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match managed.await {
-                                Some(Ok(items)) => {
-                                    let total = items.len();
-                                    let system = items
-                                        .iter()
-                                        .filter(|i| i.mi_subtype == MiSubtype::SystemAssigned)
-                                        .count();
-                                    let user = items
-                                        .iter()
-                                        .filter(|i| i.mi_subtype == MiSubtype::UserAssigned)
-                                        .count();
+                                Some(Ok(counts)) => {
+                                    let managed_identity::ManagedIdentityCounts {
+                                        total,
+                                        system_assigned: system,
+                                        user_assigned: user,
+                                    } = counts;
                                     view! {
                                         <span class="dash-card__count">{total}</span>
                                         <div class="dash-metrics">
@@ -372,23 +366,12 @@ pub fn HomeDashboard() -> impl IntoView {
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match creds.await {
-                                Some(Ok(rows)) => {
-                                    let expired = rows
-                                        .iter()
-                                        .filter(|r| matches!(r.status, CredentialStatus::Expired))
-                                        .count();
-                                    let soon = rows
-                                        .iter()
-                                        .filter(|r| {
-                                            matches!(r.days_to_expiry, Some(d) if (0..=7).contains(&d))
-                                        })
-                                        .count();
-                                    let m30 = rows
-                                        .iter()
-                                        .filter(|r| {
-                                            matches!(r.days_to_expiry, Some(d) if (0..=30).contains(&d))
-                                        })
-                                        .count();
+                                Some(Ok(counts)) => {
+                                    let credentials::CredentialHealthCounts {
+                                        expired,
+                                        within_critical: soon,
+                                        within_warning: m30,
+                                    } = counts;
                                     view! {
                                         <div class="dash-metrics">
                                             {metric_link(

@@ -29,7 +29,8 @@ use chrono::{DateTime, Utc};
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
 use crate::dto::credentials::{
-    AppCredentialPolicyDto, CredentialRowDto, CredentialUsageDto, CredentialUsageRow,
+    AppCredentialPolicyDto, CredentialHealthCounts, CredentialRowDto, CredentialUsageDto,
+    CredentialUsageRow,
 };
 use crate::state::AppState;
 
@@ -45,6 +46,20 @@ pub async fn list_credential_expirations(
     // own session proof.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     Ok(crate::commands::applications::credential_expirations_cached(&state, &tenant_id).await?)
+}
+
+/// Home's Credential Health card: the three numbers, reduced here from the
+/// same cached roll-up [`list_credential_expirations`] returns (one row per
+/// credential, so usually more rows than apps).
+#[tauri::command]
+pub async fn get_credential_health_counts(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<CredentialHealthCounts, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    let rows =
+        crate::commands::applications::credential_expirations_cached(&state, &tenant_id).await?;
+    Ok(CredentialHealthCounts::of(&rows))
 }
 
 /// Tenant-wide per-credential last-used map for the Credentials tab, read from

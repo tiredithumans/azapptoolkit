@@ -10,27 +10,36 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::applications::AppRegistrationCounts;
 use azapptoolkit_dto::audit::CachedAuditSummary;
+use azapptoolkit_dto::credentials::CredentialHealthCounts;
+use azapptoolkit_dto::enterprise_application::EnterpriseAppCounts;
+use azapptoolkit_dto::managed_identity::ManagedIdentityCounts;
 use azapptoolkit_web_rs::state::{ActiveView, SecurityTab};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::home_dashboard::HomeDashboard;
 
 /// The inventory cards' reads, so only the posture card varies per test.
+/// Home asks for counts, never rows; each is reduced from the list fixture
+/// with the backend's own reducer.
 fn mock_inventory() {
     let mut apps = fixtures::apps(&["Payroll API", "HR Sync"]);
     apps[0].password_credential_count = 1;
-    ts::mock_ok("list_applications_with_pairing", &apps);
     ts::mock_ok(
-        "list_enterprise_applications",
-        &fixtures::enterprise_apps(&["Contoso CRM"]),
+        "get_app_registration_counts",
+        &AppRegistrationCounts::of(&apps),
     );
     ts::mock_ok(
-        "list_managed_identities",
-        &fixtures::managed_identities(&["mi-build"]),
+        "get_enterprise_app_counts",
+        &EnterpriseAppCounts::of(&fixtures::enterprise_apps(&["Contoso CRM"])),
     );
     ts::mock_ok(
-        "list_credential_expirations",
-        &fixtures::credential_expirations(),
+        "get_managed_identity_counts",
+        &ManagedIdentityCounts::of(&fixtures::managed_identities(&["mi-build"])),
+    );
+    ts::mock_ok(
+        "get_credential_health_counts",
+        &CredentialHealthCounts::of(&fixtures::credential_expirations()),
     );
 }
 
@@ -131,6 +140,11 @@ async fn with_secrets_metric_drills_into_the_apps_facet() {
 
     assert_eq!(m.session.view.get_untracked(), ActiveView::Apps);
     assert_eq!(m.session.tenant_ui.apps_facet.get_untracked(), "secrets");
+    assert_eq!(
+        ts::call_count("list_applications_with_pairing"),
+        0,
+        "Home must read the counts, not the rows"
+    );
     assert_eq!(
         m.session.tenant_ui.pending_open_filters.get_untracked(),
         Some(ActiveView::Apps),

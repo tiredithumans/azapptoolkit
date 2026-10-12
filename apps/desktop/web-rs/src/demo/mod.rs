@@ -39,17 +39,19 @@ use azapptoolkit_core::scoping::{
     OFFICE365_SHAREPOINT_ONLINE_APP_ID, exchange_role_for_resource_permission,
 };
 use azapptoolkit_dto::applications::{
-    ApplicationDetail, ApplicationListRowDto, DirectoryIndexStatus,
+    AppRegistrationCounts, ApplicationDetail, ApplicationListRowDto, DirectoryIndexStatus,
 };
 use azapptoolkit_dto::audit::{AuditRunResult, CachedAuditSummary};
-use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto, CredentialUsageRow};
+use azapptoolkit_dto::credentials::{
+    CredentialHealthCounts, CredentialRowDto, CredentialUsageDto, CredentialUsageRow,
+};
 use azapptoolkit_dto::enterprise_application::{
-    EnterpriseApplicationDetail, EnterpriseApplicationDto,
+    EnterpriseAppCounts, EnterpriseApplicationDetail, EnterpriseApplicationDto,
 };
 use azapptoolkit_dto::exchange::{
     ExchangeRoleAssignmentDto, ExchangeScopeGroupDto, MailScopeEntry,
 };
-use azapptoolkit_dto::managed_identity::{AppRoleGrantDto, MiSubtype};
+use azapptoolkit_dto::managed_identity::{AppRoleGrantDto, ManagedIdentityCounts, MiSubtype};
 use azapptoolkit_dto::permission_tester::{AccessVerdict, MailboxReachersResult};
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 use azapptoolkit_dto::search::GlobalSearchResults;
@@ -949,6 +951,11 @@ fn register_fixtures() {
     let apps = catalog();
     let rows: Vec<ApplicationListRowDto> = apps.iter().map(|a| list_row(a, now)).collect();
     mock_ok("list_applications_with_pairing", &rows);
+    // Home's card: the same rows, counted with the backend's own reducer.
+    mock_ok(
+        "get_app_registration_counts",
+        &AppRegistrationCounts::of(&rows),
+    );
     // Recycle-bin read for the "Recently deleted" dialog. Its Restore / Delete
     // forever MUTATIONS stay unregistered — same policy as every other
     // mutation: they degrade to the friendly demo error, never a fake success.
@@ -1150,6 +1157,10 @@ fn register_fixtures() {
     // ---- Enterprise Applications: list + per-id detail ----
     let enterprise = enterprise_apps();
     mock_ok("list_enterprise_applications", &enterprise);
+    mock_ok(
+        "get_enterprise_app_counts",
+        &EnterpriseAppCounts::of(&enterprise),
+    );
     // The demo tenant is far below the SP-index cap, so the truncation notice
     // stays hidden. Registered rather than left to the rejected-promise
     // fallback so the demo console stays clean.
@@ -1291,6 +1302,10 @@ fn register_fixtures() {
     managed[0].mi_subtype = MiSubtype::SystemAssigned;
     managed[2].mi_subtype = MiSubtype::SystemAssigned;
     mock_ok("list_managed_identities", &managed);
+    mock_ok(
+        "get_managed_identity_counts",
+        &ManagedIdentityCounts::of(&managed),
+    );
 
     // Azure RBAC roles held by each managed identity (Azure roles tab), varied
     // per id. (Held Graph grants are covered by `list_held_app_role_grants` above.)
@@ -1323,7 +1338,12 @@ fn register_fixtures() {
     });
 
     // ---- Security / health ----
-    mock_ok("list_credential_expirations", &credential_rows(&apps, now));
+    let credential_rollup = credential_rows(&apps, now);
+    mock_ok("list_credential_expirations", &credential_rollup);
+    mock_ok(
+        "get_credential_health_counts",
+        &CredentialHealthCounts::of(&credential_rollup),
+    );
     mock_ok("list_credential_usage", &credential_usage(&apps, now));
     // One tenant-wide cap for every demo app, agreeing with the audit run's
     // policy fields below. The catalog's long-lived demo secrets then render

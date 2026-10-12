@@ -35,6 +35,14 @@ pub async fn list_applications_with_pairing(
     invoke_result("list_applications_with_pairing", TenantArg { tenant_id }).await
 }
 
+/// Home's App Registrations card: the counts, reduced in the backend from the
+/// same cached rows, so the webview never decodes the list to count it.
+pub async fn get_app_registration_counts(
+    tenant_id: &str,
+) -> Result<AppRegistrationCounts, UiError> {
+    invoke_result("get_app_registration_counts", TenantArg { tenant_id }).await
+}
+
 pub async fn get_application_detail(
     tenant_id: &str,
     object_id: &str,
