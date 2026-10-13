@@ -98,6 +98,20 @@
   --nav-width-collapsed: 56px;
   --topbar-height: 52px;
 
+  /* ---- Fluid layout (the window runs from 900px wide to maximized) ---- */
+  /* Side padding of the content area and topbar: ~18px at the 900px minimum,
+     ~22px at the default 1280, 32px from ~2100. */
+  --gutter: clamp(var(--space-3), calc(0.5rem + 1.2vw), var(--space-6));
+  /* Width caps for pages that would read badly edge to edge on a maximized
+     window. Inside them, auto-fill grids add columns rather than stretching
+     one column wide. */
+  --page-max: 1440px;
+  --form-max: 1080px;
+  /* Scrolling picker lists follow the window HEIGHT: a fixed 320px list was
+     most of a 600px-tall window and a sliver of a 1440px one. */
+  --list-max-h: clamp(200px, 40vh, 560px);
+  --list-max-h-sm: clamp(160px, 25vh, 360px);
+
   /* Tells the engine which palette the NATIVE controls should use. Without it a
      <select>'s popup list, the scrollbars, and any native form widget render in
      light chrome no matter how dark the page is — the one part of the UI CSS
@@ -325,9 +339,16 @@ h3 {
 
 .actions-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
   margin-top: var(--space-2);
+}
+/* Beside a title (`.row-between`, e.g. the detail header), the title side gives
+   way first: a wrapping row's min-content is only its widest button, so without
+   this the buttons stacked while the title kept its full width. */
+.row-between > .actions-row {
+  flex-shrink: 0;
 }
 
 /* The toolkit-managed Exchange scope group panel and its member list (one row
@@ -366,6 +387,7 @@ h3 {
    <td> wraps it in an anonymous cell and breaks the column's vertical-align. */
 .cell-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
 }
@@ -592,7 +614,7 @@ h3 {
    for the content, not for either dialog. */
 .changelog {
   margin: 0;
-  max-height: 320px;
+  max-height: var(--list-max-h);
   overflow: auto;
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
@@ -694,7 +716,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: 0 var(--space-5);
+  padding: 0 var(--gutter);
   background: var(--acrylic);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
@@ -771,7 +793,7 @@ h3 {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  max-width: 240px;
+  max-width: clamp(240px, 20vw, 400px);
   padding: var(--space-1) 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
@@ -923,7 +945,7 @@ h3 {
   min-height: 0;
   min-width: 0;
   overflow: auto;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-4) var(--gutter);
 }
 
 /* ---------- Open-items dock + workspace ---------- */
@@ -971,7 +993,8 @@ h3 {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  max-width: 220px;
+  /* 220px until a ~1570px window, then wider so long names show in full. */
+  max-width: clamp(220px, 14vw, 320px);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
@@ -1198,6 +1221,7 @@ h3 {
 /* Right-aligned action cluster in a list/section header (export + refresh). */
 .list-header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
 }
@@ -1298,6 +1322,7 @@ h3 {
    sorted in the first place. */
 .app-list__sortbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-1) var(--space-2);
@@ -1354,6 +1379,7 @@ h3 {
    left, Clear on the right. */
 .app-list__selectbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
@@ -1494,7 +1520,10 @@ h3 {
 }
 .mi-properties {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  /* The label column sizes to its longest label but never past 40%, and the
+     value column may shrink below an unbroken id's width (the id wraps) — a
+     bare `max-content 1fr` let either push the values past the pane edge. */
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
   gap: var(--space-1) var(--space-3);
   align-items: baseline;
   padding: var(--space-3);
@@ -1530,6 +1559,7 @@ h3 {
 }
 .detail-section__controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
 }
@@ -1997,6 +2027,7 @@ h3 {
 }
 .signin-summary .alert {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
@@ -2004,7 +2035,18 @@ h3 {
 .tool-page {
   display: grid;
   gap: var(--space-3);
-  max-width: 960px;
+  max-width: var(--page-max);
+}
+/* Intro prose keeps a readable line length inside the wider page caps (a
+   1440px line is ~200 characters). `display: block` because Thaw's `Body1` is
+   an inline <span>, which ignores max-width. */
+.settings-view > .hint,
+.readiness > .hint,
+.permission-tester > .thaw-body-1,
+.dr-view__lead,
+.dr-view__notes {
+  display: block;
+  max-width: 100ch;
 }
 .candidates {
   list-style: none;
@@ -2036,7 +2078,7 @@ h3 {
   margin: 0;
   display: grid;
   gap: 2px;
-  max-height: 200px;
+  max-height: var(--list-max-h-sm);
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -2115,7 +2157,9 @@ h3 {
   color: var(--text);
   padding: var(--space-5);
   border-radius: var(--radius-xl);
-  width: min(720px, 92vw);
+  /* 720px up to a ~1700px window, then grows with it to 880px. A dialog is
+     a focused task, so it grows only modestly. */
+  width: min(92vw, clamp(720px, 42vw, 880px));
   max-height: 88vh;
   display: grid;
   gap: var(--space-3);
@@ -2125,7 +2169,8 @@ h3 {
   overflow: auto;
 }
 .modal--wide {
-  width: min(880px, 92vw);
+  /* 880px up to a ~1700px window, then grows with it to 1120px. */
+  width: min(92vw, clamp(880px, 52vw, 1120px));
 }
 
 @keyframes ui-fade-in {
@@ -2148,6 +2193,7 @@ h3 {
 /* ---------- Bulk actions ---------- */
 .selection-bar {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin-right: var(--space-2);
@@ -2425,7 +2471,12 @@ h3 {
 /* ---------- Global search (topbar) ---------- */
 .global-search {
   position: relative;
-  width: min(520px, 60vw);
+  /* Tracks the window instead of snapping at the nav-collapse breakpoint:
+     ~340px at the 900px minimum, ~490px at 1280, up to 720px when maximized.
+     38vw is the share that still leaves the topbar's right third room for the
+     tenant name — the search must yield first, because a shorter search field
+     still works and a tenant name cut to an initial ("C..") does not. */
+  width: clamp(280px, 38vw, 720px);
 }
 .global-search__input {
   display: flex;
@@ -2616,7 +2667,7 @@ h3 {
   list-style: none;
   padding: 0;
   margin: 0;
-  max-height: 320px;
+  max-height: var(--list-max-h);
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -3070,7 +3121,13 @@ h3 {
 /* ---- TabBar (underline) ---- */
 .ui-tabs {
   display: flex;
-  gap: var(--space-1);
+  /* Wrap, don't scroll: in a narrow window or a 2-up compare pane the detail
+     strip (eight-plus tabs) ran past the edge, and a sideways-scrolling strip
+     shows no sign that "Conditional Access" and the rest are there at all. A
+     second row of tabs is visible; the scroll stays only as the fallback for
+     a single label wider than the strip. */
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--space-3);
   overflow-x: auto;
@@ -3121,18 +3178,21 @@ h3 {
 }
 
 /* Settings — per-tenant operator defaults, grouped into tabbed panes
-   (App Registration / Enterprise Application / Naming). Constrain the form
-   width for readability; the active pane and its sections stack with even
-   vertical rhythm. */
-.settings-view { max-width: 760px; }
+   (App Registration / Enterprise Application / Naming). The form width is
+   capped for readability; inside it the active pane's sections sit side by
+   side once two ~420px columns fit, and stack below that. */
+.settings-view { max-width: var(--form-max); }
 .settings-editor {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
 .settings-tab {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  /* auto-FIT, not auto-fill: a pane with one section lets it span the row
+     rather than leaving an empty column beside it. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr));
+  align-items: start;
   gap: var(--space-5);
 }
 .settings-section {
@@ -3209,7 +3269,7 @@ h3 {
   padding: 0;
   display: grid;
   gap: var(--space-1);
-  max-height: 320px;
+  max-height: var(--list-max-h);
   overflow-y: auto;
 }
 .gallery-result {
@@ -3293,8 +3353,13 @@ h3 {
  * Responsive breakpoints
  * ===================================================================== */
 
-/* Below 1024px: collapse sidebar to icons-only */
-@media (max-width: 1024px) {
+/* Below 1200px: collapse the sidebar to its icon rail (each item keeps its label
+   as a `title` tooltip). The only width breakpoint the desktop window (900px
+   minimum) ever reaches. At 1024 the expanded 240px nav left a 1025px window
+   ~785px of content — less than the collapsed rail leaves at 900; collapsing
+   through 1199 keeps the content area at ~840px or more everywhere, and ~960px
+   or more whenever the labels show. */
+@media (max-width: 1199px) {
   :root {
     --nav-width: var(--nav-width-collapsed);
   }
@@ -3310,13 +3375,6 @@ h3 {
     padding: 10px var(--space-2);
   }
   .nav__item--selected::before { left: 0; }
-  /* The centred search is capped at `min(520px, 60vw)` — but 60vw measures the
-     whole window, not the space left beside the tenant chip, so once the nav
-     collapses the field kept its full width and the topbar's right third was
-     squeezed until "Contoso Ltd" rendered as "C..". Make the search yield
-     first: a shorter search field still works, a tenant name cut to an initial
-     does not. */
-  .global-search { width: min(520px, 38vw); }
 }
 
 /* Below 740px: tighten topbar; collapse side-by-side compare to one pane.
@@ -3366,10 +3424,6 @@ h3 {
   }
   .ui-section-header__title {
     font-size: var(--text-md);
-  }
-  .selection-bar,
-  .list-header-actions {
-    flex-wrap: wrap;
   }
   /* Dialogs take nearly the full width with tighter padding so their content
      isn't boxed into a sliver. */
@@ -3712,7 +3766,9 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  max-width: 760px;
+  /* A form: the inputs span the page, so it takes the form cap, not the
+     wider page cap. */
+  max-width: var(--form-max);
 }
 .permission-tester .input {
   width: 100%;
@@ -3736,7 +3792,7 @@ h3 {
   left: 0;
   right: 0;
   z-index: 20;
-  max-height: 280px;
+  max-height: var(--list-max-h);
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -3895,9 +3951,10 @@ h3 {
 }
 /* What this finding says about the row (its own matched issue lines). Capped so
    one verbose permission list can't push Risk/Score/Actions off a narrow
-   window; the full text stays one "Open" away. */
+   window; the full text stays one "Open" away. The cap holds at 44ch until the
+   window passes ~1200px, then widens with it so a wide window shows more. */
 .finding-group__detail {
-  max-width: 44ch;
+  max-width: clamp(44ch, 28vw, 72ch);
 }
 .finding-group--healthy .finding-group__title {
   font-weight: var(--weight-regular);
@@ -3944,7 +4001,7 @@ h3 {
   padding: 0;
   display: grid;
   gap: var(--space-1);
-  max-height: 14rem;
+  max-height: var(--list-max-h-sm);
   overflow-y: auto;
 }
 .add-owner-candidates__row {
@@ -3962,12 +4019,18 @@ h3 {
 /* Access-readiness checklist (role/scope readiness page). */
 .readiness {
   padding: var(--space-3);
-  max-width: 920px;
+  max-width: var(--page-max);
 }
+/* Each plane's checks flow into as many ~390px columns as fit. */
 .readiness__group {
   margin-top: var(--space-3);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 28rem), 1fr));
+  align-items: start;
+  gap: var(--space-2);
 }
 .readiness__group-title {
+  grid-column: 1 / -1;
   margin: 0 0 var(--space-1);
   font-size: var(--text-base);
   text-transform: uppercase;
@@ -3979,7 +4042,6 @@ h3 {
   border-radius: var(--radius-md);
   background: var(--surface);
   padding: 10px var(--space-3);
-  margin-top: var(--space-2);
 }
 .readiness__item-head {
   display: flex;
@@ -3993,6 +4055,7 @@ h3 {
 }
 .readiness__axis {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-2);
   padding: 2px 0;
@@ -4062,6 +4125,7 @@ h3 {
 }
 .dr-view__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
 }
@@ -4227,7 +4291,7 @@ h3 {
 }
 .shortcuts__row {
   display: grid;
-  grid-template-columns: minmax(9rem, max-content) 1fr;
+  grid-template-columns: minmax(9rem, max-content) minmax(0, 1fr);
   gap: var(--space-3);
   align-items: baseline;
 }
@@ -4265,7 +4329,7 @@ h3 {
 .bulk-selection__list {
   margin: var(--space-1) 0 0;
   padding-left: var(--space-4);
-  max-height: 12rem;
+  max-height: var(--list-max-h-sm);
   overflow-y: auto;
 }
 
@@ -4291,7 +4355,7 @@ h3 {
   /* 2px, not 0: the box scrolls, and a focused row's `--focus-ring` box-shadow
      would otherwise be clipped (and provoke a horizontal scrollbar). */
   padding: 2px;
-  max-height: 320px;
+  max-height: var(--list-max-h);
   overflow-y: auto;
 }
 .uri-list__row {

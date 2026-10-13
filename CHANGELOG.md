@@ -5,6 +5,19 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **The window layout adapts to its size.** On a large or maximized window, Settings lays its
+  sections side by side, Access Readiness shows its checks in columns, and the tool pages (Bulk
+  Actions, Disaster Recovery, Key Vault, Permission Tester) widen. Dialogs, the search box, the
+  tenant pill, the open-item chips and the page margins grow with the window, and scrolling
+  picker lists follow its height.
+- **Narrow windows no longer cramp the page.** The sidebar collapses to its icon rail below
+  1200 px instead of 1024 px — just above 1024 px the expanded sidebar left the page narrower than
+  at the 900 px minimum. Toolbars, button rows and an app's tab strip wrap onto a second line
+  instead of running off the edge, so a narrow window or a side-by-side compare no longer hides
+  tabs such as Conditional Access.
+
 ## [0.33.4] - 2026-10-12
 
 ### Changed

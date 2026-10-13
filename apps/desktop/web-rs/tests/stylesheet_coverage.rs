@@ -16,6 +16,8 @@
 //! - every `var(--token)` used in `styles.css` is declared in `styles.css`
 //!   (strict: a fallback does not excuse an undefined token).
 //!
+//! A third check keeps container queries out (they would trap inline dialogs).
+//!
 //! Runs natively under `just web-test` (no WASM, no browser); gated off for
 //! wasm32 like `demo_fixture_coverage.rs`, because it reads the filesystem.
 //! See `docs/architecture/frontend-workspace.md`.
@@ -241,6 +243,25 @@ fn every_custom_property_used_is_defined() {
             .collect::<Vec<_>>()
             .join("\n  ")
     );
+}
+
+/// The layout responds to width through intrinsic sizing (wrap, `minmax(0, …)`,
+/// auto-fit grids, `clamp()`), never container queries. `ModalShell` renders
+/// its dialog inline, inside whatever view opened it, and a query container
+/// gets layout containment — which makes it the containing block of every
+/// `position: fixed` descendant. A pane that was a container would pin its
+/// dialog's full-window scrim to the pane instead of the window.
+#[test]
+fn no_container_queries() {
+    let css = strip_css_comments(&stylesheet());
+    for banned in ["container-type", "@container"] {
+        assert!(
+            !css.contains(banned),
+            "styles.css uses `{banned}` — a query container traps its inline dialogs' fixed \
+             backdrop; size with intrinsic CSS instead (see frontend-workspace.md, \
+             \"Responsive layout\")"
+        );
+    }
 }
 
 #[test]
