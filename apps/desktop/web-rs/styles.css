@@ -344,10 +344,13 @@ h3 {
   align-items: center;
   margin-top: var(--space-2);
 }
-/* Beside a title (`.row-between`, e.g. the detail header), the title side gives
-   way first: a wrapping row's min-content is only its widest button, so without
-   this the buttons stacked while the title kept its full width. */
-.row-between > .actions-row {
+/* Beside a title or hint (`.row-between`, e.g. the detail header), the text
+   side gives way first: a wrapping row's min-content is only its widest button,
+   so without this the buttons stacked while the title kept its full width — and
+   a lone Thaw button (`overflow: hidden`) shrank until its label was clipped
+   ("Add transformation" beside the claims hint). */
+.row-between > .actions-row,
+.row-between > .thaw-button {
   flex-shrink: 0;
 }
 
@@ -3545,7 +3548,8 @@ h3 {
   margin-bottom: var(--space-2);
 }
 .sso-summary,
-.sso-tab {
+.sso-tab,
+.cert-rollover {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -3560,8 +3564,23 @@ h3 {
 /* `.sso-tab` is a stretch flex column, so every direct child filled the pane —
    including the buttons, which rendered as full-width bars. Nothing else in the
    app does that: an action sits at its natural width. */
-.sso-tab > .thaw-button {
+.sso-tab > .thaw-button,
+.cert-rollover > .thaw-button {
   align-self: flex-start;
+}
+/* The signing-certificate rollover panel is ONE child of `.sso-tab`, so it
+   needs the column itself (above): as a plain block, its step buttons sat
+   flush side by side and the hint (Thaw's Body1 is an inline <span>) wrapped
+   around them, with the Activate button trailing the sentence. */
+/* A 40-hex-digit thumbprint has no break opportunity, and a date breaks at its
+   hyphens ("2029-" / "07-09"): let the thumbprint wrap anywhere (like `.mono`
+   ids elsewhere) so the date and its days-left keep their line in a narrow
+   pane. */
+.cert-rollover__thumbprint code {
+  word-break: break-all;
+}
+.cert-rollover__expiry {
+  white-space: nowrap;
 }
 .sso-field {
   display: flex;
@@ -3728,7 +3747,10 @@ h3 {
 }
 .claims-editor__basic-ref-src {
   font-family: var(--font-mono, monospace);
-  white-space: nowrap;
+  /* Breaks like the URI beside it. `nowrap` made "user.userprincipalname" a
+     ~180px floor, which with the name and the Edit button pushed the row past
+     a side-by-side compare pane (the stacked layout is phone-width only). */
+  word-break: break-all;
 }
 .claims-editor__basic-ref-note {
   font-style: italic;

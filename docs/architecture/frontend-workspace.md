@@ -209,7 +209,10 @@ gets there with intrinsic CSS rather than a ladder of breakpoints:
 
 - **Flow, don't overflow.** Toolbars, action rows (`.actions-row`, `.list-header-actions`, the
   list select/sort bars, …) and tab strips (`.ui-tabs`) `flex-wrap` — beside a title
-  (`.row-between > .actions-row`) the buttons keep their width so the title wraps first. Grid
+  (`.row-between > .actions-row`, `> .thaw-button`) the buttons keep their width so the title
+  wraps first. A panel nested inside a flex-column tab needs the column itself (`.cert-rollover`
+  in `.sso-tab`): as a plain block, its buttons sit inline and a Thaw `Body1` hint — an inline
+  `<span>` — wraps around them. Grid
   tracks that hold content are `minmax(0, 1fr)` (the comments at `.shell__main` and
   `.workspace__panes` say why); card and section groups are
   `repeat(auto-fill|auto-fit, minmax(min(100%, N), 1fr))`, so they add a column when the room is

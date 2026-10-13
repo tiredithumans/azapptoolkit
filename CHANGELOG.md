@@ -18,6 +18,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   instead of running off the edge, so a narrow window or a side-by-side compare no longer hides
   tabs such as Conditional Access.
 
+### Fixed
+
+- **The SSO tab's signing-certificate steps lay out cleanly.** "Stage new certificate", "Check
+  published metadata" and "Activate staged certificate" each sit on their own line instead of
+  running together with the note about published metadata wrapped around them. In a narrow pane
+  the certificate table keeps its Expires column in view, the attributes-and-claims reference
+  no longer pushes its Edit buttons past the edge, and "Add transformation" is no longer clipped.
+
 ## [0.33.4] - 2026-10-12
 
 ### Changed
