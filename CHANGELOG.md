@@ -17,6 +17,13 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   at the 900 px minimum. Toolbars, button rows and an app's tab strip wrap onto a second line
   instead of running off the edge, so a narrow window or a side-by-side compare no longer hides
   tabs such as Conditional Access.
+- **Semver-compatible dependency refresh across both lockfiles.** `tauri` 2.12.1 → 2.12.3 with
+  `tauri-plugin-updater` 2.13.1 → 2.13.3 (the auto-update client, whose signature check moves to
+  `minisign-verify` 0.3.0), `tauri-plugin-fs` 2.6.0 → 2.7.0 and `tauri-plugin-dialog` 2.8.1 →
+  2.8.2; the TLS-adjacent `hyper` 1.11.1 → 1.12.0, `tokio-rustls` 0.26.5 → 0.26.6 and
+  `aws-lc-rs` 1.18.1 → 1.18.2; and `leptos` 0.8.21 → 0.8.22 in the frontend. `tauri-cli` moves
+  2.11.5 → 2.12.2 in the release workflow and both `setup` scripts. The deliberate holds are
+  unchanged (`p12-keystore` 0.2.x; `sha2` 0.10). `cargo audit` and `cargo deny` pass on both trees.
 
 ### Fixed
 

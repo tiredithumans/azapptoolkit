@@ -379,17 +379,16 @@ check: _stub-frontend-dist
 # no `--manifest-path` and errors on a tree with no report, so it is not used here.
 #
 # Known today (web-rs only): proc-macro-error2 2.0.1, E0365 "extern crate
-# `proc_macro` is private" (rust#127909). Four proc-macros depend on it (from
+# `proc_macro` is private" (rust#127909); it also prints on every web-rs build,
+# `just dev` included. Leptos has dropped it (leptos 0.8.22: rstml 0.13, no
+# syn_derive; reactive_stores 0.4.4), so one path is left (from
 # `cargo tree -i proc-macro-error2 --target all` in web-rs):
-#   - leptos_macro 0.8.17 directly (leptos's `view!`);
-#   - syn_derive 0.2 <- rstml 0.12 <- leptos_macro / leptos_hot_reload;
-#   - reactive_stores_macro 0.4.3 <- reactive_stores 0.4.3 <- tachys (leptos's own);
 #   - reactive_stores_macro 0.2.6 <- reactive_stores 0.2.5 <- thaw_utils.
-# No semver update removes it. The exits are a fixed proc-macro-error2 release,
-# or leptos (leptos_macro, rstml, reactive_stores) AND thaw all dropping it —
-# one upstream alone does not clear the warning. The fallback is a
-# `[patch.crates-io]` of proc-macro-error2 to a fixed fork (plus a deny.toml
-# `allow-git` entry), which covers all four paths at once.
+# Thaw's main branch still pins reactive_stores 0.2 (no release since
+# 0.5.0-beta), and proc-macro-error2's repo is archived (RUSTSEC-2026-0173)
+# with its one-line fix unmerged, so no release will clear it. The exits are a
+# thaw release on reactive_stores 0.4, or a `[patch.crates-io]` of
+# proc-macro-error2 to a fixed copy (plus a deny.toml entry for its source).
 
 # Future-incompat report for both trees (not a gate) — run before a toolchain bump.
 future-incompat: _stub-frontend-dist
