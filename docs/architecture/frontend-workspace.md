@@ -201,6 +201,37 @@ surfaces reuse it rather than re-implementing the markup.
   chips do. An action column's header is `""` in `DataTable`, which renders a `.visually-hidden`
   "Actions"; a hand-built table writes the same span into its empty `<th>`.
 
+## Responsive layout
+
+The desktop window runs from 900×600 (`minWidth`/`minHeight` in `tauri.conf.json`) to maximized,
+and the layout should neither clip at the narrow end nor leave empty gutters at the wide one. It
+gets there with intrinsic CSS rather than a ladder of breakpoints:
+
+- **Flow, don't overflow.** Toolbars, action rows (`.actions-row`, `.list-header-actions`, the
+  list select/sort bars, …) and tab strips (`.ui-tabs`) `flex-wrap` — beside a title
+  (`.row-between > .actions-row`) the buttons keep their width so the title wraps first. Grid
+  tracks that hold content are `minmax(0, 1fr)` (the comments at `.shell__main` and
+  `.workspace__panes` say why); card and section groups are
+  `repeat(auto-fill|auto-fit, minmax(min(100%, N), 1fr))`, so they add a column when the room is
+  there. The one thing that must NOT wrap is a virtualized list row (`.app-list__row`): it is
+  positioned at a fixed `constants::ROW_HEIGHT`.
+- **Caps scale.** Widths that used to be fixed take `clamp()`/`min()` or a layout token in `:root`:
+  `--gutter` (content and topbar side padding), `--page-max` (tool pages, Access Readiness),
+  `--form-max` (Settings, Permission Tester), `--list-max-h` / `--list-max-h-sm` (scrolling
+  picker lists, which follow the window height). Modals, the global search, the tenant pill and
+  dock chips clamp between their old size and a wider one. Intro prose inside a capped page
+  keeps a `100ch` measure.
+- **One width breakpoint reaches the desktop:** `max-width: 1199px` collapses the nav to the icon
+  rail, so the content area never drops below ~960 px with labels showing. The 740/560/480 px
+  blocks are below the window minimum — they serve the GitHub Pages demo on phones only.
+- **No container queries.** `ModalShell` renders its dialog inline, inside the view that opened it,
+  and a query container gets layout containment, which makes it the containing block of every
+  `position: fixed` descendant: a pane that was a container would pin its dialog's scrim to the
+  pane. Pinned by `stylesheet_coverage.rs::no_container_queries`.
+
+No GUI test loads `styles.css`, so none of this is behaviourally tested: check a layout change by
+building the demo (`just web-build-pages /`) and resizing it, or with `just dev`.
+
 ## The open-items workspace (one shared working set)
 
 The three list views (App Registrations / Enterprise Apps / Managed Identities) render full-width;
