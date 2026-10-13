@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::audit::MAILBOX_SCOPING_UNRESOLVED;
 use crate::components::bulk_action_bar::BulkActionBar;
@@ -70,7 +70,7 @@ pub(crate) fn FindingsPane() -> impl IntoView {
             {move || {
                 let Some(gs) = groups.get() else {
                     return view! {
-                        <Body1>"Run an audit to populate the findings."</Body1>
+                        <span class="ui-text">"Run an audit to populate the findings."</span>
                     }
                         .into_any();
                 };

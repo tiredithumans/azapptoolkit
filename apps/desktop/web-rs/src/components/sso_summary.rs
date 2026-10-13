@@ -5,7 +5,7 @@
 //! Used by both the wizard's final step and the enterprise-app detail "SSO" tab.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::sso::{OidcSsoSummary, SamlSsoSummary};
 use crate::components::ui::{Callout, CopyBlock, CopyIconButton};
@@ -155,9 +155,9 @@ pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
                 .then(|| {
                     view! {
                         <Callout tone="warn" role="status">
-                            <Body1>
+                            <span class="ui-text">
                                 "The application was created, but not everything you asked for was applied:"
-                            </Body1>
+                            </span>
                             <ul class="warnings">
                                 {warnings
                                     .into_iter()
@@ -167,9 +167,9 @@ pub fn SamlSummaryView(summary: SamlSsoSummary) -> impl IntoView {
                         </Callout>
                     }
                 })}
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Share these values with the application owner to finish the SAML integration."
-            </Body1>
+            </span>
             <CopyAllButton text=all_text />
             {fields
                 .into_iter()
@@ -218,9 +218,9 @@ pub fn OidcSummaryView(summary: OidcSsoSummary) -> impl IntoView {
     let all_text = owner_summary_text("OpenID Connect single sign-on details", &fields, note);
     view! {
         <div class="sso-summary">
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Share these values with the application owner to finish the OIDC integration."
-            </Body1>
+            </span>
             <CopyAllButton text=all_text />
             {fields
                 .into_iter()

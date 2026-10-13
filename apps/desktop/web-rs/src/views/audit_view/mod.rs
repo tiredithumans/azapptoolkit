@@ -23,7 +23,6 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, RiskLevel};
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::icon::IconName;
@@ -233,7 +232,7 @@ pub fn AuditAppsPane() -> impl IntoView {
             <SearchInput value=search placeholder="Filter by name or appId…" />
             {move || {
                 if total_items.get().is_none() {
-                    return view! { <Body1>"Run an audit to populate this view."</Body1> }
+                    return view! { <span class="ui-text">"Run an audit to populate this view."</span> }
                         .into_any();
                 }
                 // The table shell renders once per scan; the count line and the

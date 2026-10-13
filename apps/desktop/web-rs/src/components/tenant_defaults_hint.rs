@@ -9,7 +9,6 @@
 //! opens Settings already on the tab that holds the setting.
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::state::use_session;
 
@@ -30,12 +29,12 @@ pub fn OwnerDefaultsHint(
 ) -> impl IntoView {
     let session = use_session();
     view! {
-        <Body1 class=class>
+        <span class=format!("ui-text {class}")>
             "No default owners configured — "
             <button class="link-btn" on:click=move |_| session.open_settings(tab)>
                 "set them in Settings"
             </button>
             "."
-        </Body1>
+        </span>
     }
 }

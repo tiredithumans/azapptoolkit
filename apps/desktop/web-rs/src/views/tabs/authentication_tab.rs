@@ -20,10 +20,10 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::applications::{self, ApplicationAuthenticationDto, ApplicationDetail};
-use crate::components::ui::{DetailLoadError, DetailSkeleton, FormError};
+use crate::components::ui::{DetailLoadError, DetailSkeleton, FormError, Spinner};
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -167,9 +167,9 @@ fn AuthenticationForm(
 
     view! {
         <div class="form-grid">
-            <Body1>
+            <span class="ui-text">
                 "Reply (redirect) URIs. Wildcards aren't allowed; use https (or http only for localhost) or a custom scheme for installed apps."
-            </Body1>
+            </span>
             <UriListEditor
                 state=web
                 class="uri-list--web"
@@ -228,7 +228,7 @@ fn AuthenticationForm(
                 >
                     {move || {
                         if cmd.busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                            view! { <Spinner /> }.into_any()
                         } else {
                             view! { "Save" }.into_any()
                         }

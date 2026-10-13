@@ -14,7 +14,6 @@ pub use detail_window::ManagedIdentityDetailWindow;
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::components::icon::IconName;
 use crate::components::list_scaffold::ListScaffold;
@@ -136,9 +135,9 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                         />
                     </div>
                 </SectionHeader>
-                <Body1 class="mi-view__intro">
+                <span class="ui-text mi-view__intro">
                     "Grant Microsoft Graph (or another resource) application permissions to a managed identity. Permissions you list (e.g. Mail.Read) are assigned to the selected identity's service principal."
-                </Body1>
+                </span>
             </div>
             <div class="mi-view__body">
                 <div class="mi-view__list">

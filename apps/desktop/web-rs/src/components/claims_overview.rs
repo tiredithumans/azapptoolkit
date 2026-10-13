@@ -4,7 +4,6 @@
 //! effect (`commands::sso::claims_view`); this only renders it.
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::bindings::sso::{ClaimRowDto, ClaimsSource, ClaimsViewDto};
 use crate::components::ui::{Callout, DataTable};
@@ -80,9 +79,9 @@ pub fn ClaimsOverview(view: ClaimsViewDto) -> impl IntoView {
                 empty_message="No additional claims."
                 row=claim_row
             />
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Read from the claims policy that is in effect, as the admin center shows it."
-            </Body1>
+            </span>
         </div>
     }
 }

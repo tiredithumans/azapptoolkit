@@ -4,14 +4,14 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
 use crate::components::app_site_access_panel::site_sweep_cap_message;
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, SearchInput, ShowMore};
+use crate::components::ui::{Callout, ProgressBar, SearchInput, ShowMore};
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -219,9 +219,9 @@ pub(super) fn SitesPanel() -> impl IntoView {
     };
 
     view! {
-        <Body1>
+        <span class="ui-text">
             "Scans every enumerable site's application permissions; search by app to see its granted sites (Sites.Selected), or by site to see who can touch it."
-        </Body1>
+        </span>
         <div class="actions-row">
             {move || {
                 if scanning.get() {
@@ -274,7 +274,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
                     view! {
                         <div class="audit-progress">
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <Body1>
+                            <span class="ui-text">
                                 {format!(
                                     "{} / {} sites{}{}",
                                     p.done,
@@ -282,7 +282,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
                                     p.current_site.as_deref().map(|s| format!(" — {s}")).unwrap_or_default(),
                                     if p.cancelled { " (cancelling…)" } else { "" },
                                 )}
-                            </Body1>
+                            </span>
                         </div>
                     }
                 })
@@ -293,7 +293,7 @@ pub(super) fn SitesPanel() -> impl IntoView {
                 .map(|e| {
                     view! {
                         <Callout tone="warn">
-                            <Body1>{e}</Body1>
+                            <span class="ui-text">{e}</span>
                             {consent_required
                                 .get()
                                 .then(|| {
@@ -316,9 +316,9 @@ pub(super) fn SitesPanel() -> impl IntoView {
             if result.with(|r| r.is_none()) {
                 return if !scanning.get() {
                     view! {
-                        <Body1>
+                        <span class="ui-text">
                             "No scan yet for this tenant. Scanning reads every site's application permissions with the signed-in user's SharePoint admin rights — it can take a while on large tenants and can be cancelled anytime."
-                        </Body1>
+                        </span>
                     }
                         .into_any()
                 } else {
@@ -337,14 +337,14 @@ pub(super) fn SitesPanel() -> impl IntoView {
                         .with(|r| r.as_ref().filter(|r| r.truncated).map(|r| r.total_sites))
                         .map(|cap| view! { <Callout tone="warn">{site_sweep_cap_message(cap)}</Callout> })
                 }}
-                <Body1 class="page__summary">{move || summary.get().unwrap_or_default()}</Body1>
+                <span class="ui-text page__summary">{move || summary.get().unwrap_or_default()}</span>
                 <Show
                     when=move || filtered_rows.with(|r| !r.is_empty())
                     fallback=|| {
                         view! {
-                            <Body1>
+                            <span class="ui-text">
                                 "No application grants match. Sites without app permissions don't produce rows — only the Sites.Selected model creates per-site grants (org-wide Sites.* holders reach every site without appearing here; see the Security audit for those)."
-                            </Body1>
+                            </span>
                         }
                     }
                 >

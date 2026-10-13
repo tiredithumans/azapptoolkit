@@ -17,10 +17,10 @@
 //! operator commits by typing the group's name.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Input};
 
 use crate::bindings::exchange::{self, RetiredScopeGroupDto};
-use crate::components::ui::{Callout, FormError};
+use crate::components::ui::{Callout, FormError, Spinner};
 use crate::state::use_session;
 
 /// The label an operator recognises the group by, falling back to the DN — which
@@ -48,9 +48,9 @@ pub fn RetiredScopeGroups(
     }
     view! {
         <Callout tone="info" role="status">
-            <Body1>
+            <span class="ui-text">
                 "This app's mailboxes now come from the toolkit-managed group. Each group below was a previous scope source, left in place for you to retire — with whatever still references it, as far as Exchange can be asked."
-            </Body1>
+            </span>
             <ul class="warnings">
                 {groups
                     .into_iter()
@@ -218,7 +218,7 @@ fn RetiredGroupRow(
                             >
                                 {move || {
                                     if busy.get() {
-                                        view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                        view! { <Spinner /> }
                                             .into_any()
                                     } else {
                                         view! { "Delete permanently" }.into_any()

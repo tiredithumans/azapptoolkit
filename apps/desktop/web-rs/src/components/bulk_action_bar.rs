@@ -24,13 +24,13 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar, Textarea};
+use thaw::{Button, ButtonAppearance, Input, Textarea};
 
 use crate::bindings::applications;
 use crate::bindings::bulk;
 use crate::bindings::events;
 use crate::components::group_autocomplete::MailboxGroupsField;
-use crate::components::ui::{Callout, FormError};
+use crate::components::ui::{Callout, FormError, ProgressBar};
 use crate::constants::RENDER_PAGE;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -458,7 +458,7 @@ pub fn BulkProgressRow(
     view! {
         <ProgressBar value=fraction />
         <div class="actions-row">
-            <Body1>
+            <span class="ui-text">
                 {move || match progress.get() {
                     Some(p) if p.total > 0 => {
                         // "Working… (12/40) — Contoso API", the DR restore's
@@ -472,7 +472,7 @@ pub fn BulkProgressRow(
                     }
                     _ => "Working…".to_string(),
                 }}
-            </Body1>
+            </span>
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Subtle)
                 on_click=Box::new(do_cancel)
@@ -977,9 +977,9 @@ pub fn BulkActionBar(
             <div class="bulk-action-bar">
                 <Show when=has_selection fallback=|| ()>
                     <div class="bulk-action-bar__actions">
-                        <Body1 class="bulk-action-bar__count">
+                        <span class="ui-text bulk-action-bar__count">
                             {move || format!("{} selected", selection.with(HashSet::len))}
-                        </Body1>
+                        </span>
                         {move || {
                             actions
                                 .get()
@@ -1003,9 +1003,9 @@ pub fn BulkActionBar(
                             (!busy.get() && bulk_running.get())
                                 .then(|| {
                                     view! {
-                                        <Body1 class="muted">
+                                        <span class="ui-text muted">
                                             "Another bulk action is still running — wait for it to finish."
-                                        </Body1>
+                                        </span>
                                     }
                                 })
                         }}
@@ -1058,9 +1058,9 @@ pub fn BulkActionBar(
                             let retry_n = retry.len();
                             view! {
                                 <div class="bulk-failures">
-                                    <Body1 class="bulk-failures__title">
+                                    <span class="ui-text bulk-failures__title">
                                         {format!("{} failed:", count_noun(fs.len(), "item", "items"))}
-                                    </Body1>
+                                    </span>
                                     <ul class="bulk-failures__list">
                                         {fs
                                             .into_iter()
@@ -1223,11 +1223,11 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
     // The description reads as a warning exactly where the operator must type
     // a keyword.
     let desc_cls = if matches!(spec.confirm, Confirm::Keyword(_)) {
-        "bulk-action__danger"
+        "ui-text bulk-action__danger"
     } else {
-        ""
+        "ui-text"
     };
-    let description = view! { <Body1 class=desc_cls>{move || describe(n())}</Body1> };
+    let description = view! { <span class=desc_cls>{move || describe(n())}</span> };
 
     // Driven by the action's `Confirm` requirement, not by naming the actions
     // that happen to have one today: an action added with `Confirm::Keyword`
@@ -1236,9 +1236,9 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
     let input: AnyView = match spec.confirm {
         Confirm::Keyword(keyword) => view! {
             <div class="confirm-gate">
-                <Body1 class="confirm-gate__label">
+                <span class="ui-text confirm-gate__label">
                     "Type "<strong>{keyword}</strong>" to confirm."
-                </Body1>
+                </span>
                 <Input value=confirm_text placeholder=keyword />
             </div>
         }
@@ -1270,7 +1270,7 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
                     {move || match owner_pick.get() {
                         Some((_, label)) => view! {
                             <div class="actions-row">
-                                <Body1>"Adding: "<strong>{label}</strong></Body1>
+                                <span class="ui-text">"Adding: "<strong>{label}</strong></span>
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Subtle)
                                     on_click=Box::new(move |_| owner_pick.set(None))

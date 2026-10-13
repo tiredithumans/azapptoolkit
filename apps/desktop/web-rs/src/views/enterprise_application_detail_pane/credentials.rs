@@ -64,9 +64,9 @@ pub(super) fn CredentialsContent(
             <h4>"Client secrets"</h4>
             {secrets_view}
             <h4>"Certificates"</h4>
-            <Body1 class="mi-view__intro">
+            <span class="ui-text mi-view__intro">
                 "For SAML single sign-on apps these are the token-signing certificates — watch the expiry to avoid SSO outages."
-            </Body1>
+            </span>
             {certs_view}
         </section>
     }

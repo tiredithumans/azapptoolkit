@@ -12,7 +12,6 @@ use std::future::Future;
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::components::export_menu::ExportMenu;
 use crate::components::icon::IconName;
@@ -340,7 +339,7 @@ where
                             || matched.with(Vec::is_empty);
                         if hidden { "none" } else { "contents" }
                     }>
-                        <Body1>
+                        <span class="ui-text">
                             {move || {
                                 format!(
                                     "{} of {} {} match",
@@ -349,7 +348,7 @@ where
                                     noun.get_value(),
                                 )
                             }}
-                        </Body1>
+                        </span>
                         <table class="data-table">
                             <thead>
                                 <tr>{header_cells}</tr>

@@ -68,9 +68,9 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                     Err(e) if e.is_consent_required() => {
                         view! {
                             <Callout tone="warn">
-                                <Body1>
+                                <span class="ui-text">
                                     "Provisioning status needs admin consent to Synchronization.Read.All."
-                                </Body1>
+                                </span>
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -89,10 +89,10 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                     Err(e) if e.code == "forbidden" => {
                         view! {
                             <Callout tone="warn">
-                                <Body1>
+                                <span class="ui-text">
                                     "Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
-                                </Body1>
-                                <Body1>{e.message}</Body1>
+                                </span>
+                                <span class="ui-text">{e.message}</span>
                             </Callout>
                         }
                             .into_any()
@@ -108,7 +108,7 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                     }
                     Ok(list) if list.is_empty() => {
                         view! {
-                            <Body1>"This application has no SCIM provisioning configured."</Body1>
+                            <span class="ui-text">"This application has no SCIM provisioning configured."</span>
                         }
                             .into_any()
                     }

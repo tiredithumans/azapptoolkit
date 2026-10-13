@@ -234,7 +234,7 @@ pub(super) fn OwnersContent(
                 >
                     {move || {
                         if adding_defaults.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                            view! { <Spinner /> }
                                 .into_any()
                         } else {
                             view! { "Add Default Owners" }.into_any()
@@ -255,7 +255,7 @@ pub(super) fn OwnersContent(
                     busy.with(|b| b.as_deref() == Some(id.as_str()))
                 })
             />
-            {move || error.get().map(|e| view! { <Body1 class="app-detail__error">{e}</Body1> })}
+            {move || error.get().map(|e| view! { <span class="ui-text app-detail__error">{e}</span> })}
             <Show when=move || no_owner_defaults.get() fallback=|| ()>
                 <OwnerDefaultsHint class="app-detail__error" tab="enterprise" />
             </Show>

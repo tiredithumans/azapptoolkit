@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::constants::RENDER_PAGE;
 
@@ -40,7 +40,7 @@ pub fn ShowMore(
         let next = next_page_size(total, limit);
         view! {
             <div class="show-more">
-                <Body1>{format!("Showing {limit} of {total} {noun}")}</Body1>
+                <span class="ui-text">{format!("Showing {limit} of {total} {noun}")}</span>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(move |_| render_limit.update(|n| *n += RENDER_PAGE))

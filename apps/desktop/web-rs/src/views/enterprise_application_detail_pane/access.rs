@@ -644,9 +644,9 @@ fn GroupMembershipSection(#[prop(into)] sp_id: Signal<String>) -> impl IntoView 
                     if e.is_consent_required() {
                         view! {
                             <Callout tone="warn">
-                                <Body1>
+                                <span class="ui-text">
                                     {format!("Group membership changes need consent — {}", e.message)}
-                                </Body1>
+                                </span>
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)

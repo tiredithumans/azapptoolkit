@@ -1,5 +1,4 @@
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 
@@ -37,7 +36,7 @@ where
     RowFn: Fn(T) -> AnyView + 'static,
 {
     if rows.is_empty() {
-        return view! { <Body1 class="data-table__empty">{empty_message}</Body1> }.into_any();
+        return view! { <span class="ui-text data-table__empty">{empty_message}</span> }.into_any();
     }
     let tbody_ref: NodeRef<leptos::html::Tbody> = NodeRef::new();
     // Rows are fixed for this table instance, so the roving tabindex is seeded

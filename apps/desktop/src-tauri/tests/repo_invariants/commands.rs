@@ -121,7 +121,16 @@ fn status_pill_markup_lives_only_in_the_badge_primitive() {
 /// tab load, or a failed backup appeared on screen without a sound, and a
 /// screen-reader user was left on a re-enabled button with no idea why.
 /// `FormError` pairs the class with `role="alert"`; writing the markup directly
-/// is how the role goes missing again.
+/// is how the role goes missing again. Since Thaw's `Body1` was retired the
+/// primitive renders `<span class="ui-text form-error">`, so the scan catches
+/// that span as well as the old `Body1` spelling.
+/// Hand-written spellings of the primitive's markup.
+const INLINE_ERROR_MARKUP: &[&str] = &[
+    "<Body1 class=\"form-error\"",
+    "<span class=\"form-error\"",
+    "<span class=\"ui-text form-error\"",
+];
+
 #[test]
 fn inline_error_markup_lives_only_in_the_form_error_primitive() {
     let mut offenders: Vec<String> = Vec::new();
@@ -134,7 +143,7 @@ fn inline_error_markup_lives_only_in_the_form_error_primitive() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            if line.contains("<Body1 class=\"form-error\"") {
+            if INLINE_ERROR_MARKUP.iter().any(|m| line.contains(m)) {
                 offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
             }
         }

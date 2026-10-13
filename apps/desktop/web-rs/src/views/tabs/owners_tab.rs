@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::{self, ApplicationDetail};
 use crate::components::directory_search::DirectorySearch;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
-use crate::components::ui::{DataTable, FormError};
+use crate::components::ui::{DataTable, FormError, Spinner};
 use crate::state::use_session;
 use crate::util::count_noun;
 use crate::views::dialogs::add_owner::{DefaultOwnersOutcome, add_default_owners};
@@ -348,7 +348,7 @@ pub fn OwnersTab(
                                                 {move || {
                                                     if removing.with(|r| r.as_deref() == Some(id_label.as_str())) {
                                                         view! {
-                                                            <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                            <Spinner />
                                                         }
                                                             .into_any()
                                                     } else {
@@ -368,9 +368,9 @@ pub fn OwnersTab(
             <Show when=move || replacing.get() fallback=|| view! { <></> }>
                 <section class="replace-owners">
                     <h3>"Target owner set (" {move || staged.with(|s| s.len())} ")"</h3>
-                    <Body1>
+                    <span class="ui-text">
                         "Apply sets the owners to exactly this list — any current owner not listed is removed."
-                    </Body1>
+                    </span>
                     {move || {
                         let items = staged.get();
                         if items.is_empty() {
@@ -429,7 +429,7 @@ pub fn OwnersTab(
                         >
                             {move || {
                                 if applying.get() {
-                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    view! { <Spinner /> }
                                         .into_any()
                                 } else {
                                     view! { "Apply — set as only owners" }.into_any()
@@ -458,7 +458,7 @@ pub fn OwnersTab(
                         >
                             {move || {
                                 if adding_defaults.get() {
-                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    view! { <Spinner /> }
                                         .into_any()
                                 } else {
                                     view! { "Add Default Owners" }.into_any()

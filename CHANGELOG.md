@@ -5,6 +5,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Changed
+
+- **A new client secret's custom start and end dates use the system date picker**, the same one
+  the lists' "Created before" and "Created after" filters use, and screen readers now announce
+  each field by name.
+
 ## [0.34.0] - 2026-10-13
 
 ### Changed

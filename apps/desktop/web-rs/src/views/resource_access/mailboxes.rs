@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::AuditPrincipalKind;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, ProgressBar};
+use thaw::{Button, ButtonAppearance, Input};
 
 use crate::bindings::events;
 use crate::bindings::permission_tester::{
     self, AccessVerdict, MailboxProbeProgress, MailboxReacherRow, MailboxReachersResult,
 };
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Badge, Callout, ShowMore};
+use crate::components::ui::{Badge, Callout, ProgressBar, ShowMore};
 use crate::constants::*;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
@@ -224,9 +224,9 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
     };
 
     view! {
-        <Body1>
+        <span class="ui-text">
             "Lists every application holding a mail-scopable Graph permission and tests each against one mailbox via Exchange's authoritative authorization check — \"who can read this mailbox?\"."
-        </Body1>
+        </span>
         <div class="actions-row">
             <div class="page__search">
                 <Input value=mailbox placeholder="Mailbox address (e.g. shared@contoso.com)…" />
@@ -275,7 +275,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                     view! {
                         <div class="audit-progress">
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <Body1>
+                            <span class="ui-text">
                                 {format!(
                                     "{} / {} candidate apps{}{}",
                                     p.done,
@@ -283,7 +283,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                                     p.current_app.as_deref().map(|s| format!(" — {s}")).unwrap_or_default(),
                                     if p.cancelled { " (cancelling…)" } else { "" },
                                 )}
-                            </Body1>
+                            </span>
                         </div>
                     }
                 })
@@ -291,7 +291,7 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
         {move || {
             error
                 .get()
-                .map(|e| view! { <Callout tone="warn"><Body1>{e}</Body1></Callout> })
+                .map(|e| view! { <Callout tone="warn"><span class="ui-text">{e}</span></Callout> })
         }}
         {move || {
             let Some(r) = result.get() else {
@@ -302,12 +302,12 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             // the one in the file are one string, not two that can drift apart.
             let summary = summary.get().unwrap_or_default();
             view! {
-                <Body1 class="page__summary">{summary}</Body1>
+                <span class="ui-text page__summary">{summary}</span>
                 {if r.rows.is_empty() {
                     view! {
-                        <Body1>
+                        <span class="ui-text">
                             "No application in this tenant holds a mail-scopable Graph application permission or an Exchange RBAC-for-Applications registration — nothing can read mailboxes app-only via Graph."
-                        </Body1>
+                        </span>
                     }
                         .into_any()
                 } else {
@@ -326,14 +326,14 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                         {if rows.is_empty() {
                             // Everything was confirmed no-access (all hidden).
                             view! {
-                                <Body1 class="page__summary">
+                                <span class="ui-text page__summary">
                                     {format!(
                                         "No application can reach “{}” — all {} candidate{} were checked and have no access.",
                                         r.mailbox,
                                         no_access,
                                         plural(no_access),
                                     )}
-                                </Body1>
+                                </span>
                             }
                                 .into_any()
                         } else {

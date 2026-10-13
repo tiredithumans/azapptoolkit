@@ -2,11 +2,11 @@
 //! create-SP toggle.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
 
 use crate::bindings::applications::{self, CreateApplicationInput};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::views::tabs::overview_tab::SIGN_IN_AUDIENCES;
 
@@ -66,9 +66,9 @@ pub fn CreateAppDialog(
                         .with(|d| d.trim().is_empty())
                         .then(|| {
                             view! {
-                                <Body1 class="hint hint--field">
+                                <span class="ui-text hint hint--field">
                                     "Enter a display name to create the app."
-                                </Body1>
+                                </span>
                             }
                         })
                 }}
@@ -118,7 +118,7 @@ pub fn CreateAppDialog(
                     {move || {
                         if cmd.busy.get() {
                             view! {
-                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                <Spinner />
                             }
                                 .into_any()
                         } else {

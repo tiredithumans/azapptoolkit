@@ -13,13 +13,13 @@
 //! each open is a fresh component — no manual state reset needed.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::enterprise_application::{
     self, ApplicationTemplateDto, GalleryAppSummary, GallerySearchResultsDto,
 };
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
@@ -149,11 +149,11 @@ pub fn GalleryDialog(
                             <Field label="Name for this application">
                                 <Input value=name />
                             </Field>
-                            <Body1 class="hint">
+                            <span class="ui-text hint">
                                 "This creates the enterprise application from the gallery \
                                  template. The new application then opens on its SSO tab \
                                  to finish single sign-on."
-                            </Body1>
+                            </span>
                             {move || {
                                 cmd.error
                                     .get()
@@ -178,9 +178,7 @@ pub fn GalleryDialog(
                                     {move || {
                                         if cmd.busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| {
-                                                    SpinnerSize::Tiny
-                                                }) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {
@@ -202,10 +200,7 @@ pub fn GalleryDialog(
                             </Field>
                             <Suspense fallback=move || {
                                 view! {
-                                    <Spinner
-                                        size=Signal::derive(|| SpinnerSize::Tiny)
-                                        label="Searching…"
-                                    />
+                                    <Spinner label="Searching…" />
                                 }
                             }>
                                 {move || {
@@ -230,9 +225,9 @@ pub fn GalleryDialog(
                                         // "start typing" prompt.
                                         let Some(found) = found else {
                                             return view! {
-                                                <Body1 class="hint">
+                                                <span class="ui-text hint">
                                                     "Type an app name to search the gallery."
-                                                </Body1>
+                                                </span>
                                             }
                                                 .into_any();
                                         };
@@ -241,7 +236,7 @@ pub fn GalleryDialog(
                                             let msg = format!(
                                                 "No gallery apps match \u{201c}{asked}\u{201d}.",
                                             );
-                                            return view! { <Body1 class="hint">{msg}</Body1> }
+                                            return view! { <span class="ui-text hint">{msg}</span> }
                                                 .into_any();
                                         }
                                         let narrowed = found
@@ -299,9 +294,9 @@ pub fn GalleryDialog(
                                             {narrowed
                                                 .map(|n| {
                                                     view! {
-                                                        <Body1 class="hint gallery-results__narrowed">
+                                                        <span class="ui-text hint gallery-results__narrowed">
                                                             {n}
-                                                        </Body1>
+                                                        </span>
                                                     }
                                                 })}
                                         }

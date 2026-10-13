@@ -11,12 +11,12 @@
 //! `group_state` so it can read the resolved group (e.g. its SMTP for a grant).
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Textarea};
 
 use crate::bindings::auth;
 use crate::bindings::exchange;
-use crate::components::ui::Callout;
 use crate::components::ui::{Badge, BadgeTone, FormError, SkeletonList};
+use crate::components::ui::{Callout, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
@@ -228,11 +228,11 @@ pub fn ManagedScopeGroupPanel(
                                     " "
                                     <Badge label="Exists" tone=BadgeTone::Ok />
                                 </div>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     {format!(
                                         "{in_scope} in scope — the app can reach exactly these through the scoped grant.",
                                     )}
-                                </Body1>
+                                </span>
                             </div>
                         }
                             .into_any()
@@ -251,7 +251,7 @@ pub fn ManagedScopeGroupPanel(
                 >
                     {move || {
                         if group_cmd.busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                            view! { <Spinner /> }.into_any()
                         } else {
                             view! { "Add mailboxes" }.into_any()
                         }
@@ -268,7 +268,7 @@ pub fn ManagedScopeGroupPanel(
                         let needs_consent = e.is_consent_required();
                         view! {
                             <Callout tone="warn">
-                                <Body1>{e.message}</Body1>
+                                <span class="ui-text">{e.message}</span>
                                 {needs_consent
                                     .then(|| {
                                         view! {
@@ -290,9 +290,9 @@ pub fn ManagedScopeGroupPanel(
                     Some(Ok(g)) if !g.exists => ().into_any(),
                     Some(Ok(g)) if g.members.is_empty() => {
                         view! {
-                            <Body1 class="hint">
+                            <span class="ui-text hint">
                                 "No mailboxes in scope yet — add at least one above."
-                            </Body1>
+                            </span>
                         }
                             .into_any()
                     }

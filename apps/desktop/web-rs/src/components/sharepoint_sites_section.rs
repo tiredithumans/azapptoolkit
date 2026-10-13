@@ -15,13 +15,13 @@
 //! notes survive.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::sharepoint::GrantSiteAccessResult;
 use crate::bindings::{auth, sharepoint};
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
-use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError};
+use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -172,9 +172,9 @@ pub fn SharePointSitesSection(
             capability_key="sharepoint_sites_selected"
             open=open
         >
-            <Body1>
+            <span class="ui-text">
                 "Grant this application access to a specific SharePoint site instead of the whole tenant (the Sites.Selected model). Enter the site URL (e.g. https://contoso.sharepoint.com/sites/Marketing). Requires the app to hold the Sites.Selected permission, and you to be a SharePoint administrator or site owner."
-            </Body1>
+            </span>
 
             <hr />
             // Which sites this app already reaches, and with what roles —
@@ -226,7 +226,7 @@ pub fn SharePointSitesSection(
                                         .get()
                                         .then(|| {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                         })
                                 }}
@@ -272,7 +272,7 @@ pub fn SharePointSitesSection(
                             <strong>"Current site permissions"</strong>
                             <Suspense fallback=move || {
                                 view! {
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" />
+                                    <Spinner label="Loading…" />
                                 }
                             }>
                                 {move || Suspend::new(async move {

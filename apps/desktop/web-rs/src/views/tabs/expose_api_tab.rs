@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::expose_api::{
@@ -24,7 +24,7 @@ use crate::bindings::expose_api::{
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError,
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError, Spinner,
 };
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -385,9 +385,9 @@ fn ExposeApiLoaded(
                         "+ Add URI"
                     </Button>
                 </header>
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "The globally unique URI clients use to request tokens for this API (the audience). Usually api://{client-id}."
-                </Body1>
+                </span>
                 <DataTable
                     headers=vec!["URI", ""]
                     rows=dto.identifier_uris.clone()
@@ -429,9 +429,9 @@ fn ExposeApiLoaded(
                         "+ Add a scope"
                     </Button>
                 </header>
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Delegated permissions client applications can request when calling this API on a signed-in user's behalf."
-                </Body1>
+                </span>
                 <DataTable
                     headers=vec![
                         "Scope name",
@@ -506,9 +506,9 @@ fn ExposeApiLoaded(
                         "+ Add a client application"
                     </Button>
                 </header>
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Pre-authorized clients can request the selected scopes without the user being asked to consent. Only authorize clients you trust."
-                </Body1>
+                </span>
                 {
                     let names = dto.client_display_names.clone();
                     let by_id: std::collections::HashMap<String, String> = dto
@@ -590,9 +590,9 @@ fn ExposeApiLoaded(
                 busy=Signal::derive(move || uri_add_cmd.busy.get())
                 on_close=Callback::new(move |()| uri_open.set(false))
             >
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Use api://{client-id} (always accepted), or an https URI on a verified domain of this tenant."
-                </Body1>
+                </span>
                 <Field label="Application ID URI">
                     <Input value=uri_value />
                 </Field>
@@ -614,7 +614,7 @@ fn ExposeApiLoaded(
                     >
                         {move || {
                             if uri_add_cmd.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Save" }.into_any()
@@ -644,9 +644,9 @@ fn ExposeApiLoaded(
                 {
                     let hint_uri = scope_name_hint_uri.clone();
                     view! {
-                        <Body1 class="hint mono">
+                        <span class="ui-text hint mono">
                             {move || format!("{hint_uri}/{}", scope_value.get())}
-                        </Body1>
+                        </span>
                     }
                 }
                 <Field label="Who can consent">
@@ -693,7 +693,7 @@ fn ExposeApiLoaded(
                     >
                         {move || {
                             if scope_cmd.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Save" }.into_any()
@@ -721,14 +721,14 @@ fn ExposeApiLoaded(
                         let id = pre_client_id.get();
                         let heading = match client_name(&id) {
                             Some(n) => view! {
-                                <Body1>
+                                <span class="ui-text">
                                     <strong>{n}</strong>
                                     " "
                                     <span class="mono">{id}</span>
-                                </Body1>
+                                </span>
                             }
                                 .into_any(),
-                            None => view! { <Body1 class="mono">{id}</Body1> }.into_any(),
+                            None => view! { <span class="ui-text mono">{id}</span> }.into_any(),
                         };
                         heading
                     } else {
@@ -751,7 +751,7 @@ fn ExposeApiLoaded(
                                     .get()
                                     .filter(|(picked, _)| picked == id.trim())
                                     .map(|(_, name)| {
-                                        view! { <Body1 class="hint">{format!("Selected: {name}")}</Body1> }
+                                        view! { <span class="ui-text hint">{format!("Selected: {name}")}</span> }
                                     })
                             }}
                             <Field label="Client ID (application ID of the client app)">
@@ -760,9 +760,9 @@ fn ExposeApiLoaded(
                                     placeholder="00000000-0000-0000-0000-000000000000"
                                 />
                             </Field>
-                            <Body1 class="hint">
+                            <span class="ui-text hint">
                                 "A client registered in another tenant won't appear in search — paste its application ID."
-                            </Body1>
+                            </span>
                         }
                             .into_any()
                     }
@@ -821,7 +821,7 @@ fn ExposeApiLoaded(
                     >
                         {move || {
                             if pre_cmd.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Save" }.into_any()

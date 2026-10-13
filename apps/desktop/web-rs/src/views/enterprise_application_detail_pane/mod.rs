@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Card, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::auth;
 use crate::bindings::enterprise_application::{self, EnterpriseApplicationDetail};
@@ -21,7 +21,8 @@ use crate::components::requires_role::RequiresRole;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, TabBar, TabBarItem,
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, SkeletonList, Spinner, TabBar,
+    TabBarItem,
 };
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
 use crate::hooks::use_command::use_command;
@@ -94,7 +95,7 @@ pub fn EnterpriseApplicationDetailPane(
     let on_refresh = Callback::new(move |()| reload.update(|n| *n += 1));
 
     view! {
-        <Card class="app-detail">
+        <div class="app-detail">
             <Suspense fallback=move || {
                 view! {
                     <div class="app-detail__body">
@@ -141,7 +142,7 @@ pub fn EnterpriseApplicationDetailPane(
                     }
                 })}
             </Suspense>
-        </Card>
+        </div>
     }
 }
 

@@ -5,10 +5,10 @@
 //! when that name is the thing that is wrong.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::auth;
-use crate::components::ui::{Callout, Card};
+use crate::components::ui::{Callout, Card, Spinner};
 use crate::state::{Session, use_session};
 
 /// One silent attempt at reviving the previous session — the launch restore in
@@ -99,18 +99,18 @@ pub fn SignInScreen(
                     <span>"azapptoolkit"</span>
                 </div>
                 <h1 class="signin-card__title">"Sign in to your tenant"</h1>
-                <Body1>
+                <span class="ui-text">
                     "Use Entra ID to manage App Registrations, permissions, and run security audits."
-                </Body1>
+                </span>
                 {move || {
                     restore_unreachable
                         .get()
                         .then(|| {
                             view! {
                                 <Callout tone="warn" role="status">
-                                    <Body1>
+                                    <span class="ui-text">
                                         "Couldn't reach Entra ID to restore your session — check your network connection, then retry."
-                                    </Body1>
+                                    </span>
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         class="signin-restore-retry"
@@ -120,7 +120,7 @@ pub fn SignInScreen(
                                         {move || {
                                             if retrying.get() {
                                                 view! {
-                                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                    <Spinner />
                                                 }
                                                     .into_any()
                                             } else {
@@ -135,7 +135,7 @@ pub fn SignInScreen(
                 {(!tenant.is_empty())
                     .then(|| {
                         view! {
-                            <Body1 class="signin-hint">
+                            <span class="ui-text signin-hint">
                                 {format!("Signing in to {tenant} · ")}
                                 <button
                                     type="button"
@@ -144,7 +144,7 @@ pub fn SignInScreen(
                                 >
                                     "Change"
                                 </button>
-                            </Body1>
+                            </span>
                         }
                     })}
                 <Button
@@ -154,7 +154,7 @@ pub fn SignInScreen(
                 >
                     {move || {
                         if busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                            view! { <Spinner /> }
                                 .into_any()
                         } else {
                             view! { "Sign in with Entra ID" }.into_any()
@@ -166,9 +166,9 @@ pub fn SignInScreen(
                         .get()
                         .map(|(msg, code, hint)| {
                             view! {
-                                <Body1 class="signin-error">
+                                <span class="ui-text signin-error">
                                     {format!("Sign-in failed: {msg}")}
-                                </Body1>
+                                </span>
                                 {(!code.is_empty())
                                     .then(|| {
                                         view! {
@@ -177,7 +177,7 @@ pub fn SignInScreen(
                                             </span>
                                         }
                                     })}
-                                <Body1 class="signin-hint">{hint}</Body1>
+                                <span class="ui-text signin-hint">{hint}</span>
                             }
                         })
                 }}
@@ -205,7 +205,7 @@ pub fn RestoringSession() -> impl IntoView {
                     <span>"azapptoolkit"</span>
                 </div>
                 <h1 class="signin-card__title">"Restoring your session"</h1>
-                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                <Spinner />
             </Card>
         </main>
     }

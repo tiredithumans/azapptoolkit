@@ -23,11 +23,11 @@ use std::collections::HashSet;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::applications;
 use crate::bindings::search::GlobalSearchResults;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
@@ -210,7 +210,7 @@ pub fn DirectorySearch(
         }
         view! {
             <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Searching…" /> }
+                view! { <Spinner label="Searching…" /> }
             }>
                 {move || Suspend::new(async move {
                     let (scope, found) = match candidates.await {
@@ -229,7 +229,7 @@ pub fn DirectorySearch(
                         .collect();
                     if found.is_empty() {
                         return if show_no_matches {
-                            view! { <Body1>"No matches."</Body1> }.into_any()
+                            view! { <span class="ui-text">"No matches."</span> }.into_any()
                         } else {
                             ().into_any()
                         };

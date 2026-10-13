@@ -1,8 +1,8 @@
 use leptos::ev::MouseEvent;
 use leptos::prelude::*;
-use thaw::{Spinner, SpinnerSize};
 
 use crate::components::icon::{Icon, IconName};
+use crate::components::ui::Spinner;
 
 /// Square 32×32 button that wraps a single icon. `aria_label` is required for
 /// screen readers since the icon is decorative. When `busy` is true the button
@@ -59,7 +59,7 @@ pub fn IconButton(
         >
             {move || {
                 if is_busy() {
-                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                    view! { <Spinner /> }.into_any()
                 } else {
                     view! { <Icon name=icon size=size /> }.into_any()
                 }

@@ -20,14 +20,14 @@
 //! room.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use azapptoolkit_core::audit::RemediationAction;
 
 use crate::bindings::exchange::{self, AapMigrationReport};
 use crate::components::aap_migration_report::{AapMigrationReportView, AapMigrationStop};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::state::use_session;
 
 #[component]
@@ -130,17 +130,17 @@ pub fn MigrateLegacyScopeButton(
                 on_close=Callback::new(move |()| open.set(false))
                 wide=true
             >
-                <Body1>
+                <span class="ui-text">
                     "Replaces this app's legacy Application Access Policy with the current model: the policy group's mailboxes (every group's, if the app has several policies) are copied into the toolkit-managed group, a management scope is built over it, the scoped Exchange roles are assigned, and only then are the matching org-wide Microsoft Entra grants removed. The legacy policy is deleted last, and only once every grant it was confining has been re-scoped — anything left org-wide keeps its policy, because that policy is the only thing still restricting it. If a mailbox can't be verified in the managed group, the scope is built over the legacy group instead, so the app never loses reach. You must be an Exchange administrator."
-                </Body1>
+                </span>
                 <p class="muted">{detail.clone()}</p>
                 {move || {
                     busy.get()
                         .then(|| {
                             view! {
                                 <div class="actions-row">
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
-                                    <Body1>"Working…"</Body1>
+                                    <Spinner />
+                                    <span class="ui-text">"Working…"</span>
                                     <AapMigrationStop />
                                 </div>
                             }

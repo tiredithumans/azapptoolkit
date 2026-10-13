@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
@@ -55,9 +55,9 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
                     "Refresh"
                 </Button>
             </header>
-            <Body1>
+            <span class="ui-text">
                 "Conditional Access policies that target this application — as a resource (directly, or via an \"All apps\" / grouping include) or as a client (its service principal / workload-identity clients). Requires Policy.Read.All consent and an Entra ID P1/P2 license."
-            </Body1>
+            </span>
 
             <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
                 {move || Suspend::new(async move {

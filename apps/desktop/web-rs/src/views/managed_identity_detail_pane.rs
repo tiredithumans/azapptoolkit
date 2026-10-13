@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Input, Select, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Input, Select};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::SP_SITES_SELECTED;
@@ -28,7 +28,7 @@ use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
     Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, FormError, SkeletonList,
-    TabBar, TabBarItem,
+    Spinner, TabBar, TabBarItem,
 };
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
@@ -647,7 +647,7 @@ fn AssignAzureRolePanel(
                                     {move || {
                                         if busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {

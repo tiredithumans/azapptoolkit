@@ -20,7 +20,6 @@
 //! that failed outright, which a new token would not fix.
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
@@ -118,7 +117,7 @@ fn item_card(item: ReadinessItem, pim_url: Option<String>) -> impl IntoView {
     let show_remediation =
         item.role_verdict != Verdict::Have || item.scope_verdict != Verdict::Have;
     let remediation = show_remediation.then(|| {
-        view! { <Body1 class="readiness__remediation">{item.remediation.clone()}</Body1> }
+        view! { <span class="ui-text readiness__remediation">{item.remediation.clone()}</span> }
     });
     view! {
         <div class="readiness__item">
@@ -205,14 +204,14 @@ pub fn ReadinessView() -> impl IntoView {
     view! {
         <div class="readiness">
             <SectionHeader title="Access Readiness".to_string() crumb="Account".to_string() />
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \
                  checks what you currently hold against what each feature needs. A PIM role you \
                  haven't activated shows as Missing — use \"Open PIM\" under it to activate, \
                  then \"Refresh token\" (top right) — that re-applies your roles and re-runs \
                  this check."
-            </Body1>
+            </span>
             // Local boundary only: the three-plane check is slow (Entra + Azure
             // RBAC + Exchange), and without one this page sat blank while it ran.
             // Deliberately NOT hoisted app-wide — lib.rs warns against that.
@@ -221,7 +220,7 @@ pub fn ReadinessView() -> impl IntoView {
                 Suspend::new(async move {
                     match report.await {
                         None => {
-                            view! { <Body1>"Sign in to check access readiness."</Body1> }
+                            view! { <span class="ui-text">"Sign in to check access readiness."</span> }
                                 .into_any()
                         }
                         Some(Err(e)) => {

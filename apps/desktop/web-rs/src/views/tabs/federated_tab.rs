@@ -7,14 +7,14 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input, Select};
 
 use crate::bindings::applications::{
     self, AddFederatedCredentialInput, ApplicationDetail, FederatedCredentialDto,
     UpdateFederatedCredentialInput,
 };
 use crate::bindings::managed_identity;
-use crate::components::ui::{DataTable, DetailLoadError, FormError, SkeletonList};
+use crate::components::ui::{DataTable, DetailLoadError, FormError, SkeletonList, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -274,7 +274,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
     };
 
     let preview_line = move |label: &'static str, value: String| {
-        view! { <Body1 class="row-meta mono">{format!("{label}: {value}")}</Body1> }
+        view! { <span class="ui-text row-meta mono">{format!("{label}: {value}")}</span> }
     };
 
     view! {
@@ -291,9 +291,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                     {move || if add_open.get() { "Cancel" } else { "+ Add federated credential" }}
                 </Button>
             </header>
-            <Body1 class="mi-view__intro">
+            <span class="ui-text mi-view__intro">
                 "Lets an external OIDC workload (GitHub Actions, Kubernetes, …) authenticate as this app with no client secret. Up to 20 per app."
-            </Body1>
+            </span>
 
             <Show when=move || add_open.get() fallback=|| view! { <></> }>
                 <section class="federated-tab__add">
@@ -336,9 +336,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                     }
                                 })
                         }}
-                        <Body1 class="hint">
+                        <span class="ui-text hint">
                             "Values must exactly match the GitHub workflow configuration — pattern matching is not supported."
-                        </Body1>
+                        </span>
                     </Show>
 
                     <Show when=move || scenario.get() == "kubernetes" fallback=|| view! { <></> }>
@@ -358,7 +358,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                         fallback=|| view! { <></> }
                     >
                         <Suspense fallback=move || {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading managed identities…" /> }
+                            view! { <Spinner label="Loading managed identities…" /> }
                         }>
                             {move || Suspend::new(async move {
                                 match mis.await {
@@ -388,9 +388,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                             <Field label="Managed identity object (principal) ID">
                                                 <Input value=mi_selected placeholder="00000000-0000-0000-0000-000000000000" />
                                             </Field>
-                                            <Body1 class="hint">
+                                            <span class="ui-text hint">
                                                 "Couldn't list managed identities — paste the identity's object (principal) ID instead."
-                                            </Body1>
+                                            </span>
                                         }
                                             .into_any()
                                     }
@@ -409,9 +409,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                         <Field label="Audience">
                             <Input value=other_audience />
                         </Field>
-                        <Body1 class="hint">
+                        <span class="ui-text hint">
                             "Microsoft recommends keeping the default audience api://AzureADTokenExchange — only change it if the external provider requires another value."
-                        </Body1>
+                        </span>
                     </Show>
 
                     <Field label="Name (unique on this app; cannot be changed later)">
@@ -443,7 +443,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                         >
                             {move || {
                                 if cmd.busy.get() {
-                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    view! { <Spinner /> }
                                         .into_any()
                                 } else {
                                     view! { "Add" }.into_any()
@@ -464,9 +464,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                 .unwrap_or_default()
                         }}
                     </strong>
-                    <Body1 class="hint">
+                    <span class="ui-text hint">
                         "The name is immutable — to rename, remove the credential and add a new one."
-                    </Body1>
+                    </span>
                     <Field label="Issuer (OIDC issuer URL)">
                         <Input value=edit_issuer />
                     </Field>
@@ -494,7 +494,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                         >
                             {move || {
                                 if cmd.busy.get() {
-                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    view! { <Spinner /> }
                                         .into_any()
                                 } else {
                                     view! { "Save" }.into_any()

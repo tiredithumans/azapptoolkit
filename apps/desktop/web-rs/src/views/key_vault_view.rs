@@ -14,12 +14,12 @@
 //! the next tenant's screen.
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field};
 
 use crate::bindings::keyvault::{self, KvSecretItemDto, KvSecretValueDto};
 use crate::components::requires_role::RequiresRole;
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyableId, DataTable, FormError, SectionHeader,
+    Badge, BadgeTone, Callout, CopyableId, DataTable, FormError, SectionHeader, Spinner,
 };
 use crate::components::vault_picker::VaultPicker;
 use crate::state::{ActiveView, use_session};
@@ -150,7 +150,7 @@ pub fn KeyVaultView() -> impl IntoView {
                 >
                     {move || {
                         if busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                            view! { <Spinner /> }.into_any()
                         } else {
                             view! { "List secrets" }.into_any()
                         }
@@ -206,7 +206,7 @@ pub fn KeyVaultView() -> impl IntoView {
                                             {move || {
                                                 if this_revealing.get() {
                                                     view! {
-                                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                        <Spinner />
                                                     }
                                                         .into_any()
                                                 } else {

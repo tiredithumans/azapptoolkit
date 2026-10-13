@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
@@ -108,9 +108,9 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
     view! {
         <div class="permissions-tab__usage">
             <h3>"Observed Graph activity"</h3>
-            <Body1>
+            <span class="ui-text">
                 "What this app actually called over the last 90 days (from MicrosoftGraphActivityLogs) — compare against the permissions above to spot unused or over-broad grants."
-            </Body1>
+            </span>
             <div class="actions-row">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -134,7 +134,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                         let tone = if unavailable.get() { "info" } else { "warn" };
                         view! {
                             <Callout tone=tone>
-                                <Body1>{e}</Body1>
+                                <span class="ui-text">{e}</span>
                                 {consent_needed
                                     .get()
                                     .then(|| {
@@ -185,7 +185,7 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                             },
                         );
                         view! {
-                            <Body1 class="page__summary">{summary}</Body1>
+                            <span class="ui-text page__summary">{summary}</span>
                             {(!r.rows.is_empty())
                                 .then(|| {
                                     view! {

@@ -1,7 +1,6 @@
 //! The sign-in link, offered in the app when the system browser won't open.
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::bindings::events;
 use crate::components::ui::{Callout, CopyBlock};
@@ -26,9 +25,9 @@ pub fn BrowserFallbackNotice() -> impl IntoView {
         link.get().flatten().map(|url| {
             view! {
                 <Callout tone="warn" role="alert" class="browser-fallback">
-                    <Body1>
+                    <span class="ui-text">
                         "Couldn't open your browser to sign in. Copy this link into a browser on this computer to continue — it works only while this window is waiting."
-                    </Body1>
+                    </span>
                     <CopyBlock label="Sign-in link" value=url />
                 </Callout>
             }
