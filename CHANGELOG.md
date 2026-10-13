@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-13
+
 ### Changed
 
 - **The window layout adapts to its size.** On a large or maximized window, Settings lays its
