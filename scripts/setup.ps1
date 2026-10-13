@@ -57,7 +57,7 @@ if (Get-Command cargo-tauri -ErrorAction SilentlyContinue) {
     # `tauri` runtime (Cargo.lock) for reproducible tooling — upstream does not
     # cut a CLI release for every runtime patch, so the two can differ in the
     # patch digit. Bump both together. --locked pins the CLI's own deps.
-    cargo install tauri-cli --locked --version "=2.11.5"
+    cargo install tauri-cli --locked --version "=2.12.2"
     Write-Ok "tauri-cli installed"
 }
 
