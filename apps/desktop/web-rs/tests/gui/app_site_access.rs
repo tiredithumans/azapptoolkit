@@ -71,7 +71,9 @@ async fn cached_sweep_lists_this_apps_sites_with_their_roles() {
     }))
     .await;
 
-    ts::wait_for(|| ts::body_contains("Marketing")).await;
+    // Wait on row-only text: "Marketing" is also in the section's static hint,
+    // which is on the page before any row loads.
+    ts::wait_until("the swept rows", || ts::body_contains("Projects")).await;
     // The roles per site are the point — "which sites" alone doesn't say what
     // the app can do there.
     assert!(ts::body_contains("read"));
@@ -166,7 +168,10 @@ async fn no_cached_sweep_offers_a_scan_instead_of_an_empty_table() {
         },
     );
     ts::click_button_labelled("Scan sites");
-    ts::wait_for(|| ts::body_contains("Marketing")).await;
+    ts::wait_until("the swept row's Manage button", || {
+        ts::has_button_labelled("Manage")
+    })
+    .await;
     assert!(
         !ts::body_contains("Finance"),
         "the fresh sweep must be projected to THIS app's rows"
@@ -184,7 +189,12 @@ async fn picking_a_site_loads_it_into_the_per_site_flow() {
         truncated: false,
     }))
     .await;
-    ts::wait_for(|| ts::body_contains("Marketing")).await;
+    // Wait on the row's own button, not "Marketing": the section's static hint
+    // names that site too, so the text is on the page before the row loads.
+    ts::wait_until("the Marketing row's Manage button", || {
+        ts::has_button_labelled("Manage")
+    })
+    .await;
 
     // "Manage" hands the URL to the existing grant/list/revoke section instead
     // of duplicating those mutations — so the site's permissions get listed.
@@ -210,7 +220,10 @@ async fn grant_read_is_the_emphasized_default_not_grant_write() {
             .unwrap_or_else(|| panic!("no button labelled `{label}`"))
             .class_name()
     };
-    ts::wait_for(|| ts::body_contains("Grant read")).await;
+    ts::wait_until("the Grant read button", || {
+        ts::has_button_labelled("Grant read")
+    })
+    .await;
     assert!(class_of("Grant read").contains("thaw-button--primary"));
     assert!(class_of("Grant write").contains("thaw-button--secondary"));
 }
