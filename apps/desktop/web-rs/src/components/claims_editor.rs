@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Input, Select};
+use thaw::{Button, ButtonAppearance, Input, Select};
 
 use crate::bindings::sso::{
     ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, DEFAULT_NAME_ID_ATTRIBUTE,
@@ -610,9 +610,9 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
 
             // ---- claim schema rows ----
             <div class="row-between">
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Each claim maps a source (attribute / constant / transformation) to a SAML claim URI and/or a JWT (token) claim name."
-                </Body1>
+                </span>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(add_claim)
@@ -629,9 +629,9 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
 
             // ---- transformations ----
             <div class="row-between claims-editor__transforms-head">
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Transformations generate a claim's value (Join, ExtractMailPrefix, case, RegexReplace). A claim whose source is \"Transformation\" names the transformation in its Transformation id; the transformation's output claim references that claim's id."
-                </Body1>
+                </span>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(add_transform)
@@ -650,9 +650,9 @@ pub fn ClaimsEditor(state: ClaimsEditorState) -> impl IntoView {
                     .is_some()
                     .then(|| {
                         view! {
-                            <Body1 class="hint claims-editor__preserved">
+                            <span class="ui-text hint claims-editor__preserved">
                                 "This policy also has advanced options (e.g. group filter, issuer / audience overrides) that aren't editable here. They're preserved unchanged when you save."
-                            </Body1>
+                            </span>
                         }
                     })
             }}

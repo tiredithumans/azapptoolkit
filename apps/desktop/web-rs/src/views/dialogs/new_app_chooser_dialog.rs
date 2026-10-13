@@ -5,7 +5,7 @@
 //! choosing just flips the relevant open flag (this closes first).
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
@@ -31,7 +31,7 @@ pub fn NewAppChooserDialog(
 
     view! {
         <ModalShell open=open title="New application" on_close=on_close>
-            <Body1 class="hint">"How do you want to create it?"</Body1>
+            <span class="ui-text hint">"How do you want to create it?"</span>
             <div class="new-app-choices">
                 <button class="new-app-choice" type="button" on:click=choose_gallery>
                     <span class="new-app-choice__icon">

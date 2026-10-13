@@ -17,7 +17,7 @@
 
 use crate::hooks::use_progress_stream::use_progress_stream;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Textarea};
+use thaw::{Button, ButtonAppearance, Textarea};
 
 use crate::bindings::bulk;
 use crate::bindings::bulk::BulkCreateStatus;
@@ -230,9 +230,9 @@ pub fn BulkActionsView() -> impl IntoView {
                     "create" => {
                         view! {
                             <div class="bulk-action">
-                                <Body1>
+                                <span class="ui-text">
                                     "Create apps from a JSON array, e.g. [{\"displayName\":\"App A\",\"signInAudience\":\"AzureADMyOrg\"}], or load a CSV inventory (DisplayName, SignInAudience, Description, Owners, Permissions). Owners are UPNs; permissions are declared, not consented. Validate first to check every name against the tenant without creating anything."
-                                </Body1>
+                                </span>
                                 <Textarea value=create_json />
                                 <div class="actions-row">
                                     <Button
@@ -289,9 +289,9 @@ pub fn BulkActionsView() -> impl IntoView {
                                         .then(|| {
                                             view! {
                                                 <div class="bulk-failures">
-                                                    <Body1 class="bulk-failures__title">
+                                                    <span class="ui-text bulk-failures__title">
                                                         {format!("{} failed:", count_noun(fs.len(), "item", "items"))}
-                                                    </Body1>
+                                                    </span>
                                                     <ul class="bulk-failures__list">
                                                         {fs
                                                             .into_iter()

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
@@ -67,9 +67,9 @@ pub fn ActivityPanel(
                     "Refresh"
                 </Button>
             </header>
-            <Body1>
+            <span class="ui-text">
                 "Administrative changes recorded in the Entra ID audit log for this application (and its paired object, when present). Requires AuditLog.Read.All consent and an Entra ID P1/P2 license; retained for 30 days."
-            </Body1>
+            </span>
 
             <Suspense fallback=move || view! { <SkeletonList rows=5 /> }>
                 {move || Suspend::new(async move {
@@ -135,7 +135,7 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                 }
                                 None => "No sign-in recorded in the reporting window.".to_string(),
                             };
-                            view! { <Body1>{text}</Body1> }.into_any()
+                            view! { <span class="ui-text">{text}</span> }.into_any()
                         }
                         Ok(dto) if dto.consent_required => {
                             let msg = dto.message.unwrap_or_default();

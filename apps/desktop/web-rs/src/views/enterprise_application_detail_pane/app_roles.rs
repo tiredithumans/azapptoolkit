@@ -13,14 +13,14 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::enterprise_application::{
     self, AppRoleInput, AppRoleTargetKind, AppRolesView, EnterpriseApplicationDetail,
 };
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, DataTable, DetailLoadError, FormError, SkeletonList,
+    Badge, BadgeTone, DataTable, DetailLoadError, FormError, SkeletonList, Spinner,
 };
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -382,9 +382,9 @@ pub(super) fn AppRolesContent(
                 <Field label="Value">
                     <Input value=f_value placeholder="e.g. Task.Write" />
                 </Field>
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "The value appears in the roles claim. No spaces; it must be unique for this app."
-                </Body1>
+                </span>
                 <Field label="Description">
                     <Textarea value=f_desc />
                 </Field>
@@ -432,7 +432,7 @@ pub(super) fn AppRolesContent(
                     >
                         {move || {
                             if upsert_cmd.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Save" }.into_any()

@@ -1,7 +1,7 @@
 //! Reveals a freshly-minted client secret with a copy-to-clipboard control.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::Callout;
@@ -41,9 +41,9 @@ pub fn SecretRevealDialog(
             wide=true
             close_on_escape=false
         >
-            <Body1>
+            <span class="ui-text">
                 "Copy the secret now — it can never be retrieved again. The Microsoft Graph API only returns the value at creation time."
-            </Body1>
+            </span>
             <pre class="secret-reveal">{secret.get_value()}</pre>
             {move || {
                 (copy_result.get() == Some(false))

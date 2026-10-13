@@ -15,14 +15,14 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::permission_tester::{self, AccessVerdict, PermissionTestResult};
 use crate::bindings::{TenantContext, auth, search, sharepoint};
 use crate::components::permission_principal::principal_label;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, DataTable, FormError, SectionHeader, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, DataTable, FormError, SectionHeader, Spinner, TabBar, TabBarItem,
 };
 use crate::constants::TYPEAHEAD_DEBOUNCE_MS;
 use crate::hooks::use_debounced::use_debounced;
@@ -391,9 +391,9 @@ pub fn PermissionTesterView() -> impl IntoView {
                 title="Permission Tester".to_string()
                 crumb="Verify effective access".to_string()
             />
-            <Body1>
+            <span class="ui-text">
                 "Check whether an app registration, enterprise app, or managed identity can actually reach a specific Exchange mailbox or SharePoint resource — a site collection, library, folder or file. This runs the live authorization check — it reflects effective access (organization-wide grant, scoped grant, or none), not just what the identity declares."
-            </Body1>
+            </span>
 
             <Field label="Identity">
                 <div class="tester-picker">
@@ -508,9 +508,9 @@ pub fn PermissionTesterView() -> impl IntoView {
                 (!id.is_empty())
                     .then(|| {
                         view! {
-                            <Body1 class="muted">
+                            <span class="ui-text muted">
                                 {format!("Selected appId: {id}")}
-                            </Body1>
+                            </span>
                         }
                     })
             }}
@@ -540,9 +540,9 @@ pub fn PermissionTesterView() -> impl IntoView {
                                 placeholder="https://contoso.sharepoint.com/sites/Finance/Shared Documents/Invoices"
                             />
                         </Field>
-                        <Body1 class="hint hint--field">
+                        <span class="ui-text hint hint--field">
                             "Any level a Selected scope can address. A permission inherited from the library or site collection counts as access, and a grant that the app can't use — a permission entry with no matching Selected scope in its token — is reported as no access."
-                        </Body1>
+                        </span>
                     }
                         .into_any()
                 }
@@ -560,7 +560,7 @@ pub fn PermissionTesterView() -> impl IntoView {
                 </Button>
                 {move || {
                     busy.get()
-                        .then(|| view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> })
+                        .then(|| view! { <Spinner /> })
                 }}
             </div>
 
@@ -603,14 +603,14 @@ pub fn PermissionTesterView() -> impl IntoView {
                                     <Badge label=label tone=badge_tone />
                                     <span class="muted">{r.resource_label.clone()}</span>
                                 </div>
-                                {r.detail.clone().map(|d| view! { <Body1>{d}</Body1> })}
+                                {r.detail.clone().map(|d| view! { <span class="ui-text">{d}</span> })}
                                 {roles
                                     .map(|roles| {
                                         view! {
-                                            <Body1>
+                                            <span class="ui-text">
                                                 <strong>"Granted via: "</strong>
                                                 {roles}
-                                            </Body1>
+                                            </span>
                                         }
                                     })}
                             </div>
@@ -632,13 +632,13 @@ pub fn PermissionTesterView() -> impl IntoView {
                 };
                 view! {
                     <div class="permission-tester__grants">
-                        <Body1>
+                        <span class="ui-text">
                             <strong>"Selected item permissions on this resource"</strong>
-                        </Body1>
-                        <Body1 class="mono muted">{url}</Body1>
-                        <Body1 class="hint hint--field">
+                        </span>
+                        <span class="ui-text mono muted">{url}</span>
+                        <span class="ui-text hint hint--field">
                             "The permission entries on the resource the tested URL resolves to — every app grant on it, not just the tested app's. This is a verify-by-URL read: an empty list means no grants on this resource, never that the app has no item-level access elsewhere (a file inherits from its library and its site)."
-                        </Body1>
+                        </span>
                         <DataTable
                             headers=vec!["Granted to", "Roles", ""]
                             rows=perms

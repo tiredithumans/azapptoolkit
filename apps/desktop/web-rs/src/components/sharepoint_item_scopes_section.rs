@@ -12,12 +12,12 @@
 //! accepts.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::sharepoint::{AppItemScopeDto, ItemScopeRef, ItemScopeStatus};
 use crate::bindings::{auth, sharepoint};
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
-use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError};
+use crate::components::ui::{Callout, DataTable, DetailLoadError, FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::no_tenant;
@@ -248,9 +248,9 @@ pub fn SharePointItemScopesSection(
             capability_key="sharepoint_selected_items"
             open=open
         >
-            <Body1>
+            <span class="ui-text">
                 "The libraries, folders and files this app can reach under a Lists, ListItems or Files .SelectedOperations.Selected permission, with what SharePoint says about each now. SharePoint can't list an app's item grants, so only grants made through azapptoolkit, or tracked below, appear here."
-            </Body1>
+            </span>
             {move || {
                 needs_consent
                     .get()
@@ -272,7 +272,7 @@ pub fn SharePointItemScopesSection(
                     })
             }}
             <Suspense fallback=move || {
-                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
+                view! { <Spinner label="Loading…" /> }
             }>
                 {move || Suspend::new(async move {
                     match scopes.await {
@@ -352,11 +352,11 @@ pub fn SharePointItemScopesSection(
                                 {(malformed > 0)
                                     .then(|| {
                                         view! {
-                                            <Body1 class="hint">
+                                            <span class="ui-text hint">
                                                 {format!(
                                                     "{malformed} record tag(s) on this app are not valid and were ignored.",
                                                 )}
-                                            </Body1>
+                                            </span>
                                         }
                                     })}
                             }
@@ -411,7 +411,7 @@ pub fn SharePointItemScopesSection(
                 {move || {
                     cmd.busy
                         .get()
-                        .then(|| view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> })
+                        .then(|| view! { <Spinner /> })
                 }}
             </div>
             {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
@@ -429,9 +429,9 @@ pub fn SharePointItemScopesSection(
                         }
                     })
             }}
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Granting breaks permission inheritance on the target. To change a role, remove the access and grant it again with the other role."
-            </Body1>
+            </span>
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this access?"

@@ -14,10 +14,10 @@
 //! since `AppState` resolves the IDs once at startup.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::config;
-use crate::components::ui::Card;
+use crate::components::ui::{Card, Spinner};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 #[component]
@@ -40,12 +40,12 @@ pub fn ConfigScreen(
                     <span>"azapptoolkit"</span>
                 </div>
                 <h1 class="signin-card__title">"Configure your tenant"</h1>
-                <Body1>
+                <span class="ui-text">
                     "Point azapptoolkit at the single-tenant app registration you created in \
                      Entra ID. These IDs are stored locally in settings.json and used to sign \
                      you in — see the README's first-run configuration section for how to create \
                      the registration."
-                </Body1>
+                </span>
                 <AuthConfigForm client_id=client_id tenant_id=tenant_id />
             </Card>
         </main>
@@ -131,7 +131,7 @@ pub fn AuthConfigForm(
         >
             {move || {
                 if busy.get() {
-                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                    view! { <Spinner /> }.into_any()
                 } else {
                     view! { "Save & restart" }.into_any()
                 }
@@ -142,8 +142,8 @@ pub fn AuthConfigForm(
                 .get()
                 .map(|(msg, hint)| {
                     view! {
-                        <Body1 class="signin-error">{msg}</Body1>
-                        <Body1 class="signin-hint">{hint}</Body1>
+                        <span class="ui-text signin-error">{msg}</span>
+                        <span class="ui-text signin-hint">{hint}</span>
                     }
                 })
         }}

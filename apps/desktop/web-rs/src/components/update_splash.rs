@@ -4,13 +4,13 @@
 //! from the launch-check toast or the nav "Check for updates" button.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::events;
 use crate::bindings::updater::{self, UpdateInfo, UpdateProgress};
 use crate::components::changelog_notes::ChangelogNotes;
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, ProgressBar};
 use crate::hooks::use_progress_stream::use_progress_stream;
 
 #[component]
@@ -72,13 +72,13 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                         };
                         view! {
                             <div class="update-splash">
-                                <Body1 class="update-splash__meta">
+                                <span class="ui-text update-splash__meta">
                                     {format!(
                                         "You're on v{}. v{} is ready to install.",
                                         i.current_version,
                                         i.version,
                                     )}
-                                </Body1>
+                                </span>
                                 <ChangelogNotes notes=notes />
                                 {move || {
                                     progress
@@ -95,7 +95,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                                         .map(|f| {
                                                             view! { <ProgressBar value=Signal::derive(move || f) /> }
                                                         })}
-                                                    <Body1>{format!("Downloading… {mb:.1} MB")}</Body1>
+                                                    <span class="ui-text">{format!("Downloading… {mb:.1} MB")}</span>
                                                 </div>
                                             }
                                         })

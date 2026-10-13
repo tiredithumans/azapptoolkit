@@ -6,7 +6,6 @@ use std::rc::Rc;
 
 use leptos::ev;
 use leptos::prelude::*;
-use thaw::{Spinner, SpinnerSize};
 use wasm_bindgen::JsCast;
 
 use crate::bindings::{applications, updater};
@@ -17,6 +16,7 @@ use crate::components::open_items_workspace::OpenItemsWorkspace;
 use crate::components::release_notes::ReleaseNotesDialog;
 use crate::components::shortcuts_help::ShortcutsHelp;
 use crate::components::toast::{ToastHost, ToastKind};
+use crate::components::ui::Spinner;
 use crate::components::update_splash::UpdateSplash;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_menu_keynav::use_menu_keynav;
@@ -422,7 +422,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         <span class="nav__icon">
                                             {move || {
                                                 if checking.get() {
-                                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                                    view! { <Spinner /> }
                                                         .into_any()
                                                 } else {
                                                     view! { <Icon name=IconName::Download size=16 /> }.into_any()
@@ -506,7 +506,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                         >
                             {move || {
                                 if refreshing.get() {
-                                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                    view! { <Spinner /> }
                                         .into_any()
                                 } else {
                                     view! { <Icon name=IconName::Refresh size=16 /> }.into_any()

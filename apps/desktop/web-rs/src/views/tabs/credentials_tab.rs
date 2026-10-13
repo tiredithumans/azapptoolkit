@@ -11,9 +11,7 @@ use azapptoolkit_dto::credentials::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
-use thaw::{
-    Body1, Button, ButtonAppearance, DatePicker, Field, Input, Select, Spinner, SpinnerSize,
-};
+use thaw::{Button, ButtonAppearance, Field, Input, Select};
 
 use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
@@ -22,7 +20,9 @@ use crate::bindings::applications::{
 use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId, DataTable, FormError};
+use crate::components::ui::{
+    Badge, BadgeTone, Callout, CopyableId, DataTable, DateInput, FormError, Spinner,
+};
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -135,7 +135,7 @@ fn remove_button(
         >
             {move || {
                 if removing.with(|r| r.as_deref() == Some(key_label.as_str())) {
-                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                    view! { <Spinner /> }.into_any()
                 } else {
                     view! { "Remove" }.into_any()
                 }
@@ -841,7 +841,7 @@ pub fn CredentialsTab(
                                             {move || {
                                                 if cmd_expire.busy.get() {
                                                     view! {
-                                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                        <Spinner />
                                                     }
                                                         .into_any()
                                                 } else {
@@ -1109,10 +1109,10 @@ pub fn CredentialsTab(
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
                 {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Consider a certificate or federated identity credential instead — \
                      they're more secure than client secrets, which shouldn't be used in production."
-                </Body1>
+                </span>
                 <Field label="Description">
                     <Input value=display_name />
                 </Field>
@@ -1159,14 +1159,14 @@ pub fn CredentialsTab(
                     fallback=|| view! { <></> }
                 >
                     <Field label="Start date">
-                        <DatePicker value=custom_start />
+                        <DateInput value=custom_start label="Start date" />
                     </Field>
                     <Field label="End date">
-                        <DatePicker value=custom_end />
+                        <DateInput value=custom_end label="End date" />
                     </Field>
-                    <Body1 class="hint">
+                    <span class="ui-text hint">
                         "Maximum 24 months; Microsoft recommends less than 12 months."
-                    </Body1>
+                    </span>
                 </Show>
                 <div class="actions-row">
                     <Button
@@ -1183,7 +1183,7 @@ pub fn CredentialsTab(
                     >
                         {move || {
                             if cmd_create.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Create" }.into_any()
@@ -1218,9 +1218,9 @@ pub fn CredentialsTab(
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
                 {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
-                <Body1>
+                <span class="ui-text">
                     "Creates an RSA-2048 certificate, adds the public part to this app as a verify-only credential, and shows the private key once — as PEM text, and as a password-protected .pfx you can save. Use either to authenticate the app (client assertion)."
-                </Body1>
+                </span>
                 <Field label="Subject (common name)">
                     <Input value=gencert_subject />
                 </Field>
@@ -1242,7 +1242,7 @@ pub fn CredentialsTab(
                     >
                         {move || {
                             if cmd_gencert.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 view! { "Generate" }.into_any()
@@ -1307,21 +1307,21 @@ pub fn CredentialsTab(
                             });
                         };
                         view! {
-                            <Body1>
+                            <span class="ui-text">
                                 "Copy the private key or save the .pfx now — neither is stored, and neither can be retrieved again. The public certificate has already been added to the application."
-                            </Body1>
-                            <Body1 class="mono">{format!("Thumbprint (SHA-1): {}", r.thumbprint)}</Body1>
-                            <Body1 class="mono">{format!("SHA-256: {}", r.thumbprint_sha256)}</Body1>
-                            <Body1 class="mono">{format!("Expires: {}", r.expires)}</Body1>
+                            </span>
+                            <span class="ui-text mono">{format!("Thumbprint (SHA-1): {}", r.thumbprint)}</span>
+                            <span class="ui-text mono">{format!("SHA-256: {}", r.thumbprint_sha256)}</span>
+                            <span class="ui-text mono">{format!("Expires: {}", r.expires)}</span>
                             <strong>".pfx password"</strong>
                             <CopyableId
                                 value=r.pfx_password.clone()
                                 label="PFX password"
                                 full=true
                             />
-                            <Body1>
+                            <span class="ui-text">
                                 "The .pfx holds this certificate and its private key, encrypted with the password above — import it with Import-PfxCertificate on Windows, then delete the file. Save both together: neither half is any use alone. Windows Server 2016 and older cannot read AES-256 .pfx files; use the PEM below there."
-                            </Body1>
+                            </span>
                             <strong>"Private key (PKCS#8 PEM)"</strong>
                             <pre class="secret-reveal">{r.private_key_pem.clone()}</pre>
                             <strong>"Certificate (PEM)"</strong>
@@ -1400,9 +1400,9 @@ pub fn CredentialsTab(
                 // the dialog open, no key shown, and the reason hidden — which
                 // reads as "the app silently did nothing".
                 {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
-                <Body1>
+                <span class="ui-text">
                     "Mints a new client secret, stores it as a new version of the vault secret below, and, with Rotate & remove, deletes every existing client secret on the app. The value is written only to Key Vault — it is never shown here."
-                </Body1>
+                </span>
                 <Field label="Key Vault name">
                     <VaultPicker value=rotate_vault />
                 </Field>
@@ -1446,7 +1446,7 @@ pub fn CredentialsTab(
                     >
                         {move || {
                             if cmd_rotate.busy.get() {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                                     .into_any()
                             } else {
                                 format!("Rotate & remove {} existing", existing_count.get())

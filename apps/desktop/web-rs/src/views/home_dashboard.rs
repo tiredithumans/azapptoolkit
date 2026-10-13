@@ -8,7 +8,7 @@
 //! heaviest frontend work.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::consent::TenantConsentPostureDto;
 use crate::bindings::{
@@ -205,7 +205,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                 }
                                 None => {
                                     view! {
-                                        <Body1>"Couldn't load app registrations for this tenant."</Body1>
+                                        <span class="ui-text">"Couldn't load app registrations for this tenant."</span>
                                     }
                                         .into_any()
                                 }
@@ -283,7 +283,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                 }
                                 None => {
                                     view! {
-                                        <Body1>"Couldn't load enterprise applications for this tenant."</Body1>
+                                        <span class="ui-text">"Couldn't load enterprise applications for this tenant."</span>
                                     }
                                         .into_any()
                                 }
@@ -352,7 +352,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                 }
                                 None => {
                                     view! {
-                                        <Body1>"Couldn't load managed identities for this tenant."</Body1>
+                                        <span class="ui-text">"Couldn't load managed identities for this tenant."</span>
                                     }
                                         .into_any()
                                 }
@@ -419,7 +419,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                 }
                                 None => {
                                     view! {
-                                        <Body1>"Couldn't load credential data for this tenant."</Body1>
+                                        <span class="ui-text">"Couldn't load credential data for this tenant."</span>
                                     }
                                         .into_any()
                                 }
@@ -570,7 +570,7 @@ pub fn HomeDashboard() -> impl IntoView {
                                         // after every relaunch and after any
                                         // hour-long gap — a tenant audited daily
                                         // for a year lands here every morning.
-                                        <Body1>"No audit run in this session."</Body1>
+                                        <span class="ui-text">"No audit run in this session."</span>
                                         <div class="dash-card__actions">
                                             <Button
                                                 appearance=Signal::derive(|| {

@@ -7,14 +7,14 @@
 use std::collections::BTreeSet;
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modal_shell::ModalShell;
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, Card, CopyableId, FormError, SectionHeader,
+    Badge, BadgeTone, Callout, Card, CopyableId, FormError, ProgressBar, SectionHeader, Spinner,
 };
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
@@ -285,7 +285,7 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                         {move || {
                             if busy.get() {
                                 view! {
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                    <Spinner />
                                     " Backing up…"
                                 }
                                     .into_any()

@@ -4,7 +4,6 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::Card;
 
 use crate::bindings::applications;
 use crate::components::detail_header::DetailHeader;
@@ -129,7 +128,7 @@ pub fn ApplicationDetailPane(
     };
 
     view! {
-        <Card class="app-detail">
+        <div class="app-detail">
             <Suspense fallback=move || {
                 view! {
                     <div class="app-detail__body">
@@ -322,6 +321,6 @@ pub fn ApplicationDetailPane(
                     }
                 })}
             </Suspense>
-        </Card>
+        </div>
     }
 }

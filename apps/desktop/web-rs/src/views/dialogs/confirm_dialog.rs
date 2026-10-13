@@ -9,10 +9,10 @@
 //! used to share made a stacked confirmation announce the first one's title.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 
 #[component]
 pub fn ConfirmDialog(
@@ -57,7 +57,7 @@ pub fn ConfirmDialog(
 
     view! {
         <ModalShell open=open title=title busy=busy on_close=on_close>
-            <Body1>{body}</Body1>
+            <span class="ui-text">{body}</span>
             {move || {
                 let s = subject.get();
                 (!s.is_empty())
@@ -95,7 +95,7 @@ pub fn ConfirmDialog(
                 >
                     {move || {
                         if busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                            view! { <Spinner /> }
                                 .into_any()
                         } else {
                             view! { {confirm_label} }.into_any()

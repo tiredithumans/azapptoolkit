@@ -22,7 +22,7 @@ use std::collections::HashSet;
 
 use azapptoolkit_core::models::DirectoryObject;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::config::{self, ConfigSource};
 use crate::bindings::defaults::{
@@ -30,7 +30,7 @@ use crate::bindings::defaults::{
 };
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::owner_picker::OwnerPicker;
-use crate::components::ui::{Callout, DetailSkeleton, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{Callout, DetailSkeleton, SectionHeader, Spinner, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::parse_lines;
 use crate::views::config_screen::AuthConfigForm;
@@ -124,11 +124,11 @@ pub fn SettingsView() -> impl IntoView {
     view! {
         <div class="settings-view">
             <SectionHeader title="Settings" crumb="Account" />
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Operator defaults for this tenant — stored locally and reused so you don't re-enter \
                  them each time. They apply only when you choose to (e.g. the \"Add Default Owners\" \
                  button); nothing here changes an app on its own."
-            </Body1>
+            </span>
             <Suspense fallback=move || view! { <DetailSkeleton /> }>
                 {move || Suspend::new(async move {
                     match loaded.await {
@@ -319,18 +319,18 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                     "enterprise" => {
                         view! {
                             <section class="settings-section">
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Default owners (users only — Entra rejects groups as service-principal owners) \
                                      and the notification email addresses seeded into a new SAML SSO configuration."
-                                </Body1>
+                                </span>
                                 {owner_list(ent_owners)}
                                 <OwnerPicker on_pick=add_ent exclude=ent_exclude />
                                 <Field label="Default SSO notification emails (one per line, max 5)">
                                     <Textarea value=emails />
                                 </Field>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Or search a distribution list / mail-enabled group to add its address:"
-                                </Body1>
+                                </span>
                                 <DlEmailPicker on_pick=add_dl_email />
                             </section>
                         }
@@ -340,21 +340,21 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                         view! {
                             <section class="settings-section">
                                 <h3>"Key Vault secret"</h3>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Naming pattern for the Key Vault secret created when rotating a credential. \
                                      Use "
                                     <code>"{appId}"</code>
                                     " as the app's client id. Blank uses the built-in "
                                     <code>"secret-{appId}"</code>
                                     " (Key Vault secret names allow only letters, digits, and dashes — no underscores)."
-                                </Body1>
+                                </span>
                                 <Field label="Secret name pattern">
                                     <Input value=secret_pattern placeholder="secret-{appId}" />
                                 </Field>
                             </section>
                             <section class="settings-section">
                                 <h3>"Management scope"</h3>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Naming pattern for the Exchange management scope this toolkit creates for any \
                                      scoped-mailbox grant (and when migrating a legacy Application Access Policy). \
                                      Use "
@@ -362,21 +362,21 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                                     " as the app's client id. Blank uses the built-in "
                                     <code>"app_scope_{appId}"</code>
                                     "."
-                                </Body1>
+                                </span>
                                 <Field label="Management scope name pattern">
                                     <Input value=pattern placeholder="app_scope_{appId}" />
                                 </Field>
                             </section>
                             <section class="settings-section">
                                 <h3>"Mail-enabled security group"</h3>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Naming pattern for the toolkit-managed mail-enabled security group whose \
                                      membership defines which mailboxes a scoped app can reach. Use "
                                     <code>"{appId}"</code>
                                     " as the app's client id. Blank uses the built-in "
                                     <code>"app_scope_group_{appId}"</code>
                                     "."
-                                </Body1>
+                                </span>
                                 <Field label="Mail-enabled group name pattern">
                                     <Input value=group_pattern placeholder="app_scope_group_{appId}" />
                                 </Field>
@@ -388,13 +388,13 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                         view! {
                             <section class="settings-section">
                                 <h3>"Tenant connection"</h3>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "The Entra app registration azapptoolkit signs in through. Stored in \
                                      settings.json; an AZAPPTOOLKIT_CLIENT_ID / AZAPPTOOLKIT_TENANT_ID \
                                      environment variable still overrides it. Saving restarts the app and \
                                      signs you out — a sign-in that keeps failing on a well-formed ID is \
                                      usually a wrong one here."
-                                </Body1>
+                                </span>
                                 {move || {
                                     conn_sources
                                         .get()
@@ -420,9 +420,9 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                     _ => {
                         view! {
                             <section class="settings-section">
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "Default owners to add with one click from an app registration's Owners tab."
-                                </Body1>
+                                </span>
                                 {owner_list(app_owners)}
                                 <OwnerPicker on_pick=add_app exclude=app_exclude />
                             </section>
@@ -454,7 +454,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                                     {move || {
                                         if busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {
@@ -477,7 +477,7 @@ fn owner_list(owners: RwSignal<Vec<StoredPrincipal>>) -> impl IntoView {
         {move || {
             let items = owners.get();
             if items.is_empty() {
-                view! { <Body1 class="hint">"No default owners set."</Body1> }.into_any()
+                view! { <span class="ui-text hint">"No default owners set."</span> }.into_any()
             } else {
                 view! {
                     <ul class="candidates">

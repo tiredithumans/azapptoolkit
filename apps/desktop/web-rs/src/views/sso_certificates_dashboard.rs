@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_DAYS};
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::sso::{self, RolloverPhase, SsoCertificateRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
@@ -177,9 +177,9 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             // and Entra can leave that field null on older SAML apps — those
             // have signing certificates but never appear here. Said out loud so
             // an empty (or short) board doesn't read as tenant-wide proof.
-            <Body1 class="hint sso-cert-board__coverage">
+            <span class="ui-text hint sso-cert-board__coverage">
                 "Covers applications whose single sign-on mode is recorded as SAML. Entra may leave that field unset on older SAML apps — those won't appear here."
-            </Body1>
+            </span>
         </div>
     }
 }

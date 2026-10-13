@@ -6,7 +6,7 @@
 //! owns (it just wires `on_delete` to open its own dialog).
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::icon::IconName;
 use crate::components::type_chip::{AppKind, TypeChip};
@@ -39,7 +39,7 @@ pub fn DetailHeader(
                 <div>
                     <h2 class="app-detail__title">{move || title.get()}</h2>
                     <span class="row-meta">
-                        <Body1 class="mono">{move || app_id.get()}</Body1>
+                        <span class="ui-text mono">{move || app_id.get()}</span>
                         <CopyIconButton value=app_id aria_label="Copy app id".to_string() />
                     </span>
                 </div>

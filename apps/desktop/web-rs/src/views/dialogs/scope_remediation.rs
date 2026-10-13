@@ -5,7 +5,7 @@
 //! groups / site URLs and confirms; nothing is scoped automatically.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Textarea};
 
 use azapptoolkit_core::audit::RemediationAction;
 
@@ -13,7 +13,7 @@ use crate::bindings::remediation::ExchangeAccessResult;
 use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{Callout, FormError};
+use crate::components::ui::{Callout, FormError, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 
@@ -209,9 +209,9 @@ pub fn ScopeMailboxButton(
                 busy=busy
                 on_close=Callback::new(move |()| open.set(false))
             >
-                <Body1>
+                <span class="ui-text">
                     "Confine these permissions to members of specific mail-enabled groups via Exchange RBAC for Applications. The app keeps access only to those mailboxes; its org-wide grant is removed once the scoped roles are in place. You must be an Exchange administrator."
-                </Body1>
+                </span>
                 <p class="muted">{action.detail.clone()}</p>
                 <MailboxGroupsField value=groups_text />
                 {move || {
@@ -225,7 +225,7 @@ pub fn ScopeMailboxButton(
                             );
                             view! {
                                 <Callout tone="warn" role="status">
-                                    <Body1>{summary}</Body1>
+                                    <span class="ui-text">{summary}</span>
                                     <ul class="warnings">
                                         {r
                                             .warnings
@@ -260,7 +260,7 @@ pub fn ScopeMailboxButton(
                                     {move || {
                                         if busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {
@@ -427,9 +427,9 @@ pub fn ScopeSharePointButton(
                 busy=busy
                 on_close=Callback::new(move |()| open.set(false))
             >
-                <Body1>
+                <span class="ui-text">
                     "Convert this app's org-wide SharePoint access to the Sites.Selected model — access only to the sites you list below. The org-wide grant is removed once at least one site grant lands. You must be a SharePoint administrator or site owner."
-                </Body1>
+                </span>
                 <p class="muted">{action.detail.clone()}</p>
                 <Textarea
                     value=sites_text

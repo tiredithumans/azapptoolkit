@@ -20,7 +20,6 @@
 //! expensive sweep/probe result survives flipping between them.
 
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::bindings::permission_tester::AccessVerdict;
 use crate::components::ui::{BadgeTone, SectionHeader, TabBar, TabBarItem};
@@ -46,9 +45,9 @@ pub fn ResourceAccessView() -> impl IntoView {
     view! {
         <div class="page">
             <SectionHeader title="Resource Access" />
-            <Body1>
+            <span class="ui-text">
                 "Reverse lookups: pick a resource plane and see which applications and identities can reach what."
-            </Body1>
+            </span>
             <TabBar
                 label="Resource type"
                 items=vec![

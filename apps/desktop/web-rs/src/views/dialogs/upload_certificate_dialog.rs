@@ -2,13 +2,13 @@
 //! application.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::bindings::applications::{self, AddCertificateInput, UploadedCertificate};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{cert_payload_from_bytes, fmt_day};
@@ -105,9 +105,9 @@ pub fn UploadCertificateDialog(
             on_close=on_close
             wide=true
         >
-            <Body1>
+            <span class="ui-text">
                 "Choose a .cer, .pem, or .crt file — or paste a PEM block / base64-encoded DER. Graph derives the expiry from the certificate. Paste only the certificate — a private key is refused and never sent."
-            </Body1>
+            </span>
             <Field label="Certificate file">
                 <input
                     type="file"
@@ -119,7 +119,7 @@ pub fn UploadCertificateDialog(
             {move || {
                 file_name
                     .get()
-                    .map(|n| view! { <Body1 class="hint mono">{format!("Loaded: {n}")}</Body1> })
+                    .map(|n| view! { <span class="ui-text hint mono">{format!("Loaded: {n}")}</span> })
             }}
             <Field label="Display name">
                 <Input value=display_name />
@@ -146,7 +146,7 @@ pub fn UploadCertificateDialog(
                     {move || {
                         if cmd.busy.get() {
                             view! {
-                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                <Spinner />
                             }
                                 .into_any()
                         } else {

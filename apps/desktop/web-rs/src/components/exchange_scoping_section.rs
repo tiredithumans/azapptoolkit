@@ -14,7 +14,7 @@
 //! those.
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use azapptoolkit_core::defaults::TenantDefaults;
 
@@ -26,7 +26,7 @@ use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
 use crate::components::retired_scope_groups::RetiredScopeGroups;
 use crate::components::scope_wizard::ScopeTarget;
-use crate::components::ui::{Callout, DataTable, FormError};
+use crate::components::ui::{Callout, DataTable, FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{count_noun, no_tenant, parse_lines};
@@ -368,7 +368,7 @@ pub fn ExchangeScopingSection(
             capability_key="exchange_rbac"
             open=open
         >
-            <Body1>
+            <span class="ui-text">
                 {move || {
                     format!(
                         "Manage which mailboxes this {}'s scoped mail access covers, using RBAC for Applications (the replacement for Application Access Policies). Add mailboxes to the toolkit-managed group, then grant once — afterwards you adjust who's in scope just by changing its membership (no re-grant needed). {}",
@@ -376,7 +376,7 @@ pub fn ExchangeScopingSection(
                         derivation.get(),
                     )
                 }}
-            </Body1>
+            </span>
 
             <ManagedScopeGroupPanel app_id=app_id group_state=group_state />
 
@@ -388,7 +388,7 @@ pub fn ExchangeScopingSection(
                 >
                     {move || {
                         if grant_cmd.busy.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }.into_any()
+                            view! { <Spinner /> }.into_any()
                         } else {
                             view! { "Grant scoped access (recommended)" }.into_any()
                         }
@@ -402,14 +402,14 @@ pub fn ExchangeScopingSection(
                     "Grant, keep org-wide grants"
                 </Button>
             </div>
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 {move || {
                     format!(
                         "“Recommended” also removes the {}'s org-wide Microsoft Entra grant for the scoped permissions — required for scoping to take effect. Only direct members are in scope (nested groups don't count), and Exchange can take 30 min–2 h to apply RBAC changes (the permission tester bypasses that cache).",
                         noun.get(),
                     )
                 }}
-            </Body1>
+            </span>
 
             // Warned grant outcome (either grant path — this sits above both).
             {move || {
@@ -427,16 +427,16 @@ pub fn ExchangeScopingSection(
                         let warnings = r.warnings.clone();
                         view! {
                             <Callout tone="warn" role="status">
-                                <Body1>{summary}</Body1>
+                                <span class="ui-text">{summary}</span>
                                 <ul class="warnings">
                                     {warnings
                                         .into_iter()
                                         .map(|w| view! { <li>{w}</li> })
                                         .collect_view()}
                                 </ul>
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     {format!("Scope filter in effect: {filter}")}
-                                </Body1>
+                                </span>
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -569,13 +569,13 @@ pub fn ExchangeScopingSection(
                                         let retired_app_id = r.app_id.clone();
                                         view! {
                                             <Callout tone=tone role="status">
-                                                <Body1>{headline}</Body1>
+                                                <span class="ui-text">{headline}</span>
                                                 {(!mailboxes.is_empty())
                                                     .then(|| {
                                                         view! {
-                                                            <Body1 class="hint">
+                                                            <span class="ui-text hint">
                                                                 {format!("Mailboxes: {}", mailboxes.join(", "))}
-                                                            </Body1>
+                                                            </span>
                                                         }
                                                     })}
                                                 {(!unverified.is_empty())
@@ -693,7 +693,7 @@ pub fn ExchangeScopingSection(
                             />
                             <Suspense fallback=move || {
                                 view! {
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" />
+                                    <Spinner label="Loading…" />
                                 }
                             }>
                                 {move || Suspend::new(async move {
@@ -725,7 +725,7 @@ pub fn ExchangeScopingSection(
                                             let needs_consent = e.is_consent_required();
                                             view! {
                                                 <Callout tone="warn">
-                                                    <Body1>{e.message}</Body1>
+                                                    <span class="ui-text">{e.message}</span>
                                                     <div class="actions-row">
                                                         {needs_consent
                                                             .then(|| {
@@ -758,20 +758,20 @@ pub fn ExchangeScopingSection(
                             <header class="row-between">
                                 <strong>"Migrate legacy Application Access Policy"</strong>
                             </header>
-                            <Body1>
+                            <span class="ui-text">
                                 "If this app is still scoped by a legacy Application Access Policy, migrate it to RBAC: the policy group's mailboxes (all the groups', if the app has several policies) are copied into the toolkit-managed group, a management scope is built over that group, the scoped roles are assigned, and the matching org-wide Entra grants are removed — Microsoft Graph mail permissions and the Exchange Web Services full_access_as_app scope alike. The legacy group is left in place for you to clean up. If any mailbox can't be verified in the managed group, the scope is built over the legacy group instead, so the app never loses reach. The legacy policy is deleted only once every grant it was confining has been re-scoped; anything left org-wide keeps its policy, because that policy is the only thing still restricting it. Only RestrictAccess policies are migrated: a DenyAccess policy is a blocklist and has no equivalent management scope. Preview first to see the plan."
-                            </Body1>
+                            </span>
                             <Field label="Management scope name (optional)">
                                 <Input
                                     value=scope_name_override
                                     placeholder=Signal::derive(move || default_scope_name.get())
                                 />
                             </Field>
-                            <Body1 class="hint">
+                            <span class="ui-text hint">
                                 "Leave blank to use the default "
                                 <code>{move || default_scope_name.get()}</code>
                                 "."
-                            </Body1>
+                            </span>
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -788,7 +788,7 @@ pub fn ExchangeScopingSection(
                                     {move || {
                                         if mig_cmd.busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {

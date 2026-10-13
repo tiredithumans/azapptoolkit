@@ -478,9 +478,9 @@ fn SigningCertRolloverPanel(
                                     view! { <Callout tone="info">{text}</Callout> }
                                 })
                         }}
-                        <Body1 class="hint">
+                        <span class="ui-text hint">
                             "This reads the Entra side only. It can't tell you the application consumed the new certificate — check the app, or its metadata refresh schedule."
-                        </Body1>
+                        </span>
 
                         // ---- step 3/4: activate, revert, retire ----
                         {staged
@@ -821,9 +821,9 @@ fn SsoEditor(
             >
                 "Apply method"
             </Button>
-            <Body1 class="hint">
+            <span class="ui-text hint">
                 "Password-based and linked single sign-on are configured in the Microsoft Entra admin center, not here."
-            </Body1>
+            </span>
 
             // ---- editable config (branches on the SAVED mode) ----
             <Show when=move || is_saml fallback=|| ()>
@@ -938,9 +938,9 @@ fn SsoEditor(
                     noun="notification email"
                     placeholder="identity-team@contoso.com"
                 />
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     "Entra emails these addresses 60/30/7 days before the SAML signing certificate expires. After saving, open the app's SSO blade in the Entra admin center once so Entra enables the notifications."
-                </Body1>
+                </span>
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                     on_click=Box::new(save_notification_emails)

@@ -9,7 +9,7 @@
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::auth;
 use crate::components::ui::{Callout, FormError};
@@ -52,9 +52,9 @@ pub fn ScopeUnavailableBanner(
         // `role="status"` so the banner — inserted after an async scope
         // resolution fails — is announced to assistive tech, not silently shown.
         <Callout tone="warn" role="status">
-            <Body1>
+            <span class="ui-text">
                 {format!("Mailbox scoping (Scope column) unavailable — {message}")}
-            </Body1>
+            </span>
             <div class="actions-row">
                 {needs_consent
                     .then(|| {

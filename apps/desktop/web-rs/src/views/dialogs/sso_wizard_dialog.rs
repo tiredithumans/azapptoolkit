@@ -16,7 +16,7 @@ use azapptoolkit_dto::credentials::{
     MAX_SECRET_LIFETIME_DAYS as SECRET_MAX_DAYS,
 };
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
 
 use crate::bindings::auth;
 use crate::bindings::sso::{
@@ -25,7 +25,7 @@ use crate::bindings::sso::{
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::modal_shell::ModalShell;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
-use crate::components::ui::{Callout, FormError};
+use crate::components::ui::{Callout, FormError, Spinner};
 use crate::state::use_session;
 
 /// Splits a textarea (one URL per line) into a trimmed, non-empty Vec.
@@ -334,14 +334,14 @@ pub fn SsoWizardDialog(
             close_on_escape=close_on_escape
         >
             <div class="sso-wizard__steps">
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     {move || match step.get() {
                         0 => "Step 1 of 3 — Protocol & name",
                         1 => "Step 2 of 3 — Configuration",
                         2 => "Step 3 of 3 — Review & create",
                         _ => "Done — configuration summary",
                     }}
-                </Body1>
+                </span>
             </div>
 
             // ---- Step 0: protocol + display name ----
@@ -385,7 +385,7 @@ pub fn SsoWizardDialog(
                                  {CERT_DEFAULT_DAYS}-day default."
                             )
                         });
-                        view! { <Body1 class="hint">{hint}</Body1> }
+                        view! { <span class="ui-text hint">{hint}</span> }
                     }}
                 </Field>
                 <Field label="Notification emails (one per line, max 5 — optional)">
@@ -393,9 +393,9 @@ pub fn SsoWizardDialog(
                 </Field>
                 <div class="sso-claims">
                     <span class="sso-field__label">"Attributes & claims (optional)"</span>
-                    <Body1 class="hint">
+                    <span class="ui-text hint">
                         "Custom claims require admin consent for Policy.ReadWrite.ApplicationConfiguration and Application.ReadWrite.All. Leave empty to use Entra's default claim set."
-                    </Body1>
+                    </span>
                     <ClaimsEditor state=claims_state />
                 </div>
             </Show>
@@ -423,7 +423,7 @@ pub fn SsoWizardDialog(
                                  {SECRET_DEFAULT_DAYS}-day default."
                             )
                         });
-                        view! { <Body1 class="hint">{hint}</Body1> }
+                        view! { <span class="ui-text hint">{hint}</span> }
                     }}
                 </Field>
             </Show>
@@ -500,9 +500,7 @@ pub fn SsoWizardDialog(
                                     {move || {
                                         if busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| {
-                                                    SpinnerSize::Tiny
-                                                }) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {

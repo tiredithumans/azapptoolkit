@@ -45,8 +45,9 @@ surfaces reuse it rather than re-implementing the markup.
   `ListScaffold` — `ListScaffold` takes no `title`/`actions` props; the card starts at its search
   box.
 - **Loading** — skeletons for content regions (`SkeletonList` / `DetailSkeleton` /
-  `SkeletonCard`), each a `role="status"` region with a hidden "Loading…"; spinners are reserved
-  for in-button / inline busy states only.
+  `SkeletonCard`), each a `role="status"` region with a hidden "Loading…"; spinners
+  (`components::ui::Spinner`) are reserved for in-button / inline busy states only. Determinate
+  progress is `ProgressBar`; date entry is `DateInput`.
 - **Load failure** — `DetailLoadError`, the universal "message + Retry" block (detail panes and
   their tabs/sections, all three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a
   context `class`. A `Suspend` `Err` arm never renders `form-error` / `FormError` directly — pinned
@@ -201,6 +202,36 @@ surfaces reuse it rather than re-implementing the markup.
   chips do. An action column's header is `""` in `DataTable`, which renders a `.visually-hidden`
   "Actions"; a hand-built table writes the same span into its empty `<th>`.
 
+## Moving off Thaw
+
+Thaw (a pre-1.0 Fluent UI port whose last release is a beta) is being retired a few components at
+a time. Each replacement is a `components::ui` primitive that renders the same plain HTML element
+(`<button>`, `<input>`, `<span>`), so the GUI tests, which find elements by tag and visible text,
+carry over. A retired component goes into `RETIRED` in `web-rs/tests/thaw_retired.rs`, which fails
+on any `thaw::` import of it.
+
+- **Retired so far:** `Body1` (a `<span class="ui-text …">`; see below), `Card` (the two detail
+  panes render a plain `.app-detail` div; the relative positioning, clipping and 12px gap Thaw
+  supplied are in that rule), `DatePicker`
+  (`ui::DateInput`, the native date input the list filters already used), `ProgressBar`
+  (`ui::ProgressBar`: a fraction, with NaN read as empty) and `Spinner` (`ui::Spinner`: Fluent's
+  20px "tiny" arc, the only size the app used, named by its `label`). Earlier, `Dialog` became
+  `ModalShell` and `TabList`/`Tab` became `TabBar`.
+- **Still on Thaw:** the form controls (`Field`, `Input`, `Textarea`, `Select`, `InputSuffix`),
+  `Button`, and `ConfigProvider`/`Theme`, which go last. `ConfigProvider`'s wrapper div also sets
+  the font every element inherits, to Thaw's stack (`'Segoe UI'` first), not `--font-sans`
+  (`"Segoe UI Variable"` first); removing it moves Windows text to Segoe UI Variable unless the
+  stack is carried over.
+- **Our CSS outranks Thaw's.** Thaw's `mount_style` *prepends* each component's stylesheet to
+  `<head>`, ahead of the static `styles.css`, so at equal specificity our rule wins (a
+  `.hint` on a Thaw `Body1` always got its 12px). A replacement keeps that order by putting its
+  base rule ahead of the component rules: `.ui-text` sits right after the root rules and pins
+  Thaw's body-1 metrics (14px/20px, regular, `white-space: normal`), so a `.hint` or `.mono` on
+  the same span still wins. Verify a swap by diffing computed styles in the demo build before and
+  after, not by reading rule text: the retirement of `Body1` changed none of 85 sampled spans.
+- **Colours come from our tokens.** The replacements use `--accent` and `--border`, not Thaw's
+  brand ramp. Light mode matches Thaw exactly; dark mode takes the app's own, lighter accent.
+
 ## Responsive layout
 
 The desktop window runs from 900×600 (`minWidth`/`minHeight` in `tauri.conf.json`) to maximized,
@@ -211,7 +242,7 @@ gets there with intrinsic CSS rather than a ladder of breakpoints:
   list select/sort bars, …) and tab strips (`.ui-tabs`) `flex-wrap` — beside a title
   (`.row-between > .actions-row`, `> .thaw-button`) the buttons keep their width so the title
   wraps first. A panel nested inside a flex-column tab needs the column itself (`.cert-rollover`
-  in `.sso-tab`): as a plain block, its buttons sit inline and a Thaw `Body1` hint — an inline
+  in `.sso-tab`): as a plain block, its buttons sit inline and a `.ui-text` hint — an inline
   `<span>` — wraps around them. Grid
   tracks that hold content are `minmax(0, 1fr)` (the comments at `.shell__main` and
   `.workspace__panes` say why); card and section groups are

@@ -15,10 +15,10 @@
 //!   post-hoc warning into a correctable typo.
 
 use leptos::prelude::*;
-use thaw::{Body1, Field, Spinner, SpinnerSize, Textarea};
+use thaw::{Field, Textarea};
 
 use crate::bindings::sharepoint::{self, SharePointResourceRef};
-use crate::components::ui::{Badge, BadgeTone, Callout};
+use crate::components::ui::{Badge, BadgeTone, Callout, Spinner};
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -159,7 +159,7 @@ pub fn ItemSelectionPanel(
                             Probe::Pending => {
                                 view! {
                                     <li class="resource-probe">
-                                        <Spinner size=SpinnerSize::Tiny />
+                                        <Spinner />
                                         <span class="muted">{url}</span>
                                     </li>
                                 }
@@ -212,19 +212,19 @@ pub fn ItemSelectionPanel(
 
         <Show when=any_mismatch fallback=|| ()>
             <Callout tone="danger" role="alert">
-                <Body1>
+                <span class="ui-text">
                     "One or more targets sit at a level this permission can't grant against. They'll be skipped — correct the URL, or pick the permission that matches."
-                </Body1>
+                </span>
             </Callout>
         </Show>
 
         <Callout tone="warn">
-            <Body1>
+            <span class="ui-text">
                 "Granting below the site collection breaks SharePoint permission inheritance on the target and uses one of the library's unique permission scopes. Prefer a dedicated document library, or a dedicated site, where the content allows it."
-            </Body1>
+            </span>
         </Callout>
-        <Body1 class="hint">
+        <span class="ui-text hint">
             "Grants the Selected permission plus the chosen access on just these resources. Nothing org-wide is removed — these scopes start least-privilege."
-        </Body1>
+        </span>
     }
 }

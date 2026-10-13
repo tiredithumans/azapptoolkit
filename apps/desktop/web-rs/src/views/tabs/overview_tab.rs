@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::Application;
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select, Spinner, SpinnerSize, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
 
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 
@@ -207,7 +207,7 @@ pub fn OverviewTab(
                                     {move || {
                                         if cmd.busy.get() {
                                             view! {
-                                                <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                                <Spinner />
                                             }
                                                 .into_any()
                                         } else {

@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::ui::Callout;
 use crate::util::write_clipboard;
@@ -32,7 +32,7 @@ pub fn CopyBlock(
     view! {
         <div class="copy-block">
             <span class="copy-block__label">{label}</span>
-            {(!hint.is_empty()).then(|| view! { <Body1 class="hint">{hint}</Body1> })}
+            {(!hint.is_empty()).then(|| view! { <span class="ui-text hint">{hint}</span> })}
             <pre class="secret-reveal">{value}</pre>
             {move || {
                 (copied.get() == Some(false))

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, ProgressBar};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::auth;
 use crate::bindings::events;
@@ -16,8 +16,8 @@ use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::SearchInput;
 use crate::components::ui::{Badge, BadgeTone, Callout, ShowMore};
+use crate::components::ui::{ProgressBar, SearchInput};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
@@ -250,9 +250,9 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
     };
 
     view! {
-        <Body1>
+        <span class="ui-text">
             "Scans every reachable Key Vault's Azure RBAC role assignments — those made on the vault and those inherited from its resource group, subscription or management group (marked Inherited); search by principal to see the vaults an app or managed identity can reach, or by vault to see who can touch it."
-        </Body1>
+        </span>
         <div class="actions-row">
             {move || {
                 if scanning.get() {
@@ -301,7 +301,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                     view! {
                         <div class="audit-progress">
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <Body1>
+                            <span class="ui-text">
                                 {format!(
                                     "{} / {} vaults{}{}",
                                     p.done,
@@ -309,7 +309,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                     p.current_vault.as_deref().map(|s| format!(" — {s}")).unwrap_or_default(),
                                     if p.cancelled { " (cancelling…)" } else { "" },
                                 )}
-                            </Body1>
+                            </span>
                         </div>
                     }
                 })
@@ -320,7 +320,7 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 .map(|e| {
                     view! {
                         <Callout tone="warn">
-                            <Body1>{e}</Body1>
+                            <span class="ui-text">{e}</span>
                             {consent_required
                                 .get()
                                 .then(|| {
@@ -353,9 +353,9 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             if result.with(|r| r.is_none()) {
                 return if !scanning.get() {
                     view! {
-                        <Body1>
+                        <span class="ui-text">
                             "No scan yet for this tenant. Scanning enumerates every Key Vault you can reach and reads its role assignments with the signed-in user's Azure Reader rights — it can take a while on large estates and can be cancelled anytime."
-                        </Body1>
+                        </span>
                     }
                         .into_any()
                 } else {
@@ -364,14 +364,14 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
             }
             let on_grid_key = on_grid_key.clone();
             view! {
-                <Body1 class="page__summary">{move || summary.get().unwrap_or_default()}</Body1>
+                <span class="ui-text page__summary">{move || summary.get().unwrap_or_default()}</span>
                 <Show
                     when=move || filtered_rows.with(|r| !r.is_empty())
                     fallback=|| {
                         view! {
-                            <Body1>
+                            <span class="ui-text">
                                 "No role assignments match. A vault in legacy access-policy mode grants data access through access policies, which aren't listed here (see the Security audit for the broader picture)."
-                            </Body1>
+                            </span>
                         }
                     }
                 >

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::exchange;
@@ -31,7 +31,7 @@ use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::components::toast::{ToastAction, ToastKind};
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, EmptyState, FormError, IconButton, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, EmptyState, FormError, IconButton, Spinner, TabBar, TabBarItem,
 };
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_grid_keynav::use_grid_keynav;
@@ -547,7 +547,7 @@ pub fn PermissionsTab(
                         {move || {
                             if consenting.get() {
                                 view! {
-                                    <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                    <Spinner />
                                 }
                                     .into_any()
                             } else {
@@ -710,9 +710,9 @@ pub fn PermissionsTab(
                             .then(|| {
                                 let kind = if filter == "delegated" { "delegated" } else { "application" };
                                 view! {
-                                    <Body1 class="data-table__empty">
+                                    <span class="ui-text data-table__empty">
                                         {format!("No {kind} permissions declared.")}
-                                    </Body1>
+                                    </span>
                                 }
                             })
                     }}
@@ -740,13 +740,13 @@ pub fn PermissionsTab(
                             .collect_view();
                         view! {
                             <Callout tone="warn">
-                                <Body1>
+                                <span class="ui-text">
                                     {format!(
                                         "Replace {} with a narrower permission. The narrower one is granted first, then {} is removed — only proceed if the app doesn't use the broader capability, because this changes its effective access.",
                                         p.broad_value,
                                         p.broad_value,
                                     )}
-                                </Body1>
+                                </span>
                                 <div class="actions-row">
                                     {buttons}
                                     <Button

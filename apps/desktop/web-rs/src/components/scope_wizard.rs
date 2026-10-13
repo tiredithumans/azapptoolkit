@@ -38,7 +38,7 @@
 use std::fmt::Write;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
@@ -49,7 +49,7 @@ use crate::components::modal_shell::ModalShell;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
-use crate::components::ui::{Callout, FormError};
+use crate::components::ui::{Callout, FormError, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::scoping::{
@@ -871,13 +871,13 @@ pub fn ScopeWizard(
     view! {
         <ModalShell open=open title="Grant access" busy=busy on_close=on_close wide=true>
             <div class="sso-wizard__steps">
-                <Body1 class="hint">
+                <span class="ui-text hint">
                     {move || match step.get() {
                         0 => "Step 1 of 3 — Select permissions",
                         1 => "Step 2 of 3 — Choose access",
                         _ => "Step 3 of 3 — Review & grant",
                     }}
-                </Body1>
+                </span>
             </div>
 
             // ---- Step 0: select permissions (full catalog, multi-select) ----
@@ -947,17 +947,17 @@ pub fn ScopeWizard(
                         .is_none()
                         .then(|| {
                             view! {
-                                <Body1 class="hint">
+                                <span class="ui-text hint">
                                     "These permissions can't be scoped together — they'll be granted org-wide. To scope instead, select only mailbox permissions, only SharePoint site permissions, or only one Selected permission for libraries/folders/files, in one pass."
-                                </Body1>
+                                </span>
                             }
                         })
                 }}
                 <Show when=move || active_mode.get() == ScopeMode::OrgWide fallback=|| ()>
                     <Callout tone="warn">
-                        <Body1>
+                        <span class="ui-text">
                             "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
-                        </Body1>
+                        </span>
                     </Callout>
                 </Show>
                 {move || {
@@ -1018,13 +1018,13 @@ pub fn ScopeWizard(
                         }}
                     </dd>
                 </dl>
-                <Body1>{review_line}</Body1>
+                <span class="ui-text">{review_line}</span>
                 {move || {
                     strip_warning()
                         .map(|w| {
                             view! {
                                 <Callout tone="warn">
-                                    <Body1>{w}</Body1>
+                                    <span class="ui-text">{w}</span>
                                 </Callout>
                             }
                         })
@@ -1067,9 +1067,9 @@ pub fn ScopeWizard(
                 (step.get() == 0 && selected.with(|s| s.is_empty()))
                     .then(|| {
                         view! {
-                            <Body1 class="hint">
+                            <span class="ui-text hint">
                                 "Select at least one permission to continue."
-                            </Body1>
+                            </span>
                         }
                     })
             }}
@@ -1095,7 +1095,7 @@ pub fn ScopeWizard(
                             {move || {
                                 if busy.get() {
                                     view! {
-                                        <Spinner size=Signal::derive(|| SpinnerSize::Tiny) />
+                                        <Spinner />
                                     }
                                         .into_any()
                                 } else {
@@ -1128,9 +1128,9 @@ fn SelectPermissionsStep(
     on_toggle: Callback<PickerSelection>,
 ) -> impl IntoView {
     view! {
-        <Body1 class="hint">
+        <span class="ui-text hint">
             "Choose the permissions to grant. You'll decide how to grant them — org-wide, or scoped to specific mailboxes or sites — next."
-        </Body1>
+        </span>
         {move || {
             let items = selected.get();
             (!items.is_empty())

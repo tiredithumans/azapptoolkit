@@ -11,13 +11,9 @@
 
 use chrono::NaiveDate;
 use leptos::prelude::*;
-use thaw::Body1;
 
 use crate::components::icon::IconName;
-use crate::components::ui::IconButton;
-
-/// The ISO format a native `<input type="date">` reads and writes.
-const ISO: &str = "%Y-%m-%d";
+use crate::components::ui::{DateInput, IconButton};
 
 #[component]
 pub fn DateRangeFilter(
@@ -43,7 +39,7 @@ pub fn DateRangeFilter(
                 );
                 let msg = inverted_msg.clone();
                 inverted.then(|| {
-                    view! { <Body1 class="filter-hint filter-hint--warn">{msg}</Body1> }
+                    view! { <span class="ui-text filter-hint filter-hint--warn">{msg}</span> }
                 })
             }}
         </div>
@@ -64,18 +60,7 @@ fn date_field(
         <div class="date-range-field">
             <label class="date-range-field__label">{label}</label>
             <div class="date-range-field__input">
-                <input
-                    type="date"
-                    class="date-range-field__native"
-                    aria-label=label
-                    prop:value=move || {
-                        value.get().map(|d| d.format(ISO).to_string()).unwrap_or_default()
-                    }
-                    on:input=move |ev| {
-                        let raw = event_target_value(&ev);
-                        value.set(NaiveDate::parse_from_str(&raw, ISO).ok());
-                    }
-                />
+                <DateInput value label class="date-range-field__native" />
                 {move || {
                     value.get().is_some().then(|| {
                         view! {

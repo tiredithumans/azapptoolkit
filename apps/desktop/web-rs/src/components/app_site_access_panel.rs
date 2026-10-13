@@ -19,11 +19,11 @@
 use std::fmt::Write;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::events;
 use crate::bindings::sharepoint::{self, AppSiteAccessDto, SiteSweepProgress};
-use crate::components::ui::{Callout, DataTable};
+use crate::components::ui::{Callout, DataTable, ProgressBar, Spinner};
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 use crate::util::plural;
@@ -190,9 +190,9 @@ pub fn AppSiteAccessPanel(
                 }
             }}
         </header>
-        <Body1 class="hint">
+        <span class="ui-text hint">
             "Microsoft Graph has no reverse app-to-sites lookup, so this reads every enumerable site's permissions once. The scan is tenant-wide and shared with Resource Access → Sites (and cached for an hour), so it also answers this question for every other app."
-        </Body1>
+        </span>
 
         {move || {
             progress
@@ -203,7 +203,7 @@ pub fn AppSiteAccessPanel(
                     view! {
                         <div class="audit-progress">
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <Body1>
+                            <span class="ui-text">
                                 {format!(
                                     "{} / {} sites{}{}",
                                     p.done,
@@ -211,7 +211,7 @@ pub fn AppSiteAccessPanel(
                                     p.current_site.as_deref().map(|s| format!(" — {s}")).unwrap_or_default(),
                                     if p.cancelled { " (cancelling…)" } else { "" },
                                 )}
-                            </Body1>
+                            </span>
                         </div>
                     }
                 })
@@ -222,7 +222,7 @@ pub fn AppSiteAccessPanel(
                 .map(|e| {
                     view! {
                         <Callout tone="warn">
-                            <Body1>{e}</Body1>
+                            <span class="ui-text">{e}</span>
                             {consent_required
                                 .get()
                                 .then(|| {
@@ -249,14 +249,14 @@ pub fn AppSiteAccessPanel(
                 // Looked, nothing cached: say what a scan costs before running it.
                 None if checked.get() => {
                     view! {
-                        <Body1>
+                        <span class="ui-text">
                             "No site scan has run for this tenant yet, so this app's per-site grants are unknown. Scanning reads every site with your SharePoint admin rights — it can take a while on large tenants and can be cancelled anytime."
-                        </Body1>
+                        </span>
                     }
                         .into_any()
                 }
                 None => {
-                    view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) label="Loading…" /> }
+                    view! { <Spinner label="Loading…" /> }
                         .into_any()
                 }
                 Some(a) => {
@@ -270,7 +270,7 @@ pub fn AppSiteAccessPanel(
                     });
                     view! {
                         {cap_notice}
-                        <Body1 class="page__summary">{summary}</Body1>
+                        <span class="ui-text page__summary">{summary}</span>
                         <DataTable
                             headers=vec!["Site", "Roles", ""]
                             rows=sites

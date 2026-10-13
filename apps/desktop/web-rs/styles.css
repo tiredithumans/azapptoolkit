@@ -188,6 +188,20 @@ body {
   height: 100%;
 }
 
+/* Body text: the span every former Thaw `Body1` renders. It pins Thaw's
+   body-1 metrics (14px/20px, regular, wrapping, start-aligned) so the text
+   keeps its size inside a smaller or bolder container. It sits ahead of every
+   component rule on purpose: Thaw prepended its own styles to <head>, so a
+   class on the same span (`.hint`, `.mono`, `.form-error`, ...) always won the
+   specificity tie, and this order keeps it winning. */
+.ui-text {
+  font-size: var(--text-base);
+  font-weight: 400;
+  line-height: 20px;
+  white-space: normal;
+  text-align: start;
+}
+
 /* Keyboard-focus ring (Fluent-style stacked outline) for interactive rows and
  * nav items. A list row is reachable because `VirtualList` gives the rendered
  * window a roving tabindex (`hooks::use_grid_keynav`) — until that landed this
@@ -1416,12 +1430,10 @@ h3 {
 }
 
 /* ---------- App detail ---------- */
-/* Scoped one level deeper than the bare class so these rules beat Thaw's
-   `.thaw-card` defaults. Thaw injects `.thaw-card` into <head> at runtime
-   (after our static stylesheet), so at equal specificity its `width: 720px`
-   and `margin: auto` would win — capping the pane width and vertically
-   centering it, leaving the details floating low in the grid cell. The
-   descendant selector raises specificity to 0-2-0 so we deterministically win. */
+/* The detail card that fills an open-items pane. It was a Thaw `Card` until
+   the app moved off Thaw; the three things that component still contributed
+   under these rules (relative positioning, clipping on both axes and the
+   12px gap between sections) are spelled out here. */
 .workspace__pane .app-detail {
   /* Fills the pane below its control bar. */
   flex: 1 1 auto;
@@ -1434,7 +1446,9 @@ h3 {
   width: 100%;
   max-width: 100%;
   margin: 0;
-  overflow-x: hidden;
+  position: relative;
+  overflow: hidden;
+  gap: var(--space-3);
   box-sizing: border-box;
   /* Deeper elevation in the overlay layer — the pane floats above the
      (now full-width) list, formalizing the workspace as its own surface. */
@@ -1630,7 +1644,7 @@ h3 {
   align-items: center;
   gap: var(--space-1);
 }
-.date-range-field__native {
+.ui-date-input {
   font: inherit;
   color: var(--text);
   background: var(--surface);
@@ -2041,11 +2055,11 @@ h3 {
   max-width: var(--page-max);
 }
 /* Intro prose keeps a readable line length inside the wider page caps (a
-   1440px line is ~200 characters). `display: block` because Thaw's `Body1` is
-   an inline <span>, which ignores max-width. */
+   1440px line is ~200 characters). `display: block` because `.ui-text` is an
+   inline <span>, which ignores max-width. */
 .settings-view > .hint,
 .readiness > .hint,
-.permission-tester > .thaw-body-1,
+.permission-tester > .ui-text,
 .dr-view__lead,
 .dr-view__notes {
   display: block;
@@ -3103,6 +3117,96 @@ h3 {
 .ui-skel-row__chip { width: 56px; height: 18px; border-radius: var(--radius-pill); }
 .ui-skel-row__title { flex: 1; height: 12px; max-width: 60%; }
 
+/* ---- Spinner ---- */
+/* Fluent's "tiny" spinner (20px, 2px stroke), ported from Thaw: a ring masked
+   out of a filled square turns while the tail's two conic halves stretch and
+   shrink the arc. Keep the class names under the `ui-spinner` prefix: the
+   reduced-motion exception below matches them by substring. */
+.ui-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  line-height: 0;
+  overflow: hidden;
+}
+.ui-spinner__arc {
+  --ui-spinner-stroke: 2px;
+  position: relative;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  mask-image: radial-gradient(
+    closest-side,
+    transparent calc(100% - var(--ui-spinner-stroke) - 1px),
+    white calc(100% - var(--ui-spinner-stroke)) calc(100% - 1px),
+    transparent 100%
+  );
+  background-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--accent);
+  animation: ui-spinner 1.5s linear infinite;
+}
+.ui-spinner__tail {
+  position: absolute;
+  display: block;
+  width: 100%;
+  height: 100%;
+  mask-image: conic-gradient(transparent 105deg, white 105deg);
+  animation: ui-spinner-tail 1.5s var(--ease-standard) infinite;
+}
+.ui-spinner__tail::before,
+.ui-spinner__tail::after {
+  content: "";
+  position: absolute;
+  display: block;
+  width: 100%;
+  height: 100%;
+  animation: inherit;
+  background-image: conic-gradient(currentcolor 135deg, transparent 135deg);
+}
+.ui-spinner__tail::before { animation-name: ui-spinner-tail-before; }
+.ui-spinner__tail::after { animation-name: ui-spinner-tail-after; }
+.ui-spinner__label {
+  font-size: var(--text-base);
+  line-height: 20px;
+  color: var(--text);
+}
+@keyframes ui-spinner {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes ui-spinner-tail {
+  0% { transform: rotate(-135deg); }
+  50% { transform: rotate(0deg); }
+  100% { transform: rotate(225deg); }
+}
+@keyframes ui-spinner-tail-before {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(105deg); }
+  100% { transform: rotate(0deg); }
+}
+@keyframes ui-spinner-tail-after {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(225deg); }
+  100% { transform: rotate(0deg); }
+}
+
+/* ---- Progress bar ---- */
+.ui-progress {
+  display: block;
+  width: 100%;
+  height: 2px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--border);
+}
+.ui-progress__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
 /* ---- Kbd ---- */
 .ui-kbd {
   display: inline-flex;
@@ -3570,7 +3674,7 @@ h3 {
 }
 /* The signing-certificate rollover panel is ONE child of `.sso-tab`, so it
    needs the column itself (above): as a plain block, its step buttons sat
-   flush side by side and the hint (Thaw's Body1 is an inline <span>) wrapped
+   flush side by side and the hint (an inline `.ui-text` <span>) wrapped
    around them, with the Activate button trailing the sentence. */
 /* A 40-hex-digit thumbprint has no break opportunity, and a date breaks at its
    hyphens ("2029-" / "07-09"): let the thumbprint wrap anywhere (like `.mono`
@@ -3774,10 +3878,9 @@ h3 {
    * UI. A steady rotation/sweep is non-vestibular, which is precisely what
    * WCAG 2.3.3 sets out to preserve; the flourishes stay disabled. */
   .ui-skel,
-  [class*="thaw-spinner"],
-  [class*="thaw-spinner"]::before,
-  [class*="thaw-spinner"]::after,
-  [class*="thaw-progress"] [class*="indeterminate"] {
+  [class*="ui-spinner"],
+  [class*="ui-spinner"]::before,
+  [class*="ui-spinner"]::after {
     animation-duration: 1.4s !important;
     animation-iteration-count: infinite !important;
   }

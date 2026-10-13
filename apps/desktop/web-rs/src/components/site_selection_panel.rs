@@ -5,7 +5,7 @@
 //! (SharePoint has no persistent scope group; access is per-site grants).
 
 use leptos::prelude::*;
-use thaw::{Body1, Field, Textarea};
+use thaw::{Field, Textarea};
 
 #[component]
 pub fn SiteSelectionPanel(
@@ -41,8 +41,8 @@ pub fn SiteSelectionPanel(
                 <span>"Write"</span>
             </label>
         </div>
-        <Body1 class="hint">
+        <span class="ui-text hint">
             "Grants Sites.Selected + the chosen access on just these sites, then removes any org-wide Sites.* grant so access is confined to them."
-        </Body1>
+        </span>
     }
 }

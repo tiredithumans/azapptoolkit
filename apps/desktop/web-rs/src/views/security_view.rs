@@ -21,10 +21,12 @@ use std::collections::HashSet;
 
 use azapptoolkit_core::audit::PostureCounts;
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, ProgressBar, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use crate::components::export_menu::ExportMenu;
-use crate::components::ui::{Callout, FormError, SectionHeader, TabBar, TabBarItem};
+use crate::components::ui::{
+    Callout, FormError, ProgressBar, SectionHeader, Spinner, TabBar, TabBarItem,
+};
 use crate::state::{SecurityTab, use_session};
 use crate::util::{TimeAgo, keep_alive, time_ago};
 use crate::views::app_permission_grants_view::AppPermissionGrantsView;
@@ -121,7 +123,7 @@ fn PostureStrip() -> impl IntoView {
                 >
                     {move || {
                         if scanning.get() {
-                            view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                            view! { <Spinner /> }
                                 .into_any()
                         } else {
                             view! { "Run audit" }.into_any()
@@ -196,10 +198,10 @@ fn PostureStrip() -> impl IntoView {
                             let label = p
                                 .current_app
                                 .unwrap_or_else(|| "Preparing the scan…".to_string());
-                            view! { <Body1>{label}</Body1> }.into_any()
+                            view! { <span class="ui-text">{label}</span> }.into_any()
                         } else {
                             view! {
-                                <Body1>
+                                <span class="ui-text">
                                     {format!(
                                         "{} / {} apps  (cap: {}{})",
                                         p.done,
@@ -207,8 +209,8 @@ fn PostureStrip() -> impl IntoView {
                                         cap,
                                         if p.cancelled { ", cancelled" } else { "" },
                                     )}
-                                </Body1>
-                                {p.current_app.map(|n| view! { <Body1>{n}</Body1> })}
+                                </span>
+                                {p.current_app.map(|n| view! { <span class="ui-text">{n}</span> })}
                             }
                                 .into_any()
                         };

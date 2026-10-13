@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use thaw::{Body1, Button, ButtonAppearance, Spinner, SpinnerSize};
+use thaw::{Button, ButtonAppearance};
 
 use azapptoolkit_core::audit::RemediationAction;
 use azapptoolkit_core::models::DirectoryObject;
@@ -17,7 +17,7 @@ use crate::bindings::applications;
 use crate::components::directory_search::DirectorySearch;
 use crate::components::modal_shell::ModalShell;
 use crate::components::tenant_defaults_hint::OwnerDefaultsHint;
-use crate::components::ui::FormError;
+use crate::components::ui::{FormError, Spinner};
 use crate::state::{Session, use_session};
 use crate::util::count_noun;
 
@@ -242,9 +242,9 @@ pub fn AddOwnerButton(
                 busy=Signal::derive(move || busy.get() || adding_defaults.get())
                 on_close=Callback::new(move |()| open.set(false))
             >
-                <Body1>
+                <span class="ui-text">
                     "Search the directory and add an owner so this application has clear accountability. Adding an owner is purely additive — it can't disrupt the app's sign-in or permissions."
-                </Body1>
+                </span>
                 <div class="actions-row">
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Primary)
@@ -257,13 +257,13 @@ pub fn AddOwnerButton(
                         adding_defaults
                             .get()
                             .then(|| {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                             })
                     }}
                 </div>
-                <Body1 class="muted">
+                <span class="ui-text muted">
                     "Adds the owners configured for this tenant in Settings (additive — skips anyone already an owner). Or search below to add someone specific."
-                </Body1>
+                </span>
                 // Cleared by the add handler only on success, so a
                 // failed add keeps the operator's query.
                 <DirectorySearch
@@ -293,7 +293,7 @@ pub fn AddOwnerButton(
                     {move || {
                         (busy.get() || adding_defaults.get())
                             .then(|| {
-                                view! { <Spinner size=Signal::derive(|| SpinnerSize::Tiny) /> }
+                                view! { <Spinner /> }
                             })
                     }}
                 </div>
