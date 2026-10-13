@@ -169,13 +169,32 @@ pub fn text(selector: &str) -> String {
         .to_string()
 }
 
-/// Whole-document text. Useful for asserting a message rendered *somewhere*
+/// Id of the `<pre>` the wasm-bindgen test runner writes its transcript into.
+/// It shares `<body>` with the views under test and, though hidden, is part of
+/// `textContent`: test names and an earlier test's panic message (which lists
+/// every button label it saw) would otherwise satisfy the next test's
+/// `body_contains` wait before its own view had rendered.
+const RUNNER_OUTPUT_ID: &str = "output";
+
+/// Whole-document text, minus the test runner's own nodes (its transcript and
+/// its `<script>`s). Useful for asserting a message rendered *somewhere*
 /// without coupling to a specific view's error/empty container markup.
 pub fn body_text() -> String {
-    document()
-        .body()
-        .and_then(|b| b.text_content())
-        .unwrap_or_default()
+    let Some(body) = document().body() else {
+        return String::new();
+    };
+    let nodes = body.child_nodes();
+    let mut out = String::new();
+    for i in 0..nodes.length() {
+        let Some(node) = nodes.item(i) else { continue };
+        if let Some(el) = node.dyn_ref::<web_sys::Element>()
+            && (el.id() == RUNNER_OUTPUT_ID || el.tag_name().eq_ignore_ascii_case("script"))
+        {
+            continue;
+        }
+        out.push_str(&node.text_content().unwrap_or_default());
+    }
+    out
 }
 
 /// True if the rendered page contains `needle` anywhere — the robust way to
