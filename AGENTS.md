@@ -82,7 +82,7 @@ docs/CHANGELOG-archive.md — releases <= 0.26.3
 
 Deep-dive: caching-and-search.md
 
-- **Security-critical app:** never write secrets to disk or logs; scope tokens per resource.
+- **Security-critical app:** never write secrets to disk or logs; scope tokens per resource; every id a client splices into a path is shape-checked (`trust.rs`).
 - **Tauri commands:** `#[tauri::command] async fn` → `State<'_, AppState>` → `Result<T, UiError>`; frontend args use `#[serde(rename_all = "camelCase")]`.
 - **Tenant-scoped caches — cross-tenant leakage is the #1 footgun.** Keys are `{tenant_id}|{kind}`, sign-out and `sign_in` sweep every kind (never `reauthenticate`), the two tenant-wide indexes are read only through their typed accessors, and a cache-only command must prove the session.
 - **Invalidate caches only on `Ok`** (tiers: `invalidate_app_lists` / `_credentials` / `_detail_state` / `_details`); a clean create/delete/rename patches the scanned lists instead (`record_created_apps` / `record_deleted_apps` / `record_renamed_app`); a pinned index or a long scan's result takes `generation_for` before the fetch and stores via `*_if_current`.
@@ -118,7 +118,7 @@ Deep-dives: exchange-scoping.md · sharepoint-selected.md
 - **Mailbox AND SharePoint permissions live on TWO resources each — carry the resource, never the bare value** (`audit::ResourcePermission`, the positive `is_scopable_*_resource_permission` / `scope_kind_for` gates; value-only forms are pinned out).
 - **`Sites.Selected` reach is knowable only from the site side:** one tenant index shared by the sweep and the per-app panel, `AppSiteAccessDto::from_sweep` the single projection, empty = "no grants" only when `is_complete()`.
 - **Sub-site Selected scopes are a SECOND, non-enumerable mechanism** (`ScopeKind::SharePointItem`, `grantedToV2` body, URL resolved then checked with `selected_scope_accepts`, appRole declared before assigned, own capability `sharepoint_selected_items`); each landed grant is recorded as an `azapptoolkit:spItem:` tag on the app registration, the only per-app list of them.
-- **SharePoint input is shape-checked at the graph client:** `site_lookup_path` rebuilds a pasted URL from parsed segments, every permission DELETE runs `validate::require_path_segment` (pinned in `trust.rs`), and a grant role is `read`/`write` only.
+- **SharePoint input is shape-checked at the graph client:** `site_lookup_path` rebuilds a pasted URL from parsed segments, and a grant role is `read`/`write` only.
 - **AAP migration is guarded, not mechanical:** `RestrictAccess` only, one batch per app, fail closed; planner `azapptoolkit-exchange::aap`.
 - **Scoped grants reuse shared cores** and grant scoped access before stripping org-wide; scope + group names come from the two per-tenant patterns via `load_tenant_defaults`; membership changes don't invalidate caches.
 - **Repointing a management scope is explicit and fail-closed:** `ensure_management_scope` is create-only, `set_management_scope_filter` the sole filter mutator, only for a proven `MemberOfGroup` OR-chain.

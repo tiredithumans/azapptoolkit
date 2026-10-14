@@ -56,6 +56,55 @@ impl BatchSubResponse {
     }
 }
 
+/// The sub-URLs for a batch helper's inputs, each built by `build` — which
+/// shape-checks the id it splices (`validate::require_path_segment`) — and,
+/// per input in order, the refusal for an input whose check failed.
+///
+/// One malformed id must not fail the whole call: every batch helper promises
+/// one `Result` per input, in order, and its callers skip a failed item (the
+/// DR backup, the role-name resolvers) or fall back to N serial per-id reads
+/// on an outer `Err`. A refused input costs no sub-request;
+/// [`rejoin_refused`] puts its `Err` back in its slot.
+pub(crate) fn checked_sub_urls<T>(
+    inputs: &[T],
+    mut build: impl FnMut(&T) -> Result<String>,
+) -> (Vec<String>, Vec<Option<GraphError>>) {
+    let mut urls = Vec::new();
+    let mut refused = Vec::new();
+    for input in inputs {
+        match build(input) {
+            Ok(url) => {
+                urls.push(url);
+                refused.push(None);
+            }
+            Err(e) => refused.push(Some(e)),
+        }
+    }
+    (urls, refused)
+}
+
+/// One result per original input, in order: `batched` (one result per
+/// sub-URL [`checked_sub_urls`] built, in order) interleaved with the refusals
+/// it recorded. A batch that answered fewer sub-requests than it was sent is a
+/// `Protocol` error in each slot it left empty, never a shifted row.
+pub(crate) fn rejoin_refused<T>(
+    refused: Vec<Option<GraphError>>,
+    batched: Vec<Result<T>>,
+) -> Vec<Result<T>> {
+    let mut batched = batched.into_iter();
+    refused
+        .into_iter()
+        .map(|slot| match slot {
+            Some(e) => Err(e),
+            None => batched.next().unwrap_or_else(|| {
+                Err(GraphError::Protocol(
+                    "$batch answered fewer sub-requests than it was sent".into(),
+                ))
+            }),
+        })
+        .collect()
+}
+
 /// Maps one inner batch response to the typed result an individual GET yields.
 fn map_batch_response<T: DeserializeOwned>(r: BatchSubResponse) -> Result<T> {
     let code = r.status;

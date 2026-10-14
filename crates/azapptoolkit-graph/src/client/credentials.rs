@@ -50,6 +50,7 @@ impl GraphClient {
         start: Option<chrono::DateTime<chrono::Utc>>,
         end: chrono::DateTime<chrono::Utc>,
     ) -> Result<PasswordCredential> {
+        validate::require_path_segment("object id", object_id)?;
         let mut credential = serde_json::json!({
             "displayName": display_name,
             "endDateTime": end.to_rfc3339(),
@@ -63,6 +64,7 @@ impl GraphClient {
     }
 
     pub async fn remove_password(&self, object_id: &str, key_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let body = serde_json::json!({ "keyId": key_id });
         let path = format!("/applications/{object_id}/removePassword");
         self.send_no_content(Method::POST, &path, Some(&body)).await
@@ -74,6 +76,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Vec<FederatedIdentityCredential>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}/federatedIdentityCredentials");
         let params: [(&str, &str); 1] =
             [("$select", "id,name,issuer,subject,description,audiences")];
@@ -84,23 +87,23 @@ impl GraphClient {
     /// Batched [`Self::list_federated_credentials`]: one `$batch` POST per 20 apps, returning
     /// each app's credentials in input order. Graph caps federated credentials at ~20/app, so
     /// the first (batched) page is almost always complete; the rare overflow finishes via
-    /// `collect_all_pages` outside the batch. A per-app failure is one `Err` in the vec.
+    /// `collect_all_pages` outside the batch. A per-app failure is one `Err` in the vec (an id
+    /// that is not a single path segment is its own `Err(Protocol)` row, costing no sub-request).
     pub async fn batch_list_federated_credentials(
         &self,
         object_ids: &[String],
     ) -> Result<Vec<Result<Vec<FederatedIdentityCredential>>>> {
-        let urls: Vec<String> = object_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/applications/{id}/federatedIdentityCredentials"),
-                    &[("$select", "id,name,issuer,subject,description,audiences")],
-                )
-            })
-            .collect();
+        let (urls, refused) = checked_sub_urls(object_ids, |id| {
+            validate::require_path_segment("object id", id)?;
+            Ok(batch_sub_url(
+                &format!("/applications/{id}/federatedIdentityCredentials"),
+                &[("$select", "id,name,issuer,subject,description,audiences")],
+            ))
+        });
         let pages: Vec<Result<Paged<FederatedIdentityCredential>>> =
             self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages, false).await
+        let lists = self.finish_paged_batch(pages, false).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// Creates a federated identity credential on an application.
@@ -109,6 +112,7 @@ impl GraphClient {
         object_id: &str,
         body: &FederatedCredentialRequest,
     ) -> Result<FederatedIdentityCredential> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}/federatedIdentityCredentials");
         self.send_json(Method::POST, &path, body).await
     }
@@ -121,6 +125,8 @@ impl GraphClient {
         credential_id: &str,
         body: &FederatedCredentialPatch,
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
+        validate::require_path_segment("credential id", credential_id)?;
         let path =
             format!("/applications/{object_id}/federatedIdentityCredentials/{credential_id}");
         self.send_no_content(Method::PATCH, &path, Some(body)).await
@@ -132,6 +138,8 @@ impl GraphClient {
         object_id: &str,
         credential_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
+        validate::require_path_segment("credential id", credential_id)?;
         let path =
             format!("/applications/{object_id}/federatedIdentityCredentials/{credential_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
@@ -150,6 +158,7 @@ impl GraphClient {
     /// other unmodeled field byte-for-byte — the same shape
     /// [`Self::remove_service_principal_key_credential`] was written against for this reason.
     async fn live_key_credentials(&self, object_id: &str) -> Result<Vec<serde_json::Value>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "keyCredentials")];
         let app: serde_json::Value = self.get_json(&path, &params, false).await?;
@@ -172,6 +181,7 @@ impl GraphClient {
         object_id: &str,
         new_cred: NewKeyCredential,
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let mut entries = self.live_key_credentials(object_id).await?;
         entries.push(serde_json::to_value(&new_cred)?);
         let body = serde_json::json!({ "keyCredentials": entries });
@@ -190,6 +200,7 @@ impl GraphClient {
     /// back would report a removal that never happened. Callers that want "already gone" to
     /// count as done match on it.
     pub async fn remove_key_credential(&self, object_id: &str, key_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let live = self.live_key_credentials(object_id).await?;
         let before = live.len();
         let entries: Vec<serde_json::Value> = live
@@ -220,6 +231,7 @@ impl GraphClient {
         display_name: &str,
         end: chrono::DateTime<chrono::Utc>,
     ) -> Result<SelfSignedCertificate> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let body = serde_json::json!({
             "displayName": display_name,
             "endDateTime": end.to_rfc3339(),
@@ -251,6 +263,7 @@ impl GraphClient {
         object_id: &str,
         key_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "keyCredentials,passwordCredentials")];
         let sp: serde_json::Value = self.get_json(&path, &params, false).await?;

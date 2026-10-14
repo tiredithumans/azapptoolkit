@@ -8,6 +8,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<SynchronizationJob>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let token = self.sync_token()?;
         let url = format!(
             "{}/servicePrincipals/{service_principal_id}/synchronization/jobs",
@@ -199,6 +200,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<GroupSummary>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let path =
             format!("/servicePrincipals/{service_principal_id}/memberOf/microsoft.graph.group");
         let params: [(&str, &str); 3] = [
@@ -216,28 +218,28 @@ impl GraphClient {
     /// SP's groups in input order; the rare overflow paginates outside the batch — as an
     /// advanced query too, since Graph does not carry the header into the `nextLink` request.
     /// A per-SP `Err` degrades to "no groups" (matching the un-batched path), so a tenant that
-    /// rejects `$count` in a batch loses group data but never fails the backup.
+    /// rejects `$count` in a batch loses group data but never fails the backup. An id that is
+    /// not a single path segment is its own `Err(Protocol)` row and costs no sub-request.
     pub async fn batch_list_service_principal_groups(
         &self,
         sp_ids: &[String],
     ) -> Result<Vec<Result<Vec<GroupSummary>>>> {
-        let urls: Vec<String> = sp_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/servicePrincipals/{id}/memberOf/microsoft.graph.group"),
-                    &[
-                        ("$select", "id,displayName,securityEnabled,groupTypes"),
-                        ("$count", "true"),
-                        ("$top", MAX_PAGE_SIZE),
-                    ],
-                )
-            })
-            .collect();
+        let (urls, refused) = checked_sub_urls(sp_ids, |id| {
+            validate::require_path_segment("service principal id", id)?;
+            Ok(batch_sub_url(
+                &format!("/servicePrincipals/{id}/memberOf/microsoft.graph.group"),
+                &[
+                    ("$select", "id,displayName,securityEnabled,groupTypes"),
+                    ("$count", "true"),
+                    ("$top", MAX_PAGE_SIZE),
+                ],
+            ))
+        });
         let pages: Vec<Result<Paged<GroupSummary>>> = self
             .batch_get_json_with_headers(&urls, &[("ConsistencyLevel", "eventual")])
             .await?;
-        self.finish_paged_batch(pages, true).await
+        let lists = self.finish_paged_batch(pages, true).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// Adds a directory object (here: an SP) to a group (`POST /groups/{id}/members/$ref`);
@@ -246,6 +248,8 @@ impl GraphClient {
     /// bundle does not cover group membership. Graph 400s adds to dynamic-membership groups
     /// (membership is rule-based).
     pub async fn add_group_member(&self, group_id: &str, member_object_id: &str) -> Result<()> {
+        validate::require_path_segment("group id", group_id)?;
+        validate::require_path_segment("member id", member_object_id)?;
         let token = self.group_member_token()?;
         let url = format!("{}/groups/{group_id}/members/$ref", self.base_url);
         let body = serde_json::json!({
@@ -258,6 +262,8 @@ impl GraphClient {
     /// Removes a group member (`DELETE /groups/{id}/members/{member-id}/$ref`); same token
     /// contract as [`Self::add_group_member`].
     pub async fn remove_group_member(&self, group_id: &str, member_object_id: &str) -> Result<()> {
+        validate::require_path_segment("group id", group_id)?;
+        validate::require_path_segment("member id", member_object_id)?;
         let token = self.group_member_token()?;
         let url = format!(
             "{}/groups/{group_id}/members/{member_object_id}/$ref",

@@ -334,3 +334,24 @@ impl ThrottleObserver for ThrottleCounter {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+/// `rejoin_refused` puts each refusal back in its input's slot, and a batch
+/// that answered fewer sub-requests than it was sent leaves a `Protocol` error
+/// in each empty slot — never a row shifted onto the wrong input.
+#[test]
+fn rejoin_refused_keeps_each_refusal_in_its_slot() {
+    let refused = vec![None, Some(GraphError::Protocol("bad".into())), None, None];
+    let out = rejoin_refused(refused, vec![Ok(1), Ok(3)]);
+    assert_eq!(out.len(), 4);
+    assert!(matches!(out[0], Ok(1)));
+    assert!(matches!(&out[1], Err(GraphError::Protocol(m)) if m == "bad"));
+    assert!(matches!(out[2], Ok(3)));
+    assert!(matches!(&out[3], Err(GraphError::Protocol(_))));
+
+    let (urls, refused) = checked_sub_urls(&["a", "../b", "c"], |id| {
+        validate::require_path_segment("object id", id)?;
+        Ok(format!("/x/{id}"))
+    });
+    assert_eq!(urls, vec!["/x/a".to_string(), "/x/c".to_string()]);
+    assert!(refused[0].is_none() && refused[1].is_some() && refused[2].is_none());
+}

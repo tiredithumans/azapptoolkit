@@ -136,10 +136,10 @@ impl ArmClient {
     /// against the ARM origin before the bearer is attached.
     pub async fn list_role_assignments_at_scope(&self, scope: &str) -> Result<Vec<RoleAssignment>> {
         require_arm_path("scope", scope)?;
+        let scope = scope.trim_start_matches('/').trim_end_matches('/');
         let url = format!(
-            "{}/{}/providers/Microsoft.Authorization/roleAssignments",
+            "{}/{scope}/providers/Microsoft.Authorization/roleAssignments",
             self.base_url.trim_end_matches('/'),
-            scope.trim_start_matches('/').trim_end_matches('/'),
         );
         self.require_arm_origin("scope", &url)?;
         self.collect_paged(
@@ -245,10 +245,10 @@ impl ArmClient {
         require_arm_path("scope", scope)?;
         require_guid("role assignment name", assignment_name)?;
         require_guid("principal id", principal_id)?;
+        let scope = scope.trim_start_matches('/').trim_end_matches('/');
         let url = format!(
-            "{}/{}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}",
+            "{}/{scope}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}",
             self.base_url.trim_end_matches('/'),
-            scope.trim_start_matches('/').trim_end_matches('/'),
         );
         self.require_arm_origin("scope", &url)?;
         let body = serde_json::json!({
