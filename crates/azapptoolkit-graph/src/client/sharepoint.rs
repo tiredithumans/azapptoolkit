@@ -24,6 +24,7 @@ impl GraphClient {
     /// truncate (the sweep, the permission tester, and the Sites.Selected
     /// conversion all count on the full set).
     pub async fn list_site_permissions(&self, site_id: &str) -> Result<Vec<SitePermission>> {
+        validate::require_path_segment("site id", site_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/permissions?$top={MAX_PAGE_SIZE}",
@@ -49,25 +50,27 @@ impl GraphClient {
     /// outside the batch by `Self::finish_paged_batch_scoped` — on the same
     /// SharePoint token, which page 2 needs as much as page 1 — so a site whose grant
     /// list spans pages is never silently truncated — the same contract the
-    /// single-site path guarantees.
+    /// single-site path guarantees. A site id that is not a single path segment
+    /// is its own `Err(Protocol)` row and costs no sub-request.
     pub async fn batch_list_site_permissions(
         &self,
         site_ids: &[String],
     ) -> Result<Vec<Result<Vec<SitePermission>>>> {
         let token = self.sharepoint_token()?;
-        let urls: Vec<String> = site_ids
-            .iter()
-            // `$top` matters more here than on an ordinary paged read: without
-            // it Graph's small default makes overflow common, and every
-            // overflowing site then needs a continuation.
-            .map(|id| format!("/sites/{id}/permissions?$top={MAX_PAGE_SIZE}"))
-            .collect();
+        // `$top` matters more here than on an ordinary paged read: without it
+        // Graph's small default makes overflow common, and every overflowing
+        // site then needs a continuation.
+        let (urls, refused) = checked_sub_urls(site_ids, |id| {
+            validate::require_path_segment("site id", id)?;
+            Ok(format!("/sites/{id}/permissions?$top={MAX_PAGE_SIZE}"))
+        });
         let pages: Vec<Result<Paged<SitePermission>>> =
             self.batch_get_json_scoped(token, &urls).await?;
         // Scoped, not the plain `finish_paged_batch`: these sub-requests need
         // `Sites.FullControl.All`, and the unscoped continuation would fall back
         // to the verb-selected read token and 403 on page 2.
-        self.finish_paged_batch_scoped(token, pages).await
+        let lists = self.finish_paged_batch_scoped(token, pages).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// Enumerates the tenant's SharePoint sites via `GET /sites?search=*`,
@@ -107,6 +110,7 @@ impl GraphClient {
         app_display_name: &str,
         roles: &[String],
     ) -> Result<SitePermission> {
+        validate::require_path_segment("site id", site_id)?;
         let token = self.sharepoint_token()?;
         let url = format!("{}/sites/{site_id}/permissions", self.base_url);
         let body = serde_json::json!({
@@ -368,6 +372,7 @@ impl GraphClient {
     /// Lists a site's document libraries. `web_url` is the field the resource
     /// resolver prefix-matches an operator's pasted URL against.
     pub async fn list_site_drives(&self, site_id: &str) -> Result<Vec<Drive>> {
+        validate::require_path_segment("site id", site_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/drives?$select=id,name,webUrl&$top={MAX_PAGE_SIZE}",
@@ -385,6 +390,7 @@ impl GraphClient {
     /// what makes `Lists.SelectedOperations.Selected` reachable for a list that
     /// has no drive behind it.
     pub async fn list_site_lists(&self, site_id: &str) -> Result<Vec<SiteList>> {
+        validate::require_path_segment("site id", site_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists?$select=id,name,displayName,webUrl&$top={MAX_PAGE_SIZE}",
@@ -404,6 +410,7 @@ impl GraphClient {
     /// library-root grant needs the **list** id, and this join is exact where a
     /// URL comparison is a guess.
     pub async fn get_drive_list(&self, drive_id: &str) -> Result<SiteList> {
+        validate::require_path_segment("drive id", drive_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/drives/{drive_id}/list?$select=id,name,displayName,webUrl",
@@ -421,11 +428,12 @@ impl GraphClient {
     ///
     /// Note the trailing `:` before the query string: without it Graph reads
     /// `?$select=` as part of the addressed path and 400s.
-    pub async fn get_drive_item_by_path(
+    pub(crate) async fn get_drive_item_by_path(
         &self,
         drive_id: &str,
         rel_path: &str,
     ) -> Result<DriveItem> {
+        validate::require_path_segment("drive id", drive_id)?;
         let token = self.sharepoint_token()?;
         let select = "id,name,webUrl,folder,file,sharepointIds";
         let url = if rel_path.is_empty() {
@@ -441,37 +449,44 @@ impl GraphClient {
 
     /// The permissions on each list or list item `targets` names, in one scoped
     /// `$batch` (20 per POST), with any multi-page entry list followed to the
-    /// end on the same SharePoint token. One result per target, in order.
+    /// end on the same SharePoint token. One result per target, in order; a target
+    /// whose ids are not single path segments is its own `Err(Protocol)` row and
+    /// costs no sub-request.
     pub async fn batch_list_selected_permissions(
         &self,
         targets: &[SelectedTarget<'_>],
     ) -> Result<Vec<Result<Vec<SelectedPermission>>>> {
         let token = self.sharepoint_token()?;
-        let urls: Vec<String> = targets
-            .iter()
-            .map(|t| format!("{}/permissions?$top={MAX_PAGE_SIZE}", t.path()))
-            .collect();
+        let (urls, refused) = checked_sub_urls(targets, |t| {
+            Ok(format!("{}/permissions?$top={MAX_PAGE_SIZE}", t.path()?))
+        });
         let pages: Vec<Result<Paged<SelectedPermission>>> =
             self.batch_get_json_scoped(token, &urls).await?;
-        self.finish_paged_batch_scoped(token, pages).await
+        let lists = self.finish_paged_batch_scoped(token, pages).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// The name and URL of each list or list item `targets` names, in one
     /// scoped `$batch`. A list item is read through its `driveItem`, which
-    /// carries the file or folder name. One result per target, in order.
+    /// carries the file or folder name. One result per target, in order; a target
+    /// whose ids are not single path segments is its own `Err(Protocol)` row and
+    /// costs no sub-request.
     pub async fn batch_get_selected_target_names(
         &self,
         targets: &[SelectedTarget<'_>],
     ) -> Result<Vec<Result<SharePointNamed>>> {
         let token = self.sharepoint_token()?;
-        let urls: Vec<String> = targets
-            .iter()
-            .map(|t| match t.item_id {
-                Some(_) => format!("{}/driveItem?$select=id,name,webUrl,folder", t.path()),
-                None => format!("{}?$select=id,name,displayName,webUrl", t.path()),
+        let (urls, refused) = checked_sub_urls(targets, |t| {
+            let path = t.path()?;
+            Ok(match t.item_id {
+                Some(_) => format!("{path}/driveItem?$select=id,name,webUrl,folder"),
+                None => format!("{path}?$select=id,name,displayName,webUrl"),
             })
-            .collect();
-        self.batch_get_json_scoped(token, &urls).await
+        });
+        Ok(rejoin_refused(
+            refused,
+            self.batch_get_json_scoped(token, &urls).await?,
+        ))
     }
 
     /// Lists the application permissions on a list.
@@ -480,6 +495,8 @@ impl GraphClient {
         site_id: &str,
         list_id: &str,
     ) -> Result<Vec<SelectedPermission>> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/permissions?$top={MAX_PAGE_SIZE}",
@@ -500,6 +517,9 @@ impl GraphClient {
         list_id: &str,
         item_id: &str,
     ) -> Result<Vec<SelectedPermission>> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
+        validate::require_path_segment("item id", item_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/items/{item_id}/permissions?$top={MAX_PAGE_SIZE}",
@@ -523,6 +543,8 @@ impl GraphClient {
         app_display_name: &str,
         roles: &[String],
     ) -> Result<SelectedPermission> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/permissions",
@@ -549,6 +571,9 @@ impl GraphClient {
         app_display_name: &str,
         roles: &[String],
     ) -> Result<SelectedPermission> {
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
+        validate::require_path_segment("item id", item_id)?;
         let token = self.sharepoint_token()?;
         let url = format!(
             "{}/sites/{site_id}/lists/{list_id}/items/{item_id}/permissions",
@@ -1209,14 +1234,23 @@ pub struct SelectedTarget<'a> {
 }
 
 impl SelectedTarget<'_> {
-    /// The relative Graph path of the list or the list item.
-    fn path(&self) -> String {
-        match self.item_id {
-            Some(item) => format!(
-                "/sites/{}/lists/{}/items/{item}",
-                self.site_id, self.list_id
-            ),
-            None => format!("/sites/{}/lists/{}", self.site_id, self.list_id),
+    /// The relative Graph path of the list or the list item. The ids come
+    /// from an app registration's tags, so each is shape-checked here, where
+    /// the path is built, before any batch that carries it is sent.
+    fn path(&self) -> Result<String> {
+        let Self {
+            site_id,
+            list_id,
+            item_id,
+        } = *self;
+        validate::require_path_segment("site id", site_id)?;
+        validate::require_path_segment("list id", list_id)?;
+        match item_id {
+            Some(item_id) => {
+                validate::require_path_segment("item id", item_id)?;
+                Ok(format!("/sites/{site_id}/lists/{list_id}/items/{item_id}"))
+            }
+            None => Ok(format!("/sites/{site_id}/lists/{list_id}")),
         }
     }
 }

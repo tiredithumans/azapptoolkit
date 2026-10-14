@@ -29,7 +29,8 @@
 //! - [`release`] — version identity, CHANGELOG format, mirrored lint block, the
 //!   update gate, the Linux glibc floor and the NSIS install mode
 //! - [`trust`] — every path that mints an authentication trust validates it,
-//!   and every signing-certificate mint bounds its lifetime
+//!   every signing-certificate mint bounds its lifetime, and every id a client
+//!   splices into a request path is shape-checked
 //! - [`webview`] — the webview's grants: CSP `connect-src` holds no remote
 //!   origin, and the capability file grants only `core:default`
 

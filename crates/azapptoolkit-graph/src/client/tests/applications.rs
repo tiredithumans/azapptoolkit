@@ -376,6 +376,85 @@ async fn delete_application_returns_ok_on_204() {
     client.delete_application("obj-1").await.unwrap();
 }
 
+/// An id that is not one path segment is refused before anything is sent.
+/// `send_core` joins the path onto the base URL and the `url` crate resolves
+/// `..`, so `/applications/../servicePrincipals/x` would DELETE a service
+/// principal.
+#[tokio::test]
+async fn an_id_that_walks_the_path_is_refused_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let err = client
+        .delete_application("../servicePrincipals/x")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Protocol(m) if m == "refusing an object id that is not a single path segment"),
+        "got {err:?}"
+    );
+}
+
+/// A `$batch` helper checks each id inside its sub-URL closure: a malformed id
+/// is its own `Err(Protocol)` row and costs no sub-request, and the
+/// well-formed ids around it still batch, in order — one bad id must not send
+/// the caller to N serial per-id reads.
+#[tokio::test]
+async fn a_malformed_id_in_a_batch_is_its_own_row_and_the_rest_still_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        // Exactly the two good ids, as sub-requests "0" and "1".
+        .and(|req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let urls: Vec<&str> = body["requests"]
+                .as_array()
+                .map(|r| r.iter().filter_map(|x| x["url"].as_str()).collect())
+                .unwrap_or_default();
+            urls.len() == 2
+                && urls[0].starts_with("/applications/obj-1?")
+                && urls[1].starts_with("/applications/obj-3?")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "responses": [
+                { "id": "1", "status": 200, "body": {
+                    "id": "obj-3", "appId": "app-3", "displayName": "three",
+                    "passwordCredentials": [], "keyCredentials": [], "requiredResourceAccess": []
+                } },
+                { "id": "0", "status": 200, "body": {
+                    "id": "obj-1", "appId": "app-1", "displayName": "one",
+                    "passwordCredentials": [], "keyCredentials": [], "requiredResourceAccess": []
+                } }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let out = client
+        .batch_get_applications_credentials(&[
+            "obj-1".to_string(),
+            "obj-1?$select=x".to_string(),
+            "obj-3".to_string(),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].as_ref().unwrap().app_id, "app-1");
+    assert!(
+        matches!(&out[1], Err(GraphError::Protocol(m)) if m == "refusing an object id that is not a single path segment"),
+        "got {:?}",
+        out[1]
+    );
+    assert_eq!(out[2].as_ref().unwrap().app_id, "app-3");
+}
+
 /// Deleting an app registration deletes its service principal with it: the
 /// per-appId SP entry and the grant matrices must not outlive the DELETE.
 #[tokio::test]

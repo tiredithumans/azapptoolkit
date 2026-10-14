@@ -482,6 +482,15 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   and capped at 800 characters by the one helper, `azapptoolkit_core::http_error::sanitize_error_body`
   — log the `ui_code`/status/request id, never a raw body that could carry token material. The
   shared retry loop logs the status and reason, and a network failure's cause chain (it has no body).
+- **Response bodies are read under a size cap.** The workspace `reqwest` inflates gzip, and drops
+  `Content-Length` when it does, so no client calls `.bytes()`/`.text()`/`.json()` on a response:
+  each transport reads through a `resp.chunk()` loop over `azapptoolkit_core::http_body::BodyCap`,
+  the running total of decoded bytes. A success body past 64 MiB (`MAX_SUCCESS_BODY_BYTES`, about twice
+  the estimated worst-case `/applications` page — unmeasured, so confirm against real tenants
+  before tightening) is the client's `Protocol` error, never retried; an error body is cut at
+  64 KiB; the `/token` reader runs its own 64 KiB loop into a `Zeroizing` buffer, and the SSO
+  metadata probe reads through `BodyCap` at 1 MiB. Pinned by
+  `repo_invariants/trust.rs::no_client_reads_an_unbounded_body`.
 - **Owner-only on disk.** `settings.json`, exports, backups, restore reports and `.pfx` files go
   through `azapptoolkit_core::private_file::write_owner_only` (0600 on unix; written to an
   unpredictably named temp created exclusively — never following a planted symlink — then renamed

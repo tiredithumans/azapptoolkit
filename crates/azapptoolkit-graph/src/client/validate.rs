@@ -1,14 +1,21 @@
 //! Shape checks for identifiers spliced into a Graph request path.
 //!
-//! The SharePoint permission endpoints take a site id, a list id, an item id
-//! and a permission id straight from an earlier Graph response — or, for a
-//! remove, from the webview — and the composed URL keeps the Graph host, but a
-//! `/`, `\` or `..` segment walks the call to a different resource and a `?`,
-//! `#` or `:` rewrites what the rest of the path means, all under the
-//! `Sites.FullControl.All` bearer. A DELETE that walks three segments up to `/drives/{d}/items/{i}`
-//! deletes a file this crate otherwise has no call for. Mirrors
-//! `azapptoolkit-arm`'s and `azapptoolkit-keyvault`'s `validate` modules;
-//! refusals never echo the value.
+//! Every client method that puts a caller-supplied id (an object, app, group,
+//! member, credential, assignment, grant, policy or template id, or a
+//! SharePoint site, drive, list, item or permission id) into a request path, a
+//! `$batch` sub-URL or an `@odata.id` body checks it here first. The ids reach
+//! the client from earlier Graph responses, app-registration tags or the
+//! webview, and the composed URL keeps the Graph host, but `send_core` joins
+//! the path onto the base URL and the `url` crate resolves `..`, `%2e%2e` and
+//! `\`: a `/`, `\` or `..` segment walks the call to a different resource, and
+//! a `?`, `#` or `:` rewrites what the rest of the path means. On the
+//! `Sites.FullControl.All` bearer, a SharePoint DELETE that walks three
+//! segments up to `/drives/{d}/items/{i}` deletes a file this crate otherwise
+//! has no call for; `delete_application("../servicePrincipals/x")` would delete
+//! a service principal. Pinned by `repo_invariants/trust.rs`
+//! (`every_client_path_splice_is_shape_checked`). Mirrors `azapptoolkit-arm`'s
+//! and `azapptoolkit-keyvault`'s `validate` modules; refusals never echo the
+//! value.
 
 use crate::error::{GraphError, Result};
 
@@ -20,7 +27,11 @@ use crate::error::{GraphError, Result};
 /// `%2e%2e` server-side, and no id this crate addresses is percent-encoded
 /// (site ids are `host,guid,guid`, list ids GUIDs, item ids digits, permission
 /// ids base64 — which never yields `/` or `+` for the ASCII identities
-/// SharePoint encodes).
+/// SharePoint encodes; directory object ids are GUIDs, and app-role assignment
+/// and delegated-grant ids base64url).
+///
+/// Deliberately a shape check, not a GUID check: assignment, grant, drive and
+/// site ids are not GUIDs.
 pub(crate) fn require_path_segment(what: &str, value: &str) -> Result<()> {
     let ok = !value.is_empty()
         && value != "."
@@ -30,8 +41,13 @@ pub(crate) fn require_path_segment(what: &str, value: &str) -> Result<()> {
     if ok {
         Ok(())
     } else {
+        let article = if what.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
         Err(GraphError::Protocol(format!(
-            "refusing a {what} that is not a single path segment"
+            "refusing {article} {what} that is not a single path segment"
         )))
     }
 }
@@ -77,5 +93,14 @@ mod tests {
                 "{bad:?}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn require_path_segment_names_what_it_refused_without_echoing_it() {
+        let err = require_path_segment("object id", "../servicePrincipals/x").unwrap_err();
+        assert!(
+            matches!(&err, GraphError::Protocol(m) if m == "refusing an object id that is not a single path segment"),
+            "{err:?}"
+        );
     }
 }

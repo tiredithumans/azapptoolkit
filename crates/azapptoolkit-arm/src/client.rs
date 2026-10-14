@@ -48,6 +48,10 @@ pub struct ArmClient {
     http: reqwest::Client,
     token: Arc<dyn BearerProvider>,
     base_url: String,
+    /// Decoded bytes one success body may hold
+    /// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`]); a field only
+    /// so a test can trip it with a small body.
+    max_body_bytes: usize,
 }
 
 impl ArmClient {
@@ -66,7 +70,16 @@ impl ArmClient {
             http,
             token,
             base_url: base_url.into(),
+            max_body_bytes: azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES,
         }
+    }
+
+    /// Lowers the decoded-bytes cap on a success body, so a test can trip it
+    /// without a 64 MiB fixture.
+    #[cfg(test)]
+    pub(crate) fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
+        self
     }
 
     /// Subscriptions the signed-in user can access.
@@ -136,10 +149,10 @@ impl ArmClient {
     /// against the ARM origin before the bearer is attached.
     pub async fn list_role_assignments_at_scope(&self, scope: &str) -> Result<Vec<RoleAssignment>> {
         require_arm_path("scope", scope)?;
+        let scope = scope.trim_start_matches('/').trim_end_matches('/');
         let url = format!(
-            "{}/{}/providers/Microsoft.Authorization/roleAssignments",
+            "{}/{scope}/providers/Microsoft.Authorization/roleAssignments",
             self.base_url.trim_end_matches('/'),
-            scope.trim_start_matches('/').trim_end_matches('/'),
         );
         self.require_arm_origin("scope", &url)?;
         self.collect_paged(
@@ -245,10 +258,10 @@ impl ArmClient {
         require_arm_path("scope", scope)?;
         require_guid("role assignment name", assignment_name)?;
         require_guid("principal id", principal_id)?;
+        let scope = scope.trim_start_matches('/').trim_end_matches('/');
         let url = format!(
-            "{}/{}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}",
+            "{}/{scope}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}",
             self.base_url.trim_end_matches('/'),
-            scope.trim_start_matches('/').trim_end_matches('/'),
         );
         self.require_arm_origin("scope", &url)?;
         let body = serde_json::json!({
@@ -293,8 +306,17 @@ impl ArmClient {
         query: &[(&str, &str)],
         body: Option<&serde_json::Value>,
     ) -> Result<bytes::Bytes> {
-        crate::transport::send_with_retry(&self.http, &self.token, "arm", method, url, query, body)
-            .await
+        crate::transport::send_with_retry(
+            &self.http,
+            &self.token,
+            "arm",
+            method,
+            url,
+            query,
+            body,
+            self.max_body_bytes,
+        )
+        .await
     }
 }
 
@@ -913,5 +935,55 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_role_assignment_exists(), "{err:?}");
+    }
+
+    /// `{"value":[],"pad":"aaaa…"}` with 4096 `a`s, gzipped (`mtime = 0`): 65
+    /// bytes on the wire, 4117 decoded — an empty page once inflated.
+    const GZIPPED_EMPTY_PAGE: [u8; 65] = [
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xed, 0xc1, 0xa1, 0x0d, 0x80,
+        0x30, 0x14, 0x05, 0xc0, 0x5d, 0x9e, 0xee, 0x04, 0x5d, 0xa5, 0xa9, 0xf8, 0x09, 0x75, 0x15,
+        0x18, 0x30, 0x84, 0xdd, 0xd9, 0x83, 0xdc, 0xdd, 0x93, 0xbb, 0xf6, 0xb5, 0xd2, 0xc7, 0x6c,
+        0x39, 0xeb, 0x48, 0x4f, 0x01, 0x00, 0x00, 0x00, 0xbf, 0x97, 0xf7, 0x03, 0xdb, 0xc3, 0x09,
+        0x62, 0x15, 0x10, 0x00, 0x00,
+    ];
+
+    /// A success body is capped by its DECODED size: reqwest inflates the gzip
+    /// reply and drops its `Content-Length`, so only the running total of decoded
+    /// chunks catches a body that fits the cap on the wire. Past the cap is a
+    /// `Protocol` error, sent once and never retried.
+    #[tokio::test]
+    async fn a_success_body_is_capped_by_its_decoded_size() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subscriptions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(GZIPPED_EMPTY_PAGE.to_vec()),
+            )
+            // One capped read (never replayed) and one under the default cap.
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let err = client(&server.uri())
+            .with_max_body_bytes(1024)
+            .list_subscriptions()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ArmError::Protocol(m) if m == "response body exceeds the 1 KiB limit"),
+            "got {err:?}"
+        );
+        assert!(!err.is_retryable());
+        // The same reply inflates and decodes under the default cap.
+        assert!(
+            client(&server.uri())
+                .list_subscriptions()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
