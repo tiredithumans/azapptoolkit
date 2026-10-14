@@ -12,8 +12,11 @@ azapptoolkit-core = { path = "../azapptoolkit-core" }
 
 # `net`/`io-util`: the OAuth loopback listener is the only raw-socket code in the
 # workspace (service/loopback.rs + the redirect listener in service/mod.rs).
-# `rt`: the refresh-token keyring reads/writes run on `tokio::task::spawn_blocking`.
-tokio = { workspace = true, features = ["net", "io-util", "rt"] }
+# `rt`: the refresh-token keyring reads/writes run on `tokio::task::spawn_blocking`,
+# and the loopback listener reads its connections on a `JoinSet`.
+# `macros`: the listener's `select!` over accept and finished connections
+# (tokio-macros is already in the build: src-tauri enables it, and the tests).
+tokio = { workspace = true, features = ["net", "io-util", "rt", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

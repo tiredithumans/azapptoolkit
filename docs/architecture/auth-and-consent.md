@@ -54,7 +54,10 @@ were present, never their values) and ignored; a non-`GET` (a CORS/PNA preflight
 trade-off is deliberate: a genuinely mismatched redirect now waits out `REDIRECT_WAIT` and surfaces as
 `cancelled` rather than failing fast as `StateMismatch`. A matching `error=` redirect keeps its
 OAuth code (gated to `[a-z_]`) and the AADSTS code from `error_description`, redacted by the same
-`wire::redact_aad_error` as a `/token` error, so the sign-in card's AADSTS hint fires.
+`wire::redact_aad_error` as a `/token` error, so the sign-in card's AADSTS hint fires. Connections
+are read concurrently, up to `MAX_INFLIGHT_CONNECTIONS` (16) at once and each limited to 5 s, so an
+idle socket accepted first (a browser's pooled preconnect, or any local process) no longer holds
+the redirect behind it for those 5 s; the wait ending drops the connections still being read.
 
 **Launch restore.** The keyring entry is keyed `{tenant}:{oid}`, and the oid used to live only in
 memory — so nothing could read the refresh token back at startup, and every launch showed the

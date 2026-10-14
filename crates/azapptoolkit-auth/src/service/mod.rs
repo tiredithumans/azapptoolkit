@@ -924,8 +924,11 @@ impl EntraAuthService {
             expires_at,
             scopes,
         };
-        // Under the registry lock, which `sign_in`/`sign_out` hold while they
-        // move the epoch and sweep the slots: a late put cannot slip in between.
+        // Under the registry lock. `sign_in` moves the epoch and sweeps the
+        // slots inside it; `sign_out` moves the epoch under the keyring's
+        // chunk-set lock and only then sweeps inside it. Either way a put that
+        // passes this check lands before the sweep, which removes it, and one
+        // checked after the move stores nothing: a late put cannot outlive it.
         let registry = self.known_tenants.lock();
         if self.session_epoch() != fence {
             drop(registry);
