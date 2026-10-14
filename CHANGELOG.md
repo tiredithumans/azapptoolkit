@@ -7,6 +7,11 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **A Remove expired credentials run whose task for an app ended without reporting now lists that
+  app as "ended without reporting an outcome" and refreshes its credentials.** It used to be left
+  out of the summary, and any secrets it had already removed stayed on the credential list and in
+  the security scan until the cache expired. A bulk delete whose only failure is such an app now
+  refreshes the app lists too, since that delete may have landed.
 - **Sign-in no longer waits on idle browser connections.** After you approve sign-in in the
   browser, the app could sit for 5 seconds per idle connection the browser (or another program on
   this computer) had opened to it before it read the real sign-in reply. It now reads them side by

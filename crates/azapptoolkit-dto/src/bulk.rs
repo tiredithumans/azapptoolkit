@@ -46,18 +46,27 @@ impl std::fmt::Display for BulkError {
     }
 }
 
+/// The code on a bulk failure row the backend synthesised for a task that was
+/// dispatched but ended without reporting an outcome (a panic or an abort).
+/// Its write may have landed, so the row tells the operator to check the app
+/// rather than re-run blind. Never re-auth-fatal: the run carries on past it.
+/// Carried by [`BulkError::code`] and [`BulkDeleteFailure::code`].
+pub const LOST_TASK: &str = "lost_task";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkProgress {
     pub done: usize,
     pub total: usize,
     pub current_app: Option<String>,
     pub cancelled: bool,
-    /// Current adaptive in-flight concurrency cap, when the emitting command
-    /// runs under a [`ConcurrencyThrottle`](../../desktop) (the DR backup).
-    /// `None` for the bulk-credential/create/delete flows, which use a fixed
-    /// cap. The DR view surfaces a back-off notice when this drops below its
-    /// observed peak. Additive + skipped when absent, so existing emitters
-    /// stay wire-compatible.
+    /// The live adaptive in-flight concurrency cap, when the emitting run fans
+    /// out under the desktop's `ConcurrencyThrottle`: the three capped bulk
+    /// writes (delete, consent grant, the expired-secret sweep) and the DR
+    /// backup send `Some`. `None` for the sequential bulk runs (create, the
+    /// remediations, restore, …), which have no fan-out to back off. The DR
+    /// view surfaces a back-off notice when this drops below its observed
+    /// peak. Additive + skipped when absent, so existing emitters stay
+    /// wire-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight_cap: Option<usize>,
 }
@@ -80,12 +89,13 @@ pub struct BulkRemoveExpiredResult {
 
 /// One app a bulk delete could not remove.
 ///
-/// `code` is the failure's wire code (`UiError::code`) when the backend had
-/// one: it is what lets the bar tell "this app failed" from "the session died
-/// on this app and the run stopped" (`is_reauth_fatal`), the same way the
-/// other bulk outcomes carry a [`BulkError`]. `None` for a failure the backend
-/// synthesised without a code (a task that ended without reporting). Additive
-/// and skipped when absent, so older payloads still decode.
+/// `code` is the failure's wire code: the `UiError::code` of a failed DELETE,
+/// or [`LOST_TASK`] for a task that ended without reporting (its DELETE may
+/// have landed). It is what lets the bar tell "this app failed" from "the
+/// session died on this app and the run stopped" (`is_reauth_fatal`), the same
+/// way the other bulk outcomes carry a [`BulkError`]. Always `Some` from this
+/// backend; optional on the wire — additive and skipped when absent — so older
+/// payloads still decode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeleteFailure {
     pub object_id: String,

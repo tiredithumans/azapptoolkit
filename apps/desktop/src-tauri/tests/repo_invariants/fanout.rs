@@ -8,9 +8,9 @@
 //! ([`every_paged_graph_read_sends_a_page_size`]).
 
 // The module list this file used to carry is gone: the fan-out modules are now
-// whichever modules actually contain a `dispatch_capped` call site, read from
-// the source tree by `sources::command_modules()`. A hand-maintained list could
-// only ever check the files someone remembered to add.
+// whichever modules actually call a driver (`sources::long_run_drivers`, derived
+// from the source tree by `sources::command_modules()`). A hand-maintained list
+// could only ever check the files someone remembered to add.
 
 /// Reads that enumerate **every object of a kind in the tenant**. A loop over
 /// one of these runs once per app/SP/site, not once per sub-object of a single
@@ -63,34 +63,39 @@ const WRITE_CALLS: &[&str] = &[
 /// allowlist to forget. Deliberately no escape hatch: the two shapes that look
 /// like violations but are not (a loop over one app's own credentials, a loop
 /// that only reads) are excluded by the rule itself, not by naming them.
+///
+/// The write loop may sit in a helper the command hands its per-item work to
+/// (`bulk::sweep_one`, `aap_migration::run_migration_batches`); see
+/// [`is_tenant_wide_writer`]. [`WRITER_FLOOR`] stops that following from
+/// silently losing the two commands that need it.
 #[test]
 fn every_tenant_wide_writer_is_cancellable() {
     let mut offenders: Vec<String> = Vec::new();
+    let mut writers: Vec<String> = Vec::new();
+    let helpers = Helpers::from_source();
     for cmd in super::sources::commands() {
-        if !TENANT_WIDE_READS.iter().any(|r| cmd.body.contains(r)) {
+        if !is_tenant_wide_writer(&cmd.body, &helpers) {
             continue;
         }
-        let writes_per_result = super::sources::loops(&cmd.body).iter().any(|(_, block)| {
-            block.contains(".await") && WRITE_CALLS.iter().any(|w| block.contains(w))
-        });
-        if !writes_per_result {
-            continue;
-        }
-        // Two accepted shapes, matching the two drivers in `commands/dispatch.rs`:
-        // a fan-out gates its spawn closure, a sequential flow breaks on the
-        // latch. Both must ALSO claim a cancel token — a dead session is not the
-        // same event as an operator pressing Cancel, and only the token answers
-        // the second.
-        let cancellable = cmd.body.contains(".claim()");
-        let stops_on_dead = cmd.body.contains("is_dead()")
-            || cmd.body.contains("dispatch_capped(")
-            || cmd.body.contains("run_bulk_seq(");
+        writers.push(cmd.name.clone());
+        // Two accepted shapes: the command gates on the latch itself, or it
+        // calls a function that does (`Helpers::dead_gated`). Both must ALSO
+        // claim a cancel token — a dead session is not the same event as an
+        // operator pressing Cancel, and only the token answers the second.
+        let (cancellable, stops_on_dead) = stoppable(&cmd.body, &helpers);
         if !(cancellable && stops_on_dead) {
             offenders.push(format!(
                 "{}::{} (claims a token: {cancellable}, stops on a dead session: {stops_on_dead})",
                 cmd.module, cmd.name
             ));
         }
+    }
+    for floor in WRITER_FLOOR {
+        assert!(
+            writers.iter().any(|w| w == floor),
+            "`{floor}` is no longer detected as a tenant-wide writer (found {writers:?}) — the \
+             detector or the helper derivation is broken"
+        );
     }
     offenders.sort();
     assert!(
@@ -103,6 +108,110 @@ fn every_tenant_wide_writer_is_cancellable() {
          `UiError::is_reauth_fatal` stays the single definition. Flag the result as incomplete: a \
          run that stopped early must never render as a finished one."
     );
+}
+
+/// Commands the writer detector must keep finding: their write loops sit in a
+/// helper (`bulk::sweep_one`; the AAP migration's `migrate_one` closure handed
+/// to `run_migration_batches`), so they are the ones a broken helper
+/// derivation would drop first.
+const WRITER_FLOOR: &[&str] = &[
+    "bulk_remove_expired_credentials",
+    "migrate_application_access_policies",
+];
+
+/// What the tenant-wide-writer rule knows about the helpers a command hands its
+/// per-item work to, derived from the source (the self-test derives one from a
+/// synthetic source). Shared by the rule and its self-test so the two cannot
+/// disagree.
+struct Helpers {
+    /// `sources::cancel_runners`: the helpers handed a `CancelToken`.
+    runners: std::collections::BTreeSet<String>,
+    /// Runners with a loop of their own that awaits a write, and their callers.
+    writing: std::collections::BTreeSet<String>,
+    /// Functions that stop on a dead session themselves: every driver from
+    /// `sources::long_run_drivers` (`run_bulk_seq` checks each outcome, and
+    /// every `dispatch_capped` call site — the one inside a derived helper
+    /// included — is pinned to gate its spawn closure by
+    /// [`every_fan_out_command_honours_is_reauth_fatal`]), every runner with
+    /// `is_dead()` inside one of its own loops, and their callers. A runner
+    /// that only honours Cancel does not count: a cancel token proves nothing
+    /// about a dead session.
+    dead_gated: std::collections::BTreeSet<String>,
+}
+
+impl Helpers {
+    fn from_source() -> Self {
+        Self::derive(
+            &super::sources::command_functions(),
+            &super::sources::command_names(),
+            super::sources::long_run_drivers(),
+            super::sources::cancel_runners(),
+        )
+    }
+
+    fn derive(
+        functions: &[super::sources::Function],
+        commands: &std::collections::BTreeSet<String>,
+        drivers: Vec<String>,
+        runners: std::collections::BTreeSet<String>,
+    ) -> Self {
+        let loop_in = |name: &String, pred: &dyn Fn(&str) -> bool| {
+            functions
+                .iter()
+                .filter(|f| f.name == *name)
+                .any(|f| super::sources::loops(&f.body).iter().any(|(_, b)| pred(b)))
+        };
+        let writing_seeds = runners
+            .iter()
+            .filter(|r| loop_in(r, &writes_per_item))
+            .cloned()
+            .collect();
+        let gated_seeds = runners
+            .iter()
+            .filter(|r| loop_in(r, &|b| b.contains("is_dead()")))
+            .cloned()
+            .chain(drivers)
+            .collect();
+        Self {
+            writing: super::sources::close_over_callers(functions, commands, writing_seeds),
+            dead_gated: super::sources::close_over_callers(functions, commands, gated_seeds),
+            runners,
+        }
+    }
+}
+
+/// A loop body that awaits a write.
+fn writes_per_item(block: &str) -> bool {
+    block.contains(".await") && WRITE_CALLS.iter().any(|w| block.contains(w))
+}
+
+/// Whether `body` reads a tenant-wide collection and then writes once per
+/// result: in a loop of its own, through a runner whose own loop writes
+/// (`bulk::sweep_one`), or by handing a runner a closure that writes (the AAP
+/// migration's `migrate_one`, looped by `run_migration_batches`).
+fn is_tenant_wide_writer(body: &str, helpers: &Helpers) -> bool {
+    let calls_any = |set: &std::collections::BTreeSet<String>| {
+        set.iter().any(|n| super::sources::calls(body, n))
+    };
+    TENANT_WIDE_READS.iter().any(|r| body.contains(r))
+        && (super::sources::loops(body)
+            .iter()
+            .any(|(_, b)| writes_per_item(b))
+            || calls_any(&helpers.writing)
+            || (calls_any(&helpers.runners) && WRITE_CALLS.iter().any(|w| body.contains(w))))
+}
+
+/// Whether a tenant-wide writer's body can be stopped, as `(claims a token,
+/// stops on a dead session)`: the latch in the body (`is_dead()`), or a call to
+/// a function in [`Helpers::dead_gated`].
+fn stoppable(body: &str, helpers: &Helpers) -> (bool, bool) {
+    let cancellable = body.contains(".claim()");
+    let stops_on_dead = body.contains("is_dead()")
+        || helpers
+            .dead_gated
+            .iter()
+            .any(|d| super::sources::calls(body, d));
+    (cancellable, stops_on_dead)
 }
 
 /// Fan-outs that still lack the branch. **Empty, and it must stay that way** —
@@ -197,6 +306,7 @@ fn call_sites<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
 fn every_fan_out_command_honours_is_reauth_fatal() {
     let mut missing: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    let drivers = super::sources::long_run_drivers();
 
     for (name, src) in super::sources::command_modules() {
         let name = name.as_str();
@@ -205,7 +315,7 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         if name == "commands/dispatch.rs" {
             continue;
         }
-        if !(src.contains("dispatch_capped(") || src.contains("run_bulk_seq(")) {
+        if !drivers.iter().any(|d| super::sources::calls(&src, d)) {
             continue;
         }
         checked += 1;
@@ -213,7 +323,11 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         // `run_bulk_seq` gates centrally, in the driver — every caller inherits
         // it, and `a_dead_session_halts_the_run_instead_of_burning_the_selection`
         // covers it. So a module that only drives the sequential path has no
-        // `dispatch_capped` sites, and the loop below is empty for it.
+        // `dispatch_capped` sites, and the loop below is empty for it. A
+        // derived driver (a helper wrapping `dispatch_capped`, from
+        // `sources::long_run_drivers`) gates centrally too: its one
+        // `dispatch_capped` call site is checked below like any other, and every
+        // command that calls the helper inherits that gate.
         let sites = call_sites(&src, "dispatch_capped");
 
         for (n, site) in sites.iter().enumerate() {
@@ -271,17 +385,48 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
 /// per app, with no token and no latch.
 #[test]
 fn the_tenant_wide_writer_rule_fires_on_an_ungated_loop() {
-    fn violates(body: &str) -> bool {
-        let reads_tenant = TENANT_WIDE_READS.iter().any(|r| body.contains(r));
-        let writes_per_result = super::sources::loops(body)
-            .iter()
-            .any(|(_, b)| b.contains(".await") && WRITE_CALLS.iter().any(|w| b.contains(w)));
-        let gated = body.contains(".claim()")
-            && (body.contains("is_dead()")
-                || body.contains("dispatch_capped(")
-                || body.contains("run_bulk_seq("));
-        reads_tenant && writes_per_result && !gated
+    // The helpers a command can hand its per-item work to, in the shapes the
+    // command layer has: a per-app write loop gated on both stops
+    // (`bulk::sweep_one`), a batch loop gated on both that runs a closure
+    // (`run_migration_batches`), the same loop gated on Cancel only, and a
+    // derived fan-out driver.
+    let helper_src = r#"
+async fn sweep_one(client: &GraphClient, cancel: &CancelToken, session: &SessionDead, app: App) {
+    for key in keys(&app) {
+        if cancel.is_cancelled() || session.is_dead() { break; }
+        client.remove_password(&app.id, key).await;
     }
+}
+async fn run_batches(batches: Vec<u8>, cancel: &CancelToken, session: &SessionDead, migrate: F) {
+    while let Some(batch) = next(&mut batches) {
+        if cancel.is_cancelled() || session.is_dead() { break; }
+        migrate(batch).await;
+    }
+}
+async fn cancel_only_batches(batches: Vec<u8>, cancel: &CancelToken, migrate: F) {
+    while let Some(batch) = next(&mut batches) {
+        if cancel.is_cancelled() { break; }
+        migrate(batch).await;
+    }
+}
+async fn run_capped_helper(cancel: &CancelToken, items: Vec<u8>, per_item: F) {
+    dispatch_capped(items, || 4, |x| spawn(x), |j| collect(j)).await;
+}
+"#;
+    let functions = super::sources::functions_in(helper_src);
+    let commands = std::collections::BTreeSet::new();
+    // The seeds plus the derived helper, standing in for
+    // `sources::long_run_drivers` (whose derivation has its own self-test).
+    let drivers = ["dispatch_capped", "run_bulk_seq", "run_capped_helper"]
+        .iter()
+        .map(|d| (*d).to_string())
+        .collect();
+    let runners = super::sources::derive_cancel_runners(&functions, &commands);
+    let helpers = Helpers::derive(&functions, &commands, drivers, runners);
+    let violates = |body: &str| {
+        let (cancellable, stops_on_dead) = stoppable(body, &helpers);
+        is_tenant_wide_writer(body, &helpers) && !(cancellable && stops_on_dead)
+    };
 
     let unguarded = r#"{
         let policies = exo.get_application_access_policies().await?;
@@ -301,6 +446,60 @@ fn the_tenant_wide_writer_rule_fires_on_an_ungated_loop() {
         }
     }"#;
     assert!(!violates(guarded), "a gated writer must pass");
+
+    // A writer whose per-item work runs through a derived driver is gated by
+    // that driver's own `dispatch_capped` call site — but it must still claim.
+    let through_helper = r#"{
+        let apps = graph.list_applications_all(query, None).await?;
+        let cancel = state.bulk_cancel.claim();
+        let run = run_capped_helper(&cancel, apps, |app| async move {
+            for key in keys(&app) { graph.remove_password(&app.id, key).await; }
+        }).await;
+    }"#;
+    assert!(
+        !violates(through_helper),
+        "a writer gated by a derived driver must pass"
+    );
+    assert!(
+        violates(&through_helper.replace(".claim()", ".peek()")),
+        "a derived driver does not excuse a missing claim"
+    );
+
+    // The write loop in a helper the command calls (`bulk::sweep_one`): still
+    // a tenant-wide writer, gated by the helper's own latch check.
+    let sweep_shape = r#"{
+        let cancel = state.bulk_cancel.claim();
+        let apps = graph.list_applications_all(query, None).await?;
+        let run = run_capped_helper(&cancel, apps, |app| async move {
+            sweep_one(&client, &cancel, &session, app).await
+        }).await;
+    }"#;
+    assert!(is_tenant_wide_writer(sweep_shape, &helpers));
+    assert!(
+        !violates(sweep_shape),
+        "a writer whose helper is gated must pass"
+    );
+    assert!(violates(&sweep_shape.replace(".claim()", ".peek()")));
+
+    // The write handed to a runner as a closure (the AAP migration): a writer,
+    // gated only if the runner's own loop checks the latch.
+    let migration_shape = r#"{
+        let cancel = state.migration_cancel.claim();
+        let session = SessionDead::new();
+        let policies = exo.get_application_access_policies().await?;
+        let run = run_batches(group(policies), &cancel, &session, |id, batch| async move {
+            migrate_one(ctx, &id, &batch).await
+        }).await;
+    }"#;
+    assert!(is_tenant_wide_writer(migration_shape, &helpers));
+    assert!(
+        !violates(migration_shape),
+        "a runner gated on both stops passes"
+    );
+    assert!(
+        violates(&migration_shape.replace("run_batches(", "cancel_only_batches(")),
+        "a runner that honours only Cancel does not stop on a dead session"
+    );
 
     // A loop over ONE app's own sub-collection is bounded by that app, not by
     // the tenant, and must not be dragged in — this is the shape 25 of the 26
@@ -598,5 +797,38 @@ fn the_throttle_observer_is_attached_only_through_fan_out_meter() {
         "hand-rolled throttle wiring — use `FanOutMeter::attach(client, cap)` and \
          `|| meter.limit()`:\n  {}",
         offenders.join("\n  ")
+    );
+}
+
+/// A command that attaches a [`FanOutMeter`] fans out, so its body must call a
+/// driver from `sources::long_run_drivers` — the cross-check on the derivation
+/// itself. Were a driver's call unreadable to `sources::calls`, or its header
+/// to `sources::is_fn_header`, the command would drop out of the cancel and
+/// dead-session rules above with nothing failing; here it fails by name.
+#[test]
+fn every_metered_command_calls_a_driver() {
+    let drivers = super::sources::long_run_drivers();
+    let mut metered = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for cmd in super::sources::commands() {
+        if !super::sources::code_lines(&cmd.body).any(|l| l.contains("FanOutMeter::attach(")) {
+            continue;
+        }
+        metered += 1;
+        if !drivers.iter().any(|d| super::sources::calls(&cmd.body, d)) {
+            offenders.push(format!("{}::{}", cmd.module, cmd.name));
+        }
+    }
+    // The same six the throttle rule above counts.
+    assert!(
+        metered >= 6,
+        "found only {metered} metered command(s) — the scan is broken"
+    );
+    assert!(
+        offenders.is_empty(),
+        "command(s) that attach a FanOutMeter but call no derived driver: {offenders:#?}\n\
+         Either the fan-out moved behind a helper the driver derivation cannot see (a call \
+         `sources::calls` cannot read, a header `sources::is_fn_header` cannot parse, a helper \
+         outside commands/), or the meter is attached for nothing. Derived drivers: {drivers:?}"
     );
 }

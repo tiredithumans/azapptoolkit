@@ -442,6 +442,13 @@ pub(crate) fn is_fn_header(trimmed: &str) -> bool {
         .strip_prefix("pub(crate) ")
         .or_else(|| trimmed.strip_prefix("pub(super) "))
         .or_else(|| trimmed.strip_prefix("pub "))
+        // `pub(in crate::commands) fn` — the path runs to the first `) `.
+        .or_else(|| {
+            trimmed
+                .strip_prefix("pub(in ")
+                .and_then(|r| r.split_once(") "))
+                .map(|(_, after)| after)
+        })
         .unwrap_or(trimmed);
     let rest = rest
         .strip_prefix("const ")
@@ -459,6 +466,8 @@ pub(crate) struct Function {
     /// `async fn` — a rule about synchronous helpers can leave the I/O cores
     /// out without naming them.
     pub(crate) is_async: bool,
+    /// The raw parameter list, the text between the signature's parens.
+    pub(crate) params: String,
     /// Brace-balanced body with every `//` line removed, so a comment that
     /// merely names a validator cannot satisfy a rule that asks for the call.
     pub(crate) body: String,
@@ -507,6 +516,10 @@ pub(crate) fn functions_in(src: &str) -> Vec<Function> {
         let Some(block) = balanced_block(src, params_end) else {
             continue;
         };
+        let params = src[fn_at..params_end]
+            .find('(')
+            .map(|open| src[fn_at + open + 1..params_end - 1].to_string())
+            .unwrap_or_default();
         let body = block
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
@@ -515,6 +528,7 @@ pub(crate) fn functions_in(src: &str) -> Vec<Function> {
         out.push(Function {
             name,
             is_async,
+            params,
             body,
         });
     }
@@ -591,6 +605,207 @@ fn find_loop_keyword(src: &str) -> Option<(usize, usize)> {
         }
     }
     best
+}
+
+/// The two fan-out drivers in the command layer: `dispatch::dispatch_capped`
+/// (bounded-concurrency spawn) and `bulk::run_bulk_seq` (the sequential bulk
+/// loop). The seed of [`long_run_drivers`], never the whole set.
+const DRIVER_SEEDS: &[&str] = &["dispatch_capped", "run_bulk_seq"];
+
+/// The drivers [`long_run_drivers`] must at least derive — a floor, not the
+/// set, like `cache::INVALIDATORS`. `bulk::run_bulk_capped` is here because
+/// nothing else would notice it dropping out: a call the matcher cannot read, a
+/// move out of `commands/`, or a header [`is_fn_header`] cannot parse would take
+/// the three capped bulk writes out of the cancel and fan-out rules while their
+/// `>= 5` floors still passed.
+const DRIVER_FLOOR: &[&str] = &["dispatch_capped", "run_bulk_seq", "run_bulk_capped"];
+
+/// The runners [`cancel_runners`] must at least derive: the two bulk drivers,
+/// the restore's passes and the AAP migration's batch loop.
+const CANCEL_RUNNER_FLOOR: &[&str] = &[
+    "run_bulk_seq",
+    "run_bulk_capped",
+    "run_restore",
+    "run_migration_batches",
+];
+
+/// Whether `body` calls `name`: `name(` or the turbofish `name::<`, not
+/// preceded by an identifier character or a backtick, so a longer identifier
+/// ending in the name (`my_dispatch_capped(`) and a doc-comment mention are not
+/// calls.
+pub(crate) fn calls(body: &str, name: &str) -> bool {
+    body.match_indices(name).any(|(at, _)| {
+        let after = &body[at + name.len()..];
+        (after.starts_with('(') || after.starts_with("::<"))
+            && body[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '`'))
+    })
+}
+
+/// Every `fn` item under `commands/`, test modules stripped.
+pub(crate) fn command_functions() -> Vec<Function> {
+    command_modules()
+        .iter()
+        .flat_map(|(_, src)| functions_in(src))
+        .collect()
+}
+
+/// The names of every `#[tauri::command]`.
+pub(crate) fn command_names() -> std::collections::BTreeSet<String> {
+    commands().into_iter().map(|c| c.name).collect()
+}
+
+/// Grows `names` by every non-command function that calls a member, until
+/// nothing changes. Commands never join: a command calling a command is a
+/// separate run with its own claim.
+pub(crate) fn close_over_callers(
+    functions: &[Function],
+    commands: &std::collections::BTreeSet<String>,
+    mut names: std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    loop {
+        let before = names.len();
+        for f in functions {
+            if commands.contains(&f.name) || names.contains(&f.name) {
+                continue;
+            }
+            if names.iter().any(|n| calls(&f.body, n)) {
+                names.insert(f.name.clone());
+            }
+        }
+        if names.len() == before {
+            break;
+        }
+    }
+    names
+}
+
+/// Every function that drives a long-running fan-out, by name: the two
+/// [`DRIVER_SEEDS`], and every non-command `fn` under `commands/` that calls
+/// one — directly or through another such `fn`.
+///
+/// Derived to a fixpoint from the source, like `cache::invalidators`, rather
+/// than spelled as the two literals the cancel and fan-out rules used to look
+/// for. Those rules key a command's obligations on "its body calls a driver",
+/// so a helper that wraps `dispatch_capped` would otherwise take every command
+/// that calls it out of both rules at once, silently, while their floors still
+/// passed. Async functions count (a driver is async by nature). Checked
+/// against [`DRIVER_FLOOR`].
+pub(crate) fn long_run_drivers() -> Vec<String> {
+    let drivers = derive_drivers(&command_functions(), &command_names());
+    for floor in DRIVER_FLOOR {
+        assert!(
+            drivers.contains(*floor),
+            "the derived driver set lacks `{floor}`: {drivers:?} — the derivation is broken, the \
+             helper moved out of commands/ or was renamed (update the floor), or `calls` / \
+             `is_fn_header` cannot read its call or its header"
+        );
+    }
+    drivers.into_iter().collect()
+}
+
+/// The fixpoint behind [`long_run_drivers`], over an explicit function list so
+/// its self-test can drive it with a synthetic source.
+fn derive_drivers(
+    functions: &[Function],
+    commands: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let seeds = DRIVER_SEEDS.iter().map(|s| (*s).to_string()).collect();
+    close_over_callers(functions, commands, seeds)
+}
+
+/// Every non-command function that runs work under a `CancelToken` it was
+/// handed, by name: one whose parameters name `CancelToken`, and every
+/// non-command `fn` that calls one, to a fixpoint.
+///
+/// A command that calls one is a long run whether or not it reaches a fan-out
+/// driver — the restore's passes (`run_restore`), the AAP migration's batches
+/// (`run_migration_batches`), the scope-group member copy (`copy_members`) — so
+/// the cancel rule asks it to claim exactly once. Deliberately not merged into
+/// [`long_run_drivers`]: a runner proves only that a Cancel reaches the work,
+/// not that a dead session stops it (`bulk::stopped_by_cancel` takes a token
+/// and loops over nothing). Checked against [`CANCEL_RUNNER_FLOOR`].
+pub(crate) fn cancel_runners() -> std::collections::BTreeSet<String> {
+    let runners = derive_cancel_runners(&command_functions(), &command_names());
+    for floor in CANCEL_RUNNER_FLOOR {
+        assert!(
+            runners.contains(*floor),
+            "the derived cancel-runner set lacks `{floor}`: {runners:?} — the derivation is \
+             broken, or the runner was renamed (update the floor)"
+        );
+    }
+    runners
+}
+
+/// The fixpoint behind [`cancel_runners`], over an explicit function list.
+pub(crate) fn derive_cancel_runners(
+    functions: &[Function],
+    commands: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let seeds = functions
+        .iter()
+        .filter(|f| !commands.contains(&f.name) && f.params.contains("CancelToken"))
+        .map(|f| f.name.clone())
+        .collect();
+    close_over_callers(functions, commands, seeds)
+}
+
+/// The derivations must follow a helper through another helper (the fixpoint),
+/// read a turbofish call and a `pub(in …)` header, and must not promote a
+/// command, a bystander, or a doc-comment mention.
+#[test]
+fn the_driver_derivation_follows_helpers_to_a_fixpoint() {
+    // `outer` sits ABOVE `inner`, so one pass in source order is not enough.
+    let src = r#"
+async fn outer(items: Vec<u8>) -> bool {
+    inner::<u8>(items).await
+}
+pub(in crate::commands) async fn inner<T>(items: Vec<T>) -> bool {
+    dispatch_capped(items, || 4, |x| None, |j| {}).await
+}
+/// Mentions `run_bulk_seq(` in prose only.
+fn bystander() -> u8 {
+    my_dispatch_capped(1)
+}
+pub async fn a_command(items: Vec<u8>) {
+    dispatch_capped(items, || 4, |x| None, |j| {}).await;
+}
+async fn passes(cancel: &CancelToken, items: Vec<u8>) {
+    for i in items { if cancel.is_cancelled() { break; } }
+}
+async fn wraps_passes(items: Vec<u8>, token: CancelToken) {
+    passes(&token, items).await;
+}
+fn reads_a_token_type() -> CancelToken {
+    unreachable!()
+}
+"#;
+    let functions = functions_in(src);
+    let commands = std::collections::BTreeSet::from(["a_command".to_string()]);
+    let drivers = derive_drivers(&functions, &commands);
+    for name in ["dispatch_capped", "run_bulk_seq", "inner", "outer"] {
+        assert!(drivers.contains(name), "`{name}` must derive: {drivers:?}");
+    }
+    for name in ["bystander", "a_command", "passes"] {
+        assert!(
+            !drivers.contains(name),
+            "`{name}` must not derive: {drivers:?}"
+        );
+    }
+    let runners = derive_cancel_runners(&functions, &commands);
+    assert_eq!(
+        runners.into_iter().collect::<Vec<_>>(),
+        ["passes", "wraps_passes"],
+        "a token parameter makes a runner; a token return type does not"
+    );
+    assert!(calls("x = run_bulk_seq(a)", "run_bulk_seq"));
+    assert!(calls("x = run_bulk_seq::<S, T>(a)", "run_bulk_seq"));
+    assert!(!calls("x = my_run_bulk_seq(a)", "run_bulk_seq"));
+    assert!(!calls("x = run_bulk_seq_more(a)", "run_bulk_seq"));
+    assert!(!calls("see `run_bulk_seq(`", "run_bulk_seq"));
+    assert!(is_fn_header("pub(in crate::commands) async fn inner() {"));
 }
 
 /// `strip_tests` drops only real `#[cfg(test)]` items. It used to cut the file
