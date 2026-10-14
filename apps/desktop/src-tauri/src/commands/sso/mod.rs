@@ -52,7 +52,6 @@ use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::GraphError;
 
-use crate::commands::applications::MAX_SECRET_LIFETIME_DAYS;
 use crate::commands::graph_err::forbidden_remediation;
 use crate::dto::UiError;
 use crate::dto::sso::ClaimsPolicyDto;
@@ -279,6 +278,9 @@ fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
 /// Default OIDC client-secret lifetime when the caller supplies none — the
 /// portal's recommended preset, the same one the Credentials tab seeds.
 const DEFAULT_SECRET_LIFETIME_DAYS: u32 = crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS;
+/// The portal's 24-month cap on a client secret, the one number in the dto
+/// crate that the Credentials tab and the applications commands also read.
+const MAX_SECRET_LIFETIME_DAYS: u32 = crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS;
 
 /// Bounds a caller-supplied OIDC client-secret lifetime to
 /// `1..=`[`MAX_SECRET_LIFETIME_DAYS`] (the portal's 24-month cap, the same
@@ -291,7 +293,7 @@ const DEFAULT_SECRET_LIFETIME_DAYS: u32 = crate::dto::credentials::DEFAULT_SECRE
 /// Checking here turns all of that into a typed rejection *before* any mutation.
 fn resolve_secret_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
     let days = days.unwrap_or(DEFAULT_SECRET_LIFETIME_DAYS);
-    if days == 0 || i64::from(days) > MAX_SECRET_LIFETIME_DAYS {
+    if days == 0 || days > MAX_SECRET_LIFETIME_DAYS {
         return Err(UiError::validation(
             "invalid_secret_lifetime",
             format!(

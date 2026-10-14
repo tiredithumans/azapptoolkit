@@ -28,7 +28,10 @@ selection), call callbacks with `try_run`, and read signals with their `try_` tw
 to the session's sink); the bulk bar's `Landing` does it for its runs. Hand-spawned tasks use
 `.try_run(` and `try_get_untracked` after an await, both pinned by
 `web-rs/tests/post_await_callbacks.rs` (textually, so an `is_disposed()` return does not excuse a
-plain read after it). A consent-then-replay — `do_run()` after the consent round trip, which is a
+plain read after it). The same file holds `UNGATED_TOAST_CEILING`, the number of hand-spawned tasks
+that still toast after an await with no `is_active_tenant` gate outside the session-level
+`shell.rs` and `state/errors.rs`; it is held by equality, so gating a site lowers it in the same
+change and a new ungated toast fails. A consent-then-replay — `do_run()` after the consent round trip, which is a
 browser prompt answered minutes later — reads signals indirectly, so it is gated on
 `is_disposed()` + `is_active_tenant` by hand: at the call site (the resource-access lenses, the
 usage panel, the app site panel, the managed scope group panel, the Access tab, the audit
@@ -208,7 +211,9 @@ Thaw (a pre-1.0 Fluent UI port whose last release is a beta) is being retired a 
 a time. Each replacement is a `components::ui` primitive that renders the same plain HTML element
 (`<button>`, `<input>`, `<span>`), so the GUI tests, which find elements by tag and visible text,
 carry over. A retired component goes into `RETIRED` in `web-rs/tests/thaw_retired.rs`, which fails
-on any `thaw::` import of it.
+on any `thaw::` import of it; the items still imported are listed in `STILL_ON_THAW` there, so a
+`thaw::` item outside both lists (a new dependency on the library being retired) fails too, and an
+item nobody imports any more must move to `RETIRED`.
 
 - **Retired so far:** `Body1` (a `<span class="ui-text …">`; see below), `Card` (the two detail
   panes render a plain `.app-detail` div; the relative positioning, clipping and 12px gap Thaw
