@@ -442,4 +442,10 @@ it as sensitive (it enumerates permissions, owners, identifier URIs). The restor
 same discipline as the in-app secret reveal (`PasswordCredential` is
 `Debug`-redacted and never logged; `SelfSignedCertificate.key` likewise). The
 report file is the only place those values land, and the operator is warned it is
-secret-bearing.
+secret-bearing. The DR view is keep-alive, so it holds the report, values
+included, until the operator presses **Done — clear secrets** — the reveal
+dialog's Done for a restore — which drops it, after a confirmation while the
+report is unsaved. **Load backup file…** waits while an unsaved report is on
+screen, and clears a saved one only once a file is chosen; a new restore and
+sign-out also drop it. It is never cleared on navigation, because the values
+cannot be shown again.

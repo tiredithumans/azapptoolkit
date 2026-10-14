@@ -229,7 +229,7 @@ fn spawned_tasks_never_run_a_callback_after_an_await() {
 /// so this is a ceiling, not a ban, held by equality so a site that is gated
 /// lowers it in the same change (see "Reactivity conventions" in
 /// `docs/architecture/frontend-workspace.md`).
-const UNGATED_TOAST_CEILING: usize = 6;
+const UNGATED_TOAST_CEILING: usize = 4;
 
 /// Files whose post-await toasts are session-level by design.
 const SESSION_LEVEL_TOASTS: &[&str] = &["views/shell.rs", "state/errors.rs"];

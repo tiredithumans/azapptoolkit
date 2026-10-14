@@ -3,6 +3,9 @@
 //! the two hard DR realities — secret/cert values are never in the backup
 //! (restore regenerates secrets and surfaces the show-once values), and managed
 //! identities are Azure resources recreated out-of-band.
+//!
+//! The two halves share no state, so each is its own card component
+//! (`BackupCard`, `RestoreCard`) under the one page header.
 
 use std::collections::BTreeSet;
 
@@ -19,12 +22,25 @@ use crate::components::ui::{
 use crate::hooks::use_progress_stream::use_progress_stream;
 use crate::state::use_session;
 use crate::util::{count_noun, plural};
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 #[component]
 pub fn DisasterRecoveryView() -> impl IntoView {
+    view! {
+        <div class="tool-page dr-view">
+            <SectionHeader title="Disaster Recovery" crumb="Backup & Restore" />
+            <BackupCard />
+            <RestoreCard />
+        </div>
+    }
+}
+
+/// Back up this tenant: capture the manifest (with streamed progress and a
+/// rate-limit notice), then save it to a file.
+#[component]
+fn BackupCard() -> impl IntoView {
     let session = use_session();
 
-    // ---- Backup state ----
     let captured: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -45,21 +61,6 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         None => peak_cap.set(0),
     });
 
-    // ---- Restore state ----
-    let loaded: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
-    let plan: RwSignal<Option<backup::RestorePlan>> = RwSignal::new(None);
-    // Source appIds the operator approved in the plan's privileged list; only
-    // these get their high-risk consent / managed-identity roles granted.
-    let approvals: RwSignal<BTreeSet<backup::RestoreApproval>> = RwSignal::new(BTreeSet::new());
-    let confirm_open = RwSignal::new(false);
-    let restoring = RwSignal::new(false);
-    let restore_error: RwSignal<Option<String>> = RwSignal::new(None);
-    let report: RwSignal<Option<backup::RestoreReport>> = RwSignal::new(None);
-    let restore_progress: RwSignal<Option<crate::bindings::bulk::BulkProgress>> =
-        RwSignal::new(None);
-    use_progress_stream(restore_progress, events::restore_progress);
-
-    // ---- Backup handlers ----
     let run_backup = move |_| {
         if busy.get() {
             return;
@@ -116,11 +117,17 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         });
     };
     let save_file = move |_| {
-        let Some(b) = captured.get() else {
+        let (Some(tenant), Some(b)) = (session.active_tenant.get(), captured.get()) else {
             return;
         };
         leptos::task::spawn_local(async move {
-            match backup::save_backup_to_file(&b, "json").await {
+            let res = backup::save_backup_to_file(&b, "json").await;
+            // Sign-out while the save dialog was open: no toast at the next
+            // sign-in (the file, if chosen, is written either way).
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match res {
                 Ok(Some(path)) => {
                     session.toast_success(format!("Backup saved to {path}"));
                 }
@@ -134,202 +141,85 @@ pub fn DisasterRecoveryView() -> impl IntoView {
         });
     };
 
-    // ---- Restore handlers ----
-    let load_file = move |_| {
-        let Some(tenant) = session.active_tenant.get() else {
-            return;
-        };
-        restore_error.set(None);
-        report.set(None);
-        leptos::task::spawn_local(async move {
-            let b = match backup::load_backup_from_file().await {
-                Ok(Some(b)) => b,
-                Ok(None) => return, // dialog cancelled
-                Err(e) => {
-                    session.fail_inline(&e, "write", restore_error);
-                    return;
-                }
-            };
-            let planned = backup::plan_restore(&tenant.tenant_id, &b).await;
-            // Sign-out while planning: another tenant's view must not show
-            // this file's plan.
-            if !session.is_active_tenant(&tenant.tenant_id) {
-                return;
-            }
-            match planned {
-                Ok(p) => {
-                    // A new file starts with nothing approved.
-                    approvals.set(BTreeSet::new());
-                    plan.set(Some(p));
-                    loaded.set(Some(b));
-                }
-                Err(e) => session.fail_inline(&e, "write", restore_error),
-            }
-        });
-    };
-    let do_restore = move |_| {
-        let (Some(tenant), Some(b)) = (session.active_tenant.get(), loaded.get()) else {
-            return;
-        };
-        let approved: Vec<backup::RestoreApproval> = approvals.get().into_iter().collect();
-        confirm_open.set(false);
-        restoring.set(true);
-        restore_error.set(None);
-        report.set(None);
-        restore_progress.set(None);
-        leptos::task::spawn_local(async move {
-            let res = backup::restore_tenant(&tenant.tenant_id, &b, &approved).await;
-            // Sign-out mid-restore: the report (and its one-time secrets) is
-            // view state and is gone with the shell either way; the "save the
-            // report" toast must not surface at the next sign-in.
-            if !session.is_active_tenant(&tenant.tenant_id) {
-                restoring.set(false);
-                restore_progress.set(None);
-                return;
-            }
-            match res {
-                Ok(r) => {
-                    let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
-                    session.toast_success(format!(
-                        "Restored {}; {} regenerated. Save the report — \
-                         the secret values are shown only once.",
-                        count_noun(r.apps.len(), "app", "apps"),
-                        count_noun(secrets, "secret", "secrets"),
-                    ));
-                    report.set(Some(r));
-                    // A second click would be a second restore, so running it
-                    // again requires deliberately re-loading the file.
-                    plan.set(None);
-                    loaded.set(None);
-                }
-                Err(e) => session.fail_inline(&e, "write", restore_error),
-            }
-            restoring.set(false);
-            restore_progress.set(None);
-        });
-    };
-    let cancel_restore = move |_| {
-        leptos::task::spawn_local(async move {
-            let _ = backup::cancel_restore().await;
-        });
-    };
-    let save_report = Callback::new(move |()| {
-        let Some(r) = report.get() else {
-            return;
-        };
-        leptos::task::spawn_local(async move {
-            match backup::save_restore_report_to_file(&r, "json").await {
-                Ok(Some(path)) => {
-                    session.toast_success(format!("Report saved to {path}"));
-                }
-                Ok(None) => {} // dialog cancelled
-                Err(e) => {
-                    if !session.report_if_session_dead(&e) {
-                        session.toast_error(format!("Couldn't save report: {}", e.message), None);
-                    }
-                }
-            }
-        });
-    });
-
-    // Restore is blocked on a cloud mismatch or a too-new manifest (both hard
-    // errors from the backend too).
-    let plan_blocked = move || plan.get().is_some_and(|p| p.is_blocked());
-    // Items whose high-risk grant the restore will skip: approval required,
-    // not given. Named in the confirm dialog so skipping is a known choice.
-    let unapproved = move || {
-        let approved = approvals.get();
-        plan.with(|p| {
-            p.as_ref().map_or(0, |p| {
-                p.privileged
-                    .iter()
-                    .filter(|i| i.requires_approval && !approved.contains(&approval_key(i)))
-                    .count()
-            })
-        })
-    };
-
     view! {
-        <div class="tool-page dr-view">
-            <SectionHeader title="Disaster Recovery" crumb="Backup & Restore" />
+        <Card>
+            <h2 class="dr-view__card-title">"Back up this tenant"</h2>
+            <p class="dr-view__lead">
+                "Captures a portable JSON manifest of every app registration (full \
+                 configuration), plus an inventory of enterprise applications and managed \
+                 identities. Use it to rebuild the estate in a new tenant during a disaster \
+                 recovery."
+            </p>
+            <ul class="dr-view__notes">
+                <li>
+                    <strong>"Secrets and certificates are not included."</strong>
+                    " Their values are unrecoverable by design — the backup records only \
+                     metadata. Restore generates fresh credentials and gives you a \
+                     redistribution report."
+                </li>
+                <li>
+                    <strong>"Managed identities can't be restored directly."</strong>
+                    " They are Azure resources; recreate them via your infrastructure-as-code, \
+                     then re-bind their permissions. The backup captures them as a runbook."
+                </li>
+            </ul>
 
-            // ---------- Backup ----------
-            <Card>
-                <h2 class="dr-view__card-title">"Back up this tenant"</h2>
-                <p class="dr-view__lead">
-                    "Captures a portable JSON manifest of every app registration (full \
-                     configuration), plus an inventory of enterprise applications and managed \
-                     identities. Use it to rebuild the estate in a new tenant during a disaster \
-                     recovery."
-                </p>
-                <ul class="dr-view__notes">
-                    <li>
-                        <strong>"Secrets and certificates are not included."</strong>
-                        " Their values are unrecoverable by design — the backup records only \
-                         metadata. Restore generates fresh credentials and gives you a \
-                         redistribution report."
-                    </li>
-                    <li>
-                        <strong>"Managed identities can't be restored directly."</strong>
-                        " They are Azure resources; recreate them via your infrastructure-as-code, \
-                         then re-bind their permissions. The backup captures them as a runbook."
-                    </li>
-                </ul>
-
-                <div class="dr-view__actions">
-                    <Button
-                        appearance=ButtonAppearance::Primary
-                        disabled=Signal::derive(move || busy.get())
-                        on_click=run_backup
-                    >
-                        {move || {
-                            if busy.get() {
-                                view! {
-                                    <Spinner />
-                                    " Backing up…"
-                                }
-                                    .into_any()
-                            } else {
-                                view! { <Icon name=IconName::Download size=16 /> " Back up this tenant" }
-                                    .into_any()
-                            }
-                        }}
-                    </Button>
-                    <Show when=move || busy.get()>
-                        <Button appearance=ButtonAppearance::Subtle on_click=cancel_backup>
-                            "Cancel"
-                        </Button>
-                    </Show>
-                </div>
-
-                <Show when=move || progress.get().is_some()>
+            <div class="dr-view__actions">
+                <Button
+                    appearance=ButtonAppearance::Primary
+                    disabled=Signal::derive(move || busy.get())
+                    on_click=run_backup
+                >
                     {move || {
-                        progress.get().map(|p| {
-                            let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
-                            let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
-                            let cap_label = p.in_flight_cap.map(|c| format!(" · {c} concurrent")).unwrap_or_default();
-                            let cap = p.in_flight_cap;
+                        if busy.get() {
                             view! {
-                                <ProgressBar value=Signal::derive(move || pct) />
-                                <p class="dr-view__progress">{format!("Captured {}/{}", p.done, p.total)}{label}{cap_label}</p>
-                                <Show when=move || matches!(cap, Some(c) if c < peak_cap.get())>
-                                    <p class="dr-view__notice" role="status">
-                                        "Microsoft Graph is rate-limiting this backup, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
-                                    </p>
-                                </Show>
+                                <Spinner />
+                                " Backing up…"
                             }
-                        })
+                                .into_any()
+                        } else {
+                            view! { <Icon name=IconName::Download size=16 /> " Back up this tenant" }
+                                .into_any()
+                        }
                     }}
+                </Button>
+                <Show when=move || busy.get()>
+                    <Button appearance=ButtonAppearance::Subtle on_click=cancel_backup>
+                        "Cancel"
+                    </Button>
                 </Show>
-                <Show when=move || error.get().is_some()>
-                    <FormError>{move || error.get().unwrap_or_default()}</FormError>
-                </Show>
+            </div>
 
-                <Show when=move || captured.get().is_some()>
-                    {move || {
+            <Show when=move || progress.with(Option::is_some)>
+                {move || {
+                    progress.get().map(|p| {
+                        let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
+                        let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
+                        let cap_label = p.in_flight_cap.map(|c| format!(" · {c} concurrent")).unwrap_or_default();
+                        let cap = p.in_flight_cap;
+                        view! {
+                            <ProgressBar value=Signal::derive(move || pct) />
+                            <p class="dr-view__progress">{format!("Captured {}/{}", p.done, p.total)}{label}{cap_label}</p>
+                            <Show when=move || matches!(cap, Some(c) if c < peak_cap.get())>
+                                <p class="dr-view__notice" role="status">
+                                    "Microsoft Graph is rate-limiting this backup, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
+                                </p>
+                            </Show>
+                        }
+                    })
+                }}
+            </Show>
+            <Show when=move || error.with(Option::is_some)>
+                <FormError>{move || error.get().unwrap_or_default()}</FormError>
+            </Show>
+
+            <Show when=move || captured.with(Option::is_some)>
+                {move || {
+                    // Borrowed, never cloned: the manifest is the whole tenant.
+                    captured.with(|b| {
                         // The `Show` gate makes `None` unreachable today, but a
                         // render closure must never be the thing that panics.
-                        let Some(b) = captured.get() else {
+                        let Some(b) = b else {
                             return ().into_any();
                         };
                         let secrets: usize = b.app_registrations.iter().map(|a| a.secrets.len()).sum();
@@ -395,98 +285,325 @@ pub fn DisasterRecoveryView() -> impl IntoView {
                             </div>
                         }
                             .into_any()
-                    }}
-                </Show>
-            </Card>
+                    })
+                }}
+            </Show>
+        </Card>
+    }
+}
 
-            // ---------- Restore ----------
-            <Card>
-                <h2 class="dr-view__card-title">"Restore into this tenant"</h2>
-                <p class="dr-view__lead">
-                    "Load a backup file to recreate its app registrations here, re-grant their \
-                     permissions, and regenerate their secrets. Object IDs change in a new tenant, \
-                     so owners and custom-API references are remapped by name where possible."
-                </p>
+/// Restore into this tenant: load a manifest, review its dry-run plan and the
+/// access it grants, run it, and hand the operator the report.
+///
+/// The report carries the run's show-once secret values, and this view is
+/// keep-alive, so it holds them until the operator presses "Done — clear
+/// secrets" (confirmed first while the report is unsaved) — the restore
+/// counterpart of the secret reveal's Done. Load backup file… waits while an
+/// unsaved report is on screen; loading a file over a saved one, a new restore
+/// and sign-out also clear it. Navigating away never does, because the values
+/// cannot be shown again.
+#[component]
+fn RestoreCard() -> impl IntoView {
+    let session = use_session();
 
-                <div class="dr-view__actions">
-                    <Button
-                        appearance=ButtonAppearance::Secondary
-                        disabled=Signal::derive(move || restoring.get())
-                        on_click=load_file
-                    >
-                        <Icon name=IconName::Upload size=16 /> " Load backup file…"
+    let loaded: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
+    let plan: RwSignal<Option<backup::RestorePlan>> = RwSignal::new(None);
+    // Source appIds the operator approved in the plan's privileged list; only
+    // these get their high-risk consent / managed-identity roles granted.
+    let approvals: RwSignal<BTreeSet<backup::RestoreApproval>> = RwSignal::new(BTreeSet::new());
+    let confirm_open = RwSignal::new(false);
+    let restoring = RwSignal::new(false);
+    let restore_error: RwSignal<Option<String>> = RwSignal::new(None);
+    let report: RwSignal<Option<backup::RestoreReport>> = RwSignal::new(None);
+    // Whether the report on screen has been written to a file — the one place
+    // its secret values survive once it is cleared.
+    let report_saved = RwSignal::new(false);
+    // Bumped each time a report lands, so a save that completes after a newer
+    // report replaced the one it wrote never marks the newer one saved.
+    let report_gen = RwSignal::new(0u64);
+    let clear_open = RwSignal::new(false);
+    let restore_progress: RwSignal<Option<crate::bindings::bulk::BulkProgress>> =
+        RwSignal::new(None);
+    use_progress_stream(restore_progress, events::restore_progress);
+
+    // Drops the report — and with it the only in-app copy of its secret values.
+    let clear_report = move || {
+        clear_open.set(false);
+        report.set(None);
+        report_saved.set(false);
+    };
+    // A report on screen that no file holds yet. Loading another backup would
+    // replace it, so Load waits until it is saved or cleared (Done asks first).
+    let unsaved_report = move || report.with(Option::is_some) && !report_saved.get();
+    let report_has_secrets = move || {
+        report.with(|r| {
+            r.as_ref()
+                .is_some_and(|r| r.apps.iter().any(|a| !a.regenerated_secrets.is_empty()))
+        })
+    };
+
+    let load_file = move |_| {
+        let Some(tenant) = session.active_tenant.get() else {
+            return;
+        };
+        restore_error.set(None);
+        leptos::task::spawn_local(async move {
+            let picked = backup::load_backup_from_file().await;
+            // Sign-out while the file dialog was open: land nothing.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            let b = match picked {
+                Ok(Some(b)) => b,
+                // Dialog cancelled: whatever was on screen stays.
+                Ok(None) => return,
+                Err(e) => {
+                    session.fail_inline(&e, "write", restore_error);
+                    return;
+                }
+            };
+            // A file was chosen: it replaces the (saved) report on screen.
+            clear_report();
+            let planned = backup::plan_restore(&tenant.tenant_id, &b).await;
+            // Sign-out while planning: another tenant's view must not show
+            // this file's plan.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match planned {
+                Ok(p) => {
+                    // A new file starts with nothing approved.
+                    approvals.set(BTreeSet::new());
+                    plan.set(Some(p));
+                    loaded.set(Some(b));
+                }
+                Err(e) => session.fail_inline(&e, "write", restore_error),
+            }
+        });
+    };
+    let do_restore = move |_| {
+        let (Some(tenant), Some(b)) = (session.active_tenant.get(), loaded.get()) else {
+            return;
+        };
+        let approved: Vec<backup::RestoreApproval> = approvals.get().into_iter().collect();
+        confirm_open.set(false);
+        restoring.set(true);
+        restore_error.set(None);
+        report.set(None);
+        restore_progress.set(None);
+        leptos::task::spawn_local(async move {
+            let res = backup::restore_tenant(&tenant.tenant_id, &b, &approved).await;
+            // Sign-out mid-restore: the report (and its one-time secrets) is
+            // view state and is gone with the shell either way; the "save the
+            // report" toast must not surface at the next sign-in.
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                restoring.set(false);
+                restore_progress.set(None);
+                return;
+            }
+            match res {
+                Ok(r) => {
+                    let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
+                    session.toast_success(format!(
+                        "Restored {}; {} regenerated. Save the report — \
+                         the secret values are shown only once.",
+                        count_noun(r.apps.len(), "app", "apps"),
+                        count_noun(secrets, "secret", "secrets"),
+                    ));
+                    report.set(Some(r));
+                    report_saved.set(false);
+                    report_gen.update(|g| *g += 1);
+                    // A second click would be a second restore, so running it
+                    // again requires deliberately re-loading the file.
+                    plan.set(None);
+                    loaded.set(None);
+                }
+                Err(e) => session.fail_inline(&e, "write", restore_error),
+            }
+            restoring.set(false);
+            restore_progress.set(None);
+        });
+    };
+    let cancel_restore = move |_| {
+        leptos::task::spawn_local(async move {
+            let _ = backup::cancel_restore().await;
+        });
+    };
+    let save_report = Callback::new(move |()| {
+        let (Some(tenant), Some(r)) = (
+            session.active_tenant.get_untracked(),
+            report.get_untracked(),
+        ) else {
+            return;
+        };
+        let saving = report_gen.get_untracked();
+        leptos::task::spawn_local(async move {
+            let res = backup::save_restore_report_to_file(&r, "json").await;
+            // Sign-out while the save dialog was open: no toast at the next
+            // sign-in (the file, if chosen, is written either way).
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match res {
+                Ok(Some(path)) => {
+                    if report_gen.try_get_untracked() == Some(saving) {
+                        report_saved.set(true);
+                    }
+                    session.toast_success(format!("Report saved to {path}"));
+                }
+                Ok(None) => {} // dialog cancelled
+                Err(e) => {
+                    if !session.report_if_session_dead(&e) {
+                        session.toast_error(format!("Couldn't save report: {}", e.message), None);
+                    }
+                }
+            }
+        });
+    });
+    let done_with_report = Callback::new(move |()| {
+        if report_saved.get_untracked() {
+            clear_report();
+        } else {
+            clear_open.set(true);
+        }
+    });
+
+    // Restore is blocked on a cloud mismatch or a too-new manifest (both hard
+    // errors from the backend too).
+    let plan_blocked =
+        move || plan.with(|p| p.as_ref().is_some_and(backup::RestorePlan::is_blocked));
+    // Items whose high-risk grant the restore will skip: approval required,
+    // not given. Named in the confirm dialog so skipping is a known choice.
+    let unapproved = move || {
+        let approved = approvals.get();
+        plan.with(|p| {
+            p.as_ref().map_or(0, |p| {
+                p.privileged
+                    .iter()
+                    .filter(|i| i.requires_approval && !approved.contains(&approval_key(i)))
+                    .count()
+            })
+        })
+    };
+
+    view! {
+        <Card>
+            <h2 class="dr-view__card-title">"Restore into this tenant"</h2>
+            <p class="dr-view__lead">
+                "Load a backup file to recreate its app registrations here, re-grant their \
+                 permissions, and regenerate their secrets. Object IDs change in a new tenant, \
+                 so owners and custom-API references are remapped by name where possible."
+            </p>
+
+            <div class="dr-view__actions">
+                <Button
+                    appearance=ButtonAppearance::Secondary
+                    disabled=Signal::derive(move || restoring.get() || unsaved_report())
+                    on_click=load_file
+                >
+                    <Icon name=IconName::Upload size=16 /> " Load backup file…"
+                </Button>
+                <Show when=move || plan.with(Option::is_some) && !plan_blocked() && !restoring.get()>
+                    <Button appearance=ButtonAppearance::Primary on_click=move |_| confirm_open.set(true)>
+                        "Restore into this tenant…"
                     </Button>
-                    <Show when=move || plan.get().is_some() && !plan_blocked() && !restoring.get()>
-                        <Button appearance=ButtonAppearance::Primary on_click=move |_| confirm_open.set(true)>
-                            "Restore into this tenant…"
-                        </Button>
-                    </Show>
-                    <Show when=move || restoring.get()>
-                        <Button appearance=ButtonAppearance::Subtle on_click=cancel_restore>
-                            "Cancel"
-                        </Button>
-                    </Show>
-                </div>
-
-                <Show when=move || restore_error.get().is_some()>
-                    <FormError>{move || restore_error.get().unwrap_or_default()}</FormError>
                 </Show>
-
-                // Plan preview (before confirming).
-                <Show when=move || plan.get().is_some() && report.get().is_none()>
-                    {move || plan.get().map(|p| view! { <RestorePlanView plan=p approvals=approvals /> })}
-                </Show>
-
-                // Live restore progress.
-                <Show when=move || restore_progress.get().is_some()>
-                    {move || {
-                        restore_progress.get().map(|p| {
-                            let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
-                            let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
-                            view! {
-                                <ProgressBar value=Signal::derive(move || pct) />
-                                <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p>
-                            }
-                        })
-                    }}
-                </Show>
-
-                // Report (after restore).
-                <Show when=move || report.get().is_some()>
-                    {move || report.get().map(|r| view! { <RestoreReportView report=r on_save=save_report /> })}
-                </Show>
-            </Card>
-
-            // Confirmation modal.
-            <ModalShell
-                open=Signal::derive(move || confirm_open.get())
-                title=Signal::derive(|| "Restore into this tenant?".to_string())
-                on_close=Callback::new(move |()| confirm_open.set(false))
-            >
-                <p>
-                    "This creates new app registrations in the current tenant and regenerates their \
-                     secrets. It does not overwrite or delete anything that already exists. Running \
-                     it again with the same file recognises the apps an earlier run created (by \
-                     their restore tag) and completes them instead of duplicating them. The new \
-                     secret values are shown only once — save the report afterwards."
-                </p>
-                <Show when=move || { unapproved() > 0 }>
-                    <p class="dr-view__note">
-                        {move || format!(
-                            "{} not approved: the restore leaves out {} consent, credentials, owners, group memberships or app roles and lists them in the report for you to grant manually.",
-                            count_noun(unapproved(), "item needing approval is", "items needing approval are"),
-                            if unapproved() == 1 { "its" } else { "their" },
-                        )}
-                    </p>
-                </Show>
-                <div class="dr-view__actions">
-                    <Button appearance=ButtonAppearance::Primary on_click=do_restore>"Restore"</Button>
-                    <Button appearance=ButtonAppearance::Subtle on_click=move |_| confirm_open.set(false)>
+                <Show when=move || restoring.get()>
+                    <Button appearance=ButtonAppearance::Subtle on_click=cancel_restore>
                         "Cancel"
                     </Button>
-                </div>
-            </ModalShell>
-        </div>
+                </Show>
+            </div>
+
+            <Show when=unsaved_report>
+                <p class="dr-view__note">
+                    "Save the restore report or press Done before loading another backup file."
+                </p>
+            </Show>
+
+            <Show when=move || restore_error.with(Option::is_some)>
+                <FormError>{move || restore_error.get().unwrap_or_default()}</FormError>
+            </Show>
+
+            // Plan preview (before confirming).
+            <Show when=move || plan.with(Option::is_some) && report.with(Option::is_none)>
+                {move || plan.get().map(|p| view! { <RestorePlanView plan=p approvals=approvals /> })}
+            </Show>
+
+            // Live restore progress.
+            <Show when=move || restore_progress.with(Option::is_some)>
+                {move || {
+                    restore_progress.get().map(|p| {
+                        let pct = if p.total > 0 { (p.done as f64) / (p.total as f64) } else { 0.0 };
+                        let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
+                        view! {
+                            <ProgressBar value=Signal::derive(move || pct) />
+                            <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p>
+                        }
+                    })
+                }}
+            </Show>
+
+            // Report (after restore).
+            <Show when=move || report.with(Option::is_some)>
+                {move || {
+                    report.get().map(|r| view! {
+                        <RestoreReportView report=r on_save=save_report on_done=done_with_report />
+                    })
+                }}
+            </Show>
+        </Card>
+
+        // Confirmation modal.
+        <ModalShell
+            open=Signal::derive(move || confirm_open.get())
+            title=Signal::derive(|| "Restore into this tenant?".to_string())
+            on_close=Callback::new(move |()| confirm_open.set(false))
+        >
+            <p>
+                "This creates new app registrations in the current tenant and regenerates their \
+                 secrets. It does not overwrite or delete anything that already exists. Running \
+                 it again with the same file recognises the apps an earlier run created (by \
+                 their restore tag) and completes them instead of duplicating them. The new \
+                 secret values are shown only once — save the report afterwards."
+            </p>
+            <Show when=move || { unapproved() > 0 }>
+                <p class="dr-view__note">
+                    {move || format!(
+                        "{} not approved: the restore leaves out {} consent, credentials, owners, group memberships or app roles and lists them in the report for you to grant manually.",
+                        count_noun(unapproved(), "item needing approval is", "items needing approval are"),
+                        if unapproved() == 1 { "its" } else { "their" },
+                    )}
+                </p>
+            </Show>
+            <div class="dr-view__actions">
+                <Button appearance=ButtonAppearance::Primary on_click=do_restore>"Restore"</Button>
+                <Button appearance=ButtonAppearance::Subtle on_click=move |_| confirm_open.set(false)>
+                    "Cancel"
+                </Button>
+            </div>
+        </ModalShell>
+
+        // Clearing an unsaved report loses it for good — with its show-once
+        // secrets when it has any, which only the first dialog mentions.
+        <ConfirmDialog
+            open=Signal::derive(move || clear_open.get() && report_has_secrets())
+            title="Clear the restore report?"
+            body="This report has not been saved. Once cleared it cannot be shown again: its regenerated secret values are gone (the only way back is to issue new secrets), and so is its list of manual follow-ups."
+            confirm_label="Clear without saving"
+            cancel_label="Keep the report"
+            on_confirm=Callback::new(move |()| clear_report())
+            on_close=Callback::new(move |()| clear_open.set(false))
+        />
+        <ConfirmDialog
+            open=Signal::derive(move || clear_open.get() && !report_has_secrets())
+            title="Clear the restore report?"
+            body="This report has not been saved. Once cleared it cannot be shown again, and its list of manual follow-ups goes with it."
+            confirm_label="Clear without saving"
+            cancel_label="Keep the report"
+            on_confirm=Callback::new(move |()| clear_report())
+            on_close=Callback::new(move |()| clear_open.set(false))
+        />
     }
 }
 
@@ -652,32 +769,40 @@ fn PrivilegedItem(
     item: backup::PrivilegedRestoreItem,
     approvals: RwSignal<BTreeSet<backup::RestoreApproval>>,
 ) -> impl IntoView {
-    let is_mi = item.kind == backup::PrivilegedKind::ManagedIdentity;
     let key = approval_key(&item);
     let checked_key = key.clone();
+    // Moved out whole: the item is this component's own.
+    let backup::PrivilegedRestoreItem {
+        kind,
+        source_app_id: _,
+        display_name,
+        admin_consent,
+        app_roles: roles,
+        delegated_scopes: scopes,
+        external_pre_authorized_clients: external,
+        federated_credentials: fics,
+        owners,
+        group_memberships: groups,
+        app_role_assignees: assignees,
+        reply_urls,
+        public_client,
+        requires_approval,
+    } = item;
+    let is_mi = kind == backup::PrivilegedKind::ManagedIdentity;
     let roles_heading = if is_mi {
         "Graph app roles re-bound:"
     } else {
         "Application permissions consented tenant-wide:"
     };
-    let roles = item.app_roles.clone();
-    let scopes = item.delegated_scopes.clone();
-    let external = item.external_pre_authorized_clients.clone();
-    let fics = item.federated_credentials.clone();
-    let owners = item.owners.clone();
-    let groups = item.group_memberships.clone();
-    let assignees = item.app_role_assignees.clone();
-    let reply_urls = item.reply_urls.clone();
-    let public_client = item.public_client;
     view! {
         <li class="dr-view__report-app dr-view__privileged-item">
             <div class="dr-view__report-head">
-                <strong>{item.display_name.clone()}</strong>
+                <strong>{display_name}</strong>
                 <span class="dr-view__report-id">
                     {if is_mi { "managed identity" } else { "app registration" }}
                 </span>
-                {item.admin_consent.then(|| view! { <Badge label="admin consent" tone=BadgeTone::Warning /> })}
-                {item.requires_approval.then(|| view! { <Badge label="needs approval" tone=BadgeTone::Danger /> })}
+                {admin_consent.then(|| view! { <Badge label="admin consent" tone=BadgeTone::Warning /> })}
+                {requires_approval.then(|| view! { <Badge label="needs approval" tone=BadgeTone::Danger /> })}
             </div>
             {(!roles.is_empty()).then(|| view! {
                 <p class="dr-view__report-note">{roles_heading}</p>
@@ -731,7 +856,7 @@ fn PrivilegedItem(
                     {format!("Assigned to the app's roles: {}", assignees.join(", "))}
                 </p>
             })}
-            {item.requires_approval.then(move || view! {
+            {requires_approval.then(move || view! {
                 <label class="checkbox-row dr-view__approve">
                     <input
                         type="checkbox"
@@ -810,35 +935,42 @@ fn permission_risk_badge(p: &backup::PrivilegedPermission, delegated: bool) -> A
     }
 }
 
-/// The restore report: a strong secrets warning, a save button, and per-app
-/// detail including the show-once regenerated secret values.
+/// The restore report: a strong secrets warning, save and Done actions, and
+/// per-app detail including the show-once regenerated secret values. `on_done`
+/// clears the report, values and all.
 #[component]
-fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> impl IntoView {
-    let total_secrets: usize = report
-        .apps
-        .iter()
-        .map(|a| a.regenerated_secrets.len())
-        .sum();
+fn RestoreReportView(
+    report: backup::RestoreReport,
+    on_save: Callback<()>,
+    on_done: Callback<()>,
+) -> impl IntoView {
+    // Moved out whole: the report is this component's own copy.
+    let backup::RestoreReport {
+        apps,
+        failures,
+        enterprise_apps: enterprise,
+        managed_identities: managed,
+        manual_items: manual,
+        cancelled,
+        // `cancelled` is set for BOTH an operator cancel and a session that
+        // died mid-run, and `session_expired` is the only thing that tells
+        // them apart — the backend has always set it and nothing here read it.
+        // The distinction is the operator's next action: a cancel is
+        // resumable as-is, an expired session means the destination tenant
+        // was left half-written by a run that stopped where it happened to
+        // be, and they must re-authenticate first.
+        session_expired,
+    } = report;
+    let total_secrets: usize = apps.iter().map(|a| a.regenerated_secrets.len()).sum();
     let has_secrets = total_secrets > 0;
-    let apps = report.apps.clone();
-    let failures = report.failures.clone();
-    let enterprise = report.enterprise_apps.clone();
-    let managed = report.managed_identities.clone();
-    let manual = report.manual_items.clone();
-    // `cancelled` is set for BOTH an operator cancel and a session that died
-    // mid-run, and `session_expired` is the only thing that tells them apart —
-    // the backend has always set it and nothing here read it. The distinction is
-    // the operator's next action: a cancel is resumable as-is, an expired
-    // session means the destination tenant was left half-written by a run that
-    // stopped where it happened to be, and they must re-authenticate first.
-    let session_expired = report.session_expired;
+    let app_count = apps.len();
     view! {
         <div class="dr-view__result">
             <p class="dr-view__summary">
                 {format!(
                     "Restored {}{}. {} regenerated.",
-                    count_noun(report.apps.len(), "app", "apps"),
-                    match (report.cancelled, session_expired) {
+                    count_noun(app_count, "app", "apps"),
+                    match (cancelled, session_expired) {
                         (_, true) => " (stopped early — the sign-in session expired)",
                         (true, false) => " (cancelled before completing — partial)",
                         (false, false) => "",
@@ -857,23 +989,37 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                      redistribute the secrets to each app's consumers, then delete the file."
                 </p>
             </Show>
-            <Button appearance=ButtonAppearance::Primary on_click=move |_| on_save.run(())>
-                <Icon name=IconName::Download size=16 /> " Save report (contains secrets)…"
-            </Button>
+            <div class="dr-view__actions">
+                <Button appearance=ButtonAppearance::Primary on_click=move |_| on_save.run(())>
+                    <Icon name=IconName::Download size=16 /> " Save report (contains secrets)…"
+                </Button>
+                // The show-once values otherwise stay in this view (and its
+                // hidden DOM) for the rest of the session.
+                <Button appearance=ButtonAppearance::Secondary on_click=move |_| on_done.run(())>
+                    {if has_secrets { "Done — clear secrets" } else { "Done" }}
+                </Button>
+            </div>
 
             <ul class="dr-view__report-list">
                 {apps.into_iter().map(|a| {
-                    let secrets = a.regenerated_secrets.clone();
-                    let unresolved = a.unresolved_owners.clone();
-                    let certs = a.certificates_needing_manual_upload.clone();
-                    let warnings = a.warnings.clone();
+                    let backup::RestoredApp {
+                        display_name,
+                        new_app_id,
+                        regenerated_secrets: secrets,
+                        unresolved_owners: unresolved,
+                        certificates_needing_manual_upload: certs,
+                        warnings,
+                        consent_granted,
+                        adopted,
+                        ..
+                    } = a;
                     view! {
                         <li class="dr-view__report-app">
                             <div class="dr-view__report-head">
-                                <strong>{a.display_name}</strong>
-                                <span class="dr-view__report-id">{format!("new appId {}", a.new_app_id)}</span>
-                                {a.consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
-                                {a.adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
+                                <strong>{display_name}</strong>
+                                <span class="dr-view__report-id">{format!("new appId {new_app_id}")}</span>
+                                {consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
+                                {adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {
                                 <ul class="dr-view__secrets">
@@ -912,14 +1058,20 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                     <h3 class="dr-view__subhead">"Enterprise app access re-applied"</h3>
                     <ul class="dr-view__report-list">
                         {enterprise.into_iter().map(|e| {
-                            let unresolved = e.unresolved_principals.clone();
-                            let warnings = e.warnings.clone();
+                            let backup::RestoredEnterpriseApp {
+                                display_name,
+                                assignments_applied,
+                                group_memberships_applied,
+                                unresolved_principals: unresolved,
+                                warnings,
+                                ..
+                            } = e;
                             view! {
                                 <li class="dr-view__report-app">
                                     <div class="dr-view__report-head">
-                                        <strong>{e.display_name}</strong>
+                                        <strong>{display_name}</strong>
                                         <span class="dr-view__report-id">
-                                            {format!("{}, {}", count_noun(e.assignments_applied, "assignment", "assignments"), count_noun(e.group_memberships_applied, "group membership", "group memberships"))}
+                                            {format!("{}, {}", count_noun(assignments_applied, "assignment", "assignments"), count_noun(group_memberships_applied, "group membership", "group memberships"))}
                                         </span>
                                     </div>
                                     {(!unresolved.is_empty()).then(|| view! {
@@ -944,13 +1096,18 @@ fn RestoreReportView(report: backup::RestoreReport, on_save: Callback<()>) -> im
                     <h3 class="dr-view__subhead">"Managed identity app-roles re-bound"</h3>
                     <ul class="dr-view__report-list">
                         {managed.into_iter().map(|m| {
-                            let warnings = m.warnings.clone();
+                            let backup::RestoredManagedIdentity {
+                                display_name,
+                                app_roles_rebound,
+                                warnings,
+                                ..
+                            } = m;
                             view! {
                                 <li class="dr-view__report-app">
                                     <div class="dr-view__report-head">
-                                        <strong>{m.display_name}</strong>
+                                        <strong>{display_name}</strong>
                                         <span class="dr-view__report-id">
-                                            {format!("{} re-bound", count_noun(m.app_roles_rebound, "Graph app role", "Graph app roles"))}
+                                            {format!("{} re-bound", count_noun(app_roles_rebound, "Graph app role", "Graph app roles"))}
                                         </span>
                                     </div>
                                     {(!warnings.is_empty()).then(|| view! {
