@@ -424,6 +424,18 @@ in Pass 2, so a session that dies there stops the restore with
 
 ### Security posture
 
+**Every string the plan and the report echo from the file is bounded.** The plan
+shows each manifest value as an 80-character `excerpt`, and a federated
+credential's refusal at most `MAX_REPORT_VALUE_CHARS` (1024) — `core::federation`
+checks a value's length before any refusal quotes it. `run_restore` ends with
+`bound_report_text`, which caps every name and label in the report (and the
+progress events' app name) at 1024 characters and every warning and runbook
+reason, which compose several values, at `MAX_REPORT_LINE_CHARS` (32 KiB). Both
+sit above what Entra accepts, so a legitimate report is never cut, while a
+hostile manifest's multi-megabyte display name or issuer is. It skips ids and a
+regenerated secret's `key_id` and value, and destructures the report
+exhaustively, so a new field does not compile until it is decided there.
+
 The backup manifest carries configuration but **no secret values** — still treat
 it as sensitive (it enumerates permissions, owners, identifier URIs). The restore
 **report** *does* carry show-once regenerated secret values: handle it with the

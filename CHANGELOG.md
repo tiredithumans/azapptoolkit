@@ -58,6 +58,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   The plan never listed it, because it shows only clients from outside the backup. The restore
   now leaves such a client out and names it in the app's warnings; running the restore again
   once the client is restored adds it.
+- **Over-long values in a backup file are cut short in the restore plan and report.** A name,
+  URL, permission id or credential field longer than anything Entra accepts now ends in "…"
+  instead of being shown whole, so a damaged or hostile backup file can no longer fill the plan,
+  the report or the saved report file with megabytes of text.
 
 ## [0.34.0] - 2026-10-13
 
