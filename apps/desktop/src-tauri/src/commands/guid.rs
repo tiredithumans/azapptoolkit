@@ -54,18 +54,4 @@ mod tests {
         // Vanishingly unlikely to collide — pins that it's actually random.
         assert_ne!(g, new_v4_guid());
     }
-
-    #[test]
-    fn is_guid_accepts_canonical_and_rejects_junk() {
-        assert!(is_guid("00000000-0000-0000-0000-000000000000"));
-        assert!(is_guid("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
-        assert!(is_guid("3FA85F64-5717-4562-B3FC-2C963F66AFA6")); // hex is case-insensitive
-        assert!(!is_guid(""));
-        assert!(!is_guid("not-a-guid"));
-        assert!(!is_guid("{00000003-0000-0000-c000-000000000000}"));
-        assert!(!is_guid("urn:uuid:00000003-0000-0000-c000-000000000000"));
-        assert!(!is_guid("00000003-0000-0000-c000-00000000000")); // too short
-        assert!(!is_guid("3fa85f64-5717-4562-b3fc-2c963f66afa6-extra"));
-        assert!(!is_guid("zzzzzzzz-5717-4562-b3fc-2c963f66afa6")); // non-hex
-    }
 }

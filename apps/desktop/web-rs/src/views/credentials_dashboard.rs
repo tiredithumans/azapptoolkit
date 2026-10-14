@@ -15,7 +15,7 @@ use azapptoolkit_core::audit::EXPIRY_WARNING_DAYS as WARNING_DAYS;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
-use crate::bindings::credentials::{self, CredentialRowDto};
+use crate::bindings::credentials::{self, CredentialHealthCounts, CredentialRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, Callout, CopyableId};
 use crate::state::use_session;
@@ -57,11 +57,9 @@ pub fn CredentialsDashboard() -> impl IntoView {
             fetch=fetch
             export=export
             banner=move |all: &[CredentialRowDto]| {
-                let expired = all.iter().filter(|r| r.is_expired()).count();
-                let soon = all
-                    .iter()
-                    .filter(|r| r.expires_within(CRITICAL_DAYS))
-                    .count();
+                // The same predicates the chips and the Home counts use.
+                let counts = CredentialHealthCounts::of(all);
+                let (expired, soon) = (counts.expired, counts.within_critical);
                 (expired + soon > 0)
                     .then(|| {
                         view! {

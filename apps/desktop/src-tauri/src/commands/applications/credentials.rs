@@ -51,10 +51,9 @@ pub(crate) async fn add_password_core(
 
 /// Maximum client-secret lifetime — the portal's 24-month hard cap, as the
 /// `i64` the date arithmetic here wants. The number itself lives in the dto
-/// crate beside the frontend's, so one concept has one bound; the OIDC SSO
-/// create path (`sso::resolve_secret_lifetime_days`) shares this.
-pub(crate) const MAX_SECRET_LIFETIME_DAYS: i64 =
-    crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS as i64;
+/// crate beside the frontend's, so one concept has one bound (the OIDC SSO
+/// create path reads the same dto constant as a `u32`).
+const MAX_SECRET_LIFETIME_DAYS: i64 = crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS as i64;
 
 /// Why [`resolve_password_window`] refused a custom secret window. Both causes
 /// cross IPC as the one `invalid_secret_window` code (no consumer branches on

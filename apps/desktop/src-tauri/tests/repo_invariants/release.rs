@@ -824,6 +824,35 @@ fn tauri_cli_pin_agrees_across_files_and_tracks_the_locked_runtime() {
     );
 }
 
+/// The release workflow restores no build cache. rust-cache keys are per job
+/// and `main` only ever saves `rust`, `web` and `analyze` caches, so a tag run's
+/// `guard` and `build` jobs find none (every leg of v0.33.3–v0.34.0 logged "No
+/// cache found"); what they saved went under the tag ref, which no later run
+/// can restore, and each tag's ~1.7 GiB crowded main's caches out of the 10 GB
+/// quota. A cache step here is pure cost, and the signed updater build is
+/// better off never depending on a restored one.
+#[test]
+fn release_workflow_restores_no_build_cache() {
+    let release = include_str!("../../../../../.github/workflows/release.yml");
+    let offenders: Vec<&str> = release
+        .lines()
+        .filter(|l| {
+            l.contains("uses:") && (l.contains("rust-cache") || l.contains("actions/cache@"))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "release.yml restores a build cache that no tag can ever hit: {offenders:?}"
+    );
+    // The rule must be looking at the right file: the CI workflow DOES cache.
+    let ci = include_str!("../../../../../.github/workflows/ci.yml");
+    assert!(
+        ci.lines()
+            .any(|l| l.contains("uses:") && l.contains("rust-cache")),
+        "ci.yml lost its rust-cache step, or the include path is wrong"
+    );
+}
+
 /// The build matrix compiles every dependency's build script and proc-macro,
 /// so it must hold neither a write token nor a persisted checkout credential:
 /// with either, third-party code could replace release assets or `latest.json`.
