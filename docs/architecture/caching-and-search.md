@@ -684,15 +684,17 @@ Graph batches GETs — so their win is bounded concurrency + adaptive 429 backof
 collapse. They emit the live cap in `BulkProgress.in_flight_cap` (additive `Option`; the DR view
 shows it plus a back-off notice).
 
-The three bulk writes run through one bulk-local driver, `bulk::run_bulk_capped`, starting at
-`BULK_WRITE_CONCURRENCY` (4, the Graph directory-write budget). Each command still attaches its own
-`FanOutMeter` and picks its own cache tier; the driver owns the rest: the initial `done: 0` event,
-the `is_cancelled() || is_dead()` spawn gate, the dead-session latch, one tick and event per joined
-task on its collect side (serial, so `done` never steps backwards), the terminal event, and the
-lost-task reconciliation. A task that was dispatched but never reported (a panic or an abort) may
-have landed its write, so it becomes a failure row coded `lost_task` (`dto::bulk::LOST_TASK`)
-rather than vanishing: the delete busts the list tier, the consent grant busts it too (its client
-SP may exist), and the expired-secret sweep drops that app's credential tier.
+The three bulk writes run through one bulk-local driver, `bulk::run_bulk_capped`, at a starting
+cap of `BULK_WRITE_CONCURRENCY` (4 apps in flight, before the throttle halves it on a 429). Each
+command still attaches its own `FanOutMeter` and picks its own cache tier; the driver owns the
+rest: the initial `done: 0` event, the `is_cancelled() || is_dead()` spawn gate, the dead-session
+latch, one tick and event per joined task on its collect side (serial, so `done` never steps
+backwards), the terminal event, and the lost-task reconciliation. The sweep's per-app work is
+`bulk::sweep_one`, which also checks both stops between keys. A task that was dispatched but never
+reported (a panic or an abort) may have landed its write, so it becomes a failure row coded
+`lost_task` (`dto::bulk::LOST_TASK`) rather than vanishing: the delete busts the list tier, the
+consent grant busts it too (its client SP may exist), and the expired-secret sweep drops that
+app's credential tier.
 
 ## The site-sweep cache invalidates on site-permission mutations
 
@@ -759,9 +761,13 @@ stays empty.
   from the selection and offers Undo — an error there used to throw the landed deletes away, leaving
   them selected with no Undo. The three mutating fan-outs share `bulk::run_bulk_capped`, which
   gates centrally: its one `dispatch_capped` call site is the one `repo_invariants/fanout.rs`
-  checks, and both pins derive their driver set from the source (`sources::long_run_drivers`, every
-  non-command fn that calls a driver, to a fixpoint), so a command calling the helper stays in
-  scope. A dispatched task that never reported is a `lost_task` failure row, never a silent gap.
+  checks, and both pins derive their subjects from the source, each set with a floor:
+  `sources::long_run_drivers` (every non-command fn that calls a driver, to a fixpoint) and
+  `sources::cancel_runners` (every non-command fn handed a `CancelToken` — the restore's passes,
+  the AAP migration's batch loop, `bulk::sweep_one`). So a command whose loop sits in a helper
+  stays in scope: it must claim exactly once, and if it reads the tenant and writes per result
+  through the helper, the helper's own loop must check `is_dead()` (a Cancel-only runner does not
+  count). A dispatched task that never reported is a `lost_task` failure row, never a silent gap.
   Sequential flows that have already mutated (restore, AAP migration) likewise break each pass and
   flag the report — stopping is not enough once writes have landed.
 

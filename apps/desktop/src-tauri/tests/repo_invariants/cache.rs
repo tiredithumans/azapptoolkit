@@ -678,9 +678,10 @@ fn an_in_place_write_never_busts_the_list_tier() {
     offenders.sort();
 
     assert!(
-        checked >= 18,
-        "only {checked} in-place writer(s) found (18 at 2026-10-14) — the source walk or the \
-         fragment list is broken, and a rule that scans nothing passes vacuously"
+        checked >= 17,
+        "only {checked} in-place writer(s) found (17 at 2026-10-14, once the expired-credential \
+         sweep's per-key writes moved into `sweep_one`) — the source walk or the fragment list \
+         is broken, and a rule that scans nothing passes vacuously"
     );
     assert!(
         offenders.is_empty(),

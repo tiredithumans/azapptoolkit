@@ -1,16 +1,17 @@
 //! Bulk-operation admin actions.
 //!
-//! Every bulk command reuses a single-app core
-//! (`permissions::grant_admin_consent_core`, `applications::create_application_core`,
-//! the remediation cores, …) so the semantics stay identical to the per-app
-//! path — bulk is a UX shortcut, not a new code path. Two drivers run them:
-//! [`run_bulk_seq`] for the cores that take `State` (sequential), and
-//! [`run_bulk_capped`] for the three whose work is `Send` — delete, consent
-//! grant and the expired-credential sweep — which fan out under the adaptive
-//! throttle. The sweep has no single-app core to call, but selects credentials
-//! with the same shared expiry rule ([`azapptoolkit_core::audit::is_expired`])
-//! the audit scorer and the per-app removal paths use — pinned by
-//! `expired_password_key_ids`'s test in `azapptoolkit_core::audit`.
+//! Every bulk command but the expired-credential sweep reuses a single-app
+//! core (`permissions::grant_admin_consent_core`,
+//! `applications::create_application_core`, the remediation cores, …) so the
+//! semantics stay identical to the per-app path — bulk is a UX shortcut, not a
+//! new code path. The sweep has no single-app core to call, but selects
+//! credentials with the same shared expiry rule
+//! ([`azapptoolkit_core::audit::is_expired`]) the audit scorer and the per-app
+//! removal paths use — pinned by `expired_password_key_ids`'s test in
+//! `azapptoolkit_core::audit`. Two drivers run them: [`run_bulk_seq`]
+//! (sequential) for the cores that take `State` or borrow the command's locals,
+//! and [`run_bulk_capped`] for the three whose work is `Send` — delete, consent
+//! grant and the sweep — which fan out under the adaptive throttle.
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
@@ -43,14 +44,14 @@ use crate::dto::bulk::{
 use crate::dto::permissions::PermissionKind;
 use crate::state::{AppState, CancelToken};
 
-/// The in-flight cap the three capped bulk writes (delete, consent grant, the
-/// expired-secret sweep) start at, before [`FanOutMeter`]'s throttle halves it
-/// on a 429. It budgets Microsoft Graph's **directory write** rate limit — the
-/// Entra ID service limit Graph applies per app per tenant to writes on
-/// `/applications`, `/servicePrincipals` and their grants — which every
-/// in-flight item spends: one DELETE, a consent grant's role assignments and
-/// scope grants, a run of `removePassword` calls. Reads and the ARM control
-/// plane (`dispatch::ARM_CONCURRENCY`) are budgeted on their own.
+/// The starting in-flight cap of the three capped bulk writes (delete, consent
+/// grant, the expired-secret sweep); [`FanOutMeter`]'s throttle halves it on a
+/// 429 and recovers it when quiet. It bounds how many apps have Microsoft Graph
+/// directory **writes** in flight — each item writes to `/applications`,
+/// `/servicePrincipals` or their grants: one DELETE, a consent grant's role
+/// assignments and scope grants, a run of `removePassword` calls — so it is the
+/// cap Graph's throttling of those writes pushes back on. Reads and the ARM
+/// control plane (`dispatch::ARM_CONCURRENCY`) have caps of their own.
 const BULK_WRITE_CONCURRENCY: usize = 4;
 
 /// Lets the bulk drivers ([`run_bulk_seq`], [`run_bulk_capped`]) ask an opaque
@@ -466,54 +467,7 @@ pub async fn bulk_remove_expired_credentials(
             let client = client.clone();
             let cancel = cancel.clone();
             let session = session.clone();
-            let expired_key_ids = expired_password_key_ids(&app, now);
-            let Application {
-                id: app_obj_id,
-                display_name: app_name,
-                ..
-            } = app;
-            async move {
-                let mut removed = Vec::new();
-                let mut failed = Vec::new();
-                let mut error: Option<BulkError> = None;
-                for key_id in &expired_key_ids {
-                    if cancel.is_cancelled() || session.is_dead() {
-                        break;
-                    }
-                    match client.remove_password(&app_obj_id, key_id).await {
-                        Ok(()) => removed.push(key_id.clone()),
-                        Err(err) => {
-                            failed.push(key_id.clone());
-                            let ui = UiError::from(err);
-                            // Latch here, not only when the driver collects
-                            // this app: once the session is dead every
-                            // remaining key on every in-flight app fails
-                            // identically, so the sibling tasks' key loops stop
-                            // too, not just the dispatch.
-                            let fatal = session.note_code(&ui.code);
-                            // The app's one error slot keeps the first
-                            // failure — unless a later one is fatal: that
-                            // code is what the bar reads to prompt
-                            // re-authentication, and an earlier
-                            // `not_found` in its place would hide a run
-                            // the session killed.
-                            if fatal || error.is_none() {
-                                error = Some(ui.into());
-                            }
-                            if fatal {
-                                break;
-                            }
-                        }
-                    }
-                }
-                AppRemovalSummary {
-                    object_id: app_obj_id,
-                    display_name: app_name,
-                    removed_key_ids: removed,
-                    failed_key_ids: failed,
-                    error,
-                }
-            }
+            async move { sweep_one(&client, &cancel, &session, app, now).await }
         },
     )
     .await;
@@ -531,6 +485,62 @@ pub async fn bulk_remove_expired_credentials(
         run,
         |id| names.get(id).cloned().unwrap_or_else(|| id.to_string()),
     ))
+}
+
+/// One app of the expired-secret sweep: removes each secret expired at `now`,
+/// one `removePassword` at a time, checking Cancel and the dead-session latch
+/// before every key — an app with many expired secrets is itself a loop the
+/// operator must be able to stop.
+async fn sweep_one(
+    client: &azapptoolkit_graph::GraphClient,
+    cancel: &CancelToken,
+    session: &SessionDead,
+    app: Application,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppRemovalSummary {
+    let expired_key_ids = expired_password_key_ids(&app, now);
+    let Application {
+        id: object_id,
+        display_name,
+        ..
+    } = app;
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    let mut error: Option<BulkError> = None;
+    for key_id in &expired_key_ids {
+        if cancel.is_cancelled() || session.is_dead() {
+            break;
+        }
+        match client.remove_password(&object_id, key_id).await {
+            Ok(()) => removed.push(key_id.clone()),
+            Err(err) => {
+                failed.push(key_id.clone());
+                let ui = UiError::from(err);
+                // Latch here, not only when the driver collects this app: once
+                // the session is dead every remaining key on every in-flight
+                // app fails identically, so the sibling tasks' key loops stop
+                // too, not just the dispatch.
+                let fatal = session.note_code(&ui.code);
+                // The app's one error slot keeps the first failure — unless a
+                // later one is fatal: that code is what the bar reads to
+                // prompt re-authentication, and an earlier `not_found` in its
+                // place would hide a run the session killed.
+                if fatal || error.is_none() {
+                    error = Some(ui.into());
+                }
+                if fatal {
+                    break;
+                }
+            }
+        }
+    }
+    AppRemovalSummary {
+        object_id,
+        display_name,
+        removed_key_ids: removed,
+        failed_key_ids: failed,
+        error,
+    }
 }
 
 /// Folds an expired-secret sweep's capped run into its result and drops the
@@ -2185,10 +2195,12 @@ mod tests {
     mod capped {
         use super::*;
         use crate::commands::test_support::{
-            detail_cached, dies_after, indexes_intact, mock_state_with_write_token,
-            seed_indexes_and_detail,
+            detail_cached, dies_after, fixed_now, indexes_intact, mock_state_with_write_token,
+            sample_app_json, seed_indexes_and_detail,
         };
         use crate::commands::throttle::FanOutMeter;
+        use azapptoolkit_core::token::{BearerProvider, TokenError};
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wiremock::matchers::method;
         use wiremock::{Mock, ResponseTemplate};
@@ -2346,6 +2358,187 @@ mod tests {
             // processed and the cancellation.
             assert_eq!(events(&rec), vec![(0, None), (0, None)]);
             assert!(progress(&rec)[1].cancelled);
+        }
+
+        #[tokio::test]
+        async fn a_cancel_mid_run_lets_the_task_in_flight_finish_and_spawns_nothing_more() {
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            let session = SessionDead::new();
+            let rec = Recorder::default();
+            // One in flight: `a` runs alone and presses Cancel while it does.
+            let meter = FanOutMeter::detached(1);
+            let spawned = AtomicUsize::new(0);
+            let run = run_bulk_capped(
+                &rec,
+                &cancel,
+                &session,
+                &meter,
+                vec![deleted("a"), deleted("b"), deleted("c")],
+                |o| o.object_id().to_string(),
+                |o| {
+                    spawned.fetch_add(1, Ordering::SeqCst);
+                    let presses = (o.object_id() == "a").then(|| flag.clone());
+                    async move {
+                        if let Some(flag) = presses {
+                            flag.cancel();
+                        }
+                        o
+                    }
+                },
+            )
+            .await;
+            assert_eq!(spawned.load(Ordering::SeqCst), 1, "`b` is never spawned");
+            assert_eq!(run.outcomes.len(), 1, "the in-flight `a` still reports");
+            assert!(run.lost.is_empty());
+            assert!(run.cancelled);
+            let events = progress(&rec);
+            assert_eq!(
+                events.iter().map(|e| e.done).collect::<Vec<_>>(),
+                [0, 1, 1],
+                "the terminal event reports how far the run got"
+            );
+            assert!(events.last().is_some_and(|e| e.cancelled));
+        }
+
+        /// The application `sample_app_json` describes, holding a secret per
+        /// key in `expired` that expired before `fixed_now`, plus one that is
+        /// still valid and must never be touched.
+        fn app_with_expired(expired: &[&str]) -> Application {
+            let mut json = sample_app_json();
+            let mut secrets: Vec<serde_json::Value> = expired
+                .iter()
+                .map(|k| serde_json::json!({ "keyId": k, "endDateTime": "2025-06-01T00:00:00Z" }))
+                .collect();
+            secrets.push(
+                serde_json::json!({ "keyId": "k-live", "endDateTime": "2027-01-01T00:00:00Z" }),
+            );
+            json["passwordCredentials"] = serde_json::Value::Array(secrets);
+            serde_json::from_value(json).expect("a valid application")
+        }
+
+        async fn remove_password_calls(server: &wiremock::MockServer) -> usize {
+            server
+                .received_requests()
+                .await
+                .expect("request recording is on")
+                .iter()
+                .filter(|r| r.url.path().ends_with("/removePassword"))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn the_sweep_task_stops_between_keys_when_the_session_dies() {
+            let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2", "k3"]),
+                fixed_now(),
+            )
+            .await;
+            assert_eq!(summary.removed_key_ids, ["k1"]);
+            assert_eq!(summary.failed_key_ids, ["k2"], "`k3` is never attempted");
+            assert_eq!(
+                summary.error.as_ref().map(|e| e.code.as_str()),
+                Some("refresh_missing")
+            );
+            // The task latches the session itself, so a sibling task stops
+            // between its keys without waiting for the driver to collect this one.
+            assert!(session.is_dead());
+            assert_eq!(remove_password_calls(&server).await, 1);
+
+            // ...and a sibling's latch stops a task before its first key.
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k4"]),
+                fixed_now(),
+            )
+            .await;
+            assert!(summary.removed_key_ids.is_empty() && summary.failed_key_ids.is_empty());
+            assert_eq!(remove_password_calls(&server).await, 1);
+        }
+
+        #[tokio::test]
+        async fn a_fatal_failure_replaces_an_earlier_one_in_the_sweep_rows_error() {
+            let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "error": { "code": "Request_ResourceNotFound", "message": "gone" }
+                })))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2", "k3"]),
+                fixed_now(),
+            )
+            .await;
+            assert!(summary.removed_key_ids.is_empty());
+            assert_eq!(summary.failed_key_ids, ["k1", "k2"]);
+            // `k1`'s 404 came first, but the row carries the code that tells
+            // the bar to prompt re-authentication.
+            assert_eq!(
+                summary.error.as_ref().map(|e| e.code.as_str()),
+                Some("refresh_missing")
+            );
+        }
+
+        /// A write token that presses Cancel each time it is asked for a
+        /// bearer, then serves one: the key in flight lands, and the check
+        /// before the next key sees the cancel.
+        struct CancelsOnWrite(CancelFlag);
+
+        #[async_trait::async_trait]
+        impl BearerProvider for CancelsOnWrite {
+            async fn bearer(&self) -> Result<String, TokenError> {
+                self.0.cancel();
+                Ok("tok".to_string())
+            }
+        }
+
+        #[tokio::test]
+        async fn a_cancel_between_keys_stops_the_sweep_task() {
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            let (server, state) =
+                mock_state_with_write_token(TENANT, Arc::new(CancelsOnWrite(flag.clone()))).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2"]),
+                fixed_now(),
+            )
+            .await;
+            assert_eq!(summary.removed_key_ids, ["k1"]);
+            assert!(summary.failed_key_ids.is_empty() && summary.error.is_none());
+            assert_eq!(
+                remove_password_calls(&server).await,
+                1,
+                "`k2` is never sent"
+            );
         }
 
         /// The delete path end to end through its real per-item work: the
