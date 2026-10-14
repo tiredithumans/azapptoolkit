@@ -10,6 +10,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_dto::permission_tester::{AccessVerdict, MailboxReachersResult};
 use azapptoolkit_dto::sharepoint::{SiteAppGrantRow, SiteSweepResult};
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::resource_access::ResourceAccessView;
@@ -123,4 +124,52 @@ async fn a_dead_session_site_sweep_offers_reauthenticate() {
         !ts::body_contains("session expired"),
         "the lever replaces the dead-end inline text"
     );
+}
+
+/// Cross-tenant leakage, the repo's #1 footgun: a mailbox probe answered after
+/// a tenant switch belongs to the tenant it was started for and must land
+/// nothing. The panel clears its result on the switch, so a late `set` would
+/// bring the previous tenant's verdicts back under the new tenant.
+#[wasm_bindgen_test]
+async fn a_mailbox_probe_answered_after_a_tenant_switch_lands_nothing() {
+    ts::reset();
+    ts::mock_ok(
+        "find_mailbox_reachers",
+        &MailboxReachersResult {
+            tenant_id: "test-tenant".into(),
+            mailbox: "shared@contoso.com".into(),
+            total_candidates: 1,
+            rows: vec![fixtures::mailbox_reacher_row(
+                "app-1",
+                "obj-1",
+                "Payroll API",
+                &["Mail.Read"],
+                AccessVerdict::OrgWide,
+                &[],
+            )],
+            exchange_available: true,
+            exchange_sp_store_read: true,
+            cancelled: false,
+        },
+    );
+
+    let m = ts::mount_view(|| view! { <ResourceAccessView /> });
+    m.session.resource_access_tab.set("mailboxes".to_string());
+    ts::set_input_value(
+        "input[placeholder^=\"Mailbox address\"]",
+        "shared@contoso.com",
+    );
+    ts::click_button_labelled("Check mailbox");
+    // The mock answers on the next microtask: switch tenants before it lands.
+    let mut other = ts::test_tenant();
+    other.tenant_id = "other-tenant".into();
+    m.session.set_active_tenant(Some(other));
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    assert!(
+        !ts::body_contains("Payroll API"),
+        "the previous tenant's mailbox verdicts landed after the switch"
+    );
+    assert_eq!(ts::call_count("find_mailbox_reachers"), 1);
 }
