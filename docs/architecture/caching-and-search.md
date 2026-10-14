@@ -684,6 +684,16 @@ Graph batches GETs — so their win is bounded concurrency + adaptive 429 backof
 collapse. They emit the live cap in `BulkProgress.in_flight_cap` (additive `Option`; the DR view
 shows it plus a back-off notice).
 
+The three bulk writes run through one bulk-local driver, `bulk::run_bulk_capped`, starting at
+`BULK_WRITE_CONCURRENCY` (4, the Graph directory-write budget). Each command still attaches its own
+`FanOutMeter` and picks its own cache tier; the driver owns the rest: the initial `done: 0` event,
+the `is_cancelled() || is_dead()` spawn gate, the dead-session latch, one tick and event per joined
+task on its collect side (serial, so `done` never steps backwards), the terminal event, and the
+lost-task reconciliation. A task that was dispatched but never reported (a panic or an abort) may
+have landed its write, so it becomes a failure row coded `lost_task` (`dto::bulk::LOST_TASK`)
+rather than vanishing: the delete busts the list tier, the consent grant busts it too (its client
+SP may exist), and the expired-secret sweep drops that app's credential tier.
+
 ## The site-sweep cache invalidates on site-permission mutations
 
 The Resource Access reverse-lookup caches a **complete** site sweep under `{tenant}|site_sweep`
@@ -747,8 +757,13 @@ stays empty.
   (`BulkError.code`, `BulkDeleteFailure.code`), with `cancelled` reserved for the operator's Cancel.
   The bar reads that code (`session_dead_error`) to prompt re-authentication, prunes the deleted ids
   from the selection and offers Undo — an error there used to throw the landed deletes away, leaving
-  them selected with no Undo. Sequential flows that have already mutated (restore, AAP migration)
-  likewise break each pass and flag the report — stopping is not enough once writes have landed.
+  them selected with no Undo. The three mutating fan-outs share `bulk::run_bulk_capped`, which
+  gates centrally: its one `dispatch_capped` call site is the one `repo_invariants/fanout.rs`
+  checks, and both pins derive their driver set from the source (`sources::long_run_drivers`, every
+  non-command fn that calls a driver, to a fixpoint), so a command calling the helper stays in
+  scope. A dispatched task that never reported is a `lost_task` failure row, never a silent gap.
+  Sequential flows that have already mutated (restore, AAP migration) likewise break each pass and
+  flag the report — stopping is not enough once writes have landed.
 
 **One flag per run kind, each with exactly one Cancel command.** `audit_cancel` (`run_audit`,
 `cancel_audit`), `bulk_cancel` (every `bulk_*`, `cancel_bulk`), `migration_cancel` (the AAP
