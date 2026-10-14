@@ -593,6 +593,107 @@ fn find_loop_keyword(src: &str) -> Option<(usize, usize)> {
     best
 }
 
+/// The two fan-out drivers in the command layer: `dispatch::dispatch_capped`
+/// (bounded-concurrency spawn) and `bulk::run_bulk_seq` (the sequential bulk
+/// loop). The seed of [`long_run_drivers`], never the whole set.
+const DRIVER_SEEDS: &[&str] = &["dispatch_capped", "run_bulk_seq"];
+
+/// Whether `body` calls `name`: `name(` not preceded by an identifier
+/// character or a backtick, so a longer identifier ending in the name
+/// (`my_dispatch_capped(`) and a doc-comment mention are not calls.
+pub(crate) fn calls(body: &str, name: &str) -> bool {
+    let needle = format!("{name}(");
+    body.match_indices(&needle).any(|(at, _)| {
+        body[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '`'))
+    })
+}
+
+/// Every function that drives a long-running run, by name: the two
+/// [`DRIVER_SEEDS`], and every non-command `fn` under `commands/` that calls
+/// one — directly or through another such `fn`.
+///
+/// Derived to a fixpoint from the source, like `cache::invalidators`, rather
+/// than spelled as the two literals the cancel and fan-out rules used to look
+/// for. Those rules key a command's obligations on "its body calls a driver",
+/// so a helper that wraps `dispatch_capped` would otherwise take every command
+/// that calls it out of both rules at once, silently, while their floors still
+/// passed. Async functions count (a driver is async by nature); commands do
+/// not (a command calling a command is a separate run with its own claim).
+pub(crate) fn long_run_drivers() -> Vec<String> {
+    use std::collections::BTreeSet;
+    let commands: BTreeSet<String> = commands().into_iter().map(|c| c.name).collect();
+    let functions: Vec<Function> = command_modules()
+        .iter()
+        .flat_map(|(_, src)| functions_in(src))
+        .collect();
+    derive_drivers(&functions, &commands).into_iter().collect()
+}
+
+/// The fixpoint behind [`long_run_drivers`], over an explicit function list so
+/// its self-test can drive it with a synthetic source.
+fn derive_drivers(
+    functions: &[Function],
+    commands: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    let mut names: std::collections::BTreeSet<String> =
+        DRIVER_SEEDS.iter().map(|s| (*s).to_string()).collect();
+    loop {
+        let before = names.len();
+        for f in functions {
+            if commands.contains(&f.name) || names.contains(&f.name) {
+                continue;
+            }
+            if names.iter().any(|n| calls(&f.body, n)) {
+                names.insert(f.name.clone());
+            }
+        }
+        if names.len() == before {
+            break;
+        }
+    }
+    names
+}
+
+/// The derivation must follow a helper through another helper (the fixpoint),
+/// and must not promote a command, a bystander, or a doc-comment mention.
+#[test]
+fn the_driver_derivation_follows_helpers_to_a_fixpoint() {
+    // `outer` sits ABOVE `inner`, so one pass in source order is not enough.
+    let src = r#"
+async fn outer(items: Vec<u8>) -> bool {
+    inner(items).await
+}
+async fn inner(items: Vec<u8>) -> bool {
+    dispatch_capped(items, || 4, |x| None, |j| {}).await
+}
+/// Mentions `run_bulk_seq(` in prose only.
+fn bystander() -> u8 {
+    my_dispatch_capped(1)
+}
+pub async fn a_command(items: Vec<u8>) {
+    dispatch_capped(items, || 4, |x| None, |j| {}).await;
+}
+"#;
+    let functions = functions_in(src);
+    let commands = std::collections::BTreeSet::from(["a_command".to_string()]);
+    let drivers = derive_drivers(&functions, &commands);
+    for name in ["dispatch_capped", "run_bulk_seq", "inner", "outer"] {
+        assert!(drivers.contains(name), "`{name}` must derive: {drivers:?}");
+    }
+    for name in ["bystander", "a_command"] {
+        assert!(
+            !drivers.contains(name),
+            "`{name}` must not derive: {drivers:?}"
+        );
+    }
+    assert!(calls("x = run_bulk_seq(a)", "run_bulk_seq"));
+    assert!(!calls("x = my_run_bulk_seq(a)", "run_bulk_seq"));
+    assert!(!calls("see `run_bulk_seq(`", "run_bulk_seq"));
+}
+
 /// `strip_tests` drops only real `#[cfg(test)]` items. It used to cut the file
 /// at the first occurrence of the TEXT, so a doc comment mentioning the
 /// attribute hid every production item below it from every rule.

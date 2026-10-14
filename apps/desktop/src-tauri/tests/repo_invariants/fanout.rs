@@ -8,9 +8,9 @@
 //! ([`every_paged_graph_read_sends_a_page_size`]).
 
 // The module list this file used to carry is gone: the fan-out modules are now
-// whichever modules actually contain a `dispatch_capped` call site, read from
-// the source tree by `sources::command_modules()`. A hand-maintained list could
-// only ever check the files someone remembered to add.
+// whichever modules actually call a driver (`sources::long_run_drivers`, derived
+// from the source tree by `sources::command_modules()`). A hand-maintained list
+// could only ever check the files someone remembered to add.
 
 /// Reads that enumerate **every object of a kind in the tenant**. A loop over
 /// one of these runs once per app/SP/site, not once per sub-object of a single
@@ -66,6 +66,7 @@ const WRITE_CALLS: &[&str] = &[
 #[test]
 fn every_tenant_wide_writer_is_cancellable() {
     let mut offenders: Vec<String> = Vec::new();
+    let drivers = super::sources::long_run_drivers();
     for cmd in super::sources::commands() {
         if !TENANT_WIDE_READS.iter().any(|r| cmd.body.contains(r)) {
             continue;
@@ -76,15 +77,11 @@ fn every_tenant_wide_writer_is_cancellable() {
         if !writes_per_result {
             continue;
         }
-        // Two accepted shapes, matching the two drivers in `commands/dispatch.rs`:
-        // a fan-out gates its spawn closure, a sequential flow breaks on the
-        // latch. Both must ALSO claim a cancel token — a dead session is not the
-        // same event as an operator pressing Cancel, and only the token answers
-        // the second.
-        let cancellable = cmd.body.contains(".claim()");
-        let stops_on_dead = cmd.body.contains("is_dead()")
-            || cmd.body.contains("dispatch_capped(")
-            || cmd.body.contains("run_bulk_seq(");
+        // Two accepted shapes: the command gates on the latch itself, or it
+        // calls a driver (`sources::long_run_drivers`) that does. Both must ALSO
+        // claim a cancel token — a dead session is not the same event as an
+        // operator pressing Cancel, and only the token answers the second.
+        let (cancellable, stops_on_dead) = stoppable(&cmd.body, &drivers);
         if !(cancellable && stops_on_dead) {
             offenders.push(format!(
                 "{}::{} (claims a token: {cancellable}, stops on a dead session: {stops_on_dead})",
@@ -103,6 +100,22 @@ fn every_tenant_wide_writer_is_cancellable() {
          `UiError::is_reauth_fatal` stays the single definition. Flag the result as incomplete: a \
          run that stopped early must never render as a finished one."
     );
+}
+
+/// Whether a tenant-wide writer's body can be stopped, as `(claims a token,
+/// stops on a dead session)`. A dead session is stopped either by gating on the
+/// latch in the body (`is_dead()`) or by calling a driver from
+/// `sources::long_run_drivers`: `run_bulk_seq` checks the outcome centrally,
+/// and every `dispatch_capped` call site — including the one inside a derived
+/// helper — is pinned to gate its spawn closure by
+/// [`every_fan_out_command_honours_is_reauth_fatal`]. Shared with
+/// [`the_tenant_wide_writer_rule_fires_on_an_ungated_loop`] so the rule and its
+/// self-test cannot disagree.
+fn stoppable(body: &str, drivers: &[String]) -> (bool, bool) {
+    let cancellable = body.contains(".claim()");
+    let stops_on_dead =
+        body.contains("is_dead()") || drivers.iter().any(|d| super::sources::calls(body, d));
+    (cancellable, stops_on_dead)
 }
 
 /// Fan-outs that still lack the branch. **Empty, and it must stay that way** —
@@ -197,6 +210,7 @@ fn call_sites<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
 fn every_fan_out_command_honours_is_reauth_fatal() {
     let mut missing: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    let drivers = super::sources::long_run_drivers();
 
     for (name, src) in super::sources::command_modules() {
         let name = name.as_str();
@@ -205,7 +219,7 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         if name == "commands/dispatch.rs" {
             continue;
         }
-        if !(src.contains("dispatch_capped(") || src.contains("run_bulk_seq(")) {
+        if !drivers.iter().any(|d| super::sources::calls(&src, d)) {
             continue;
         }
         checked += 1;
@@ -213,7 +227,11 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
         // `run_bulk_seq` gates centrally, in the driver — every caller inherits
         // it, and `a_dead_session_halts_the_run_instead_of_burning_the_selection`
         // covers it. So a module that only drives the sequential path has no
-        // `dispatch_capped` sites, and the loop below is empty for it.
+        // `dispatch_capped` sites, and the loop below is empty for it. A
+        // derived driver (a helper wrapping `dispatch_capped`, from
+        // `sources::long_run_drivers`) gates centrally too: its one
+        // `dispatch_capped` call site is checked below like any other, and every
+        // command that calls the helper inherits that gate.
         let sites = call_sites(&src, "dispatch_capped");
 
         for (n, site) in sites.iter().enumerate() {
@@ -271,17 +289,20 @@ fn every_fan_out_command_honours_is_reauth_fatal() {
 /// per app, with no token and no latch.
 #[test]
 fn the_tenant_wide_writer_rule_fires_on_an_ungated_loop() {
-    fn violates(body: &str) -> bool {
+    // The seeds plus one derived helper, standing in for
+    // `sources::long_run_drivers` (whose derivation has its own self-test).
+    let drivers: Vec<String> = ["dispatch_capped", "run_bulk_seq", "run_capped_helper"]
+        .iter()
+        .map(|d| (*d).to_string())
+        .collect();
+    let violates = |body: &str| {
         let reads_tenant = TENANT_WIDE_READS.iter().any(|r| body.contains(r));
         let writes_per_result = super::sources::loops(body)
             .iter()
             .any(|(_, b)| b.contains(".await") && WRITE_CALLS.iter().any(|w| b.contains(w)));
-        let gated = body.contains(".claim()")
-            && (body.contains("is_dead()")
-                || body.contains("dispatch_capped(")
-                || body.contains("run_bulk_seq("));
-        reads_tenant && writes_per_result && !gated
-    }
+        let (cancellable, stops_on_dead) = stoppable(body, &drivers);
+        reads_tenant && writes_per_result && !(cancellable && stops_on_dead)
+    };
 
     let unguarded = r#"{
         let policies = exo.get_application_access_policies().await?;
@@ -301,6 +322,24 @@ fn the_tenant_wide_writer_rule_fires_on_an_ungated_loop() {
         }
     }"#;
     assert!(!violates(guarded), "a gated writer must pass");
+
+    // A writer whose per-item work runs through a derived driver is gated by
+    // that driver's own `dispatch_capped` call site — but it must still claim.
+    let through_helper = r#"{
+        let apps = graph.list_applications_all(query, None).await?;
+        let cancel = state.bulk_cancel.claim();
+        let run = run_capped_helper(&cancel, apps, |app| async move {
+            for key in keys(&app) { graph.remove_password(&app.id, key).await; }
+        }).await;
+    }"#;
+    assert!(
+        !violates(through_helper),
+        "a writer gated by a derived driver must pass"
+    );
+    assert!(
+        violates(&through_helper.replace(".claim()", ".peek()")),
+        "a derived driver does not excuse a missing claim"
+    );
 
     // A loop over ONE app's own sub-collection is bounded by that app, not by
     // the tenant, and must not be dragged in — this is the shape 25 of the 26

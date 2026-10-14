@@ -33,15 +33,22 @@
 ///
 /// Claim *placement* is the sibling rule
 /// [`every_long_running_command_claims_before_its_first_await`].
+///
+/// "Drives a long run" means the body calls a driver from
+/// `sources::long_run_drivers` — derived from the source, so a helper that
+/// wraps `dispatch_capped` keeps its callers in scope instead of taking them
+/// out of this rule while the floor below still passes.
 #[test]
 fn every_long_running_command_claims_exactly_one_cancel_token() {
     let mut missing: Vec<String> = Vec::new();
     let mut multiple: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    let drivers = super::sources::long_run_drivers();
 
     for cmd in super::sources::commands() {
-        let drives_long_run = cmd.body.contains("dispatch_capped(")
-            || cmd.body.contains("run_bulk_seq(")
+        let drives_long_run = drivers
+            .iter()
+            .any(|d| super::sources::calls(&cmd.body, d))
             // Sequential flows — no dispatcher, same hazard.
             || cmd.body.contains("report.cancelled = true");
         if !drives_long_run {
