@@ -13,14 +13,27 @@
 //! dropped slice would be a silently missing app.
 //! - Graph documents `startswith` on `appId` for `/servicePrincipals` but not
 //!   for `/applications`, so support is learned at runtime per collection: a
-//!   400 in plain mode retries once as an advanced query, and a 400 there pins
-//!   the collection to the serial read for this client (one per tenant,
-//!   dropped by the sign-out sweep).
+//!   400 on a slice's page one in plain mode retries once as an advanced
+//!   query, and a 400 there pins the collection to the serial read for this
+//!   client (one per tenant, dropped by the sign-out sweep).
 //! - The merged result is checked before it is trusted ([`merge_slices`]):
 //!   every row under its slice's prefix, every row of the unfiltered first page
-//!   present, and the total within a small tolerance of `/$count`. Anything off
-//!   falls back to the serial read, logs a `warn`, and pins the collection
-//!   serial.
+//!   present, and the union no shorter than `/$count`. There is no tolerance:
+//!   a principal with no `appId` is in no slice, and letting the union run a
+//!   few rows short would drop exactly those principals. Anything off falls
+//!   back to the serial read and logs a `warn`. A structural refusal (a row
+//!   outside its prefix, a row no slice can hold) pins the collection serial.
+//!   A lag-type one is judged by the serial read it falls back to: when every
+//!   row the serial read returned was already in the slices' union, the
+//!   slices were complete and only `/$count` was stale (the index lags a
+//!   delete), so nothing is held against the collection; otherwise it counts,
+//!   and [`MAX_LAG_REFUSALS`] in a row pin the collection serial.
+//! - The residual gap is the index lag itself: `/$count` comes from the
+//!   eventually-consistent index while plain slices read the directory, so a
+//!   principal with no `appId` created inside the lag window is in neither
+//!   and the union check cannot see it until the index has counted it. The
+//!   first scan whose rows include such a principal pins the collection serial
+//!   for the client's lifetime, so the window closes on the next refusal.
 
 use std::collections::HashSet;
 
@@ -37,6 +50,15 @@ pub(crate) enum SliceMode {
     Serial,
 }
 
+/// What a client remembers about one collection's slicing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SliceMemo {
+    /// The mode that last worked, or `Serial` once the collection is pinned.
+    pub(crate) mode: Option<SliceMode>,
+    /// Lag-type refusals in a row; a merge that validated resets it.
+    pub(crate) lag_refusals: u8,
+}
+
 /// The slice prefixes: a GUID's first character is one lowercase hex digit.
 const SLICE_PREFIXES: [char; 16] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
@@ -45,6 +67,90 @@ const SLICE_PREFIXES: [char; 16] = [
 /// Below this many pages in all, the serial chain is no longer than the
 /// partitioned read's fan-out, so the scan stays serial.
 const MIN_PAGES_TO_PARTITION: u64 = 4;
+
+/// Lag-type refusals in a row that the serial read did not clear (see
+/// [`GraphClient::refuse`]) before a collection is pinned serial for the
+/// client's lifetime: enough to ride out one index-lag window, not enough to
+/// pay 16 wasted chains on every scan of a tenant that never validates.
+const MAX_LAG_REFUSALS: u8 = 2;
+
+/// Why a sliced read was refused. `Err` from [`merge_slices`] names the check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// A slice stopped at the page limit below the cap (a cyclic or
+    /// pathologically empty `nextLink` chain), so it is incomplete.
+    SlicePageLimit,
+    /// A row outside its slice's prefix: Graph ignored or misread the filter,
+    /// so the slices are not disjoint and complete.
+    PrefixMismatch,
+    /// A row with no `appId`: no slice can hold it, so no sliced read of this
+    /// collection is ever complete.
+    UnslicedRow,
+    /// A row of the unfiltered page one is in no slice.
+    ProbeRowMissing,
+    /// Fewer rows than `/$count`. Skipped when the cap cut a slice short,
+    /// since the union is then short by design.
+    CountShortfall,
+    /// A slice failed for a reason that says nothing about the filter: a 400
+    /// on a continuation page, or a throttle, server or network error its
+    /// retries could not outwait, on any page. The wave is incomplete.
+    SliceFailed,
+    /// A mode that validated before answered 400 on a slice's page one.
+    ModeRejected,
+}
+
+impl Refusal {
+    /// A structural refusal cannot clear by waiting, so the collection is
+    /// pinned serial at once; the rest can be the index lagging the directory.
+    pub(crate) fn is_structural(self) -> bool {
+        matches!(
+            self,
+            Refusal::SlicePageLimit | Refusal::PrefixMismatch | Refusal::UnslicedRow
+        )
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Refusal::SlicePageLimit => "slice_page_limit",
+            Refusal::PrefixMismatch => "prefix_mismatch",
+            Refusal::UnslicedRow => "unsliced_row",
+            Refusal::ProbeRowMissing => "probe_row_missing",
+            Refusal::CountShortfall => "count_shortfall",
+            Refusal::SliceFailed => "slice_failed",
+            Refusal::ModeRejected => "mode_rejected",
+        }
+    }
+}
+
+/// A refused merge: the check that failed, and the object ids the slices did
+/// return, so the serial read that follows can tell a stale `/$count` from
+/// slices that really missed a row.
+#[derive(Debug)]
+pub(crate) struct Refused {
+    pub(crate) reason: Refusal,
+    pub(crate) union: HashSet<String>,
+}
+
+impl From<Refusal> for Refused {
+    fn from(reason: Refusal) -> Self {
+        Refused {
+            reason,
+            union: HashSet::new(),
+        }
+    }
+}
+
+/// How a wave of slices failed to read.
+enum SliceError {
+    /// A slice's page one answered 400: this mode's filter is not accepted.
+    Rejected,
+    /// A slice's page one holds a row outside its prefix: Graph misread the
+    /// filter, and paging the rest would only fetch the whole collection
+    /// sixteen times over.
+    Mismatch,
+    /// Any other failure, on page one or a continuation.
+    Graph(GraphError),
+}
 
 /// A row of a collection a partitioned scan can split and de-duplicate.
 pub(crate) trait DirectoryRow {
@@ -77,6 +183,11 @@ pub(crate) struct Slice<T> {
     pub(crate) truncated: bool,
 }
 
+/// The slice a row belongs to: its `appId`'s first character, lowercased.
+fn slice_of<T: DirectoryRow>(row: &T) -> Option<char> {
+    row.app_id().chars().next().map(|c| c.to_ascii_lowercase())
+}
+
 impl GraphClient {
     /// Every row of the collection at `path`, up to `cap`, and whether the cap
     /// (or the page limit) cut it short: the tenant-wide scans' read.
@@ -98,7 +209,7 @@ impl GraphClient {
         T: DeserializeOwned + DirectoryRow + Send,
     {
         let started = std::time::Instant::now();
-        let known = self.slice_mode(path);
+        let known = self.slice_memo(path).mode;
         // The count decides whether slicing pays; fetching it beside page one
         // costs no round trip. Skipped where slicing is known not to work.
         let (probe, count) = if known == Some(SliceMode::Serial) {
@@ -116,6 +227,11 @@ impl GraphClient {
         let (rows, truncated, strategy) = self
             .finish_scan(path, params, probe, count, known, cap)
             .await?;
+        // A row with no appId can be in no slice, whichever path returned it:
+        // from now on this collection is read serially.
+        if rows.iter().any(|r| r.app_id().is_empty()) {
+            self.update_slice_memo(path, |memo| memo.mode = Some(SliceMode::Serial));
+        }
         log_directory_scan(scan, strategy, started, first_page, rows.len(), truncated);
         Ok((rows, truncated))
     }
@@ -159,6 +275,13 @@ impl GraphClient {
         if count > u64::try_from(cap).unwrap_or(u64::MAX).saturating_mul(2) {
             return self.serial_rest(probe, cap, "serial_over_cap").await;
         }
+        // A principal with no appId is in no slice. One on page one proves the
+        // tenant cannot be sliced, before any slice is asked for.
+        if probe.items.iter().any(|r| r.app_id().is_empty()) {
+            return self
+                .refuse(path, probe, cap, Refusal::UnslicedRow.into(), count)
+                .await;
+        }
 
         let modes: &[SliceMode] = match known {
             Some(SliceMode::Plain) => &[SliceMode::Plain],
@@ -168,7 +291,7 @@ impl GraphClient {
         for &mode in modes {
             let slices = match self.read_slices::<T>(path, params, cap, mode).await {
                 Ok(slices) => slices,
-                Err(GraphError::Api { status: 400, .. }) => {
+                Err(SliceError::Rejected) => {
                     tracing::debug!(
                         target: "azapptoolkit::graph::scan",
                         path,
@@ -177,32 +300,106 @@ impl GraphClient {
                     );
                     continue;
                 }
-                Err(err) => return Err(err),
+                Err(SliceError::Mismatch) => {
+                    return self
+                        .refuse(path, probe, cap, Refusal::PrefixMismatch.into(), count)
+                        .await;
+                }
+                // A continuation 400, or a throttle, server or network error
+                // the retries could not outwait on any page, says nothing
+                // about the filter: the serial read supplies this scan.
+                Err(SliceError::Graph(err))
+                    if err.is_retryable() || matches!(err, GraphError::Api { status: 400, .. }) =>
+                {
+                    tracing::warn!(
+                        target: "azapptoolkit::graph::scan",
+                        path,
+                        ?mode,
+                        code = %err.ui_code(),
+                        "a slice failed; reading serially"
+                    );
+                    return self
+                        .refuse(path, probe, cap, Refusal::SliceFailed.into(), count)
+                        .await;
+                }
+                Err(SliceError::Graph(err)) => return Err(err),
             };
             match merge_slices(&probe.items, slices, count, cap) {
                 Ok((rows, truncated)) => {
-                    self.set_slice_mode(path, mode);
+                    self.update_slice_memo(path, |memo| {
+                        memo.mode = Some(mode);
+                        memo.lag_refusals = 0;
+                    });
                     let strategy = match mode {
                         SliceMode::Advanced => "partitioned_advanced",
                         _ => "partitioned",
                     };
                     return Ok((rows, truncated, strategy));
                 }
-                Err(reason) => {
-                    tracing::warn!(
-                        target: "azapptoolkit::graph::scan",
-                        path,
-                        reason,
-                        count,
-                        "partitioned read failed validation; reading serially"
-                    );
-                    self.set_slice_mode(path, SliceMode::Serial);
-                    return self.serial_rest(probe, cap, "serial_fallback").await;
-                }
+                Err(refused) => return self.refuse(path, probe, cap, refused, count).await,
             }
         }
-        self.set_slice_mode(path, SliceMode::Serial);
+        if known.is_some() {
+            // A mode that validated before is evidence the filter works: one
+            // 400 is judged like any other failed wave, not pinned outright.
+            return self
+                .refuse(path, probe, cap, Refusal::ModeRejected.into(), count)
+                .await;
+        }
+        self.update_slice_memo(path, |memo| memo.mode = Some(SliceMode::Serial));
         self.serial_rest(probe, cap, "serial_fallback").await
+    }
+
+    /// The serial read after a refused sliced read, and what the client keeps
+    /// of the refusal.
+    ///
+    /// A structural refusal pins the collection serial before the read (so a
+    /// serial read that then fails does not buy the wasted wave again), and so
+    /// does a serial result holding a row no slice could have returned. A
+    /// lag-type refusal is judged by that result: when every row the serial
+    /// read returned was already in the slices' union (and nothing was cut by
+    /// the cap), the slices were complete and only `/$count` was stale, so the
+    /// refusal is not held against the collection; otherwise it is counted,
+    /// and [`MAX_LAG_REFUSALS`] in a row pin the collection serial.
+    async fn refuse<T>(
+        &self,
+        path: &'static str,
+        probe: Paged<T>,
+        cap: usize,
+        refused: Refused,
+        count: u64,
+    ) -> Result<(Vec<T>, bool, &'static str)>
+    where
+        T: DeserializeOwned + DirectoryRow,
+    {
+        let Refused { reason, union } = refused;
+        tracing::warn!(
+            target: "azapptoolkit::graph::scan",
+            path,
+            reason = reason.as_str(),
+            count,
+            "partitioned read failed validation; reading serially"
+        );
+        if reason.is_structural() {
+            self.update_slice_memo(path, |memo| memo.mode = Some(SliceMode::Serial));
+        }
+        let (rows, truncated, strategy) = self.serial_rest(probe, cap, "serial_fallback").await?;
+        let structural = reason.is_structural() || rows.iter().any(|r| r.app_id().is_empty());
+        let slices_were_complete = !structural
+            && !truncated
+            && !union.is_empty()
+            && rows.iter().all(|r| union.contains(r.object_id()));
+        self.update_slice_memo(path, |memo| {
+            if structural {
+                memo.mode = Some(SliceMode::Serial);
+            } else if !slices_were_complete {
+                memo.lag_refusals = memo.lag_refusals.saturating_add(1);
+                if memo.lag_refusals >= MAX_LAG_REFUSALS {
+                    memo.mode = Some(SliceMode::Serial);
+                }
+            }
+        });
+        Ok((rows, truncated, strategy))
     }
 
     /// The serial read: follow page one's `nextLink`s up to `cap`.
@@ -228,9 +425,9 @@ impl GraphClient {
         params: &[(&str, &str)],
         cap: usize,
         mode: SliceMode,
-    ) -> Result<Vec<Slice<T>>>
+    ) -> std::result::Result<Vec<Slice<T>>, SliceError>
     where
-        T: DeserializeOwned + Send,
+        T: DeserializeOwned + DirectoryRow + Send,
     {
         let advanced = mode == SliceMode::Advanced;
         futures::future::try_join_all(SLICE_PREFIXES.iter().map(|&prefix| async move {
@@ -240,9 +437,19 @@ impl GraphClient {
             if advanced {
                 query.push(("$count", "true"));
             }
-            let page: Paged<T> = self.get_json(path, &query, advanced).await?;
-            let (rows, truncated) = self.collect_all_pages_capped(page, cap, advanced).await?;
-            Ok::<_, GraphError>(Slice {
+            let page: Paged<T> = match self.get_json(path, &query, advanced).await {
+                Ok(page) => page,
+                Err(GraphError::Api { status: 400, .. }) => return Err(SliceError::Rejected),
+                Err(err) => return Err(SliceError::Graph(err)),
+            };
+            if page.items.iter().any(|r| slice_of(r) != Some(prefix)) {
+                return Err(SliceError::Mismatch);
+            }
+            let (rows, truncated) = self
+                .collect_all_pages_capped(page, cap, advanced)
+                .await
+                .map_err(SliceError::Graph)?;
+            Ok(Slice {
                 prefix,
                 rows,
                 truncated,
@@ -266,26 +473,25 @@ impl GraphClient {
             .map_err(|e| GraphError::Deserialize(format!("$count: {e}")))
     }
 
-    fn slice_mode(&self, path: &'static str) -> Option<SliceMode> {
-        self.slice_modes.lock().get(path).copied()
+    fn slice_memo(&self, path: &'static str) -> SliceMemo {
+        self.slice_memos
+            .lock()
+            .get(path)
+            .copied()
+            .unwrap_or_default()
     }
 
-    fn set_slice_mode(&self, path: &'static str, mode: SliceMode) {
-        self.slice_modes.lock().insert(path, mode);
+    fn update_slice_memo(&self, path: &'static str, update: impl FnOnce(&mut SliceMemo)) {
+        update(self.slice_memos.lock().entry(path).or_default());
     }
 }
 
 /// Merges the slices in prefix order and checks the result can be trusted.
-/// `Err` names the failed check; the caller then reads serially.
+/// `Err` names the failed check and carries the union's ids; the caller then
+/// reads serially.
 ///
-/// - `slice_page_limit`: a slice stopped at the page limit below the cap (a
-///   cyclic or pathologically empty `nextLink` chain), so it is incomplete.
-/// - `prefix_mismatch`: a row outside its slice's prefix — Graph ignored or
-///   misread the filter, so the slices are not disjoint and complete.
-/// - `probe_row_missing`: a row of the unfiltered page one is in no slice.
-/// - `count_shortfall`: fewer rows than `/$count` beyond the tolerance
-///   (`max(2, count / 1000)`, for the index's lag). Skipped when the cap cut a
-///   slice short, since the union is then short by design.
+/// The count check is skipped when the cap cut a slice short: the union is
+/// then short by design, and the result is flagged truncated.
 ///
 /// Rows are de-duplicated by object id (first occurrence wins), then cut to
 /// `cap`; the flag is set when rows existed past it.
@@ -294,31 +500,39 @@ pub(crate) fn merge_slices<T: DirectoryRow>(
     slices: Vec<Slice<T>>,
     count: u64,
     cap: usize,
-) -> std::result::Result<(Vec<T>, bool), &'static str> {
+) -> std::result::Result<(Vec<T>, bool), Refused> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut rows: Vec<T> = Vec::new();
     let mut any_truncated = false;
     for slice in slices {
         if slice.truncated && slice.rows.len() < cap {
-            return Err("slice_page_limit");
+            return Err(Refusal::SlicePageLimit.into());
         }
         any_truncated |= slice.truncated;
         for row in slice.rows {
-            let first = row.app_id().chars().next().map(|c| c.to_ascii_lowercase());
-            if first != Some(slice.prefix) {
-                return Err("prefix_mismatch");
+            if slice_of(&row) != Some(slice.prefix) {
+                return Err(Refusal::PrefixMismatch.into());
             }
             if seen.insert(row.object_id().to_owned()) {
                 rows.push(row);
             }
         }
     }
+    if probe.iter().any(|r| r.app_id().is_empty()) {
+        return Err(Refusal::UnslicedRow.into());
+    }
     if probe.iter().any(|r| !seen.contains(r.object_id())) {
-        return Err("probe_row_missing");
+        return Err(Refused {
+            reason: Refusal::ProbeRowMissing,
+            union: seen,
+        });
     }
     let union = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-    if !any_truncated && union.saturating_add((count / 1000).max(2)) < count {
-        return Err("count_shortfall");
+    if !any_truncated && union < count {
+        return Err(Refused {
+            reason: Refusal::CountShortfall,
+            union: seen,
+        });
     }
     let truncated = any_truncated || rows.len() > cap;
     rows.truncate(cap);
@@ -363,8 +577,11 @@ mod tests {
     fn a_row_outside_its_prefix_fails() {
         let slices = vec![slice('1', vec![sp("x", "2abc")])];
         assert_eq!(
-            merge_slices(&[], slices, 1, 100).map(|_| ()),
-            Err("prefix_mismatch")
+            merge_slices(&[], slices, 1, 100)
+                .map(|_| ())
+                .unwrap_err()
+                .reason,
+            Refusal::PrefixMismatch
         );
     }
 
@@ -372,22 +589,47 @@ mod tests {
     fn a_missing_probe_row_fails() {
         let probe = vec![sp("p", "3000")];
         let slices = vec![slice('3', vec![sp("q", "3001")])];
+        let refused = merge_slices(&probe, slices, 1, 100)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(refused.reason, Refusal::ProbeRowMissing);
         assert_eq!(
-            merge_slices(&probe, slices, 1, 100).map(|_| ()),
-            Err("probe_row_missing")
+            refused.union.len(),
+            1,
+            "the union rides along for the serial read to judge"
         );
     }
 
+    /// A principal with no `appId` on the probe page is refused before the
+    /// missing-row check, as the structural reason it is.
     #[test]
-    fn a_count_shortfall_past_the_tolerance_fails() {
+    fn a_probe_row_without_an_app_id_is_structural() {
+        let probe = vec![sp("agent", ""), sp("p", "3000")];
+        let slices = vec![slice('3', vec![sp("p", "3000")])];
+        let refusal = merge_slices(&probe, slices, 2, 100)
+            .map(|_| ())
+            .unwrap_err()
+            .reason;
+        assert_eq!(refusal, Refusal::UnslicedRow);
+        assert!(refusal.is_structural());
+        assert!(!Refusal::CountShortfall.is_structural());
+        assert!(!Refusal::ProbeRowMissing.is_structural());
+        assert!(!Refusal::SliceFailed.is_structural());
+        assert!(!Refusal::ModeRejected.is_structural());
+    }
+
+    /// No tolerance on the count: one row short is one principal dropped.
+    #[test]
+    fn any_count_shortfall_fails() {
         let rows: Vec<_> = (0..10).map(|i| sp(&format!("o{i}"), "7a")).collect();
-        // Within the tolerance of 2: passes.
-        assert!(merge_slices(&[], vec![slice('7', rows.clone())], 12, 100).is_ok());
-        // Three short: fails.
-        assert_eq!(
-            merge_slices(&[], vec![slice('7', rows)], 13, 100).map(|_| ()),
-            Err("count_shortfall")
-        );
+        assert!(merge_slices(&[], vec![slice('7', rows.clone())], 10, 100).is_ok());
+        // The index can lag a just-created object: an over-count passes.
+        assert!(merge_slices(&[], vec![slice('7', rows.clone())], 9, 100).is_ok());
+        let refused = merge_slices(&[], vec![slice('7', rows)], 11, 100)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(refused.reason, Refusal::CountShortfall);
+        assert_eq!(refused.union.len(), 10);
     }
 
     #[test]
@@ -408,8 +650,11 @@ mod tests {
             truncated: true,
         };
         assert_eq!(
-            merge_slices(&[], vec![stopped], 1, 100).map(|_| ()),
-            Err("slice_page_limit")
+            merge_slices(&[], vec![stopped], 1, 100)
+                .map(|_| ())
+                .unwrap_err()
+                .reason,
+            Refusal::SlicePageLimit
         );
     }
 

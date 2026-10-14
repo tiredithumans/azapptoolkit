@@ -605,22 +605,45 @@ slices: every `appId` is a GUID, so its first hex digit puts each row in exactly
    serially from page one (`serial_small` / `serial_no_count` / `serial_over_cap`).
 3. Otherwise the 16 slices run under `try_join_all` (never `stream::buffered`: Send inference),
    each paging serially with its own consistency flag. Graph documents `startswith` on `appId` for
-   `/servicePrincipals` but not `/applications`, so support is learned at runtime: a 400 in plain
-   mode retries once as an advanced query, a 400 there falls back to serial. The mode that worked
-   (or `Serial`) is remembered per collection on the per-tenant `GraphClient`, which the sign-out
-   sweep drops.
+   `/servicePrincipals` but not `/applications`, so support is learned at runtime: a 400 on a
+   slice's **page one** in plain mode retries once as an advanced query, a 400 there falls back to
+   serial. The mode that worked (or `Serial`) is remembered per collection on the per-tenant
+   `GraphClient`, which the sign-out sweep drops. A slice that fails for a reason that says nothing
+   about the filter (a 400 on a continuation page; a throttle, server or network error its retries
+   could not outwait, on any page; a 400 on page one of a mode that validated before) reads that
+   scan serially and is judged like a refused merge (step 4). A slice whose page one holds a row
+   outside its prefix stops there, before paging the whole collection sixteen times over.
 4. **Fail closed.** `merge_slices` de-duplicates by object id in prefix order and refuses the merge
-   when a row sits outside its slice's prefix, a row of the unfiltered page one is in no slice, the
-   union is short of `/$count` by more than `max(2, count / 1000)` (the index lags), or a slice
-   stopped at the page limit under the cap. A refused merge logs a `warn`, reads serially from page
-   one's `nextLink`, and pins the collection serial: a security inventory must never come back short
-   because a filter misbehaved.
+   when a row sits outside its slice's prefix, a row has no `appId` (no slice can hold it), a row of
+   the unfiltered page one is in no slice, the union is short of `/$count` **by any amount** (the
+   check is skipped when the cap cut a slice short: the union is then short by design and the result
+   is flagged truncated), or a slice stopped at the page limit under the cap. There is no tolerance
+   on the count: a principal with no `appId` is in no slice, and a tolerance of even two rows would
+   silently drop exactly those principals. A refused merge logs a `warn` naming the check and reads
+   serially from page one's `nextLink`: a security inventory must never come back short because a
+   filter misbehaved. What the client then remembers depends on the reason. A **structural**
+   refusal (a prefix mismatch, a page-limit stop, a row with no `appId` on page one) pins the
+   collection serial for the client's lifetime, before the serial read; so does any scan whose
+   rows include a principal with no `appId`. A **lag-type** one (the count short, a page-one row
+   missing from the slices, a slice that failed) is judged by the serial read it falls back to:
+   when every row the serial read returned was already in the slices' union, the slices were
+   complete and only `/$count` was stale (the index still counts a just-deleted object), so nothing
+   is held against the collection and the next scan slices again; otherwise the slices really
+   missed a row, the refusal is counted, and the second counted refusal in a row pins the
+   collection serial, so a tenant that never validates pays the wasted slice wave twice at most
+   per session.
 5. The cap is applied to the merged rows in prefix order, so truncation is deterministic and keeps
    the `len == cap` contract the cap notices read.
 
 A service principal without an `appId` (Graph omits it for some principal kinds) reads as `""`
-rather than failing the whole index; it is in no slice, so such a tenant fails the count check and
-reads serially.
+rather than failing the whole index. It is in no slice: one on the probe page sends the scan
+serial before any slice is asked for, and one past the probe page leaves the union short of
+`/$count`, which refuses the merge; either way the serial read returns it and pins the collection
+serial. The residual gap is the index lag itself: `/$count` comes from the eventually-consistent
+index while plain slices read the directory, so such a principal created inside the lag window is
+in neither, and the union check cannot see it until the index has counted it (a transient gap of
+at most one list TTL, closed by the first scan that returns the row). `/applications` is
+unaffected (`Application.app_id` is required, so a row without one fails its page loudly).
 
 ### Reading a slow scan off the log
 
