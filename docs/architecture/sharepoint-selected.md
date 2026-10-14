@@ -130,10 +130,12 @@ offers.
 
 ## Input boundary: URLs and ids in Graph paths
 
-The site lookup, the item resolver's URL parser and every permission DELETE splice operator- or
-webview-supplied text into a path sent on the `Sites.FullControl.All` bearer, so the graph client
-validates at that boundary rather than trusting its callers (pinned by `repo_invariants/trust.rs`);
-the other ids a call takes come from Graph's own responses.
+The site lookup, the item resolver's URL parser and every SharePoint call splice operator-,
+webview- or tag-supplied text into a path sent on the `Sites.FullControl.All` bearer, so the graph
+client validates at that boundary rather than trusting its callers, including for the ids that come
+from Graph's own responses (pinned by
+`repo_invariants/trust.rs::every_client_path_splice_is_shape_checked`, which holds every `/{name}`
+a Graph, ARM or Key Vault client method splices into a `format!` path to the same rule).
 
 - **Site URLs** go through `site_lookup_path`, which parses the text as a URL (`url::Url` resolves
   `..` / `%2e%2e` and turns `\` into `/` the way a browser does), rebuilds the path from the parsed
@@ -143,10 +145,14 @@ the other ids a call takes come from Graph's own responses.
   a non-http(s) scheme. The id Graph answers with must itself be a single path segment. The item
   resolver's `url_host_and_segments` applies the same segment rule, because its output is spliced
   into `root:/{path}:` drive addressing. Refusals never echo the input.
-- **Permission, site, list and item ids** in every DELETE go through
+- **Site, drive, list, item and permission ids** in every read, grant and DELETE (and in the
+  `$batch` sub-URLs `SelectedTarget::path` builds from an app's `spItem` tags) go through
   `validate::require_path_segment` (the `azapptoolkit-arm` / `azapptoolkit-keyvault` pattern):
   non-empty, not a dot segment, none of `/ \ ? # % :`, no whitespace or control character. A
-  `permission_id` of `../../../drives/{d}/items/{i}` could delete a file.
+  `permission_id` of `../../../drives/{d}/items/{i}` could delete a file. The one multi-segment
+  splice is `get_drive_item_by_path`'s library-relative path, which `site_relative_path` builds
+  from `url_host_and_segments`' checked segments (exempt in the pin's table, with the URL
+  rebuilders above).
 
 ## Who may grant: the site collection is not the sub-site
 

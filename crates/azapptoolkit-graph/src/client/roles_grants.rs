@@ -41,6 +41,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<AppRoleAssignment>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignments");
         let params: [(&str, &str); 2] = [
             ("$select", APP_ROLE_ASSIGNMENT_SELECT),
@@ -63,6 +64,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<AppRoleAssignment>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let path = format!("/servicePrincipals/{service_principal_id}/appRoleAssignedTo");
         let params: [(&str, &str); 2] = [
             ("$select", APP_ROLE_ASSIGNMENT_SELECT),
@@ -113,48 +115,48 @@ impl GraphClient {
 
     /// Batched [`Self::list_app_role_assigned_to`], many SPs per `$batch` POST: returns each SP's
     /// assignments (the rare overflow paginates outside the batch) in input order. The DR
-    /// backup's Pass-2 "who's assigned" read.
+    /// backup's Pass-2 "who's assigned" read. An id that is not a single path segment is its
+    /// own `Err(Protocol)` row and costs no sub-request.
     pub async fn batch_list_app_role_assigned_to(
         &self,
         sp_ids: &[String],
     ) -> Result<Vec<Result<Vec<AppRoleAssignment>>>> {
-        let urls: Vec<String> = sp_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/servicePrincipals/{id}/appRoleAssignedTo"),
-                    &[
-                        ("$select", APP_ROLE_ASSIGNMENT_SELECT),
-                        ("$top", MAX_PAGE_SIZE),
-                    ],
-                )
-            })
-            .collect();
+        let (urls, refused) = checked_sub_urls(sp_ids, |id| {
+            validate::require_path_segment("service principal id", id)?;
+            Ok(batch_sub_url(
+                &format!("/servicePrincipals/{id}/appRoleAssignedTo"),
+                &[
+                    ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+                    ("$top", MAX_PAGE_SIZE),
+                ],
+            ))
+        });
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages, false).await
+        let lists = self.finish_paged_batch(pages, false).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// Batched [`Self::list_app_role_assignments`]: the application permissions
     /// **held by** many SPs, one `$batch` POST per 20. The DR backup's Pass-3
-    /// managed-identity read.
+    /// managed-identity read. An id that is not a single path segment is its own
+    /// `Err(Protocol)` row and costs no sub-request.
     pub async fn batch_list_app_role_assignments(
         &self,
         sp_ids: &[String],
     ) -> Result<Vec<Result<Vec<AppRoleAssignment>>>> {
-        let urls: Vec<String> = sp_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/servicePrincipals/{id}/appRoleAssignments"),
-                    &[
-                        ("$select", APP_ROLE_ASSIGNMENT_SELECT),
-                        ("$top", MAX_PAGE_SIZE),
-                    ],
-                )
-            })
-            .collect();
+        let (urls, refused) = checked_sub_urls(sp_ids, |id| {
+            validate::require_path_segment("service principal id", id)?;
+            Ok(batch_sub_url(
+                &format!("/servicePrincipals/{id}/appRoleAssignments"),
+                &[
+                    ("$select", APP_ROLE_ASSIGNMENT_SELECT),
+                    ("$top", MAX_PAGE_SIZE),
+                ],
+            ))
+        });
         let pages: Vec<Result<Paged<AppRoleAssignment>>> = self.batch_get_json(&urls).await?;
-        self.finish_paged_batch(pages, false).await
+        let lists = self.finish_paged_batch(pages, false).await?;
+        Ok(rejoin_refused(refused, lists))
     }
 
     /// Assigns a principal (user/group) to a role on `resource_sp_id` — grants access to the
@@ -167,6 +169,7 @@ impl GraphClient {
         principal_id: &str,
         app_role_id: &str,
     ) -> Result<AppRoleAssignment> {
+        validate::require_path_segment("resource service principal id", resource_sp_id)?;
         let path = format!("/servicePrincipals/{resource_sp_id}/appRoleAssignedTo");
         let body = serde_json::json!({
             "principalId": principal_id,
@@ -185,6 +188,8 @@ impl GraphClient {
         resource_sp_id: &str,
         assignment_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("resource service principal id", resource_sp_id)?;
+        validate::require_path_segment("assignment id", assignment_id)?;
         let path = format!("/servicePrincipals/{resource_sp_id}/appRoleAssignedTo/{assignment_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await?;
@@ -243,6 +248,7 @@ impl GraphClient {
         resource_sp_id: &str,
         app_role_id: &str,
     ) -> Result<AppRoleAssignment> {
+        validate::require_path_segment("service principal id", client_sp_id)?;
         let path = format!("/servicePrincipals/{client_sp_id}/appRoleAssignments");
         let body = serde_json::json!({
             "principalId": client_sp_id,
@@ -264,6 +270,8 @@ impl GraphClient {
         service_principal_id: &str,
         assignment_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
+        validate::require_path_segment("assignment id", assignment_id)?;
         let path =
             format!("/servicePrincipals/{service_principal_id}/appRoleAssignments/{assignment_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
@@ -286,6 +294,7 @@ impl GraphClient {
     /// PATCHes the `scope` field of an existing oauth2PermissionGrant. Used
     /// when admin consent needs to add scopes to a grant that already exists.
     pub async fn update_oauth2_grant_scope(&self, grant_id: &str, scope: &str) -> Result<()> {
+        validate::require_path_segment("grant id", grant_id)?;
         let path = format!("/oauth2PermissionGrants/{grant_id}");
         let body = serde_json::json!({ "scope": scope });
         self.send_no_content(Method::PATCH, &path, Some(&body))
@@ -297,6 +306,7 @@ impl GraphClient {
     /// Reads a single oauth2PermissionGrant by id — needed by the per-scope
     /// revoke path which computes the new scope string from the current value.
     pub async fn get_oauth2_grant(&self, grant_id: &str) -> Result<OAuth2PermissionGrant> {
+        validate::require_path_segment("grant id", grant_id)?;
         let path = format!("/oauth2PermissionGrants/{grant_id}");
         self.get_json(&path, &[], false).await
     }
@@ -305,6 +315,7 @@ impl GraphClient {
     /// scope from a delegated grant — Graph keeps the empty grant around
     /// otherwise.
     pub async fn delete_oauth2_grant(&self, grant_id: &str) -> Result<()> {
+        validate::require_path_segment("grant id", grant_id)?;
         let path = format!("/oauth2PermissionGrants/{grant_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await?;

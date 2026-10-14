@@ -89,6 +89,7 @@ pub use applications::{
     ApplicationSsoPatch, ApplicationWebPatch, CreateApplicationRequest, DEFAULT_APP_PAGE_SIZE,
     DELETED_APPS_MAX, DELETED_SPS_MAX, ImplicitGrantSettingsPatch,
 };
+pub(crate) use batch::{checked_sub_urls, rejoin_refused};
 pub use credentials::{FederatedCredentialPatch, FederatedCredentialRequest};
 pub use service_principals::{
     ServicePrincipalSigningKeyPatch, ServicePrincipalSsoModePatch, sp_index_row,

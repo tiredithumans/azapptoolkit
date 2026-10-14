@@ -838,39 +838,371 @@ fn relative(root: &std::path::Path, src: &std::path::Path) -> String {
     src.strip_prefix(root).unwrap_or(src).display().to_string()
 }
 
-/// Every SharePoint permission DELETE in the Graph client shape-checks each id
-/// it splices into the path, and the site lookup validates the operator's URL.
+/// The calls that prove an id may stand in a request path. Any
+/// `validate_*(` call counts too (`azapptoolkit-keyvault`'s
+/// `validate_secret_name` / `validate_secret_version` / `validate_vault_name`).
+const PATH_VALIDATORS: [&str; 3] = ["require_path_segment", "require_guid", "require_arm_path"];
+
+/// Placeholders that are spliced into a path without a single-segment check,
+/// each named, with why that is safe: `(file, function, placeholders,
+/// reason)`. Every placeholder is listed by name (`{}` for a positional one),
+/// so a new id spliced into one of these functions is an offender like
+/// anywhere else, and a placeholder that no longer appears fails the stale
+/// check — the table cannot outlive the code it excuses.
+const PATH_SPLICE_EXEMPT: &[(&str, &str, &[&str], &str)] = &[
+    (
+        "azapptoolkit-graph/src/client/sharepoint.rs",
+        "site_lookup_path",
+        &["trimmed", "host", "rel"],
+        "rebuilds an operator-pasted site URL from `url::Url`'s parsed segments and refuses `:`, \
+         an encoded `/ \\ : .`, a non-hostname, credentials and a port (its own unit tests pin it)",
+    ),
+    (
+        "azapptoolkit-graph/src/client/sharepoint.rs",
+        "url_host_and_segments",
+        &["trimmed"],
+        "the item resolver's URL parser: prefixes a scheme before `url::Url` parses the text, and \
+         applies the same parsed-segment rule as `site_lookup_path`",
+    ),
+    (
+        "azapptoolkit-graph/src/client/sharepoint.rs",
+        "site_collection_url",
+        &["host", "{}"],
+        "builds a URL (not a request path) from `url_host_and_segments`' checked host and \
+         segments; it reaches Graph only through `site_lookup_path`",
+    ),
+    (
+        "azapptoolkit-graph/src/client/sharepoint.rs",
+        "descend_one_segment",
+        &["next"],
+        "extends a site's `webUrl` by one parsed segment; the result reaches Graph only through \
+         `site_lookup_path`",
+    ),
+    (
+        "azapptoolkit-graph/src/client/sharepoint.rs",
+        "get_drive_item_by_path",
+        &["rel_path"],
+        "several segments by design (`root:/{path}:` addressing) and `pub(crate)`: its one caller \
+         passes `site_relative_path`'s output, built from `url_host_and_segments`, which refuses \
+         `:` and an encoded `/ \\ : .` per segment",
+    ),
+];
+
+/// The units the path-splice scan must find splices in: every Graph client
+/// domain module (a `name.rs` file or a `name/` directory) and the ARM and Key
+/// Vault crate roots. A unit that contributes nothing has dropped out of the
+/// scan (moved, renamed, or unreadable), which the function floor alone does
+/// not catch: moving `applications.rs` into `applications/` used to lose 19
+/// functions and still pass.
+const PATH_SPLICE_UNITS: [&str; 9] = [
+    "azapptoolkit-graph/src/client/applications",
+    "azapptoolkit-graph/src/client/credentials",
+    "azapptoolkit-graph/src/client/directory",
+    "azapptoolkit-graph/src/client/policies",
+    "azapptoolkit-graph/src/client/roles_grants",
+    "azapptoolkit-graph/src/client/service_principals",
+    "azapptoolkit-graph/src/client/sharepoint",
+    "azapptoolkit-arm/src",
+    "azapptoolkit-keyvault/src",
+];
+
+/// Whether `file` (crate-relative, `/`-separated) belongs to `unit`.
+fn in_splice_unit(file: &str, unit: &str) -> bool {
+    file.strip_suffix(".rs") == Some(unit)
+        || file
+            .strip_prefix(unit)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The placeholders spliced into the **path** of every `format!` literal in
+/// `body`: the text before the first `?`, where a `{x}` directly after a `/`
+/// is a path segment. `Some(name)` for a named `/{name}`, `None` for a
+/// positional `/{}` or `/{0}`, which cannot be tied to a check by name.
+/// `{{`/`}}` escapes are skipped.
+fn path_placeholders(body: &str) -> Vec<Option<String>> {
+    let code = super::sources::code_mask(body);
+    let mut out = Vec::new();
+    for (at, m) in body.match_indices("format!(") {
+        let starts_ident = body[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !code[at] || starts_ident {
+            continue;
+        }
+        let Some(literal) = leading_string_literal(&body[at + m.len()..]) else {
+            continue;
+        };
+        let path = literal.split('?').next().unwrap_or_default();
+        let bytes = path.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' if bytes.get(i + 1) == Some(&b'{') => i += 2,
+                b'{' => {
+                    let Some(close) = path[i..].find('}') else {
+                        break;
+                    };
+                    let inner = &path[i + 1..i + close];
+                    let name = inner.split(':').next().unwrap_or_default();
+                    if i > 0 && bytes[i - 1] == b'/' {
+                        let positional =
+                            name.is_empty() || name.bytes().all(|b| b.is_ascii_digit());
+                        out.push((!positional).then(|| name.to_string()));
+                    }
+                    i += close + 1;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    out
+}
+
+/// The contents of the string literal (plain or raw) that `rest` opens with,
+/// after leading whitespace; escapes are left as written.
+fn leading_string_literal(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start();
+    if let Some(body) = rest.strip_prefix('"') {
+        let bytes = body.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => return Some(&body[..i]),
+                _ => i += 1,
+            }
+        }
+        return None;
+    }
+    let raw = rest.strip_prefix('r')?;
+    let hashes = raw.len() - raw.trim_start_matches('#').len();
+    let body = raw[hashes..].strip_prefix('"')?;
+    let close = format!("\"{}", "#".repeat(hashes));
+    body.find(&close).map(|end| &body[..end])
+}
+
+/// The variables `body` proves are path-safe: every identifier passed to a
+/// [`PATH_VALIDATORS`] or `validate_*` call whose result is propagated with
+/// `?`. String literals in the arguments (the `"site id"` label) and field
+/// names (`site.id` proves `site`, not `id`) do not count, and neither does a
+/// call whose result is dropped.
+fn path_checked_idents(body: &str) -> Vec<String> {
+    let code = super::sources::code_mask(body);
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    for (at, c) in body.char_indices() {
+        if !code[at] || !is_ident(c) || body[..at].chars().next_back().is_some_and(is_ident) {
+            continue;
+        }
+        let name: String = body[at..].chars().take_while(|&c| is_ident(c)).collect();
+        let is_validator = PATH_VALIDATORS.contains(&name.as_str())
+            || (name.starts_with("validate_") && name.len() > "validate_".len());
+        let open = at + name.len();
+        if !is_validator || body.as_bytes().get(open) != Some(&b'(') {
+            continue;
+        }
+        let (mut depth, mut close) = (0usize, None);
+        for (i, b) in body.bytes().enumerate().skip(open) {
+            if !code[i] {
+                continue;
+            }
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            continue;
+        };
+        if !body[close + 1..].trim_start().starts_with('?') {
+            continue;
+        }
+        for (i, c) in body[open + 1..close].char_indices() {
+            let i = open + 1 + i;
+            let starts = code[i]
+                && (c.is_ascii_alphabetic() || c == '_')
+                && !body[..i].chars().next_back().is_some_and(is_ident)
+                && !body[..i].trim_end().ends_with('.');
+            if starts {
+                out.push(body[i..].chars().take_while(|&c| is_ident(c)).collect());
+            }
+        }
+    }
+    out
+}
+
+/// For each function in `src` that splices at least one placeholder into a
+/// request path: its name and the placeholders no check covers (`{}` for a
+/// positional one).
+fn unchecked_path_splices(src: &str) -> Vec<(String, Vec<String>)> {
+    functions_in(src)
+        .into_iter()
+        .filter_map(|f| {
+            let spliced = path_placeholders(&f.body);
+            if spliced.is_empty() {
+                return None;
+            }
+            let checked = path_checked_idents(&f.body);
+            let unchecked = spliced
+                .into_iter()
+                .filter_map(|p| match p {
+                    Some(name) if checked.contains(&name) => None,
+                    Some(name) => Some(name),
+                    None => Some("{}".to_string()),
+                })
+                .collect();
+            Some((f.name, unchecked))
+        })
+        .collect()
+}
+
+/// Every Rust source the path-splice rule reads, as (crate-relative name,
+/// source with test items stripped): the Graph client's modules, walked
+/// recursively but not `client/tests/`, and the whole of the ARM and Key Vault
+/// crates. An unreadable directory fails the walk rather than shrinking it.
+fn path_splice_sources() -> Vec<(String, String)> {
+    fn rust_files(dir: &std::path::Path, skip: &[&str], out: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("path-splice scan: read {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("path-splice scan: list {}: {e}", dir.display()))
+                .path();
+            if path.is_dir() {
+                if !path
+                    .file_name()
+                    .is_some_and(|n| skip.iter().any(|s| n == *s))
+                {
+                    rust_files(&path, skip, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates")
+        .canonicalize()
+        .expect("crates dir");
+    let mut files = Vec::new();
+    rust_files(
+        &crates.join("azapptoolkit-graph/src/client"),
+        &["tests"],
+        &mut files,
+    );
+    rust_files(&crates.join("azapptoolkit-arm/src"), &[], &mut files);
+    rust_files(&crates.join("azapptoolkit-keyvault/src"), &[], &mut files);
+    files.sort();
+    files
+        .into_iter()
+        .map(|file| {
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("path-splice scan: read {}: {e}", file.display()));
+            let name = relative(&crates, &file).replace('\\', "/");
+            (name, super::sources::strip_tests(&text))
+        })
+        .collect()
+}
+
+/// Every id a client splices into a request path is shape-checked in the
+/// function that splices it, and the site lookup validates the operator's URL.
 ///
-/// `permission_id` arrives from the webview and `site_id` / `list_id` /
-/// `item_id` from earlier Graph responses or app-registration tags; the DELETE
-/// runs on the `Sites.FullControl.All` bearer, so `../../../drives/{d}/items/{i}`
-/// in any of them could delete a file this crate otherwise has no call for. The
-/// rule is per function: a wrapper does not inherit its callee's check.
+/// `send_core` joins a path onto the base URL with `format!` and the `url`
+/// crate resolves `..`, `%2e%2e` and `\`, while a `?` or `#` rewrites the
+/// query, so an id like `../servicePrincipals/X` retargets the request: a
+/// `delete_application` call deletes a service principal, and a SharePoint
+/// permission DELETE on the `Sites.FullControl.All` bearer walks up to
+/// `/drives/{d}/items/{i}` and deletes a file. Ids reach the clients from the
+/// webview, app-registration tags and earlier responses, so the check sits at
+/// the client boundary rather than trusting every caller.
+///
+/// The rule: every `/{name}` placeholder in the path part (before `?`) of a
+/// `format!` literal names a variable the same function passes to
+/// `require_path_segment` / `require_guid` / `require_arm_path` / `validate_*`
+/// with the result propagated by `?`; a `$batch` helper checks inside its
+/// closure. A positional `/{}` is an offender — name the id. Per function: a
+/// wrapper does not inherit its callee's check, and a callee does not inherit
+/// its caller's. Blind spots: a path built without `format!` (`push_str`,
+/// `url::Url::join`), assembled from a pre-joined variable, or spliced without
+/// a `/` before it (ARM's `"{}{role_definition_id}"`, checked by
+/// `require_arm_path` all the same).
 #[test]
-fn every_sharepoint_permission_delete_validates_its_path_segments() {
-    let src = include_str!("../../../../../crates/azapptoolkit-graph/src/client/sharepoint.rs");
-    let fns = functions_in(src);
-    let deletes: Vec<&str> = fns
+fn every_client_path_splice_is_shape_checked() {
+    let mut functions = 0usize;
+    let mut per_unit = [0usize; PATH_SPLICE_UNITS.len()];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut exemptions_hit: Vec<(&str, &str, &str)> = Vec::new();
+    for (file, src) in path_splice_sources() {
+        for (func, unchecked) in unchecked_path_splices(&src) {
+            functions += 1;
+            for (unit, count) in PATH_SPLICE_UNITS.iter().zip(per_unit.iter_mut()) {
+                if in_splice_unit(&file, unit) {
+                    *count += 1;
+                }
+            }
+            for name in unchecked {
+                let exempt = PATH_SPLICE_EXEMPT.iter().find_map(|(f, fun, names, _)| {
+                    (*f == file && *fun == func)
+                        .then(|| names.iter().find(|n| **n == name))
+                        .flatten()
+                        .map(|n| (*f, *fun, *n))
+                });
+                match exempt {
+                    Some(hit) => exemptions_hit.push(hit),
+                    None => offenders.push(format!("{file}::{func} — {{{name}}}")),
+                }
+            }
+        }
+    }
+
+    let lost: Vec<&str> = PATH_SPLICE_UNITS
         .iter()
-        .filter(|f| f.body.contains("Method::DELETE"))
-        .map(|f| f.name.as_str())
+        .zip(per_unit)
+        .filter(|(_, count)| *count == 0)
+        .map(|(unit, _)| *unit)
         .collect();
     assert!(
-        deletes.len() >= 3,
-        "only {} DELETE function(s) found in graph client/sharepoint.rs — the scan is broken: \
-         {deletes:?}",
-        deletes.len()
+        lost.is_empty(),
+        "no path splice found in {lost:?} — the module moved, was renamed or dropped out of the \
+         scan; point `PATH_SPLICE_UNITS` (and the walk) at where it lives now"
     );
-    let offenders: Vec<&str> = fns
-        .iter()
-        .filter(|f| f.body.contains("Method::DELETE") && !names(&f.body, "require_path_segment("))
-        .map(|f| f.name.as_str())
-        .collect();
+    assert!(
+        functions >= 90,
+        "found only {functions} function(s) that splice an id into a request path across the \
+         Graph, ARM and Key Vault clients — the scan is broken, and a rule that scans nothing \
+         passes vacuously"
+    );
     assert!(
         offenders.is_empty(),
-        "SharePoint DELETE(s) that splice an id into the path without \
-         `validate::require_path_segment`: {offenders:?}"
+        "id(s) spliced into a request path without a shape check: {offenders:#?}\n\
+         Call `validate::require_path_segment(\"<what>\", id)?` (Graph; `require_guid` / \
+         `require_arm_path` / `validate_*` in ARM and Key Vault) at the top of the function, or \
+         inside the closure for a `$batch` sub-URL, and name a positional `{{}}`. Otherwise add a \
+         justified entry to `PATH_SPLICE_EXEMPT`."
     );
+    for (file, func, placeholders, _) in PATH_SPLICE_EXEMPT {
+        for placeholder in *placeholders {
+            assert!(
+                exemptions_hit.contains(&(*file, *func, *placeholder)),
+                "stale path-splice exemption `{file}::{func}` ({{{placeholder}}}) — it matches no \
+                 unchecked placeholder; remove it"
+            );
+        }
+    }
+
+    let graph = path_splice_sources()
+        .into_iter()
+        .find(|(file, _)| file == "azapptoolkit-graph/src/client/sharepoint.rs")
+        .expect("graph client/sharepoint.rs is in the scan");
+    let fns = functions_in(&graph.1);
     let lookup = fns
         .iter()
         .find(|f| f.name == "get_site_by_url")
@@ -880,4 +1212,110 @@ fn every_sharepoint_permission_delete_validates_its_path_segments() {
         "get_site_by_url must build its path through site_lookup_path (which refuses anything but \
          a plain site address) and shape-check the id Graph answers with"
     );
+}
+
+/// The path-splice rule must fire on an unchecked id, on a check whose result
+/// is dropped, on a label or a field that merely shares the id's name, and on
+/// a positional placeholder — and must pass a checked splice, a check inside a
+/// `$batch` closure, a query value and an escaped brace.
+#[test]
+fn the_path_splice_rule_fires_on_an_unchecked_id() {
+    let src = r##"
+impl Client {
+    pub async fn unchecked(&self, object_id: &str) -> Result<()> {
+        let path = format!("/applications/{object_id}");
+        self.send(&path).await
+    }
+
+    pub async fn checked(&self, object_id: &str, name: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
+        let url = format!(
+            "{}/applications/{object_id}/owners?$filter=startswith(x,'/{name}')",
+            self.base_url
+        );
+        self.send(&url).await
+    }
+
+    pub async fn dropped(&self, object_id: &str) -> Result<()> {
+        let _ = validate::require_path_segment("object id", object_id);
+        self.send(&format!("/applications/{object_id}")).await
+    }
+
+    pub async fn label_only(&self, id: &str, other: &str) -> Result<()> {
+        validate::require_path_segment("site id", other)?;
+        // format!("/sites/{other}") in a comment is not a splice
+        self.send(&format!("/sites/{id}")).await
+    }
+
+    pub async fn field_only(&self, site: &Site, id: &str) -> Result<()> {
+        validate::require_path_segment("site id", &site.id)?;
+        self.send(&format!("/sites/{id}/drives")).await
+    }
+
+    pub async fn positional(&self, t: &Target) -> Result<()> {
+        require_path_segment("site id", t.site_id)?;
+        self.send(&format!("/sites/{}", t.site_id)).await
+    }
+
+    pub async fn batched(&self, ids: &[String]) -> Result<()> {
+        let urls: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                validate::require_path_segment("object id", id)?;
+                Ok(format!("/applications/{id}"))
+            })
+            .collect::<Result<_>>()?;
+        self.batch(&urls).await
+    }
+
+    pub fn vault(name: &str) -> Result<String> {
+        crate::validate::validate_vault_name(name)?;
+        Ok(format!("https://{name}.vault.azure.net/secrets/{{literal}}"))
+    }
+
+    pub fn not_a_path(name: &str) -> String {
+        format!("displayName eq '{name}'")
+    }
+}
+"##;
+    let got = unchecked_path_splices(src);
+    let expect = |name: &str, unchecked: &[&str]| {
+        let found = got
+            .iter()
+            .find(|(f, _)| f == name)
+            .unwrap_or_else(|| panic!("`{name}` was not seen as a path splice: {got:?}"));
+        assert_eq!(found.1, unchecked, "`{name}`");
+    };
+    expect("unchecked", &["object_id"]);
+    expect("checked", &[]);
+    expect("dropped", &["object_id"]);
+    expect("label_only", &["id"]);
+    expect("field_only", &["id"]);
+    expect("positional", &["{}"]);
+    expect("batched", &[]);
+    expect("vault", &[]);
+    assert!(
+        got.iter().all(|(f, _)| f != "not_a_path"),
+        "a filter literal is not a path: {got:?}"
+    );
+
+    // A unit is its own file or anything under its directory, never a sibling
+    // that merely shares the prefix.
+    let unit = "azapptoolkit-graph/src/client/applications";
+    assert!(in_splice_unit(
+        "azapptoolkit-graph/src/client/applications.rs",
+        unit
+    ));
+    assert!(in_splice_unit(
+        "azapptoolkit-graph/src/client/applications/owners.rs",
+        unit
+    ));
+    assert!(!in_splice_unit(
+        "azapptoolkit-graph/src/client/applications_extra.rs",
+        unit
+    ));
+    assert!(in_splice_unit(
+        "azapptoolkit-arm/src/client.rs",
+        "azapptoolkit-arm/src"
+    ));
 }
