@@ -7,6 +7,7 @@
 //! fast — are pinned by `tests/transport.rs`.
 
 use super::*;
+use azapptoolkit_core::http_body::{BodyCap, MAX_ERROR_BODY_BYTES};
 use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::net::endpoint_family;
 use azapptoolkit_core::token::TokenError;
@@ -41,13 +42,10 @@ impl GraphClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_error_body(resp).await;
             return Err(map_error_status(code, body, retry_after));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
+        let bytes = read_success_body(resp, self.max_body_bytes).await?;
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
 
@@ -602,6 +600,7 @@ impl GraphClient {
                 let method = method.clone();
                 let body_bytes = body_bytes.clone();
                 let observer = self.throttle_observer.read().clone();
+                let max_body = self.max_body_bytes;
                 async move {
                     let mut req = http.request(method, url).headers(headers).query(query);
                     if let Some(b) = body_bytes.as_ref() {
@@ -624,10 +623,7 @@ impl GraphClient {
                     let status = resp.status();
                     if status.is_success() {
                         return Attempt::Done(
-                            resp.bytes()
-                                .await
-                                .map(Outcome::Body)
-                                .map_err(|e| GraphError::Network(describe_error_chain(&e))),
+                            read_success_body(resp, max_body).await.map(Outcome::Body),
                         );
                     }
 
@@ -644,7 +640,7 @@ impl GraphClient {
                         .map(str::to_string);
                     // Sanitized and capped before it reaches an error, a log line
                     // or a toast — a proxy block page can be megabytes of HTML.
-                    let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
+                    let body_text = sanitize_error_body(&read_error_body(resp).await);
                     let code = status.as_u16();
 
                     if code == 401 {
@@ -834,6 +830,51 @@ pub(crate) fn log_directory_scan(
 /// truncating.
 fn millis(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Reads a success body under the client's decoded-bytes cap
+/// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`] unless a test
+/// lowered it). reqwest drops `Content-Length` when it inflates a gzip body, so
+/// the running total of decoded chunks is the guard; a body past the cap is a
+/// [`GraphError::Protocol`], which is never retried.
+async fn read_success_body(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let mut cap = BodyCap::new(resp.content_length(), max);
+    cap.check_declared()
+        .map_err(|e| GraphError::Protocol(e.to_string()))?;
+    let mut chunks = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| GraphError::Network(describe_error_chain(&e)))?
+    {
+        cap.push(chunk.len())
+            .map_err(|e| GraphError::Protocol(e.to_string()))?;
+        chunks.push(chunk);
+    }
+    // One chunk is handed back as is, as `resp.bytes()` did, so a small reply
+    // gains no extra copy; more are joined once.
+    Ok(if chunks.len() == 1 {
+        chunks.swap_remove(0)
+    } else {
+        chunks.concat().into()
+    })
+}
+
+/// Reads at most [`MAX_ERROR_BODY_BYTES`] of an error body as text for
+/// `sanitize_error_body`, which keeps far less; the rest is dropped unread
+/// (the status, not the body, decides the error). A read that fails midway
+/// keeps what arrived.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut cap = BodyCap::new(None, MAX_ERROR_BODY_BYTES);
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let n = cap.take(chunk.len());
+        body.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// The crate's "object vanished between the index read and the detail read"

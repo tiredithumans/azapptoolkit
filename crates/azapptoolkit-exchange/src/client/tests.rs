@@ -1362,3 +1362,52 @@ async fn a_connection_failure_surfaces_as_network() {
         .expect_err("nothing is listening");
     assert!(matches!(err, ExchangeError::Network(_)), "got {err:?}");
 }
+
+/// `{"value":[],"pad":"aaaa…"}` with 4096 `a`s, gzipped (`mtime = 0`): 65
+/// bytes on the wire, 4117 decoded — an empty cmdlet result once inflated.
+const GZIPPED_EMPTY_RESULT: [u8; 65] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xed, 0xc1, 0xa1, 0x0d, 0x80, 0x30,
+    0x14, 0x05, 0xc0, 0x5d, 0x9e, 0xee, 0x04, 0x5d, 0xa5, 0xa9, 0xf8, 0x09, 0x75, 0x15, 0x18, 0x30,
+    0x84, 0xdd, 0xd9, 0x83, 0xdc, 0xdd, 0x93, 0xbb, 0xf6, 0xb5, 0xd2, 0xc7, 0x6c, 0x39, 0xeb, 0x48,
+    0x4f, 0x01, 0x00, 0x00, 0x00, 0xbf, 0x97, 0xf7, 0x03, 0xdb, 0xc3, 0x09, 0x62, 0x15, 0x10, 0x00,
+    0x00,
+];
+
+/// A success body is capped by its DECODED size: reqwest inflates the gzip
+/// reply and drops its `Content-Length`, so only the running total of decoded
+/// chunks catches a body that fits the cap on the wire. Past the cap is a
+/// `Protocol` error, never retried (after a 2xx the cmdlet has committed).
+#[tokio::test]
+async fn a_success_body_is_capped_by_its_decoded_size() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(invoke_path()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .insert_header("content-type", "application/json")
+                .set_body_bytes(GZIPPED_EMPTY_RESULT.to_vec()),
+        )
+        // One capped read (never replayed) and one under the default cap.
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let err = make_client(&server.uri())
+        .with_max_body_bytes(1024)
+        .list_service_principals()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ExchangeError::Protocol(m) if m == "response body exceeds the 1 KiB limit"),
+        "got {err:?}"
+    );
+    assert!(!err.is_retryable());
+    assert!(
+        make_client(&server.uri())
+            .list_service_principals()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

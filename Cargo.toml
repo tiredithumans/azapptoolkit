@@ -50,7 +50,13 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 # inflates transparently. Two clients opt out with `.no_gzip()`: the `/token`
 # client (tokens read into a `Zeroizing` buffer) and Key Vault (secret values);
 # an inflate buffer is one more un-wiped plaintext copy, for replies of a few
-# KiB (pinned in `repo_invariants/trust.rs`).
+# KiB (pinned in `repo_invariants/trust.rs`). reqwest drops `Content-Length`
+# when it inflates, so a few KiB of gzip can decode to gigabytes: the client
+# transports and the SSO metadata probe read a body through
+# `azapptoolkit_core::http_body::BodyCap` (a running total of decoded bytes) and
+# the `/token` reader through its own capped `Zeroizing` loop, never
+# `.bytes()`/`.text()`/`.json()` (pinned by
+# `trust.rs::no_client_reads_an_unbounded_body`).
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "form", "system-proxy", "http2", "gzip"] }
 bytes = "1"
 # Auth

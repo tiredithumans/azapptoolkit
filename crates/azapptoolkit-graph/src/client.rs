@@ -154,6 +154,10 @@ pub struct GraphClient {
     /// `appId` slices (`partition.rs`), learned on first use. Lives as long as
     /// this per-tenant client, which the sign-out sweep drops.
     slice_memos: parking_lot::Mutex<std::collections::HashMap<&'static str, partition::SliceMemo>>,
+    /// Decoded bytes one success body may hold
+    /// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`]); a field only
+    /// so a test can trip it with a small body.
+    max_body_bytes: usize,
 }
 
 impl GraphClient {
@@ -203,7 +207,16 @@ impl GraphClient {
             group_member_token: None,
             throttle_observer: parking_lot::RwLock::new(None),
             slice_memos: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            max_body_bytes: azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES,
         }
+    }
+
+    /// Lowers the decoded-bytes cap on a success body, so a test can trip it
+    /// without a 64 MiB fixture.
+    #[cfg(test)]
+    pub(crate) fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
+        self
     }
 
     /// Attaches a `Synchronization.Read.All` token enabling provisioning status.

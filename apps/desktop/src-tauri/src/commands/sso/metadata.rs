@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use azapptoolkit_core::http_body::{BodyCap, BodyTooLarge};
 use tauri::State;
 
 use crate::commands::guid::is_guid;
@@ -18,8 +19,10 @@ use super::saml_summary_urls;
 /// Unauthenticated GET to the public metadata endpoint (a backend `reqwest`
 /// call, so no CSP change — `connect-src` governs the webview only). A transport
 /// or parse failure is returned as a populated [`MetadataProbeDto`] with
-/// `http_status: None`, never as a command error: "we couldn't check" and "Entra
-/// isn't publishing it" must not look the same to the operator.
+/// `error` set (and `http_status: None` when no response arrived), never as a
+/// command error: "we couldn't check" and "Entra isn't publishing it" must not
+/// look the same to the operator. A body that could not be read — cut off, or
+/// past [`MAX_METADATA_BYTES`] — keeps the status it came with.
 #[tauri::command]
 pub async fn probe_federation_metadata(
     state: State<'_, AppState>,
@@ -49,12 +52,13 @@ pub async fn probe_federation_metadata(
     let (status, body) = match response {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            match resp.text().await {
+            match read_metadata_body(resp).await {
                 Ok(body) => (status, Some(body)),
-                Err(err) => {
+                Err(error) => {
                     return Ok(MetadataProbeDto {
                         fetched_at,
-                        error: Some(format!("Could not read the metadata response: {err}")),
+                        http_status: Some(status),
+                        error: Some(error),
                         ..Default::default()
                     });
                 }
@@ -79,6 +83,32 @@ pub async fn probe_federation_metadata(
         http_status: Some(status),
         error,
     })
+}
+
+/// Decoded bytes the probe reads. Entra's federation metadata for one app is
+/// a few KiB (two or three signing certificates); anything near a MiB is not
+/// that document, and the `gzip` reqwest feature means only a running total of
+/// the decoded bytes bounds it.
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
+/// The probe's body, read under [`MAX_METADATA_BYTES`], or the sentence the
+/// probe reports instead of a body.
+async fn read_metadata_body(mut resp: reqwest::Response) -> Result<String, String> {
+    let too_large = |e: BodyTooLarge| format!("The metadata response was not read: {e}.");
+    let mut cap = BodyCap::new(resp.content_length(), MAX_METADATA_BYTES);
+    cap.check_declared().map_err(too_large)?;
+    let mut chunks = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                cap.push(chunk.len()).map_err(too_large)?;
+                chunks.push(chunk);
+            }
+            Ok(None) => break,
+            Err(err) => return Err(format!("Could not read the metadata response: {err}")),
+        }
+    }
+    Ok(String::from_utf8_lossy(&chunks.concat()).into_owned())
 }
 
 /// Shared `reqwest` client for federation-metadata probes. The endpoint is
