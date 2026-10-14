@@ -7,6 +7,14 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Changed
 
+- **Semver-compatible dependency refresh:** `rustls` 0.23.45 → 0.23.46, which fixes the four
+  advisories published on 2026-10-14 — RUSTSEC-2026-0346 (`Debug` impls for client session values
+  exposed TLS secrets), -0347 (buffered application data was sent to the outer server after an ECH
+  rejection), -0348 (Brotli certificate decompression could allocate up to 1 GiB before
+  authentication) and -0349 (an unauthenticated ServerHello could downgrade later connections to
+  classical key exchange). Every Graph, login, Exchange, Key Vault and ARM connection rides this
+  TLS stack. The frontend lockfile carries no `rustls`.
+
 - **A new client secret's custom start and end dates use the system date picker**, the same one
   the lists' "Created before" and "Created after" filters use, and screen readers now announce
   each field by name.
