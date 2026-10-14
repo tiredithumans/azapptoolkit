@@ -32,7 +32,7 @@ use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
-use crate::hooks::use_list_export::use_list_export;
+use crate::hooks::use_list_export::{ExportRows, TenantRows, use_list_export};
 use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::{
     contains_ignore_case, created_in_range, expiry_label, floored_days_until, fmt_day,
@@ -88,7 +88,7 @@ fn cmp_missing_last<T: Ord>(a: Option<&T>, b: Option<&T>, desc: bool) -> Orderin
 /// Orders the filtered rows by `col`. Pure so the column semantics — above all
 /// where a missing value lands — are pinned by tests rather than by eyeballing
 /// a 5 000-app tenant.
-fn sort_rows(rows: &mut [ApplicationListRowDto], col: AppSortCol, desc: bool) {
+fn sort_rows(rows: &mut [Arc<ApplicationListRowDto>], col: AppSortCol, desc: bool) {
     match col {
         AppSortCol::Name => {
             // Lowercase ONCE per row (`sort_by_cached_key`) instead of twice per
@@ -222,11 +222,14 @@ pub fn ApplicationList() -> impl IntoView {
     let refreshing = RwSignal::new(false);
 
     // Rows currently shown (after every filter) — captured for the inventory
-    // export so "what you see is what you export". Kept in step by the
-    // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
-    // copy, not a row-by-row clone of the filtered list.
+    // export so "what you see is what you export". Published by `LoadedApps`
+    // from its `sorted` memo, tagged with the tenant they were fetched for;
+    // the `Arc`s make each snapshot a pointer copy, not a row-by-row clone of
+    // the filtered list. The binding borrows the rows, so the click builds one
+    // `Vec` of references and copies none.
     let (export_rows, exporting, do_export) = use_list_export(
-        |rows: Arc<Vec<ApplicationListRowDto>>, format| async move {
+        |rows: Arc<Vec<Arc<ApplicationListRowDto>>>, format| async move {
+            let rows: Vec<&ApplicationListRowDto> = rows.iter().map(Arc::as_ref).collect();
             applications::save_applications_to_file(&rows, format).await
         },
         "app registrations",
@@ -241,11 +244,15 @@ pub fn ApplicationList() -> impl IntoView {
         async move {
             let Some(t) = tenant else {
                 refreshing.set(false);
-                return Ok(Vec::new());
+                return Ok(TenantRows::new(None, Vec::new()));
             };
             let result = applications::list_applications_with_pairing(&t.tenant_id).await;
             refreshing.set(false);
-            result
+            // Each row wrapped ONCE, here (every later stage — the resource's
+            // own read, the filter memos, the sort, the export snapshot, the
+            // virtual window — copies a refcount instead of the row), and
+            // tagged with the tenant the fetch ran for.
+            result.map(|rows| TenantRows::new(Some(&t.tenant_id), rows))
         }
     });
 
@@ -357,10 +364,10 @@ pub fn ApplicationList() -> impl IntoView {
                             // across that.
                             Suspend::new(async move {
                                 match apps.await {
-                                    Ok(items) => {
+                                    Ok(loaded) => {
                                         view! {
                                             <LoadedApps
-                                                items=items
+                                                loaded=loaded
                                                 search=search
                                                 cred_filter=cred_filter
                                                 created_after=created_after
@@ -404,7 +411,8 @@ pub fn ApplicationList() -> impl IntoView {
 /// own inputs change and downstream subtrees update independently.
 #[component]
 fn LoadedApps(
-    items: Vec<ApplicationListRowDto>,
+    /// The fetch's rows and the tenant it ran for.
+    loaded: TenantRows<ApplicationListRowDto>,
     search: Signal<String>,
     cred_filter: RwSignal<String>,
     created_after: RwSignal<Option<NaiveDate>>,
@@ -414,9 +422,13 @@ fn LoadedApps(
     filters_open: RwSignal<bool>,
     /// Active `(column, descending)`, or `None` for the order Graph returned.
     sort: RwSignal<Option<(AppSortCol, bool)>>,
-    export_rows: StoredValue<Arc<Vec<ApplicationListRowDto>>>,
+    export_rows: ExportRows<Arc<ApplicationListRowDto>>,
 ) -> impl IntoView {
     let session = use_session();
+    let TenantRows {
+        tenant_id,
+        rows: items,
+    } = loaded;
 
     // Publish the `object_id -> display name` map for the bulk bars (here and
     // the standalone Bulk Actions page), which operate on this same selection
@@ -480,9 +492,6 @@ fn LoadedApps(
             ),
             Facet::new("With certs", "certs", ApplicationListRowDto::has_certs),
         ],
-        // The export snapshot is taken from `sorted` below instead, so what you
-        // export matches what you see down to the row order.
-        export_rows: None,
     });
 
     // The backend paginates to completion (bounded by the `APPS_MAX` it shares
@@ -502,24 +511,24 @@ fn LoadedApps(
     // The sort sits BETWEEN the filtered set and the `VirtualList`: the scroller
     // is handed an already-ordered `Arc<Vec<_>>` exactly as it is handed the
     // filtered one, so virtualization never learns that sorting exists.
-    let sorted: Memo<Arc<Vec<ApplicationListRowDto>>> = Memo::new(move |_| {
+    let sorted: Memo<Arc<Vec<Arc<ApplicationListRowDto>>>> = Memo::new(move |_| {
         let Some((col, desc)) = sort.get() else {
             // Unsorted: a pointer copy of the filtered set, not a row-by-row
             // clone of it (the same short-circuit `use_filtered_list` makes).
             return shown.get();
         };
-        // One clone of the *filtered* set to own an order. `base` already clones
-        // its matches whenever a search is active, so this adds a second pass
-        // over a set that is usually much smaller than the tenant — and only
-        // while a sort is actually held.
+        // The filtered set's own `Vec` to own an order — of `Arc`s, so one
+        // refcount per row, never a copy of a row, and only while a sort is
+        // actually held.
         let mut rows = shown.with(|s| s.as_ref().clone());
         sort_rows(&mut rows, col, desc);
         Arc::new(rows)
     });
 
-    // "What you see is what you export", order included. `use_filtered_list` was
-    // given no `export_rows`, so this is the snapshot's single writer.
-    Effect::new(move |_| export_rows.set_value(sorted.get()));
+    // "What you see is what you export", order included: published from
+    // `sorted`, not `shown`, and refused under any tenant but the one these
+    // rows were fetched for.
+    export_rows.publish(tenant_id, sorted);
 
     // Derived ONCE, outside the render closures: each is memoized, so a
     // keystroke updates the count text and the selection bar in place instead of
@@ -641,7 +650,7 @@ fn LoadedApps(
 /// every row is filtered out, otherwise the keyed virtualized window.
 #[component]
 fn VirtualRows(
-    items: Memo<Arc<Vec<ApplicationListRowDto>>>,
+    items: Memo<Arc<Vec<Arc<ApplicationListRowDto>>>>,
     // The pre-filter tenant count, so an empty tenant gets an onboarding CTA
     // rather than the "adjust your filters" copy meant for a filtered-empty list.
     total: usize,
@@ -696,7 +705,7 @@ fn VirtualRows(
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
                 row_selector=".app-list__row"
-                key=|row: &ApplicationListRowDto| row.id.clone()
+                key={|row: &Arc<ApplicationListRowDto>| row.id.clone()}
                 render_row=move |idx, row| view_row(idx, row, session, now).into_any()
                 scroll_offset=session.tenant_ui.apps_scroll_top
             />
@@ -704,16 +713,19 @@ fn VirtualRows(
     }
 }
 
+/// One row of the window. The row is shared with the filter memos (an `Arc`),
+/// so the few fields it renders are copied out here, once per row entering the
+/// window, never per filter change.
 fn view_row(
     idx: usize,
-    row: ApplicationListRowDto,
+    row: Arc<ApplicationListRowDto>,
     session: crate::state::Session,
     now: DateTime<Utc>,
 ) -> impl IntoView {
-    let paired_sp_id = row.paired_service_principal_id;
+    let paired_sp_id = row.paired_service_principal_id.clone();
     // One shared allocation for the row id; the per-handler captures below are
     // refcount bumps instead of String clones.
-    let id: Arc<str> = row.id.into();
+    let id: Arc<str> = row.id.as_str().into();
     let id_class = Arc::clone(&id);
     let id_click = Arc::clone(&id);
     let id_check = Arc::clone(&id);
@@ -731,12 +743,12 @@ fn view_row(
     let display_name = if row.display_name.is_empty() {
         row.app_id.clone()
     } else {
-        row.display_name
+        row.display_name.clone()
     };
     let title_name = display_name.clone();
     // Owned name copies for the open handlers (the open chip's label).
     let name_click = display_name.clone();
-    let app_id_string = row.app_id;
+    let app_id_string = row.app_id.clone();
     // Descriptive per-row label for the bulk-select checkbox: the row's
     // display name plus its appId, so screen-reader users can tell rows apart
     // instead of hearing "Select for bulk actions" repeated.
@@ -826,8 +838,8 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap() + Duration::days(days)
     }
 
-    fn row(name: &str, expiry: Option<i64>, created: Option<i64>) -> ApplicationListRowDto {
-        ApplicationListRowDto {
+    fn row(name: &str, expiry: Option<i64>, created: Option<i64>) -> Arc<ApplicationListRowDto> {
+        Arc::new(ApplicationListRowDto {
             id: name.to_string(),
             app_id: format!("{name}-appid"),
             display_name: name.to_string(),
@@ -839,10 +851,10 @@ mod tests {
             soonest_credential_expiry: expiry.map(at),
             credential_status: ListCredentialStatus::None,
             paired_service_principal_id: None,
-        }
+        })
     }
 
-    fn names(rows: &[ApplicationListRowDto]) -> Vec<&str> {
+    fn names(rows: &[Arc<ApplicationListRowDto>]) -> Vec<&str> {
         rows.iter().map(|r| r.display_name.as_str()).collect()
     }
 

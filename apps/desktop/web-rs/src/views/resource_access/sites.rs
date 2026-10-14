@@ -117,8 +117,13 @@ pub(super) fn SitesPanel() -> impl IntoView {
         "site grants",
     );
     // Keep the export snapshot in step with what's rendered — what you see is
-    // what you export, filter included.
-    Effect::new(move |_| export_rows.set_value(Arc::new(filtered_rows.get())));
+    // what you export, filter included. Tagged with the active tenant, read
+    // untracked: the rows follow `result`, which the hydration Effect below
+    // clears on every tenant switch and only ever sets for the active tenant.
+    Effect::new(move |_| {
+        let tenant_id = tenant.with_untracked(|t| t.as_ref().map(|t| t.tenant_id.clone()));
+        export_rows.set(tenant_id, Arc::new(filtered_rows.get()));
+    });
 
     // Subscribe to sweep progress for this view's lifetime; abort on unmount so
     // the stream task doesn't leak or race a remount's task (audit pattern).

@@ -154,7 +154,12 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
         },
         "candidate apps",
     );
-    Effect::new(move |_| export_rows.set_value(Arc::new(visible_rows.get())));
+    // Tagged with the active tenant, read untracked: the rows follow `result`,
+    // which the Effect below clears on every tenant switch.
+    Effect::new(move |_| {
+        let tenant_id = tenant.with_untracked(|t| t.as_ref().map(|t| t.tenant_id.clone()));
+        export_rows.set(tenant_id, Arc::new(visible_rows.get()));
+    });
 
     // A probe result is mailbox- and tenant-specific: clear it on tenant switch
     // so another tenant's verdicts can never linger (cross-tenant leakage).

@@ -420,14 +420,19 @@ pub async fn delete_enterprise_app_role(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveEnterpriseArgs<'a> {
-    rows: &'a [EnterpriseApplicationDto],
+    rows: &'a [&'a EnterpriseApplicationDto],
     format: &'a str,
 }
 
 /// Exports the (filtered) enterprise-application list to a CSV/JSON file via the
 /// OS save dialog. Returns the chosen path, or `None` if the user cancelled.
+///
+/// Borrowed rows, because the list holds them as `Arc`s: a `&Row` serializes
+/// exactly as the `Row`, without relying on serde's `rc` feature. web-rs never
+/// declares `rc`; it arrives only transitively (`leptos_config`, and the shared
+/// crates' workspace `serde`), so it could leave with a dependency bump.
 pub async fn save_enterprise_applications_to_file(
-    rows: &[EnterpriseApplicationDto],
+    rows: &[&EnterpriseApplicationDto],
     format: &str,
 ) -> Result<Option<String>, UiError> {
     invoke_result(

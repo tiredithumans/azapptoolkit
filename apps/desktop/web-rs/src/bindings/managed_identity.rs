@@ -104,14 +104,19 @@ pub async fn assign_managed_identity_azure_role(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveManagedIdentitiesArgs<'a> {
-    rows: &'a [ManagedIdentityDto],
+    rows: &'a [&'a ManagedIdentityDto],
     format: &'a str,
 }
 
 /// Exports the (filtered) managed-identity list to a CSV/JSON file via the OS
 /// save dialog. Returns the chosen path, or `None` if the user cancelled.
+///
+/// Borrowed rows, because the list holds them as `Arc`s: a `&Row` serializes
+/// exactly as the `Row`, without relying on serde's `rc` feature. web-rs never
+/// declares `rc`; it arrives only transitively (`leptos_config`, and the shared
+/// crates' workspace `serde`), so it could leave with a dependency bump.
 pub async fn save_managed_identities_to_file(
-    rows: &[ManagedIdentityDto],
+    rows: &[&ManagedIdentityDto],
     format: &str,
 ) -> Result<Option<String>, UiError> {
     invoke_result(

@@ -28,7 +28,7 @@ use crate::components::index_cap_notice::IndexCapNotice;
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
-use crate::hooks::use_list_export::use_list_export;
+use crate::hooks::use_list_export::{ExportRows, TenantRows, use_list_export};
 use crate::state::use_session;
 use crate::util::contains_ignore_case;
 
@@ -78,10 +78,13 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 
     // Rows currently shown (after every filter) — captured for the inventory
     // export so "what you see is what you export" (the backend serializes these
-    // passed rows; filters live here). Kept in step by an Effect in
-    // `LoadedManagedIdentities`; the `Arc` makes each snapshot a pointer copy.
+    // passed rows; filters live here). Published by `LoadedManagedIdentities`
+    // from its `shown` memo, tagged with the tenant the rows were fetched for;
+    // the `Arc`s make each snapshot a pointer copy. The binding borrows the
+    // rows, so the click builds one `Vec` of references and copies none.
     let (export_rows, exporting, do_export) = use_list_export(
-        |rows: Arc<Vec<ManagedIdentityDto>>, format| async move {
+        |rows: Arc<Vec<Arc<ManagedIdentityDto>>>, format| async move {
+            let rows: Vec<&ManagedIdentityDto> = rows.iter().map(Arc::as_ref).collect();
             managed_identity::save_managed_identities_to_file(&rows, format).await
         },
         "managed identities",
@@ -97,7 +100,11 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             };
             let result = managed_identity::list_managed_identities(&t.tenant_id).await;
             refreshing.set(false);
-            result
+            // Each row wrapped ONCE, here (every later stage — the resource's
+            // own read, the filter memos, the export snapshot, the virtual
+            // window — copies a refcount instead of the row), and tagged with
+            // the tenant the fetch ran for.
+            result.map(|rows| TenantRows::new(Some(&t.tenant_id), rows))
         }
     });
 
@@ -159,7 +166,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                             // memos, not here.
                             Suspend::new(async move {
                                 match identities.await {
-                                    Ok(list) if list.is_empty() => {
+                                    Ok(loaded) if loaded.rows.is_empty() => {
                                         view! {
                                             <EmptyState
                                                 icon=IconName::Server
@@ -170,10 +177,10 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                                         }
                                             .into_any()
                                     }
-                                    Ok(list) => {
+                                    Ok(loaded) => {
                                         view! {
                                             <LoadedManagedIdentities
-                                                list=list
+                                                loaded=loaded
                                                 search=search
                                                 mi_filter=mi_filter
                                                 filters_open=filters_open
@@ -215,16 +222,21 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 /// memory without rebuilding this subtree.
 #[component]
 fn LoadedManagedIdentities(
-    list: Vec<ManagedIdentityDto>,
+    /// The fetch's rows and the tenant it ran for.
+    loaded: TenantRows<ManagedIdentityDto>,
     search: Signal<String>,
     mi_filter: RwSignal<String>,
     /// Drawer state, so the facet chips collapse with the rest of the drawer —
     /// matching the two sibling lists.
     filters_open: RwSignal<bool>,
-    export_rows: StoredValue<Arc<Vec<ManagedIdentityDto>>>,
+    export_rows: ExportRows<Arc<ManagedIdentityDto>>,
 ) -> impl IntoView {
+    let TenantRows {
+        tenant_id,
+        rows: items,
+    } = loaded;
     let list = use_filtered_list(FilteredListSpec {
-        items: list,
+        items,
         search,
         // Name OR appId, like the two sibling lists — a managed identity is
         // just as likely to arrive from a log line as from a name.
@@ -251,10 +263,12 @@ fn LoadedManagedIdentities(
                 matches_mi_facet(mi, "disabled")
             }),
         ],
-        export_rows: Some(export_rows),
     });
 
     let filtered = list.shown;
+    // "What you see is what you export", refused under any tenant but the one
+    // these rows were fetched for.
+    export_rows.publish(tenant_id, filtered);
     let total = list.total;
     let shown_total = list.shown_total();
     let base_total = list.base_total();
@@ -307,7 +321,7 @@ fn LoadedManagedIdentities(
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
                 row_selector=".app-list__row"
-                key=|mi: &ManagedIdentityDto| mi.id.clone()
+                key={|mi: &Arc<ManagedIdentityDto>| mi.id.clone()}
                 render_row=move |idx, mi| { render_row(idx, mi).into_any() }
             />
         </Show>

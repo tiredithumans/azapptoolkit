@@ -28,7 +28,7 @@ use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
-use crate::hooks::use_list_export::use_list_export;
+use crate::hooks::use_list_export::{ExportRows, TenantRows, use_list_export};
 use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::{contains_ignore_case, created_in_range};
 use crate::views::pairing::jump_to_paired_app;
@@ -83,11 +83,14 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
     let refreshing = RwSignal::new(false);
 
     // Rows currently shown (after every filter) — captured for the inventory
-    // export so "what you see is what you export". Kept in step by the
-    // `use_filtered_list` export hook; the `Arc` makes each snapshot a pointer
-    // copy.
+    // export so "what you see is what you export". Published by
+    // `LoadedEnterpriseApps` from its `shown` memo, tagged with the tenant the
+    // rows were fetched for; the `Arc`s make each snapshot a pointer copy. The
+    // binding borrows the rows, so the click builds one `Vec` of references and
+    // copies none.
     let (export_rows, exporting, do_export) = use_list_export(
-        |rows: Arc<Vec<EnterpriseApplicationDto>>, format| async move {
+        |rows: Arc<Vec<Arc<EnterpriseApplicationDto>>>, format| async move {
+            let rows: Vec<&EnterpriseApplicationDto> = rows.iter().map(Arc::as_ref).collect();
             enterprise_application::save_enterprise_applications_to_file(&rows, format).await
         },
         "enterprise applications",
@@ -101,11 +104,15 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
         async move {
             let Some(t) = tenant else {
                 refreshing.set(false);
-                return Ok(Vec::new());
+                return Ok(TenantRows::new(None, Vec::new()));
             };
             let result = enterprise_application::list_enterprise_applications(&t.tenant_id).await;
             refreshing.set(false);
-            result
+            // Each row wrapped ONCE, here (every later stage — the resource's
+            // own read, the filter memos, the export snapshot, the virtual
+            // window — copies a refcount instead of the row), and tagged with
+            // the tenant the fetch ran for.
+            result.map(|rows| TenantRows::new(Some(&t.tenant_id), rows))
         }
     });
 
@@ -178,10 +185,10 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                             // carries the scroll position across it.
                             Suspend::new(async move {
                                 match sps.await {
-                                    Ok(items) => {
+                                    Ok(loaded) => {
                                         view! {
                                             <LoadedEnterpriseApps
-                                                items=items
+                                                loaded=loaded
                                                 search=search
                                                 ent_filter=ent_filter
                                                 created_after=created_after
@@ -221,7 +228,8 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
 /// result count, and the virtualized rows.
 #[component]
 fn LoadedEnterpriseApps(
-    items: Vec<EnterpriseApplicationDto>,
+    /// The fetch's rows and the tenant it ran for.
+    loaded: TenantRows<EnterpriseApplicationDto>,
     search: Signal<String>,
     ent_filter: RwSignal<String>,
     created_after: RwSignal<Option<NaiveDate>>,
@@ -229,8 +237,12 @@ fn LoadedEnterpriseApps(
     /// Shared with the list view's filter toggle — the facet chips collapse with
     /// the rest of the drawer.
     filters_open: RwSignal<bool>,
-    export_rows: StoredValue<Arc<Vec<EnterpriseApplicationDto>>>,
+    export_rows: ExportRows<Arc<EnterpriseApplicationDto>>,
 ) -> impl IntoView {
+    let TenantRows {
+        tenant_id,
+        rows: items,
+    } = loaded;
     let list = use_filtered_list(FilteredListSpec {
         items,
         search,
@@ -269,11 +281,13 @@ fn LoadedEnterpriseApps(
                 sp.is_foreign_tenant
             }),
         ],
-        export_rows: Some(export_rows),
     });
 
     let total = list.total;
     let shown = list.shown;
+    // "What you see is what you export", refused under any tenant but the one
+    // these rows were fetched for.
+    export_rows.publish(tenant_id, shown);
     let base_total = list.base_total();
     let enabled = list.count_of("enabled");
     let disabled = list.count_of("disabled");
@@ -313,7 +327,7 @@ fn LoadedEnterpriseApps(
 /// every row is filtered out, otherwise the keyed virtualized window.
 #[component]
 fn VirtualRows(
-    items: Memo<Arc<Vec<EnterpriseApplicationDto>>>,
+    items: Memo<Arc<Vec<Arc<EnterpriseApplicationDto>>>>,
     // Pre-filter tenant count: 0 ⇒ no enterprise apps at all (onboarding CTA)
     // rather than a filtered-empty list ("broaden your search").
     total: usize,
@@ -364,7 +378,7 @@ fn VirtualRows(
                 scroller_class="app-list__scroller"
                 sizer_class="app-list__sizer"
                 row_selector=".app-list__row"
-                key=|sp: &EnterpriseApplicationDto| sp.id.clone()
+                key={|sp: &Arc<EnterpriseApplicationDto>| sp.id.clone()}
                 render_row=move |idx, sp| view_row(idx, sp, session).into_any()
                 scroll_offset=session.tenant_ui.enterprise_scroll_top
             />
@@ -372,18 +386,21 @@ fn VirtualRows(
     }
 }
 
+/// One row of the window. The row is shared with the filter memos (an `Arc`),
+/// so the few fields it renders are copied out here, once per row entering the
+/// window, never per filter change.
 fn view_row(
     idx: usize,
-    sp: EnterpriseApplicationDto,
+    sp: Arc<EnterpriseApplicationDto>,
     session: crate::state::Session,
 ) -> impl IntoView {
     // The list offers an Enabled/Disabled facet, but the rows never showed the
     // state they filter on — so a filtered view and an unfiltered one looked
-    // identical row-for-row. Read before any field moves out of `sp`.
+    // identical row-for-row.
     let is_disabled = sp.is_disabled();
     // One shared allocation for the row id; the per-handler captures below are
     // refcount bumps instead of String clones.
-    let id: Arc<str> = sp.id.into();
+    let id: Arc<str> = sp.id.as_str().into();
     let id_click = Arc::clone(&id);
     // Highlight every row open in the workspace (the working set). Class name
     // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
@@ -398,14 +415,14 @@ fn view_row(
     let display_name = if sp.display_name.is_empty() {
         sp.app_id.clone()
     } else {
-        sp.display_name
+        sp.display_name.clone()
     };
     let title_name = display_name.clone();
     // Owned name copies for the open handlers (the open chip's label).
     let name_click = display_name.clone();
-    let app_id_string = sp.app_id;
+    let app_id_string = sp.app_id.clone();
     let is_foreign = sp.is_foreign_tenant;
-    let paired_app_id = sp.paired_app_registration_id;
+    let paired_app_id = sp.paired_app_registration_id.clone();
 
     // Descriptive per-row label so the row button announces which enterprise
     // application it opens.

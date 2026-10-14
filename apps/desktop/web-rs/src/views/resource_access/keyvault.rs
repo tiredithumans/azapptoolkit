@@ -141,8 +141,13 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
         "role assignments",
     );
     // Keep the export snapshot in step with what's rendered — what you see is
-    // what you export, filter included.
-    Effect::new(move |_| export_rows.set_value(Arc::new(filtered_rows.get())));
+    // what you export, filter included. Tagged with the active tenant, read
+    // untracked: the rows follow `result`, which the hydration Effect below
+    // clears on every tenant switch and only ever sets for the active tenant.
+    Effect::new(move |_| {
+        let tenant_id = tenant.with_untracked(|t| t.as_ref().map(|t| t.tenant_id.clone()));
+        export_rows.set(tenant_id, Arc::new(filtered_rows.get()));
+    });
 
     use_progress_stream(progress, events::keyvault_sweep_progress);
 

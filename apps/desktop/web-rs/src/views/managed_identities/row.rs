@@ -23,11 +23,14 @@ pub(crate) fn chip_kind_for(subtype: MiSubtype) -> AppKind {
 // Reuses the shared `app-list__*` row classes (and the VirtualList scroller)
 // so the managed-identity list matches the App Registration / Enterprise
 // Application lists exactly. Rows are absolutely positioned inside the sizer.
-pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
+// The row is shared with the filter memos (an `Arc`), so the few fields it
+// renders are copied out here, once per row entering the window, never per
+// filter change.
+pub(super) fn render_row(idx: usize, mi: Arc<ManagedIdentityDto>) -> impl IntoView {
     let session = use_session();
     // One shared allocation for the row id; the per-handler captures below are
     // refcount bumps instead of String clones.
-    let id: Arc<str> = mi.id.into();
+    let id: Arc<str> = mi.id.as_str().into();
     let id_for_click = Arc::clone(&id);
     // Highlight every row open in the workspace (the working set). Class name
     // stays `--selected` so `pairing.rs`'s scroll-settle selector keeps matching.
@@ -49,7 +52,7 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
     let display_name = if mi.display_name.is_empty() {
         mi.app_id.clone()
     } else {
-        mi.display_name
+        mi.display_name.clone()
     };
     let title_name = display_name.clone();
     let name_for_open = display_name.clone();
@@ -57,7 +60,7 @@ pub(super) fn render_row(idx: usize, mi: ManagedIdentityDto) -> impl IntoView {
     // accessible name is whatever the chip + truncated spans happen to
     // concatenate to (the sibling lists both label their rows).
     let row_label = format!("Open managed identity {display_name}");
-    let app_id = mi.app_id;
+    let app_id = mi.app_id.clone();
     view! {
         <div
             class=row_class
