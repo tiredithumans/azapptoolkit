@@ -207,23 +207,23 @@ impl GraphClient {
     /// index scans (service principals), a tenant larger than the bound must
     /// degrade to a truncated-but-usable list: failing the Enterprise Apps
     /// list, the App Registrations pairing join, and global search outright is
-    /// strictly worse than returning the first N rows. The cap also bounds a
-    /// Returns `(items, truncated)` — `truncated` is `true` when rows existed
-    /// beyond the cap, so the caller can log/surface that coverage is partial.
+    /// strictly worse than returning the first N rows. Returns
+    /// `(items, truncated)` — `truncated` is `true` when rows existed beyond
+    /// the cap, so the caller can log/surface that coverage is partial.
     ///
     /// `consistency_eventual` must match the choice the **first** page was
     /// issued with, exactly as for [`Self::collect_all_pages`]: an `$expand`
     /// enumeration that pages as an advanced query gets a 200 with the
     /// expanded property missing, not an error.
     ///
-    /// The item cap is **not** a cycle guard, despite what this doc used to
-    /// claim. Only a non-empty page advances toward it, so
-    /// `{"value": [], "@odata.nextLink": "<same url>"}` spun without bound —
-    /// and Graph legitimately returns empty pages carrying a `nextLink` on
-    /// filtered directory collections, which is exactly what both callers page
-    /// through. Hence the explicit `MAX_PAGES`, matching the sibling
-    /// `collect_all_pages`; since this helper's contract is to degrade rather
-    /// than fail, hitting it reports `truncated` instead of erroring.
+    /// The item cap is **not** a cycle guard. Only a non-empty page advances
+    /// toward it, so `{"value": [], "@odata.nextLink": "<same url>"}` would
+    /// spin without bound — and Graph legitimately returns empty pages
+    /// carrying a `nextLink` on filtered directory collections, which is
+    /// exactly what both callers page through. [`MAX_PAGES`] is the cycle
+    /// guard, as in the sibling `collect_all_pages`; since this helper's
+    /// contract is to degrade rather than fail, hitting it reports `truncated`
+    /// instead of erroring.
     pub(crate) async fn collect_all_pages_capped<T: DeserializeOwned>(
         &self,
         mut page: Paged<T>,
@@ -736,10 +736,6 @@ impl GraphClient {
     }
 }
 
-/// The crate's "object vanished between the index read and the detail read"
-/// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
-/// stays an error. One definition, so the single-object readers and the
-/// batched ones cannot drift.
 /// Wall-clock and row accounting for one multi-page read, so a slow
 /// tenant-wide scan can be read straight off the log file: one `debug` line
 /// per continuation page, and one summary once the read has followed at least
@@ -840,6 +836,10 @@ fn millis(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The crate's "object vanished between the index read and the detail read"
+/// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
+/// stays an error. One definition, so the single-object readers and the
+/// batched ones cannot drift.
 pub(crate) fn not_found_as_none<T>(r: Result<T>) -> Result<Option<T>> {
     match r {
         Ok(v) => Ok(Some(v)),
@@ -870,12 +870,13 @@ pub(crate) fn search_phrase(field: &str, term: &str) -> String {
 /// with percent-encoded query values, for the `$batch` helpers. Mirrors the
 /// single-call encoding the SP prewarm (`prewarm_sps`) does inline, so a
 /// batched read's URL is byte-identical to its per-item equivalent. `path` is
-/// already-escaped (object ids are GUIDs); only the query values are encoded.
+/// used as given and only the query values are encoded, so every id the caller
+/// spliced into it must already have passed `validate::require_path_segment`.
 pub(crate) fn batch_sub_url(path: &str, query: &[(&str, &str)]) -> String {
     // A throwaway base just to reuse `url`'s query encoder; the host is never
     // emitted — only `path?query` is returned.
     let mut u = url::Url::parse(&format!("https://graph.invalid{path}"))
-        .expect("static base + GUID path parses");
+        .expect("static base + absolute path parses");
     {
         let mut pairs = u.query_pairs_mut();
         for (k, v) in query {
