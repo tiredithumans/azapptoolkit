@@ -367,7 +367,12 @@ roles/scopes (`app_roles.rs`, `expose_api.rs`) change one app or SP in place —
 rename nothing, so nothing in the list tier changes — and call `invalidate_app_details` (the
 can't-miss cheap sweep of the per-app payloads). `repo_invariants::an_in_place_write_never_busts_the_list_tier`
 pins both tiers lexically: a command body with an in-place mutation call and no set-changing call
-must not name `invalidate_app_lists`.
+must not name `invalidate_app_lists`. An SP PATCH is in place too: hiding an app from My Apps (a
+tag), `appRoleAssignmentRequired` and the SAML signing-key thumbprint are on no list row, so they
+take the detail tier, while `accountEnabled` is selected into the SP index and shown on the
+Enterprise list, so it busts the list tier — the pin reads the indexed fields from the graph
+client's `SP_INDEX_SELECT` rather than listing them by hand. Removing an app's Exchange mailbox
+scoping and the AAP migration take `invalidate_app_detail_state` for the same reason.
 
 **The app-role resource directory has two busts.** `list_app_role_resources` (the Grant-access
 picker's "Tenant app registrations" group) caches which tenant SPs expose ≥1 enabled Application
@@ -520,8 +525,9 @@ Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the
 grant) call `invalidate_app_lists` only when an SP was newly created; otherwise the cheaper
 detail + audit bust suffices. `GrantRun.sp_created` survives a later failure in the same run, so
 an SP created just before a refused grant still busts the list tier. `grant_exchange_mailbox_access`
-does the same when `apply_exchange_mailbox_scope` refuses after its SP was created (the core busts
-the list tier itself on success).
+busts the list tier whenever it created the SP, whether or not the scope step then succeeded; the
+core (`apply_exchange_mailbox_scope`) always busts the detail tier, since scoping changes no list
+row.
 
 ## Batched Graph fan-out + the adaptive throttle
 

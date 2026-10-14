@@ -1063,6 +1063,34 @@ fn eviction_is_by_recency_not_insertion_order() {
     );
 }
 
+/// Repeated hits re-key the LRU slot in place (reusing the key the slot held)
+/// and the recency order is still exact afterwards: the most-touched entry is
+/// the safest, the untouched one goes first.
+#[test]
+fn repeated_touches_keep_the_lru_order_exact() {
+    let cache = Cache::new();
+    cache.configure(None, None, None, None, None, Some(3));
+    for i in 0..3 {
+        cache.put(
+            CacheKind::Permissions,
+            format!("k{i}"),
+            &Sample(format!("v{i}")),
+        );
+    }
+    for _ in 0..3 {
+        assert!(cache.get::<Sample>(CacheKind::Permissions, "k0").is_some());
+    }
+    assert!(cache.get::<Sample>(CacheKind::Permissions, "k1").is_some());
+    assert!(cache.get::<Sample>(CacheKind::Permissions, "k0").is_some());
+    cache.put(CacheKind::Permissions, "k3".into(), &Sample("v3".into()));
+    assert!(cache.get::<Sample>(CacheKind::Permissions, "k0").is_some());
+    assert!(cache.get::<Sample>(CacheKind::Permissions, "k1").is_some());
+    assert!(
+        cache.get::<Sample>(CacheKind::Permissions, "k2").is_none(),
+        "the never-touched entry must be the one evicted"
+    );
+}
+
 /// A pinned index entry must outlive a flood of ordinary entries in the same
 /// bucket — the per-app `app_detail|…` / `mail_scopes|…` writes an audit run
 /// makes, which previously evicted the tenant-wide indexes.

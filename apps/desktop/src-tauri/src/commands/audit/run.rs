@@ -453,13 +453,14 @@ pub async fn run_audit(
     if run_is_cacheable(cancelled, truncated, &degraded) {
         state.cache.put_typed_if_current(
             audit_watch,
-            Arc::new(CachedAuditRun {
-                completed_at: completed_at.clone(),
-                items: items.clone(),
+            Arc::new(CachedAuditRun::new(
+                tenant_id.clone(),
+                completed_at.clone(),
+                items.clone(),
                 mailbox_scoping_resolved,
-                credential_policy_available: app_policy_available,
+                app_policy_available,
                 credential_policy_max_days,
-            }),
+            )),
         );
     }
 

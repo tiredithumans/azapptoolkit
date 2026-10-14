@@ -219,8 +219,15 @@ impl Bucket {
         if let Some(e) = self.entries.get_mut(key) {
             let previous = e.last_access;
             e.last_access = tick;
-            self.lru.remove(&previous);
-            self.lru.insert(tick, key.to_string());
+            // Re-key the LRU slot with the String it already holds: a hit on
+            // the hot read path (every pinned-index lookup included) then
+            // allocates nothing. A slot that is not this key (never, unless
+            // the index and the entries disagree) falls back to a copy.
+            let owned = match self.lru.remove(&previous) {
+                Some(owned) if owned == key => owned,
+                _ => key.to_string(),
+            };
+            self.lru.insert(tick, owned);
         }
     }
 

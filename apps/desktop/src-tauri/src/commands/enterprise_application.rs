@@ -15,7 +15,7 @@ use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_core::models::{AppRoleAssignment, ServicePrincipal, SynchronizationJob};
 use azapptoolkit_graph::GraphError;
 
-use crate::commands::applications::{enterprise_key, invalidate_app_lists};
+use crate::commands::applications::{enterprise_key, invalidate_app_details, invalidate_app_lists};
 use crate::commands::graph_err::forbidden_remediation;
 use crate::dto::UiError;
 use crate::dto::enterprise_application::{
@@ -433,10 +433,11 @@ pub async fn set_enterprise_app_visibility(
     client
         .set_service_principal_tags(&service_principal_id, &tags)
         .await?;
-    // The `HideApp` tag is cached in the enterprise list DTO (and the shared SP
-    // index it derives from), so bust the list caches on success per the
-    // invalidate-on-Ok rule — otherwise the toggle stays stale until the TTL.
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // `tags` is not a field the SP index selects (`SP_INDEX_SELECT`), so no
+    // list row carries it: the detail tier, which holds the paired SP, is the
+    // one to bust. Busting the list tier here cost a full directory rescan per
+    // toggle.
+    invalidate_app_details(&state.cache, &tenant_id);
     Ok(())
 }
 
@@ -463,8 +464,8 @@ pub async fn set_enterprise_app_account_enabled(
 
 /// Sets `appRoleAssignmentRequired` on the service principal (the portal's
 /// "Assignment required?" toggle). When `true`, only assigned users/services can
-/// obtain a token for the app. Busts the list caches on success — the flag is on
-/// the enterprise list DTO and the shared SP index.
+/// obtain a token for the app. Busts the detail tier on success: the flag is on
+/// no list row (the SP index does not select it), only on the detail's SP.
 #[tauri::command]
 pub async fn set_enterprise_app_assignment_required(
     state: State<'_, AppState>,
@@ -477,7 +478,7 @@ pub async fn set_enterprise_app_assignment_required(
     client
         .patch_service_principal(&service_principal_id, &body)
         .await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    invalidate_app_details(&state.cache, &tenant_id);
     Ok(())
 }
 

@@ -7,7 +7,7 @@ use tauri::State;
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_graph::client::ServicePrincipalSigningKeyPatch;
 
-use crate::commands::applications::invalidate_app_lists;
+use crate::commands::applications::invalidate_app_details;
 use crate::dto::UiError;
 use crate::dto::sso::{SigningCertRolloverDto, SsoCertResult};
 use crate::state::AppState;
@@ -50,7 +50,9 @@ pub async fn rotate_saml_signing_certificate(
             },
         )
         .await?;
-    invalidate_app_lists(&state.cache, &tenant_id);
+    // The thumbprint and the key credential are on no list row (the SP index
+    // does not select them): the detail tier plus the cert board are enough.
+    invalidate_app_details(&state.cache, &tenant_id);
     invalidate_sso_cert_board(&state, &tenant_id);
     Ok(cert)
 }
