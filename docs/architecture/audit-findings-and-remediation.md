@@ -565,16 +565,28 @@ healthy positives (`scoped_mailbox` / `scoped_sites`) are demoted to a collapsed
 
 ## Bulk remediations reuse the single-app cores, sequentially
 
-`bulk_remove_redundant_permissions` / `bulk_scope_mailbox_access` / `bulk_scope_sharepoint_access`
-(`commands/bulk.rs`) loop the per-app remediation paths
-(`remediation::remediate_remove_redundant_permissions`, `exchange::grant_exchange_mailbox_access`
-with `permissions: None` = all, `remediation::remediate_scope_sharepoint_access`) — **not** the
-`dispatch_capped` spawn fan-out, because those cores take `State` (not `Send` into a spawn) and
-the selection is a small admin-chosen set. They `claim()` a `bulk_cancel` token once, before the
-first await, and poll it, emit
-`bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than aborting; each
-per-app core busts its own cache. The scope targets (mailbox groups / site URLs + role) are
-**uniform across the selection**.
+Eight bulk commands (`commands/bulk.rs`) loop a per-app path through the sequential driver
+`run_bulk_seq`:
+
+| Command | Per-app path |
+|---|---|
+| `bulk_create_applications` | `applications::create_application_core_with` |
+| `bulk_remove_redundant_permissions` | `remediation::remediate_remove_redundant_permissions_core` |
+| `bulk_scope_mailbox_access` | `exchange::grant_exchange_mailbox_access` (`permissions: None` = all) |
+| `bulk_scope_sharepoint_access` | `remediation::remediate_scope_sharepoint_access` |
+| `bulk_add_owner` | the live owner pre-read + `add_owner` the per-app path uses |
+| `bulk_disable_sign_in` | `remediation::remediate_disable_sign_in` |
+| `bulk_restore_deleted` | `restore_deleted_item` on the app, then its paired deleted SPs |
+| `bulk_stage_sso_certificates` | `sso::stage_if_not_already` (the shared `mint_signing_certificate`) |
+
+They stay **sequential** — **not** a `dispatch_capped` spawn fan-out — because most of those cores
+take `State` or borrow the command's locals (not `Send + 'static` into a spawn) and the selection
+is a small admin-chosen set. (The three bulk writes whose work is `Send` — delete, consent grant,
+the expired-secret sweep — fan out through `run_bulk_capped` instead; see
+`caching-and-search.md`.) They `claim()` a `bulk_cancel` token once, before the first await, and
+poll it, emit `bulk-progress` (no `in_flight_cap`), and degrade to a per-app `error` rather than
+aborting; each per-app core busts its own cache (or the command busts once after the loop). The
+scope targets (mailbox groups / site URLs + role) are **uniform across the selection**.
 
 ## SP-only principals in the audit (no local application)
 

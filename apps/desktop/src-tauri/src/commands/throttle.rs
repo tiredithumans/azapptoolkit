@@ -203,19 +203,24 @@ impl Drop for ThrottleGuard {
 /// collection and the progress payload genuinely differ per command
 /// (`BulkProgress` vs `AuditProgress`), and a driver abstract enough to cover
 /// all of them would hide the gating rather than share it. This shares the
-/// mechanical part and leaves the decisions visible at each call site.
+/// mechanical part and leaves the decisions visible at each call site. The
+/// bulk-local helper is the exception: `bulk::run_bulk_capped` drives the three
+/// capped bulk writes, which share one payload (`BulkProgress`), one gate and
+/// one lost-task contract — three hand copies of that had drifted. Its callers
+/// still attach the meter themselves.
 pub(crate) struct FanOutMeter {
     tracker: Arc<ConcurrencyThrottle>,
     done: Arc<AtomicUsize>,
-    /// Detaches the observer on drop; held, never read.
-    _guard: ThrottleGuard,
+    /// Detaches the observer on drop; held, never read. `None` only for a test
+    /// meter (`detached`), which has no client to attach to.
+    _guard: Option<ThrottleGuard>,
 }
 
 impl FanOutMeter {
     /// Starts at `initial` in-flight and attaches the observer to `client`.
     pub(crate) fn attach(client: Arc<GraphClient>, initial: usize) -> Self {
         let tracker = Arc::new(ConcurrencyThrottle::new(initial));
-        let _guard = ThrottleGuard::attach(client, tracker.clone());
+        let _guard = Some(ThrottleGuard::attach(client, tracker.clone()));
         Self {
             tracker,
             done: Arc::new(AtomicUsize::new(0)),
@@ -258,13 +263,28 @@ impl FanOutTicker {
     /// Records one completed item and returns `(done_so_far, in_flight_cap)`.
     ///
     /// The pair is best-effort: the cap is an atomic read taken after the
-    /// count, and every caller emits after `tick` returns and outside any
-    /// lock, so two tasks can tick 5 then 6 and emit 6 then 5. A progress bar
-    /// that must not step backwards has to compare `done` on the receiving
-    /// side; nothing here orders the events.
+    /// count, and a caller that ticks inside its spawned tasks emits after
+    /// `tick` returns and outside any lock, so two tasks can tick 5 then 6 and
+    /// emit 6 then 5. A progress bar that must not step backwards has to
+    /// compare `done` on the receiving side; nothing here orders the events.
+    /// (`bulk::run_bulk_capped` ticks on its collect side instead, which runs
+    /// serially, so its events arrive in order.)
     pub(crate) fn tick(&self) -> (usize, usize) {
         let done = self.done.fetch_add(1, Ordering::AcqRel) + 1;
         (done, self.tracker.current_limit())
+    }
+}
+
+#[cfg(test)]
+impl FanOutMeter {
+    /// A meter with no client attached, for tests that drive a capped fan-out
+    /// directly (`bulk::run_bulk_capped`).
+    pub(crate) fn detached(initial: usize) -> Self {
+        Self {
+            tracker: Arc::new(ConcurrencyThrottle::new(initial)),
+            done: Arc::new(AtomicUsize::new(0)),
+            _guard: None,
+        }
     }
 }
 

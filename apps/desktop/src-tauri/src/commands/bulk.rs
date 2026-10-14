@@ -1,14 +1,17 @@
 //! Bulk-operation admin actions.
 //!
-//! Most bulk commands reuse the single-app cores
-//! (`permissions::grant_admin_consent_core`, `applications::create_application_core`)
-//! so the semantics stay identical to the per-app path — bulk is a UX
-//! shortcut, not a new code path. The expired-credential sweep is the
-//! exception: it runs its own concurrent loop for throughput, but selects
+//! Every bulk command but the expired-credential sweep reuses a single-app
+//! core (`permissions::grant_admin_consent_core`,
+//! `applications::create_application_core`, the remediation cores, …) so the
+//! semantics stay identical to the per-app path — bulk is a UX shortcut, not a
+//! new code path. The sweep has no single-app core to call, but selects
 //! credentials with the same shared expiry rule
-//! ([`azapptoolkit_core::audit::is_expired`]) the audit scorer and the
-//! per-app removal paths use — pinned by `expired_password_key_ids`'s test in
-//! `azapptoolkit_core::audit`.
+//! ([`azapptoolkit_core::audit::is_expired`]) the audit scorer and the per-app
+//! removal paths use — pinned by `expired_password_key_ids`'s test in
+//! `azapptoolkit_core::audit`. Two drivers run them: [`run_bulk_seq`]
+//! (sequential) for the cores that take `State` or borrow the command's locals,
+//! and [`run_bulk_capped`] for the three whose work is `Send` — delete, consent
+//! grant and the sweep — which fan out under the adaptive throttle.
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
@@ -18,6 +21,7 @@ use std::future::Future;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::expired_password_key_ids;
+use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::{
     Application, DeletedApplication, DeletedServicePrincipal, RequiredResourceAccess,
     ServicePrincipal,
@@ -35,19 +39,28 @@ use crate::dto::bulk::{
     BulkDisableSignInResult, BulkError, BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome,
     BulkProgress, BulkRemoveExpiredResult, BulkRemoveRedundantOutcome, BulkRemoveRedundantResult,
     BulkRestoreOutcome, BulkRestoreResult, BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome,
-    BulkStageCertResult,
+    BulkStageCertResult, LOST_TASK,
 };
 use crate::dto::permissions::PermissionKind;
 use crate::state::{AppState, CancelToken};
 
-const CONCURRENCY: usize = 4;
+/// The starting in-flight cap of the three capped bulk writes (delete, consent
+/// grant, the expired-secret sweep); [`FanOutMeter`]'s throttle halves it on a
+/// 429 and recovers it when quiet. It bounds how many apps have Microsoft Graph
+/// directory **writes** in flight — each item writes to `/applications`,
+/// `/servicePrincipals` or their grants: one DELETE, a consent grant's role
+/// assignments and scope grants, a run of `removePassword` calls — so it is the
+/// cap Graph's throttling of those writes pushes back on. Reads and the ARM
+/// control plane (`dispatch::ARM_CONCURRENCY`) have caps of their own.
+const BULK_WRITE_CONCURRENCY: usize = 4;
 
-/// Lets [`run_bulk_seq`] ask an opaque outcome whether the run should stop.
+/// Lets the bulk drivers ([`run_bulk_seq`], [`run_bulk_capped`]) ask an opaque
+/// outcome whether the run should stop.
 ///
-/// The driver is generic over the outcome type, so it cannot reach into an
-/// `error` field itself. Implemented per outcome rather than passed as a closure
-/// at each call site so the answer can't drift between the six bulk commands —
-/// they all mean the same thing by "the session died".
+/// The drivers are generic over the outcome type, so they cannot reach into an
+/// `error` field themselves. Implemented per outcome rather than passed as a
+/// closure at each call site so the answer can't drift between the bulk
+/// commands — they all mean the same thing by "the session died".
 trait BulkOutcome {
     /// True when this item failed for a reason that makes every *remaining*
     /// item fail the same way. See [`BulkError::is_reauth_fatal`].
@@ -76,6 +89,71 @@ bulk_outcome_error_field!(
     BulkStageCertOutcome,
     BulkRestoreOutcome,
 );
+
+/// A bulk delete's outcome: the deleted id, or the failure. Its code is
+/// optional on the wire, so the fatal check reads it through
+/// `UiError::is_reauth_fatal` rather than `BulkError`'s.
+impl BulkOutcome for Result<String, BulkDeleteFailure> {
+    fn session_fatal(&self) -> bool {
+        self.as_ref()
+            .err()
+            .and_then(|failure| failure.code.as_deref())
+            .is_some_and(|code| UiError::new(code, String::new(), false).is_reauth_fatal())
+    }
+}
+
+impl BulkOutcome for GrantItem {
+    fn session_fatal(&self) -> bool {
+        self.outcome.session_fatal()
+    }
+}
+
+/// What [`run_bulk_capped`] needs from one item's outcome beyond
+/// [`BulkOutcome`]. `Send + 'static` because every outcome crosses back from a
+/// spawned task.
+trait CappedOutcome: BulkOutcome + Send + 'static {
+    /// The id the item was dispatched under — matched against the dispatched
+    /// list to find the tasks that never reported.
+    fn object_id(&self) -> &str;
+
+    /// The `current_app` the item's progress event carries.
+    fn progress_label(&self) -> String;
+}
+
+/// The delete and grant rows label progress by object id (the bar maps ids to
+/// names); the sweep holds each app's display name, so it sends that.
+impl CappedOutcome for Result<String, BulkDeleteFailure> {
+    fn object_id(&self) -> &str {
+        match self {
+            Ok(id) => id,
+            Err(failure) => &failure.object_id,
+        }
+    }
+
+    fn progress_label(&self) -> String {
+        self.object_id().to_string()
+    }
+}
+
+impl CappedOutcome for GrantItem {
+    fn object_id(&self) -> &str {
+        &self.outcome.object_id
+    }
+
+    fn progress_label(&self) -> String {
+        self.outcome.object_id.clone()
+    }
+}
+
+impl CappedOutcome for AppRemovalSummary {
+    fn object_id(&self) -> &str {
+        &self.object_id
+    }
+
+    fn progress_label(&self) -> String {
+        self.display_name.clone()
+    }
+}
 
 /// Rejects a bulk-create spec that cannot possibly succeed, without touching
 /// Graph. Split out of the command closure so the rules are unit-testable: a
@@ -282,7 +360,8 @@ pub fn cancel_bulk(state: State<'_, AppState>) {
 /// that cannot be read is reported as a failure row rather than silently left
 /// out. When `None`, every app in the tenant is walked, capped at
 /// [`APPS_MAX`](super::applications::APPS_MAX) like every other tenant-wide
-/// enumeration. Cancellation flows through [`AppState::bulk_cancel`], stopped by
+/// enumeration. The removals fan out through [`run_bulk_capped`];
+/// cancellation flows through [`AppState::bulk_cancel`], stopped by
 /// [`cancel_bulk`].
 #[tauri::command]
 pub async fn bulk_remove_expired_credentials(
@@ -364,123 +443,132 @@ pub async fn bulk_remove_expired_credentials(
     // `summaries`, not here.
     let total = apps.len();
 
-    // Adaptive 429 backoff (was a fixed `CONCURRENCY` cap with no observer): the
-    // throttle halves the in-flight cap on a 429 and recovers when quiet, and the
-    // live cap is surfaced via `in_flight_cap` so the UI can show the back-off.
-    let meter = FanOutMeter::attach(client.clone(), CONCURRENCY);
+    // A lost task's row names its app the way a reported one does.
+    let names: HashMap<String, String> = apps
+        .iter()
+        .map(|app| (app.id.clone(), app.display_name.clone()))
+        .collect();
 
-    emit_progress(
-        &app_handle,
-        crate::dto::events::BULK_PROGRESS,
-        BulkProgress {
-            done: 0,
-            total,
-            current_app: None,
-            cancelled: false,
-            in_flight_cap: Some(meter.limit()),
-        },
-    );
+    // Adaptive 429 backoff (was a fixed cap with no observer): the throttle
+    // halves the in-flight cap on a 429 and recovers when quiet, and the live
+    // cap is surfaced via `in_flight_cap` so the UI can show the back-off.
+    let meter = FanOutMeter::attach(client.clone(), BULK_WRITE_CONCURRENCY);
 
     let now = chrono::Utc::now();
 
-    let cancelled_early = dispatch_capped(
+    let run = run_bulk_capped(
+        &app_handle,
+        &cancel,
+        &session,
+        &meter,
         apps,
-        || meter.limit(),
+        |app| app.id.clone(),
         |app| {
-            if cancel.is_cancelled() || session.is_dead() {
-                return None;
-            }
-            let app_handle = app_handle.clone();
             let client = client.clone();
-            let ticker = meter.ticker();
             let cancel = cancel.clone();
             let session = session.clone();
-            let app_name = app.display_name.clone();
-            let app_obj_id = app.id.clone();
-            let expired_key_ids = expired_password_key_ids(&app, now);
-
-            Some(tokio::spawn(async move {
-                let mut removed = Vec::new();
-                let mut failed = Vec::new();
-                let mut error: Option<BulkError> = None;
-                if !expired_key_ids.is_empty() {
-                    for key_id in &expired_key_ids {
-                        if cancel.is_cancelled() || session.is_dead() {
-                            break;
-                        }
-                        match client.remove_password(&app_obj_id, key_id).await {
-                            Ok(()) => removed.push(key_id.clone()),
-                            Err(err) => {
-                                failed.push(key_id.clone());
-                                let ui = UiError::from(err);
-                                // Latch before converting: once the session is
-                                // dead every remaining key on every remaining
-                                // app fails identically, so this app's own loop
-                                // stops too, not just the dispatch.
-                                let fatal = session.note_code(&ui.code);
-                                // The app's one error slot keeps the first
-                                // failure — unless a later one is fatal: that
-                                // code is what the bar reads to prompt
-                                // re-authentication, and an earlier
-                                // `not_found` in its place would hide a run
-                                // the session killed.
-                                if fatal || error.is_none() {
-                                    error = Some(ui.into());
-                                }
-                                if fatal {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let (done, in_flight_cap) = ticker.tick();
-                let progress = BulkProgress {
-                    done,
-                    total,
-                    current_app: Some(app_name.clone()),
-                    cancelled: cancel.is_cancelled(),
-                    in_flight_cap: Some(in_flight_cap),
-                };
-                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
-
-                AppRemovalSummary {
-                    object_id: app_obj_id,
-                    display_name: app_name,
-                    removed_key_ids: removed,
-                    failed_key_ids: failed,
-                    error,
-                }
-            }))
-        },
-        |joined| match joined {
-            Ok(summary) => {
-                if !summary.removed_key_ids.is_empty()
-                    || !summary.failed_key_ids.is_empty()
-                    || summary.error.is_some()
-                {
-                    summaries.push(summary);
-                }
-            }
-            Err(err) => tracing::warn!(?err, "bulk join error"),
+            async move { sweep_one(&client, &cancel, &session, app, now).await }
         },
     )
     .await;
 
-    // Terminal event, same contract as the delete/grant fan-outs: `done` is the
-    // number of apps actually processed (every spawned task has joined).
-    emit_progress(
-        &app_handle,
-        crate::dto::events::BULK_PROGRESS,
-        BulkProgress {
-            done: meter.done(),
-            total,
-            current_app: None,
-            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-            in_flight_cap: Some(meter.limit()),
-        },
-    );
+    // A run the session killed partway still returns what it did: the summary
+    // that latched the dead session carries the fatal code, which is what the
+    // bar reads to prompt re-authentication and to say the sweep stopped,
+    // instead of presenting it as complete. An error here used to throw that
+    // summary away along with the removals that had landed.
+    Ok(finish_expired_sweep(
+        &state.cache,
+        &tenant_id,
+        total,
+        summaries,
+        run,
+        |id| names.get(id).cloned().unwrap_or_else(|| id.to_string()),
+    ))
+}
+
+/// One app of the expired-secret sweep: removes each secret expired at `now`,
+/// one `removePassword` at a time, checking Cancel and the dead-session latch
+/// before every key — an app with many expired secrets is itself a loop the
+/// operator must be able to stop.
+async fn sweep_one(
+    client: &azapptoolkit_graph::GraphClient,
+    cancel: &CancelToken,
+    session: &SessionDead,
+    app: Application,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppRemovalSummary {
+    let expired_key_ids = expired_password_key_ids(&app, now);
+    let Application {
+        id: object_id,
+        display_name,
+        ..
+    } = app;
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    let mut error: Option<BulkError> = None;
+    for key_id in &expired_key_ids {
+        if cancel.is_cancelled() || session.is_dead() {
+            break;
+        }
+        match client.remove_password(&object_id, key_id).await {
+            Ok(()) => removed.push(key_id.clone()),
+            Err(err) => {
+                failed.push(key_id.clone());
+                let ui = UiError::from(err);
+                // Latch here, not only when the driver collects this app: once
+                // the session is dead every remaining key on every in-flight
+                // app fails identically, so the sibling tasks' key loops stop
+                // too, not just the dispatch.
+                let fatal = session.note_code(&ui.code);
+                // The app's one error slot keeps the first failure — unless a
+                // later one is fatal: that code is what the bar reads to
+                // prompt re-authentication, and an earlier `not_found` in its
+                // place would hide a run the session killed.
+                if fatal || error.is_none() {
+                    error = Some(ui.into());
+                }
+                if fatal {
+                    break;
+                }
+            }
+        }
+    }
+    AppRemovalSummary {
+        object_id,
+        display_name,
+        removed_key_ids: removed,
+        failed_key_ids: failed,
+        error,
+    }
+}
+
+/// Folds an expired-secret sweep's capped run into its result and drops the
+/// credential tier of every app whose secrets may have changed. Split from the
+/// command so the lost-task path runs in a test.
+///
+/// `summaries` arrives holding the selected apps that could not be read. A
+/// reported app joins it when it has something to say (a removal, a failure);
+/// a lost one always does, as a [`LOST_TASK`] row named through `name_of`: its
+/// task ended without reporting, and some of its removals may have landed.
+fn finish_expired_sweep(
+    cache: &Cache,
+    tenant_id: &str,
+    apps_scanned: usize,
+    mut summaries: Vec<AppRemovalSummary>,
+    run: CappedRun<AppRemovalSummary>,
+    name_of: impl Fn(&str) -> String,
+) -> BulkRemoveExpiredResult {
+    let CappedRun {
+        outcomes,
+        lost,
+        cancelled,
+    } = run;
+    summaries.extend(outcomes.into_iter().filter(|summary| {
+        !summary.removed_key_ids.is_empty()
+            || !summary.failed_key_ids.is_empty()
+            || summary.error.is_some()
+    }));
 
     // Invalidate however the run ended: the removals that already landed are
     // real, so the caches are stale either way. The only mutation here is
@@ -489,24 +577,36 @@ pub async fn bulk_remove_expired_credentials(
     // shared SP/app-name indexes, the enterprise list and every mailbox-scope
     // verdict intact (`applications::cache::invalidate_app_credentials` explains
     // the cost of dropping them: a full tenant re-enumeration). The shared keys
-    // it does drop are hash removals, so repeating them per app is free.
+    // it does drop are hash removals, so repeating them per app is free. A lost
+    // app takes the same tier: nothing says which of its removals landed.
     for mutated in summaries.iter().filter(|s| !s.removed_key_ids.is_empty()) {
-        super::applications::invalidate_app_credentials(
-            &state.cache,
-            &tenant_id,
-            &mutated.object_id,
-        );
+        super::applications::invalidate_app_credentials(cache, tenant_id, &mutated.object_id);
     }
-    // A run the session killed partway still returns what it did: the summary
-    // that latched the dead session carries the fatal code, which is what the
-    // bar reads to prompt re-authentication and to say the sweep stopped,
-    // instead of presenting it as complete. An error here used to throw that
-    // summary away along with the removals that had landed.
-    Ok(BulkRemoveExpiredResult {
-        apps_scanned: total,
+    for object_id in &lost {
+        super::applications::invalidate_app_credentials(cache, tenant_id, object_id);
+    }
+    summaries.extend(lost.into_iter().map(|object_id| {
+        AppRemovalSummary {
+            display_name: name_of(&object_id),
+            object_id,
+            removed_key_ids: Vec::new(),
+            failed_key_ids: Vec::new(),
+            error: Some(BulkError {
+                code: LOST_TASK.into(),
+                message:
+                    "its expired-secret removal ended without reporting an outcome; check the \
+                      app's credentials before re-running"
+                        .into(),
+                retryable: false,
+            }),
+        }
+    }));
+
+    BulkRemoveExpiredResult {
+        apps_scanned,
         summaries,
-        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-    })
+        cancelled,
+    }
 }
 
 /// Whether a fan-out stopped because the operator pressed Cancel. A run the
@@ -521,7 +621,7 @@ fn stopped_by_cancel(cancelled_early: bool, cancel: &CancelToken, session: &Sess
 }
 
 /// Deletes every application in `object_ids`, fanning out through
-/// [`dispatch_capped`] under a [`ConcurrencyThrottle`] that halves the in-flight
+/// [`run_bulk_capped`] under a `ConcurrencyThrottle` that halves the in-flight
 /// cap on a 429 and recovers when quiet. (This ran sequentially once; the doc
 /// comment outlived the change.) Failures are collected rather than aborting —
 /// the UI shows a summary dialog.
@@ -536,7 +636,6 @@ pub async fn bulk_delete_applications(
     object_ids: Vec<String>,
 ) -> Result<BulkDeleteResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let total = object_ids.len();
     let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
@@ -544,133 +643,109 @@ pub async fn bulk_delete_applications(
     // backed off under throttling). The throttle halves the in-flight cap on a
     // 429 and recovers when quiet; `dispatch_capped` re-reads it between
     // completions so the cap takes effect mid-run.
-    let meter = FanOutMeter::attach(client.clone(), CONCURRENCY);
-
-    let mut deleted = Vec::new();
-    let mut failed = Vec::new();
-    // Every id a task was spawned for. A task that never reported back (a
-    // panic or abort) may still have landed its DELETE, and the only way to
-    // name that app afterwards is to remember what was dispatched: a join
-    // error carries no id.
-    let mut dispatched: Vec<String> = Vec::new();
+    let meter = FanOutMeter::attach(client.clone(), BULK_WRITE_CONCURRENCY);
     let session = SessionDead::new();
-    let cancelled_early = dispatch_capped(
+    let run = run_bulk_capped(
+        &app_handle,
+        &cancel,
+        &session,
+        &meter,
         object_ids,
-        || meter.limit(),
+        String::clone,
         |id| {
-            if cancel.is_cancelled() || session.is_dead() {
-                return None;
-            }
-            dispatched.push(id.clone());
             let client = client.clone();
-            let app_handle = app_handle.clone();
-            let ticker = meter.ticker();
-            let cancel = cancel.clone();
-            let session = session.clone();
-            Some(tokio::spawn(async move {
-                let result = client.delete_application(&id).await;
-                let (done, in_flight_cap) = ticker.tick();
-                let progress = BulkProgress {
-                    done,
-                    total,
-                    current_app: Some(id.clone()),
-                    cancelled: cancel.is_cancelled(),
-                    in_flight_cap: Some(in_flight_cap),
-                };
-                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
-                match result {
-                    Ok(()) => Ok(id),
-                    Err(err) => {
-                        // Classified here, while the typed error still
-                        // exists; the code also rides the failure so the bar
-                        // can tell a dead session from an app-level failure.
-                        let ui = UiError::from(err);
-                        session.note_code(&ui.code);
-                        Err(BulkDeleteFailure {
-                            object_id: id,
-                            message: ui.message,
-                            code: Some(ui.code),
-                        })
-                    }
-                }
-            }))
-        },
-        |joined| match joined {
-            Ok(Ok(id)) => deleted.push(id),
-            Ok(Err(f)) => failed.push(f),
-            Err(err) => tracing::warn!(?err, "bulk delete join error"),
+            async move { delete_one(&client, id).await }
         },
     )
     .await;
 
-    // A dispatched app that is in neither list lost its task. Reporting it as
-    // a failure (rather than leaving it out) keeps the bar's "N were never
-    // attempted" note honest: that app WAS attempted, and its DELETE may have
-    // landed, so the operator is told to look rather than to re-run blind.
-    let reported: HashSet<&str> = deleted
-        .iter()
-        .map(String::as_str)
-        .chain(failed.iter().map(|f| f.object_id.as_str()))
-        .collect();
-    let lost: Vec<String> = dispatched
-        .into_iter()
-        .filter(|id| !reported.contains(id.as_str()))
-        .collect();
-    drop(reported);
-    failed.extend(lost.into_iter().map(|object_id| {
-        BulkDeleteFailure {
-            object_id,
-            message: "its delete ended without reporting an outcome; check Recently deleted \
-                  before re-running"
-                .into(),
-            code: None,
-        }
-    }));
-
-    emit_progress(
-        &app_handle,
-        crate::dto::events::BULK_PROGRESS,
-        BulkProgress {
-            // Items actually processed: `dispatch_capped` has joined every
-            // spawned task, so the meter's count is final. Equal to `total`
-            // only for a run that finished.
-            done: meter.done(),
-            total,
-            current_app: None,
-            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-            in_flight_cap: Some(meter.limit()),
-        },
-    );
-
-    // Update the caches first: the deletions that landed are real regardless of
-    // how the run ended (see the sweep above). A clean run removes exactly the
-    // deleted rows. A failed DELETE — a lost task is listed as one — may still
-    // have landed, and only a rescan can tell, so that run busts the list tier.
-    if !deleted.is_empty() {
-        if failed.is_empty() {
-            super::applications::record_deleted_apps(&state.cache, &tenant_id, &deleted);
-        } else {
-            super::applications::invalidate_app_lists(&state.cache, &tenant_id);
-        }
-    }
     // Writes have landed, so the result is returned however the run ended: a
     // run the session killed partway reports the ids it deleted (they leave
     // the selection and can be restored) beside the failure that carries the
     // fatal code, which is what the bar reads to prompt re-authentication. An
     // error here used to drop `deleted` on the floor — the apps were gone,
     // the selection still held them, and there was no Undo.
-    Ok(BulkDeleteResult {
+    Ok(finish_bulk_delete(&state.cache, &tenant_id, run))
+}
+
+/// One bulk DELETE: the id on success, else a failure carrying the error's
+/// wire code, classified here while the typed error still exists so the bar
+/// can tell a dead session from an app-level failure.
+async fn delete_one(
+    client: &azapptoolkit_graph::GraphClient,
+    object_id: String,
+) -> Result<String, BulkDeleteFailure> {
+    match client.delete_application(&object_id).await {
+        Ok(()) => Ok(object_id),
+        Err(err) => {
+            let ui = UiError::from(err);
+            Err(BulkDeleteFailure {
+                object_id,
+                message: ui.message,
+                code: Some(ui.code),
+            })
+        }
+    }
+}
+
+/// Folds a bulk delete's capped run into its result and updates the caches.
+/// Split from the command so the lost-task path runs in a test.
+fn finish_bulk_delete(
+    cache: &Cache,
+    tenant_id: &str,
+    run: CappedRun<Result<String, BulkDeleteFailure>>,
+) -> BulkDeleteResult {
+    let CappedRun {
+        outcomes,
+        lost,
+        cancelled,
+    } = run;
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(id) => deleted.push(id),
+            Err(failure) => failed.push(failure),
+        }
+    }
+
+    // A dispatched app that is in neither list lost its task. Reporting it as
+    // a failure (rather than leaving it out) keeps the bar's "N were never
+    // attempted" note honest: that app WAS attempted, and its DELETE may have
+    // landed, so the operator is told to look rather than to re-run blind.
+    let lost_any = !lost.is_empty();
+    failed.extend(lost.into_iter().map(|object_id| {
+        BulkDeleteFailure {
+            object_id,
+            message: "its delete ended without reporting an outcome; check Recently deleted \
+                  before re-running"
+                .into(),
+            code: Some(LOST_TASK.into()),
+        }
+    }));
+
+    // Update the caches first: the deletions that landed are real regardless of
+    // how the run ended (see the sweep above). A clean run removes exactly the
+    // deleted rows. A failed DELETE may still have landed, and only a rescan
+    // can tell, so a run with deletions and failures busts the list tier — and
+    // so does a lost task on its own, which reports no deletion to patch.
+    if lost_any || (!deleted.is_empty() && !failed.is_empty()) {
+        super::applications::invalidate_app_lists(cache, tenant_id);
+    } else if !deleted.is_empty() {
+        super::applications::record_deleted_apps(cache, tenant_id, &deleted);
+    }
+    BulkDeleteResult {
         deleted,
         failed,
-        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-    })
+        cancelled,
+    }
 }
 
 /// Grants admin consent to each application in `object_ids`, reusing the same
-/// orchestration as the single-app command. Bounded-concurrency fan-out with
-/// adaptive 429 backoff (each app issues several Graph writes, so the throttle
-/// matters); cancellation rides [`AppState::bulk_cancel`] and progress the
-/// shared `bulk-progress` stream.
+/// orchestration as the single-app command. Bounded-concurrency fan-out through
+/// [`run_bulk_capped`] with adaptive 429 backoff (each app issues several Graph
+/// writes, so the throttle matters); cancellation rides
+/// [`AppState::bulk_cancel`] and progress the shared `bulk-progress` stream.
 #[tauri::command]
 pub async fn bulk_grant_permissions(
     app_handle: AppHandle,
@@ -679,171 +754,137 @@ pub async fn bulk_grant_permissions(
     object_ids: Vec<String>,
 ) -> Result<BulkGrantResult, UiError> {
     let client = state.graph_for(&tenant_id);
-    let total = object_ids.len();
     let cancel = state.bulk_cancel.claim();
 
     // Bounded-concurrency fan-out with adaptive 429 backoff, replacing the old
     // serial loop + fixed 50ms pause. Each grant is a multi-write orchestration,
     // so backing off the in-flight cap under throttling matters more here than
     // for the delete sweep.
-    let meter = FanOutMeter::attach(client.clone(), CONCURRENCY);
-
-    let mut outcomes = Vec::new();
-    // True if any app's grant created a brand-new SP — that adds Enterprise App
-    // rows / search-index entries, so the run must bust the full list caches.
-    let mut any_sp_created = false;
-    // Every id a task was spawned for, so a task that ended without reporting
-    // (a join error carries no id) can still be named below.
-    let mut dispatched: Vec<String> = Vec::new();
+    let meter = FanOutMeter::attach(client.clone(), BULK_WRITE_CONCURRENCY);
     let session = SessionDead::new();
-    let cancelled_early = dispatch_capped(
+    let run = run_bulk_capped(
+        &app_handle,
+        &cancel,
+        &session,
+        &meter,
         object_ids,
-        || meter.limit(),
+        String::clone,
         |id| {
-            if cancel.is_cancelled() || session.is_dead() {
-                return None;
-            }
-            dispatched.push(id.clone());
             let client = client.clone();
-            let app_handle = app_handle.clone();
-            let ticker = meter.ticker();
-            let cancel = cancel.clone();
-            let session = session.clone();
-            Some(tokio::spawn(async move {
+            async move {
                 let res = super::permissions::grant_admin_consent_core(&client, &id).await;
-                let (done, in_flight_cap) = ticker.tick();
-                let progress = BulkProgress {
-                    done,
-                    total,
-                    current_app: Some(id.clone()),
-                    cancelled: cancel.is_cancelled(),
-                    in_flight_cap: Some(in_flight_cap),
-                };
-                emit_progress(&app_handle, crate::dto::events::BULK_PROGRESS, progress);
-                match res {
-                    // The client SP was created and a later step failed: the
-                    // row reports the error, and `sp_created` still reaches
-                    // `any_sp_created` so the new Enterprise App row is busted.
-                    Ok(super::permissions::GrantRun {
-                        error: Some(e),
-                        sp_created,
-                        ..
-                    }) => {
-                        session.note_code(&e.code);
-                        (
-                            BulkGrantOutcome {
-                                object_id: id,
-                                granted: 0,
-                                skipped: 0,
-                                failed: 0,
-                                error: Some(e.into()),
-                            },
-                            sp_created,
-                        )
-                    }
-                    Ok(run) => {
-                        let r = run.result;
-                        (
-                            BulkGrantOutcome {
-                                object_id: id,
-                                granted: r.role_assignments_created.len()
-                                    + r.scope_grants_upserted.len(),
-                                skipped: r.role_assignments_skipped.len(),
-                                failed: r.failures.len(),
-                                error: r.failures.first().map(|f| BulkError {
-                                    code: "partial_failure".into(),
-                                    message: f.message.clone(),
-                                    retryable: false,
-                                }),
-                            },
-                            run.sp_created,
-                        )
-                    }
-                    Err(e) => {
-                        session.note_code(&e.code);
-                        (
-                            BulkGrantOutcome {
-                                object_id: id,
-                                granted: 0,
-                                skipped: 0,
-                                failed: 0,
-                                error: Some(e.into()),
-                            },
-                            false,
-                        )
-                    }
-                }
-            }))
-        },
-        |joined| match joined {
-            Ok((outcome, sp_created)) => {
-                any_sp_created |= sp_created;
-                outcomes.push(outcome);
+                grant_item(id, res)
             }
-            Err(err) => tracing::warn!(?err, "bulk grant join error"),
         },
     )
     .await;
+
+    // Bust first (the grants that landed are real), then return what landed
+    // however the run ended: the outcome that latched the dead session carries
+    // the fatal code, which is what the bar reads to prompt re-authentication
+    // instead of presenting the remainder as consented.
+    Ok(finish_bulk_grant(&state.cache, &tenant_id, run))
+}
+
+/// One consent grant's outcome, plus whether it created the app's client
+/// service principal — which picks the run's cache tier and never reaches the
+/// bar.
+struct GrantItem {
+    outcome: BulkGrantOutcome,
+    sp_created: bool,
+}
+
+/// Maps the single-app consent core's result onto one bulk row.
+fn grant_item(object_id: String, res: Result<super::permissions::GrantRun, UiError>) -> GrantItem {
+    let failed_outright = |object_id: String, error: UiError, sp_created: bool| GrantItem {
+        outcome: BulkGrantOutcome {
+            object_id,
+            granted: 0,
+            skipped: 0,
+            failed: 0,
+            error: Some(error.into()),
+        },
+        sp_created,
+    };
+    match res {
+        // The client SP was created and a later step failed: the row reports
+        // the error, and `sp_created` still reaches the run's cache tier so the
+        // new Enterprise App row is busted.
+        Ok(super::permissions::GrantRun {
+            error: Some(e),
+            sp_created,
+            ..
+        }) => failed_outright(object_id, e, sp_created),
+        Ok(run) => {
+            let r = run.result;
+            GrantItem {
+                outcome: BulkGrantOutcome {
+                    object_id,
+                    granted: r.role_assignments_created.len() + r.scope_grants_upserted.len(),
+                    skipped: r.role_assignments_skipped.len(),
+                    failed: r.failures.len(),
+                    error: r.failures.first().map(|f| BulkError {
+                        code: "partial_failure".into(),
+                        message: f.message.clone(),
+                        retryable: false,
+                    }),
+                },
+                sp_created: run.sp_created,
+            }
+        }
+        Err(e) => failed_outright(object_id, e, false),
+    }
+}
+
+/// Folds a bulk consent grant's capped run into its result and updates the
+/// caches. Split from the command so the lost-task path runs in a test.
+fn finish_bulk_grant(cache: &Cache, tenant_id: &str, run: CappedRun<GrantItem>) -> BulkGrantResult {
+    let CappedRun {
+        outcomes: items,
+        lost,
+        cancelled,
+    } = run;
+    // True if any app's grant created a brand-new SP — that adds Enterprise App
+    // rows / search-index entries, so the run must bust the full list caches.
+    let mut any_sp_created = items.iter().any(|item| item.sp_created);
+    let mut outcomes: Vec<BulkGrantOutcome> = items.into_iter().map(|item| item.outcome).collect();
 
     // A dispatched app with no outcome lost its task; some of its grant writes
     // may have landed — the client SP included, so the list tier is busted as
     // if one had been created. Reported as a failure so the bar's "never
     // attempted" note stays honest and the operator re-checks the app rather
     // than re-running blind.
-    let reported: HashSet<String> = outcomes.iter().map(|o| o.object_id.clone()).collect();
-    for object_id in dispatched {
-        if reported.contains(&object_id) {
-            continue;
-        }
-        any_sp_created = true;
-        outcomes.push(BulkGrantOutcome {
+    any_sp_created |= !lost.is_empty();
+    outcomes.extend(lost.into_iter().map(|object_id| {
+        BulkGrantOutcome {
             object_id,
             granted: 0,
             skipped: 0,
             failed: 0,
             error: Some(BulkError {
-                code: "lost_task".into(),
+                code: LOST_TASK.into(),
                 message: "its consent grant ended without reporting an outcome; check the app's \
-                          permissions before re-running"
+                      permissions before re-running"
                     .into(),
                 retryable: false,
             }),
-        });
-    }
-
-    emit_progress(
-        &app_handle,
-        crate::dto::events::BULK_PROGRESS,
-        BulkProgress {
-            // Items actually processed: `dispatch_capped` has joined every
-            // spawned task, so the meter's count is final. Equal to `total`
-            // only for a run that finished.
-            done: meter.done(),
-            total,
-            current_app: None,
-            cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-            in_flight_cap: Some(meter.limit()),
-        },
-    );
+        }
+    }));
 
     // Consent really changed app-role/scope state for any app that granted >0, so
     // bust the detail + audit caches exactly like the single-app path
-    // (permissions::grant_admin_consent). Only on this success path. If any grant
-    // created a new SP, bust the full list caches instead (new Enterprise App
-    // row / search-index entry), matching grant_single_permission.
+    // (permissions::grant_admin_consent). If any grant created a new SP, bust
+    // the full list caches instead (new Enterprise App row / search-index
+    // entry), matching grant_single_permission.
     if any_sp_created {
-        super::applications::invalidate_app_lists(&state.cache, &tenant_id);
+        super::applications::invalidate_app_lists(cache, tenant_id);
     } else if outcomes.iter().any(|o| o.granted > 0) {
-        super::applications::invalidate_app_detail_state(&state.cache, &tenant_id);
+        super::applications::invalidate_app_detail_state(cache, tenant_id);
     }
-    // Bust first (the grants that landed are real), then return what landed
-    // however the run ended: the outcome that latched the dead session carries
-    // the fatal code, which is what the bar reads to prompt re-authentication
-    // instead of presenting the remainder as consented.
-    Ok(BulkGrantResult {
+    BulkGrantResult {
         outcomes,
-        cancelled: stopped_by_cancel(cancelled_early, &cancel, &session),
-    })
+        cancelled,
+    }
 }
 
 /// Creates each application in `specs`, reusing the single-app create path.
@@ -1499,11 +1540,14 @@ pub async fn bulk_stage_sso_certificates(
     })
 }
 
-/// Shared scaffold for the **sequential** bulk commands (create / remove-redundant
-/// / scope-mailbox / scope-sharepoint / add-owner / disable-sign-in). These stay
-/// sequential on purpose: each per-app core takes `State` (not `Send`, so it can't
-/// cross into a `dispatch_capped` spawn) and the selection is a small admin-chosen
-/// set — the win here is dedup, not concurrency.
+/// Shared scaffold for the **sequential** bulk commands — all eight: create /
+/// remove-redundant / scope-mailbox / scope-sharepoint / add-owner /
+/// disable-sign-in / restore-deleted / stage-SSO-certificates. These stay
+/// sequential on purpose: most per-app cores take `State` or borrow the
+/// command's locals (not `Send + 'static`, so they can't cross into a
+/// `dispatch_capped` spawn), and the selection is a small admin-chosen set —
+/// the win here is dedup, not concurrency. The three bulk writes whose work is
+/// `Send` fan out through [`run_bulk_capped`] instead.
 ///
 /// Runs `per_item` on each `items` element in order, emitting a `bulk-progress`
 /// event (`done = i`, `in_flight_cap: None` — there's no fan-out to back off)
@@ -1572,6 +1616,145 @@ where
         },
     );
     (outcomes, cancel.is_cancelled())
+}
+
+/// What [`run_bulk_capped`] hands back to its command.
+struct CappedRun<O> {
+    /// Every outcome a task reported, in completion order.
+    outcomes: Vec<O>,
+    /// Ids that were dispatched but whose task never reported (a panic or an
+    /// abort). Its write may have landed, so the command reports each one as a
+    /// [`LOST_TASK`] failure row and treats that app as mutated.
+    lost: Vec<String>,
+    /// Stopped by the operator's Cancel — never by the dead session, whose
+    /// fatal code rides the outcomes instead (see [`stopped_by_cancel`]).
+    cancelled: bool,
+}
+
+/// Shared scaffold for the **capped** bulk writes — delete, consent grant and
+/// the expired-secret sweep — whose per-item work is `Send`, so it fans out
+/// through [`dispatch_capped`] under the command's [`FanOutMeter`]. It replaces
+/// three hand copies that had drifted: only two reconciled a lost task, so a
+/// lost sweep task left the secrets it had removed in the credential caches.
+///
+/// It owns what the three share:
+/// - the initial `done: 0` event, one event per joined task, and a terminal
+///   event whose `done` counts every joined task (equal to `total` only for a
+///   run that finished), each carrying the live cap;
+/// - the spawn gate, `cancel.is_cancelled() || session.is_dead()`: a Cancel
+///   or a dead session stops dispatch while the tasks in flight drain;
+/// - the dead-session latch, noted from each outcome's
+///   [`BulkOutcome::session_fatal`];
+/// - the dispatched list, and `lost` = dispatched − reported;
+/// - `cancelled`, through [`stopped_by_cancel`].
+///
+/// It ticks and emits on the collect side, which the dispatcher runs serially,
+/// so `done` never steps backwards (a task that ticked and emitted itself could
+/// emit 6 before 5) and the sink need not be `Clone + Send` — a test passes the
+/// `Recorder`. Each command keeps its own `FanOutMeter::attach` (the throttle
+/// observer lives as long as the command) and its own cache tier. A task may
+/// still note the latch itself: the sweep's does, so its siblings' key loops
+/// stop between keys. The caller claims the token once, before its first
+/// await (pinned by `repo_invariants::cancel`), and passes it in.
+async fn run_bulk_capped<S, T, O, Fut>(
+    progress: &S,
+    cancel: &CancelToken,
+    session: &SessionDead,
+    meter: &FanOutMeter,
+    items: Vec<T>,
+    id_of: impl Fn(&T) -> String,
+    per_item: impl Fn(T) -> Fut,
+) -> CappedRun<O>
+where
+    S: ProgressSink,
+    O: CappedOutcome,
+    Fut: Future<Output = O> + Send + 'static,
+{
+    let total = items.len();
+    emit_progress(
+        progress,
+        crate::dto::events::BULK_PROGRESS,
+        BulkProgress {
+            done: 0,
+            total,
+            current_app: None,
+            cancelled: false,
+            in_flight_cap: Some(meter.limit()),
+        },
+    );
+    let ticker = meter.ticker();
+    let mut outcomes: Vec<O> = Vec::with_capacity(total);
+    // Every id a task was spawned for. A task that never reported back (a
+    // panic or abort) may still have landed its write, and the only way to
+    // name that app afterwards is to remember what was dispatched: a join
+    // error carries no id.
+    let mut dispatched: Vec<String> = Vec::new();
+    let cancelled_early = dispatch_capped(
+        items,
+        || meter.limit(),
+        |item| {
+            if cancel.is_cancelled() || session.is_dead() {
+                return None;
+            }
+            dispatched.push(id_of(&item));
+            Some(tokio::spawn(per_item(item)))
+        },
+        |joined| {
+            let (done, in_flight_cap) = ticker.tick();
+            let current_app = match joined {
+                Ok(outcome) => {
+                    session.note_fatal(outcome.session_fatal());
+                    let label = outcome.progress_label();
+                    outcomes.push(outcome);
+                    Some(label)
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "bulk task ended without reporting an outcome");
+                    None
+                }
+            };
+            emit_progress(
+                progress,
+                crate::dto::events::BULK_PROGRESS,
+                BulkProgress {
+                    done,
+                    total,
+                    current_app,
+                    cancelled: cancel.is_cancelled(),
+                    in_flight_cap: Some(in_flight_cap),
+                },
+            );
+        },
+    )
+    .await;
+
+    // Dispatched minus reported. The set borrows the reported ids, so it is
+    // scoped to end before `outcomes` moves into the result.
+    let lost: Vec<String> = {
+        let reported: HashSet<&str> = outcomes.iter().map(CappedOutcome::object_id).collect();
+        dispatched
+            .into_iter()
+            .filter(|id| !reported.contains(id.as_str()))
+            .collect()
+    };
+    let cancelled = stopped_by_cancel(cancelled_early, cancel, session);
+    emit_progress(
+        progress,
+        crate::dto::events::BULK_PROGRESS,
+        BulkProgress {
+            // Every spawned task has joined, so the meter's count is final.
+            done: meter.done(),
+            total,
+            current_app: None,
+            cancelled,
+            in_flight_cap: Some(meter.limit()),
+        },
+    );
+    CappedRun {
+        outcomes,
+        lost,
+        cancelled,
+    }
 }
 
 #[cfg(test)]
@@ -2005,6 +2188,594 @@ mod tests {
             owners_not_added(&["u-2".into()], &ids, &upns).as_deref(),
             Some("Owner(s) not added: b@c.com.")
         );
+    }
+
+    /// The capped bulk writes' driver, `run_bulk_capped`, and the three
+    /// commands' finishers — the counterparts of the `run_bulk_seq` tests above.
+    mod capped {
+        use super::*;
+        use crate::commands::test_support::{
+            detail_cached, dies_after, fixed_now, indexes_intact, mock_state_with_write_token,
+            sample_app_json, seed_indexes_and_detail,
+        };
+        use crate::commands::throttle::FanOutMeter;
+        use azapptoolkit_core::token::{BearerProvider, TokenError};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+
+        const TENANT: &str = "tenant-bulk";
+
+        /// An `AppState` whose cache the finishers write to. Nothing here
+        /// reaches its Graph client, so the base URL is never dialled.
+        fn state() -> AppState {
+            AppState::for_test(TENANT, "http://127.0.0.1:9")
+        }
+
+        /// One delete's outcome: landed when `code` is `None`, else a failure
+        /// carrying that wire code.
+        fn delete_outcome(id: &str, code: Option<&str>) -> Result<String, BulkDeleteFailure> {
+            match code {
+                None => Ok(id.into()),
+                Some(code) => Err(BulkDeleteFailure {
+                    object_id: id.into(),
+                    message: format!("{code} happened"),
+                    code: Some(code.into()),
+                }),
+            }
+        }
+
+        fn deleted(id: &str) -> Result<String, BulkDeleteFailure> {
+            delete_outcome(id, None)
+        }
+
+        fn removal(id: &str, removed: &[&str], error: Option<BulkError>) -> AppRemovalSummary {
+            AppRemovalSummary {
+                object_id: id.into(),
+                display_name: format!("App {id}"),
+                removed_key_ids: removed.iter().map(|k| (*k).to_string()).collect(),
+                failed_key_ids: error.iter().map(|_| "k-failed".to_string()).collect(),
+                error,
+            }
+        }
+
+        fn granted(id: &str, n: usize) -> GrantItem {
+            GrantItem {
+                outcome: BulkGrantOutcome {
+                    object_id: id.into(),
+                    granted: n,
+                    skipped: 0,
+                    failed: 0,
+                    error: None,
+                },
+                sp_created: false,
+            }
+        }
+
+        /// Drives `run_bulk_capped` over ready-made outcomes with `cap` in
+        /// flight. The task whose id is `lose` panics instead of reporting — a
+        /// task that ends without an outcome.
+        async fn drive<O: CappedOutcome>(
+            rec: &Recorder,
+            cancel: &CancelToken,
+            session: &SessionDead,
+            cap: usize,
+            items: Vec<O>,
+            lose: Option<&'static str>,
+        ) -> CappedRun<O> {
+            let meter = FanOutMeter::detached(cap);
+            run_bulk_capped(
+                rec,
+                cancel,
+                session,
+                &meter,
+                items,
+                |o| o.object_id().to_string(),
+                |o| {
+                    let lost = lose == Some(o.object_id());
+                    async move {
+                        assert!(!lost, "this task is lost on purpose");
+                        o
+                    }
+                },
+            )
+            .await
+        }
+
+        fn progress(rec: &Recorder) -> Vec<BulkProgress> {
+            rec.payloads::<BulkProgress>(crate::dto::events::BULK_PROGRESS)
+        }
+
+        #[tokio::test]
+        async fn every_joined_task_ticks_in_order_between_an_initial_and_a_terminal_event() {
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let rec = Recorder::default();
+            let run = drive(
+                &rec,
+                &cancel,
+                &session,
+                4,
+                vec![deleted("a"), deleted("b"), deleted("c")],
+                None,
+            )
+            .await;
+            assert_eq!(run.outcomes.len(), 3);
+            assert!(run.lost.is_empty());
+            assert!(!run.cancelled);
+
+            let events = progress(&rec);
+            // The bar shows the run started before anything completes, then one
+            // tick per joined task. They are emitted on the collect side, so
+            // `done` never steps backwards; the terminal event repeats the
+            // final count with no app named.
+            assert_eq!(
+                events.iter().map(|e| e.done).collect::<Vec<_>>(),
+                [0, 1, 2, 3, 3]
+            );
+            assert_eq!(events[0].current_app, None);
+            let mut named: Vec<String> = events[1..4]
+                .iter()
+                .filter_map(|e| e.current_app.clone())
+                .collect();
+            named.sort();
+            assert_eq!(named, ["a", "b", "c"]);
+            let last = events.last().unwrap();
+            assert_eq!(
+                (last.total, last.current_app.as_deref(), last.cancelled),
+                (3, None, false)
+            );
+            assert!(events.iter().all(|e| e.in_flight_cap == Some(4)));
+        }
+
+        #[tokio::test]
+        async fn a_cancel_before_the_first_dispatch_spawns_nothing() {
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            flag.cancel();
+            let session = SessionDead::new();
+            let rec = Recorder::default();
+            let meter = FanOutMeter::detached(4);
+            let spawned = AtomicUsize::new(0);
+            let run = run_bulk_capped(
+                &rec,
+                &cancel,
+                &session,
+                &meter,
+                vec![deleted("a"), deleted("b")],
+                |o| o.object_id().to_string(),
+                |o| {
+                    spawned.fetch_add(1, Ordering::SeqCst);
+                    async move { o }
+                },
+            )
+            .await;
+            assert_eq!(spawned.load(Ordering::SeqCst), 0, "nothing may be written");
+            assert!(run.outcomes.is_empty() && run.lost.is_empty());
+            assert!(run.cancelled);
+            // The initial event and the terminal one, which reports nothing
+            // processed and the cancellation.
+            assert_eq!(events(&rec), vec![(0, None), (0, None)]);
+            assert!(progress(&rec)[1].cancelled);
+        }
+
+        #[tokio::test]
+        async fn a_cancel_mid_run_lets_the_task_in_flight_finish_and_spawns_nothing_more() {
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            let session = SessionDead::new();
+            let rec = Recorder::default();
+            // One in flight: `a` runs alone and presses Cancel while it does.
+            let meter = FanOutMeter::detached(1);
+            let spawned = AtomicUsize::new(0);
+            let run = run_bulk_capped(
+                &rec,
+                &cancel,
+                &session,
+                &meter,
+                vec![deleted("a"), deleted("b"), deleted("c")],
+                |o| o.object_id().to_string(),
+                |o| {
+                    spawned.fetch_add(1, Ordering::SeqCst);
+                    let presses = (o.object_id() == "a").then(|| flag.clone());
+                    async move {
+                        if let Some(flag) = presses {
+                            flag.cancel();
+                        }
+                        o
+                    }
+                },
+            )
+            .await;
+            assert_eq!(spawned.load(Ordering::SeqCst), 1, "`b` is never spawned");
+            assert_eq!(run.outcomes.len(), 1, "the in-flight `a` still reports");
+            assert!(run.lost.is_empty());
+            assert!(run.cancelled);
+            let events = progress(&rec);
+            assert_eq!(
+                events.iter().map(|e| e.done).collect::<Vec<_>>(),
+                [0, 1, 1],
+                "the terminal event reports how far the run got"
+            );
+            assert!(events.last().is_some_and(|e| e.cancelled));
+        }
+
+        /// The application `sample_app_json` describes, holding a secret per
+        /// key in `expired` that expired before `fixed_now`, plus one that is
+        /// still valid and must never be touched.
+        fn app_with_expired(expired: &[&str]) -> Application {
+            let mut json = sample_app_json();
+            let mut secrets: Vec<serde_json::Value> = expired
+                .iter()
+                .map(|k| serde_json::json!({ "keyId": k, "endDateTime": "2025-06-01T00:00:00Z" }))
+                .collect();
+            secrets.push(
+                serde_json::json!({ "keyId": "k-live", "endDateTime": "2027-01-01T00:00:00Z" }),
+            );
+            json["passwordCredentials"] = serde_json::Value::Array(secrets);
+            serde_json::from_value(json).expect("a valid application")
+        }
+
+        async fn remove_password_calls(server: &wiremock::MockServer) -> usize {
+            server
+                .received_requests()
+                .await
+                .expect("request recording is on")
+                .iter()
+                .filter(|r| r.url.path().ends_with("/removePassword"))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn the_sweep_task_stops_between_keys_when_the_session_dies() {
+            let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2", "k3"]),
+                fixed_now(),
+            )
+            .await;
+            assert_eq!(summary.removed_key_ids, ["k1"]);
+            assert_eq!(summary.failed_key_ids, ["k2"], "`k3` is never attempted");
+            assert_eq!(
+                summary.error.as_ref().map(|e| e.code.as_str()),
+                Some("refresh_missing")
+            );
+            // The task latches the session itself, so a sibling task stops
+            // between its keys without waiting for the driver to collect this one.
+            assert!(session.is_dead());
+            assert_eq!(remove_password_calls(&server).await, 1);
+
+            // ...and a sibling's latch stops a task before its first key.
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k4"]),
+                fixed_now(),
+            )
+            .await;
+            assert!(summary.removed_key_ids.is_empty() && summary.failed_key_ids.is_empty());
+            assert_eq!(remove_password_calls(&server).await, 1);
+        }
+
+        #[tokio::test]
+        async fn a_fatal_failure_replaces_an_earlier_one_in_the_sweep_rows_error() {
+            let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "error": { "code": "Request_ResourceNotFound", "message": "gone" }
+                })))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2", "k3"]),
+                fixed_now(),
+            )
+            .await;
+            assert!(summary.removed_key_ids.is_empty());
+            assert_eq!(summary.failed_key_ids, ["k1", "k2"]);
+            // `k1`'s 404 came first, but the row carries the code that tells
+            // the bar to prompt re-authentication.
+            assert_eq!(
+                summary.error.as_ref().map(|e| e.code.as_str()),
+                Some("refresh_missing")
+            );
+        }
+
+        /// A write token that presses Cancel each time it is asked for a
+        /// bearer, then serves one: the key in flight lands, and the check
+        /// before the next key sees the cancel.
+        struct CancelsOnWrite(CancelFlag);
+
+        #[async_trait::async_trait]
+        impl BearerProvider for CancelsOnWrite {
+            async fn bearer(&self) -> Result<String, TokenError> {
+                self.0.cancel();
+                Ok("tok".to_string())
+            }
+        }
+
+        #[tokio::test]
+        async fn a_cancel_between_keys_stops_the_sweep_task() {
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            let (server, state) =
+                mock_state_with_write_token(TENANT, Arc::new(CancelsOnWrite(flag.clone()))).await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            let client = state.graph_for(TENANT);
+            let session = SessionDead::new();
+            let summary = sweep_one(
+                &client,
+                &cancel,
+                &session,
+                app_with_expired(&["k1", "k2"]),
+                fixed_now(),
+            )
+            .await;
+            assert_eq!(summary.removed_key_ids, ["k1"]);
+            assert!(summary.failed_key_ids.is_empty() && summary.error.is_none());
+            assert_eq!(
+                remove_password_calls(&server).await,
+                1,
+                "`k2` is never sent"
+            );
+        }
+
+        /// The delete path end to end through its real per-item work: the
+        /// session dies between the first and second DELETE.
+        #[tokio::test]
+        async fn a_dead_session_mid_delete_returns_the_landed_delete_and_the_fatal_code() {
+            let (server, state) = mock_state_with_write_token(TENANT, dies_after(1)).await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            seed_indexes_and_detail(&state, TENANT, "a");
+            let client = state.graph_for(TENANT);
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let rec = Recorder::default();
+            // One in flight, so the order is fixed: `a` lands, `b` meets the
+            // dead session, and `c` is never dispatched.
+            let meter = FanOutMeter::detached(1);
+            let run = run_bulk_capped(
+                &rec,
+                &cancel,
+                &session,
+                &meter,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                String::clone,
+                |id| {
+                    let client = client.clone();
+                    async move { delete_one(&client, id).await }
+                },
+            )
+            .await;
+            assert!(session.is_dead(), "the collect side latched the session");
+            let result = finish_bulk_delete(&state.cache, TENANT, run);
+
+            assert_eq!(result.deleted, ["a"], "the landed DELETE is reported");
+            assert_eq!(result.failed.len(), 1);
+            assert_eq!(result.failed[0].object_id, "b");
+            assert_eq!(result.failed[0].code.as_deref(), Some("refresh_missing"));
+            assert!(!result.cancelled, "a dead session is not a Cancel");
+            // `c` is in neither list: the bar counts it as never attempted.
+            assert_eq!(progress(&rec).last().map(|e| e.done), Some(2));
+            // A deletion beside a failure busts the list tier.
+            assert!(!indexes_intact(&state, TENANT));
+        }
+
+        #[tokio::test]
+        async fn a_dead_session_mid_grant_returns_the_landed_grant_and_the_fatal_code() {
+            let state = state();
+            seed_indexes_and_detail(&state, TENANT, "a");
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let dead = grant_item(
+                "b".into(),
+                Err(UiError::new("refresh_missing", "gone", false)),
+            );
+            let run = drive(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                1,
+                vec![granted("a", 2), dead, granted("c", 1)],
+                None,
+            )
+            .await;
+            let result = finish_bulk_grant(&state.cache, TENANT, run);
+
+            let ids: Vec<&str> = result
+                .outcomes
+                .iter()
+                .map(|o| o.object_id.as_str())
+                .collect();
+            assert_eq!(ids, ["a", "b"], "`c` is never dispatched");
+            assert_eq!(result.outcomes[0].granted, 2);
+            assert!(
+                result.outcomes[1]
+                    .error
+                    .as_ref()
+                    .is_some_and(BulkError::is_reauth_fatal)
+            );
+            assert!(!result.cancelled);
+            // The landed grant busts the detail tier; no SP was created, so the
+            // indexes stay.
+            assert!(!detail_cached(&state, TENANT, "a"));
+            assert!(indexes_intact(&state, TENANT));
+        }
+
+        #[tokio::test]
+        async fn a_dead_session_mid_sweep_returns_the_landed_removals_and_the_fatal_code() {
+            let state = state();
+            seed_indexes_and_detail(&state, TENANT, "a");
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let run = drive(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                1,
+                vec![
+                    removal("a", &["k1"], None),
+                    removal("b", &["k2"], Some(err("refresh_missing"))),
+                    removal("c", &["k3"], None),
+                ],
+                None,
+            )
+            .await;
+            let result = finish_expired_sweep(&state.cache, TENANT, 3, Vec::new(), run, |id| {
+                id.to_string()
+            });
+
+            let ids: Vec<&str> = result
+                .summaries
+                .iter()
+                .map(|s| s.object_id.as_str())
+                .collect();
+            assert_eq!(ids, ["a", "b"], "`c` is never dispatched");
+            assert!(
+                result.summaries[1]
+                    .error
+                    .as_ref()
+                    .is_some_and(BulkError::is_reauth_fatal)
+            );
+            assert_eq!(result.apps_scanned, 3);
+            assert!(!result.cancelled);
+            // The landed removal drops its app's credential tier, which keeps
+            // the indexes.
+            assert!(!detail_cached(&state, TENANT, "a"));
+            assert!(indexes_intact(&state, TENANT));
+        }
+
+        #[tokio::test]
+        async fn a_lost_delete_is_a_failure_row_and_busts_the_list_tier() {
+            let rec = Recorder::default();
+            for (items, landed) in [
+                (vec![deleted("a"), deleted("b")], vec!["a"]),
+                // A lost task alone still busts: its DELETE may have landed.
+                (vec![deleted("b")], vec![]),
+            ] {
+                let state = state();
+                seed_indexes_and_detail(&state, TENANT, "b");
+                let cancel = CancelFlag::new().claim();
+                let session = SessionDead::new();
+                let total = items.len();
+                let run = drive(&rec, &cancel, &session, 1, items, Some("b")).await;
+                assert_eq!(run.lost, ["b"]);
+                assert_eq!(
+                    progress(&rec).last().map(|e| e.done),
+                    Some(total),
+                    "a lost task has joined, so the terminal count includes it"
+                );
+                let result = finish_bulk_delete(&state.cache, TENANT, run);
+                assert_eq!(result.deleted, landed);
+                assert_eq!(result.failed.len(), 1);
+                assert_eq!(result.failed[0].object_id, "b");
+                assert_eq!(result.failed[0].code.as_deref(), Some(LOST_TASK));
+                assert!(!indexes_intact(&state, TENANT), "only a rescan can tell");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_lost_sweep_task_is_a_row_and_drops_that_apps_credential_tier() {
+            let state = state();
+            seed_indexes_and_detail(&state, TENANT, "b");
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let run = drive(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                1,
+                vec![removal("a", &[], None), removal("b", &["k"], None)],
+                Some("b"),
+            )
+            .await;
+            let result = finish_expired_sweep(&state.cache, TENANT, 2, Vec::new(), run, |id| {
+                format!("Name of {id}")
+            });
+
+            // `a` had nothing to remove, so it is no row; `b` is one although
+            // it never reported.
+            assert_eq!(result.summaries.len(), 1);
+            let row = &result.summaries[0];
+            assert_eq!(
+                (row.object_id.as_str(), row.display_name.as_str()),
+                ("b", "Name of b")
+            );
+            assert_eq!(row.error.as_ref().map(|e| e.code.as_str()), Some(LOST_TASK));
+            // Some of its removals may have landed: its credential tier goes,
+            // the indexes stay.
+            assert!(!detail_cached(&state, TENANT, "b"));
+            assert!(indexes_intact(&state, TENANT));
+        }
+
+        #[tokio::test]
+        async fn a_lost_grant_is_a_row_and_busts_the_list_tier() {
+            let state = state();
+            seed_indexes_and_detail(&state, TENANT, "a");
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let run = drive(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                1,
+                vec![granted("a", 1), granted("b", 1)],
+                Some("b"),
+            )
+            .await;
+            let result = finish_bulk_grant(&state.cache, TENANT, run);
+            let lost = result.outcomes.iter().find(|o| o.object_id == "b").unwrap();
+            assert_eq!(
+                lost.error.as_ref().map(|e| e.code.as_str()),
+                Some(LOST_TASK)
+            );
+            // Its client SP may have been created, so the list tier goes.
+            assert!(!indexes_intact(&state, TENANT));
+        }
+
+        #[test]
+        fn a_lost_task_is_never_session_fatal() {
+            assert!(delete_outcome("a", Some("refresh_missing")).session_fatal());
+            assert!(!delete_outcome("a", Some(LOST_TASK)).session_fatal());
+            assert!(!delete_outcome("a", Some("forbidden")).session_fatal());
+            assert!(!deleted("a").session_fatal());
+            assert!(
+                !removal(
+                    "a",
+                    &[],
+                    Some(BulkError {
+                        code: LOST_TASK.into(),
+                        message: String::new(),
+                        retryable: false,
+                    })
+                )
+                .session_fatal()
+            );
+        }
     }
 
     mod resolve {

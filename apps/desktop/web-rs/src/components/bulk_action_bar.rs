@@ -430,10 +430,11 @@ pub fn BulkProgressRow(
     /// which the bar renders as an empty bar rather than as nothing — the row
     /// appearing is itself the signal that the run started.
     progress: RwSignal<Option<bulk::BulkProgress>>,
-    /// `object_id -> display name`, as passed to [`BulkActionBar`].
-    /// `run_bulk_seq` labels its progress events with the object id it was
-    /// handed, so without this the row would name the app by GUID; the fan-out
-    /// commands and the Create flow already send a display name, which passes
+    /// `object_id -> display name`, as passed to [`BulkActionBar`]. The delete
+    /// and consent-grant fan-outs and most `run_bulk_seq` commands label their
+    /// progress events with the object id they were handed, so without this
+    /// the row would name the app by GUID; the expired-secret sweep, the
+    /// restore and the Create flow already send a display name, which passes
     /// through unchanged. Not `#[prop(optional)]` — both hosts state what they
     /// have, and the Create flow's `None` is a fact about it, not an omission.
     names: Option<Signal<Arc<HashMap<String, String>>>>,
