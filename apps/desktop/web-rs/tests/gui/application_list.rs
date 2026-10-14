@@ -805,3 +805,94 @@ async fn saved_views_carry_the_date_range_and_clear_it() {
     ts::click(".saved-view-chip__apply[aria-label=\"Apply saved view All time\"]");
     ts::wait_for(|| dates().iter().all(|v| v.is_empty())).await;
 }
+
+/// "What you see is what you export", order included: the inventory export
+/// hands the save command exactly the rows the facet left, in the order the
+/// sort put them. The list holds its rows as shared `Arc`s and the binding
+/// borrows them, so this also pins that each still reaches the wire as a
+/// whole row object.
+#[wasm_bindgen_test]
+async fn export_saves_the_shown_rows_in_the_shown_order() {
+    ts::reset();
+    let mut zulu = fixtures::app_row("app-1", "Zulu");
+    zulu.password_credential_count = 1;
+    let mut cert_only = fixtures::app_row("app-2", "Mike");
+    cert_only.key_credential_count = 1;
+    let mut alpha = fixtures::app_row("app-3", "Alpha");
+    alpha.password_credential_count = 1;
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &vec![zulu, cert_only, alpha],
+    );
+    ts::mock_ok("save_applications_to_file", &Option::<String>::None);
+
+    let m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "3 app registrations").await;
+
+    m.session.tenant_ui.apps_facet.set("secrets".to_string());
+    ts::wait_for(|| ts::text(COUNT) == "2 of 3 app registrations").await;
+    // Name, A→Z: the reverse of the order Graph returned the two in.
+    ts::click(".app-list__sortbar button");
+    ts::wait_for(|| ts::text(".app-list__row-title") == "Alpha").await;
+
+    ts::click_button_labelled("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    ts::click_button_labelled("Export as CSV…");
+    ts::wait_for(|| ts::call_count("save_applications_to_file") == 1).await;
+
+    let call = ts::last_call("save_applications_to_file").expect("recorded call");
+    assert_eq!(call.arg_str("format").as_deref(), Some("csv"));
+    let rows = call
+        .args
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("a rows array");
+    let names: Vec<_> = rows
+        .iter()
+        .map(|r| r.get("display_name").and_then(|n| n.as_str()))
+        .collect();
+    assert_eq!(names, [Some("Alpha"), Some("Zulu")]);
+    assert_eq!(
+        rows[0].get("app_id").and_then(|v| v.as_str()),
+        Some("app-3-appid"),
+        "each row goes over whole, not as a bare name"
+    );
+}
+
+/// Cross-tenant leakage, the repo's #1 footgun. This view stays mounted across
+/// a tenant switch, and its export snapshot used to outlive the rows it came
+/// from: tenant B's list fails to load, so the loaded list never mounts to
+/// replace it, and the export saved tenant A's app registrations.
+#[wasm_bindgen_test]
+async fn export_after_a_tenant_switch_never_saves_the_previous_tenants_rows() {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM", "Fabrikam API"]),
+    );
+    ts::mock_ok("save_applications_to_file", &Option::<String>::None);
+
+    let m = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "2 app registrations").await;
+
+    ts::mock_err(
+        "list_applications_with_pairing",
+        &fixtures::ui_error("forbidden", "Insufficient privileges in this tenant"),
+    );
+    let mut other = ts::test_tenant();
+    other.tenant_id = "other-tenant".into();
+    m.session.set_active_tenant(Some(other));
+    ts::wait_for(|| ts::body_contains("Insufficient privileges in this tenant")).await;
+
+    ts::click_button_labelled("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    ts::click_button_labelled("Export as CSV…");
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("save_applications_to_file"),
+        0,
+        "the export saved the previous tenant's app registrations"
+    );
+}

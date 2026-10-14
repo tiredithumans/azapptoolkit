@@ -511,14 +511,19 @@ pub async fn remove_federated_credential(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveApplicationsArgs<'a> {
-    rows: &'a [ApplicationListRowDto],
+    rows: &'a [&'a ApplicationListRowDto],
     format: &'a str,
 }
 
 /// Exports the (filtered) app-registration list to a CSV/JSON file via the OS
 /// save dialog. Returns the chosen path, or `None` if the user cancelled.
+///
+/// Borrowed rows, because the list holds them as `Arc`s: a `&Row` serializes
+/// exactly as the `Row`, without relying on serde's `rc` feature. web-rs never
+/// declares `rc`; it arrives only transitively (`leptos_config`, and the shared
+/// crates' workspace `serde`), so it could leave with a dependency bump.
 pub async fn save_applications_to_file(
-    rows: &[ApplicationListRowDto],
+    rows: &[&ApplicationListRowDto],
     format: &str,
 ) -> Result<Option<String>, UiError> {
     invoke_result(

@@ -54,6 +54,8 @@ pub fn VirtualList<T, K, KF, R>(
     /// row set changes within this instance the scroller snaps back to the top
     /// (the old offset pointed into a different list). A parent that remounts
     /// the list instead (a refetch) carries the offset via `scroll_offset`.
+    /// Every window re-render clones each row in it, which is why the three
+    /// list views pass `Arc` rows (a refcount bump each).
     #[prop(into)]
     items: Signal<Arc<Vec<T>>>,
     /// Fixed row height in pixels (e.g. `52.0`).

@@ -158,3 +158,87 @@ async fn refresh_refetches_only_after_the_cache_is_dropped() {
     assert_eq!(call.arg_str("tenantId").as_deref(), Some("test-tenant"));
     assert_eq!(call.arg_str("kind").as_deref(), Some("enterprise"));
 }
+
+/// The inventory export hands the save command exactly the rows the active
+/// facet left ("what you see is what you export").
+#[wasm_bindgen_test]
+async fn export_saves_the_rows_the_facet_left() {
+    ts::reset();
+    let mut disabled = fixtures::enterprise_app("sp-2", "Fabrikam API");
+    disabled.account_enabled = Some(false);
+    ts::mock_ok(
+        "list_enterprise_applications",
+        &vec![fixtures::enterprise_app("sp-1", "Contoso CRM"), disabled],
+    );
+    ts::mock_ok(
+        "save_enterprise_applications_to_file",
+        &Option::<String>::None,
+    );
+
+    let m = ts::mount_view(|| view! { <EnterpriseApplicationList /> });
+    ts::wait_for(|| ts::query_all(".app-list__row").len() == 2).await;
+
+    m.session
+        .tenant_ui
+        .enterprise_facet
+        .set("disabled".to_string());
+    ts::wait_for(|| ts::query_all(".app-list__row").len() == 1).await;
+
+    ts::click_button_labelled("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    ts::click_button_labelled("Export as JSON…");
+    ts::wait_for(|| ts::call_count("save_enterprise_applications_to_file") == 1).await;
+
+    let call = ts::last_call("save_enterprise_applications_to_file").expect("recorded call");
+    assert_eq!(call.arg_str("format").as_deref(), Some("json"));
+    let ids: Vec<_> = call
+        .args
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("a rows array")
+        .iter()
+        .map(|r| r.get("id").and_then(|n| n.as_str()))
+        .collect();
+    assert_eq!(ids, [Some("sp-2")]);
+}
+
+/// Cross-tenant leakage, the repo's #1 footgun. This view stays mounted across
+/// a tenant switch, and its export snapshot used to outlive the rows it came
+/// from: tenant B's list fails to load, so the loaded list never mounts to
+/// replace it, and the export saved tenant A's applications.
+#[wasm_bindgen_test]
+async fn export_after_a_tenant_switch_never_saves_the_previous_tenants_rows() {
+    ts::reset();
+    ts::mock_ok(
+        "list_enterprise_applications",
+        &fixtures::enterprise_apps(&["Contoso CRM", "Fabrikam API"]),
+    );
+    ts::mock_ok(
+        "save_enterprise_applications_to_file",
+        &Option::<String>::None,
+    );
+
+    let m = ts::mount_view(|| view! { <EnterpriseApplicationList /> });
+    ts::wait_for(|| ts::query_all(".app-list__row").len() == 2).await;
+
+    ts::mock_err(
+        "list_enterprise_applications",
+        &fixtures::ui_error("forbidden", "Insufficient privileges in this tenant"),
+    );
+    let mut other = ts::test_tenant();
+    other.tenant_id = "other-tenant".into();
+    m.session.set_active_tenant(Some(other));
+    ts::wait_for(|| ts::body_contains("Insufficient privileges in this tenant")).await;
+
+    ts::click_button_labelled("Export");
+    ts::wait_for(|| !ts::query_all("[role=\"menuitem\"]").is_empty()).await;
+    ts::click_button_labelled("Export as JSON…");
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    assert_eq!(
+        ts::call_count("save_enterprise_applications_to_file"),
+        0,
+        "the export saved the previous tenant's applications"
+    );
+}

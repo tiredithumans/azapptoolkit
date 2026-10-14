@@ -7,6 +7,13 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Exporting an inventory list after switching tenants no longer saves the previous tenant's
+  rows.** App Registrations, Enterprise Applications and Managed Identities keep their page in
+  place across a tenant switch, and their CSV/JSON export kept the last list it was shown. While
+  the new tenant's list was still loading, or when it failed to load (or, for Managed Identities,
+  was empty), "Export" saved the previous tenant's apps or identities and reported success. An
+  export now saves only rows loaded for the tenant you are signed in to, and does nothing
+  otherwise.
 - **A restore no longer pre-authorizes a client app under the backed-up tenant's appId.** When
   an API in the backup pre-authorized a client app that is also in the backup, and that client
   failed to restore (or was left for manual follow-up), the restored API was still written with

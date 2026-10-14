@@ -1,9 +1,10 @@
 //! Data plumbing shared by the tenant list views (App Registrations, Enterprise
-//! Applications). Operates on the *loaded* rows and owns the layered filter
-//! memos the three lists hand-rolled identically: a `base` set (search + an
-//! extra predicate such as a creation-date range), a facet partition (`shown`),
-//! per-facet counts for the chips, and the "what you see is what you export"
-//! snapshot.
+//! Applications, Managed Identities). Operates on the *loaded* rows and owns the
+//! layered filter memos the three lists hand-rolled identically: a `base` set
+//! (search + an extra predicate such as a creation-date range), a facet
+//! partition (`shown`), and per-facet counts for the chips. The "what you see
+//! is what you export" snapshot is published from `shown` (or a sort of it) by
+//! the view, through [`ExportRows::publish`](crate::hooks::use_list_export::ExportRows::publish).
 //!
 //! It is deliberately scoped to the loaded body — the async fetch / refresh and
 //! the chrome live in the view and [`ListScaffold`](crate::components::list_scaffold).
@@ -12,6 +13,17 @@
 //! `Memo::new` requires its closure (and value) to be `Send + Sync + 'static`,
 //! so the generic predicates are bounded the same way. The views satisfy this:
 //! their closures capture only `Copy` signals (or nothing).
+//!
+//! **Rows are `Arc`s, by type.** `items` is a `Vec<Arc<T>>` (the views wrap each
+//! fetched row once, in [`TenantRows`](crate::hooks::use_list_export::TenantRows)),
+//! and the hook does not require `T: Clone`. Every filtered stage re-collects
+//! its rows — `base` while a search or date filter is active, `shown` while a
+//! facet chip is, and neither the facet clicks nor the date fields are
+//! debounced — so at the 10 000-row list ceiling an owned row type meant a deep
+//! copy of every kept row's strings per change. As `Arc`s each is a refcount
+//! bump, and the memos' change check takes `Arc`'s pointer-equality shortcut
+//! (the row DTOs are all `Eq`) instead of comparing row contents. A view that
+//! hands owned rows does not compile.
 
 use std::sync::Arc;
 
@@ -42,15 +54,16 @@ impl<T> Facet<T> {
 /// Inputs to [`use_filtered_list`]. The two closures and the facet predicates
 /// are the only per-view-specific pieces; everything else is wiring.
 pub struct FilteredListSpec<T, S, E> {
-    /// The loaded rows (pre-filter).
-    pub items: Vec<T>,
+    /// The loaded rows (pre-filter), shared rather than owned so no stage
+    /// copies a row (see the module docs).
+    pub items: Vec<Arc<T>>,
     /// Debounced filter query (the caller lifts + debounces it).
     pub search: Signal<String>,
     /// Whether `row` matches the already-trimmed-and-lowercased needle.
     pub search_match: S,
     /// True when any non-search, non-facet filter (e.g. a date range) is active.
     /// Lets `base` short-circuit to a pointer copy of the full set when nothing
-    /// is filtering — avoids cloning every row on an unfiltered list.
+    /// is filtering — avoids re-collecting every row on an unfiltered list.
     pub extra_active: Signal<bool>,
     /// Whether `row` passes the extra filters (date range, …). Should read its
     /// own signals so `base` re-runs when they change.
@@ -61,8 +74,6 @@ pub struct FilteredListSpec<T, S, E> {
     pub facet_any: &'static str,
     /// Facet partitions of `base`; their counts populate the chips.
     pub facets: Vec<Facet<T>>,
-    /// Optional export snapshot, kept in step with `shown` (a pointer copy).
-    pub export_rows: Option<StoredValue<Arc<Vec<T>>>>,
 }
 
 /// Reactive handles over the loaded list. `Clone`; its `Memo`s are `Copy`.
@@ -70,9 +81,9 @@ pub struct FilteredListSpec<T, S, E> {
 pub struct FilteredList<T: Send + Sync + 'static> {
     /// Rows after search + extra filters, before the facet partition. The facet
     /// chip counts (and the "all" chip) are over this set.
-    pub base: Memo<Arc<Vec<T>>>,
+    pub base: Memo<Arc<Vec<Arc<T>>>>,
     /// Rows after the active facet partition — the `VirtualList` input.
-    pub shown: Memo<Arc<Vec<T>>>,
+    pub shown: Memo<Arc<Vec<Arc<T>>>>,
     /// Total loaded rows (pre-filter) — the "N of M" denominator.
     pub total: usize,
     /// Per-facet counts over `base`, aligned with `facet_values`.
@@ -113,7 +124,7 @@ impl<T: Send + Sync + 'static> FilteredList<T> {
 /// Build the filter memos for a loaded list. See the module docs.
 pub fn use_filtered_list<T, S, E>(spec: FilteredListSpec<T, S, E>) -> FilteredList<T>
 where
-    T: Clone + PartialEq + Send + Sync + 'static,
+    T: PartialEq + Send + Sync + 'static,
     S: Fn(&T, &str) -> bool + Send + Sync + 'static,
     E: Fn(&T) -> bool + Send + Sync + 'static,
 {
@@ -126,7 +137,6 @@ where
         facet,
         facet_any,
         facets,
-        export_rows,
     } = spec;
 
     let total = items.len();
@@ -145,7 +155,7 @@ where
         Arc::new(
             all.iter()
                 .filter(|row| (needle.is_empty() || search_match(row, &needle)) && extra(row))
-                .cloned()
+                .map(Arc::clone)
                 .collect::<Vec<_>>(),
         )
     });
@@ -183,7 +193,12 @@ where
                 Some(f) => {
                     let pred = Arc::clone(&f.predicate);
                     base.with(|b| {
-                        Arc::new(b.iter().filter(|r| pred(r)).cloned().collect::<Vec<_>>())
+                        Arc::new(
+                            b.iter()
+                                .filter(|r| pred(r))
+                                .map(Arc::clone)
+                                .collect::<Vec<_>>(),
+                        )
                     })
                 }
                 // Unknown facet (stale saved view) → no partition.
@@ -191,11 +206,6 @@ where
             }
         })
     };
-
-    // Keep the export snapshot in step with what's shown (a pointer copy).
-    if let Some(export_rows) = export_rows {
-        Effect::new(move |_| export_rows.set_value(shown.get()));
-    }
 
     FilteredList {
         base,
@@ -256,7 +266,7 @@ mod tests {
         let only_owned = RwSignal::new(false);
         let facet = RwSignal::new("any".to_string());
         let list = use_filtered_list(FilteredListSpec {
-            items: rows(),
+            items: rows().into_iter().map(Arc::new).collect(),
             search: search.into(),
             search_match: |row: &Row, needle: &str| row.name.contains(needle),
             extra_active: extra_active.into(),
@@ -267,7 +277,6 @@ mod tests {
                 Facet::new("Enabled", "enabled", |r: &Row| r.enabled),
                 Facet::new("Disabled", "disabled", |r: &Row| !r.enabled),
             ],
-            export_rows: None,
         });
         Harness {
             list,
@@ -278,7 +287,7 @@ mod tests {
         }
     }
 
-    fn names(rows: &[Row]) -> Vec<&'static str> {
+    fn names(rows: &[Arc<Row>]) -> Vec<&'static str> {
         rows.iter().map(|r| r.name).collect()
     }
 
@@ -394,6 +403,102 @@ mod tests {
             assert_eq!(h.list.shown_total().get(), 1);
             // `total` stays the pre-filter denominator for "N of M".
             assert_eq!(h.list.total, 4);
+        });
+    }
+
+    thread_local! {
+        /// Deep copies of a [`Counted`] row: what an `Arc` row must never pay
+        /// for on a filter change.
+        static DEEP_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A row whose `Clone` is counted, standing in for a list DTO.
+    #[derive(PartialEq, Eq, Debug)]
+    struct Counted {
+        name: &'static str,
+        enabled: bool,
+    }
+
+    impl Clone for Counted {
+        fn clone(&self) -> Self {
+            DEEP_COPIES.with(|c| c.set(c.get() + 1));
+            Self {
+                name: self.name,
+                enabled: self.enabled,
+            }
+        }
+    }
+
+    #[test]
+    fn arc_rows_reach_shown_as_the_loaded_allocations_never_as_copies() {
+        // The spec takes `Vec<Arc<T>>`, so a view cannot hand the hook owned
+        // rows (it would not compile), and the hook does not need `T: Clone`.
+        // What is left to regress is the hook itself re-materializing rows: a
+        // `T: Clone` bound plus an `Arc::new((**row).clone())` in a stage would
+        // still pass every value-equality test above, at the cost of copying
+        // every kept row on each search, date or (undebounced) facet change.
+        // Pinned by identity AND by a copy count; `Counted` is `Clone`, so such
+        // a change would compile here and fail both.
+        Owner::new().with(|| {
+            let loaded: Vec<Arc<Counted>> = ["alpha", "beta", "gamma", "delta"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    Arc::new(Counted {
+                        name,
+                        enabled: i % 2 == 0,
+                    })
+                })
+                .collect();
+            let search = RwSignal::new(String::new());
+            let extra_active = RwSignal::new(false);
+            let facet = RwSignal::new("any".to_string());
+            let list = use_filtered_list(FilteredListSpec {
+                items: loaded.clone(),
+                search: search.into(),
+                search_match: |row: &Counted, needle: &str| row.name.contains(needle),
+                extra_active: extra_active.into(),
+                extra: |row: &Counted| row.name != "delta",
+                facet,
+                facet_any: "any",
+                facets: vec![Facet::new("Enabled", "enabled", |row: &Counted| {
+                    row.enabled
+                })],
+            });
+            let loaded_row = |name: &str| {
+                loaded
+                    .iter()
+                    .find(|r| r.name == name)
+                    .expect("a loaded row")
+                    .clone()
+            };
+            DEEP_COPIES.with(|c| c.set(0));
+
+            search.set("a".into()); // every name contains an "a"
+            extra_active.set(true); // drops delta
+            facet.set("enabled".into()); // alpha, gamma
+            let shown = list.shown.get();
+            let names: Vec<_> = shown.iter().map(|r| r.name).collect();
+            assert_eq!(names, ["alpha", "gamma"]);
+            for row in shown.iter() {
+                assert!(
+                    Arc::ptr_eq(row, &loaded_row(row.name)),
+                    "`shown` holds a copy of {}, not the loaded row",
+                    row.name
+                );
+            }
+            for row in list.base.get().iter() {
+                assert!(
+                    Arc::ptr_eq(row, &loaded_row(row.name)),
+                    "`base` holds a copy of {}, not the loaded row",
+                    row.name
+                );
+            }
+            assert_eq!(
+                DEEP_COPIES.with(std::cell::Cell::get),
+                0,
+                "a search, date or facet change deep-copied rows"
+            );
         });
     }
 }
