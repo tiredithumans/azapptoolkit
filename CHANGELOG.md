@@ -7,6 +7,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **Sign-in no longer waits on idle browser connections.** After you approve sign-in in the
+  browser, the app could sit for 5 seconds per idle connection the browser (or another program on
+  this computer) had opened to it before it read the real sign-in reply. It now reads them side by
+  side, so sign-in finishes as soon as the reply arrives.
 - **A large tenant's Enterprise applications list could omit principals without an application
   ID.** The partitioned tenant-wide scan (0.33.4) reads a directory as 16 `appId` slices and checked
   the merged result against `/$count` with a small tolerance for index lag; a service principal with

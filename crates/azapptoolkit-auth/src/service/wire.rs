@@ -4,6 +4,8 @@
 //! [`super::EntraAuthService`] — the `service` flows call these; nothing here
 //! touches the network or the keyring.
 
+use std::borrow::Cow;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Deserializer};
@@ -156,18 +158,27 @@ fn decode_claims_challenge(b64: &str) -> Option<Vec<u8>> {
         .or_else(|| STANDARD.decode(b64).ok())
 }
 
+/// The `claims` parameter with no challenge to merge: the `cp1` client
+/// capability alone — what [`build_cae_claims`] builds from an empty object
+/// (pinned by `cae_claims_advertise_cp1_and_merge_challenge`).
+const CP1_CLAIMS: &str = r#"{"access_token":{"xms_cc":{"values":["cp1"]}}}"#;
+
 /// Builds the `claims` request parameter for a CAE-capable token. It always
 /// advertises the `cp1` client capability (`xms_cc`) so Microsoft Graph issues a
 /// CAE token; when a base64 `challenge` from a `401 insufficient_claims` is
 /// supplied, its decoded claims are merged under `access_token` so the re-minted
-/// token also satisfies the resource's new requirement.
-pub(super) fn build_cae_claims(challenge_b64: Option<&str>) -> String {
+/// token also satisfies the resource's new requirement. Without a usable
+/// challenge — every Graph token request but a challenge retry — it borrows
+/// [`CP1_CLAIMS`] instead of building the same JSON again.
+pub(super) fn build_cae_claims(challenge_b64: Option<&str>) -> Cow<'static, str> {
     use serde_json::{Value, json};
-    let mut claims: Value = challenge_b64
+    let Some(mut claims) = challenge_b64
         .and_then(decode_claims_challenge)
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
+    else {
+        return Cow::Borrowed(CP1_CLAIMS);
+    };
 
     let root = claims
         .as_object_mut()
@@ -180,7 +191,7 @@ pub(super) fn build_cae_claims(challenge_b64: Option<&str>) -> String {
         .as_object_mut()
         .expect("access_token is an object")
         .insert("xms_cc".into(), json!({ "values": ["cp1"] }));
-    claims.to_string()
+    Cow::Owned(claims.to_string())
 }
 
 #[derive(Debug, Default)]
@@ -464,9 +475,18 @@ mod claims_tests {
 
     #[test]
     fn cae_claims_advertise_cp1_and_merge_challenge() {
-        // No challenge → just the cp1 client capability under access_token.
-        let v: serde_json::Value = serde_json::from_str(&build_cae_claims(None)).unwrap();
+        // No challenge → just the cp1 client capability under access_token,
+        // borrowed from the constant rather than rebuilt on every call.
+        let no_challenge = build_cae_claims(None);
+        assert!(matches!(no_challenge, Cow::Borrowed(_)), "{no_challenge}");
+        let v: serde_json::Value = serde_json::from_str(&no_challenge).unwrap();
         assert_eq!(v["access_token"]["xms_cc"]["values"][0], "cp1");
+        // The constant is exactly what the builder makes of an empty object.
+        let empty = URL_SAFE_NO_PAD.encode("{}");
+        let built = build_cae_claims(Some(&empty));
+        assert!(matches!(built, Cow::Owned(_)), "{built}");
+        let built: serde_json::Value = serde_json::from_str(&built).unwrap();
+        assert_eq!(v, built);
 
         // A challenge's claims are preserved AND cp1 is added alongside.
         let challenge = URL_SAFE_NO_PAD

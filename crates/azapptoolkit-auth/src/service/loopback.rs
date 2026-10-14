@@ -2,30 +2,50 @@
 //! authorization-code flows. The caller (`run_auth_code_flow`) bounds the
 //! whole wait with `REDIRECT_WAIT` (300s); nothing here needs its own deadline.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 
 use crate::error::{AuthError, Result};
 
-/// How long one connection may hold the accept loop before it is dropped.
+/// How long one connection may stay open without completing its request head
+/// before it is dropped.
 ///
-/// Generous next to a redirect that arrives in milliseconds, and short next to
-/// the caller's 300s sign-in timeout — which is what an idle preconnect used to
-/// consume in full.
+/// Connections are read concurrently, so this no longer stands between the
+/// redirect and the wait: it only bounds how long an idle socket (a browser's
+/// speculative or pooled connection, or any local process) holds one of the
+/// [`MAX_INFLIGHT_CONNECTIONS`] slots. Generous next to a redirect that arrives
+/// in milliseconds.
 const PER_CONNECTION_READ_TIMEOUT_SECS: u64 = 5;
+
+/// How many connections are read at once, which bounds the request-head
+/// buffers (16 KiB each, plus the lossy copy the parse makes). A connection
+/// past it waits in the kernel's accept queue until a slot frees, which an
+/// idle peer does at most [`PER_CONNECTION_READ_TIMEOUT_SECS`] after it was
+/// accepted. This bounds memory; it is no defence against a local process
+/// that keeps every slot busy on purpose (which now takes sixteen sockets
+/// renewed every few seconds instead of one), and the caller's `REDIRECT_WAIT`
+/// still ends such a sign-in.
+const MAX_INFLIGHT_CONNECTIONS: usize = 16;
 
 /// Waits on `listener` for the browser's OAuth redirect and extracts the
 /// authorization code (validating the CSRF `state` against `expected_state`).
 ///
 /// Robustness over a bare accept-and-read: browsers open speculative
-/// ("preconnect") sockets and fire stray requests (`/favicon.ico`) at loopback
-/// servers — with a single `accept()`, one consumes the slot and the real
-/// redirect is lost until the caller's timeout ("sign-in hangs"). So this
-/// loops: a connection that closes without sending, or whose request carries
-/// none of `code`/`state`/`error`, or that is not a `GET` (a CORS/PNA
-/// `OPTIONS` preflight), gets a 404 and the listener keeps waiting.
+/// ("preconnect") sockets, keep idle ones in their pool, and fire stray
+/// requests (`/favicon.ico`) at loopback servers — with a single `accept()`,
+/// one consumes the slot and the real redirect is lost until the caller's
+/// timeout ("sign-in hangs"). So this keeps accepting and reads every
+/// connection on its own task, up to [`MAX_INFLIGHT_CONNECTIONS`] at once and
+/// each limited to [`PER_CONNECTION_READ_TIMEOUT_SECS`]: an idle socket
+/// accepted first no longer holds back the redirect queued behind it. A
+/// connection that closes or stalls without sending is dropped; one whose
+/// request carries none of `code`/`state`/`error`, or that is not a `GET` (a
+/// CORS/PNA `OPTIONS` preflight), gets a 404. Either way the listener keeps
+/// waiting.
 ///
 /// Only a redirect carrying the pending `state` ends the wait. Any local
 /// process — or any web page via a blind cross-origin request — can reach the
@@ -37,98 +57,145 @@ const PER_CONNECTION_READ_TIMEOUT_SECS: u64 = 5;
 /// `REDIRECT_WAIT` and surfaces as [`AuthError::Cancelled`]. The browser page
 /// is written only after `state` validates, and says what is true at that
 /// point (the code exchange still follows).
+///
+/// Nothing outlives the wait: returning, or the caller's `REDIRECT_WAIT`
+/// dropping this future, drops the task set, which aborts every connection
+/// still being read, and the listener closes with it.
 pub(super) async fn listen_for_code(listener: TcpListener, expected_state: &str) -> Result<String> {
+    listen_with(
+        listener,
+        expected_state,
+        Duration::from_secs(PER_CONNECTION_READ_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// [`listen_for_code`] with the per-connection read bound as a parameter, so a
+/// test can prove that a full set of stalled connections frees its slots on
+/// that bound without waiting the real five seconds.
+async fn listen_with(
+    listener: TcpListener,
+    expected_state: &str,
+    read_timeout: Duration,
+) -> Result<String> {
+    let expected_state: Arc<str> = Arc::from(expected_state);
+    let mut inflight: JoinSet<Option<Result<String>>> = JoinSet::new();
     loop {
-        let (mut socket, _peer) = listener
-            .accept()
-            .await
-            .map_err(|e| AuthError::Loopback(e.to_string()))?;
-
-        // Each connection is bounded INDEPENDENTLY, not just the batch.
-        //
-        // The accept loop reads one connection to completion before accepting
-        // the next, and `read_request_head` returns only on EOF, a complete
-        // head, or 16 KiB. That covered a preconnect that *closes*; it did not
-        // cover one that stays open idle — which is what browsers actually do,
-        // holding speculative sockets in the pool for seconds. The browser
-        // opens an idle socket, sends the redirect on a second one, and this
-        // loop sits parked on the first until the caller's 300s timeout fires:
-        // sign-in hangs after a successful consent.
-        let read = tokio::time::timeout(
-            Duration::from_secs(PER_CONNECTION_READ_TIMEOUT_SECS),
-            read_request_head(&mut socket),
-        )
-        .await;
-        // A silent or stalled peer is dropped and we go back to `accept()`.
-        let Ok(Ok(request)) = read else {
-            continue;
-        };
-
-        let first_line = request.lines().next().unwrap_or_default();
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap_or("");
-        let path = parts.next().unwrap_or("");
-
-        let query = path.split('?').nth(1).unwrap_or("");
-        let mut code: Option<String> = None;
-        let mut state: Option<String> = None;
-        let mut error: Option<String> = None;
-        let mut error_subcode: Option<String> = None;
-        let mut error_description: Option<String> = None;
-        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-            match k.as_ref() {
-                "code" => code = Some(v.into_owned()),
-                "state" => state = Some(v.into_owned()),
-                "error" => error = Some(v.into_owned()),
-                "error_subcode" => error_subcode = Some(v.into_owned()),
-                "error_description" => error_description = Some(v.into_owned()),
-                _ => {}
+        // Both branches are cancel-safe; at least one is always enabled.
+        tokio::select! {
+            // Finished connections first: one may carry the redirect, and each
+            // drained task frees a slot.
+            biased;
+            Some(joined) = inflight.join_next(), if !inflight.is_empty() => match joined {
+                Ok(Some(outcome)) => return outcome,
+                Ok(None) => {}
+                // A panic in a connection task is a bug: surface it here, as
+                // the inline read it replaced would have.
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) => {}
+            },
+            accepted = listener.accept(), if inflight.len() < MAX_INFLIGHT_CONNECTIONS => match accepted {
+                Ok((socket, _peer)) => {
+                    inflight.spawn(handle_connection(socket, Arc::clone(&expected_state), read_timeout));
+                }
+                // A peer that resets or aborts before it is accepted is its
+                // own problem, not the listener's: the redirect may still be
+                // on its way.
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+                Err(e) => return Err(AuthError::Loopback(e.to_string())),
             }
         }
-
-        // Not the OAuth redirect (favicon probe, unrelated request, a CORS/PNA
-        // preflight): answer and keep waiting for the real one.
-        if method != "GET" || (code.is_none() && state.is_none() && error.is_none()) {
-            respond(&mut socket, "404 Not Found", "").await;
-            continue;
-        }
-
-        // A request that does not carry the pending `state` is not our
-        // redirect, whatever else it claims: ignore it rather than let it end
-        // the wait. Never log the values — only which parameters were present.
-        if state.as_deref() != Some(expected_state) {
-            tracing::warn!(
-                target: "auth",
-                has_code = code.is_some(),
-                has_error = error.is_some(),
-                "ignoring a loopback request whose state does not match the pending sign-in"
-            );
-            respond(
-                &mut socket,
-                "400 Bad Request",
-                "<html><body><h2>This request doesn't match a pending azapptoolkit sign-in.</h2><p>You can close this window.</p></body></html>",
-            )
-            .await;
-            continue;
-        }
-
-        let outcome = match (error, code) {
-            (Some(err), _) => Err(redirect_error(
-                &err,
-                error_subcode.as_deref(),
-                error_description.as_deref(),
-            )),
-            (None, Some(code)) => Ok(code),
-            (None, None) => Err(AuthError::Authorization("no code returned".into())),
-        };
-        let body = if outcome.is_ok() {
-            "<html><body><h2>azapptoolkit received your sign-in.</h2><p>You can close this window and return to the app.</p></body></html>"
-        } else {
-            "<html><body><h2>Sign-in failed.</h2><p>You can close this window.</p></body></html>"
-        };
-        respond(&mut socket, "200 OK", body).await;
-        return outcome;
     }
+}
+
+/// Reads and answers one loopback connection. `Some` only for the redirect
+/// carrying `expected_state`, its page already written — the outcome that ends
+/// the wait. Anything else gets its 404 or 400 — or nothing, when the peer
+/// closed, stalled past `read_timeout` or could not be read — and `None`.
+async fn handle_connection(
+    mut socket: TcpStream,
+    expected_state: Arc<str>,
+    read_timeout: Duration,
+) -> Option<Result<String>> {
+    // Each connection is bounded on its own: `read_request_head` returns only
+    // on EOF, a complete head, or 16 KiB, and browsers hold speculative sockets
+    // open idle in their pool for seconds. Read one at a time, an idle socket
+    // accepted first parked the loop for the whole bound (once per socket)
+    // while the redirect sat in the accept queue; read concurrently, the bound
+    // only frees this connection's slot and buffer.
+    let read = tokio::time::timeout(read_timeout, read_request_head(&mut socket)).await;
+    // A silent or stalled peer is dropped.
+    let Ok(Ok(request)) = read else {
+        return None;
+    };
+
+    let first_line = request.lines().next().unwrap_or_default();
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    let query = path.split('?').nth(1).unwrap_or("");
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut error: Option<String> = None;
+    let mut error_subcode: Option<String> = None;
+    let mut error_description: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
+            "error_subcode" => error_subcode = Some(v.into_owned()),
+            "error_description" => error_description = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+
+    // Not the OAuth redirect (favicon probe, unrelated request, a CORS/PNA
+    // preflight): answer and keep waiting for the real one.
+    if method != "GET" || (code.is_none() && state.is_none() && error.is_none()) {
+        respond(&mut socket, "404 Not Found", "").await;
+        return None;
+    }
+
+    // A request that does not carry the pending `state` is not our redirect,
+    // whatever else it claims: ignore it rather than let it end the wait.
+    // Never log the values — only which parameters were present.
+    if state.as_deref() != Some(&*expected_state) {
+        tracing::warn!(
+            target: "auth",
+            has_code = code.is_some(),
+            has_error = error.is_some(),
+            "ignoring a loopback request whose state does not match the pending sign-in"
+        );
+        respond(
+            &mut socket,
+            "400 Bad Request",
+            "<html><body><h2>This request doesn't match a pending azapptoolkit sign-in.</h2><p>You can close this window.</p></body></html>",
+        )
+        .await;
+        return None;
+    }
+
+    let outcome = match (error, code) {
+        (Some(err), _) => Err(redirect_error(
+            &err,
+            error_subcode.as_deref(),
+            error_description.as_deref(),
+        )),
+        (None, Some(code)) => Ok(code),
+        (None, None) => Err(AuthError::Authorization("no code returned".into())),
+    };
+    let body = if outcome.is_ok() {
+        "<html><body><h2>azapptoolkit received your sign-in.</h2><p>You can close this window and return to the app.</p></body></html>"
+    } else {
+        "<html><body><h2>Sign-in failed.</h2><p>You can close this window.</p></body></html>"
+    };
+    respond(&mut socket, "200 OK", body).await;
+    Some(outcome)
 }
 
 /// Writes one complete `Connection: close` response and shuts the socket down.
@@ -222,8 +289,10 @@ mod tests {
     /// stays open IDLE, and a stray probe (favicon) all arrive before the real
     /// redirect. The old single-accept implementation lost the redirect to the
     /// first connection; an unbounded per-connection read then parked the loop
-    /// on the idle one. It must survive all three and still deliver the code —
-    /// including when the redirect's request line is split across TCP segments.
+    /// on the idle one, and a bounded one still made everything behind it wait
+    /// out the bound. It must survive all three and deliver the code promptly
+    /// while the idle socket is still open — including when the redirect's
+    /// request line is split across TCP segments.
     #[tokio::test]
     async fn stray_connections_do_not_consume_the_redirect() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -236,23 +305,28 @@ mod tests {
         // 1b: the case the old mitigation did NOT cover — a socket that opens
         // and stays open, sending nothing. Chrome and Edge hold speculative
         // sockets in the pool for seconds, so this is what browsers actually
-        // do. Held for the whole test: without a per-connection read bound the
-        // accept loop parks here and never reaches the real redirect below.
-        let _idle = TcpStream::connect(addr).await.unwrap();
+        // do. Held for the whole test, and everything below must finish well
+        // inside its 5 s read bound: a listener that reads one connection at a
+        // time parks here and serves nothing behind it until the bound fires.
+        let mut idle = TcpStream::connect(addr).await.unwrap();
 
         // 2: stray probe — must get a 404, not steal the redirect slot.
-        {
+        let probe = async {
             let mut s = TcpStream::connect(addr).await.unwrap();
             s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
                 .await
                 .unwrap();
             let mut resp = Vec::new();
             let _ = s.read_to_end(&mut resp).await;
-            assert!(
-                String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 404"),
-                "probe should get a 404"
-            );
-        }
+            resp
+        };
+        let resp = tokio::time::timeout(PROMPTLY, probe)
+            .await
+            .expect("the probe waited behind the idle socket");
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 404"),
+            "probe should get a 404"
+        );
 
         // 3: the real redirect, request line split across two writes.
         let mut s = TcpStream::connect(addr).await.unwrap();
@@ -263,7 +337,128 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         s.write_all(b"P/1.1\r\nHost: x\r\n\r\n").await.unwrap();
 
-        let code = wait.await.unwrap().unwrap();
+        let code = tokio::time::timeout(PROMPTLY, wait)
+            .await
+            .expect("the redirect waited behind the idle socket")
+            .unwrap()
+            .unwrap();
+        assert_eq!(code, "c0de");
+
+        // Nothing outlives the wait: the idle socket's reader was aborted when
+        // the wait returned, so the peer sees end-of-stream at once.
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(PROMPTLY, idle.read_to_end(&mut rest))
+            .await
+            .expect("the idle connection outlived the wait");
+        assert!(matches!(read, Ok(0)), "{read:?}");
+    }
+
+    /// With every slot held by a peer that never sends and never closes, the
+    /// redirect still lands: each stalled connection is dropped on its read
+    /// bound, which frees its slot. Run with a 200 ms bound so the proof does
+    /// not wait the real five seconds; a listener that lost the bound would
+    /// leave the redirect queued until the caller's `REDIRECT_WAIT`.
+    #[tokio::test]
+    async fn stalled_connections_free_their_slots_on_the_read_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let wait = tokio::spawn(async move {
+            listen_with(listener, "st4te", Duration::from_millis(200)).await
+        });
+
+        let mut stalled = Vec::new();
+        for _ in 0..MAX_INFLIGHT_CONNECTIONS {
+            stalled.push(TcpStream::connect(addr).await.unwrap());
+        }
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /?code=c0de&state=st4te HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let code = tokio::time::timeout(PROMPTLY, wait)
+            .await
+            .expect("the redirect never got a slot: the stalled connections were not dropped")
+            .unwrap()
+            .unwrap();
+        assert_eq!(code, "c0de");
+        // Every stalled peer was dropped on its bound (or aborted when the
+        // wait returned): none is still being read.
+        for mut peer in stalled {
+            let mut rest = Vec::new();
+            let read = tokio::time::timeout(PROMPTLY, peer.read_to_end(&mut rest))
+                .await
+                .expect("a stalled connection outlived the wait");
+            assert!(matches!(read, Ok(0)), "{read:?}");
+        }
+    }
+
+    /// Far under [`PER_CONNECTION_READ_TIMEOUT_SECS`], far over a loopback
+    /// round trip: a test that must finish within it proves nothing waited
+    /// out an idle connection's read bound.
+    const PROMPTLY: Duration = Duration::from_secs(1);
+
+    /// Each idle socket used to add its own 5 s ahead of the redirect — the
+    /// listener read one connection at a time, so any local process could
+    /// stall sign-in that long per connect. Read concurrently, two cost
+    /// nothing, and the browser still gets its page.
+    #[tokio::test]
+    async fn idle_sockets_ahead_of_the_redirect_do_not_delay_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let wait = tokio::spawn(async move { listen_for_code(listener, "st4te").await });
+
+        let _idle_one = TcpStream::connect(addr).await.unwrap();
+        let _idle_two = TcpStream::connect(addr).await.unwrap();
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /?code=c0de&state=st4te HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        tokio::time::timeout(PROMPTLY, s.read_to_end(&mut resp))
+            .await
+            .expect("the redirect waited behind the idle sockets")
+            .unwrap();
+        let page = String::from_utf8_lossy(&resp);
+        assert!(page.contains("received your sign-in"), "{page}");
+
+        let code = tokio::time::timeout(PROMPTLY, wait)
+            .await
+            .expect("the wait outlived its redirect")
+            .unwrap()
+            .unwrap();
+        assert_eq!(code, "c0de");
+    }
+
+    /// The read buffers are bounded: with every slot held by an idle socket
+    /// the redirect waits in the accept queue, and it lands as soon as one
+    /// slot frees — a full set never wedges the listener.
+    #[tokio::test]
+    async fn a_full_set_of_connections_waits_for_a_free_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let wait = tokio::spawn(async move { listen_for_code(listener, "st4te").await });
+
+        let mut idle = Vec::new();
+        for _ in 0..MAX_INFLIGHT_CONNECTIONS {
+            idle.push(TcpStream::connect(addr).await.unwrap());
+        }
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /?code=c0de&state=st4te HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !wait.is_finished(),
+            "a connection past the cap was read while every slot was held"
+        );
+
+        // One idle peer goes away: its slot frees and the redirect is read.
+        drop(idle.pop());
+        let code = tokio::time::timeout(PROMPTLY, wait)
+            .await
+            .expect("the redirect never got the freed slot")
+            .unwrap()
+            .unwrap();
         assert_eq!(code, "c0de");
     }
 
