@@ -23,6 +23,27 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Thaw items the app still imports (the retirement order is the business of
+/// `docs/architecture/frontend-workspace.md`, "Moving off Thaw"). The ratchet
+/// only ever shortens: a Thaw item outside this list and [`RETIRED`] is a new
+/// dependency on the library being retired, so it fails; retiring one moves
+/// it to [`RETIRED`]. The list is not capped by count, because the
+/// one-primitive rule routes a new button onto `thaw::Button` until
+/// `ui::Button` exists.
+const STILL_ON_THAW: &[&str] = &[
+    "Button",
+    "ButtonAppearance",
+    "ButtonRef",
+    "Input",
+    "InputSuffix",
+    "Field",
+    "Textarea",
+    "Select",
+    "ComponentRef",
+    "ConfigProvider",
+    "Theme",
+];
+
 /// Thaw items the app no longer uses, each with the primitive that replaced it.
 const RETIRED: &[(&str, &str)] = &[
     ("Body1", "a <span class=\"ui-text …\">"),
@@ -119,6 +140,51 @@ fn no_retired_thaw_component_is_imported() {
         offenders.is_empty(),
         "these files import a Thaw component the app has retired:\n  {}",
         offenders.join("\n  ")
+    );
+}
+
+/// A Thaw item the app has not imported before is a step backwards: the set
+/// of items still on Thaw only shrinks.
+#[test]
+fn no_new_thaw_item_is_imported() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    files.sort();
+
+    let mut offenders = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for file in &files {
+        let src = strip_line_comments(&fs::read_to_string(file).expect("read source"));
+        for item in thaw_items(&src) {
+            seen.insert(item.clone());
+            let known = STILL_ON_THAW.contains(&item.as_str())
+                || RETIRED.iter().any(|(name, _)| *name == item);
+            if !known {
+                offenders.push(format!(
+                    "{}: thaw::{item}",
+                    file.strip_prefix(root).unwrap_or(file).display()
+                ));
+            }
+        }
+    }
+    assert!(
+        seen.len() >= 5,
+        "found only {seen:?} Thaw items — has the import shape changed?"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these files import a Thaw item the app did not use before; build on a `components::ui` \
+         primitive instead, or retire the item and move it to RETIRED:\n  {}",
+        offenders.join("\n  ")
+    );
+    let stale: Vec<&&str> = STILL_ON_THAW
+        .iter()
+        .filter(|name| !seen.contains(**name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "no file imports {stale:?} any more: move them to RETIRED so they stay retired"
     );
 }
 

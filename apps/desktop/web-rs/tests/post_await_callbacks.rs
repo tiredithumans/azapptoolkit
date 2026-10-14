@@ -219,6 +219,102 @@ fn spawned_tasks_never_run_a_callback_after_an_await() {
     );
 }
 
+/// Spawned tasks that surface a toast after their first await, outside the
+/// files where a session-level toast is the design (`views/shell.rs` and
+/// `state/errors.rs`: sign-out, re-auth and consent recovery run for the
+/// session, not a view), without gating on `Session::is_active_tenant` or
+/// landing through `CommandState::land`. Such a toast lands at the next
+/// sign-in when the result arrives after a switch or sign-out. The number can
+/// only go down: converting a site is a behaviour change that needs GUI proof,
+/// so this is a ceiling, not a ban, held by equality so a site that is gated
+/// lowers it in the same change (see "Reactivity conventions" in
+/// `docs/architecture/frontend-workspace.md`).
+const UNGATED_TOAST_CEILING: usize = 6;
+
+/// Files whose post-await toasts are session-level by design.
+const SESSION_LEVEL_TOASTS: &[&str] = &["views/shell.rs", "state/errors.rs"];
+
+/// `(line)` of every `spawn_local(async move { … })` block in `src` that
+/// toasts after its first `.await` with no `is_active_tenant` or `.land(` in
+/// the block.
+fn ungated_post_await_toasts(src: &str) -> Vec<usize> {
+    const OPEN: &str = "spawn_local(async move {";
+    const TOASTS: &[&str] = &[".toast_success(", ".toast_error(", ".push_toast("];
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = src[from..].find(OPEN) {
+        let start = from + at + OPEN.len();
+        let end = block_end(src, start);
+        let body = &src[start..end];
+        if let Some(awaited) = body.find(".await") {
+            let tail = &body[awaited..];
+            let toasts = TOASTS.iter().any(|t| tail.contains(t));
+            let gated = body.contains("is_active_tenant") || body.contains(".land(");
+            if toasts && !gated {
+                out.push(src[..start + awaited].matches('\n').count() + 1);
+            }
+        }
+        from = start;
+    }
+    out
+}
+
+#[test]
+fn spawned_tasks_that_toast_after_an_await_stay_under_the_ceiling() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    files.sort();
+
+    let mut sites = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if SESSION_LEVEL_TOASTS.iter().any(|f| rel.ends_with(f)) {
+            continue;
+        }
+        let src = strip_line_comments(
+            &fs::read_to_string(file)
+                .unwrap_or_else(|e| panic!("read {}: {e}", file.display()))
+                .replace("\r\n", "\n"),
+        );
+        for line in ungated_post_await_toasts(&src) {
+            sites.push(format!("src/{rel}:{line}"));
+        }
+    }
+    assert!(
+        sites.len() <= UNGATED_TOAST_CEILING,
+        "{} spawned tasks toast after an await with no is_active_tenant gate (ceiling {}); gate \
+         the new one on `session.is_active_tenant(&tenant)` or land it through `CommandState::run`:\n{}",
+        sites.len(),
+        UNGATED_TOAST_CEILING,
+        sites.join("\n")
+    );
+    assert_eq!(
+        sites.len(),
+        UNGATED_TOAST_CEILING,
+        "only {} ungated sites remain; lower UNGATED_TOAST_CEILING to {} so the ratchet keeps \
+         biting:\n{}",
+        sites.len(),
+        sites.len(),
+        sites.join("\n")
+    );
+}
+
+#[test]
+fn the_toast_scanner_reads_the_shapes_the_tree_uses() {
+    let ungated = "spawn_local(async move {\n    let r = f().await;\n    session.toast_success(\"done\");\n});";
+    assert_eq!(ungated_post_await_toasts(ungated), [2]);
+    let gated = "spawn_local(async move {\n    let r = f().await;\n    if !session.is_active_tenant(&t) { return; }\n    session.toast_error(\"x\", None);\n});";
+    assert!(ungated_post_await_toasts(gated).is_empty());
+    let before_await =
+        "spawn_local(async move {\n    session.toast_success(\"starting\");\n    f().await;\n});";
+    assert!(ungated_post_await_toasts(before_await).is_empty());
+}
+
 #[test]
 fn spawned_tasks_never_read_a_signal_after_an_await() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

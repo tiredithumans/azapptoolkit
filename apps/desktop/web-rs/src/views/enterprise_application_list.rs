@@ -377,6 +377,10 @@ fn view_row(
     sp: EnterpriseApplicationDto,
     session: crate::state::Session,
 ) -> impl IntoView {
+    // The list offers an Enabled/Disabled facet, but the rows never showed the
+    // state they filter on — so a filtered view and an unfiltered one looked
+    // identical row-for-row. Read before any field moves out of `sp`.
+    let is_disabled = sp.is_disabled();
     // One shared allocation for the row id; the per-handler captures below are
     // refcount bumps instead of String clones.
     let id: Arc<str> = sp.id.into();
@@ -401,10 +405,6 @@ fn view_row(
     let name_click = display_name.clone();
     let app_id_string = sp.app_id;
     let is_foreign = sp.is_foreign_tenant;
-    // The list offers an Enabled/Disabled facet, but the rows never showed the
-    // state they filter on — so a filtered view and an unfiltered one looked
-    // identical row-for-row.
-    let is_disabled = sp.account_enabled == Some(false);
     let paired_app_id = sp.paired_app_registration_id;
 
     // Descriptive per-row label so the row button announces which enterprise

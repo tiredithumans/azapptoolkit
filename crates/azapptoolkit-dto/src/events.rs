@@ -42,6 +42,22 @@ pub const ALL: &[&str] = &[
 mod tests {
     use super::ALL;
 
+    /// Every `pub const NAME: &str = "value";` in this file, as `(NAME, value)`,
+    /// read from the source so a constant left out of [`ALL`] cannot pass: the
+    /// pins in `repo_invariants/ipc.rs` loop over `ALL`, so a name missing from
+    /// it would be checked nowhere.
+    fn declared_names() -> Vec<(String, String)> {
+        include_str!("events.rs")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("pub const ")?;
+                let (name, rest) = rest.split_once(": &str = \"")?;
+                let (value, _) = rest.split_once('"')?;
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect()
+    }
+
     #[test]
     fn every_name_is_distinct_kebab_case() {
         let mut seen = std::collections::BTreeSet::new();
@@ -52,6 +68,22 @@ mod tests {
             );
             assert!(seen.insert(*name), "{name} is listed twice");
         }
-        assert_eq!(seen.len(), 9);
+        let declared = declared_names();
+        assert!(declared.len() >= 5, "the source scan found {declared:?}");
+        let declared_values: std::collections::BTreeSet<&str> =
+            declared.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(
+            seen, declared_values,
+            "ALL must list every event constant declared in this file, and nothing else"
+        );
+        // `repo_invariants/ipc.rs` derives each constant's name from its value
+        // (upper snake of the kebab value), so state that contract here.
+        for (name, value) in &declared {
+            assert_eq!(
+                *name,
+                value.to_uppercase().replace('-', "_"),
+                "constant {name} must be the upper-snake form of {value:?}"
+            );
+        }
     }
 }

@@ -75,7 +75,12 @@ jobs:
           }
 
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # No rust-cache: its keys are per job and main only ever saves `rust`,
+      # `web` and `analyze` caches, so a tag run's guard/build jobs find none
+      # (every leg of v0.33.3–v0.34.0 logged "No cache found"); what they saved
+      # went under the tag ref, unreachable from any later run, and each tag's
+      # ~1.7 GiB crowded main's caches out of the 10 GB quota. Pinned by
+      # repo_invariants/release.rs.
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: just,cargo-audit,cargo-deny@0.20.2
@@ -144,7 +149,7 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}, wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # No rust-cache (see the guard job): a tag's caches can never be restored.
 
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
