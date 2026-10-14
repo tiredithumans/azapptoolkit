@@ -56,7 +56,7 @@ pub async fn save_audit_to_file(
                     )
                 })?;
             let coverage = cached_run_coverage(&run);
-            (run.items.clone(), coverage)
+            (run.items().to_vec(), coverage)
         }
     };
     let (content, ext, filter_name) = match format.as_str() {
@@ -83,11 +83,11 @@ pub async fn save_audit_to_file(
 /// does it.
 fn cached_run_coverage(run: &CachedAuditRun) -> AuditExportCoverage {
     AuditExportCoverage {
-        total_apps: run.items.len(),
+        total_apps: run.items().len(),
         cancelled: false,
         truncated: false,
         degraded: Vec::new(),
-        sign_in_report_available: run.items.iter().any(|i| i.sign_in_report_available),
+        sign_in_report_available: run.items().iter().any(|i| i.sign_in_report_available),
         completed_at: Some(run.completed_at.clone()),
         // The one caveat a cacheable run can still carry.
         mailbox_scoping_resolved: run.mailbox_scoping_resolved,

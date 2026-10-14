@@ -607,6 +607,14 @@ fn graph_client_sp_mutators_sweep_the_sp_cache() {
 /// helper's own tests, so it is out of this rule's lexical reach on purpose. A
 /// body that mixes an in-place write into a create flow is therefore excused
 /// here, which is right: a create IS a set change.
+///
+/// An SP PATCH (`patch_service_principal`, `set_service_principal_tags`) is an
+/// in-place write too, with one exception derived from the graph source: a
+/// PATCH that names a field the SP index selects (`SP_INDEX_SELECT`, today
+/// `accountEnabled`) changes a list row, so it IS a list-tier write and is left
+/// out of this rule. Tags, `appRoleAssignmentRequired` and the signing-key
+/// thumbprint are on no list row, and busting the list tier for them cost a
+/// full directory rescan per toggle.
 #[test]
 fn an_in_place_write_never_busts_the_list_tier() {
     const IN_PLACE_WRITES: &[&str] = &[
@@ -617,7 +625,28 @@ fn an_in_place_write_never_busts_the_list_tier() {
         ".patch_application_web(",
         ".patch_application_expose_api(",
         "apply_claims_policy(",
+        ".patch_service_principal(",
+        ".set_service_principal_tags(",
     ];
+    const SP_PATCHES: &[&str] = &[".patch_service_principal(", ".set_service_principal_tags("];
+    let sp_index_select: Vec<String> = {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/azapptoolkit-graph/src/client/service_principals.rs");
+        let src = std::fs::read_to_string(&path).expect("read the SP index projection");
+        let (_, rest) = src
+            .split_once("const SP_INDEX_SELECT: &[&str] = &[")
+            .expect("SP_INDEX_SELECT in service_principals.rs");
+        let (list, _) = rest.split_once("];").expect("SP_INDEX_SELECT end");
+        list.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_matches('"').to_string())
+            .collect()
+    };
+    assert!(
+        sp_index_select.len() >= 5 && sp_index_select.iter().any(|f| f == "accountEnabled"),
+        "SP_INDEX_SELECT read as {sp_index_select:?} — the projection scan is broken"
+    );
     const SET_CHANGING_WRITES: &[&str] = &[
         ".create_",
         ".delete_",
@@ -631,7 +660,14 @@ fn an_in_place_write_never_busts_the_list_tier() {
     for cmd in super::sources::commands() {
         let in_place = IN_PLACE_WRITES.iter().any(|w| cmd.body.contains(w));
         let set_changing = SET_CHANGING_WRITES.iter().any(|w| cmd.body.contains(w));
-        if !in_place || set_changing {
+        // An SP PATCH whose JSON body names an indexed field (`"accountEnabled":`)
+        // rewrites a list row: a list-tier write. The key form, not a bare
+        // string, so a message or comment naming a field does not exempt a body.
+        let indexed_sp_write = SP_PATCHES.iter().any(|w| cmd.body.contains(w))
+            && sp_index_select
+                .iter()
+                .any(|f| cmd.body.contains(&format!("\"{f}\":")));
+        if !in_place || set_changing || indexed_sp_write {
             continue;
         }
         checked += 1;
@@ -642,8 +678,9 @@ fn an_in_place_write_never_busts_the_list_tier() {
     offenders.sort();
 
     assert!(
-        checked >= 8,
-        "only {checked} in-place writer(s) found — the source walk or the fragment list is          broken, and a rule that scans nothing passes vacuously"
+        checked >= 18,
+        "only {checked} in-place writer(s) found (18 at 2026-10-14) — the source walk or the \
+         fragment list is broken, and a rule that scans nothing passes vacuously"
     );
     assert!(
         offenders.is_empty(),
@@ -652,8 +689,9 @@ fn an_in_place_write_never_busts_the_list_tier() {
          not call `invalidate_app_lists` — that tier drops the two tenant-wide indexes, which cost \
          a full directory re-enumeration (tens of seconds on a large tenant) to rebuild. Use the \
          tier that matches the write: credential-only → `invalidate_app_credentials(cache, tenant, \
-         object_id)`; in-place PATCH (URIs, exposed scopes/roles, claims) → \
-         `invalidate_app_details(cache, tenant)`. See `applications/cache.rs`."
+         object_id)`; in-place PATCH (URIs, exposed scopes/roles, claims, an SP field the index \
+         does not select) → `invalidate_app_details(cache, tenant)`; a scoping/grant/owner write → \
+         `invalidate_app_detail_state`. See `applications/cache.rs`."
     );
 }
 
@@ -2148,52 +2186,65 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
     assert_eq!(flat.len(), map.len());
 }
 
-/// Every tenant-wide index accessor is in [`CACHED_ACCESSORS`].
+/// Every tenant-wide index accessor is in [`CACHED_ACCESSORS`], and nothing
+/// else is.
 ///
 /// The session rule sees a read through an accessor only by name, so an
 /// accessor missing from the list makes every command that reads through it
 /// invisible — the vacuous pass this rule was hardened against. The accessors
-/// live in one file, `commands/applications/cache.rs`, and are named for what
-/// they are (`*_cached` reads through, `*_hit` reads only), so the ratchet reads
-/// that file directly. It deliberately does not walk every command module: the
-/// test helpers (`test_support::detail_cached`) share the suffix and are not
-/// production readers.
+/// are named for what they are (`*_cached` reads through, `*_hit` reads only),
+/// plus the two unsuffixed corpora, and they live in several command modules
+/// (`applications/cache.rs`, `enterprise_application.rs`, `managed_identity.rs`,
+/// `arm_roles.rs`, `exchange/mail_scopes.rs`, `search.rs`, `gallery.rs`), so the
+/// ratchet walks the whole commands tree rather than one file: a production fn
+/// with the suffix whose body reads the cache — directly, or through another
+/// accessor — is an accessor, and the discovered set must equal the list in
+/// both directions. `command_modules()` already leaves out the `tests.rs`
+/// siblings and strips inline test modules; `test_support` and the handler-test
+/// modules are skipped by [`mounted_test_only`]; and a suffixed helper that
+/// reads no cache (`search::probe_hit`) is not an accessor.
 #[test]
 fn every_index_accessor_counts_as_a_cache_read() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/applications/cache.rs");
-    let src = std::fs::read_to_string(&path).expect("read the index accessors");
-    let mut accessors: Vec<String> = Vec::new();
-    for line in src.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
+    const UNSUFFIXED: &[&str] = &["search_corpus", "load_gallery_corpus"];
+    let mut discovered: std::collections::BTreeSet<String> = Default::default();
+    let mut modules: std::collections::BTreeSet<String> = Default::default();
+    for (name, src) in super::sources::command_modules() {
+        if mounted_test_only(&name) {
             continue;
         }
-        let Some(at) = trimmed.find("fn ") else {
-            continue;
-        };
-        let rest = &trimmed[at + "fn ".len()..];
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if name.ends_with("_cached") || name.ends_with("_hit") {
-            accessors.push(name);
+        for f in super::sources::functions_in(&src) {
+            let candidate = f.name.ends_with("_cached")
+                || f.name.ends_with("_hit")
+                || UNSUFFIXED.contains(&f.name.as_str());
+            if !candidate {
+                continue;
+            }
+            let (flat, _) = flatten_out_whitespace(&f.body);
+            if first_cache_read(&flat).is_some() {
+                discovered.insert(f.name.clone());
+                modules.insert(name.clone());
+            }
         }
     }
     assert!(
-        accessors.len() >= 5,
-        "found only {accessors:?} in {} — the scan is broken",
-        path.display()
+        discovered.len() >= 15 && modules.len() >= 5,
+        "found only {discovered:?} across {modules:?} — the scan is broken"
     );
-    let missing: Vec<&String> = accessors
+    let listed: std::collections::BTreeSet<String> = CACHED_ACCESSORS
         .iter()
-        .filter(|name| !CACHED_ACCESSORS.contains(&format!("{name}(").as_str()))
+        .map(|a| a.trim_end_matches('(').to_string())
         .collect();
+    let missing: Vec<&String> = discovered.difference(&listed).collect();
     assert!(
         missing.is_empty(),
         "these index accessors read the cache but are not in CACHED_ACCESSORS, so a command \
          reading through them escapes the session rule: {missing:?}"
+    );
+    let stale: Vec<&String> = listed.difference(&discovered).collect();
+    assert!(
+        stale.is_empty(),
+        "CACHED_ACCESSORS names fns that no longer read the cache (or no longer exist): \
+         {stale:?}"
     );
 }
 

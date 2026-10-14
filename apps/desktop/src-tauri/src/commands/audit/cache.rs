@@ -3,6 +3,8 @@
 
 use tauri::State;
 
+use std::sync::Arc;
+
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_core::cache::CacheKind;
 
@@ -33,7 +35,12 @@ pub(crate) fn audit_cache_key(tenant_id: &str) -> String {
 pub(crate) struct CachedAuditRun {
     /// RFC3339 UTC.
     pub(crate) completed_at: String,
-    pub(crate) items: Vec<AuditItem>,
+    /// The [`AuditRunResult`] a cache hit answers with, built once when the run
+    /// is stored and shared out by refcount: `get_cached_audit` used to deep-copy
+    /// every item (up to `APPS_MAX`) on each Security-tab hydrate only to
+    /// serialize the copy. Serde's `rc` feature serializes the `Arc` as the
+    /// value, so the wire shape is unchanged.
+    pub(crate) result: Arc<AuditRunResult>,
     /// [`AuditRunResult::mailbox_scoping_resolved`] — stored with the items
     /// because an unresolved run is still cacheable (it over-reports, never
     /// under-reports), so a cache hit and its export must still carry the
@@ -46,6 +53,53 @@ pub(crate) struct CachedAuditRun {
     /// that knew the cap.
     pub(crate) credential_policy_available: bool,
     pub(crate) credential_policy_max_days: Option<i64>,
+}
+
+impl CachedAuditRun {
+    /// The entry for a finished, cacheable run. Report availability is
+    /// reconstructed from the items (every item carries the run's
+    /// `sign_in_report_available`); a cached run never re-prompts for consent,
+    /// so `sign_in_consent_required` is false on a hit; a truncated or degraded
+    /// run is never cached (see `run_is_cacheable`), so anything read back from
+    /// here covered the whole tenant by construction; and `completed_at` is the
+    /// stamp the RUN wrote, never a read's time — "scanned just now" about an
+    /// hour-old scan is the false claim that field exists to stop.
+    pub(crate) fn new(
+        tenant_id: String,
+        completed_at: String,
+        items: Vec<AuditItem>,
+        mailbox_scoping_resolved: bool,
+        credential_policy_available: bool,
+        credential_policy_max_days: Option<i64>,
+    ) -> Self {
+        let sign_in_report_available = items.iter().any(|i| i.sign_in_report_available);
+        let result = AuditRunResult {
+            tenant_id,
+            total_apps: items.len(),
+            items,
+            cancelled: false,
+            sign_in_report_available,
+            sign_in_consent_required: false,
+            credential_policy_available,
+            credential_policy_max_days,
+            truncated: false,
+            degraded: Vec::new(),
+            completed_at: Some(completed_at.clone()),
+            mailbox_scoping_resolved,
+        };
+        Self {
+            completed_at,
+            result: Arc::new(result),
+            mailbox_scoping_resolved,
+            credential_policy_available,
+            credential_policy_max_days,
+        }
+    }
+
+    /// The scored items, borrowed from the shared result.
+    pub(crate) fn items(&self) -> &[AuditItem] {
+        &self.result.items
+    }
 }
 
 /// Whether a finished run may be written to the audit cache.
@@ -97,7 +151,7 @@ pub(crate) fn invalidate_audit_cache(cache: &azapptoolkit_core::cache::Cache, te
 pub async fn get_cached_audit(
     state: State<'_, AppState>,
     tenant_id: String,
-) -> Result<Option<AuditRunResult>, UiError> {
+) -> Result<Option<Arc<AuditRunResult>>, UiError> {
     let Some(_) = state.auth.tenant_context(&tenant_id) else {
         return Ok(None);
     };
@@ -108,40 +162,7 @@ pub async fn get_cached_audit(
     else {
         return Ok(None);
     };
-    Ok(Some(cached_run_result(tenant_id, &run)))
-}
-
-/// The [`AuditRunResult`] a cache hit answers with. The one deep copy left on
-/// this path is `items`: [`AuditRunResult`] is a wire type the frontend
-/// decodes, so it owns its items rather than sharing the cache's `Arc`.
-fn cached_run_result(tenant_id: String, run: &CachedAuditRun) -> AuditRunResult {
-    let items = run.items.clone();
-    // Report availability is reconstructed from the cached items (every item
-    // carries the run's `sign_in_report_available`); a cached run never re-prompts
-    // for consent, so `sign_in_consent_required` is false on a cache hit.
-    let sign_in_report_available = items.iter().any(|i| i.sign_in_report_available);
-    AuditRunResult {
-        tenant_id,
-        total_apps: items.len(),
-        items,
-        cancelled: false,
-        sign_in_report_available,
-        sign_in_consent_required: false,
-        credential_policy_available: run.credential_policy_available,
-        credential_policy_max_days: run.credential_policy_max_days,
-        // A truncated run is never cached (see `run_audit`), so anything read
-        // back from here covered the whole tenant by construction.
-        truncated: false,
-        // Nor is a degraded one, for the same reason.
-        degraded: Vec::new(),
-        // The stamp the RUN wrote, not this read: a cache hit is what the
-        // dashboard shows after a relaunch-free hour, and "scanned just now"
-        // about an hour-old scan is the false claim this field exists to stop.
-        completed_at: Some(run.completed_at.clone()),
-        // Cached WITH the items: an unresolved run is cacheable, and its
-        // caveat must survive the round trip.
-        mailbox_scoping_resolved: run.mailbox_scoping_resolved,
-    }
+    Ok(Some(Arc::clone(&run.result)))
 }
 
 /// The Home dashboard's view of the cached audit: the posture counts and each
@@ -168,7 +189,7 @@ pub async fn get_cached_audit_summary(
         return Ok(None);
     };
     Ok(Some(CachedAuditSummary::from_items(
-        &run.items,
+        run.items(),
         Some(run.completed_at.clone()),
         run.credential_policy_available,
         run.credential_policy_max_days,

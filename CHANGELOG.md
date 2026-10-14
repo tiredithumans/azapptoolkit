@@ -29,7 +29,13 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   authentication) and -0349 (an unauthenticated ServerHello could downgrade later connections to
   classical key exchange). Every Graph, login, Exchange, Key Vault and ARM connection rides this
   TLS stack. The frontend lockfile carries no `rustls`.
-
+- **Hiding an enterprise app from My Apps, toggling "Assignment required?", rotating a SAML
+  signing certificate, scoping or removing an app's Exchange mailbox access and the AAP migration
+  no longer force a full directory rescan.** Each of these changes one service principal in place
+  (or the app's scoping), nothing on the cached lists, yet they dropped the two tenant-wide indexes, so
+  the next list open re-enumerated the directory (tens of seconds on a large tenant). They now
+  bust only the detail tier, and the invariant test derives the fields that DO change a list row
+  (`accountEnabled`) from the index's own projection.
 - **A new client secret's custom start and end dates use the system date picker**, the same one
   the lists' "Created before" and "Created after" filters use, and screen readers now announce
   each field by name.

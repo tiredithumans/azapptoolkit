@@ -156,18 +156,21 @@ fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
     cache.put_typed(
         CacheKind::Audit,
         key.clone(),
-        Arc::new(CachedAuditRun {
-            completed_at: "2026-01-01T00:00:00Z".into(),
-            items: vec![sample("A"), sample("B")],
-            mailbox_scoping_resolved: true,
-            credential_policy_available: true,
-            credential_policy_max_days: Some(90),
-        }),
+        Arc::new(CachedAuditRun::new(
+            "t1".into(),
+            "2026-01-01T00:00:00Z".into(),
+            vec![sample("A"), sample("B")],
+            true,
+            true,
+            Some(90),
+        )),
     );
     let run = cache
         .get_typed::<CachedAuditRun>(CacheKind::Audit, &key)
         .expect("typed read hits");
-    assert_eq!(run.items.len(), 2);
+    assert_eq!(run.items().len(), 2);
+    assert_eq!(run.result.total_apps, 2);
+    assert!(!run.result.sign_in_consent_required);
     // The wrong door: `CachedAuditRun` is no longer `Deserialize`, so probe
     // with the item vector the untyped path would have to decode.
     assert!(
@@ -177,7 +180,7 @@ fn the_cached_run_is_stored_typed_and_summarized_from_its_own_stamp() {
         "an untyped read of the typed run entry must miss"
     );
     let summary = CachedAuditSummary::from_items(
-        &run.items,
+        run.items(),
         Some(run.completed_at.clone()),
         run.credential_policy_available,
         run.credential_policy_max_days,
