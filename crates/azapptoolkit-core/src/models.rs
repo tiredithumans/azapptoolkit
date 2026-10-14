@@ -143,9 +143,11 @@ pub struct ServicePrincipal {
     pub id: String,
     /// Null-tolerant: one service principal without an `appId` (Graph does not
     /// list it for every principal kind) must not fail the whole tenant-wide
-    /// index it arrives in. Such a row reads as `""`, joins nothing, and is in
-    /// no `appId` slice, so a partitioned scan's count check sends that tenant
-    /// to the serial read.
+    /// index it arrives in. Such a row reads as `""` and joins nothing. It is
+    /// in no `appId` slice either, so a partitioned scan refuses a merge whose
+    /// union is even one row short of `/$count` and reads such a tenant
+    /// serially once the count index has seen the row
+    /// (`graph/src/client/partition.rs`).
     #[serde(default, deserialize_with = "null_to_default")]
     pub app_id: String,
     #[serde(default, deserialize_with = "null_to_default")]

@@ -5,6 +5,21 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Fixed
+
+- **A large tenant's Enterprise applications list could omit principals without an application
+  ID.** The partitioned tenant-wide scan (0.33.4) reads a directory as 16 `appId` slices and checked
+  the merged result against `/$count` with a small tolerance for index lag; a service principal with
+  no `appId` (some agent and first-party principal kinds) is in no slice, so up to that tolerance of
+  them went missing from the Enterprise applications list and the audit's inventory, and the short
+  result was cached. The count check now has no tolerance, and a tenant with such principals reads
+  serially from the first scan on which the directory's count index has caught up with them. A
+  refused merge that may only be index lag (a just-deleted object) no longer pins the collection
+  serial for the whole session: when the serial read confirms the slices were complete nothing is
+  remembered, and only a second genuine miss in a row pins it. A 400 on a slice's continuation
+  page, or a slice whose throttling outlasts its retries, now reads that scan serially instead of
+  mis-learning the filter as unsupported or failing the scan.
+
 ### Changed
 
 - **A new client secret's custom start and end dates use the system date picker**, the same one
