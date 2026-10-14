@@ -452,6 +452,7 @@ impl GraphClient {
         &self,
         sp_object_id: &str,
     ) -> Result<Vec<DirectoryObject>> {
+        validate::require_path_segment("service principal id", sp_object_id)?;
         let path = format!("/servicePrincipals/{sp_object_id}/owners");
         let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
         let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
@@ -466,6 +467,8 @@ impl GraphClient {
         sp_object_id: &str,
         principal_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", sp_object_id)?;
+        validate::require_path_segment("principal id", principal_id)?;
         let odata_id = format!(
             "{}/directoryObjects/{principal_id}",
             self.base_url.trim_end_matches('/')
@@ -482,6 +485,8 @@ impl GraphClient {
         sp_object_id: &str,
         principal_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", sp_object_id)?;
+        validate::require_path_segment("principal id", principal_id)?;
         let path = format!("/servicePrincipals/{sp_object_id}/owners/{principal_id}/$ref");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await
@@ -574,6 +579,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<ServicePrincipal>> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         // Explicit `$select` (directoryObject-derived resource) so the detail
         // view's non-default fields are returned reliably.
@@ -587,18 +593,23 @@ impl GraphClient {
     /// vanished between the index read and the backup is `Ok(None)` (skipped),
     /// not an error. Used by the DR backup for both the enterprise-app SP read
     /// (Pass 2) and the managed-identity resource-SP resolves (Pass 3). Returns
-    /// one result per input id, in order.
+    /// one result per input id, in order; an id that is not a single path segment is its own
+    /// `Err(Protocol)` row and costs no sub-request.
     pub async fn batch_get_service_principals(
         &self,
         object_ids: &[String],
     ) -> Result<Vec<Result<Option<ServicePrincipal>>>> {
         let select = default_service_principal_select().join(",");
-        let urls: Vec<String> = object_ids
-            .iter()
-            .map(|id| batch_sub_url(&format!("/servicePrincipals/{id}"), &[("$select", &select)]))
-            .collect();
+        let (urls, refused) = checked_sub_urls(object_ids, |id| {
+            validate::require_path_segment("service principal id", id)?;
+            Ok(batch_sub_url(
+                &format!("/servicePrincipals/{id}"),
+                &[("$select", &select)],
+            ))
+        });
         let raw: Vec<Result<ServicePrincipal>> = self.batch_get_json(&urls).await?;
-        Ok(raw.into_iter().map(not_found_as_none).collect())
+        let found = raw.into_iter().map(not_found_as_none).collect();
+        Ok(rejoin_refused(refused, found))
     }
 
     /// GET `/servicePrincipals/{id}` selecting only the SSO-relevant fields, as
@@ -609,6 +620,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<serde_json::Value>> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         let params: [(&str, &str); 1] = [(
             "$select",
@@ -620,6 +632,7 @@ impl GraphClient {
     /// Replaces a service principal's `tags` array (full-set PATCH). Used to
     /// toggle the `HideApp` tag that controls My Apps portal visibility.
     pub async fn set_service_principal_tags(&self, object_id: &str, tags: &[String]) -> Result<()> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         let body = serde_json::json!({ "tags": tags });
         self.send_no_content(Method::PATCH, &path, Some(&body))
@@ -633,6 +646,7 @@ impl GraphClient {
     /// or foreign-tenant SP can break sign-in or orphan consent, so callers
     /// must guard this behind explicit confirmation.
     pub async fn delete_service_principal(&self, object_id: &str) -> Result<()> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await?;
@@ -649,6 +663,7 @@ impl GraphClient {
         object_id: &str,
         body: &B,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(body))
             .await?;
@@ -667,6 +682,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Vec<serde_json::Value>> {
+        validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "appRoles")];
         let v: serde_json::Value = self.get_json(&path, &params, false).await?;

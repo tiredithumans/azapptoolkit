@@ -795,3 +795,53 @@ async fn graph_reads_ask_for_and_inflate_a_gzipped_body() {
     assert_eq!(sps.len(), 1, "the gzipped page did not decode");
     assert_eq!(sps[0].app_id, "app-1");
 }
+
+/// `{"value":"aaaa…"}` with 4096 `a`s, gzipped (`mtime = 0`): 54 bytes on the
+/// wire, 4108 decoded.
+const GZIPPED_4108_DECODED: [u8; 54] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xed, 0xc1, 0x31, 0x11, 0x00, 0x20,
+    0x0c, 0x04, 0x30, 0x2f, 0x2f, 0x03, 0x37, 0x1d, 0xd8, 0x58, 0x61, 0xe9, 0xe1, 0x1d, 0x1f, 0x5c,
+    0x92, 0xce, 0xa9, 0xb5, 0x67, 0x46, 0x0a, 0x00, 0x00, 0x00, 0xf8, 0x5e, 0xee, 0x03, 0x7f, 0x5a,
+    0x15, 0x48, 0x0c, 0x10, 0x00, 0x00,
+];
+
+/// A success body is capped by its DECODED size. reqwest inflates a gzip reply
+/// and drops its `Content-Length`, so a body that fits the cap on the wire can
+/// decode far past it; only the running total of decoded chunks catches that.
+/// Past the cap is a `Protocol` error, sent once and never retried.
+#[tokio::test]
+async fn a_success_body_is_capped_by_its_decoded_size_not_its_wire_size() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .insert_header("content-type", "application/json")
+                .set_body_bytes(GZIPPED_4108_DECODED.to_vec()),
+        )
+        // One capped read (never replayed) and one under the default cap.
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let capped = make_client(&server.uri()).with_max_body_bytes(1024);
+    let err = capped
+        .get_json::<serde_json::Value>("/applications/obj-1", &[], false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, GraphError::Protocol(m) if m == "response body exceeds the 1 KiB limit"),
+        "got {err:?}"
+    );
+    assert_eq!(err.ui_code(), "protocol_error");
+    assert!(!err.is_retryable());
+
+    // The same reply inflates and decodes under the default cap, so the
+    // refusal above is the cap and not a broken fixture.
+    let body: serde_json::Value = make_client(&server.uri())
+        .get_json("/applications/obj-1", &[], false)
+        .await
+        .unwrap();
+    assert_eq!(body["value"].as_str().map(str::len), Some(4096));
+}

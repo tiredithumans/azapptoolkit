@@ -295,6 +295,7 @@ impl GraphClient {
     }
 
     pub async fn get_application(&self, object_id: &str) -> Result<Application> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         // Project only the typed model's fields. `application` is a
         // directoryObject-derived resource, so an explicit `$select` is required
@@ -311,6 +312,7 @@ impl GraphClient {
     /// reads the per-tab paths make — cutting the backup's Graph call volume (and the throttling
     /// it triggers) sharply. A single-item GET, so no `$orderby`/`ConsistencyLevel` concerns.
     pub async fn get_application_backup_json(&self, object_id: &str) -> Result<serde_json::Value> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 2] = [("$select", APP_BACKUP_SELECT), ("$expand", "owners")];
         self.get_json(&path, &params, false).await
@@ -319,22 +321,21 @@ impl GraphClient {
     /// Batched [`Self::get_application_backup_json`], one `$batch` POST per 20 ids; returns one
     /// `Result<serde_json::Value>` per id **in order**. The DR backup's Pass-1 fan-out; cuts
     /// round trips (and the throttling) ~20×. A per-id failure is one `Err` in the vec (the
-    /// caller skips that app); a whole-batch failure is the outer `Err`, so the caller can fall
-    /// back to per-id reads.
+    /// caller skips that app) — an id that is not a single path segment included, as its own
+    /// `Err(Protocol)` row that costs no sub-request; a whole-batch failure is the outer `Err`,
+    /// so the caller can fall back to per-id reads.
     pub async fn batch_get_applications_backup_json(
         &self,
         object_ids: &[String],
     ) -> Result<Vec<Result<serde_json::Value>>> {
-        let urls: Vec<String> = object_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/applications/{id}"),
-                    &[("$select", APP_BACKUP_SELECT), ("$expand", "owners")],
-                )
-            })
-            .collect();
-        self.batch_get_json(&urls).await
+        let (urls, refused) = checked_sub_urls(object_ids, |id| {
+            validate::require_path_segment("object id", id)?;
+            Ok(batch_sub_url(
+                &format!("/applications/{id}"),
+                &[("$select", APP_BACKUP_SELECT), ("$expand", "owners")],
+            ))
+        });
+        Ok(rejoin_refused(refused, self.batch_get_json(&urls).await?))
     }
 
     /// Batched `GET /applications/{id}` projected to what the bulk expired-secret sweep reads
@@ -342,22 +343,21 @@ impl GraphClient {
     /// all N" fetches exactly the selected apps instead of walking every page of the tenant and
     /// discarding all but the selection. The projection mirrors the sweep's tenant-walk `$select`
     /// so both read paths see the same fields. One `Result<Application>` per id **in order**; a
-    /// per-id failure is one `Err` in the vec, a whole-batch failure the outer `Err` (fall back
-    /// to per-id reads).
+    /// per-id failure is one `Err` in the vec (an id that is not a single path segment is its own
+    /// `Err(Protocol)` row and costs no sub-request), a whole-batch failure the outer `Err` (fall
+    /// back to per-id reads).
     pub async fn batch_get_applications_credentials(
         &self,
         object_ids: &[String],
     ) -> Result<Vec<Result<Application>>> {
-        let urls: Vec<String> = object_ids
-            .iter()
-            .map(|id| {
-                batch_sub_url(
-                    &format!("/applications/{id}"),
-                    &[("$select", "id,appId,displayName,passwordCredentials")],
-                )
-            })
-            .collect();
-        self.batch_get_json(&urls).await
+        let (urls, refused) = checked_sub_urls(object_ids, |id| {
+            validate::require_path_segment("object id", id)?;
+            Ok(batch_sub_url(
+                &format!("/applications/{id}"),
+                &[("$select", "id,appId,displayName,passwordCredentials")],
+            ))
+        });
+        Ok(rejoin_refused(refused, self.batch_get_json(&urls).await?))
     }
 
     /// Every application in the tenant, up to `cap` (a safety against unbounded memory in
@@ -410,6 +410,7 @@ impl GraphClient {
     }
 
     pub async fn list_owners(&self, object_id: &str) -> Result<Vec<DirectoryObject>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}/owners");
         let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
         let page: Paged<DirectoryObject> = self.get_json(&path, &params, false).await?;
@@ -421,6 +422,7 @@ impl GraphClient {
     }
 
     pub async fn update_application(&self, object_id: &str, patch: &AppPatch) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(patch))
             .await
@@ -432,6 +434,7 @@ impl GraphClient {
     /// Without it the Security tab kept reporting the deleted SP's application
     /// permissions as live for up to the 60-minute TTL.
     pub async fn delete_application(&self, object_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await?;
@@ -490,6 +493,7 @@ impl GraphClient {
     /// paired SP back with a second call), so the SP and grant caches are
     /// swept on `Ok` like a delete sweeps them.
     pub async fn restore_deleted_item(&self, object_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/directory/deletedItems/{object_id}/restore");
         self.send_no_content(Method::POST, &path, Some(&serde_json::json!({})))
             .await?;
@@ -501,12 +505,15 @@ impl GraphClient {
     /// copy points at). Graph answers 204; the window closes on its own after
     /// ~30 days either way.
     pub async fn purge_deleted_application(&self, object_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/directory/deletedItems/microsoft.graph.application/{object_id}");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await
     }
 
     pub async fn add_owner(&self, object_id: &str, principal_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
+        validate::require_path_segment("principal id", principal_id)?;
         let odata_id = format!(
             "{}/directoryObjects/{principal_id}",
             self.base_url.trim_end_matches('/')
@@ -517,6 +524,8 @@ impl GraphClient {
     }
 
     pub async fn remove_owner(&self, object_id: &str, principal_id: &str) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
+        validate::require_path_segment("principal id", principal_id)?;
         let path = format!("/applications/{object_id}/owners/{principal_id}/$ref");
         self.send_no_content::<()>(Method::DELETE, &path, None)
             .await
@@ -611,6 +620,7 @@ impl GraphClient {
         object_id: &str,
         select: &str,
     ) -> Result<Option<serde_json::Value>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         self.get_json_optional(&path, &[("$select", select)]).await
     }
@@ -622,6 +632,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Option<ApplicationExposeApi>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "id,appId,identifierUris,api")];
         self.get_json_optional(&path, &params).await
@@ -634,6 +645,7 @@ impl GraphClient {
         object_id: &str,
         body: &ApplicationExposeApiPatch,
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(body))
             .await?;
@@ -654,6 +666,7 @@ impl GraphClient {
         template_id: &str,
         display_name: &str,
     ) -> Result<ApplicationServicePrincipal> {
+        validate::require_path_segment("template id", template_id)?;
         let body = serde_json::json!({ "displayName": display_name });
         let path = format!("/applicationTemplates/{template_id}/instantiate");
         self.send_json(Method::POST, &path, &body).await
@@ -686,6 +699,7 @@ impl GraphClient {
     /// The application's `tags`, read on their own. Kept off the typed
     /// [`Application`], which crosses IPC as-is.
     pub async fn get_application_tags(&self, object_id: &str) -> Result<Vec<String>> {
+        validate::require_path_segment("object id", object_id)?;
         #[derive(serde::Deserialize)]
         struct AppTags {
             #[serde(default)]
@@ -714,6 +728,7 @@ impl GraphClient {
         object_id: &str,
         body: &B,
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         self.send_no_content(Method::PATCH, &path, Some(body)).await
     }
@@ -726,6 +741,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Vec<serde_json::Value>> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         let params: [(&str, &str); 1] = [("$select", "appRoles")];
         let v: serde_json::Value = self.get_json(&path, &params, false).await?;
@@ -743,6 +759,7 @@ impl GraphClient {
         object_id: &str,
         roles: &[serde_json::Value],
     ) -> Result<()> {
+        validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
         let body = serde_json::json!({ "appRoles": roles });
         self.send_no_content(Method::PATCH, &path, Some(&body))

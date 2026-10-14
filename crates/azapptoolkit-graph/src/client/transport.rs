@@ -7,6 +7,7 @@
 //! fast — are pinned by `tests/transport.rs`.
 
 use super::*;
+use azapptoolkit_core::http_body::{BodyCap, MAX_ERROR_BODY_BYTES};
 use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::net::endpoint_family;
 use azapptoolkit_core::token::TokenError;
@@ -41,13 +42,10 @@ impl GraphClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_error_body(resp).await;
             return Err(map_error_status(code, body, retry_after));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| GraphError::Network(describe_error_chain(&e)))?;
+        let bytes = read_success_body(resp, self.max_body_bytes).await?;
         serde_json::from_slice(&bytes).map_err(|e| GraphError::Deserialize(e.to_string()))
     }
 
@@ -207,23 +205,23 @@ impl GraphClient {
     /// index scans (service principals), a tenant larger than the bound must
     /// degrade to a truncated-but-usable list: failing the Enterprise Apps
     /// list, the App Registrations pairing join, and global search outright is
-    /// strictly worse than returning the first N rows. The cap also bounds a
-    /// Returns `(items, truncated)` — `truncated` is `true` when rows existed
-    /// beyond the cap, so the caller can log/surface that coverage is partial.
+    /// strictly worse than returning the first N rows. Returns
+    /// `(items, truncated)` — `truncated` is `true` when rows existed beyond
+    /// the cap, so the caller can log/surface that coverage is partial.
     ///
     /// `consistency_eventual` must match the choice the **first** page was
     /// issued with, exactly as for [`Self::collect_all_pages`]: an `$expand`
     /// enumeration that pages as an advanced query gets a 200 with the
     /// expanded property missing, not an error.
     ///
-    /// The item cap is **not** a cycle guard, despite what this doc used to
-    /// claim. Only a non-empty page advances toward it, so
-    /// `{"value": [], "@odata.nextLink": "<same url>"}` spun without bound —
-    /// and Graph legitimately returns empty pages carrying a `nextLink` on
-    /// filtered directory collections, which is exactly what both callers page
-    /// through. Hence the explicit `MAX_PAGES`, matching the sibling
-    /// `collect_all_pages`; since this helper's contract is to degrade rather
-    /// than fail, hitting it reports `truncated` instead of erroring.
+    /// The item cap is **not** a cycle guard. Only a non-empty page advances
+    /// toward it, so `{"value": [], "@odata.nextLink": "<same url>"}` would
+    /// spin without bound — and Graph legitimately returns empty pages
+    /// carrying a `nextLink` on filtered directory collections, which is
+    /// exactly what both callers page through. [`MAX_PAGES`] is the cycle
+    /// guard, as in the sibling `collect_all_pages`; since this helper's
+    /// contract is to degrade rather than fail, hitting it reports `truncated`
+    /// instead of erroring.
     pub(crate) async fn collect_all_pages_capped<T: DeserializeOwned>(
         &self,
         mut page: Paged<T>,
@@ -602,6 +600,7 @@ impl GraphClient {
                 let method = method.clone();
                 let body_bytes = body_bytes.clone();
                 let observer = self.throttle_observer.read().clone();
+                let max_body = self.max_body_bytes;
                 async move {
                     let mut req = http.request(method, url).headers(headers).query(query);
                     if let Some(b) = body_bytes.as_ref() {
@@ -624,10 +623,7 @@ impl GraphClient {
                     let status = resp.status();
                     if status.is_success() {
                         return Attempt::Done(
-                            resp.bytes()
-                                .await
-                                .map(Outcome::Body)
-                                .map_err(|e| GraphError::Network(describe_error_chain(&e))),
+                            read_success_body(resp, max_body).await.map(Outcome::Body),
                         );
                     }
 
@@ -644,7 +640,7 @@ impl GraphClient {
                         .map(str::to_string);
                     // Sanitized and capped before it reaches an error, a log line
                     // or a toast — a proxy block page can be megabytes of HTML.
-                    let body_text = sanitize_error_body(&resp.text().await.unwrap_or_default());
+                    let body_text = sanitize_error_body(&read_error_body(resp).await);
                     let code = status.as_u16();
 
                     if code == 401 {
@@ -736,10 +732,6 @@ impl GraphClient {
     }
 }
 
-/// The crate's "object vanished between the index read and the detail read"
-/// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
-/// stays an error. One definition, so the single-object readers and the
-/// batched ones cannot drift.
 /// Wall-clock and row accounting for one multi-page read, so a slow
 /// tenant-wide scan can be read straight off the log file: one `debug` line
 /// per continuation page, and one summary once the read has followed at least
@@ -840,6 +832,55 @@ fn millis(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Reads a success body under the client's decoded-bytes cap
+/// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`] unless a test
+/// lowered it). reqwest drops `Content-Length` when it inflates a gzip body, so
+/// the running total of decoded chunks is the guard; a body past the cap is a
+/// [`GraphError::Protocol`], which is never retried.
+async fn read_success_body(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let mut cap = BodyCap::new(resp.content_length(), max);
+    cap.check_declared()
+        .map_err(|e| GraphError::Protocol(e.to_string()))?;
+    let mut chunks = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| GraphError::Network(describe_error_chain(&e)))?
+    {
+        cap.push(chunk.len())
+            .map_err(|e| GraphError::Protocol(e.to_string()))?;
+        chunks.push(chunk);
+    }
+    // One chunk is handed back as is, as `resp.bytes()` did, so a small reply
+    // gains no extra copy; more are joined once.
+    Ok(if chunks.len() == 1 {
+        chunks.swap_remove(0)
+    } else {
+        chunks.concat().into()
+    })
+}
+
+/// Reads at most [`MAX_ERROR_BODY_BYTES`] of an error body as text for
+/// `sanitize_error_body`, which keeps far less; the rest is dropped unread
+/// (the status, not the body, decides the error). A read that fails midway
+/// keeps what arrived.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut cap = BodyCap::new(None, MAX_ERROR_BODY_BYTES);
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let n = cap.take(chunk.len());
+        body.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+/// The crate's "object vanished between the index read and the detail read"
+/// convention: a 404 becomes `Ok(None)`; every other error, including a 403,
+/// stays an error. One definition, so the single-object readers and the
+/// batched ones cannot drift.
 pub(crate) fn not_found_as_none<T>(r: Result<T>) -> Result<Option<T>> {
     match r {
         Ok(v) => Ok(Some(v)),
@@ -870,12 +911,13 @@ pub(crate) fn search_phrase(field: &str, term: &str) -> String {
 /// with percent-encoded query values, for the `$batch` helpers. Mirrors the
 /// single-call encoding the SP prewarm (`prewarm_sps`) does inline, so a
 /// batched read's URL is byte-identical to its per-item equivalent. `path` is
-/// already-escaped (object ids are GUIDs); only the query values are encoded.
+/// used as given and only the query values are encoded, so every id the caller
+/// spliced into it must already have passed `validate::require_path_segment`.
 pub(crate) fn batch_sub_url(path: &str, query: &[(&str, &str)]) -> String {
     // A throwaway base just to reuse `url`'s query encoder; the host is never
     // emitted — only `path?query` is returned.
     let mut u = url::Url::parse(&format!("https://graph.invalid{path}"))
-        .expect("static base + GUID path parses");
+        .expect("static base + absolute path parses");
     {
         let mut pairs = u.query_pairs_mut();
         for (k, v) in query {

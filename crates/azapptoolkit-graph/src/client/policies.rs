@@ -26,6 +26,8 @@ impl GraphClient {
         service_principal_id: &str,
         policy_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
+        validate::require_path_segment("policy id", policy_id)?;
         let token = self.policy_write_token()?;
         let odata_id = format!(
             "{}/policies/claimsMappingPolicies/{policy_id}",
@@ -47,6 +49,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Vec<ClaimsMappingPolicy>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let token = self.policy_write_token()?;
         let url = format!(
             "{}/servicePrincipals/{service_principal_id}/claimsMappingPolicies",
@@ -74,6 +77,7 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
     ) -> Result<Option<CustomClaimsPolicy>> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
         let token = self.policy_write_token()?;
         let url = format!(
             "{}/servicePrincipals/{service_principal_id}/claimsPolicy",
@@ -113,6 +117,8 @@ impl GraphClient {
         service_principal_id: &str,
         policy_id: &str,
     ) -> Result<()> {
+        validate::require_path_segment("service principal id", service_principal_id)?;
+        validate::require_path_segment("policy id", policy_id)?;
         let token = self.policy_write_token()?;
         let url = format!(
             "{}/servicePrincipals/{service_principal_id}/claimsMappingPolicies/{policy_id}/$ref",
@@ -131,6 +137,7 @@ impl GraphClient {
         policy_id: &str,
         definition_json: &str,
     ) -> Result<()> {
+        validate::require_path_segment("policy id", policy_id)?;
         let token = self.policy_write_token()?;
         let body = serde_json::json!({ "definition": [definition_json] });
         let url = format!(
@@ -144,6 +151,7 @@ impl GraphClient {
     /// Deletes the tenant-level policy object — not the `$ref` assignment. The caller must
     /// prove nothing else uses it. Requires `policy_write_token`.
     pub async fn delete_claims_mapping_policy(&self, policy_id: &str) -> Result<()> {
+        validate::require_path_segment("policy id", policy_id)?;
         let token = self.policy_write_token()?;
         let url = format!(
             "{}/policies/claimsMappingPolicies/{policy_id}",
@@ -161,6 +169,7 @@ impl GraphClient {
         &self,
         policy_id: &str,
     ) -> Result<Vec<String>> {
+        validate::require_path_segment("policy id", policy_id)?;
         let token = self.policy_write_token()?;
         let url = format!(
             "{}/policies/claimsMappingPolicies/{policy_id}/appliesTo?$select=id&$top={MAX_PAGE_SIZE}",
@@ -264,6 +273,7 @@ impl GraphClient {
         &self,
         object_id: &str,
     ) -> Result<Vec<AppManagementPolicy>> {
+        validate::require_path_segment("object id", object_id)?;
         let cache_key = format!("{}|app_management_policies:{object_id}", self.tenant_id);
         if let Some(cached) = self
             .cache

@@ -11,6 +11,9 @@ pub mod defaults;
 pub mod federation;
 // Pure shape check, ungated: shared by the ARM client and the command layer.
 pub mod guid;
+// Server-side only: the decoded-body cap every client transport reads with.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http_body;
 // Server-side only: the macro's generated `is_retryable` calls `http_retry`,
 // and no WASM surface constructs a client error.
 #[cfg(not(target_arch = "wasm32"))]
