@@ -794,6 +794,133 @@ fn secret_bearing_http_clients_never_inflate() {
     }
 }
 
+/// The `reqwest::Response` readers that buffer the whole body, however large.
+const UNBOUNDED_BODY_READS: [&str; 3] = ["bytes", "text", "json"];
+
+/// Every whole-body read in `src` awaited on a response — `.bytes().await`,
+/// `.text().await`, `.json().await` or `.json::<T>().await` — by method name,
+/// in order. Comments and string literals are ignored and whitespace is
+/// squeezed out first, so a read split over lines (`resp.bytes()\n.await`)
+/// still counts; a call that is not awaited (`name.bytes().all(..)`) does not.
+fn unbounded_body_reads(src: &str) -> Vec<&'static str> {
+    let code = super::sources::code_mask(src);
+    let squeezed: String = src
+        .char_indices()
+        .filter(|&(i, c)| code[i] && !c.is_whitespace())
+        .map(|(_, c)| c)
+        .collect();
+    let mut hits: Vec<(usize, &'static str)> = Vec::new();
+    for name in UNBOUNDED_BODY_READS {
+        let needle = format!(".{name}");
+        for (at, _) in squeezed.match_indices(&needle) {
+            let mut rest = &squeezed[at + needle.len()..];
+            // `.text_with_charset(` / `.json_value(` are other methods.
+            if rest
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            if let Some(generic) = rest.strip_prefix("::<") {
+                let mut depth = 1usize;
+                let Some(end) = generic.char_indices().find_map(|(i, c)| {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(i)
+                }) else {
+                    continue;
+                };
+                rest = &generic[end + 1..];
+            }
+            if rest.starts_with("().await") {
+                hits.push((at, name));
+            }
+        }
+    }
+    hits.sort_unstable();
+    hits.into_iter().map(|(_, name)| name).collect()
+}
+
+/// No client reads a response body without a size cap.
+///
+/// The workspace `reqwest` has the `gzip` feature, and reqwest drops
+/// `Content-Length` when it inflates, so `resp.bytes()` / `resp.text()` /
+/// `resp.json()` buffer whatever a reply decodes to: a few KiB on the wire can
+/// be gigabytes in memory, and an error body was read whole before
+/// `sanitize_error_body` kept 800 characters of it. Every reader instead runs
+/// a capped `resp.chunk()` loop — `core::http_body::BodyCap` in the client
+/// transports (a success body past `MAX_SUCCESS_BODY_BYTES` is the client's
+/// `Protocol` error, an error body is cut at `MAX_ERROR_BODY_BYTES`) and the
+/// SSO metadata probe (1 MiB), a 64 KiB `Zeroizing` buffer in the `/token`
+/// reader. Test code is exempt (it reads
+/// bodies the test itself served).
+#[test]
+fn no_client_reads_an_unbounded_body() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut capped_readers = 0usize;
+    for (root, src) in retry_scan_sources() {
+        let is_test_file = src.components().any(|c| c.as_os_str() == "tests")
+            || src.file_name().is_some_and(|f| f == "tests.rs");
+        if is_test_file {
+            continue;
+        }
+        let text = std::fs::read_to_string(&src).expect("read source");
+        let code = super::sources::strip_tests(&text);
+        if code.contains("BodyCap::new(") {
+            capped_readers += 1;
+        }
+        for name in unbounded_body_reads(&code) {
+            offenders.push(format!("{} — `.{name}().await`", relative(&root, &src)));
+        }
+    }
+
+    // Graph, ARM, Key Vault, Exchange and the SSO metadata probe.
+    assert!(
+        capped_readers >= 5,
+        "only {capped_readers} source(s) read a body through `BodyCap` — the source walk is \
+         broken, or a client lost its capped reader"
+    );
+    assert!(
+        offenders.is_empty(),
+        "response bodies read whole, with no size cap: {offenders:#?}\n\
+         Read the body with a `resp.chunk()` loop over `azapptoolkit_core::http_body::BodyCap` \
+         (the transports' `read_success_body` / `read_error_body`): the `gzip` feature means \
+         `Content-Length` cannot bound what a reply decodes to."
+    );
+}
+
+/// The body-cap rule must fire on a whole-body read however it is laid out,
+/// and not on a chunk loop, a request builder, a comment or a byte iterator.
+#[test]
+fn the_body_cap_rule_fires_on_an_unbounded_read() {
+    assert_eq!(
+        unbounded_body_reads("let b = resp.bytes()\n    .await?;"),
+        vec!["bytes"]
+    );
+    assert_eq!(
+        unbounded_body_reads("let t = resp\n    .text()\n    .await\n    .unwrap_or_default();"),
+        vec!["text"]
+    );
+    assert_eq!(
+        unbounded_body_reads("let v = resp.json::<Vec<Paged<T>>>().await?; resp.text().await"),
+        vec!["json", "text"]
+    );
+    for clean in [
+        "name.bytes().all(|b| b.is_ascii_lowercase())",
+        "// rather than `resp.bytes().await`, which buffers it all",
+        "let doc = \"resp.text().await\";",
+        "while let Some(chunk) = resp.chunk().await? { cap.push(chunk.len())?; }",
+        "let resp = http.post(url).json(&body).send().await?;",
+        "let n = s.text_len().await;",
+    ] {
+        assert!(unbounded_body_reads(clean).is_empty(), "fired on {clean:?}");
+    }
+}
+
 /// Every Rust source the retry and client-budget rules scan, paired with the root it was
 /// found under (for readable offender paths): the shared crates AND the
 /// desktop backend, which hosts HTTP code of its own (`cert.rs`, the SSO

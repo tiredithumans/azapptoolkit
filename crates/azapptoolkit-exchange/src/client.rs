@@ -65,6 +65,10 @@ pub struct ExchangeClient {
     /// `UPN:` prefix matches the ExchangeOnlineManagement module's captured
     /// traffic for this endpoint.
     anchor_mailbox: String,
+    /// Decoded bytes one success body may hold
+    /// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`]); a field only
+    /// so a test can trip it with a small body.
+    max_body_bytes: usize,
 }
 
 impl ExchangeClient {
@@ -97,6 +101,15 @@ impl ExchangeClient {
             base_url: base_url.into(),
             tenant_id: tenant_id.into(),
             anchor_mailbox: format!("UPN:{admin_upn}"),
+            max_body_bytes: azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES,
         }
+    }
+
+    /// Lowers the decoded-bytes cap on a success body, so a test can trip it
+    /// without a 64 MiB fixture.
+    #[cfg(test)]
+    pub(crate) fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
+        self
     }
 }

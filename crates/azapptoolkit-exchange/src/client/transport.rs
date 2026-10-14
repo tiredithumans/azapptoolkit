@@ -13,6 +13,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
+use azapptoolkit_core::http_body::{BodyCap, MAX_ERROR_BODY_BYTES};
 use azapptoolkit_core::http_error::{describe_error_chain, sanitize_error_body};
 use azapptoolkit_core::http_retry::{
     Attempt, RetryClass, RetryReason, parse_retry_after_seconds, with_retries,
@@ -209,11 +210,7 @@ impl ExchangeClient {
                 if status.is_success() {
                     // Terminal even when the body read fails: after a 2xx the
                     // write has committed, so it is never replayed.
-                    return Attempt::Done(
-                        resp.bytes()
-                            .await
-                            .map_err(|e| ExchangeError::Network(describe_error_chain(&e))),
-                    );
+                    return Attempt::Done(read_success_body(resp, self.max_body_bytes).await);
                 }
 
                 let retry_after = parse_retry_after_seconds(
@@ -237,7 +234,7 @@ impl ExchangeClient {
                 // On a bodyless rejection the auth middleware's reason (if any)
                 // rides `WWW-Authenticate` — captured for the log line below.
                 let www_authenticate = header_str("www-authenticate");
-                let raw_body = resp.text().await.unwrap_or_default();
+                let raw_body = read_error_body(resp).await;
                 let body_text = compose_error_detail(
                     cmdlet,
                     &raw_body,
@@ -301,6 +298,52 @@ impl ExchangeClient {
         })
         .await
     }
+}
+
+/// Reads a success body under `max` decoded bytes
+/// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`] unless a test
+/// lowered it): reqwest drops `Content-Length` when it inflates a gzip body, so
+/// the running total of decoded chunks is the guard. A body past the cap is an
+/// [`ExchangeError::Protocol`], which is never retried — and after a 2xx the
+/// cmdlet has committed, so nothing here may replay it.
+async fn read_success_body(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let mut cap = BodyCap::new(resp.content_length(), max);
+    cap.check_declared()
+        .map_err(|e| ExchangeError::Protocol(e.to_string()))?;
+    let mut chunks = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| ExchangeError::Network(describe_error_chain(&e)))?
+    {
+        cap.push(chunk.len())
+            .map_err(|e| ExchangeError::Protocol(e.to_string()))?;
+        chunks.push(chunk);
+    }
+    // One chunk is handed back as is, as `resp.bytes()` did, so a small reply
+    // gains no extra copy; more are joined once.
+    Ok(if chunks.len() == 1 {
+        chunks.swap_remove(0)
+    } else {
+        chunks.concat().into()
+    })
+}
+
+/// Reads at most [`MAX_ERROR_BODY_BYTES`] of an error body as text for
+/// [`compose_error_detail`], whose `sanitize_error_body` keeps far less; the
+/// rest is dropped unread (the status, not the body, decides the error). A read
+/// that fails midway keeps what arrived.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut cap = BodyCap::new(None, MAX_ERROR_BODY_BYTES);
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let n = cap.take(chunk.len());
+        body.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Classifies one failed attempt for [`with_retries`].

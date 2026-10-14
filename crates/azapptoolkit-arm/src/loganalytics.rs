@@ -23,6 +23,9 @@ pub struct LogAnalyticsClient {
     base_url: String,
 }
 
+/// Decoded bytes one query result may hold: the shared success cap.
+const MAX_QUERY_BODY_BYTES: usize = azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES;
+
 impl LogAnalyticsClient {
     pub fn new(token: Arc<dyn BearerProvider>, base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
@@ -73,6 +76,7 @@ impl LogAnalyticsClient {
             &url,
             &[],
             Some(&body),
+            MAX_QUERY_BODY_BYTES,
         )
         .await?;
         let parsed: LogsQueryResponse =

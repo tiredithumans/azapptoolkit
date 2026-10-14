@@ -8,6 +8,7 @@ use std::sync::Arc;
 use reqwest::Method;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
+use azapptoolkit_core::http_body::{BodyCap, MAX_ERROR_BODY_BYTES};
 use azapptoolkit_core::http_error::{describe_error_chain, failed_response, send_failure};
 use azapptoolkit_core::http_retry::{Attempt, RetryClass, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::endpoint_family;
@@ -22,7 +23,12 @@ use crate::error::{ArmError, Result};
 /// "table absent" as a probe miss — while 429 and 5xx are retried, honoring an
 /// explicit `Retry-After` exactly. `label` tags the retry warnings (e.g.
 /// `"arm"`, `"log analytics"`), followed by the verb and endpoint family (ids
-/// masked, no query).
+/// masked, no query). `max_body` caps the decoded success body (the client's
+/// `max_body_bytes`).
+// Each argument is an orthogonal knob of the one transport both ARM-stack
+// clients share (as in the Graph client's `send_core_url_with`); a params
+// struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_with_retry(
     http: &reqwest::Client,
     token: &Arc<dyn BearerProvider>,
@@ -31,6 +37,7 @@ pub(crate) async fn send_with_retry(
     url: &str,
     query: &[(&str, &str)],
     body: Option<&serde_json::Value>,
+    max_body: usize,
 ) -> Result<bytes::Bytes> {
     let bearer = token.bearer().await.map_err(ArmError::Token)?;
     let mut headers = HeaderMap::new();
@@ -58,11 +65,7 @@ pub(crate) async fn send_with_retry(
             };
             let status = resp.status();
             if status.is_success() {
-                return Attempt::Done(
-                    resp.bytes()
-                        .await
-                        .map_err(|e| ArmError::Network(describe_error_chain(&e))),
-                );
+                return Attempt::Done(read_success_body(resp, max_body).await);
             }
             // `Retry-After` first: reading the body consumes the response.
             let retry_after = parse_retry_after_seconds(
@@ -70,11 +73,56 @@ pub(crate) async fn send_with_retry(
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok()),
             );
-            let raw_body = resp.text().await.unwrap_or_default();
+            let raw_body = read_error_body(resp).await;
             failed_response(status.as_u16(), retry_after, &raw_body)
         }
     })
     .await
+}
+
+/// Reads a success body under `max` decoded bytes
+/// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`] unless a test
+/// lowered it): reqwest drops `Content-Length` when it inflates a gzip body, so
+/// the running total of decoded chunks is the guard. A body past the cap is an
+/// [`ArmError::Protocol`], which is never retried.
+async fn read_success_body(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let mut cap = BodyCap::new(resp.content_length(), max);
+    cap.check_declared()
+        .map_err(|e| ArmError::Protocol(e.to_string()))?;
+    let mut chunks = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| ArmError::Network(describe_error_chain(&e)))?
+    {
+        cap.push(chunk.len())
+            .map_err(|e| ArmError::Protocol(e.to_string()))?;
+        chunks.push(chunk);
+    }
+    // One chunk is handed back as is, as `resp.bytes()` did, so a small reply
+    // gains no extra copy; more are joined once.
+    Ok(if chunks.len() == 1 {
+        chunks.swap_remove(0)
+    } else {
+        chunks.concat().into()
+    })
+}
+
+/// Reads at most [`MAX_ERROR_BODY_BYTES`] of an error body as text for
+/// `failed_response`, whose `sanitize_error_body` keeps far less; the rest is
+/// dropped unread (the status, not the body, decides the error). A read that
+/// fails midway keeps what arrived.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut cap = BodyCap::new(None, MAX_ERROR_BODY_BYTES);
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let n = cap.take(chunk.len());
+        body.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// The retry class for an HTTP verb.

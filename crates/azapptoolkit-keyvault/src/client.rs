@@ -15,6 +15,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use azapptoolkit_core::http_body::{BodyCap, MAX_ERROR_BODY_BYTES};
 use azapptoolkit_core::http_error::{describe_error_chain, failed_response, send_failure};
 use azapptoolkit_core::http_retry::{Attempt, RetryClass, parse_retry_after_seconds, with_retries};
 use azapptoolkit_core::net::{endpoint_family, redacted_host, same_origin};
@@ -42,6 +43,10 @@ pub struct KeyVaultClient {
     /// Full base URL: `https://{vault-name}.vault.azure.net`.
     base_url: String,
     api_version: String,
+    /// Decoded bytes one success body may hold
+    /// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`]); a field only
+    /// so a test can trip it with a small body.
+    max_body_bytes: usize,
 }
 
 impl KeyVaultClient {
@@ -77,11 +82,20 @@ impl KeyVaultClient {
             token,
             base_url: base_url.into(),
             api_version: DEFAULT_API_VERSION.to_string(),
+            max_body_bytes: azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES,
         }
     }
 
     pub fn with_api_version(mut self, version: impl Into<String>) -> Self {
         self.api_version = version.into();
+        self
+    }
+
+    /// Lowers the decoded-bytes cap on a success body, so a test can trip it
+    /// without a 64 MiB fixture.
+    #[cfg(test)]
+    pub(crate) fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
         self
     }
 
@@ -197,6 +211,7 @@ impl KeyVaultClient {
             let headers = headers.clone();
             let method = method.clone();
             let body = body.clone();
+            let max_body = self.max_body_bytes;
             async move {
                 let mut req = http.request(method, url).headers(headers);
                 if let Some(v) = api_version {
@@ -211,11 +226,7 @@ impl KeyVaultClient {
                 };
                 let status = resp.status();
                 if status.is_success() {
-                    return Attempt::Done(
-                        resp.bytes()
-                            .await
-                            .map_err(|e| KeyVaultError::Network(describe_error_chain(&e))),
-                    );
+                    return Attempt::Done(read_success_body(resp, max_body).await);
                 }
                 // `Retry-After` first: reading the body consumes the response.
                 let retry_after = parse_retry_after_seconds(
@@ -223,7 +234,7 @@ impl KeyVaultClient {
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok()),
                 );
-                let raw_body = resp.text().await.unwrap_or_default();
+                let raw_body = read_error_body(resp).await;
                 failed_response(status.as_u16(), retry_after, &raw_body)
             }
         })
@@ -236,6 +247,51 @@ impl KeyVaultClient {
     async fn send_core_absolute(&self, method: Method, url: &str) -> Result<bytes::Bytes> {
         self.send_core_url(method, url, false, None, true).await
     }
+}
+
+/// Reads a success body under `max` bytes
+/// ([`azapptoolkit_core::http_body::MAX_SUCCESS_BODY_BYTES`] unless a test
+/// lowered it). This client never asks for gzip, but the running total is the
+/// guard all the same: a chunked reply declares no length. A body past the cap
+/// is a [`KeyVaultError::Protocol`], which is never retried.
+async fn read_success_body(mut resp: reqwest::Response, max: usize) -> Result<bytes::Bytes> {
+    let mut cap = BodyCap::new(resp.content_length(), max);
+    cap.check_declared()
+        .map_err(|e| KeyVaultError::Protocol(e.to_string()))?;
+    let mut chunks = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| KeyVaultError::Network(describe_error_chain(&e)))?
+    {
+        cap.push(chunk.len())
+            .map_err(|e| KeyVaultError::Protocol(e.to_string()))?;
+        chunks.push(chunk);
+    }
+    // One chunk is handed back as is, as `resp.bytes()` did, so a small reply
+    // (a Key Vault secret) gains no extra copy; more are joined once.
+    Ok(if chunks.len() == 1 {
+        chunks.swap_remove(0)
+    } else {
+        chunks.concat().into()
+    })
+}
+
+/// Reads at most [`MAX_ERROR_BODY_BYTES`] of an error body as text for
+/// `failed_response`, whose `sanitize_error_body` keeps far less; the rest is
+/// dropped unread (the status, not the body, decides the error). A read that
+/// fails midway keeps what arrived.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut cap = BodyCap::new(None, MAX_ERROR_BODY_BYTES);
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let n = cap.take(chunk.len());
+        body.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// The retry class for an HTTP verb.
@@ -586,5 +642,44 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, KeyVaultError::InvalidName(_)), "got {err:?}");
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A success body past the cap is a `Protocol` error, sent once and never
+    /// retried. This client never asks for gzip, so the 4117-byte reply declares
+    /// its length and is refused before a byte is buffered; a chunked reply would
+    /// trip the same running total.
+    #[tokio::test]
+    async fn a_success_body_past_the_cap_is_a_protocol_error() {
+        let server = MockServer::start().await;
+        let body = format!(r#"{{"value":[],"pad":"{}"}}"#, "a".repeat(4096));
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body),
+            )
+            // One capped read (never replayed) and one under the default cap.
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let err = make_client(&server.uri())
+            .with_max_body_bytes(1024)
+            .list_secrets()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, KeyVaultError::Protocol(m) if m == "response body exceeds the 1 KiB limit"),
+            "got {err:?}"
+        );
+        assert!(!err.is_retryable());
+        assert!(
+            make_client(&server.uri())
+                .list_secrets()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
