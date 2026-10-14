@@ -1398,6 +1398,27 @@ struct RestoreRun<'a> {
     approved: &'a HashSet<RestoreApproval>,
 }
 
+/// The borrowed inputs the per-app helpers of Passes 2-4 share, built once
+/// Pass 1 has stopped changing the remap.
+///
+/// The principal memo stays a separate `&mut` parameter, and so does the
+/// cancel token: the repo invariants find a pass helper as a cancel runner by
+/// the `CancelToken` in its signature (`sources::cancel_runners`).
+struct PassCtx<'a> {
+    client: &'a GraphClient,
+    /// The run's one dead-session latch; every failure is noted through it.
+    session: &'a SessionDead,
+    /// `source_app_id → new app id`, final once Pass 1 ends.
+    app_id_remap: &'a HashMap<String, String>,
+    cloud: CloudEnvironment,
+    /// When the backup was taken: the cutoff for [`expired_at_backup`].
+    taken_at: DateTime<Utc>,
+    /// The tenant the backup was taken from.
+    source_tenant_id: &'a str,
+    /// The destination tenant.
+    dest_tenant_id: &'a str,
+}
+
 /// The five passes of [`restore_tenant`], split from the command the way
 /// [`restore_managed_identities`] is, so the pass loop runs in a test against a
 /// mock Graph. Returns the report and what the run changed ([`RestoreEffects`],
@@ -1566,6 +1587,16 @@ async fn run_restore(
     // Every app the backup owns, recreated or not: a pre-authorized client in
     // here with no remap entry is one Pass 1 failed or refused, never foreign.
     let backup_apps = backup_apps(backup);
+    // The remap is final from here on: Passes 2-4 share it read-only.
+    let ctx = PassCtx {
+        client,
+        session: &session,
+        app_id_remap: &app_id_remap,
+        cloud,
+        taken_at: backup.created_at,
+        source_tenant_id: &backup.source_tenant_id,
+        dest_tenant_id: tenant_id,
+    };
     for c in &created {
         // Both stop conditions, in every pass. Passes 2-5 once checked only
         // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
@@ -1579,17 +1610,11 @@ async fn run_restore(
             break;
         }
         let (restored, trusts) = wire_application(
-            client,
+            &ctx,
             c,
-            &app_id_remap,
             &backup_apps,
             &mut principals,
-            &session,
             &cancel,
-            cloud,
-            backup.created_at,
-            &backup.source_tenant_id,
-            tenant_id,
             withheld.contains_key(&c.backup.source_app_id),
         )
         .await;
@@ -1631,15 +1656,7 @@ async fn run_restore(
             });
             continue;
         }
-        reconsent(
-            client,
-            c,
-            &app_id_remap,
-            &session,
-            &mut report.apps[idx],
-            &mut report.manual_items,
-        )
-        .await;
+        reconsent(&ctx, c, &mut report.apps[idx], &mut report.manual_items).await;
     }
 
     // ---- Pass 4: enterprise applications ----
@@ -1658,13 +1675,11 @@ async fn run_restore(
         // the operator approved — decided from the approvals themselves, never
         // from a classification that could miss an enterprise app.
         restore_enterprise_app(
-            client,
+            &ctx,
             ent,
-            &app_id_remap,
             !approved.contains(&app_approval(&ent.source_app_id)),
             &mut report,
             &mut principals,
-            &session,
             &cancel,
         )
         .await;
@@ -1718,13 +1733,17 @@ async fn run_restore(
 /// same read (never a second one that could change in between). Anything else
 /// is a runbook item, never a consent.
 async fn reconsent(
-    client: &GraphClient,
+    ctx: &PassCtx<'_>,
     c: &CreatedApp,
-    app_id_remap: &HashMap<String, String>,
-    session: &SessionDead,
     out: &mut RestoredApp,
     manual: &mut Vec<ManualItem>,
 ) {
+    let PassCtx {
+        client,
+        session,
+        app_id_remap,
+        ..
+    } = *ctx;
     let expected = remap_required_resource_access(&c.backup.required_resource_access, app_id_remap);
     let live = match client.get_application(&c.new_object_id).await {
         Ok(live) => live,
@@ -1857,40 +1876,42 @@ fn restorable_fic_subject(fic: &FederatedIdentityCredential) -> Result<&str, Str
 ///
 /// Every step is best-effort — a failure becomes a warning and the app keeps
 /// its other config (it already exists). So a dead session would otherwise be
-/// indistinguishable from a tenant rejecting each individual write; `session`
-/// is the latch that tells them apart: each failure is noted through it by
-/// `ui_code`, keeping `UiError::is_reauth_fatal` the single definition of which
-/// codes are fatal.
+/// indistinguishable from a tenant rejecting each individual write;
+/// `ctx.session` is the latch that tells them apart: each failure is noted
+/// through it by `ui_code`, keeping `UiError::is_reauth_fatal` the single
+/// definition of which codes are fatal.
 ///
 /// For an adopted app the PATCHes are full-replace and simply re-applied, while
 /// the additive writes (federated credentials, owners, secrets) skip what the
-/// earlier run already put there. `taken_at` is the backup's timestamp, the
-/// cutoff for [`expired_at_backup`]; the two tenant ids are what the
-/// identifier-URI rewrite maps (source → destination).
+/// earlier run already put there. `ctx.taken_at` is the backup's timestamp,
+/// the cutoff for [`expired_at_backup`]; the two tenant ids in `ctx` are what
+/// the identifier-URI rewrite maps (source → destination).
 ///
 /// `withhold` marks an app that needed approval in the plan and did not get
 /// it: it is wired as usual, but gains no federated credential and no owner
 /// from the file — each withheld set is one runbook item.
 ///
 /// `backup_apps` is every app registration the backup owns: a pre-authorized
-/// client among them that `app_id_remap` lacks (Pass 1 failed or refused it)
-/// is left out with a warning rather than written under its appId from the
+/// client among them that `ctx.app_id_remap` lacks (Pass 1 failed or refused
+/// it) is left out with a warning rather than written under its appId from the
 /// backup's source tenant ([`plan_pre_authorized`]).
-#[allow(clippy::too_many_arguments)]
 async fn wire_application(
-    client: &GraphClient,
+    ctx: &PassCtx<'_>,
     c: &CreatedApp,
-    app_id_remap: &HashMap<String, String>,
     backup_apps: &BackupApps,
     principals: &mut PrincipalMemo,
-    session: &SessionDead,
     cancel: &CancelToken,
-    cloud: CloudEnvironment,
-    taken_at: DateTime<Utc>,
-    source_tenant_id: &str,
-    dest_tenant_id: &str,
     withhold: bool,
 ) -> (RestoredApp, Vec<ManualItem>) {
+    let PassCtx {
+        client,
+        session,
+        app_id_remap,
+        cloud,
+        taken_at,
+        source_tenant_id,
+        dest_tenant_id,
+    } = *ctx;
     let app = &c.backup;
     // Sign-in trusts this app gained from the manifest. Reported separately
     // from `warnings`, because these are the steps that *succeeded* — and a
@@ -2271,21 +2292,24 @@ const DEFAULT_ACCESS_ROLE: &str = "00000000-0000-0000-0000-000000000000";
 /// memberships; otherwise records a runbook entry (foreign/gallery apps and
 /// paired apps that weren't restored can't be replayed automatically).
 ///
-/// Every failure is noted through `session`, as in Pass 2, so a session that
-/// dies here stops the restore instead of producing one wrong runbook item per
-/// remaining app. `withhold` (its app was not approved in the plan) skips the
-/// group memberships into one runbook item; role assignments still apply.
-#[allow(clippy::too_many_arguments)]
+/// Every failure is noted through `ctx.session`, as in Pass 2, so a session
+/// that dies here stops the restore instead of producing one wrong runbook item
+/// per remaining app. `withhold` (its app was not approved in the plan) skips
+/// the group memberships into one runbook item; role assignments still apply.
 async fn restore_enterprise_app(
-    client: &GraphClient,
+    ctx: &PassCtx<'_>,
     ent: &EnterpriseAppBackup,
-    app_id_remap: &HashMap<String, String>,
     withhold: bool,
     report: &mut RestoreReport,
     principals: &mut PrincipalMemo,
-    session: &SessionDead,
     cancel: &CancelToken,
 ) {
+    let PassCtx {
+        client,
+        session,
+        app_id_remap,
+        ..
+    } = *ctx;
     // Restorable only when its app registration was recreated here.
     let new_app_id = match app_id_remap.get(&ent.source_app_id) {
         Some(id) if !ent.is_foreign_tenant => id.clone(),

@@ -637,13 +637,11 @@ async fn a_failed_sp_read_is_not_reported_as_having_no_sp() {
     let remap = HashMap::from([("src-a".to_string(), "new-a".to_string())]);
 
     restore_enterprise_app(
-        &client,
+        &pass_ctx(&client, &session, &remap),
         &ent,
-        &remap,
         false,
         &mut report,
         &mut HashMap::new(),
-        &session,
         &never_cancelled(),
     )
     .await;
@@ -708,6 +706,24 @@ async fn mount_tagged_fics(server: &wiremock::MockServer, fics: serde_json::Valu
 /// A cancel token nothing ever cancels.
 fn never_cancelled() -> CancelToken {
     crate::state::CancelFlag::new().claim()
+}
+
+/// The pass context the wiring and enterprise-app tests run under: the
+/// commercial cloud, a backup taken 2026-01-01, `src-tenant` → `dst-tenant`.
+fn pass_ctx<'a>(
+    client: &'a GraphClient,
+    session: &'a SessionDead,
+    app_id_remap: &'a HashMap<String, String>,
+) -> PassCtx<'a> {
+    PassCtx {
+        client,
+        session,
+        app_id_remap,
+        cloud: CloudEnvironment::Commercial,
+        taken_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+        source_tenant_id: "src-tenant",
+        dest_tenant_id: "dst-tenant",
+    }
 }
 
 async fn decide(client: &GraphClient, session: &SessionDead) -> Adoption {
@@ -1018,17 +1034,11 @@ async fn wire_with(
     withhold: bool,
 ) -> (RestoredApp, Vec<ManualItem>) {
     wire_application(
-        client,
+        &pass_ctx(client, &SessionDead::new(), &HashMap::new()),
         c,
-        &HashMap::new(),
         &BackupApps::default(),
         &mut PrincipalMemo::new(),
-        &SessionDead::new(),
         &never_cancelled(),
-        CloudEnvironment::Commercial,
-        "2026-01-01T00:00:00Z".parse().unwrap(),
-        "src-tenant",
-        "dst-tenant",
         withhold,
     )
     .await
@@ -2155,13 +2165,11 @@ async fn a_withheld_app_joins_no_group() {
     let remap = HashMap::from([("src-a".to_string(), "new-a".to_string())]);
 
     restore_enterprise_app(
-        &client,
+        &pass_ctx(&client, &SessionDead::new(), &remap),
         &ent,
-        &remap,
         true,
         &mut report,
         &mut PrincipalMemo::new(),
-        &SessionDead::new(),
         &never_cancelled(),
     )
     .await;
