@@ -61,7 +61,7 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_core::redirect::{validate_logout_url, validate_redirect_uri};
 use azapptoolkit_core::restore_plan::{
-    remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
+    BackupApps, plan_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
 };
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::{
@@ -672,16 +672,151 @@ fn id_problems<'a>(
     );
 }
 
-/// Longest value from the file echoed into a manifest problem, in characters.
+/// Longest value from the file echoed into the plan, in characters.
 const MAX_ECHOED_CHARS: usize = 80;
 
 /// `value` cut to [`MAX_ECHOED_CHARS`] characters (never mid-character), with
 /// an ellipsis when cut: a hostile file's multi-megabyte display name must not
 /// become the plan's text.
 fn excerpt(value: &str) -> String {
-    match value.char_indices().nth(MAX_ECHOED_CHARS) {
+    excerpt_to(value, MAX_ECHOED_CHARS)
+}
+
+/// `value` cut to `max` characters (never mid-character), with an ellipsis
+/// when cut. Copies only what it keeps.
+fn excerpt_to(value: &str, max: usize) -> String {
+    match value.char_indices().nth(max) {
         Some((at, _)) => format!("{}…", &value[..at]),
         None => value.to_string(),
+    }
+}
+
+/// [`excerpt_to`] in place.
+fn cap_chars(text: &mut String, max: usize) {
+    // A string of at most `max` bytes has at most `max` characters.
+    if text.len() <= max {
+        return;
+    }
+    if let Some((at, _)) = text.char_indices().nth(max) {
+        text.truncate(at);
+        text.push('…');
+    }
+}
+
+/// Longest single value the restore report (and its progress events) carries,
+/// in characters: a name, a principal label, a URI — and the cap on a plan
+/// item's validator refusal, which quotes one value held to Entra's ceiling
+/// (escaped, so possibly several times longer). Above every
+/// value Entra accepts — a federated credential's issuer, subject and audience
+/// stop at 600 characters, a reply URL at 256 — so a legitimate value is never
+/// cut, while a hostile file's multi-megabyte one is.
+const MAX_REPORT_VALUE_CHARS: usize = 1024;
+
+/// Longest warning or runbook reason the report carries, in characters. These
+/// compose several values with prose — every federated credential a withheld
+/// app would have had (up to 20, each issuer and subject up to 600), every
+/// permission a skipped consent covered — so they get room for that worst case
+/// rather than one value's cap.
+const MAX_REPORT_LINE_CHARS: usize = 32 * 1024;
+
+fn cap_report_value(text: &mut String) {
+    cap_chars(text, MAX_REPORT_VALUE_CHARS);
+}
+
+fn cap_report_line(text: &mut String) {
+    cap_chars(text, MAX_REPORT_LINE_CHARS);
+}
+
+/// Caps every text field of a finished report — the names, labels, warnings
+/// and runbook reasons, which echo values from the backup file — so a hostile
+/// manifest cannot make the report (the DR view's text and the saved file)
+/// carry a multi-megabyte string. A single value is capped at
+/// [`MAX_REPORT_VALUE_CHARS`], a composed line at [`MAX_REPORT_LINE_CHARS`];
+/// both sit above what a legitimate report holds, so it is never cut.
+///
+/// Not capped: ids (a source appId passed `validate_manifest` — a GUID —
+/// before any run; every new id is one Graph assigned), and a regenerated
+/// secret's `key_id` and show-once `secret_value`, which Graph minted. Every
+/// struct is destructured exhaustively, so a field added to the report does
+/// not compile until it is decided here.
+fn bound_report_text(report: &mut RestoreReport) {
+    let RestoreReport {
+        apps,
+        failures,
+        enterprise_apps,
+        managed_identities,
+        manual_items,
+        cancelled: _,
+        session_expired: _,
+    } = report;
+    for RestoredApp {
+        display_name,
+        source_app_id: _,
+        new_app_id: _,
+        new_object_id: _,
+        regenerated_secrets,
+        certificates_needing_manual_upload,
+        unresolved_owners,
+        warnings,
+        consent_granted: _,
+        adopted: _,
+    } in apps
+    {
+        cap_report_value(display_name);
+        for RegeneratedSecret {
+            display_name,
+            key_id: _,
+            secret_value: _,
+            expires: _,
+        } in regenerated_secrets
+        {
+            cap_report_value(display_name);
+        }
+        certificates_needing_manual_upload
+            .iter_mut()
+            .for_each(cap_report_value);
+        unresolved_owners.iter_mut().for_each(cap_report_value);
+        warnings.iter_mut().for_each(cap_report_line);
+    }
+    for RestoreFailure {
+        display_name,
+        source_app_id: _,
+        message,
+    } in failures
+    {
+        cap_report_value(display_name);
+        cap_report_line(message);
+    }
+    for RestoredEnterpriseApp {
+        display_name,
+        new_sp_object_id: _,
+        assignments_applied: _,
+        group_memberships_applied: _,
+        unresolved_principals,
+        warnings,
+    } in enterprise_apps
+    {
+        cap_report_value(display_name);
+        unresolved_principals.iter_mut().for_each(cap_report_value);
+        warnings.iter_mut().for_each(cap_report_line);
+    }
+    for RestoredManagedIdentity {
+        display_name,
+        new_principal_id: _,
+        app_roles_rebound: _,
+        warnings,
+    } in managed_identities
+    {
+        cap_report_value(display_name);
+        warnings.iter_mut().for_each(cap_report_line);
+    }
+    for ManualItem {
+        display_name,
+        reason,
+    } in manual_items
+    {
+        cap_report_value(display_name);
+        cap_report_line(reason);
     }
 }
 
@@ -727,7 +862,7 @@ fn build_restore_plan(
         schema_too_new: schema_too_new(backup.schema_version),
         invalid_manifest: manifest_problems(backup),
         tenant_changed: backup.source_tenant_id != tenant_id,
-        source_tenant_id: backup.source_tenant_id.clone(),
+        source_tenant_id: excerpt(&backup.source_tenant_id),
         destination_tenant_id: tenant_id,
         app_registrations_to_create: backup.app_registrations.len(),
         secrets_to_regenerate: sum(|a| a.secrets.len()) - expired_secrets_skipped,
@@ -859,10 +994,12 @@ fn consent_permissions(
                 (None, _) if restored_api => PermissionRisk::Low,
                 (None, _) => PermissionRisk::Unknown,
             };
+            // The resource and permission ids come from the file; the name
+            // and value were resolved in the destination.
             let perm = PrivilegedPermission {
-                resource_app_id: rra.resource_app_id.clone(),
+                resource_app_id: excerpt(&rra.resource_app_id),
                 resource_display_name: sp.map(|sp| sp.display_name.clone()),
-                permission_id: access.id.clone(),
+                permission_id: excerpt(&access.id),
                 value,
                 risk,
                 restored_api,
@@ -921,11 +1058,15 @@ async fn privileged_restore_items(
     backup: &TenantBackup,
     session: &SessionDead,
 ) -> Vec<PrivilegedRestoreItem> {
+    // Exact, as `remap_required_resource_access` (Pass 2's resource remap) is.
     let in_backup: HashSet<&str> = backup
         .app_registrations
         .iter()
         .map(|a| a.source_app_id.as_str())
         .collect();
+    // Ignoring case, as Pass 2's `plan_pre_authorized` is: a client is foreign
+    // here exactly when the run would write it as listed.
+    let backup_apps = backup_apps(backup);
     let resources = resolve_resources(client, &consent_resources(backup), session).await;
     let mut items = Vec::new();
     for app in &backup.app_registrations {
@@ -937,11 +1078,12 @@ async fn privileged_restore_items(
         let mut external: Vec<String> = app
             .pre_authorized_applications
             .iter()
-            .filter(|p| !in_backup.contains(p.app_id.as_str()))
+            .filter(|p| !backup_apps.contains(&p.app_id))
             .map(|p| excerpt(&p.app_id))
             .collect();
-        external.sort();
-        external.dedup();
+        // One per client, as the run writes them.
+        external.sort_by_key(|id| id.to_ascii_lowercase());
+        external.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         let federated_credentials: Vec<PlannedFederatedCredential> = app
             .federated_credentials
             .iter()
@@ -952,6 +1094,11 @@ async fn privileged_restore_items(
                 } else {
                     fic.audiences.clone()
                 };
+                // Validator prose quoting a value `core::federation` has
+                // already held to its 600-character ceiling, but Debug-escaped,
+                // so possibly several times longer. Capped like a report value:
+                // bounded, without cutting the explanation the way an
+                // 80-character excerpt would.
                 let rejected = validate_federated_credential(
                     Some(&fic.name),
                     &fic.issuer,
@@ -959,7 +1106,8 @@ async fn privileged_restore_items(
                     &audiences,
                     fic.description.as_deref(),
                 )
-                .err();
+                .err()
+                .map(|reason| excerpt_to(&reason, MAX_REPORT_VALUE_CHARS));
                 Some(PlannedFederatedCredential {
                     name: excerpt(&fic.name),
                     issuer: excerpt(&fic.issuer),
@@ -1042,16 +1190,16 @@ async fn privileged_restore_items(
             .held_app_roles
             .iter()
             .map(|r| {
-                let value = r.app_role_value.clone().filter(|v| !v.is_empty());
+                // Every field here comes from the file. Risk is ranked on the
+                // whole value, then each is shown as an excerpt.
+                let value = r.app_role_value.as_deref().filter(|v| !v.is_empty());
                 PrivilegedPermission {
-                    resource_app_id: r.resource_app_id.clone(),
-                    resource_display_name: r.resource_display_name.clone(),
-                    permission_id: r.app_role_id.clone(),
+                    resource_app_id: excerpt(&r.resource_app_id),
+                    resource_display_name: r.resource_display_name.as_deref().map(excerpt),
+                    permission_id: excerpt(&r.app_role_id),
                     // No value: Pass 5 cannot re-bind it at all (a warning).
-                    risk: value
-                        .as_deref()
-                        .map_or(PermissionRisk::Unknown, app_role_risk),
-                    value,
+                    risk: value.map_or(PermissionRisk::Unknown, app_role_risk),
+                    value: value.map(excerpt),
                     restored_api: false,
                 }
             })
@@ -1081,6 +1229,17 @@ fn permission_label(p: &PrivilegedPermission) -> String {
             p.permission_id, p.resource_app_id
         ),
     }
+}
+
+/// The backup's own app registrations, for classifying pre-authorized clients
+/// ([`plan_pre_authorized`]) the same way in the plan and in Pass 2.
+fn backup_apps(backup: &TenantBackup) -> BackupApps {
+    BackupApps::new(
+        backup
+            .app_registrations
+            .iter()
+            .map(|a| (a.source_app_id.as_str(), a.display_name.as_str())),
+    )
 }
 
 /// The approval key for an app registration.
@@ -1404,6 +1563,9 @@ async fn run_restore(
     }
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
+    // Every app the backup owns, recreated or not: a pre-authorized client in
+    // here with no remap entry is one Pass 1 failed or refused, never foreign.
+    let backup_apps = backup_apps(backup);
     for c in &created {
         // Both stop conditions, in every pass. Passes 2-5 once checked only
         // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
@@ -1420,6 +1582,7 @@ async fn run_restore(
             client,
             c,
             &app_id_remap,
+            &backup_apps,
             &mut principals,
             &session,
             &cancel,
@@ -1531,6 +1694,8 @@ async fn run_restore(
     // exists. So the report comes back, flagged, and the front end pairs the
     // flag with the re-auth prompt.
     report.session_expired = session.is_dead();
+    // Every text field echoes the file somewhere; bound them all once, here.
+    bound_report_text(&mut report);
     emit(progress, total, total, None);
     let effects = RestoreEffects {
         created_any: !created.is_empty(),
@@ -1706,11 +1871,17 @@ fn restorable_fic_subject(fic: &FederatedIdentityCredential) -> Result<&str, Str
 /// `withhold` marks an app that needed approval in the plan and did not get
 /// it: it is wired as usual, but gains no federated credential and no owner
 /// from the file — each withheld set is one runbook item.
+///
+/// `backup_apps` is every app registration the backup owns: a pre-authorized
+/// client among them that `app_id_remap` lacks (Pass 1 failed or refused it)
+/// is left out with a warning rather than written under its appId from the
+/// backup's source tenant ([`plan_pre_authorized`]).
 #[allow(clippy::too_many_arguments)]
 async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
     app_id_remap: &HashMap<String, String>,
+    backup_apps: &BackupApps,
     principals: &mut PrincipalMemo,
     session: &SessionDead,
     cancel: &CancelToken,
@@ -1759,14 +1930,35 @@ async fn wire_application(
         source_tenant_id,
         dest_tenant_id,
     );
-    let pre_auth = remap_pre_authorized(&app.pre_authorized_applications, app_id_remap);
-    if !identifier_uris.is_empty() || !app.api_scopes.is_empty() || !pre_auth.is_empty() {
+    // A client from outside the backup is written as listed (the plan showed
+    // it); one the backup owns but did not recreate has no appId here — the
+    // one it lists is from the backup's source tenant — so it is left out. A
+    // re-run that recreates it adopts this app and re-applies this
+    // full-replace PATCH with it.
+    let (pre_auth, own_not_restored) =
+        plan_pre_authorized(&app.pre_authorized_applications, app_id_remap, backup_apps);
+    for client_app_id in own_not_restored {
+        let named = match backup_apps.display_name(&client_app_id) {
+            Some(name) => format!("'{name}' ({client_app_id})"),
+            None => client_app_id,
+        };
+        out.warnings.push(format!(
+            "pre-authorized client {named} was NOT restored — it is an app in this backup \
+             that was not recreated here, so its appId from the backup's source tenant was left \
+             out; run the restore again once that app is restored"
+        ));
+    }
+    // Whenever the backup lists any client, the list is written — even empty
+    // once every client is left out — so this full-replace PATCH also clears
+    // an entry an earlier run (or an older build) wrote on an adopted app.
+    let lists_pre_auth = !app.pre_authorized_applications.is_empty();
+    if !identifier_uris.is_empty() || !app.api_scopes.is_empty() || lists_pre_auth {
         let patch = ApplicationExposeApiPatch {
             identifier_uris: (!identifier_uris.is_empty()).then_some(identifier_uris),
             api: Some(ApiApplicationPatch {
                 oauth2_permission_scopes: (!app.api_scopes.is_empty())
                     .then(|| app.api_scopes.clone()),
-                pre_authorized_applications: (!pre_auth.is_empty()).then_some(pre_auth),
+                pre_authorized_applications: lists_pre_auth.then_some(pre_auth),
             }),
         };
         if let Err(e) = client
@@ -2649,7 +2841,11 @@ fn emit(progress: &impl ProgressSink, done: usize, total: usize, current_app: Op
     let payload = BulkProgress {
         done,
         total,
-        current_app,
+        // The file's display name, bounded like the report's.
+        current_app: current_app.map(|mut name| {
+            cap_report_value(&mut name);
+            name
+        }),
         cancelled: false,
         in_flight_cap: None,
     };
@@ -3686,6 +3882,7 @@ mod tests {
             client,
             c,
             &HashMap::new(),
+            &BackupApps::default(),
             &mut PrincipalMemo::new(),
             &SessionDead::new(),
             &never_cancelled(),
@@ -4311,6 +4508,427 @@ mod tests {
             "{:?}",
             report.manual_items
         );
+    }
+
+    /// A pre-authorized client the backup owns but Pass 1 failed to create has
+    /// no appId in this tenant. The restored API never names it by its source
+    /// appId — that would pre-authorize the source tenant's app, which the plan
+    /// (listing only clients from outside the backup) never showed — while a
+    /// foreign client the plan did show is written as listed. Clients are
+    /// matched ignoring case (a backup app listed as `CCCC…` is still that app,
+    /// and is remapped), a client listed twice is reported once, and an API
+    /// whose every client was left out is written an empty list, so the
+    /// full-replace PATCH clears what an earlier run wrote.
+    #[tokio::test]
+    async fn a_client_that_failed_to_restore_is_not_pre_authorized_by_its_source_appid() {
+        const SRC_C: &str = "cccccccc-0000-0000-0000-000000000003";
+        const SRC_D: &str = "dddddddd-0000-0000-0000-000000000004";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/applications"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({ "displayName": "App B" }),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "Request_BadRequest", "message": "refused" }
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_create(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let pre_authorized = |app_id: &str| azapptoolkit_core::models::PreAuthorizedApplication {
+            app_id: app_id.into(),
+            delegated_permission_ids: vec!["scope-1".into()],
+        };
+        let api = AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "App A".into(),
+            pre_authorized_applications: vec![
+                pre_authorized(&SRC_C.to_ascii_uppercase()),
+                pre_authorized(SRC_B),
+                pre_authorized(&SRC_B.to_ascii_uppercase()),
+                pre_authorized("foreign-client"),
+            ],
+            ..Default::default()
+        };
+        let failed = AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "App B".into(),
+            ..Default::default()
+        };
+        let restored = AppRegistrationBackup {
+            source_app_id: SRC_C.into(),
+            display_name: "App C".into(),
+            ..Default::default()
+        };
+        // Every client it lists is left out.
+        let emptied = AppRegistrationBackup {
+            source_app_id: SRC_D.into(),
+            display_name: "App D".into(),
+            pre_authorized_applications: vec![pre_authorized(SRC_B)],
+            ..Default::default()
+        };
+        let backup = manifest(vec![api, failed, restored, emptied]);
+
+        let items = privileged_restore_items(&client, &backup, &SessionDead::new()).await;
+        assert_eq!(
+            items[0].external_pre_authorized_clients,
+            ["foreign-client"],
+            "the plan shows only the client from outside the backup, in any case"
+        );
+
+        let (report, _) = restore(
+            &client,
+            &backup,
+            crate::state::CancelFlag::new().claim(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(report.failures.len(), 1, "{report:?}");
+        assert_eq!(report.failures[0].source_app_id, SRC_B);
+        let server = &server;
+        let written = |obj: &'static str| async move {
+            requests(server, "PATCH", &format!("/applications/{obj}"))
+                .await
+                .iter()
+                .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+                .filter_map(|b| b["api"]["preAuthorizedApplications"].as_array().cloned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            written("obj-a").await,
+            [vec![
+                serde_json::json!({ "appId": "app-c", "delegatedPermissionIds": ["scope-1"] }),
+                serde_json::json!({ "appId": "foreign-client", "delegatedPermissionIds": ["scope-1"] }),
+            ]],
+            "the recreated client remapped, the foreign one as listed, nothing else"
+        );
+        assert_eq!(
+            written("obj-d").await,
+            [Vec::<serde_json::Value>::new()],
+            "an emptied list is still written, so the PATCH replaces"
+        );
+        let app_a = report
+            .apps
+            .iter()
+            .find(|a| a.display_name == "App A")
+            .expect("App A restored");
+        let left_out: Vec<&String> = app_a
+            .warnings
+            .iter()
+            .filter(|w| w.contains("was NOT restored"))
+            .collect();
+        assert_eq!(
+            left_out.len(),
+            1,
+            "listed twice, reported once: {left_out:?}"
+        );
+        assert!(
+            left_out[0].contains("'App B'") && left_out[0].contains(SRC_B),
+            "{left_out:?}"
+        );
+    }
+
+    /// Every value from the file the plan shows is an excerpt — the source
+    /// tenant id, a consented permission's resource and permission ids, a
+    /// managed identity's role fields — and a federated credential's refusal is
+    /// bounded too: `core::federation` checks length before it quotes a value,
+    /// and the plan caps the (escaped) refusal at `MAX_REPORT_VALUE_CHARS`.
+    #[tokio::test]
+    async fn the_plan_echoes_file_values_bounded() {
+        let server = MockServer::start().await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let long = "x".repeat(10_000);
+        let mut app = consenting_app(SRC_A, "App A");
+        app.required_resource_access[0].resource_app_id = long.clone();
+        app.required_resource_access[0].resource_access[0].id = long.clone();
+        app.federated_credentials = vec![FederatedIdentityCredential {
+            name: "gh-main".into(),
+            issuer: format!("https://issuer.example/{long} "),
+            subject: Some("sub".into()),
+            ..Default::default()
+        }];
+        let mut backup = manifest(vec![app]);
+        backup.source_tenant_id = long.clone();
+        backup.managed_identities = vec![ManagedIdentityBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "mi-one".into(),
+            held_app_roles: vec![crate::dto::backup::AppRoleGrantRef {
+                resource_app_id: long.clone(),
+                resource_display_name: Some(long.clone()),
+                app_role_id: long.clone(),
+                app_role_value: Some(long.clone()),
+            }],
+            ..Default::default()
+        }];
+
+        let plan = build_restore_plan(&backup, "dst-tenant".into(), CloudEnvironment::Commercial);
+        assert_eq!(plan.source_tenant_id, excerpt(&long));
+        assert!(plan.tenant_changed, "compared on the whole id");
+
+        let items = privileged_restore_items(&client, &backup, &SessionDead::new()).await;
+        let [app, mi] = &items[..] else {
+            panic!("{items:#?}")
+        };
+        assert_eq!(app.app_roles[0].resource_app_id, excerpt(&long));
+        assert_eq!(app.app_roles[0].permission_id, excerpt(&long));
+        let rejected = app.federated_credentials[0]
+            .rejected
+            .as_deref()
+            .expect("an oversized issuer is refused");
+        assert!(
+            rejected.contains("longer than 600 characters") && rejected.chars().count() < 100,
+            "{} characters",
+            rejected.len()
+        );
+        let role = &mi.app_roles[0];
+        for field in [
+            role.resource_app_id.as_str(),
+            role.permission_id.as_str(),
+            role.resource_display_name.as_deref().unwrap_or_default(),
+            role.value.as_deref().unwrap_or_default(),
+        ] {
+            assert_eq!(field, excerpt(&long));
+        }
+    }
+
+    /// A hostile manifest's multi-megabyte strings never reach the report (the
+    /// DR view's text and the saved file) whole: every name and label is cut
+    /// at `MAX_REPORT_VALUE_CHARS`, every warning and runbook reason at
+    /// `MAX_REPORT_LINE_CHARS`, the progress events' app names too — and the
+    /// show-once secret value is left exactly as Graph minted it.
+    #[tokio::test]
+    async fn a_hostile_manifest_cannot_make_the_report_carry_its_strings_whole() {
+        let huge = "x".repeat(100_000);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/applications"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({ "displayName": format!("{huge} B") }),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "Request_BadRequest", "message": "refused" }
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_create(&server).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/applications/obj-[a-z]+/addPassword$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "key-1",
+                "secretText": "s3cr3t-value",
+                "endDateTime": "2027-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/applications/obj-[a-z]+/federatedIdentityCredentials$",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "fic-1",
+                "name": "gh-main",
+                "issuer": "https://token.actions.githubusercontent.com",
+                "subject": "repo:contoso/app:ref:refs/heads/main",
+                "audiences": ["api://AzureADTokenExchange"]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-a'"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-a", "appId": "app-a", "displayName": "App A" }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .and(query_param(
+                "$filter",
+                "servicePrincipalType eq 'ManagedIdentity'",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "mi-sp", "appId": "mi-app", "displayName": huge.clone() }]
+            })))
+            .mount(&server)
+            .await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        // Looked up by nothing: a type the restore cannot search by name.
+        let unsearchable = PrincipalRef {
+            display_name: Some(huge.clone()),
+            principal_type: Some("ServicePrincipal".into()),
+            ..Default::default()
+        };
+        let valid_fic = |name: &str| FederatedIdentityCredential {
+            name: name.into(),
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: Some("repo:contoso/app:ref:refs/heads/main".into()),
+            ..Default::default()
+        };
+        let hostile_fic = FederatedIdentityCredential {
+            name: huge.clone(),
+            issuer: huge.clone(),
+            subject: Some(huge.clone()),
+            ..Default::default()
+        };
+        let named_secret = CredentialMeta {
+            display_name: Some(huge.clone()),
+            ..Default::default()
+        };
+        // Approved: every value goes through its writer or validator.
+        let approved = AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: format!("{huge} A"),
+            web_redirect_uris: vec![format!("https://app.example/{huge}")],
+            logout_url: Some(format!("https://app.example/{huge}")),
+            federated_credentials: vec![
+                valid_fic("gh-main"),
+                hostile_fic.clone(),
+                FederatedIdentityCredential {
+                    subject: None,
+                    ..hostile_fic.clone()
+                },
+            ],
+            owners: vec![unsearchable.clone()],
+            secrets: vec![named_secret.clone()],
+            certificates: vec![named_secret],
+            ..Default::default()
+        };
+        // Pass 1 refuses it.
+        let failed = AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: format!("{huge} B"),
+            ..Default::default()
+        };
+        // Not approved: its credentials and owners are listed, never validated.
+        let withheld = AppRegistrationBackup {
+            source_app_id: "cccccccc-0000-0000-0000-000000000003".into(),
+            display_name: format!("{huge} C"),
+            federated_credentials: vec![valid_fic("gh-c"), hostile_fic],
+            owners: vec![PrincipalRef {
+                user_principal_name: Some(huge.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut backup = manifest(vec![approved, failed, withheld]);
+        backup.enterprise_apps = vec![EnterpriseAppBackup {
+            source_app_id: SRC_A.into(),
+            display_name: huge.clone(),
+            app_role_assignees: vec![crate::dto::backup::AppRoleAssigneeRef {
+                principal: unsearchable.clone(),
+                app_role_id: DEFAULT_ACCESS_ROLE.into(),
+                app_role_value: None,
+            }],
+            group_memberships: vec![unsearchable],
+            ..Default::default()
+        }];
+        backup.managed_identities = vec![ManagedIdentityBackup {
+            source_app_id: "dddddddd-0000-0000-0000-000000000004".into(),
+            display_name: huge.clone(),
+            held_app_roles: vec![crate::dto::backup::AppRoleGrantRef {
+                resource_app_id: GRAPH.into(),
+                app_role_id: "r".into(),
+                app_role_value: Some(huge.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let recorder = crate::commands::test_support::Recorder::default();
+        let approvals = HashSet::from([app_approval(SRC_A)]);
+
+        let (report, _) = run_restore(
+            &client,
+            &recorder,
+            crate::state::CancelFlag::new().claim(),
+            RestoreRun {
+                backup: &backup,
+                tenant_id: "dst-tenant",
+                cloud: CloudEnvironment::Commercial,
+                operator_oid: Some("operator-oid"),
+                approved: &approvals,
+            },
+        )
+        .await;
+
+        // The run reached every surface that echoes the file.
+        assert_eq!(report.apps.len(), 2, "{:?}", report.failures);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.enterprise_apps.len(), 1);
+        assert_eq!(report.managed_identities.len(), 1);
+        let secret = &report.apps[0].regenerated_secrets[0];
+        assert_eq!(secret.secret_value, "s3cr3t-value", "never cut");
+        assert_eq!(secret.key_id, "key-1");
+
+        let chars = |s: &str| s.chars().count();
+        let value_cap = MAX_REPORT_VALUE_CHARS + 1; // the ellipsis
+        let mut values: Vec<&str> = vec![&report.failures[0].display_name];
+        for app in &report.apps {
+            values.push(&app.display_name);
+            values.extend(
+                app.regenerated_secrets
+                    .iter()
+                    .map(|s| s.display_name.as_str()),
+            );
+            values.extend(
+                app.certificates_needing_manual_upload
+                    .iter()
+                    .map(String::as_str),
+            );
+            values.extend(app.unresolved_owners.iter().map(String::as_str));
+        }
+        let ent = &report.enterprise_apps[0];
+        values.push(&ent.display_name);
+        values.extend(ent.unresolved_principals.iter().map(String::as_str));
+        values.push(&report.managed_identities[0].display_name);
+        values.extend(report.manual_items.iter().map(|m| m.display_name.as_str()));
+        assert!(values.len() > 10, "{values:?}");
+        for v in &values {
+            assert!(chars(v) <= value_cap, "a {}-character value", chars(v));
+        }
+        assert_eq!(chars(&report.apps[0].display_name), value_cap);
+        assert!(report.apps[0].display_name.ends_with('…'));
+
+        // No string anywhere in the report — warnings and runbook reasons
+        // included — is longer than a composed line's cap, and the huge
+        // values did reach some of them (so the cap is what bounded them).
+        fn strings<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+            match v {
+                serde_json::Value::String(s) => out.push(s),
+                serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+                serde_json::Value::Object(o) => o.values().for_each(|v| strings(v, out)),
+                _ => {}
+            }
+        }
+        let json = serde_json::to_value(&report).expect("the report serializes");
+        let mut all = Vec::new();
+        strings(&json, &mut all);
+        for s in &all {
+            assert!(
+                chars(s) <= MAX_REPORT_LINE_CHARS + 1,
+                "a {}-character string",
+                chars(s)
+            );
+        }
+        let cut_lines = all
+            .iter()
+            .filter(|s| chars(s) == MAX_REPORT_LINE_CHARS + 1)
+            .count();
+        assert!(cut_lines >= 5, "{cut_lines} lines were cut");
+
+        let progress: Vec<BulkProgress> = recorder.payloads(crate::dto::events::RESTORE_PROGRESS);
+        assert!(!progress.is_empty());
+        for p in &progress {
+            let name = p.current_app.as_deref().unwrap_or_default();
+            assert!(chars(name) <= value_cap, "a {}-character name", chars(name));
+        }
     }
 
     /// An app not approved in the plan is created and wired, but gets no

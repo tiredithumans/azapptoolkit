@@ -208,9 +208,20 @@ fn is_host_and_port(authority: &str) -> bool {
 
 /// The checks every value shares: present, within the length ceiling, no
 /// surrounding whitespace, and no wildcard.
+///
+/// The length check comes before any refusal that quotes the value, so a
+/// message here (or in [`validate_issuer`], which runs this first) quotes only
+/// a value already within [`MAX_FIELD_LEN`] characters: a restore validates
+/// values from a file, and a multi-megabyte issuer must not become the plan's
+/// text. Quoting with `{value:?}` escapes it, though, so a refusal can still be
+/// several times that long; a caller that shows one caps it (the restore plan
+/// at 1024 characters).
 fn validate_field(label: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{label} is required"));
+    }
+    if value.chars().count() > MAX_FIELD_LEN {
+        return Err(format!("{label} is longer than {MAX_FIELD_LEN} characters"));
     }
     // Entra documents that leading or trailing whitespace in the issuer blocks
     // the token exchange — and it does so silently, at exchange time.
@@ -218,9 +229,6 @@ fn validate_field(label: &str, value: &str) -> Result<(), String> {
         return Err(format!(
             "{label} has leading or trailing whitespace, which silently blocks the token exchange: {value:?}"
         ));
-    }
-    if value.chars().count() > MAX_FIELD_LEN {
-        return Err(format!("{label} is longer than {MAX_FIELD_LEN} characters"));
     }
     // "Wildcard characters aren't supported in any federated identity credential
     // property value" — a value containing one cannot match a real token claim,
@@ -390,6 +398,46 @@ mod tests {
         assert!(check("ok-name", " https://issuer.example", "sub").is_err());
         assert!(check("ok-name", "https://issuer.example ", "sub").is_err());
         assert!(check("ok-name", "https://issuer.example", "sub\n").is_err());
+    }
+
+    /// A refusal quotes the value only once it is known to be within the
+    /// ceiling. Surrounding whitespace on an oversized value used to be checked
+    /// first and echoed the whole value, so a restored manifest's
+    /// multi-megabyte issuer or subject became the plan's refusal text.
+    #[test]
+    fn a_refusal_never_echoes_a_value_past_the_ceiling() {
+        let huge = "a".repeat(1_000_000);
+        for (issuer, subject) in [
+            (format!(" https://issuer.example/{huge}"), "sub".to_string()),
+            (format!("https://issuer.example/{huge} "), "sub".to_string()),
+            ("https://issuer.example".to_string(), format!("{huge}\n")),
+            ("https://issuer.example".to_string(), format!(" {huge}")),
+        ] {
+            let err = check("ok-name", &issuer, &subject).unwrap_err();
+            assert!(
+                err.contains("longer than 600 characters") && err.chars().count() < 100,
+                "{} characters: {}",
+                err.len(),
+                err.chars().take(120).collect::<String>()
+            );
+        }
+        let err = validate_federated_credential(
+            Some("ok-name"),
+            "https://issuer.example",
+            "sub",
+            &[format!("{huge} ")],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.chars().count() < 100, "{}", err.len());
+        let err = check(&format!("{huge}!"), "https://issuer.example", "sub").unwrap_err();
+        assert!(err.chars().count() < 100, "{}", err.len());
+        // Within the ceiling, the whitespace refusal still names the value.
+        let err = check("ok-name", "https://issuer.example ", "sub").unwrap_err();
+        assert!(
+            err.contains("whitespace") && err.contains("issuer.example"),
+            "{err}"
+        );
     }
 
     #[test]

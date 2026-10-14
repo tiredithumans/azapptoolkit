@@ -247,7 +247,15 @@ resolve:
    the source appId or source tenant → the new appId / destination tenant —
    Microsoft rejects a GUID segment matching neither, and the URIs share one
    PATCH with the scopes and pre-authorized apps),
-   Expose-an-API scopes (ids preserved) + pre-authorized apps (remapped),
+   Expose-an-API scopes (ids preserved) + pre-authorized apps
+   (`plan_pre_authorized`, matching appIds ignoring case and listing each
+   client once: a client this backup recreated is remapped, one from outside
+   it is written as listed — the plan's shown-only foreign clients — and one
+   this backup owns that Pass 1 failed or refused is left out with a warning,
+   never written under its appId from the backup's source tenant; the list is
+   written even when that empties it, so the full-replace PATCH clears what an
+   earlier run wrote, and a re-run that recreates the client adopts this app
+   and re-applies the PATCH with it),
    authentication (each redirect URI through `core::redirect`, the logout URL
    through its stricter `validate_logout_url`, a rejected one dropped with a
    warning), federated credentials (validated + reported, below), owners (`resolve_principal`
@@ -370,10 +378,11 @@ carries the new ids, the show-once regenerated secrets, unresolved owners,
 certificates needing manual re-upload, per-app warnings, and hard failures.
 
 The remap helpers (`remap_required_resource_access`, `rewrite_identifier_uris`,
-`remap_pre_authorized`) are pure and unit-tested (first-party-survives vs
+`plan_pre_authorized`) are pure and unit-tested (first-party-survives vs
 custom-remap, the `api://` rewrite across Microsoft's four supported forms —
 `api://<appId>`, `api://<tenantId>/<appId>`, `api://<tenantId>/<string>`,
-`api://<string>/<appId>`).
+`api://<string>/<appId>` — and a backup client Pass 1 never recreated left out
+rather than kept by its source appId).
 
 **Enterprise applications** restore in Pass 4. For an SP that was recreated by
 its paired app registration (it's in the `app_id_remap` and not foreign), the
@@ -415,10 +424,28 @@ in Pass 2, so a session that dies there stops the restore with
 
 ### Security posture
 
+**Every string the plan and the report echo from the file is bounded.** The plan
+shows each manifest value as an 80-character `excerpt`, and a federated
+credential's refusal at most `MAX_REPORT_VALUE_CHARS` (1024) — `core::federation`
+checks a value's length before any refusal quotes it. `run_restore` ends with
+`bound_report_text`, which caps every name and label in the report (and the
+progress events' app name) at 1024 characters and every warning and runbook
+reason, which compose several values, at `MAX_REPORT_LINE_CHARS` (32 KiB). Both
+sit above what Entra accepts, so a legitimate report is never cut, while a
+hostile manifest's multi-megabyte display name or issuer is. It skips ids and a
+regenerated secret's `key_id` and value, and destructures the report
+exhaustively, so a new field does not compile until it is decided there.
+
 The backup manifest carries configuration but **no secret values** — still treat
 it as sensitive (it enumerates permissions, owners, identifier URIs). The restore
 **report** *does* carry show-once regenerated secret values: handle it with the
 same discipline as the in-app secret reveal (`PasswordCredential` is
 `Debug`-redacted and never logged; `SelfSignedCertificate.key` likewise). The
 report file is the only place those values land, and the operator is warned it is
-secret-bearing.
+secret-bearing. The DR view is keep-alive, so it holds the report, values
+included, until the operator presses **Done — clear secrets** — the reveal
+dialog's Done for a restore — which drops it, after a confirmation while the
+report is unsaved. **Load backup file…** waits while an unsaved report is on
+screen, and clears a saved one only once a file is chosen; a new restore and
+sign-out also drop it. It is never cleared on navigation, because the values
+cannot be shown again.

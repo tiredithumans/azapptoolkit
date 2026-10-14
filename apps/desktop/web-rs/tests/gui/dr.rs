@@ -20,10 +20,11 @@ use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::backup::{
     PermissionRisk, PlannedFederatedCredential, PrivilegedKind, PrivilegedPermission,
-    PrivilegedRestoreItem, RestorePlan, RestoreReport, RestoredApp, SchemaTooNew, SkippedObject,
-    TenantBackup,
+    PrivilegedRestoreItem, RegeneratedSecret, RestorePlan, RestoreReport, RestoredApp,
+    SchemaTooNew, SkippedObject, TenantBackup,
 };
 use azapptoolkit_dto::events as names;
+use azapptoolkit_web_rs::components::toast::ToastHost;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
 
@@ -282,7 +283,7 @@ async fn the_restore_button_is_withdrawn_once_a_report_renders() {
     );
     assert!(
         ts::has_button_labelled("Load backup file…"),
-        "re-loading stays possible"
+        "re-loading stays possible (once the report is saved or cleared)"
     );
 }
 
@@ -354,6 +355,131 @@ async fn an_expired_session_during_restore_asks_for_re_authentication() {
     assert!(
         body.contains("Re-authenticate and run the restore again"),
         "the operator needs the remedy, not only the diagnosis: {body}"
+    );
+}
+
+/// A report holding one show-once regenerated secret.
+fn report_with_a_secret() -> RestoreReport {
+    RestoreReport {
+        apps: vec![RestoredApp {
+            display_name: "App A".into(),
+            regenerated_secrets: vec![RegeneratedSecret {
+                display_name: "ci".into(),
+                key_id: "key-1".into(),
+                secret_value: "s3cr3t-value".into(),
+                expires: None,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// The view is keep-alive, so a report's show-once secret values would stay in
+/// its (hidden) DOM for the whole session. "Done — clear secrets" drops them —
+/// asking first while the report is unsaved, because cleared values cannot be
+/// shown again: Keep leaves the report as it was, Clear without saving drops
+/// it, values and all.
+#[wasm_bindgen_test]
+async fn done_asks_before_clearing_an_unsaved_report_and_its_secrets() {
+    let _m = run_restore(report_with_a_secret()).await;
+    ts::wait_for(|| ts::body_contains("s3cr3t-value")).await;
+    // Loading another file would replace the unsaved report, so Load waits.
+    assert!(
+        !ts::button_labelled_enabled("Load backup file…"),
+        "one click on Load must not discard an unsaved report"
+    );
+    assert!(ts::body_contains(
+        "Save the restore report or press Done before loading another backup file."
+    ));
+
+    ts::click_button_labelled("Done — clear secrets");
+    ts::wait_for(|| ts::body_contains("Clear the restore report?")).await;
+    ts::click_button_labelled("Keep the report");
+    ts::wait_for(|| !ts::has_button_labelled("Keep the report")).await;
+    assert!(
+        ts::body_contains("s3cr3t-value"),
+        "Keep leaves the report on screen"
+    );
+
+    ts::click_button_labelled("Done — clear secrets");
+    ts::wait_for(|| ts::has_button_labelled("Clear without saving")).await;
+    ts::click_button_labelled("Clear without saving");
+    ts::wait_for(|| ts::query(".dr-view__result").is_none()).await;
+    assert!(
+        !ts::body_contains("s3cr3t-value"),
+        "the secret value is gone from the page: {}",
+        ts::body_text()
+    );
+    assert!(!ts::body_contains("Clear the restore report?"));
+    // The next restore starts from a file, as after any report.
+    assert!(ts::button_labelled_enabled("Load backup file…"));
+    assert!(!ts::has_button_labelled("Restore into this tenant…"));
+}
+
+/// A report with no secrets says "Done", and its confirmation does not claim
+/// secret values are being lost — only the report and its follow-ups.
+#[wasm_bindgen_test]
+async fn done_on_a_report_without_secrets_says_only_what_is_lost() {
+    let _m = run_restore(RestoreReport::default()).await;
+    ts::click_button_labelled("Done");
+    ts::wait_for(|| ts::body_contains("Clear the restore report?")).await;
+    assert!(ts::body_contains("manual follow-ups"));
+    assert!(
+        !ts::body_contains("regenerated secret values"),
+        "no secrets, so none to lose: {}",
+        ts::body_text()
+    );
+    ts::click_button_labelled("Clear without saving");
+    ts::wait_for(|| ts::query(".dr-view__result").is_none()).await;
+}
+
+/// Once the report is saved to a file, Done clears it without asking: the file
+/// is the copy the operator keeps.
+#[wasm_bindgen_test]
+async fn done_clears_a_saved_report_without_asking() {
+    ts::reset();
+    ts::mock_ok("load_backup_from_file", &Some(backup()));
+    ts::mock_ok("plan_restore", &plan());
+    ts::mock_ok("restore_tenant", &report_with_a_secret());
+    ts::mock_ok(
+        "save_restore_report_to_file",
+        &Some("/tmp/restore-report.json".to_string()),
+    );
+    // The toast stack shows when the save has landed.
+    let _m = ts::mount_view(|| {
+        view! {
+            <ToastHost />
+            <DisasterRecoveryView />
+        }
+    });
+    ts::tick().await;
+    ts::click_button_labelled("Load backup file…");
+    ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::body_contains("s3cr3t-value")).await;
+
+    ts::click_button_labelled("Save report (contains secrets)…");
+    ts::wait_for(|| ts::body_contains("Report saved to /tmp/restore-report.json")).await;
+    // Saved, Load is offered again — and a cancelled file dialog keeps the
+    // report rather than clearing it on the click.
+    assert!(ts::button_labelled_enabled("Load backup file…"));
+    ts::mock_ok("load_backup_from_file", &None::<TenantBackup>);
+    ts::click_button_labelled("Load backup file…");
+    ts::wait_for(|| ts::call_count("load_backup_from_file") == 2).await;
+    ts::tick().await;
+    assert!(
+        ts::body_contains("s3cr3t-value"),
+        "a cancelled load keeps the report"
+    );
+    ts::click_button_labelled("Done — clear secrets");
+    ts::wait_for(|| ts::query(".dr-view__result").is_none()).await;
+    assert!(!ts::body_contains("s3cr3t-value"));
+    assert!(
+        !ts::body_contains("Clear the restore report?"),
+        "a saved report clears without a confirmation"
     );
 }
 

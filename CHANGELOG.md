@@ -7,6 +7,17 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Fixed
 
+- **A restore no longer pre-authorizes a client app under the backed-up tenant's appId.** When
+  an API in the backup pre-authorized a client app that is also in the backup, and that client
+  failed to restore (or was left for manual follow-up), the restored API was still written with
+  the client's appId from the backed-up tenant, which pre-authorized that tenant's app instead.
+  The plan never listed it, because it shows only clients from outside the backup. The restore
+  now leaves such a client out and names it in the app's warnings; running the restore again
+  once the client is restored adds it.
+- **Over-long values in a backup file are cut short in the restore plan and report.** A name,
+  URL, permission id or credential field longer than anything Entra accepts now ends in "…"
+  instead of being shown whole, so a damaged or hostile backup file can no longer fill the plan,
+  the report or the saved report file with megabytes of text.
 - **A Remove expired credentials run whose task for an app ended without reporting now lists that
   app as "ended without reporting an outcome" and refreshes its credentials.** It used to be left
   out of the summary, and any secrets it had already removed stayed on the credential list and in
@@ -31,6 +42,12 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ### Changed
 
+- **A finished restore's report has a "Done — clear secrets" button.** Disaster Recovery keeps
+  its page in place while you work elsewhere, so the regenerated secret values a restore shows
+  once stayed in the app until the next load, restore or sign-out. Done clears the report and its
+  values; if you have not saved the report yet, it asks first, because the values cannot be shown
+  again. "Load backup file…" now waits until the report is saved or cleared, so one click can no
+  longer discard an unsaved report, and leaving the page still keeps it.
 - **Semver-compatible dependency refresh:** `rustls` 0.23.45 → 0.23.46, which fixes the four
   advisories published on 2026-10-14 — RUSTSEC-2026-0346 (`Debug` impls for client session values
   exposed TLS secrets), -0347 (buffered application data was sent to the outer server after an ECH
