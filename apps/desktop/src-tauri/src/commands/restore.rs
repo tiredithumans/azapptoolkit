@@ -61,7 +61,7 @@ use azapptoolkit_core::models::{
 };
 use azapptoolkit_core::redirect::{validate_logout_url, validate_redirect_uri};
 use azapptoolkit_core::restore_plan::{
-    remap_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
+    BackupApps, plan_pre_authorized, remap_required_resource_access, rewrite_identifier_uris,
 };
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::client::{
@@ -921,11 +921,15 @@ async fn privileged_restore_items(
     backup: &TenantBackup,
     session: &SessionDead,
 ) -> Vec<PrivilegedRestoreItem> {
+    // Exact, as `remap_required_resource_access` (Pass 2's resource remap) is.
     let in_backup: HashSet<&str> = backup
         .app_registrations
         .iter()
         .map(|a| a.source_app_id.as_str())
         .collect();
+    // Ignoring case, as Pass 2's `plan_pre_authorized` is: a client is foreign
+    // here exactly when the run would write it as listed.
+    let backup_apps = backup_apps(backup);
     let resources = resolve_resources(client, &consent_resources(backup), session).await;
     let mut items = Vec::new();
     for app in &backup.app_registrations {
@@ -937,11 +941,12 @@ async fn privileged_restore_items(
         let mut external: Vec<String> = app
             .pre_authorized_applications
             .iter()
-            .filter(|p| !in_backup.contains(p.app_id.as_str()))
+            .filter(|p| !backup_apps.contains(&p.app_id))
             .map(|p| excerpt(&p.app_id))
             .collect();
-        external.sort();
-        external.dedup();
+        // One per client, as the run writes them.
+        external.sort_by_key(|id| id.to_ascii_lowercase());
+        external.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         let federated_credentials: Vec<PlannedFederatedCredential> = app
             .federated_credentials
             .iter()
@@ -1081,6 +1086,17 @@ fn permission_label(p: &PrivilegedPermission) -> String {
             p.permission_id, p.resource_app_id
         ),
     }
+}
+
+/// The backup's own app registrations, for classifying pre-authorized clients
+/// ([`plan_pre_authorized`]) the same way in the plan and in Pass 2.
+fn backup_apps(backup: &TenantBackup) -> BackupApps {
+    BackupApps::new(
+        backup
+            .app_registrations
+            .iter()
+            .map(|a| (a.source_app_id.as_str(), a.display_name.as_str())),
+    )
 }
 
 /// The approval key for an app registration.
@@ -1404,6 +1420,9 @@ async fn run_restore(
     }
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
+    // Every app the backup owns, recreated or not: a pre-authorized client in
+    // here with no remap entry is one Pass 1 failed or refused, never foreign.
+    let backup_apps = backup_apps(backup);
     for c in &created {
         // Both stop conditions, in every pass. Passes 2-5 once checked only
         // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
@@ -1420,6 +1439,7 @@ async fn run_restore(
             client,
             c,
             &app_id_remap,
+            &backup_apps,
             &mut principals,
             &session,
             &cancel,
@@ -1706,11 +1726,17 @@ fn restorable_fic_subject(fic: &FederatedIdentityCredential) -> Result<&str, Str
 /// `withhold` marks an app that needed approval in the plan and did not get
 /// it: it is wired as usual, but gains no federated credential and no owner
 /// from the file — each withheld set is one runbook item.
+///
+/// `backup_apps` is every app registration the backup owns: a pre-authorized
+/// client among them that `app_id_remap` lacks (Pass 1 failed or refused it)
+/// is left out with a warning rather than written under its appId from the
+/// backup's source tenant ([`plan_pre_authorized`]).
 #[allow(clippy::too_many_arguments)]
 async fn wire_application(
     client: &GraphClient,
     c: &CreatedApp,
     app_id_remap: &HashMap<String, String>,
+    backup_apps: &BackupApps,
     principals: &mut PrincipalMemo,
     session: &SessionDead,
     cancel: &CancelToken,
@@ -1759,14 +1785,35 @@ async fn wire_application(
         source_tenant_id,
         dest_tenant_id,
     );
-    let pre_auth = remap_pre_authorized(&app.pre_authorized_applications, app_id_remap);
-    if !identifier_uris.is_empty() || !app.api_scopes.is_empty() || !pre_auth.is_empty() {
+    // A client from outside the backup is written as listed (the plan showed
+    // it); one the backup owns but did not recreate has no appId here — the
+    // one it lists is from the backup's source tenant — so it is left out. A
+    // re-run that recreates it adopts this app and re-applies this
+    // full-replace PATCH with it.
+    let (pre_auth, own_not_restored) =
+        plan_pre_authorized(&app.pre_authorized_applications, app_id_remap, backup_apps);
+    for client_app_id in own_not_restored {
+        let named = match backup_apps.display_name(&client_app_id) {
+            Some(name) => format!("'{name}' ({client_app_id})"),
+            None => client_app_id,
+        };
+        out.warnings.push(format!(
+            "pre-authorized client {named} was NOT restored — it is an app in this backup \
+             that was not recreated here, so its appId from the backup's source tenant was left \
+             out; run the restore again once that app is restored"
+        ));
+    }
+    // Whenever the backup lists any client, the list is written — even empty
+    // once every client is left out — so this full-replace PATCH also clears
+    // an entry an earlier run (or an older build) wrote on an adopted app.
+    let lists_pre_auth = !app.pre_authorized_applications.is_empty();
+    if !identifier_uris.is_empty() || !app.api_scopes.is_empty() || lists_pre_auth {
         let patch = ApplicationExposeApiPatch {
             identifier_uris: (!identifier_uris.is_empty()).then_some(identifier_uris),
             api: Some(ApiApplicationPatch {
                 oauth2_permission_scopes: (!app.api_scopes.is_empty())
                     .then(|| app.api_scopes.clone()),
-                pre_authorized_applications: (!pre_auth.is_empty()).then_some(pre_auth),
+                pre_authorized_applications: lists_pre_auth.then_some(pre_auth),
             }),
         };
         if let Err(e) = client
@@ -3686,6 +3733,7 @@ mod tests {
             client,
             c,
             &HashMap::new(),
+            &BackupApps::default(),
             &mut PrincipalMemo::new(),
             &SessionDead::new(),
             &never_cancelled(),
@@ -4310,6 +4358,128 @@ mod tests {
                 .any(|m| m.reason.contains("don't match the backup")),
             "{:?}",
             report.manual_items
+        );
+    }
+
+    /// A pre-authorized client the backup owns but Pass 1 failed to create has
+    /// no appId in this tenant. The restored API never names it by its source
+    /// appId — that would pre-authorize the source tenant's app, which the plan
+    /// (listing only clients from outside the backup) never showed — while a
+    /// foreign client the plan did show is written as listed. Clients are
+    /// matched ignoring case (a backup app listed as `CCCC…` is still that app,
+    /// and is remapped), a client listed twice is reported once, and an API
+    /// whose every client was left out is written an empty list, so the
+    /// full-replace PATCH clears what an earlier run wrote.
+    #[tokio::test]
+    async fn a_client_that_failed_to_restore_is_not_pre_authorized_by_its_source_appid() {
+        const SRC_C: &str = "cccccccc-0000-0000-0000-000000000003";
+        const SRC_D: &str = "dddddddd-0000-0000-0000-000000000004";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/applications"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({ "displayName": "App B" }),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": { "code": "Request_BadRequest", "message": "refused" }
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_create(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let pre_authorized = |app_id: &str| azapptoolkit_core::models::PreAuthorizedApplication {
+            app_id: app_id.into(),
+            delegated_permission_ids: vec!["scope-1".into()],
+        };
+        let api = AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "App A".into(),
+            pre_authorized_applications: vec![
+                pre_authorized(&SRC_C.to_ascii_uppercase()),
+                pre_authorized(SRC_B),
+                pre_authorized(&SRC_B.to_ascii_uppercase()),
+                pre_authorized("foreign-client"),
+            ],
+            ..Default::default()
+        };
+        let failed = AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "App B".into(),
+            ..Default::default()
+        };
+        let restored = AppRegistrationBackup {
+            source_app_id: SRC_C.into(),
+            display_name: "App C".into(),
+            ..Default::default()
+        };
+        // Every client it lists is left out.
+        let emptied = AppRegistrationBackup {
+            source_app_id: SRC_D.into(),
+            display_name: "App D".into(),
+            pre_authorized_applications: vec![pre_authorized(SRC_B)],
+            ..Default::default()
+        };
+        let backup = manifest(vec![api, failed, restored, emptied]);
+
+        let items = privileged_restore_items(&client, &backup, &SessionDead::new()).await;
+        assert_eq!(
+            items[0].external_pre_authorized_clients,
+            ["foreign-client"],
+            "the plan shows only the client from outside the backup, in any case"
+        );
+
+        let (report, _) = restore(
+            &client,
+            &backup,
+            crate::state::CancelFlag::new().claim(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(report.failures.len(), 1, "{report:?}");
+        assert_eq!(report.failures[0].source_app_id, SRC_B);
+        let server = &server;
+        let written = |obj: &'static str| async move {
+            requests(server, "PATCH", &format!("/applications/{obj}"))
+                .await
+                .iter()
+                .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+                .filter_map(|b| b["api"]["preAuthorizedApplications"].as_array().cloned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            written("obj-a").await,
+            [vec![
+                serde_json::json!({ "appId": "app-c", "delegatedPermissionIds": ["scope-1"] }),
+                serde_json::json!({ "appId": "foreign-client", "delegatedPermissionIds": ["scope-1"] }),
+            ]],
+            "the recreated client remapped, the foreign one as listed, nothing else"
+        );
+        assert_eq!(
+            written("obj-d").await,
+            [Vec::<serde_json::Value>::new()],
+            "an emptied list is still written, so the PATCH replaces"
+        );
+        let app_a = report
+            .apps
+            .iter()
+            .find(|a| a.display_name == "App A")
+            .expect("App A restored");
+        let left_out: Vec<&String> = app_a
+            .warnings
+            .iter()
+            .filter(|w| w.contains("was NOT restored"))
+            .collect();
+        assert_eq!(
+            left_out.len(),
+            1,
+            "listed twice, reported once: {left_out:?}"
+        );
+        assert!(
+            left_out[0].contains("'App B'") && left_out[0].contains(SRC_B),
+            "{left_out:?}"
         );
     }
 

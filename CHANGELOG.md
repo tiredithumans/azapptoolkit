@@ -49,6 +49,16 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
   the lists' "Created before" and "Created after" filters use, and screen readers now announce
   each field by name.
 
+### Fixed
+
+- **A restore no longer pre-authorizes a client app under the backed-up tenant's appId.** When
+  an API in the backup pre-authorized a client app that is also in the backup, and that client
+  failed to restore (or was left for manual follow-up), the restored API was still written with
+  the client's appId from the backed-up tenant, which pre-authorized that tenant's app instead.
+  The plan never listed it, because it shows only clients from outside the backup. The restore
+  now leaves such a client out and names it in the app's warnings; running the restore again
+  once the client is restored adds it.
+
 ## [0.34.0] - 2026-10-13
 
 ### Changed
