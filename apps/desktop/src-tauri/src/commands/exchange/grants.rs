@@ -405,10 +405,12 @@ pub(super) async fn apply_exchange_mailbox_scope(
         Vec::new()
     };
 
-    // `ensure_service_principal` above may have created/registered an SP, adding
-    // a pairing the cached App Registrations / Enterprise Apps lists (and the
-    // shared SP index) must reflect. Invalidate only on this success path.
-    invalidate_app_lists(&state.cache, tenant_id);
+    // Scoping changes the per-permission verdicts, the detail payloads and the
+    // audit's findings, never the app/SP set: `ensure_service_principal` above
+    // registers Exchange's pointer to an Entra SP that already exists. The one
+    // caller that may have created that SP busts the list tier itself
+    // (`grant_exchange_mailbox_access`'s `sp_created`). Only on this success path.
+    invalidate_app_detail_state(&state.cache, tenant_id);
 
     Ok(ExchangeAccessResult {
         app_id: app_id.to_string(),
@@ -463,8 +465,9 @@ pub async fn grant_exchange_mailbox_access(
         )
     })?;
 
-    // `invalidate_app_lists` runs in `apply_exchange_mailbox_scope` on success;
-    // `sp_created` covers the case where the scope step then fails.
+    // A new enterprise app is a set change the cached lists must show, whether
+    // or not the scope step then succeeds (`sp_created` below); the scoping
+    // itself busts the detail tier inside `apply_exchange_mailbox_scope`.
     let (entra_sp, sp_created) = graph.ensure_service_principal(&app.app_id).await?;
 
     let result = apply_exchange_mailbox_scope(ApplyExchangeMailboxScopeParams {
@@ -485,7 +488,7 @@ pub async fn grant_exchange_mailbox_access(
     // the scope step then refused (no_scope_group, scope_group_mismatch, an
     // Exchange error). That is a brand-new Enterprise App row the cached lists
     // must show — the `invalidate_after_grant` / `GrantRun.sp_created` precedent.
-    if sp_created && result.is_err() {
+    if sp_created {
         invalidate_app_lists(&state.cache, &tenant_id);
     }
     result
@@ -646,9 +649,10 @@ pub async fn remove_exchange_mailbox_access(
     // Assignments were really removed (even on partial success, and even when
     // the run then reports failure), changing the cached per-permission scope
     // verdicts and audit-relevant state — invalidate because state really
-    // changed.
+    // changed. No app or SP was added or removed, so the detail tier (details +
+    // audit run) is the one that changed.
     if removed_any {
-        invalidate_app_lists(&state.cache, &tenant_id);
+        invalidate_app_detail_state(&state.cache, &tenant_id);
     }
     result
 }

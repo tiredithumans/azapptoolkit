@@ -135,7 +135,7 @@ may be shared with other apps whose reach must not change as a side effect.
   targets at all (the policy then governs nothing). A partial strip **keeps** every policy and reports
   `partial` naming the blockers — the policy is the only thing still confining them.
 
-A real run busts `invalidate_app_lists` once it has **attempted** any app
+A real run busts `invalidate_app_detail_state` once it has **attempted** any app
 (`migration_should_invalidate`), not only when an app produced an item: `migrate_one` can return
 `Err` after the scope, the member copy or the SP pointer landed.
 
@@ -207,7 +207,8 @@ the same helper) because a 403 can return a NUL-padded blob; log the `ui_code`, 
 ## Scoped grants reuse one Exchange core
 
 The scoped-mailbox grant body (register Exchange SP → management scope from groups → scoped role
-assignment → strip org-wide Entra grant → `invalidate_app_lists`) lives in
+assignment → strip org-wide Entra grant → `invalidate_app_detail_state`; the one caller that may have
+created the Entra SP busts the list tier itself) lives in
 `commands::exchange::apply_exchange_mailbox_scope`; the two callers differ only in how
 `ExchangeTarget`s are derived:
 

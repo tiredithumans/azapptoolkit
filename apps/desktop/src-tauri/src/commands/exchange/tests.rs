@@ -1399,7 +1399,7 @@ fn the_migration_command_invalidates_from_the_run_verdict() {
         .expect("command body");
     assert!(
         body.contains(
-            "if run.should_invalidate(dry_run) {\n        invalidate_app_lists(&state.cache, &tenant_id);"
+            "if run.should_invalidate(dry_run) {\n        invalidate_app_detail_state(&state.cache, &tenant_id);"
         ),
         "the command must invalidate on `run.should_invalidate(dry_run)`"
     );

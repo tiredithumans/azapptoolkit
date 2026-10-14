@@ -20,8 +20,8 @@ use super::*;
 // scope verdict (it keys off the scope name / MemberOfGroup-clause count, not
 // the member set), the member list is fetched live, and a distribution group is
 // absent from the app/SP pairing + name indexes. The grant command that wires
-// the scope to this group is the one that mutates pairing, and it already calls
-// `invalidate_app_lists`.
+// the scope to this group busts the list tier itself when it created the SP,
+// and the detail tier otherwise.
 
 /// State of the managed scope group for `app_id` — whether it exists, how to
 /// reference it, and its current direct members. Degrades like the other

@@ -297,9 +297,9 @@ Two kinds vary the pattern:
   the commit stays disabled until that plan returns, because the fail-closed outcomes (scope left on
   the legacy group, policy kept) are only visible there. Both surfaces render the report through
   `components::aap_migration_report::AapMigrationReportView`, whose one job is that a `partial`
-  status never reads as success. The command now busts `invalidate_app_lists` on a **non-dry** run
-  that produced any item (partial included — the grants really were removed); a dry run busts
-  nothing.
+  status never reads as success. The command busts `invalidate_app_detail_state` on a **non-dry** run
+  that attempted any app (partial included — the grants really were removed, and no list row
+  changes); a dry run busts nothing.
 - **`DisableSignIn`** is attached by **two runner post-passes**, deduped to one Fix per row: the
   risky-SP pass (`apply_service_principal_risk`) attaches it first for a risky *enabled* principal,
   and the sign-in pass (`unused` app) skips when that already happened — or when the SP is already

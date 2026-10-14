@@ -104,8 +104,10 @@ pub async fn migrate_application_access_policies(
     .await;
 
     // A real run assigns Exchange roles and removes org-wide Entra grants, which
-    // changes the app/SP lists, every detail payload, the mailbox-scope verdicts
-    // AND the audit's scoping findings — `invalidate_app_lists` reaches all four.
+    // changes every detail payload, the mailbox-scope verdicts AND the audit's
+    // scoping findings — `invalidate_app_detail_state` reaches all three. The
+    // list rows carry no grant data and no app or SP is added or removed, so
+    // the list tier (and its full directory rescan) stays valid.
     // A dry run mutated nothing, so it must not bust anything. Same exception the
     // credential remediation makes: a **partial** migration is still a real write,
     // so invalidate whenever any app was ATTEMPTED rather than only on a clean
@@ -114,7 +116,7 @@ pub async fn migrate_application_access_policies(
     // pointer can fail after the management scope and member copy went in — and
     // left a single-app run's caches stale after Exchange really changed.
     if run.should_invalidate(dry_run) {
-        invalidate_app_lists(&state.cache, &tenant_id);
+        invalidate_app_detail_state(&state.cache, &tenant_id);
     }
 
     failures.extend(run.failures);
