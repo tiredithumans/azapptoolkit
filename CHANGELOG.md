@@ -5,6 +5,8 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-10-15
+
 ### Fixed
 
 - **A mailbox check answered after you switched tenants no longer shows up under the new tenant.**
