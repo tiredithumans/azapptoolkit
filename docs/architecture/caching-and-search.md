@@ -103,8 +103,7 @@ search keeps its application half.
 
 - **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
   `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.
-- The audit (`$expand=owners`) and the bulk expired-credential sweep are the only other
-  `list_applications_all` callers, pinned by `repo_invariants::the_full_application_list_scan_has_one_home`.
+- The audit (`$expand=owners`) is the only other `list_applications_all` caller, pinned by `repo_invariants::the_full_application_list_scan_has_one_home`.
 - A cold Home launch used to run three concurrent scans (the App Registrations, Enterprise Apps and
   Credential health cards): 3 × ceil(N/999) serial round trips, 18 → 6 at 5,000 apps. A cold
   `app_name_index_cached` runs `scan_app_list` too: it used to run a lean `id,appId,displayName`
@@ -602,8 +601,8 @@ page). Two exemptions are justified in its table: `list_applications_all` (its p
 ### The two tenant-wide scans are partitioned
 
 A serial chain cannot be shortened, but it can be split. `GraphClient::scan_directory_capped`
-(`graph/src/client/partition.rs`) reads the SP index and the `/applications` list scan (and the
-bulk sweep's; never the audit's `$expand=owners` scan) as 16 concurrent `startswith(appId,'h')`
+(`graph/src/client/partition.rs`) reads the SP index and the `/applications` list scan (never the
+audit's `$expand=owners` scan) as 16 concurrent `startswith(appId,'h')`
 slices: every `appId` is a GUID, so its first hex digit puts each row in exactly one slice.
 
 1. Page one and `GET {path}/$count` go out together, so the size costs no round trip.

@@ -341,8 +341,7 @@ impl GraphClient {
     /// Batched `GET /applications/{id}` projected to what the bulk expired-secret sweep reads
     /// (`id,appId,displayName,passwordCredentials`) — the sweep's **selection** read, so a "Fix
     /// all N" fetches exactly the selected apps instead of walking every page of the tenant and
-    /// discarding all but the selection. The projection mirrors the sweep's tenant-walk `$select`
-    /// so both read paths see the same fields. One `Result<Application>` per id **in order**; a
+    /// discarding all but the selection. One `Result<Application>` per id **in order**; a
     /// per-id failure is one `Err` in the vec (an id that is not a single path segment is its own
     /// `Err(Protocol)` row and costs no sub-request), a whole-batch failure the outer `Err` (fall
     /// back to per-id reads).
@@ -383,7 +382,7 @@ impl GraphClient {
         // that `collect_all_pages` raises — the right degradation for a tenant-wide scan.
         let cap = cap.unwrap_or(usize::MAX);
         if is_partitionable(&q) {
-            // The list scan and the bulk sweep: page one and `/$count` together, then the
+            // The list scan: page one and `/$count` together, then the
             // rest as concurrent `appId` slices when the tenant is large enough to pay
             // (`partition.rs`). Page size and projection come from `app_list_params`, the
             // builder `list_applications` uses.

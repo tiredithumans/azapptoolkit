@@ -26,7 +26,7 @@ use azapptoolkit_core::models::{
     Application, DeletedApplication, DeletedServicePrincipal, RequiredResourceAccess,
     ServicePrincipal,
 };
-use azapptoolkit_graph::client::{AppListQuery, DELETED_APPS_MAX, DELETED_SPS_MAX};
+use azapptoolkit_graph::client::{DELETED_APPS_MAX, DELETED_SPS_MAX};
 
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::{ProgressSink, emit_progress};
@@ -353,14 +353,13 @@ pub fn cancel_bulk(state: State<'_, AppState>) {
 /// (`commands::remediation::remediate_remove_expired_credentials`)
 /// also removes expired *certificates*.
 ///
-/// Two read paths. When `object_ids` is `Some` (the UI scopes the sweep to the
-/// user's selection — the Findings pane's "Fix all" and the App Registrations
-/// bulk bar always do), exactly those apps are fetched by id in one `$batch`
-/// per 20 (per-id reads if a whole batch fails), never a tenant walk; an app
-/// that cannot be read is reported as a failure row rather than silently left
-/// out. When `None`, every app in the tenant is walked, capped at
-/// [`APPS_MAX`](super::applications::APPS_MAX) like every other tenant-wide
-/// enumeration. The removals fan out through [`run_bulk_capped`];
+/// It sweeps exactly the selected apps (the Findings pane's "Fix all" and the
+/// App Registrations bulk bar): they are fetched by id in one `$batch` per 20
+/// (per-id reads if a whole batch fails), never a tenant walk, and an app that
+/// cannot be read is reported as a failure row rather than silently left out.
+/// There is no tenant-wide form: nothing in the UI called one, and the
+/// expired-credentials finding's "Fix all" already sweeps every affected app.
+/// The removals fan out through [`run_bulk_capped`];
 /// cancellation flows through [`AppState::bulk_cancel`], stopped by
 /// [`cancel_bulk`].
 #[tauri::command]
@@ -368,10 +367,10 @@ pub async fn bulk_remove_expired_credentials(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     tenant_id: String,
-    object_ids: Option<Vec<String>>,
+    object_ids: Vec<String>,
 ) -> Result<BulkRemoveExpiredResult, UiError> {
-    // Claimed before the first await: the tenant walk below can cover 10 000
-    // apps (and the batched selection read is an await too), and a token
+    // Claimed before the first await: the batched selection read is an await,
+    // and a token
     // claimed after it carries a higher generation than a cancel issued during
     // it, which `is_cancelled()` then discards. Pinned by
     // `repo_invariants::cancel`.
@@ -380,64 +379,48 @@ pub async fn bulk_remove_expired_credentials(
     let session = SessionDead::new();
     let mut summaries: Vec<AppRemovalSummary> = Vec::new();
 
-    // Both paths project only what the sweep reads (`expired_password_key_ids`
+    // The read projects only what the sweep reads (`expired_password_key_ids`
     // touches `passwordCredentials`); the default projection drags in
     // `requiredResourceAccess` etc. — the bulk of a permission-heavy app's
-    // payload, multiplied across a full-tenant scan.
-    let apps: Vec<Application> = match &object_ids {
-        Some(ids) => {
-            // The selection path fetches exactly the selected ids. It used to
-            // walk every page of `/applications` and then `retain` the
-            // selection — tens of seconds on a large tenant for a "Fix all 12".
-            let graph = client.as_ref();
-            let batched = graph.batch_get_applications_credentials(ids).await;
-            let fetched = batch_or_serial(
-                "expired-credential sweep app",
-                ids,
-                batched,
-                |oid: String| async move { graph.get_application(&oid).await },
-            )
-            .await;
-            let mut apps = Vec::with_capacity(ids.len());
-            for (id, read) in ids.iter().zip(fetched) {
-                match read {
-                    Ok(app) => apps.push(app),
-                    Err(err) => {
-                        // A selected app that could not be read is a failure
-                        // row (the frontend lists it under its id), not a
-                        // silent thinning of the operator's selection. A
-                        // re-auth-fatal code latches the session so the
-                        // dispatch below spawns nothing, and this row's code
-                        // tells the bar why the run stopped.
-                        let ui = UiError::from(err);
-                        session.note_code(&ui.code);
-                        summaries.push(AppRemovalSummary {
-                            object_id: id.clone(),
-                            display_name: id.clone(),
-                            removed_key_ids: Vec::new(),
-                            failed_key_ids: Vec::new(),
-                            error: Some(ui.into()),
-                        });
-                    }
+    // payload.
+    let ids = &object_ids;
+    let apps: Vec<Application> = {
+        // The selection path fetches exactly the selected ids. It used to
+        // walk every page of `/applications` and then `retain` the
+        // selection — tens of seconds on a large tenant for a "Fix all 12".
+        let graph = client.as_ref();
+        let batched = graph.batch_get_applications_credentials(ids).await;
+        let fetched = batch_or_serial(
+            "expired-credential sweep app",
+            ids,
+            batched,
+            |oid: String| async move { graph.get_application(&oid).await },
+        )
+        .await;
+        let mut apps = Vec::with_capacity(ids.len());
+        for (id, read) in ids.iter().zip(fetched) {
+            match read {
+                Ok(app) => apps.push(app),
+                Err(err) => {
+                    // A selected app that could not be read is a failure
+                    // row (the frontend lists it under its id), not a
+                    // silent thinning of the operator's selection. A
+                    // re-auth-fatal code latches the session so the
+                    // dispatch below spawns nothing, and this row's code
+                    // tells the bar why the run stopped.
+                    let ui = UiError::from(err);
+                    session.note_code(&ui.code);
+                    summaries.push(AppRemovalSummary {
+                        object_id: id.clone(),
+                        display_name: id.clone(),
+                        removed_key_ids: Vec::new(),
+                        failed_key_ids: Vec::new(),
+                        error: Some(ui.into()),
+                    });
                 }
             }
-            apps
         }
-        None => {
-            // `_truncated`: the cap applies only to this best-effort tenant
-            // sweep, whose per-app outcomes are all reported individually — it
-            // never claims to have covered every app. The selection path above
-            // fetches exactly the selected ids, so the cap cannot apply there.
-            let (apps, _truncated) = client
-                .list_applications_all(
-                    AppListQuery::default()
-                        .with_top(azapptoolkit_graph::client::DEFAULT_APP_PAGE_SIZE)
-                        .with_select(vec!["id", "appId", "displayName", "passwordCredentials"]),
-                    Some(super::applications::APPS_MAX),
-                )
-                .await?;
-            apps
-        }
+        apps
     };
     // Apps actually evaluated; a selected app that failed to read is counted in
     // `summaries`, not here.

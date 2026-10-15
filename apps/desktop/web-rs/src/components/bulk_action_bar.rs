@@ -925,7 +925,7 @@ pub fn BulkActionBar(
                 BulkAction::Grant => bulk::bulk_grant_permissions(tid, &ids)
                     .await
                     .map(|r| parse_grant(r, label_for)),
-                BulkAction::RemoveExpired => bulk::bulk_remove_expired_credentials(tid, Some(&ids))
+                BulkAction::RemoveExpired => bulk::bulk_remove_expired_credentials(tid, &ids)
                     .await
                     .map(parse_remove_expired),
                 BulkAction::RemoveRedundant => bulk::bulk_remove_redundant_permissions(tid, &ids)
