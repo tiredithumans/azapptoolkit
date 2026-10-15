@@ -2255,16 +2255,14 @@ fn every_index_accessor_counts_as_a_cache_read() {
 /// Launch used to page the whole collection three times concurrently — the App
 /// Registrations list, the credential-expiry roll-up and the app-name index each
 /// ran their own scan, although one `$select` superset covers all three and the
-/// same mutation tiers bust them. The two other callers are deliberate: the
-/// audit run needs `$expand=owners`, and the expired-credential bulk sweep is a
-/// write path that caches nothing. Counted per module on non-comment lines; the
+/// same mutation tiers bust them. The one other caller is deliberate: the audit
+/// run needs `$expand=owners`. Counted per module on non-comment lines; the
 /// total is asserted exactly so the rule cannot pass vacuously.
 #[test]
 fn the_full_application_list_scan_has_one_home() {
-    const EXPECTED: [(&str, usize); 3] = [
+    const EXPECTED: [(&str, usize); 2] = [
         ("commands/applications/mod.rs", 1),
         ("commands/audit/run.rs", 1),
-        ("commands/bulk.rs", 1),
     ];
     let mut offenders: Vec<String> = Vec::new();
     let mut total = 0usize;
@@ -2288,7 +2286,7 @@ fn the_full_application_list_scan_has_one_home() {
          Read the app list through `apps_pairing_cached` / `credential_expirations_cached` / \
          `app_name_index_cached`, which share one gated scan (`scan_app_list`). A new bare scan \
          is the third-concurrent-scan bug this rule exists for. The audit's `$expand=owners` run \
-         and the bulk expired-credential sweep are the deliberate exceptions."
+         is the deliberate exception."
     );
     assert_eq!(
         total,
