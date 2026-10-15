@@ -3,6 +3,22 @@
 
 use super::*;
 
+use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
+use azapptoolkit_core::redirect::validate_redirect_uri;
+use azapptoolkit_core::restore_plan::BackupApps;
+
+use crate::dto::backup::{
+    AppRegistrationBackup, BACKUP_SCHEMA_VERSION, CredentialMeta, EnterpriseAppBackup,
+    ManagedIdentityBackup, PermissionRisk, PrincipalRef, PrivilegedKind, RestoredApp,
+};
+use crate::dto::managed_identity::MiSubtype;
+
+use super::adoption::*;
+use super::enterprise::*;
+use super::manifest::*;
+use super::principals::*;
+use super::wire::*;
+
 #[test]
 fn a_manifest_from_a_newer_build_is_refused_but_an_older_one_restores() {
     // Older and current: additive, `serde(default)` fields — restoring one

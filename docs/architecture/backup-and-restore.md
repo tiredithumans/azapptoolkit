@@ -3,7 +3,8 @@
 This subsystem lets an operator capture a tenant's app estate to a portable file
 and rebuild it in a **new** tenant — for DR, a tenant-compromise recovery, or a
 forced migration. Read this before touching `commands/backup.rs`,
-`commands/restore.rs`, or `azapptoolkit-dto/src/backup.rs`.
+`commands/restore.rs` (and its per-phase modules under `commands/restore/`), or
+`azapptoolkit-dto/src/backup.rs`.
 
 ## The shape: file-bridged, two single-tenant instances
 
@@ -157,7 +158,7 @@ run is an **error**, not a truncated success — a partial backup is a dangerous
 artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
 restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
 
-## Restore (`commands/restore.rs`) — shipped (app registrations, enterprise apps, managed identities)
+## Restore (`commands/restore.rs` + `commands/restore/`) — shipped (app registrations, enterprise apps, managed identities)
 
 `plan_restore` is a dry-run, no writes (mirrors the `bulk_create` validate-only
 pattern). It computes the counts for all five passes — including the Pass 4
@@ -272,6 +273,16 @@ The passes live in `run_restore(client, &impl ProgressSink, CancelToken,
 RestoreRun)`; `restore_tenant` is the shell (manifest refusals, cloud check,
 claim, cache bust), so the pass loop is tested against wiremock like
 `restore_managed_identities`.
+
+`commands/restore.rs` keeps the four commands, `run_restore` and its run
+structs; the rest is split by phase under `commands/restore/`: `manifest.rs`
+(the schema and source-appId checks, the echo and report bounds), `plan.rs`
+(`build_restore_plan`, `privileged_restore_items`, `unapproved_apps`),
+`adoption.rs` (Pass 1's `decide_adoption`), `wire.rs` (Pass 2's
+`wire_application`, with the redirect and logout-URL checks it calls),
+`reconsent.rs` (Pass 3), `enterprise.rs` (Pass 4), `managed_identities.rs`
+(Pass 5) and `principals.rs` (`resolve_principal` and its memo). The tests
+live in `restore/tests.rs`.
 
 **Principals resolve only on exactly one match.** A UPN is looked up exactly
 (`find_user_by_upn`, `userPrincipalName eq`). A display name is looked up

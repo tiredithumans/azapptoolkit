@@ -1,0 +1,107 @@
+//! Pass 3: re-granting admin consent, only for exactly the declared permissions
+//! the plan classified.
+
+use azapptoolkit_core::restore_plan::remap_required_resource_access;
+
+use crate::commands::permissions::grant_admin_consent_to_app_core;
+use crate::dto::backup::{ManualItem, RestoredApp};
+
+use super::PassCtx;
+use super::wire::CreatedApp;
+
+/// Pass-3 work for one app: re-grant admin consent — but only for exactly the
+/// declared permissions the plan classified.
+///
+/// Consent grants whatever the app *in the tenant* declares, and the plan
+/// classified the backup's list. Those differ whenever Pass 2's PATCH failed or
+/// was skipped (an empty manifest list sends none), and an adopted app may
+/// carry permissions someone else declared — so the live list is re-read and
+/// consent proceeds only when it equals the remapped backup list, using that
+/// same read (never a second one that could change in between). Anything else
+/// is a runbook item, never a consent.
+pub(super) async fn reconsent(
+    ctx: &PassCtx<'_>,
+    c: &CreatedApp,
+    out: &mut RestoredApp,
+    manual: &mut Vec<ManualItem>,
+) {
+    let PassCtx {
+        client,
+        session,
+        app_id_remap,
+        ..
+    } = *ctx;
+    let expected = remap_required_resource_access(&c.backup.required_resource_access, app_id_remap);
+    let live = match client.get_application(&c.new_object_id).await {
+        Ok(live) => live,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            out.warnings.push(format!(
+                "admin consent skipped: couldn't re-read the app's declared permissions ({e})"
+            ));
+            return;
+        }
+    };
+    if rra_fingerprint(&live.required_resource_access) != rra_fingerprint(&expected) {
+        out.warnings.push(
+            "admin consent skipped: the app's declared permissions don't match the backup".into(),
+        );
+        manual.push(ManualItem {
+            display_name: c.backup.display_name.clone(),
+            reason: "Admin consent skipped: the app's declared API permissions in this tenant \
+                     don't match the backup the plan showed (the permissions update failed, or \
+                     the app already declared others). Consent would have granted what the app \
+                     declares now, which nobody approved. Review its API permissions, then grant \
+                     consent from its Permissions tab if they are intended."
+                .into(),
+        });
+        return;
+    }
+    if expected.is_empty() {
+        // Nothing declared, nothing to consent.
+        return;
+    }
+    // The freshly-restored app reg usually has its SP already (Pass 1),
+    // and a run that created one still busts the list tier, since
+    // `created` is non-empty — so `sp_created` is moot here.
+    match grant_admin_consent_to_app_core(client, &live).await {
+        Ok(run) => {
+            out.consent_granted = run.error.is_none();
+            for f in run.result.failures {
+                out.warnings
+                    .push(format!("consent: {} ({})", f.message, f.resource_app_id));
+            }
+            if let Some(e) = run.error {
+                session.note_code(&e.code);
+                out.warnings
+                    .push(format!("admin consent failed: {}", e.message));
+            }
+        }
+        Err(e) => {
+            session.note_code(&e.code);
+            out.warnings
+                .push(format!("admin consent failed: {}", e.message));
+        }
+    }
+}
+
+/// Sorted, case-folded form of a declared-permissions list, for comparing the
+/// live app against the remapped backup.
+fn rra_fingerprint(
+    rra: &[azapptoolkit_core::models::RequiredResourceAccess],
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out: Vec<(String, Vec<(String, String)>)> = rra
+        .iter()
+        .map(|r| {
+            let mut access: Vec<(String, String)> = r
+                .resource_access
+                .iter()
+                .map(|a| (a.id.to_ascii_lowercase(), a.r#type.clone()))
+                .collect();
+            access.sort();
+            (r.resource_app_id.to_ascii_lowercase(), access)
+        })
+        .collect();
+    out.sort();
+    out
+}
