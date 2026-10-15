@@ -46,9 +46,10 @@
 //! running, and the report flags the run cancelled (partial); a re-run adopts
 //! the already-created, tagged apps and finishes wiring them.
 //!
-//! Split by phase: this file holds the commands and `run_restore`, the pass
-//! loop; `manifest` (schema and shape checks, echo bounds), `plan` (the dry
-//! run and the approval classification), `adoption` (Pass 1's tag decision),
+//! Split by phase: this file holds the commands and `run_restore`, which runs
+//! the passes in order; `manifest` (schema and shape checks, echo bounds),
+//! `plan` (the dry run and the approval classification), `adoption` (Pass 1:
+//! create or adopt),
 //! `wire` (Pass 2), `reconsent` (Pass 3), `enterprise` (Pass 4),
 //! `managed_identities` (Pass 5) and `principals` (the per-run principal
 //! resolution every pass shares).
@@ -70,29 +71,22 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_graph::GraphClient;
 
-use crate::commands::applications::{
-    CreateExtras, create_application_core_with, invalidate_app_lists,
-};
+use crate::commands::applications::invalidate_app_lists;
 use crate::commands::dispatch::SessionDead;
 use crate::commands::progress::{ProgressSink, emit_progress};
 use crate::dto::UiError;
-use crate::dto::applications::CreateApplicationInput;
-use crate::dto::backup::{
-    ManualItem, RestoreApproval, RestoreFailure, RestorePlan, RestoreReport, TenantBackup,
-};
+use crate::dto::backup::{RestoreApproval, RestorePlan, RestoreReport, TenantBackup};
 use crate::dto::bulk::BulkProgress;
 use crate::state::{AppState, CancelToken};
 
-use adoption::{Adoption, decide_adoption, restore_marker};
-use enterprise::restore_enterprise_app;
+use adoption::pass1_create_or_adopt;
+use enterprise::pass4_enterprise;
 use managed_identities::restore_managed_identities;
 use manifest::{bound_report_text, cap_report_value, check_manifest_schema, validate_manifest};
-use plan::{
-    app_approval, backup_apps, build_restore_plan, privileged_restore_items, unapproved_apps,
-};
+use plan::{backup_apps, build_restore_plan, privileged_restore_items, unapproved_apps};
 use principals::PrincipalMemo;
-use reconsent::reconsent;
-use wire::{CreatedApp, wire_application};
+use reconsent::pass3_reconsent;
+use wire::pass2_wire;
 
 /// Dry-run analysis of restoring `backup` into the current tenant — counts,
 /// warnings and the privileged grants, no writes. The frontend shows this
@@ -243,32 +237,32 @@ struct PassCtx<'a> {
 ///
 /// Stops at the next item on `cancel` and on a dead session — in every pass,
 /// and inside each pass's per-item loops; both flag the report.
+///
+/// Each pass's loop is a function in its phase's module, called here in order:
+/// [`pass1_create_or_adopt`], [`pass2_wire`], [`pass3_reconsent`],
+/// [`pass4_enterprise`], then [`restore_managed_identities`] for Pass 5.
 async fn run_restore(
     client: &GraphClient,
     progress: &impl ProgressSink,
     cancel: CancelToken,
     run: RestoreRun<'_>,
 ) -> (RestoreReport, RestoreEffects) {
+    // Every field is `Copy`, so `run` stays whole for Pass 1.
     let RestoreRun {
         backup,
         tenant_id,
         cloud,
-        operator_oid,
         approved,
+        ..
     } = run;
     let total = backup.app_registrations.len();
     emit(progress, 0, total, None);
 
     let mut report = RestoreReport::default();
-    // source_app_id → new app id, for remapping cross-app references.
-    let mut app_id_remap: HashMap<String, String> = HashMap::new();
     // Per-run principal-resolution memo (UPN/group display name → destination
     // object id), shared across passes so a principal reused across owners,
     // assignees, and group memberships is searched once, not per occurrence.
     let mut principals = PrincipalMemo::new();
-    // The apps we actually created, paired with their backup + new ids, so
-    // passes 2–3 wire exactly those.
-    let mut created: Vec<CreatedApp> = Vec::new();
     // One latch across all five passes: the first re-auth-fatal error stops the
     // rest instead of letting each remaining item fail the same way.
     let session = SessionDead::new();
@@ -278,127 +272,16 @@ async fn run_restore(
     let withheld = unapproved_apps(client, backup, approved, &session).await;
 
     // ---- Pass 1: create shells ----
-    let mut done = 0;
-    for app in &backup.app_registrations {
-        if cancel.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        // A dead session makes every remaining create fail identically, so the
-        // loop would otherwise manufacture one indistinguishable failure per
-        // remaining app and report them as if the tenant had rejected them.
-        if session.is_dead() {
-            report.cancelled = true;
-            break;
-        }
-        // Has an earlier run of this restore already created it? Every read
-        // failure and every unprovable match is refused into a runbook item:
-        // creating blind is how a re-run duplicates apps, and adopting blind
-        // would hand someone else's app this one's permissions and consent.
-        match decide_adoption(
-            client,
-            app,
-            backup.created_at,
-            cloud,
-            operator_oid,
-            &mut principals,
-            &session,
-        )
-        .await
-        {
-            Adoption::Refuse(reason) => {
-                report.manual_items.push(ManualItem {
-                    display_name: app.display_name.clone(),
-                    reason,
-                });
-                done += 1;
-                emit(progress, done, total, Some(app.display_name.clone()));
-                continue;
-            }
-            Adoption::Adopt {
-                object_id,
-                app_id,
-                live_secret_names,
-            } => {
-                let mut warnings = Vec::new();
-                // The earlier run may have died between the app POST and its
-                // SP; `ensure_service_principal` is a no-op when it exists.
-                if app.has_service_principal
-                    && let Err(e) = client.ensure_service_principal(&app_id).await
-                {
-                    session.note_code(e.ui_code());
-                    warnings.push(format!("service principal: {e}"));
-                }
-                app_id_remap.insert(app.source_app_id.clone(), app_id.clone());
-                created.push(CreatedApp {
-                    backup: app.clone(),
-                    new_object_id: object_id,
-                    new_app_id: app_id,
-                    adopted: true,
-                    live_secret_names,
-                    warnings,
-                });
-                done += 1;
-                emit(progress, done, total, Some(app.display_name.clone()));
-                continue;
-            }
-            Adoption::Create => {}
-        }
-        let input = CreateApplicationInput {
-            display_name: app.display_name.clone(),
-            sign_in_audience: app.sign_in_audience.clone(),
-            description: app.description.clone(),
-            create_service_principal: app.has_service_principal,
-            initial_owner_ids: Vec::new(),
-            initial_secret_display_name: None,
-            initial_secret_lifetime_days: None,
-        };
-        // The tag rides the create POST itself, so no app this restore creates
-        // can exist without it — not even one whose SP create then failed.
-        let marker = restore_marker(&app.source_app_id);
-        match create_application_core_with(
-            client,
-            input,
-            CreateExtras {
-                tags: vec![marker],
-                ..Default::default()
-            },
-        )
-        .await
-        {
-            // The registration landed even when its SP then failed (the only
-            // later step this input runs): record it as created — so it is
-            // wired, counted and cache-busted — with the SP failure as a
-            // warning, exactly as the adopt branch above does. Recording it as
-            // a failure hid an app that exists.
-            Ok((res, error)) => {
-                let mut warnings = Vec::new();
-                if let Some(e) = error {
-                    session.note_code(&e.code);
-                    warnings.push(format!("service principal: {}", e.message));
-                }
-                app_id_remap.insert(app.source_app_id.clone(), res.application.app_id.clone());
-                created.push(CreatedApp {
-                    backup: app.clone(),
-                    new_object_id: res.application.id,
-                    new_app_id: res.application.app_id,
-                    adopted: false,
-                    live_secret_names: Vec::new(),
-                    warnings,
-                });
-            }
-            Err(e) => {
-                session.note_code(&e.code);
-                report.failures.push(RestoreFailure {
-                    display_name: app.display_name.clone(),
-                    source_app_id: app.source_app_id.clone(),
-                    message: e.message,
-                });
-            }
-        }
-        done += 1;
-        emit(progress, done, total, Some(app.display_name.clone()));
-    }
+    let (app_id_remap, created) = pass1_create_or_adopt(
+        client,
+        progress,
+        &cancel,
+        &run,
+        &session,
+        &mut principals,
+        &mut report,
+    )
+    .await;
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
     // Every app the backup owns, recreated or not: a pre-authorized client in
@@ -414,93 +297,33 @@ async fn run_restore(
         source_tenant_id: &backup.source_tenant_id,
         dest_tenant_id: tenant_id,
     };
-    for c in &created {
-        // Both stop conditions, in every pass. Passes 2-5 once checked only
-        // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
-        // the operator pressed it and watched the restore keep wiring, granting
-        // consent and re-binding roles for every remaining app.
-        if cancel.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        if session.is_dead() {
-            break;
-        }
-        let (restored, trusts) = wire_application(
-            &ctx,
-            c,
-            &backup_apps,
-            &mut principals,
-            &cancel,
-            withheld.contains_key(&c.backup.source_app_id),
-        )
-        .await;
-        report.apps.push(restored);
-        report.manual_items.extend(trusts);
-    }
+    pass2_wire(
+        &ctx,
+        &created,
+        &backup_apps,
+        &withheld,
+        &mut principals,
+        &cancel,
+        &mut report,
+    )
+    .await;
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
-    for (idx, c) in created.iter().enumerate() {
-        if cancel.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        if session.is_dead() {
-            break;
-        }
-        if !c.backup.admin_consent_granted {
-            continue;
-        }
-        // Not approved in the plan: the file asks for tenant-wide consent the
-        // operator has not agreed to grant. The app is still restored; the
-        // consent becomes a runbook item.
-        if let Some(held) = withheld.get(&c.backup.source_app_id) {
-            report.apps[idx]
-                .warnings
-                .push("admin consent skipped: not approved in the plan".into());
-            report.manual_items.push(ManualItem {
-                display_name: c.backup.display_name.clone(),
-                reason: format!(
-                    "Admin consent skipped: not approved in the plan. The backup asks for \
-                     tenant-wide consent to {}. Review them, then grant consent from the app's \
-                     Permissions tab if they are intended.",
-                    if held.is_empty() {
-                        "its declared permissions".to_string()
-                    } else {
-                        held.join(", ")
-                    }
-                ),
-            });
-            continue;
-        }
-        reconsent(&ctx, c, &mut report.apps[idx], &mut report.manual_items).await;
-    }
+    pass3_reconsent(&ctx, &created, &withheld, &cancel, &mut report).await;
 
     // ---- Pass 4: enterprise applications ----
     // Re-apply access (assignments + group memberships + settings) for SPs that
     // were recreated by the app-reg restore above. Foreign/gallery apps — and
     // paired apps that weren't restored — become runbook entries.
-    for ent in &backup.enterprise_apps {
-        if cancel.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        if session.is_dead() {
-            break;
-        }
-        // Group memberships always need approval, so they apply only to an app
-        // the operator approved — decided from the approvals themselves, never
-        // from a classification that could miss an enterprise app.
-        restore_enterprise_app(
-            &ctx,
-            ent,
-            !approved.contains(&app_approval(&ent.source_app_id)),
-            &mut report,
-            &mut principals,
-            &cancel,
-        )
-        .await;
-    }
+    pass4_enterprise(
+        &ctx,
+        &backup.enterprise_apps,
+        approved,
+        &mut principals,
+        &cancel,
+        &mut report,
+    )
+    .await;
 
     // ---- Pass 5: managed identities ----
     // MIs are Azure resources — they can't be created here. Re-bind Graph

@@ -1,6 +1,6 @@
-//! Pass 1's adoption decision: whether an app carrying this restore's tag is
-//! provably the one an earlier run created, and so is finished rather than
-//! created again.
+//! Pass 1: creating each app's shell, or adopting the app an earlier run of
+//! this restore created — only once it is provably that one — and finishing
+//! it rather than creating it again.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,11 +10,16 @@ use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
 use azapptoolkit_graph::GraphClient;
 
+use crate::commands::applications::{CreateExtras, create_application_core_with};
 use crate::commands::dispatch::SessionDead;
-use crate::dto::backup::AppRegistrationBackup;
+use crate::commands::progress::ProgressSink;
+use crate::dto::applications::CreateApplicationInput;
+use crate::dto::backup::{AppRegistrationBackup, ManualItem, RestoreFailure, RestoreReport};
+use crate::state::CancelToken;
 
 use super::principals::{PrincipalMemo, resolve_principal};
-use super::wire::expired_at_backup;
+use super::wire::{CreatedApp, expired_at_backup};
+use super::{RestoreRun, emit};
 
 /// Prefix of the tag every app created by a restore carries; the suffix is the
 /// app's **source** appId, the one key that survives the tenant move.
@@ -390,4 +395,157 @@ pub(super) fn fic_key(fic: &FederatedIdentityCredential, cloud: CloudEnvironment
         fic.subject.clone(),
         audiences,
     )
+}
+
+/// Pass 1 of [`run_restore`](super::run_restore): create every manifest app's
+/// shell, or adopt the one an earlier run of this restore created
+/// ([`decide_adoption`]); a refused app becomes a runbook item and a failed
+/// create a report failure. Returns the `source_app_id → new app id` remap and
+/// the apps created or adopted, which Passes 2-4 then share read-only.
+///
+/// Stops at the next app on `cancel` and on a dead session, flagging the report
+/// cancelled either way, and emits one progress tick per app it settles.
+pub(super) async fn pass1_create_or_adopt(
+    client: &GraphClient,
+    progress: &impl ProgressSink,
+    cancel: &CancelToken,
+    run: &RestoreRun<'_>,
+    session: &SessionDead,
+    principals: &mut PrincipalMemo,
+    report: &mut RestoreReport,
+) -> (HashMap<String, String>, Vec<CreatedApp>) {
+    let RestoreRun {
+        backup,
+        cloud,
+        operator_oid,
+        ..
+    } = *run;
+    let total = backup.app_registrations.len();
+    // source_app_id → new app id, for remapping cross-app references.
+    let mut app_id_remap: HashMap<String, String> = HashMap::new();
+    // The apps we actually created, paired with their backup + new ids, so
+    // passes 2–3 wire exactly those.
+    let mut created: Vec<CreatedApp> = Vec::new();
+    let mut done = 0;
+    for app in &backup.app_registrations {
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        // A dead session makes every remaining create fail identically, so the
+        // loop would otherwise manufacture one indistinguishable failure per
+        // remaining app and report them as if the tenant had rejected them.
+        if session.is_dead() {
+            report.cancelled = true;
+            break;
+        }
+        // Has an earlier run of this restore already created it? Every read
+        // failure and every unprovable match is refused into a runbook item:
+        // creating blind is how a re-run duplicates apps, and adopting blind
+        // would hand someone else's app this one's permissions and consent.
+        match decide_adoption(
+            client,
+            app,
+            backup.created_at,
+            cloud,
+            operator_oid,
+            principals,
+            session,
+        )
+        .await
+        {
+            Adoption::Refuse(reason) => {
+                report.manual_items.push(ManualItem {
+                    display_name: app.display_name.clone(),
+                    reason,
+                });
+                done += 1;
+                emit(progress, done, total, Some(app.display_name.clone()));
+                continue;
+            }
+            Adoption::Adopt {
+                object_id,
+                app_id,
+                live_secret_names,
+            } => {
+                let mut warnings = Vec::new();
+                // The earlier run may have died between the app POST and its
+                // SP; `ensure_service_principal` is a no-op when it exists.
+                if app.has_service_principal
+                    && let Err(e) = client.ensure_service_principal(&app_id).await
+                {
+                    session.note_code(e.ui_code());
+                    warnings.push(format!("service principal: {e}"));
+                }
+                app_id_remap.insert(app.source_app_id.clone(), app_id.clone());
+                created.push(CreatedApp {
+                    backup: app.clone(),
+                    new_object_id: object_id,
+                    new_app_id: app_id,
+                    adopted: true,
+                    live_secret_names,
+                    warnings,
+                });
+                done += 1;
+                emit(progress, done, total, Some(app.display_name.clone()));
+                continue;
+            }
+            Adoption::Create => {}
+        }
+        let input = CreateApplicationInput {
+            display_name: app.display_name.clone(),
+            sign_in_audience: app.sign_in_audience.clone(),
+            description: app.description.clone(),
+            create_service_principal: app.has_service_principal,
+            initial_owner_ids: Vec::new(),
+            initial_secret_display_name: None,
+            initial_secret_lifetime_days: None,
+        };
+        // The tag rides the create POST itself, so no app this restore creates
+        // can exist without it — not even one whose SP create then failed.
+        let marker = restore_marker(&app.source_app_id);
+        match create_application_core_with(
+            client,
+            input,
+            CreateExtras {
+                tags: vec![marker],
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            // The registration landed even when its SP then failed (the only
+            // later step this input runs): record it as created — so it is
+            // wired, counted and cache-busted — with the SP failure as a
+            // warning, exactly as the adopt branch above does. Recording it as
+            // a failure hid an app that exists.
+            Ok((res, error)) => {
+                let mut warnings = Vec::new();
+                if let Some(e) = error {
+                    session.note_code(&e.code);
+                    warnings.push(format!("service principal: {}", e.message));
+                }
+                app_id_remap.insert(app.source_app_id.clone(), res.application.app_id.clone());
+                created.push(CreatedApp {
+                    backup: app.clone(),
+                    new_object_id: res.application.id,
+                    new_app_id: res.application.app_id,
+                    adopted: false,
+                    live_secret_names: Vec::new(),
+                    warnings,
+                });
+            }
+            Err(e) => {
+                session.note_code(&e.code);
+                report.failures.push(RestoreFailure {
+                    display_name: app.display_name.clone(),
+                    source_app_id: app.source_app_id.clone(),
+                    message: e.message,
+                });
+            }
+        }
+        done += 1;
+        emit(progress, done, total, Some(app.display_name.clone()));
+    }
+    (app_id_remap, created)
 }

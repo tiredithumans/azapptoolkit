@@ -269,16 +269,22 @@ resolve:
    still match the backup (above).
 4. **Enterprise applications** and 5. **Managed identities** — below.
 
-The passes live in `run_restore(client, &impl ProgressSink, CancelToken,
+The passes run in `run_restore(client, &impl ProgressSink, CancelToken,
 RestoreRun)`; `restore_tenant` is the shell (manifest refusals, cloud check,
 claim, cache bust), so the pass loop is tested against wiremock like
-`restore_managed_identities`.
+`restore_managed_identities`. Each pass's loop is its own function, which
+`run_restore` calls in order with the same token: `pass1_create_or_adopt`,
+`pass2_wire`, `pass3_reconsent`, `pass4_enterprise`, then
+`restore_managed_identities` for Pass 5. Every one takes the `CancelToken` and
+checks `is_cancelled()` and `is_dead()` in its own loop, which is how the repo
+invariants derive them as cancel runners (`sources::cancel_runners`) and as
+dead-gated (`fanout.rs`).
 
 `commands/restore.rs` keeps the four commands, `run_restore` and its run
 structs; the rest is split by phase under `commands/restore/`: `manifest.rs`
 (the schema and source-appId checks, the echo and report bounds), `plan.rs`
 (`build_restore_plan`, `privileged_restore_items`, `unapproved_apps`),
-`adoption.rs` (Pass 1's `decide_adoption`), `wire.rs` (Pass 2's
+`adoption.rs` (Pass 1: create or adopt), `wire.rs` (Pass 2's
 `wire_application`, with the redirect and logout-URL checks it calls),
 `reconsent.rs` (Pass 3), `enterprise.rs` (Pass 4), `managed_identities.rs`
 (Pass 5) and `principals.rs` (`resolve_principal` and its memo). The tests

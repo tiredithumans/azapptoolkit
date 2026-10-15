@@ -1,10 +1,13 @@
 //! Pass 3: re-granting admin consent, only for exactly the declared permissions
 //! the plan classified.
 
+use std::collections::HashMap;
+
 use azapptoolkit_core::restore_plan::remap_required_resource_access;
 
 use crate::commands::permissions::grant_admin_consent_to_app_core;
-use crate::dto::backup::{ManualItem, RestoredApp};
+use crate::dto::backup::{ManualItem, RestoreReport, RestoredApp};
+use crate::state::CancelToken;
 
 use super::PassCtx;
 use super::wire::CreatedApp;
@@ -104,4 +107,57 @@ fn rra_fingerprint(
         .collect();
     out.sort();
     out
+}
+
+/// Pass 3 of [`run_restore`](super::run_restore): re-grant admin consent
+/// ([`reconsent`]) for each created or adopted app that had it — after Pass 2
+/// wired every app, so a custom resource's SP and scopes already exist. An app
+/// in `withheld` (not approved in the plan) gets a warning and a runbook item
+/// instead. `report.apps` holds Pass 2's entries, index-aligned with `created`.
+///
+/// Stops at the next app on `cancel` (flagging the report) and on a dead
+/// session.
+pub(super) async fn pass3_reconsent(
+    ctx: &PassCtx<'_>,
+    created: &[CreatedApp],
+    withheld: &HashMap<String, Vec<String>>,
+    cancel: &CancelToken,
+    report: &mut RestoreReport,
+) {
+    let session = ctx.session;
+    for (idx, c) in created.iter().enumerate() {
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        if session.is_dead() {
+            break;
+        }
+        if !c.backup.admin_consent_granted {
+            continue;
+        }
+        // Not approved in the plan: the file asks for tenant-wide consent the
+        // operator has not agreed to grant. The app is still restored; the
+        // consent becomes a runbook item.
+        if let Some(held) = withheld.get(&c.backup.source_app_id) {
+            report.apps[idx]
+                .warnings
+                .push("admin consent skipped: not approved in the plan".into());
+            report.manual_items.push(ManualItem {
+                display_name: c.backup.display_name.clone(),
+                reason: format!(
+                    "Admin consent skipped: not approved in the plan. The backup asks for \
+                     tenant-wide consent to {}. Review them, then grant consent from the app's \
+                     Permissions tab if they are intended.",
+                    if held.is_empty() {
+                        "its declared permissions".to_string()
+                    } else {
+                        held.join(", ")
+                    }
+                ),
+            });
+            continue;
+        }
+        reconsent(ctx, c, &mut report.apps[idx], &mut report.manual_items).await;
+    }
 }

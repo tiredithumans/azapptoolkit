@@ -2,7 +2,7 @@
 //! Expose-an-API, authentication, federated credentials, owners and
 //! regenerated secrets.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -19,7 +19,8 @@ use azapptoolkit_graph::client::{
 };
 
 use crate::dto::backup::{
-    AppRegistrationBackup, CredentialMeta, ManualItem, PrincipalRef, RegeneratedSecret, RestoredApp,
+    AppRegistrationBackup, CredentialMeta, ManualItem, PrincipalRef, RegeneratedSecret,
+    RestoreReport, RestoredApp,
 };
 use crate::state::CancelToken;
 
@@ -528,4 +529,47 @@ pub(super) async fn wire_application(
         .collect();
 
     (out, trusts)
+}
+
+/// Pass 2 of [`run_restore`](super::run_restore): wire every app Pass 1 created
+/// or adopted ([`wire_application`]), in order, into the report — its entry,
+/// and the sign-in trusts it gained as runbook items. `withheld` holds the apps
+/// the plan's approvals left out.
+///
+/// Stops at the next app on `cancel` (flagging the report) and on a dead
+/// session.
+pub(super) async fn pass2_wire(
+    ctx: &PassCtx<'_>,
+    created: &[CreatedApp],
+    backup_apps: &BackupApps,
+    withheld: &HashMap<String, Vec<String>>,
+    principals: &mut PrincipalMemo,
+    cancel: &CancelToken,
+    report: &mut RestoreReport,
+) {
+    let session = ctx.session;
+    for c in created {
+        // Both stop conditions, in every pass. Passes 2-5 once checked only
+        // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
+        // the operator pressed it and watched the restore keep wiring, granting
+        // consent and re-binding roles for every remaining app.
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        if session.is_dead() {
+            break;
+        }
+        let (restored, trusts) = wire_application(
+            ctx,
+            c,
+            backup_apps,
+            principals,
+            cancel,
+            withheld.contains_key(&c.backup.source_app_id),
+        )
+        .await;
+        report.apps.push(restored);
+        report.manual_items.extend(trusts);
+    }
 }

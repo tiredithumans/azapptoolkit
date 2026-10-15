@@ -1,12 +1,16 @@
 //! Pass 4: re-applying an enterprise application's settings, app-role
 //! assignments and group memberships to its recreated service principal.
 
+use std::collections::HashSet;
+
 use crate::dto::backup::{
-    EnterpriseAppBackup, ManualItem, PrincipalRef, RestoreReport, RestoredEnterpriseApp,
+    EnterpriseAppBackup, ManualItem, PrincipalRef, RestoreApproval, RestoreReport,
+    RestoredEnterpriseApp,
 };
 use crate::state::CancelToken;
 
 use super::PassCtx;
+use super::plan::app_approval;
 use super::principals::{PrincipalMemo, owner_label, resolve_principal};
 
 /// Default-access app role (the all-zero GUID) — present on every SP, so an
@@ -204,4 +208,42 @@ pub(super) fn map_assignee_role_id(
         .iter()
         .find(|r| r.value == value)
         .map(|r| r.id.clone())
+}
+
+/// Pass 4 of [`run_restore`](super::run_restore): re-apply each enterprise
+/// app's access ([`restore_enterprise_app`]) to the service principal Pass 1
+/// recreated; group memberships only for an app `approved` names.
+///
+/// Stops at the next enterprise app on `cancel` (flagging the report) and on a
+/// dead session.
+pub(super) async fn pass4_enterprise(
+    ctx: &PassCtx<'_>,
+    enterprise_apps: &[EnterpriseAppBackup],
+    approved: &HashSet<RestoreApproval>,
+    principals: &mut PrincipalMemo,
+    cancel: &CancelToken,
+    report: &mut RestoreReport,
+) {
+    let session = ctx.session;
+    for ent in enterprise_apps {
+        if cancel.is_cancelled() {
+            report.cancelled = true;
+            break;
+        }
+        if session.is_dead() {
+            break;
+        }
+        // Group memberships always need approval, so they apply only to an app
+        // the operator approved — decided from the approvals themselves, never
+        // from a classification that could miss an enterprise app.
+        restore_enterprise_app(
+            ctx,
+            ent,
+            !approved.contains(&app_approval(&ent.source_app_id)),
+            report,
+            principals,
+            cancel,
+        )
+        .await;
+    }
 }
