@@ -29,7 +29,12 @@ azapptoolkit-permissions = { path = "../../../crates/azapptoolkit-permissions" }
 azapptoolkit-dto = { path = "../../../crates/azapptoolkit-dto", features = ["backend"] }
 
 tauri = { version = "2", features = [] }
-tauri-plugin-updater = "2"
+# Default features minus `zip`: that feature unpacks Tauri v1 compressed update
+# bundles, and pulls in `zip` 4.x (RUSTSEC-2026-0367/0368/0369, patched only in
+# zip >= 9). Releases serve the raw NSIS `-setup.exe` and `.AppImage`
+# (release.yml's latest.json), and macOS `.app.tar.gz` extraction does not
+# depend on the feature, so nothing reads an archive through it.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-dialog = "2"
 
 # `macros`: `tokio::join!` in the command fan-outs. `rt-multi-thread`: no runtime
