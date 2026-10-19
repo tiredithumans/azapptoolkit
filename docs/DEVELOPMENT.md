@@ -455,6 +455,31 @@ Linux AppImage + `.deb`, each with signed updater artifacts) → one **draft** r
 aggregated `latest.json` and `SHA256SUMS`. Publishing is the deliberate human step. Details:
 [docs/architecture/release-updater-demo.md](architecture/release-updater-demo.md).
 
+### Dependabot auto-merge
+
+`main` requires a PR to be up to date before it merges, and GitHub's auto-merge never updates a
+branch, so two workflows keep auto-merge moving:
+
+- `dependabot-auto-merge.yml` turns on auto-merge (merge commit) for every Dependabot patch and
+  minor update. Majors wait for a human.
+- `update-behind-prs.yml` runs after every push to `main` (or by hand from the Actions tab) and
+  updates each open auto-merge PR that has fallen behind, which re-runs its CI.
+
+Both use `AUTOMERGE_TOKEN`, a fine-grained personal access token, because pushes and merges made
+with the built-in `GITHUB_TOKEN` start no workflows. To create it:
+
+1. GitHub → Settings → Developer settings → Fine-grained tokens → Generate new token. Resource
+   owner `tiredithumans`, **Only select repositories** → `azapptoolkit`. Repository permissions:
+   **Contents**, **Pull requests** and **Workflows**, each Read and write. Pick an expiry and put
+   a renewal reminder in your calendar.
+2. Repo → Settings → Secrets and variables → **Actions** → New repository secret named
+   `AUTOMERGE_TOKEN` with the token.
+3. Repo → Settings → Secrets and variables → **Dependabot** → the same name and token
+   (Dependabot-triggered runs read only Dependabot secrets).
+
+A missing or expired token fails the two workflows with an error naming the secret; neither is a
+required check, so nothing else is blocked.
+
 ## Token & secret security model
 
 Invariants every change must preserve (the audit/review baseline for auth-adjacent code):

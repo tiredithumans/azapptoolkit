@@ -1,0 +1,40 @@
+name: Dependabot auto-merge
+
+# Turns on auto-merge (merge commit) for Dependabot patch and minor updates, so
+# they land as soon as the required checks pass. Majors are left for a human.
+# A grouped PR counts as its highest bump (fetch-metadata's `update-type`).
+#
+# Uses the AUTOMERGE_TOKEN fine-grained PAT, not GITHUB_TOKEN: a merge done
+# under an auto-merge that GITHUB_TOKEN enabled pushes to main as
+# github-actions, and such pushes start no workflows, so main's ci.yml run and
+# update-behind-prs.yml would never fire. Dependabot-triggered runs read
+# Dependabot secrets, so the token is stored there (see docs/DEVELOPMENT.md).
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enable:
+    name: Enable auto-merge
+    # The PR author, not the actor: a human pushing to a Dependabot branch must
+    # not opt the PR out, and nobody else can open a PR as dependabot[bot].
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      - name: Enable auto-merge (patch/minor)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::AUTOMERGE_TOKEN is not set as a Dependabot secret (docs/DEVELOPMENT.md)."
+            exit 1
+          fi
+          gh pr merge --auto --merge "$PR_URL"
