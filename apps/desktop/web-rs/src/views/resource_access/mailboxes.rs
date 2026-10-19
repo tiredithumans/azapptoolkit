@@ -206,7 +206,18 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
                 probing.set(false);
                 return;
             };
-            match permission_tester::find_mailbox_reachers(&t.tenant_id, &mb).await {
+            let res = permission_tester::find_mailbox_reachers(&t.tenant_id, &mb).await;
+            // A probe answered after a tenant switch (or a sign-out) belongs to
+            // the tenant it was started for: the Effect above already cleared
+            // `result`, and landing this answer would bring that tenant's
+            // verdicts back under the new one. Land nothing, the error line
+            // included (the Key Vault and Sites lenses gate the same way).
+            if !session.is_active_tenant(&t.tenant_id) {
+                probing.set(false);
+                progress.set(None);
+                return;
+            }
+            match res {
                 Ok(r) => result.set(Some(r)),
                 // This panel has no consent / step-up button of its own, so it
                 // takes the shared sink's whole ladder (dead session, rejected

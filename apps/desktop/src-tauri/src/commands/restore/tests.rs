@@ -1,7 +1,23 @@
-//! Unit tests for the DR restore (`super`), kept out of `restore.rs` so the
-//! production code reads in one pass.
+//! Unit tests for the DR restore (`super` and its per-phase modules).
 
 use super::*;
+
+use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
+use azapptoolkit_core::redirect::validate_redirect_uri;
+use azapptoolkit_core::restore_plan::BackupApps;
+
+use crate::dto::backup::{
+    AppRegistrationBackup, BACKUP_SCHEMA_VERSION, CredentialMeta, EnterpriseAppBackup,
+    ManagedIdentityBackup, ManualItem, PermissionRisk, PrincipalRef, PrivilegedKind, RestoredApp,
+};
+use crate::dto::managed_identity::MiSubtype;
+
+use super::adoption::*;
+use super::enterprise::*;
+use super::manifest::*;
+use super::plan::app_approval;
+use super::principals::*;
+use super::wire::*;
 
 #[test]
 fn a_manifest_from_a_newer_build_is_refused_but_an_older_one_restores() {

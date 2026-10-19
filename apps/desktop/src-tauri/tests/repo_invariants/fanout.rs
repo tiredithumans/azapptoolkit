@@ -65,9 +65,11 @@ const WRITE_CALLS: &[&str] = &[
 /// that only reads) are excluded by the rule itself, not by naming them.
 ///
 /// The write loop may sit in a helper the command hands its per-item work to
-/// (`bulk::sweep_one`, `aap_migration::run_migration_batches`); see
-/// [`is_tenant_wide_writer`]. [`WRITER_FLOOR`] stops that following from
-/// silently losing the two commands that need it.
+/// (`aap_migration::run_migration_batches`); see [`is_tenant_wide_writer`].
+/// [`WRITER_FLOOR`] stops that following from silently losing the command that
+/// needs it. (The expired-credential sweep left this rule's scope when its
+/// tenant-wide form was removed: it reads only the selected apps, and its
+/// capped driver keeps it under the claim-once and dead-session rules.)
 #[test]
 fn every_tenant_wide_writer_is_cancellable() {
     let mut offenders: Vec<String> = Vec::new();
@@ -111,13 +113,10 @@ fn every_tenant_wide_writer_is_cancellable() {
 }
 
 /// Commands the writer detector must keep finding: their write loops sit in a
-/// helper (`bulk::sweep_one`; the AAP migration's `migrate_one` closure handed
-/// to `run_migration_batches`), so they are the ones a broken helper
-/// derivation would drop first.
-const WRITER_FLOOR: &[&str] = &[
-    "bulk_remove_expired_credentials",
-    "migrate_application_access_policies",
-];
+/// helper (the AAP migration's `migrate_one` closure handed to
+/// `run_migration_batches`), so they are the ones a broken helper derivation
+/// would drop first.
+const WRITER_FLOOR: &[&str] = &["migrate_application_access_policies"];
 
 /// What the tenant-wide-writer rule knows about the helpers a command hands its
 /// per-item work to, derived from the source (the self-test derives one from a

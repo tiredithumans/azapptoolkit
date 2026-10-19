@@ -14,21 +14,14 @@ pub async fn cancel_bulk() {
     invoke::<()>("cancel_bulk", ()).await
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoveExpiredArgs<'a> {
-    tenant_id: &'a str,
-    /// `None` sweeps the whole tenant; `Some` scopes the sweep to these apps.
-    object_ids: Option<&'a [String]>,
-}
-
+/// Removes the expired secrets of exactly these apps.
 pub async fn bulk_remove_expired_credentials(
     tenant_id: &str,
-    object_ids: Option<&[String]>,
+    object_ids: &[String],
 ) -> Result<BulkRemoveExpiredResult, UiError> {
     invoke_result(
         "bulk_remove_expired_credentials",
-        RemoveExpiredArgs {
+        BulkObjectIdsArgs {
             tenant_id,
             object_ids,
         },

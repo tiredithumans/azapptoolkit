@@ -5,8 +5,15 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-10-15
+
 ### Fixed
 
+- **A mailbox check answered after you switched tenants no longer shows up under the new tenant.**
+  The Resource Access "Mailboxes" lens clears its result on a tenant switch, but a check that was
+  still running when you switched could land its verdicts afterwards, listing the previous
+  tenant's applications under the new one. A late answer is now dropped, as the Sites and Vault
+  access lenses already did.
 - **Exporting an inventory list after switching tenants no longer saves the previous tenant's
   rows.** App Registrations, Enterprise Applications and Managed Identities keep their page in
   place across a tenant switch, and their CSV/JSON export kept the last list it was shown. While

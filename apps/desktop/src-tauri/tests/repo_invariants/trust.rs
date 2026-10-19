@@ -15,7 +15,7 @@
 //!
 //! Checked **per function, with one helper level**, not per module. The first
 //! form asked only whether the *module* named the validator, which is the
-//! helper bleed `sources::commands` documents: `sso/mod.rs` and `restore.rs`
+//! helper bleed `sources::commands` documents: `sso/mod.rs` and `restore/wire.rs`
 //! both contain `validate_redirect_uri`, so a new command in either that built
 //! a patch straight from its input passed. [`unvalidated_writes`] holds the
 //! write and the check to the same function, or to every in-module caller of
@@ -183,7 +183,7 @@ fn every_command_that_writes_a_redirect_uri_validates_it_first() {
          every in-module caller): {offenders:#?}\n\
          A reply URL decides where auth codes are delivered. Run \
          `core::redirect::validate_redirect_uri(s)` over every list before the patch and report \
-         each rejection, the way `restore.rs::checked_uris` does."
+         each rejection, the way `restore/wire.rs::checked_uris` does."
     );
 }
 
