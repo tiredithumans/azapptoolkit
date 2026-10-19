@@ -1,0 +1,61 @@
+name: Update behind PRs
+
+# main's branch protection is strict (a PR must be up to date to merge), and
+# GitHub's auto-merge never updates a branch itself, so a PR queued for
+# auto-merge stalls once anything else lands. After every push to main this
+# brings each open auto-merge PR that is behind up to date, which re-runs its CI
+# and lets auto-merge finish. Merge queues would do this natively, but they
+# need an organization-owned repo.
+#
+# Every behind PR is updated at once: the first to go green merges and the rest
+# fall behind again and are updated on that push. ci.yml's cancel-in-progress
+# drops the superseded runs.
+#
+# Uses the AUTOMERGE_TOKEN fine-grained PAT: a branch update pushed with
+# GITHUB_TOKEN starts no workflows, so the required checks would never report.
+on:
+  push:
+    branches: [main]
+  # Manual run, e.g. after enabling auto-merge on a PR that is already behind.
+  workflow_dispatch:
+
+# One pass at a time; a newer push supersedes a pass still in flight.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Update auto-merge PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update behind branches
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::AUTOMERGE_TOKEN is not set as an Actions secret (docs/DEVELOPMENT.md)."
+            exit 1
+          fi
+          # mergeStateStatus is computed lazily and reads UNKNOWN right after a
+          # push, so "behind" comes from the compare API instead.
+          gh pr list --repo "$REPO" --base main --state open --limit 100 \
+            --json number,headRefOid,autoMergeRequest \
+            --jq '.[] | select(.autoMergeRequest != null) | "\(.number) \(.headRefOid)"' |
+          while read -r num head; do
+            behind=$(gh api "repos/$REPO/compare/main...$head" --jq .behind_by)
+            if [ "$behind" -eq 0 ]; then
+              echo "#$num is up to date"
+              continue
+            fi
+            echo "#$num is $behind commit(s) behind; updating"
+            # A conflicting branch can't be updated; report it and move on.
+            gh api -X PUT "repos/$REPO/pulls/$num/update-branch" \
+              -f expected_head_sha="$head" --silent ||
+              echo "::warning::could not update #$num (conflict, or its head moved)"
+          done

@@ -62,7 +62,7 @@ apps/desktop/web-rs/ — WASM frontend (Trunk), EXCLUDED from the root workspace
   build.rs — bakes this version's CHANGELOG section ("What's new")
 docs/DEVELOPMENT.md — build, test, package, release, updater keys
 docs/CHANGELOG-archive.md — releases <= 0.26.3
-.github/workflows/ — ci.yml · release.yml (3-OS matrix) · codeql.yml · pages.yml
+.github/workflows/ — ci.yml · release.yml (3-OS matrix) · codeql.yml · pages.yml · dependabot-auto-merge.yml + update-behind-prs.yml
 .claude/ — hooks/ (advisory) · rules/ (path-scoped detail) · skills/ (ship, feature, repo-review, release, debug)
 ```
 
