@@ -30,7 +30,7 @@ publish = false
 # builds a runtime (Tauri owns the only one). Crates that need more re-add it
 # explicitly: `azapptoolkit-auth` (net, io-util, rt, macros) and `src-tauri` (macros,
 # rt-multi-thread); test builds get `macros`/`rt*` through dev-dependencies.
-tokio = { version = "1.53", features = ["sync", "time"] }
+tokio = { version = "1.54", features = ["sync", "time"] }
 # No `executor` feature: nothing here blocks on a future outside tokio.
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # HTTP

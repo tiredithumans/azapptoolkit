@@ -161,7 +161,7 @@ jobs:
         # runtime (Cargo.lock) for reproducible release tooling — upstream does not
         # cut a CLI release for every runtime patch, so the two can differ in the
         # patch digit. Bump in lockstep with the crate. --locked pins its deps.
-        run: cargo install tauri-cli --locked --version "=2.12.2"
+        run: cargo install tauri-cli --locked --version "=2.12.3"
 
       # Compile and bundle are separate steps so TAURI_SIGNING_PRIVATE_KEY is
       # only in the environment of the bundling step (review F285). A single
