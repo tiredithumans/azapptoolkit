@@ -23,7 +23,8 @@ ambiguous, or if a gate fails.
 - **Changelog check:** if the changes include a user-facing feature, fix, or behavior change, make
   sure `CHANGELOG.md` `[Unreleased]` has an entry for it (add one proactively — the advisory
   `changelog-check.sh` hook only nudges after the fact). Internal/docs/CI-only changes don't need
-  one.
+  one. An entry is one line of at most 120 characters saying what the user will notice; the cause
+  and the fix go in the commit body (`.claude/rules/release-and-dependencies.md`).
 
 ## 1. Branch
 

@@ -1,7 +1,7 @@
 //! Release identity and the hand-mirrored definitions around it: the three
-//! manifests, the web-rs lint block, the CHANGELOG header format, the
-//! AGENTS.md size budget — and who the shipped artifacts reach: the update gate,
-//! the Linux glibc floor and the NSIS install mode.
+//! manifests, the web-rs lint block, the CHANGELOG header format and entry
+//! style, the AGENTS.md size budget — and who the shipped artifacts reach: the
+//! update gate, the Linux glibc floor and the NSIS install mode.
 
 /// The non-comment, non-blank lines of a TOML block, sorted.
 ///
@@ -110,6 +110,66 @@ fn changelog_headers_match_what_both_parsers_require() {
     assert!(
         releases > 0,
         "no release headers found in CHANGELOG.md — this test is checking nothing"
+    );
+}
+
+/// Every CHANGELOG entry from `[Unreleased]` down to [`CONCISE_SINCE`] is one
+/// line saying what the person using the app will notice. Entries used to carry
+/// a bold lede plus paragraphs of cause and fix (0.31.0 ran to ~15 000 words),
+/// which buried the change in the update splash, on GitHub and in the file; that
+/// detail belongs in the commit body. Releases up to and including
+/// `CONCISE_SINCE` stay as shipped.
+const CONCISE_SINCE: &str = "## [0.34.1]";
+
+#[test]
+fn changelog_entries_are_one_line_each() {
+    const MAX_ENTRY_CHARS: usize = 120;
+    const SECTIONS: &[&str] = &[
+        "### Added",
+        "### Changed",
+        "### Fixed",
+        "### Removed",
+        "### Security",
+    ];
+    let changelog = include_str!("../../../../../CHANGELOG.md");
+    let start = changelog
+        .find("## [Unreleased]")
+        .expect("CHANGELOG.md has no `## [Unreleased]` header");
+    let end = changelog.find(CONCISE_SINCE).unwrap_or_else(|| {
+        panic!(
+            "CHANGELOG.md has no {CONCISE_SINCE} header — if it moved to the archive, point \
+             CONCISE_SINCE at the oldest release still in CHANGELOG.md"
+        )
+    });
+    assert!(
+        start < end,
+        "`## [Unreleased]` must come before {CONCISE_SINCE} in CHANGELOG.md"
+    );
+
+    let mut bad: Vec<&str> = Vec::new();
+    for line in changelog[start..end].lines() {
+        if line.trim().is_empty() || line.starts_with("## [") {
+            continue;
+        }
+        let ok = if line.starts_with("###") {
+            SECTIONS.contains(&line.trim_end())
+        } else if let Some(entry) = line.strip_prefix("- ") {
+            entry.chars().count() <= MAX_ENTRY_CHARS
+        } else {
+            // A wrapped continuation, a nested bullet or a paragraph.
+            false
+        };
+        if !ok {
+            bad.push(line);
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "CHANGELOG.md line(s) that break the one-line entry style: {bad:#?}\n\
+         Each change is a single `- ` line of at most {MAX_ENTRY_CHARS} characters under \
+         {SECTIONS:?}, saying what the user will notice — no wrapped lines, nested bullets or \
+         paragraphs. The cause and the fix go in the commit body \
+         (docs/architecture/release-updater-demo.md, \"Writing CHANGELOG entries\")."
     );
 }
 

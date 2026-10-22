@@ -38,7 +38,8 @@ Review work in progress before it lands on `main`. Use the repo's exact verifica
 - Commits follow Conventional Commits with a scope from the canonical list in AGENTS.md → Git &
   version control (the commit hook enforces both).
 - CHANGELOG.md `[Unreleased]` has entries for user-visible changes (internal, docs, and tooling
-  changes need none).
+  changes need none), each one line saying what the user will notice. Flag an entry that names
+  functions, crates, versions or advisory IDs, or explains the cause; that belongs in the commit body.
 
 ## 4. Produce output
 

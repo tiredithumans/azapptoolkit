@@ -13,12 +13,14 @@
 //!
 //! # Summary first, detail on request
 //!
-//! `CHANGELOG.md` is written for operators *and* contributors: each entry leads
-//! with one sentence of what changed for the person running the app, then
-//! several paragraphs of why, which function was wrong, and how it was fixed —
-//! plus whole `### Internal` sections about tests and refactors. Dumping that
-//! verbatim into an update splash buries the answer to the only question being
-//! asked there ("what changes for me?") under implementation detail.
+//! Up to 0.34.1, `CHANGELOG.md` was written for operators *and* contributors:
+//! each entry led with one sentence of what changed for the person running the
+//! app, then several paragraphs of why, which function was wrong, and how it
+//! was fixed — plus whole `### Internal` sections about tests and refactors.
+//! Dumping that verbatim into an update splash buries the answer to the only
+//! question being asked there ("what changes for me?") under implementation
+//! detail. Later entries are one line each (pinned in `repo_invariants`), so
+//! for them the condensing below is usually a no-op and the toggle stays hidden.
 //!
 //! So the default render is condensed: repo-internal sections are dropped, and
 //! every bullet is cut to its lede sentence (see `first_sentence`). Nothing is
