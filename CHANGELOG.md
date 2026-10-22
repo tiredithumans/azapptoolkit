@@ -5,6 +5,10 @@ Headers follow `## [X.Y.Z] - YYYY-MM-DD` exactly (parsed by `release.yml` and `w
 
 ## [Unreleased]
 
+### Security
+
+- Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
+
 ## [0.34.1] - 2026-10-15
 
 ### Fixed
