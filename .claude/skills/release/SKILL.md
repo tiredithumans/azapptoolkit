@@ -28,6 +28,9 @@ directly; everything lands via the release PR.
   a `v` prefix or an em-dash silently ships fallback notes instead of the changelog. It also
   matches every existing entry in `CHANGELOG.md`.
 - Re-add an empty `## [Unreleased]` stub above the new section.
+- Tidy the rolled section: merge lines that describe the same change, drop a line a later entry
+  undoes, and keep every line to one user-facing sentence (`changelog_entries_are_one_line_each`
+  fails on anything longer).
 
 Roll first because `just bump` (next step) ends with the `release.rs` identity tests, which
 require the newest CHANGELOG header to equal the manifests. After the roll they go green on

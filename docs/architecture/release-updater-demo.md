@@ -45,6 +45,26 @@ the real `build_support.rs` parser. `web-rs`'s
 `the_running_versions_changelog_section_is_baked_in` test fails the build when the manifest
 version has no finalized section — the same mistake that would otherwise ship blank in-app notes.
 
+## Writing CHANGELOG entries
+
+An entry tells the person running the app what they will notice. It is one line, nothing more:
+
+- **One `- ` line per change, at most 120 characters.** No wrapped continuation lines, no nested
+  bullets, no paragraphs, no bold lede.
+- **Sections are `### Added`, `### Changed`, `### Fixed`, `### Removed` and `### Security` only.**
+  Internal, test, refactor, CI and tooling work gets no entry.
+- **Say what changed for the user, in the app's own words** (tab, button and list names): what
+  they can now do, or what no longer goes wrong. Leave out function, crate, file and test names,
+  version numbers, advisory IDs and the cause.
+- **Merge related changes into one line.** A dependency refresh gets one `### Security` line
+  when it fixes an advisory ("Security fixes in the connection library behind every Microsoft
+  service call.") and no entry otherwise.
+- **The cause and the fix go in the commit body and the PR description.**
+
+`changelog_entries_are_one_line_each` (`repo_invariants/release.rs`) enforces the shape from
+`[Unreleased]` down to its `CONCISE_SINCE` header (0.34.1). That release and every older one
+predate the rule and stay as shipped.
+
 ## Auto-update is interactive, never silent
 
 The front-end checks once on launch (`commands::updater::check_for_update`, swallowed silently
@@ -91,10 +111,11 @@ itself; the command layer logs only what it does not — `app.updater()` and ins
 
 ### Release notes are rendered summary-first
 
-`CHANGELOG.md` serves operators *and* contributors: every entry is a one-sentence lede followed
-by paragraphs of rationale and implementation detail, plus whole `### Internal` sections about
-tests and refactors. Rendered verbatim, an update splash answers "what does this change for me?"
-with several screens of backend detail.
+Releases up to 0.34.1 wrote every `CHANGELOG.md` entry as a one-sentence lede followed by
+paragraphs of rationale and implementation detail, plus whole `### Internal` sections about tests
+and refactors. Rendered verbatim, an update splash answers "what does this change for me?" with
+several screens of backend detail. Newer entries are one line each (above), so for them the
+condensing below usually changes nothing and the toggle stays hidden.
 
 `components/changelog_notes.rs` therefore condenses by default — internal sections dropped, every
 bullet cut to its first sentence, nested bullets (always elaboration) dropped — with a **Show

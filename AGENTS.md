@@ -161,7 +161,7 @@ Deep-dive: release-updater-demo.md
   - Types: `feat fix docs chore refactor test build ci perf style revert deps`
   - Scopes (the canonical nine; the hook mirrors this line and `repo_invariants/release.rs` pins them equal): `desktop`, `core`, `auth`, `graph`, `exchange`, `keyvault`, `permissions`, `ci`, `docs`. Omit the scope rather than invent one.
 - Branch naming: `<type>/<short-slug>` (e.g. `feat/batch-approve`).
-- **CHANGELOG:** every user-visible change gets an entry under `[Unreleased]`; internal, docs, CI and tooling changes need none.
+- **CHANGELOG:** every user-visible change gets one plain-language line (≤ 120 chars) under `[Unreleased]`; cause and fix go in the commit body; internal, docs, CI and tooling changes need none.
 - Porting from legacy PowerShell → reference source `file:line` in the commit body.
 
 ## Verification playbook
