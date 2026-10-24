@@ -1,8 +1,8 @@
 //! GUI tests for the Scope-column banner (`ScopeUnavailableBanner`) when the
 //! Exchange mailbox-scope lookup fails because the session is dead: the
-//! banner raises the session's Re-authenticate lever and drops its plain
-//! Retry (a retry fails the same way until the session is re-authenticated),
-//! while an ordinary failure keeps its Retry and raises no session lever.
+//! banner raises the session's Re-authenticate lever and keeps its Retry for
+//! once that lever has run (nothing else re-runs the lookup), while an
+//! ordinary failure keeps its Retry and raises no session lever.
 //! Mounted through the app-registration Permissions tab, which renders the
 //! banner from `get_mail_permission_scopes`.
 #![cfg(target_arch = "wasm32")]
@@ -60,7 +60,7 @@ fn toast_actions(m: &ts::Mounted) -> Vec<Option<String>> {
 }
 
 #[wasm_bindgen_test]
-async fn a_dead_session_raises_reauthenticate_and_drops_the_retry() {
+async fn a_dead_session_raises_reauthenticate_and_keeps_the_retry() {
     ts::reset();
     ts::mock_err(
         "get_mail_permission_scopes",
@@ -73,10 +73,12 @@ async fn a_dead_session_raises_reauthenticate_and_drops_the_retry() {
         toast_actions(&m).contains(&Some("Re-authenticate".to_string()))
     })
     .await;
-    assert!(ts::body_contains("your session has expired"));
+    assert!(ts::body_contains(
+        "Re-authenticate from the notice, then select Retry."
+    ));
     assert!(
-        !banner_buttons().iter().any(|b| b == "Retry"),
-        "a dead session's banner must not offer a Retry that fails the same way: {:?}",
+        banner_buttons().iter().any(|b| b == "Retry"),
+        "after re-authenticating, the banner's Retry is the way back: {:?}",
         banner_buttons()
     );
 }

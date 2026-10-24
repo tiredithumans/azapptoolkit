@@ -7,7 +7,8 @@
 //! `interaction_required` (an Exchange MFA policy), plus a plain Retry. A dead
 //! session (`refresh_missing` / `not_signed_in`) or a rejected token gets the
 //! session's own lever instead — the Re-authenticate / Refresh token toast —
-//! and a dead session drops the Retry, which would only fail the same way.
+//! and keeps the Retry for once that lever has run (nothing else re-runs the
+//! lookup after a re-authentication).
 //! Shared by the app-registration, managed-identity and enterprise-app
 //! permission views so the affordance stays identical.
 
@@ -21,10 +22,10 @@ use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyI
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 
-/// The banner's text for a dead session: the lever is the toast, and the
-/// scope lookup re-runs when the tab is reopened after re-authenticating.
+/// The banner's text for a dead session: the lever is the toast, then the
+/// banner's own Retry re-runs the scope lookup.
 const SESSION_EXPIRED: &str =
-    "your session has expired. Re-authenticate from the notice, then reopen this tab.";
+    "your session has expired. Re-authenticate from the notice, then select Retry.";
 
 #[component]
 pub fn ScopeUnavailableBanner(
@@ -50,11 +51,9 @@ pub fn ScopeUnavailableBanner(
     if session.active_tenant.with_untracked(Option::is_some) {
         session.report_if_session_lost(&error);
     }
-    // Retrying a dead session fails the same way until it is re-authenticated.
-    let session_dead = error.is_reauth_fatal();
     let message = if needs_step_up {
         VERIFY_IDENTITY_MESSAGE.to_string()
-    } else if session_dead {
+    } else if error.is_reauth_fatal() {
         SESSION_EXPIRED.to_string()
     } else {
         error.message.clone()
@@ -90,17 +89,12 @@ pub fn ScopeUnavailableBanner(
                             </Button>
                         }
                     })}
-                {(!session_dead)
-                    .then(|| {
-                        view! {
-                            <Button
-                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                on_click=Box::new(on_retry_click)
-                            >
-                                "Retry"
-                            </Button>
-                        }
-                    })}
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(on_retry_click)
+                >
+                    "Retry"
+                </Button>
             </div>
             {needs_step_up
                 .then(|| {
