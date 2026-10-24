@@ -129,6 +129,30 @@ impl GraphClient {
         Ok(sp)
     }
 
+    /// The service principal for `app_id` with its credential lists, read live:
+    /// never answered from the cache and never stored in it. For a decision
+    /// that must see the principal as it is now — restore adoption refuses an
+    /// app whose service principal holds a credential, and a cached copy from
+    /// before a credential was added would let that one through. `None` when
+    /// the app has no service principal.
+    pub async fn get_service_principal_credentials_by_app_id(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<ServicePrincipal>> {
+        let filter = format!("appId eq '{}'", escape_odata(app_id));
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            (
+                "$select",
+                "id,appId,displayName,passwordCredentials,keyCredentials",
+            ),
+            ("$top", "1"),
+        ];
+        let page: Paged<ServicePrincipal> =
+            self.get_json("/servicePrincipals", &params, false).await?;
+        Ok(page.items.into_iter().next())
+    }
+
     /// Lean variant of [`Self::get_service_principal_by_app_id`] for the
     /// security audit: projects only `SP_LEAN_SELECT` and caches under a
     /// distinct `|lean` key, so a huge first-party SP is neither transferred

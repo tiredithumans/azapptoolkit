@@ -30,9 +30,10 @@
 //! re-run finds it and finishes wiring it rather than creating it twice. The tag
 //! and the display name are both writable by anyone who may register apps, so a
 //! hit is adopted only once it is also provably this restore's: created after
-//! the backup, owned by nobody but the operator and the manifest's owners, and
+//! the backup, owned by nobody but the operator and the manifest's owners,
 //! holding no credential (secret, certificate, federated credential) the
-//! manifest does not account for. Anything else — an ambiguous or unprovable
+//! manifest does not account for, and with a service principal (if it has one)
+//! holding no credential at all and no other owner. Anything else — an ambiguous or unprovable
 //! match, or a read that failed — is a runbook item and never a blind create.
 //!
 //! Secret/cert values can't be restored: secrets are regenerated (the show-once
@@ -43,8 +44,10 @@
 //! Long-running, so it polls its own `AppState.restore_cancel` token (stopped
 //! only by `cancel_restore`, never by a backup's Cancel) and emits
 //! `restore-progress`. A cancel stops at the next item in whichever pass is
-//! running, and the report flags the run cancelled (partial); a re-run adopts
-//! the already-created, tagged apps and finishes wiring them.
+//! running, and the report flags the run cancelled (partial) — still listing
+//! every app Pass 1 created, each it stopped before wiring fully flagged
+//! `incomplete`; a re-run adopts the already-created, tagged apps and finishes
+//! wiring them.
 //!
 //! Split by phase: this file holds the commands and `run_restore`, which runs
 //! the passes in order; `manifest` (schema and shape checks, echo bounds),
@@ -82,7 +85,8 @@ use crate::state::{AppState, CancelToken};
 use adoption::pass1_create_or_adopt;
 use enterprise::pass4_enterprise;
 use managed_identities::restore_managed_identities;
-use manifest::{bound_report_text, cap_report_value, check_manifest_schema, validate_manifest};
+pub(super) use manifest::check_manifest_schema;
+use manifest::{bound_report_text, cap_report_value, validate_manifest};
 use plan::{backup_apps, build_restore_plan, privileged_restore_items, unapproved_apps};
 use principals::PrincipalMemo;
 use reconsent::pass3_reconsent;
@@ -148,9 +152,11 @@ pub async fn restore_tenant(
         return Err(UiError::validation(
             "cloud_mismatch",
             format!(
-                "backup is from cloud '{}', but this build targets '{}'",
-                backup.cloud.as_str(),
-                cloud.as_str()
+                "backup is from cloud '{b}', but this build targets '{}'. If this tenant is in \
+                 the '{b}' cloud, relaunch with AZAPPTOOLKIT_CLOUD={b} (and a client ID \
+                 registered in that cloud), or use a build configured for it.",
+                cloud.as_str(),
+                b = backup.cloud.as_str(),
             ),
         ));
     }
@@ -255,8 +261,18 @@ async fn run_restore(
         approved,
         ..
     } = run;
-    let total = backup.app_registrations.len();
-    emit(progress, 0, total, None);
+    // Where each pass's work ends, cumulatively — see `RestoreProgress`.
+    let apps = backup.app_registrations.len();
+    let consenting = backup
+        .app_registrations
+        .iter()
+        .filter(|a| a.admin_consent_granted)
+        .count();
+    let pass2_end = 2 * apps;
+    let pass3_end = pass2_end + consenting;
+    let pass4_end = pass3_end + backup.enterprise_apps.len();
+    let total = pass4_end + backup.managed_identities.len();
+    let mut progress = RestoreProgress::start(progress, total);
 
     let mut report = RestoreReport::default();
     // Per-run principal-resolution memo (UPN/group display name → destination
@@ -274,7 +290,7 @@ async fn run_restore(
     // ---- Pass 1: create shells ----
     let (app_id_remap, created) = pass1_create_or_adopt(
         client,
-        progress,
+        &mut progress,
         &cancel,
         &run,
         &session,
@@ -282,6 +298,7 @@ async fn run_restore(
         &mut report,
     )
     .await;
+    progress.reach(apps);
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
     // Every app the backup owns, recreated or not: a pre-authorized client in
@@ -305,11 +322,23 @@ async fn run_restore(
         &mut principals,
         &cancel,
         &mut report,
+        &mut progress,
     )
     .await;
+    // Apps Pass 1 refused or failed to create have nothing to wire.
+    progress.reach(pass2_end);
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
-    pass3_reconsent(&ctx, &created, &withheld, &cancel, &mut report).await;
+    pass3_reconsent(
+        &ctx,
+        &created,
+        &withheld,
+        &cancel,
+        &mut report,
+        &mut progress,
+    )
+    .await;
+    progress.reach(pass3_end);
 
     // ---- Pass 4: enterprise applications ----
     // Re-apply access (assignments + group memberships + settings) for SPs that
@@ -322,8 +351,10 @@ async fn run_restore(
         &mut principals,
         &cancel,
         &mut report,
+        &mut progress,
     )
     .await;
+    progress.reach(pass4_end);
 
     // ---- Pass 5: managed identities ----
     // MIs are Azure resources — they can't be created here. Re-bind Graph
@@ -339,6 +370,7 @@ async fn run_restore(
             &mut report,
             &session,
             &cancel,
+            &mut progress,
         )
         .await;
     }
@@ -346,12 +378,13 @@ async fn run_restore(
     // Unlike the read-only fan-outs, which return `session.err(..)` rather than
     // a partial result, a restore has already created objects in the tenant —
     // discarding the report would leave the operator with no record of what
-    // exists. So the report comes back, flagged, and the front end pairs the
-    // flag with the re-auth prompt.
+    // exists. So the report comes back, flagged, with every app Pass 1 created
+    // or adopted — one Pass 2 did not finish (or never reached) marked
+    // `incomplete` — and the front end pairs the flag with the re-auth prompt.
     report.session_expired = session.is_dead();
     // Every text field echoes the file somewhere; bound them all once, here.
     bound_report_text(&mut report);
-    emit(progress, total, total, None);
+    progress.finish();
     let effects = RestoreEffects {
         created_any: !created.is_empty(),
         rebound_any: report
@@ -401,6 +434,63 @@ pub fn cancel_restore(state: State<'_, AppState>) {
 }
 
 // ---------------- internals ----------------
+
+/// Restore progress across all five passes, as `restore-progress` events.
+///
+/// `total` is every unit of work the run can do: each app twice (Pass 1
+/// creates or adopts it, Pass 2 wires it), each app whose admin consent Pass 3
+/// re-grants, and each enterprise app (Pass 4) and managed identity (Pass 5).
+/// It once counted only Pass 1, so the bar sat full at "N/N" while the rest of
+/// the run — wiring, secrets, consent, assignments, role re-binds — went on
+/// with nothing moving. A pass [`tick`](Self::tick)s once per item it settles;
+/// [`reach`](Self::reach) then moves past the items it had no work for (an app
+/// Pass 1 did not create, one with no consent to re-grant), so `done` only
+/// ever grows.
+pub(super) struct RestoreProgress<'p, P> {
+    sink: &'p P,
+    done: usize,
+    total: usize,
+}
+
+impl<'p, P: ProgressSink> RestoreProgress<'p, P> {
+    /// Emits `0/total`.
+    pub(super) fn start(sink: &'p P, total: usize) -> Self {
+        let progress = Self {
+            sink,
+            done: 0,
+            total,
+        };
+        progress.send(None);
+        progress
+    }
+
+    /// One item settled — `name` is the file's name for it, capped like the
+    /// report's by [`emit`].
+    pub(super) fn tick(&mut self, name: &str) {
+        self.done = (self.done + 1).min(self.total);
+        self.send(Some(name.to_string()));
+    }
+
+    /// The end of a pass, as a cumulative count: whatever it did not tick
+    /// counts as settled.
+    pub(super) fn reach(&mut self, end: usize) {
+        let end = end.min(self.total);
+        if end > self.done {
+            self.done = end;
+            self.send(None);
+        }
+    }
+
+    /// The run is over, finished or stopped.
+    fn finish(&mut self) {
+        self.done = self.total;
+        self.send(None);
+    }
+
+    fn send(&self, current_app: Option<String>) {
+        emit(self.sink, self.done, self.total, current_app);
+    }
+}
 
 fn emit(progress: &impl ProgressSink, done: usize, total: usize, current_app: Option<String>) {
     let payload = BulkProgress {

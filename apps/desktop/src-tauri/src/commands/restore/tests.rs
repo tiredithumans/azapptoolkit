@@ -457,7 +457,10 @@ fn adoption_for_creates_adopts_or_refuses() {
     // secrets it already holds.
     let mut same = hit("1", "App A");
     same.password_credentials = vec![PasswordCredential {
+        key_id: "key-1".into(),
         display_name: Some("ci".into()),
+        hint: Some("Ab1".into()),
+        start_date_time: chrono::DateTime::from_timestamp(1_000_700, 0),
         ..Default::default()
     }];
     assert_eq!(
@@ -465,7 +468,12 @@ fn adoption_for_creates_adopts_or_refuses() {
         Adoption::Adopt {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
-            live_secret_names: vec!["ci".into()],
+            live_secrets: vec![LiveSecret {
+                name: "ci".into(),
+                key_id: "key-1".into(),
+                valid_from: chrono::DateTime::from_timestamp(1_000_700, 0),
+                hint: Some("Ab1".into()),
+            }],
         }
     );
 
@@ -557,6 +565,29 @@ fn graph_over(server: &wiremock::MockServer, dead: bool) -> GraphClient {
     )
 }
 
+/// Pass 5 on its own, its progress ticks recorded nowhere a test reads.
+async fn rebind_mis(
+    client: &GraphClient,
+    mis: &[ManagedIdentityBackup],
+    approved: &HashSet<RestoreApproval>,
+    report: &mut RestoreReport,
+    session: &SessionDead,
+    cancel: &CancelToken,
+) {
+    let sink = crate::commands::test_support::Recorder::default();
+    let mut progress = RestoreProgress::start(&sink, mis.len());
+    restore_managed_identities(
+        client,
+        mis,
+        approved,
+        report,
+        session,
+        cancel,
+        &mut progress,
+    )
+    .await;
+}
+
 fn two_mis() -> Vec<ManagedIdentityBackup> {
     ["mi-one", "mi-two"]
         .into_iter()
@@ -584,7 +615,7 @@ async fn a_failed_mi_listing_is_reported_once_not_as_missing_identities() {
     let session = SessionDead::new();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &two_mis(),
         &HashSet::new(),
@@ -615,7 +646,7 @@ async fn a_dead_session_during_the_mi_listing_latches() {
     let session = SessionDead::new();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &two_mis(),
         &HashSet::new(),
@@ -702,6 +733,53 @@ async fn mount_tagged_hit(server: &wiremock::MockServer, owners: serde_json::Val
         .mount(server)
         .await;
     mount_tagged_fics(server, serde_json::json!([]), 5).await;
+    mount_tagged_sp(server, serde_json::json!([]), 5).await;
+    mount_tagged_sp_owners(server, serde_json::json!([]), 5).await;
+}
+
+/// The tagged hit's service principal (`sp-1`), read live with its
+/// credentials once the app's own checks pass. A test that plants a
+/// credential mounts again at a higher priority (lower number).
+async fn mount_tagged_sp(
+    server: &wiremock::MockServer,
+    passwords: serde_json::Value,
+    priority: u8,
+) {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", "appId eq 'app-1'"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "sp-1",
+                "appId": "app-1",
+                "displayName": "App A",
+                "passwordCredentials": passwords,
+                "keyCredentials": []
+            }]
+        })))
+        .with_priority(priority)
+        .mount(server)
+        .await;
+}
+
+/// The owners of the tagged hit's service principal.
+async fn mount_tagged_sp_owners(
+    server: &wiremock::MockServer,
+    owners: serde_json::Value,
+    priority: u8,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/owners"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": owners })),
+        )
+        .with_priority(priority)
+        .mount(server)
+        .await;
 }
 
 /// The tagged hit's federated credentials, read after its owners pass. A
@@ -830,8 +908,120 @@ async fn a_tagged_app_owned_only_by_the_operator_is_adopted() {
         Adoption::Adopt {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
-            live_secret_names: Vec::new(),
+            live_secrets: Vec::new(),
         }
+    );
+}
+
+/// The service principal is the other half of the app: a secret or
+/// certificate on it signs in as this app once Pass 3 consents. A restore
+/// never adds one, so any credential there refuses the adoption.
+#[tokio::test]
+async fn a_tagged_app_whose_service_principal_holds_a_credential_is_not_adopted() {
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(
+        &server,
+        serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+    )
+    .await;
+    mount_tagged_sp(
+        &server,
+        serde_json::json!([{ "keyId": "k-sp", "displayName": "backdoor" }]),
+        1,
+    )
+    .await;
+    let client = graph_over(&server, false);
+
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("a credential on the service principal must block adoption");
+    };
+    assert!(
+        reason.contains("service principal") && reason.contains("secret 'backdoor'"),
+        "{reason}"
+    );
+    // The credential read is live, never a cached copy from before it was added.
+    let reads = requests(&server, "GET", "/servicePrincipals").await;
+    assert!(
+        reads.iter().any(|r| r
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("passwordCredentials")),
+        "the service principal is read with its credentials"
+    );
+}
+
+/// An owner of the service principal can add a credential to it, so one the
+/// restore did not set refuses the adoption just as an app owner does.
+#[tokio::test]
+async fn a_tagged_app_with_a_foreign_sp_owner_is_not_adopted() {
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(
+        &server,
+        serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+    )
+    .await;
+    mount_tagged_sp_owners(
+        &server,
+        serde_json::json!([
+            { "id": "operator-oid", "userPrincipalName": "admin@contoso.com" },
+            { "id": "mallory-oid", "userPrincipalName": "mallory@contoso.com" }
+        ]),
+        1,
+    )
+    .await;
+    let client = graph_over(&server, false);
+
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("a foreign service-principal owner must block adoption");
+    };
+    assert!(
+        reason.contains("service principal") && reason.contains("mallory@contoso.com"),
+        "{reason}"
+    );
+    assert!(!reason.contains("admin@contoso.com"), "{reason}");
+}
+
+/// Both service-principal reads fail closed, like the tag, owner and
+/// credential reads before them.
+#[tokio::test]
+async fn a_failed_service_principal_read_refuses_the_adoption() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let operator = serde_json::json!([{ "id": "operator-oid" }]);
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(&server, operator.clone()).await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let client = graph_over(&server, false);
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("an unreadable service principal must block adoption");
+    };
+    assert!(
+        reason.contains("Couldn't read the service principal"),
+        "{reason}"
+    );
+
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(&server, operator).await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/owners"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let client = graph_over(&server, false);
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("unreadable service-principal owners must block adoption");
+    };
+    assert!(
+        reason.contains("Couldn't read the owners of the service principal"),
+        "{reason}"
     );
 }
 
@@ -1001,6 +1191,7 @@ const MAIL_SEND_ROLE: &str = "b633e1c5-b582-4048-a93e-9f11b44c7e96";
 const USER_READ_SCOPE: &str = "e1fe6dd8-ba31-4d61-89e7-88639da4683d";
 const SRC_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const SRC_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+const SRC_C: &str = "cccccccc-0000-0000-0000-000000000003";
 
 /// Answers whatever a test did not mount: 204 for a PATCH, an empty page
 /// for anything else. A test mounts only what it asserts on and reads the
@@ -1035,7 +1226,7 @@ fn created(app: AppRegistrationBackup) -> CreatedApp {
         new_object_id: "new-obj".into(),
         new_app_id: "new-app".into(),
         adopted: false,
-        live_secret_names: Vec::new(),
+        live_secrets: Vec::new(),
         warnings: Vec::new(),
     }
 }
@@ -1173,7 +1364,12 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         ..Default::default()
     });
     c.adopted = true;
-    c.live_secret_names = vec!["ci".into()];
+    c.live_secrets = vec![LiveSecret {
+        name: "ci".into(),
+        key_id: "key-live-1".into(),
+        valid_from: Some("2026-01-02T03:04:00Z".parse().unwrap()),
+        hint: Some("Ab1".into()),
+    }];
 
     let (out, _) = wire(&client, &c).await;
 
@@ -1195,12 +1391,18 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         "{:?}",
         out.unresolved_owners
     );
+    // The kept secret is named by what tells it from a planted copy of the
+    // name: its key id, start date and hint.
+    let kept = out
+        .warnings
+        .iter()
+        .find(|w| w.contains("secret 'ci' already exists"))
+        .unwrap_or_else(|| panic!("{:?}", out.warnings));
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("secret 'ci' already exists")),
-        "{:?}",
-        out.warnings
+        kept.contains("key id key-live-1")
+            && kept.contains("valid from 2026-01-02 03:04 UTC")
+            && kept.contains("hint 'Ab1'"),
+        "{kept}"
     );
 }
 
@@ -1238,11 +1440,18 @@ fn manifest(apps: Vec<AppRegistrationBackup>) -> TenantBackup {
 /// Pass 1's create answers with an object id derived from the display
 /// name ("App A" → `obj-a`), so each app's later requests are tellable.
 async fn mount_create(server: &MockServer) {
+    mount_create_then(server, |_| {}).await;
+}
+
+/// [`mount_create`], calling `on_create` with each created app's display
+/// name before answering — where a test cancels the run.
+async fn mount_create_then(server: &MockServer, on_create: impl Fn(&str) + Send + Sync + 'static) {
     Mock::given(method("POST"))
         .and(path("/applications"))
-        .respond_with(|req: &Request| {
+        .respond_with(move |req: &Request| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             let name = body["displayName"].as_str().unwrap_or_default().to_string();
+            on_create(&name);
             let tag = name
                 .rsplit(' ')
                 .next()
@@ -1322,7 +1531,9 @@ async fn mount_live_apps(server: &MockServer) {
 }
 
 /// Whether Pass 3 got as far as ensuring `app_id`'s service principal —
-/// the first step of an actual consent.
+/// the first step of an actual consent. Pass 1's live credential read of an
+/// adoption candidate's service principal (it selects `passwordCredentials`)
+/// is not one.
 async fn consent_attempted(server: &MockServer, app_id: &str) -> bool {
     server
         .received_requests()
@@ -1330,9 +1541,11 @@ async fn consent_attempted(server: &MockServer, app_id: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|r| {
+            let query = r.url.query().unwrap_or_default();
             r.method.as_str() == "GET"
                 && r.url.path() == "/servicePrincipals"
-                && r.url.query().unwrap_or_default().contains(app_id)
+                && query.contains(app_id)
+                && !query.contains("passwordCredentials")
         })
 }
 
@@ -1446,6 +1659,413 @@ async fn a_cancel_between_passes_is_reported_and_skips_consent() {
         "Pass 3 must not run after a cancel"
     );
     assert!(!report.apps[0].consent_granted);
+    // Pass 2 finished it; the consent the backup asks for is what is missing.
+    let warnings = &report.apps[0].warnings;
+    assert!(report.apps[0].incomplete, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted"))
+            && !warnings
+                .iter()
+                .any(|w| w.starts_with("stopped before finishing")),
+        "{warnings:?}"
+    );
+}
+
+/// Progress covers every pass: the total counts each app twice (create,
+/// wire), each consenting app, each enterprise app and each managed identity,
+/// and each pass ticks as it settles an item — the bar once sat at "2/2"
+/// from the end of Pass 1 to the end of the run.
+#[tokio::test]
+async fn progress_advances_through_every_pass() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_graph_sp(&server).await;
+    mount_live_apps(&server).await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let mut backup = manifest(vec![
+        consenting_app(SRC_A, "App A"),
+        AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "App B".into(),
+            ..Default::default()
+        },
+    ]);
+    backup.enterprise_apps = vec![EnterpriseAppBackup {
+        source_app_id: SRC_B.into(),
+        display_name: "Ent B".into(),
+        ..Default::default()
+    }];
+    backup.managed_identities = vec![ManagedIdentityBackup {
+        source_app_id: SRC_C.into(),
+        display_name: "mi-one".into(),
+        ..Default::default()
+    }];
+    let sink = crate::commands::test_support::Recorder::default();
+    let approved: HashSet<RestoreApproval> = HashSet::from([app_approval(SRC_A)]);
+
+    let (report, _) = run_restore(
+        &client,
+        &sink,
+        never_cancelled(),
+        RestoreRun {
+            backup: &backup,
+            tenant_id: "dst-tenant",
+            cloud: CloudEnvironment::Commercial,
+            operator_oid: Some("operator-oid"),
+            approved: &approved,
+        },
+    )
+    .await;
+    assert!(!report.cancelled, "{report:?}");
+
+    let ticks: Vec<crate::dto::bulk::BulkProgress> =
+        sink.payloads(crate::dto::events::RESTORE_PROGRESS);
+    // 2 apps × 2 + 1 consenting + 1 enterprise app + 1 managed identity.
+    assert!(ticks.iter().all(|t| t.total == 7), "{ticks:?}");
+    assert_eq!(ticks.first().map(|t| t.done), Some(0));
+    assert_eq!(ticks.last().map(|t| t.done), Some(7));
+    assert!(
+        ticks.windows(2).all(|w| w[0].done <= w[1].done),
+        "done never goes back: {ticks:?}"
+    );
+    let ticked = |name: &str, done: usize| {
+        ticks
+            .iter()
+            .any(|t| t.done == done && t.current_app.as_deref() == Some(name))
+    };
+    assert!(
+        ticked("App A", 1) && ticked("App B", 2),
+        "Pass 1: {ticks:?}"
+    );
+    assert!(
+        ticked("App A", 3) && ticked("App B", 4),
+        "Pass 2: {ticks:?}"
+    );
+    assert!(ticked("App A", 5), "Pass 3: {ticks:?}");
+    assert!(ticked("Ent B", 6), "Pass 4: {ticks:?}");
+    assert!(ticked("mi-one", 7), "Pass 5: {ticks:?}");
+}
+
+/// Plain apps: no consent, credentials or owners, so nothing needs approval.
+fn plain_apps(names: &[(&str, &str)]) -> TenantBackup {
+    manifest(
+        names
+            .iter()
+            .map(|(src, name)| AppRegistrationBackup {
+                source_app_id: (*src).into(),
+                display_name: (*name).into(),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
+/// The report entries of a run that stopped before wiring: one per app Pass 1
+/// created, in order, each with its new ids and flagged unfinished.
+fn assert_reported_unwired(report: &RestoreReport, tags: &[&str]) {
+    assert_eq!(report.apps.len(), tags.len(), "{report:?}");
+    for (app, tag) in report.apps.iter().zip(tags) {
+        assert_eq!(app.new_app_id, format!("app-{tag}"));
+        assert_eq!(app.new_object_id, format!("obj-{tag}"));
+        assert!(app.incomplete, "{app:?}");
+        assert!(
+            app.warnings.iter().any(|w| w.starts_with("not wired")),
+            "{:?}",
+            app.warnings
+        );
+    }
+}
+
+/// A cancel during Pass 1 keeps every app it already created in the report,
+/// with its new ids, flagged unfinished — the report is the operator's only
+/// record of what exists. It once listed none of them ("Restored 0 apps").
+#[tokio::test]
+async fn a_cancel_during_pass_1_reports_every_created_app() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while App B is being created.
+    mount_create_then(&server, move |name| {
+        if name == "App B" {
+            flag.cancel();
+        }
+    })
+    .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let backup = plain_apps(&[(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+
+    let (report, effects) = restore(&client, &backup, cancel, &[]).await;
+
+    assert!(report.cancelled);
+    assert!(!report.session_expired);
+    assert!(effects.created_any);
+    assert_reported_unwired(&report, &["a", "b"]);
+    assert_eq!(
+        requests(&server, "POST", "/applications").await.len(),
+        2,
+        "App C is never created after the cancel"
+    );
+    assert!(
+        requests(&server, "PATCH", "/applications/obj-a")
+            .await
+            .is_empty(),
+        "nothing is wired after a cancel"
+    );
+}
+
+/// The same when the session dies during Pass 1: the apps it created are all
+/// reported, unwired, with the run marked as stopped by the expired session.
+#[tokio::test]
+async fn a_dead_session_during_pass_1_reports_every_created_app() {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_fallback(&server).await;
+    // Reads succeed; the third write (App C's create) finds the session dead.
+    let client = GraphClient::with_base_url(
+        "tenant-test",
+        StaticTokenProvider::new("tok"),
+        crate::commands::test_support::dies_after(2),
+        azapptoolkit_core::cache::Cache::new(),
+        server.uri(),
+    );
+    let backup = plain_apps(&[(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+
+    let (report, _) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(report.session_expired);
+    assert_reported_unwired(&report, &["a", "b"]);
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert_eq!(report.failures[0].display_name, "App C");
+}
+
+/// A cancel inside an app's secret loop marks that app unfinished and says how
+/// much was left — it once read as a finished app with fewer secrets.
+#[tokio::test]
+async fn a_cancel_inside_the_secret_loop_marks_the_app_incomplete() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while the first secret is issued.
+    Mock::given(method("POST"))
+        .and(path("/applications/new-obj/addPassword"))
+        .respond_with(move |_: &Request| {
+            flag.cancel();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "key-1",
+                "displayName": "ci",
+                "secretText": "s3cr3t"
+            }))
+        })
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let secret = |name: &str| CredentialMeta {
+        display_name: Some(name.into()),
+        ..Default::default()
+    };
+    let c = created(AppRegistrationBackup {
+        display_name: "App A".into(),
+        secrets: vec![secret("ci"), secret("deploy"), secret("ops")],
+        ..Default::default()
+    });
+
+    let (out, _) = wire_application(
+        &pass_ctx(&client, &SessionDead::new(), &HashMap::new()),
+        &c,
+        &BackupApps::default(),
+        &mut PrincipalMemo::new(),
+        &cancel,
+        false,
+    )
+    .await;
+
+    assert_eq!(out.regenerated_secrets.len(), 1, "the issued one is kept");
+    assert!(out.incomplete);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("stopped before finishing: 2 of 3 secrets not processed")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        requests(&server, "POST", "/applications/new-obj/addPassword")
+            .await
+            .len(),
+        1
+    );
+}
+
+/// A consent withheld because its API could not be read during the run says
+/// so — the plan may never have asked about it, so "not approved in the plan"
+/// would send the operator looking for a checkbox that was never shown.
+#[tokio::test]
+async fn a_failed_resource_read_at_run_time_withholds_consent_with_its_own_reason() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    // Microsoft Graph's service principal cannot be read: User.Read, low-risk
+    // in the plan, is unidentified now.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", format!("appId eq '{GRAPH}'")))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let mut app = consenting_app(SRC_A, "App A");
+    app.required_resource_access[0].resource_access =
+        vec![azapptoolkit_core::models::ResourceAccess {
+            id: USER_READ_SCOPE.into(),
+            r#type: "Scope".into(),
+        }];
+    // An application permission needs approval whatever it is, so the plan
+    // asked about App B: its reason stays "not approved in the plan".
+    let backup = manifest(vec![app, consenting_app(SRC_B, "App B")]);
+
+    let (report, _) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(!consent_attempted(&server, "app-a").await);
+    let item = report
+        .manual_items
+        .iter()
+        .find(|m| m.display_name == "App A")
+        .expect("the withheld consent is a runbook item");
+    assert!(
+        item.reason
+            .contains("could not be identified when the restore ran")
+            && !item.reason.contains("not approved in the plan"),
+        "{}",
+        item.reason
+    );
+    assert!(
+        report.apps[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("could not be identified when the restore ran")),
+        "{:?}",
+        report.apps[0].warnings
+    );
+    let asked = report
+        .manual_items
+        .iter()
+        .find(|m| m.display_name == "App B")
+        .expect("App B's withheld consent is a runbook item");
+    assert!(
+        asked.reason.contains("not approved in the plan")
+            && !asked.reason.contains("could not be identified"),
+        "{}",
+        asked.reason
+    );
+    assert!(!report.session_expired, "a 403 is not a dead session");
+}
+
+/// A cancel during Pass 3 leaves each later consenting app without the
+/// consent the backup asks for: those are marked unfinished, never reported
+/// as finished apps that simply have none.
+#[tokio::test]
+async fn a_cancel_during_pass_3_marks_the_unreached_consent_unfinished() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_graph_sp(&server).await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while Pass 3 re-reads App A, the first consent.
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-a"))
+        .respond_with(move |_: &Request| {
+            flag.cancel();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "obj-a",
+                "appId": "app-a",
+                "displayName": "App A",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [{ "id": APP_RW_ROLE, "type": "Role" }]
+                }]
+            }))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_live_apps(&server).await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let backup = manifest(vec![
+        consenting_app(SRC_A, "App A"),
+        consenting_app(SRC_B, "App B"),
+    ]);
+
+    let (report, _) = restore(&client, &backup, cancel, &[SRC_A, SRC_B]).await;
+
+    assert!(report.cancelled);
+    assert!(!consent_attempted(&server, "app-b").await);
+    let b = &report.apps[1];
+    assert!(b.incomplete && !b.consent_granted, "{b:?}");
+    assert!(
+        b.warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted")),
+        "{:?}",
+        b.warnings
+    );
+    assert!(
+        !report.apps[0]
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted")),
+        "App A was reached: {:?}",
+        report.apps[0].warnings
+    );
+}
+
+/// A session that dies in a step that is not a loop — here the
+/// authentication PATCH — leaves the app part-wired, and says so.
+#[tokio::test]
+async fn a_session_that_dies_in_a_patch_marks_the_app_incomplete() {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    let server = MockServer::start().await;
+    mount_fallback(&server).await;
+    // Reads succeed; the first write finds the session dead.
+    let client = GraphClient::with_base_url(
+        "tenant-test",
+        StaticTokenProvider::new("tok"),
+        crate::commands::test_support::dies_after(0),
+        azapptoolkit_core::cache::Cache::new(),
+        server.uri(),
+    );
+    let session = SessionDead::new();
+    let c = created(AppRegistrationBackup {
+        display_name: "App A".into(),
+        web_redirect_uris: vec!["https://good.contoso.com/cb".into()],
+        ..Default::default()
+    });
+
+    let (out, _) = wire_application(
+        &pass_ctx(&client, &session, &HashMap::new()),
+        &c,
+        &BackupApps::default(),
+        &mut PrincipalMemo::new(),
+        &never_cancelled(),
+        false,
+    )
+    .await;
+
+    assert!(session.is_dead());
+    assert!(out.incomplete, "{out:?}");
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("the sign-in session ended while this app was being wired")),
+        "{:?}",
+        out.warnings
+    );
 }
 
 /// The plan names what the file grants and which items need approval:
@@ -2457,7 +3077,7 @@ async fn duplicate_destination_mi_names_become_a_manual_item() {
         ..Default::default()
     }];
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &HashSet::new(),
@@ -2522,7 +3142,7 @@ async fn an_unapproved_mi_gets_no_app_role() {
     // An APP approval with the same id does not approve the identity.
     let app_only = HashSet::from([app_approval(SRC_A)]);
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &app_only,
@@ -2547,7 +3167,7 @@ async fn an_unapproved_mi_gets_no_app_role() {
         source_app_id: SRC_A.into(),
     }]);
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &approved,
@@ -2923,7 +3543,7 @@ async fn a_cancel_during_pass_5_stops_at_the_next_identity() {
         .collect();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &approved,
@@ -2988,7 +3608,7 @@ async fn an_identity_of_another_subtype_is_not_matched_by_name() {
     const GRANTS: &str = "/servicePrincipals/sp-1/appRoleAssignments";
 
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &[mi(MiSubtype::SystemAssigned)],
         &approved,
@@ -3009,7 +3629,7 @@ async fn an_identity_of_another_subtype_is_not_matched_by_name() {
 
     for subtype in [MiSubtype::UserAssigned, MiSubtype::Unknown] {
         let mut report = RestoreReport::default();
-        restore_managed_identities(
+        rebind_mis(
             &client,
             &[mi(subtype)],
             &approved,

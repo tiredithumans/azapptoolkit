@@ -43,6 +43,9 @@ fn BackupCard() -> impl IntoView {
 
     let captured: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
+    // Set by Cancel until the run ends, so a click reads as taken: the backup
+    // stops only at its next chunk boundary.
+    let cancelling = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let progress: RwSignal<Option<crate::bindings::bulk::BulkProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::backup_progress);
@@ -69,6 +72,7 @@ fn BackupCard() -> impl IntoView {
             return;
         };
         busy.set(true);
+        cancelling.set(false);
         error.set(None);
         captured.set(None);
         progress.set(None);
@@ -88,7 +92,17 @@ fn BackupCard() -> impl IntoView {
                         b.enterprise_apps.len(),
                         b.managed_identities.len(),
                     );
-                    captured.set(Some(b));
+                    // Signed out and back in to this tenant while it ran: the
+                    // card that would hold the backup is gone, so "save it to
+                    // a file" would point at nothing.
+                    if captured.try_set(Some(b)).is_some() {
+                        session.toast_error(
+                            "The backup finished, but it could not be kept because you signed \
+                             out while it ran. Back up the tenant again.",
+                            None,
+                        );
+                        return;
+                    }
                     session.toast_success(format!(
                         "Backed up {}, {}, {}. Save it to a file to keep it.",
                         count_noun(apps, "app registration", "app registrations"),
@@ -99,7 +113,7 @@ fn BackupCard() -> impl IntoView {
                 // A user-initiated cancel comes back as the `cancelled` code —
                 // it's not a failure, so show a neutral toast, not a red banner.
                 Err(e) if e.code == "cancelled" => {
-                    session.toast_success("Backup cancelled.");
+                    session.toast_success("Backup cancelled — nothing was captured.");
                 }
                 // The recovery lever when one applies (a dead session, a
                 // rejected token, a step-up), then the banner. A backup is
@@ -112,8 +126,23 @@ fn BackupCard() -> impl IntoView {
         });
     };
     let cancel_backup = move |_| {
+        if cancelling.get_untracked() {
+            return;
+        }
+        let Some(tenant) = session.active_tenant.get_untracked() else {
+            return;
+        };
+        cancelling.set(true);
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_backup().await;
+            let res = backup::cancel_backup().await;
+            // The cancel never reached the backend: the run goes on, so offer
+            // Cancel again and say why.
+            if let Err(e) = res
+                && session.is_active_tenant(&tenant.tenant_id)
+            {
+                cancelling.try_set(false);
+                session.toast_error(format!("Couldn't cancel the backup: {}", e.message), None);
+            }
         });
     };
     let save_file = move |_| {
@@ -184,8 +213,12 @@ fn BackupCard() -> impl IntoView {
                     }}
                 </Button>
                 <Show when=move || busy.get()>
-                    <Button appearance=ButtonAppearance::Subtle on_click=cancel_backup>
-                        "Cancel"
+                    <Button
+                        appearance=ButtonAppearance::Subtle
+                        disabled=Signal::derive(move || cancelling.get())
+                        on_click=cancel_backup
+                    >
+                        {move || if cancelling.get() { "Cancelling…" } else { "Cancel" }}
                     </Button>
                 </Show>
             </div>
@@ -197,9 +230,17 @@ fn BackupCard() -> impl IntoView {
                         let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
                         let cap_label = p.in_flight_cap.map(|c| format!(" · {c} concurrent")).unwrap_or_default();
                         let cap = p.in_flight_cap;
+                        // The backend's first event, sent before it enumerates
+                        // the estate (a full directory scan on a cold cache),
+                        // has no total yet.
+                        let readout = if p.total == 0 {
+                            "Reading the tenant's app and service-principal lists…".to_string()
+                        } else {
+                            format!("Captured {}/{}{label}{cap_label}", p.done, p.total)
+                        };
                         view! {
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <p class="dr-view__progress">{format!("Captured {}/{}", p.done, p.total)}{label}{cap_label}</p>
+                            <p class="dr-view__progress">{readout}</p>
                             <Show when=move || matches!(cap, Some(c) if c < peak_cap.get())>
                                 <p class="dr-view__notice" role="status">
                                     "Microsoft Graph is rate-limiting this backup, so it's automatically slowing down to recover. It will still complete — large tenants just take longer."
@@ -313,6 +354,8 @@ fn RestoreCard() -> impl IntoView {
     let approvals: RwSignal<BTreeSet<backup::RestoreApproval>> = RwSignal::new(BTreeSet::new());
     let confirm_open = RwSignal::new(false);
     let restoring = RwSignal::new(false);
+    // Set by Cancel until the run ends (see `BackupCard`).
+    let cancelling = RwSignal::new(false);
     let restore_error: RwSignal<Option<String>> = RwSignal::new(None);
     let report: RwSignal<Option<backup::RestoreReport>> = RwSignal::new(None);
     // Whether the report on screen has been written to a file — the one place
@@ -341,6 +384,15 @@ fn RestoreCard() -> impl IntoView {
                 .is_some_and(|r| r.apps.iter().any(|a| !a.regenerated_secrets.is_empty()))
         })
     };
+    // What signing out now would lose — a running restore's report, or an
+    // unsaved one's secret values — published for the shell's Sign Out, which
+    // asks first. This card is the only writer; unmounting it (sign-out
+    // itself) has nothing left to lose.
+    let unsaved_secrets = session.tenant_ui.dr_unsaved_secrets;
+    Effect::new(move |_| {
+        unsaved_secrets.set(restoring.get() || (unsaved_report() && report_has_secrets()));
+    });
+    on_cleanup(move || unsaved_secrets.set(false));
 
     let load_file = move |_| {
         let Some(tenant) = session.active_tenant.get() else {
@@ -388,6 +440,7 @@ fn RestoreCard() -> impl IntoView {
         let approved: Vec<backup::RestoreApproval> = approvals.get().into_iter().collect();
         confirm_open.set(false);
         restoring.set(true);
+        cancelling.set(false);
         restore_error.set(None);
         report.set(None);
         restore_progress.set(None);
@@ -404,13 +457,40 @@ fn RestoreCard() -> impl IntoView {
             match res {
                 Ok(r) => {
                     let secrets: usize = r.apps.iter().map(|a| a.regenerated_secrets.len()).sum();
+                    let apps = r.apps.len();
+                    // Signed out and back in to this tenant while it ran (the
+                    // sign-out confirmation was accepted): the card that would
+                    // hold the report is gone, and its one-time secret values
+                    // with it. "Save the report" would point at nothing.
+                    if report.try_set(Some(r)).is_some() {
+                        session.toast_error(
+                            if secrets > 0 {
+                                format!(
+                                    "The restore finished, but its report could not be kept \
+                                     because you signed out while it ran: the values of its {} \
+                                     are lost. Issue new secrets for those apps.",
+                                    count_noun(
+                                        secrets,
+                                        "regenerated secret",
+                                        "regenerated secrets"
+                                    ),
+                                )
+                            } else {
+                                "The restore finished, but its report could not be kept because \
+                                 you signed out while it ran. Run it again with the same backup \
+                                 file to see what it did."
+                                    .to_string()
+                            },
+                            None,
+                        );
+                        return;
+                    }
                     session.toast_success(format!(
                         "Restored {}; {} regenerated. Save the report — \
                          the secret values are shown only once.",
-                        count_noun(r.apps.len(), "app", "apps"),
+                        count_noun(apps, "app", "apps"),
                         count_noun(secrets, "secret", "secrets"),
                     ));
-                    report.set(Some(r));
                     report_saved.set(false);
                     report_gen.update(|g| *g += 1);
                     // A second click would be a second restore, so running it
@@ -425,8 +505,23 @@ fn RestoreCard() -> impl IntoView {
         });
     };
     let cancel_restore = move |_| {
+        if cancelling.get_untracked() {
+            return;
+        }
+        let Some(tenant) = session.active_tenant.get_untracked() else {
+            return;
+        };
+        cancelling.set(true);
         leptos::task::spawn_local(async move {
-            let _ = backup::cancel_restore().await;
+            let res = backup::cancel_restore().await;
+            // The cancel never reached the backend: the run goes on, so offer
+            // Cancel again and say why.
+            if let Err(e) = res
+                && session.is_active_tenant(&tenant.tenant_id)
+            {
+                cancelling.try_set(false);
+                session.toast_error(format!("Couldn't cancel the restore: {}", e.message), None);
+            }
         });
     };
     let save_report = Callback::new(move |()| {
@@ -509,8 +604,12 @@ fn RestoreCard() -> impl IntoView {
                     </Button>
                 </Show>
                 <Show when=move || restoring.get()>
-                    <Button appearance=ButtonAppearance::Subtle on_click=cancel_restore>
-                        "Cancel"
+                    <Button
+                        appearance=ButtonAppearance::Subtle
+                        disabled=Signal::derive(move || cancelling.get())
+                        on_click=cancel_restore
+                    >
+                        {move || if cancelling.get() { "Cancelling…" } else { "Cancel" }}
                     </Button>
                 </Show>
             </div>
@@ -538,7 +637,8 @@ fn RestoreCard() -> impl IntoView {
                         let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
                         view! {
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p>
+                            // Work items across all five passes, not just the creates.
+                            <p class="dr-view__progress">{format!("Restoring {}/{}", p.done, p.total)}{label}</p>
                         }
                     })
                 }}
@@ -627,9 +727,12 @@ fn RestorePlanView(
             {cloud.map(|m| view! {
                 <Callout tone="danger" role="alert">
                     {format!(
-                        "This backup is from the \"{}\" cloud, but this app targets \"{}\". \
-                         Restore is blocked — use a build configured for the backup's cloud.",
-                        m.backup_cloud.as_str(), m.destination_cloud.as_str(),
+                        "This backup is from the \"{b}\" cloud, but this app targets \"{}\". \
+                         Restore is blocked. If this tenant is in the \"{b}\" cloud, relaunch \
+                         with AZAPPTOOLKIT_CLOUD={b} (and a client ID registered in that cloud), \
+                         or use a build configured for it.",
+                        m.destination_cloud.as_str(),
+                        b = m.backup_cloud.as_str(),
                     )}
                 </Callout>
             })}
@@ -964,12 +1067,16 @@ fn RestoreReportView(
     let total_secrets: usize = apps.iter().map(|a| a.regenerated_secrets.len()).sum();
     let has_secrets = total_secrets > 0;
     let app_count = apps.len();
+    // Apps the run created (or adopted) but stopped before wiring fully: they
+    // exist in the tenant, so they are listed — marked, never as finished.
+    let unfinished = apps.iter().filter(|a| a.incomplete).count();
     view! {
         <div class="dr-view__result">
             <p class="dr-view__summary">
                 {format!(
-                    "Restored {}{}. {} regenerated.",
+                    "Restored {}{}{}. {} regenerated.",
                     count_noun(app_count, "app", "apps"),
+                    if unfinished > 0 { format!(", {unfinished} not finished") } else { String::new() },
                     match (cancelled, session_expired) {
                         (_, true) => " (stopped early — the sign-in session expired)",
                         (true, false) => " (cancelled before completing — partial)",
@@ -980,7 +1087,7 @@ fn RestoreReportView(
             </p>
             <Show when=move || session_expired>
                 <Callout tone="warn">
-                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
+                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Every app listed below exists in this tenant; those marked Not finished were not fully wired, and anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
                 </Callout>
             </Show>
             <Show when=move || has_secrets>
@@ -1011,6 +1118,7 @@ fn RestoreReportView(
                         warnings,
                         consent_granted,
                         adopted,
+                        incomplete,
                         ..
                     } = a;
                     view! {
@@ -1019,7 +1127,20 @@ fn RestoreReportView(
                                 <strong>{display_name}</strong>
                                 <span class="dr-view__report-id">{format!("new appId {new_app_id}")}</span>
                                 {consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
-                                {adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
+                                // "completed" only when this run did finish it.
+                                {adopted.then(|| view! {
+                                    <span class="dr-view__badge">
+                                        {if incomplete { "already restored" } else { "already restored — completed" }}
+                                    </span>
+                                })}
+                                {incomplete.then(|| view! {
+                                    <span
+                                        class="dr-view__badge"
+                                        title="The restore stopped before wiring this app fully — run it again with the same backup file to finish it"
+                                    >
+                                        "Not finished"
+                                    </span>
+                                })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {
                                 <ul class="dr-view__secrets">

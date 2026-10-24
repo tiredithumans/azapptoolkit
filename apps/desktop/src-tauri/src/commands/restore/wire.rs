@@ -18,15 +18,17 @@ use azapptoolkit_graph::client::{
     FederatedCredentialRequest, ImplicitGrantSettingsPatch,
 };
 
+use crate::commands::progress::ProgressSink;
 use crate::dto::backup::{
     AppRegistrationBackup, CredentialMeta, ManualItem, PrincipalRef, RegeneratedSecret,
     RestoreReport, RestoredApp,
 };
 use crate::state::CancelToken;
 
-use super::PassCtx;
-use super::adoption::{FicKey, fic_key};
+use super::adoption::{FicKey, LiveSecret, fic_key};
+use super::plan::Withheld;
 use super::principals::{PrincipalMemo, owner_label, resolve_principal};
+use super::{PassCtx, RestoreProgress};
 
 /// Keeps only the redirect URIs that pass `core::redirect`, recording each
 /// rejection in the restore report.
@@ -94,8 +96,8 @@ pub(super) struct CreatedApp {
     pub(super) new_app_id: String,
     /// Recognised by its restore tag rather than created by this run.
     pub(super) adopted: bool,
-    /// For an adopted app, the display names of the secrets it already holds.
-    pub(super) live_secret_names: Vec<String>,
+    /// For an adopted app, the named secrets it already holds.
+    pub(super) live_secrets: Vec<LiveSecret>,
     /// Pass-1 warnings to carry into the app's report entry.
     pub(super) warnings: Vec<String>,
 }
@@ -358,8 +360,9 @@ pub(super) async fn wire_application(
     } else {
         HashSet::new()
     };
-    for fic in fics {
+    for (i, fic) in fics.iter().enumerate() {
         if cancel.is_cancelled() || session.is_dead() {
+            stopped_before(&mut out, fics.len() - i, fics.len(), "federated credential");
             break;
         }
         let subject = match restorable_fic_subject(fic) {
@@ -457,8 +460,9 @@ pub(super) async fn wire_application(
     } else {
         HashSet::new()
     };
-    for owner in owners {
+    for (i, owner) in owners.iter().enumerate() {
         if cancel.is_cancelled() || session.is_dead() {
+            stopped_before(&mut out, owners.len() - i, owners.len(), "owner");
             break;
         }
         match resolve_principal(client, principals, owner, session).await {
@@ -477,9 +481,10 @@ pub(super) async fn wire_application(
     // for one already expired when the backup was taken, and not for one an
     // earlier run of this restore already issued on an adopted app (matched by
     // name, as a multiset, so two same-named secrets still count as two).
-    let mut already_issued = c.live_secret_names.clone();
-    for meta in &app.secrets {
+    let mut already_issued = c.live_secrets.clone();
+    for (i, meta) in app.secrets.iter().enumerate() {
         if cancel.is_cancelled() || session.is_dead() {
+            stopped_before(&mut out, app.secrets.len() - i, app.secrets.len(), "secret");
             break;
         }
         let name = meta
@@ -496,12 +501,13 @@ pub(super) async fn wire_application(
             ));
             continue;
         }
-        if let Some(pos) = already_issued.iter().position(|n| *n == name) {
-            already_issued.swap_remove(pos);
+        if let Some(pos) = already_issued.iter().position(|s| s.name == name) {
+            let live = already_issued.swap_remove(pos);
             out.warnings.push(format!(
-                "secret '{name}' already exists — not issued again. If an earlier restore run \
-                 issued it, its value is in that run's report; compare its key id with that \
-                 report, and remove it if it isn't that one"
+                "secret '{name}' already exists ({}) — not issued again. If an earlier restore \
+                 run issued it, its value is in that run's report: compare this key id with that \
+                 report, and remove the secret if it isn't that one",
+                live_secret_label(&live)
             ));
             continue;
         }
@@ -520,15 +526,88 @@ pub(super) async fn wire_application(
         }
     }
 
-    // Certificates can't be restored (private key never left the source);
-    // surface them for manual re-upload from the operator's PKI.
-    out.certificates_needing_manual_upload = app
-        .certificates
-        .iter()
-        .map(|c| c.display_name.clone().unwrap_or_else(|| "(unnamed)".into()))
-        .collect();
+    out.certificates_needing_manual_upload = certificates_to_reupload(app);
+
+    // The loops above check before each item, but a session can die in a step
+    // that is not a loop — a PATCH, or the last credential, owner or secret
+    // write — and every later write then failed the same way.
+    if session.is_dead() && !out.incomplete {
+        out.incomplete = true;
+        out.warnings.push(
+            "stopped before finishing: the sign-in session ended while this app was being wired \
+             — run the restore again with the same backup to finish it"
+                .into(),
+        );
+    }
 
     (out, trusts)
+}
+
+/// The kept secret's key id, start date and hint — what tells the secret an
+/// earlier run issued from a planted one that copied its name.
+fn live_secret_label(live: &LiveSecret) -> String {
+    let valid_from = live.valid_from.map_or_else(
+        || "an unknown time".to_string(),
+        |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+    );
+    let hint = live
+        .hint
+        .as_deref()
+        .map(|h| format!(", hint '{h}'"))
+        .unwrap_or_default();
+    format!("key id {}, valid from {valid_from}{hint}", live.key_id)
+}
+
+/// Certificates can't be restored (the private key never left the source), so
+/// each is listed for manual re-upload from the operator's PKI.
+fn certificates_to_reupload(app: &AppRegistrationBackup) -> Vec<String> {
+    app.certificates
+        .iter()
+        .map(|c| c.display_name.clone().unwrap_or_else(|| "(unnamed)".into()))
+        .collect()
+}
+
+/// Flags `out` incomplete: the run stopped (a cancel, or a dead session) with
+/// `left` of the app's `of` items of one step — `what`, singular — never
+/// processed. Without it the app read as finished, with no sign that its
+/// remaining credentials, owners or secrets were skipped.
+fn stopped_before(out: &mut RestoredApp, left: usize, of: usize, what: &str) {
+    out.incomplete = true;
+    let noun = if of == 1 {
+        what.to_string()
+    } else {
+        format!("{what}s")
+    };
+    out.warnings.push(format!(
+        "stopped before finishing: {left} of {of} {noun} not processed — run the restore again \
+         with the same backup to finish this app"
+    ));
+}
+
+/// The report entry for an app Pass 1 created or adopted that Pass 2 never
+/// reached because the run stopped: its ids, its Pass-1 warnings and the
+/// certificates it will need, flagged incomplete. Leaving it out made the
+/// report — the operator's only record of what the run created — silent about
+/// an app that exists in the tenant.
+fn not_wired(c: &CreatedApp) -> RestoredApp {
+    let mut warnings = c.warnings.clone();
+    warnings.push(
+        "not wired — the restore stopped before reaching this app, so none of its \
+         configuration, credentials, owners or secrets were restored; run the restore again \
+         with the same backup to finish it"
+            .into(),
+    );
+    RestoredApp {
+        display_name: c.backup.display_name.clone(),
+        source_app_id: c.backup.source_app_id.clone(),
+        new_app_id: c.new_app_id.clone(),
+        new_object_id: c.new_object_id.clone(),
+        certificates_needing_manual_upload: certificates_to_reupload(&c.backup),
+        warnings,
+        adopted: c.adopted,
+        incomplete: true,
+        ..Default::default()
+    }
 }
 
 /// Pass 2 of [`run_restore`](super::run_restore): wire every app Pass 1 created
@@ -537,27 +616,34 @@ pub(super) async fn wire_application(
 /// the plan's approvals left out.
 ///
 /// Stops at the next app on `cancel` (flagging the report) and on a dead
-/// session.
+/// session — and still reports every app it did not reach ([`not_wired`]), so
+/// `report.apps` stays index-aligned with `created`, which Pass 3 relies on.
+/// Ticks `progress` once per app it wires.
+// Eight, not a struct: `PassCtx` holds what every pass shares, and the token
+// stays a parameter so the repo invariants find this as a cancel runner.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn pass2_wire(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
     backup_apps: &BackupApps,
-    withheld: &HashMap<String, Vec<String>>,
+    withheld: &HashMap<String, Withheld>,
     principals: &mut PrincipalMemo,
     cancel: &CancelToken,
     report: &mut RestoreReport,
+    progress: &mut RestoreProgress<'_, impl ProgressSink>,
 ) {
     let session = ctx.session;
-    for c in created {
+    for (i, c) in created.iter().enumerate() {
         // Both stop conditions, in every pass. Passes 2-5 once checked only
         // `is_dead()`, so Cancel stopped mattering the moment Pass 1 finished:
         // the operator pressed it and watched the restore keep wiring, granting
         // consent and re-binding roles for every remaining app.
         if cancel.is_cancelled() {
             report.cancelled = true;
-            break;
         }
-        if session.is_dead() {
+        if cancel.is_cancelled() || session.is_dead() {
+            // These exist in the tenant: they stay in the report, unwired.
+            report.apps.extend(created[i..].iter().map(not_wired));
             break;
         }
         let (restored, trusts) = wire_application(
@@ -571,5 +657,6 @@ pub(super) async fn pass2_wire(
         .await;
         report.apps.push(restored);
         report.manual_items.extend(trusts);
+        progress.tick(&c.backup.display_name);
     }
 }

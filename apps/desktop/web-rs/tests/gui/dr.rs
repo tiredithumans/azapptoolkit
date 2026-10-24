@@ -27,6 +27,7 @@ use azapptoolkit_dto::events as names;
 use azapptoolkit_web_rs::components::toast::ToastHost;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dr::DisasterRecoveryView;
+use azapptoolkit_web_rs::views::shell::AppShell;
 
 #[wasm_bindgen_test]
 async fn backup_progress_renders_count_and_throttle_notice() {
@@ -49,6 +50,49 @@ async fn backup_progress_renders_count_and_throttle_notice() {
     ts::emit_event(names::BACKUP_PROGRESS, &fixtures::backup_progress(4, 10, 2));
     ts::wait_for(|| ts::query(".dr-view__notice").is_some()).await;
     assert!(ts::body_contains("2 concurrent"));
+}
+
+/// The backup's first event comes before the estate is enumerated (a full
+/// directory scan on a cold cache), with no total yet: it reads as that wait,
+/// never as "Captured 0/0".
+#[wasm_bindgen_test]
+async fn backup_progress_before_the_enumeration_says_it_is_reading_the_lists() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+    ts::tick().await;
+
+    ts::emit_event(names::BACKUP_PROGRESS, &fixtures::backup_progress(0, 0, 4));
+    ts::wait_for(|| ts::body_contains("Reading the tenant's app and service-principal lists…"))
+        .await;
+    assert!(!ts::body_contains("Captured 0/0"));
+
+    ts::emit_event(names::BACKUP_PROGRESS, &fixtures::backup_progress(0, 12, 4));
+    ts::wait_for(|| ts::body_contains("Captured 0/12")).await;
+}
+
+/// Restore progress reads as the run's work, not just its creates: the
+/// backend counts every pass's items, so the label says "Restoring", never
+/// "Created N/N" sitting full while wiring and consent go on.
+#[wasm_bindgen_test]
+async fn restore_progress_reads_as_the_whole_run() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+    ts::tick().await;
+
+    ts::emit_event(
+        names::RESTORE_PROGRESS,
+        &azapptoolkit_dto::bulk::BulkProgress {
+            done: 3,
+            total: 7,
+            current_app: Some("App A".into()),
+            cancelled: false,
+            in_flight_cap: None,
+        },
+    );
+    ts::wait_for(|| ts::body_contains("Restoring 3/7 — App A")).await;
+    assert!(!ts::body_contains("Created 3/7"));
 }
 
 /// A minimal manifest — the view only passes it back to `restore_tenant`.
@@ -355,6 +399,50 @@ async fn an_expired_session_during_restore_asks_for_re_authentication() {
     assert!(
         body.contains("Re-authenticate and run the restore again"),
         "the operator needs the remedy, not only the diagnosis: {body}"
+    );
+}
+
+/// An app the run created but stopped before wiring fully is listed — it
+/// exists in the tenant — and marked, so it never reads as a finished one.
+#[wasm_bindgen_test]
+async fn an_app_the_run_did_not_finish_is_marked_not_finished() {
+    let _m = run_restore(RestoreReport {
+        apps: vec![
+            RestoredApp {
+                display_name: "App A".into(),
+                ..Default::default()
+            },
+            RestoredApp {
+                display_name: "App B".into(),
+                new_app_id: "app-b".into(),
+                incomplete: true,
+                warnings: vec!["not wired — the restore stopped before reaching this app".into()],
+                ..Default::default()
+            },
+        ],
+        cancelled: true,
+        ..Default::default()
+    })
+    .await;
+    let body = ts::body_text();
+    assert!(
+        body.contains("Restored 2 apps, 1 not finished"),
+        "the summary counts the unfinished app: {body}"
+    );
+    assert!(
+        body.contains("new appId app-b"),
+        "its new id is listed: {body}"
+    );
+    assert_eq!(
+        ts::query_all(".dr-view__report-app")
+            .iter()
+            .filter(|el| el
+                .text_content()
+                .unwrap_or_default()
+                .contains("Not finished"))
+            .count(),
+        1,
+        "only the unfinished app is marked"
     );
 }
 
@@ -697,4 +785,161 @@ async fn approve_all_listed_ticks_every_item_needing_approval() {
             { "kind": "managedIdentity", "sourceAppId": "src-a" }
         ])
     );
+}
+
+/// Cancel reads as taken: "Cancelling…" and disabled until the run ends. The
+/// backup stops only at its next chunk boundary, and a Cancel that looked
+/// unclicked invited a second click, or a wait for nothing. The next run gets
+/// a fresh Cancel.
+#[wasm_bindgen_test]
+async fn backup_cancel_reads_as_cancelling_until_the_run_ends() {
+    ts::reset();
+    ts::mock_pending("backup_tenant");
+    ts::mock_ok("cancel_backup", &());
+    let _m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+
+    ts::click_button_labelled("Back up this tenant");
+    ts::wait_for(|| ts::has_button_labelled("Cancel")).await;
+    ts::click_button_labelled("Cancel");
+    ts::wait_for(|| ts::has_button_labelled("Cancelling…")).await;
+    assert!(
+        !ts::button_labelled_enabled("Cancelling…"),
+        "a second click is not offered"
+    );
+    assert_eq!(ts::call_count("cancel_backup"), 1);
+
+    // The run ends; the next one starts with Cancel, not "Cancelling…".
+    assert_eq!(ts::resolve_pending("backup_tenant", &backup()), 1);
+    ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
+    ts::click_button_labelled("Back up this tenant");
+    ts::wait_for(|| ts::has_button_labelled("Cancel")).await;
+    assert!(ts::button_labelled_enabled("Cancel"));
+}
+
+/// The restore's Cancel behaves the same way.
+#[wasm_bindgen_test]
+async fn restore_cancel_reads_as_cancelling() {
+    ts::reset();
+    ts::mock_pending("restore_tenant");
+    ts::mock_ok("cancel_restore", &());
+    let _m = load_plan(plan()).await;
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
+
+    ts::wait_for(|| ts::has_button_labelled("Cancel")).await;
+    ts::click_button_labelled("Cancel");
+    ts::wait_for(|| ts::has_button_labelled("Cancelling…")).await;
+    assert!(!ts::button_labelled_enabled("Cancelling…"));
+    assert_eq!(ts::call_count("cancel_restore"), 1);
+}
+
+/// Runs a restore inside the shell, answering `report`, and waits for it.
+async fn restore_in_shell(report: RestoreReport) -> ts::Mounted {
+    ts::mock_ok("load_backup_from_file", &Some(backup()));
+    ts::mock_ok("plan_restore", &plan());
+    ts::mock_ok("restore_tenant", &report);
+    ts::mock_ok("sign_out", &());
+    let m = ts::mount_view(|| view! { <AppShell><DisasterRecoveryView /></AppShell> });
+    ts::wait_for(|| ts::has_button_labelled("Load backup file…")).await;
+    ts::click_button_labelled("Load backup file…");
+    ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
+    m
+}
+
+/// Opens the account menu and presses Sign Out.
+async fn press_sign_out() {
+    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
+    ts::click(".shell__tenant-chip");
+    ts::wait_for(|| ts::query(".shell__account-item--signout").is_some()).await;
+    ts::click(".shell__account-item--signout");
+}
+
+/// Sign-out discards the DR view's report — and an unsaved one's one-time
+/// secret values cannot be shown again — so Sign Out asks first: Stay keeps
+/// the report and the session, Sign out anyway goes ahead.
+#[wasm_bindgen_test]
+async fn signing_out_over_an_unsaved_secret_report_asks_first() {
+    ts::reset();
+    let _m = restore_in_shell(report_with_a_secret()).await;
+    ts::wait_for(|| ts::body_contains("s3cr3t-value")).await;
+
+    press_sign_out().await;
+    ts::wait_for(|| ts::body_contains("Signing out discards them")).await;
+    assert_eq!(
+        ts::call_count("sign_out"),
+        0,
+        "nothing is signed out before the answer"
+    );
+    ts::click_button_labelled("Stay signed in");
+    ts::wait_for(|| !ts::has_button_labelled("Stay signed in")).await;
+    assert!(ts::body_contains("s3cr3t-value"), "the report is kept");
+    assert_eq!(ts::call_count("sign_out"), 0);
+
+    press_sign_out().await;
+    ts::wait_for(|| ts::has_button_labelled("Sign out anyway")).await;
+    ts::click_button_labelled("Sign out anyway");
+    ts::wait_for(|| ts::call_count("sign_out") == 1).await;
+}
+
+/// With nothing to lose — no secrets in the report — Sign Out does not ask.
+#[wasm_bindgen_test]
+async fn signing_out_over_a_report_without_secrets_does_not_ask() {
+    ts::reset();
+    let _m = restore_in_shell(RestoreReport::default()).await;
+    press_sign_out().await;
+    ts::wait_for(|| ts::call_count("sign_out") == 1).await;
+    assert!(!ts::body_contains("Signing out discards them"));
+}
+
+/// A restore whose card is gone when it lands (signed out and back in to the
+/// same tenant while it ran) cannot keep its report: the toast says so, and
+/// that the secrets need reissuing — never "Save the report", which would
+/// point at a report that is not there.
+#[wasm_bindgen_test]
+async fn a_report_landing_after_its_card_is_gone_says_it_was_not_kept() {
+    ts::reset();
+    ts::mock_ok("load_backup_from_file", &Some(backup()));
+    ts::mock_ok("plan_restore", &plan());
+    ts::mock_pending("restore_tenant");
+    let shown = RwSignal::new(true);
+    let m = ts::mount_view(move || {
+        view! {
+            <ToastHost />
+            <Show when=move || shown.get()>
+                <DisasterRecoveryView />
+            </Show>
+        }
+    });
+    ts::tick().await;
+    ts::click_button_labelled("Load backup file…");
+    ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
+    ts::click_button_labelled("Restore into this tenant…");
+    ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::click_button_labelled("Restore");
+    ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
+    // While it runs, signing out would lose its report.
+    let flag = m.session.tenant_ui.dr_unsaved_secrets;
+    ts::wait_for(|| flag.get_untracked()).await;
+
+    shown.set(false);
+    ts::wait_for(|| ts::query(".dr-view").is_none()).await;
+    assert!(!flag.get_untracked(), "the card's unmount clears the flag");
+    assert_eq!(
+        ts::resolve_pending("restore_tenant", &report_with_a_secret()),
+        1
+    );
+    ts::wait_for(|| ts::body_contains("could not be kept")).await;
+    assert!(
+        ts::body_contains("Issue new secrets"),
+        "{}",
+        ts::body_text()
+    );
+    assert!(!ts::body_contains("Save the report"));
 }

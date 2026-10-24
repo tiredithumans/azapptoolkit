@@ -92,7 +92,11 @@ feeds both the plan's `invalid_manifest` blocker and the refusal.
 The file itself is read through the shared `export::read_capped_utf8`, capped at
 `MAX_BACKUP_BYTES` (256 MiB — far above a large tenant's manifest) by the read,
 not by a size check the file could outgrow; a non-UTF-8 file is refused with an
-error naming its encoding.
+error naming its encoding. A file that does not parse is re-read as plain JSON
+(`not_a_backup`) to say what it is when it can: a `schemaVersion` above this
+build's gets the restore's own `check_manifest_schema` refusal (`schema_too_new`
+— its new fields are what failed), and an object with `apps` and `manualItems`
+is a restore report picked by mistake.
 
 Three object classes:
 
@@ -144,7 +148,11 @@ of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
 Each batched read returns `Vec<Result<T>>` in input order; a **whole-batch
 failure degrades to per-object reads** for that chunk (never failing the backup),
 and a per-object failure skips (or partially captures) just that object,
-recorded in `skipped`. Concurrency is **adaptive**: a
+recorded in `skipped`. A chunk *task* that panicked or was aborted is different:
+its objects are gone with no `skipped` entry, so `collect_chunk` latches it and
+the backup fails (`lost_task`, the bulk runs' `LOST_TASK` code: "nothing was
+captured — run the backup again")
+rather than reading as complete. Concurrency is **adaptive**: a
 shared `ConcurrencyThrottle` (`commands/throttle.rs`, the audit's tracker)
 wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
 and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
@@ -153,7 +161,10 @@ and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
 It is long-running, so it claims (once, before the first await) its own
 `backup_cancel` token (cancelled only by `cancel_backup`, so neither a restore
 nor an audit/bulk run can stop it; checked at chunk boundaries) and emits
-`backup-progress` (`BulkProgress` shape) events the DR view renders. A cancelled
+`backup-progress` (`BulkProgress` shape) events the DR view renders — the first
+one, `0/0`, before the index enumeration, which on a cold cache is a full
+directory scan; the view shows a total of 0 as "Reading the tenant's app and
+service-principal lists…". A cancelled
 run is an **error**, not a truncated success — a partial backup is a dangerous DR
 artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
 restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
@@ -225,7 +236,11 @@ unapproved MI, Pass 5 re-binds no role. Each withheld set is a `ManualItem`
 ("not approved in the plan"); the app is still created and wired (permissions
 declared, URIs, secrets, role assignments). A classification read that fails
 makes the permission `Unknown`, so a transient error withholds rather than
-grants. A dead session while planning is an error, not a plan of unknowns.
+grants — and when that failed read is the only reason the app needs approval
+(the plan may never have asked about it), its consent's runbook item says a
+permission could not be identified when the restore ran
+(`Withheld::lookup_failed`) rather than "not approved in the plan". A dead
+session while planning is an error, not a plan of unknowns.
 
 **Consent grants only what the plan showed.** `grant_admin_consent_core`
 consents the *live* app's `requiredResourceAccess`, and the plan classified the
@@ -341,10 +356,22 @@ with no subject, can never be matched and is foreign): the standing access an
 owner check cannot see. A credential the operator added after an earlier run is
 refused the same way — the item says to finish the app by hand or remove it and
 re-run. A same-named secret is the one residue; Pass 2 reports it rather than
-keeping it silently. Only then does the app join the remap: its SP is ensured (the earlier run may
-have died between the two POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
+keeping it silently, naming the live secret's key id, start date and hint
+(carried from the tag lookup as `LiveSecret`) so the operator can compare it
+with the earlier run's report. Last, the hit's existing **service principal** is
+checked (`check_service_principal`), whether or not the manifest says the app had
+one: it is the other half of the app, Pass 1 only ensures it exists, and Pass 3
+consents onto it. It is read live — `get_service_principal_credentials_by_app_id`,
+never the SP cache, since a cached copy could predate a planted credential — with
+its owners (`list_service_principal_owners`). Any password or certificate on it
+refuses (a restore never adds one, so one the operator added after an earlier run
+is refused too, with the same two ways out), and so does an owner outside the set
+the app's own owners are held to (the operator and the manifest's resolved
+owners); a failed read of either refuses like the rest. Only then does the app
+join the remap: its SP is ensured (the earlier run may have died between the two
+POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
 
-A failed lookup — of the tag, of the owners or of the federated credentials — **fails closed** into a
+A failed lookup — of the tag, of the owners, of the federated credentials or of the service principal — **fails closed** into a
 `ManualItem` too: creating blind is how a re-run duplicates the estate, and
 adopting blind is how someone else's app is granted this one's consent. For an adopted app Pass 2 re-applies the
 full-replace PATCHes as-is and skips what is already there among the additive
@@ -389,7 +416,17 @@ the next item in whichever pass is running — including inside each pass's
 per-item loops (owners, secrets, federated credentials, assignees, group
 memberships, managed identities) and the report flags the run
 cancelled, so a re-run adopts the already-created, tagged apps and finishes
-them), emits `restore-progress`, and busts the destination's list
+them; the report still lists every app Pass 1 created or adopted, with its new
+ids: one Pass 2 never reached is a "not wired" entry, and one whose federated
+credential, owner or secret loop was cut short says how many were left, both
+flagged `RestoredApp.incomplete` (the DR view's Not finished), which keeps
+`report.apps` index-aligned with `created`; a consenting app Pass 3 did not
+reach, and an app whose session died in a step that is not a loop, are flagged
+the same way), emits `restore-progress` across
+all five passes (`RestoreProgress`: the total is each app twice — create, wire —
+plus each consenting app, enterprise app and managed identity; every pass ticks
+as it settles an item, and the DR view reads "Restoring done/total"), and
+busts the destination's list
 caches (`invalidate_app_lists`) when anything was created. The `RestoreReport`
 carries the new ids, the show-once regenerated secrets, unresolved owners,
 certificates needing manual re-upload, per-app warnings, and hard failures.
@@ -465,4 +502,16 @@ dialog's Done for a restore — which drops it, after a confirmation while the
 report is unsaved. **Load backup file…** waits while an unsaved report is on
 screen, and clears a saved one only once a file is chosen; a new restore and
 sign-out also drop it. It is never cleared on navigation, because the values
-cannot be shown again.
+cannot be shown again. Sign-out is the one way to drop it without the view's own
+confirmation, and the backend restore keeps running until the session fence stops
+it — so while a restore runs, or its report holds secret values nobody saved,
+`RestoreCard` sets `TenantScopedUi::dr_unsaved_secrets` and the shell's Sign Out
+asks first (confirm, not block: a dead restore's secrets are reissued either way).
+A restore that lands after its card is gone — signed out and back in to the same
+tenant while it ran — cannot keep its report (`report.try_set` hands it back): its
+toast says the report was lost and the secrets need reissuing, never "save the
+report"; a backup that lands that way says to back up again. Each card's Cancel
+reads "Cancelling…" and stays disabled until the run ends (a backup stops only
+at its next chunk boundary), and a cloud-mismatch block names the
+`AZAPPTOOLKIT_CLOUD` value to relaunch with (and a client ID registered in that
+cloud) beside using a build configured for it.

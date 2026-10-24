@@ -18,9 +18,21 @@ After 0.34.1, each change is one line written for the person using the app.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
+- A cancelled or interrupted restore now lists every app it created, and marks the ones it did not finish.
+- A restore that can't identify a permission while running now says so, not "not approved in the plan".
+- A restore re-run that keeps an existing same-named secret now shows its key id, start date and hint.
+- Restore progress now keeps moving through every step, instead of sitting full once the apps are created.
+- Signing out now asks first while a restore runs or its report holds secret values you haven't saved.
+- A restore that finishes after you signed out and back in now says its report was lost, not to save it.
+- Cancel on a backup or restore now reads "Cancelling…" until the run stops.
+- A restore blocked by a cloud mismatch now says which AZAPPTOOLKIT_CLOUD value to relaunch with.
+- A backup now shows that it started while it reads the tenant's app lists, instead of nothing.
+- A backup whose background task fails now stops with an error instead of reporting Ready with apps missing.
+- Loading a restore report or a newer build's backup now says which it is, not a raw parse error.
 
 ### Security
 
+- A restore re-run no longer takes over an app whose service principal has a credential or an unknown owner.
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
 - Security fix for a timing weakness in a cryptography helper that the app's hashing code depends on.
 

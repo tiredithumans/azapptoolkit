@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
+use tokio::task::JoinError;
 
 use azapptoolkit_core::models::{
     AppRoleAssignment, Application, ApplicationExposeApi, DirectoryObject,
@@ -29,6 +30,7 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::{ProgressSink, emit_progress};
+use crate::commands::restore::check_manifest_schema;
 use crate::commands::throttle::{FanOutMeter, FanOutTicker};
 use crate::dto::UiError;
 use crate::dto::backup::{
@@ -36,7 +38,7 @@ use crate::dto::backup::{
     CredentialMeta, EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, SkippedObject,
     TenantBackup,
 };
-use crate::dto::bulk::BulkProgress;
+use crate::dto::bulk::{BulkProgress, LOST_TASK};
 use crate::dto::managed_identity::MiSubtype;
 use crate::state::{AppState, CancelToken};
 
@@ -97,6 +99,10 @@ pub async fn backup_tenant(
     // meter's completion counter is the backup's running `done`, shared by all
     // three passes (it used to be a hand-rolled tracker + an async-locked count).
     let meter = FanOutMeter::attach(client.clone(), INITIAL_DR_CONCURRENCY);
+    // A first event before the enumeration below: on a cold cache it is a
+    // full directory scan, and nothing else tells the view the run started
+    // (a total of 0 reads as "reading the tenant's lists").
+    emit(&app_handle, 0, 0, None, Some(meter.limit()));
 
     // Enumerate the estate up front so progress has a real denominator. BOTH
     // indexes are the shared per-tenant entries the lists populate, so a backup
@@ -136,6 +142,7 @@ pub async fn backup_tenant(
     // Carried onto the manifest so a short backup says so — see
     // `TenantBackup::skipped`.
     let mut skipped: Vec<SkippedObject> = Vec::new();
+    let mut lost_task = false;
     let cancelled = dispatch_capped(
         app_chunks,
         || meter.limit(),
@@ -157,21 +164,20 @@ pub async fn backup_tenant(
                 backup_app_chunk(&client, chunk, &sp_app_ids, &tick, &session).await
             }))
         },
-        |joined| {
-            if let Ok((mut v, mut s)) = joined {
-                app_backups.append(&mut v);
-                skipped.append(&mut s);
-            }
-        },
+        |joined| collect_chunk(joined, &mut app_backups, &mut skipped, &mut lost_task),
     )
     .await;
     // A partial backup is a dangerous DR artifact (it reads as complete), so a
-    // cancelled run is an error, not a truncated success.
+    // cancelled run is an error, not a truncated success — and so is one that
+    // lost a chunk's task.
     if session.is_dead() {
         return Err(session.err("the tenant backup"));
     }
     if cancelled || cancel.is_cancelled() {
         return Err(cancelled_err());
+    }
+    if lost_task {
+        return Err(lost_task_err());
     }
 
     // appId → source object id, so an enterprise-app SP backed by an in-backup
@@ -219,12 +225,7 @@ pub async fn backup_tenant(
                 backup_enterprise_chunk(&client, chunk, &tenant, &map, &tick, &session).await
             }))
         },
-        |joined| {
-            if let Ok((mut v, mut s)) = joined {
-                enterprise_apps.append(&mut v);
-                skipped.append(&mut s);
-            }
-        },
+        |joined| collect_chunk(joined, &mut enterprise_apps, &mut skipped, &mut lost_task),
     )
     .await;
     if session.is_dead() {
@@ -232,6 +233,9 @@ pub async fn backup_tenant(
     }
     if ent_cancelled || cancel.is_cancelled() {
         return Err(cancelled_err());
+    }
+    if lost_task {
+        return Err(lost_task_err());
     }
 
     // ---- Managed identities: identity + held Graph app-roles (the re-bindable
@@ -264,7 +268,45 @@ pub async fn backup_tenant(
 /// A cancelled backup is an error, not a truncated success — a partial manifest
 /// reads as complete and is a dangerous DR artifact.
 fn cancelled_err() -> UiError {
-    UiError::new("cancelled", "backup cancelled before completion", false)
+    UiError::new(
+        "cancelled",
+        "backup cancelled before completion — nothing was captured",
+        false,
+    )
+}
+
+/// Feeds one joined chunk task into its pass's results. A task that panicked
+/// or was aborted took up to [`BATCH_CHUNK`] objects with it and recorded no
+/// `skipped` entry for them, so the pass latches `lost` and the backup fails
+/// ([`lost_task_err`]) instead of reading as complete without them.
+fn collect_chunk<T>(
+    joined: Result<(Vec<T>, Vec<SkippedObject>), JoinError>,
+    out: &mut Vec<T>,
+    skipped: &mut Vec<SkippedObject>,
+    lost: &mut bool,
+) {
+    match joined {
+        Ok((mut v, mut s)) => {
+            out.append(&mut v);
+            skipped.append(&mut s);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "a backup chunk task ended without its result");
+            *lost = true;
+        }
+    }
+}
+
+/// A backup that lost a chunk's task is an error: the objects in it are
+/// missing with no record of it, the partial manifest the cancel rule refuses.
+/// Coded like the bulk runs' lost task ([`LOST_TASK`]); a backup only reads, so
+/// running it again is safe.
+fn lost_task_err() -> UiError {
+    UiError::new(
+        LOST_TASK,
+        "a backup task failed; nothing was captured — run the backup again",
+        true,
+    )
 }
 
 /// Writes a [`TenantBackup`] to a JSON file via the OS save dialog. JSON only:
@@ -328,8 +370,32 @@ pub async fn load_backup_from_file(app_handle: AppHandle) -> Result<Option<Tenan
 /// without a 256 MiB fixture).
 fn read_backup_file(path: &std::path::Path, cap: u64) -> Result<TenantBackup, UiError> {
     let content = super::export::read_capped_utf8(path, cap, "invalid_backup_file")?;
-    serde_json::from_str(&content)
-        .map_err(|e| UiError::serde(format!("not a valid backup file: {e}")))
+    serde_json::from_str(&content).map_err(|e| not_a_backup(&content, &e))
+}
+
+/// Why `content` did not parse as a backup, in the operator's terms where the
+/// file says what it is instead: a backup from a newer build (whose fields
+/// this one cannot read — refused by the restore's own
+/// [`check_manifest_schema`]), or a restore report picked by mistake — both of
+/// which once surfaced as a bare serde message ("missing field
+/// `schemaVersion`").
+fn not_a_backup(content: &str, err: &serde_json::Error) -> UiError {
+    let value: Option<serde_json::Value> = serde_json::from_str(content).ok();
+    let object = value.as_ref().and_then(serde_json::Value::as_object);
+    if let Some(version) = object
+        .and_then(|o| o.get("schemaVersion"))
+        .and_then(serde_json::Value::as_u64)
+        && let Err(newer) = check_manifest_schema(u32::try_from(version).unwrap_or(u32::MAX))
+    {
+        return newer;
+    }
+    if object.is_some_and(|o| o.contains_key("apps") && o.contains_key("manualItems")) {
+        return UiError::serde(
+            "This is a restore report, not a backup file. Load the backup file the restore was \
+             run from.",
+        );
+    }
+    UiError::serde(format!("not a valid backup file: {err}"))
 }
 
 /// Signals an in-progress backup to stop at the next dispatch boundary.
@@ -1041,6 +1107,77 @@ mod tests {
         let err = read_backup_file(&utf16.0, cap).unwrap_err();
         assert_eq!(err.code, "invalid_backup_file");
         assert!(err.message.contains("UTF-16"), "{}", err.message);
+    }
+
+    /// A file that is not a backup is named for what it is when it says so: a
+    /// backup from a newer build, or a restore report — once both read as a
+    /// bare serde error ("missing field `schemaVersion`").
+    #[test]
+    fn an_unreadable_backup_file_says_what_it_is() {
+        let read = |json: &[u8]| {
+            let file = temp_file(json);
+            read_backup_file(&file.0, MAX_BACKUP_BYTES).unwrap_err()
+        };
+
+        // The restore's own refusal of a newer manifest: one rule, one code.
+        let newer = read(br#"{ "schemaVersion": 99, "createdAt": "not a date" }"#);
+        assert_eq!(newer.code, "schema_too_new");
+        assert!(
+            newer.message.contains("schema version 99")
+                && newer.message.contains("update azapptoolkit first"),
+            "{}",
+            newer.message
+        );
+
+        let report = serde_json::to_vec(&crate::dto::backup::RestoreReport::default()).unwrap();
+        let report = read(&report);
+        assert!(
+            report
+                .message
+                .contains("This is a restore report, not a backup file"),
+            "{}",
+            report.message
+        );
+
+        // Anything else keeps the parser's own account of what is wrong.
+        let other = read(br#"{ "hello": "world" }"#);
+        assert!(
+            other.message.starts_with("not a valid backup file:"),
+            "{}",
+            other.message
+        );
+    }
+
+    /// A chunk task that panicked (or was aborted) took its objects with it and
+    /// recorded no skip for them; the backup fails rather than reading as
+    /// complete without them. It was once dropped by an `if let Ok`.
+    #[tokio::test]
+    async fn a_chunk_whose_task_panicked_fails_the_backup() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut skipped: Vec<SkippedObject> = Vec::new();
+        let mut lost = false;
+        dispatch_capped(
+            [false, true, false],
+            || 2,
+            |panics| {
+                Some(tokio::spawn(async move {
+                    assert!(!panics, "this chunk's task panics");
+                    (vec![1u8], Vec::<SkippedObject>::new())
+                }))
+            },
+            |joined| collect_chunk(joined, &mut out, &mut skipped, &mut lost),
+        )
+        .await;
+        assert!(lost, "a lost chunk must be noticed");
+        assert_eq!(out.len(), 2, "the other chunks still land");
+
+        let err = lost_task_err();
+        assert_eq!(err.code, LOST_TASK);
+        assert!(
+            err.message.contains("nothing was captured"),
+            "{}",
+            err.message
+        );
     }
 
     /// A ticker that records into `rec`; the events carry `fan`'s cap, so a

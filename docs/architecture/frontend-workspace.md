@@ -341,8 +341,10 @@ footgun, with the reset enforced **by structure, not vigilance**:
   facet of every drill target (`enterprise_facet`, `mi_facet`, `credentials_facet`, the audit's
   `audit_severity`, the Findings pane's `audit_expanded_group`); the two lists' creation-date
   ranges (`apps_created_*` / `enterprise_created_*`); both bulk selections
-  (`selected_app_ids`, `selected_audit_ids`); the pending deep-link tabs; and the shell dialog
-  flags (`cache_open` / `create_open` / `sso_wizard_open`).
+  (`selected_app_ids`, `selected_audit_ids`); the pending deep-link tabs; the shell dialog
+  flags (`cache_open` / `create_open` / `sso_wizard_open`); and `dr_unsaved_secrets`, which the
+  DR view's `RestoreCard` keeps set while a restore runs or its report holds unsaved secret values,
+  so the shell's Sign Out confirms first (see backup-and-restore.md).
 - **Who seeds it** — Global Search seeds the list search; the Home dashboard's clickable metrics
   seed the facet via `open_enterprise_with_facet` / `open_managed_identities_with_facet` /
   `open_posture_with_facet` / `open_credentials_with_facet` before navigating.
@@ -437,7 +439,9 @@ unconditionally.
 
 Tests are `tests/gui/<view>.rs` **modules**, grouped into shard binaries
 (`tests/gui_N.rs`) via `#[path] mod`; the harness lives in
-`web-rs/src/test_support/`.
+`web-rs/src/test_support/`. A command mocked with `mock_pending` stays in flight
+until `resolve_pending` settles it, for a test that acts mid-run (a Cancel, an
+unmount).
 
 **Why shards.** Each served test wasm must stay under the ceiling headless Chrome
 will instantiate (at opt-level 0 one merged binary exceeded it), and each binary

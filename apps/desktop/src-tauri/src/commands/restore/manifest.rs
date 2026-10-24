@@ -19,8 +19,10 @@ use crate::dto::backup::{
 ///
 /// Only the future direction is rejected: every field is `serde(default)` and
 /// additive, so an older manifest restores correctly, and refusing one would
-/// break the DR case the format was versioned to support.
-pub(super) fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
+/// break the DR case the format was versioned to support. Loading a backup
+/// file that fails to parse uses it too (`backup::read_backup_file`): its
+/// unreadable new fields are what failed.
+pub(in crate::commands) fn check_manifest_schema(schema_version: u32) -> Result<(), UiError> {
     if schema_too_new(schema_version).is_some() {
         return Err(UiError::validation(
             "schema_too_new",
@@ -222,6 +224,7 @@ pub(super) fn bound_report_text(report: &mut RestoreReport) {
         warnings,
         consent_granted: _,
         adopted: _,
+        incomplete: _,
     } in apps
     {
         cap_report_value(display_name);
