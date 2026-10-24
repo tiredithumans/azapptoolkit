@@ -25,6 +25,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - The Permissions tab's mailbox Scope banner now offers Re-authenticate when your session has expired.
 - An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
 - The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
+- The Activity, Conditional Access and Provisioning tabs now say when Entra ID is busy or a proxy answered instead.
 
 ### Security
 
