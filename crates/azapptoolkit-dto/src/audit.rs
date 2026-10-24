@@ -332,7 +332,8 @@ pub enum AuditCoverageGap {
     /// The service-principal sign-in activity report could not be read
     /// because of a transient failure — the report throttled, failing (5xx)
     /// or unreachable after the retry budget, or the token endpoint
-    /// unreachable — on a tenant that can otherwise read it.
+    /// unreachable, busy or answered by a proxy instead of Entra ID — on a
+    /// tenant that can otherwise read it.
     ///
     /// Not the *unavailable* case — no consent, no P1/P2 license or no
     /// reporting role — which only switches unused-app detection off, like

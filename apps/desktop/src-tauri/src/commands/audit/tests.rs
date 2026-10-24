@@ -980,15 +980,31 @@ async fn an_unentitled_sign_in_report_is_unavailable_not_a_gap() {
     assert_eq!(gap, None);
 }
 
-/// The pre-acquire half: an unreachable token endpoint (`AuthError::Http` →
-/// `network`) is the transient gap; a missing consent is the grant button, not
-/// a gap; an unclassified `/token` refusal stays unavailable.
+/// The pre-acquire half: a token endpoint that never gave Entra's verdict —
+/// unreachable (`AuthError::Http` → `network`), still busy after its retries
+/// (`ServiceUnavailable`) or answered by a proxy (`UnexpectedResponder`) — is
+/// the transient gap; a missing consent is the grant button, not a gap; an
+/// unclassified `/token` refusal stays unavailable.
 #[test]
-fn a_failed_pre_acquire_is_a_gap_only_when_the_token_endpoint_is_unreachable() {
-    let (available, consent_required, _, gap) =
-        sign_in_pre_acquire_outcome(&UiError::new("network", "connection refused", true));
-    assert!(!available && !consent_required);
-    assert_eq!(gap, Some(AuditCoverageGap::SignInActivity));
+fn a_failed_pre_acquire_is_a_gap_only_when_entra_never_answered() {
+    use azapptoolkit_auth::AuthError;
+    for ui in [
+        // `AuthError::Http` wraps a `reqwest::Error`, which a unit test can't
+        // build; `From<AuthError>` maps it to `network` (pinned in the dto).
+        UiError::new("network", "connection refused", true),
+        UiError::from(AuthError::ServiceUnavailable {
+            status: 503,
+            detail: "temporarily_unavailable (AADSTS90033)".into(),
+        }),
+        UiError::from(AuthError::UnexpectedResponder {
+            status: 403,
+            content_type_class: "html",
+        }),
+    ] {
+        let (available, consent_required, _, gap) = sign_in_pre_acquire_outcome(&ui);
+        assert!(!available && !consent_required, "{}", ui.code);
+        assert_eq!(gap, Some(AuditCoverageGap::SignInActivity), "{}", ui.code);
+    }
     assert!(!run_is_cacheable(
         false,
         false,

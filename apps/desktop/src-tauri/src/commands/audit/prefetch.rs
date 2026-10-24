@@ -371,7 +371,8 @@ pub(crate) type SignInPrefetch = (
 /// operator holds no reporting role reads as *unavailable* — no gap, no
 /// degraded banner, since most tenants are not entitled. A **transient**
 /// failure — the report throttled, failing (5xx) or unreachable once its
-/// pages' retry budget is spent, or the token endpoint unreachable — on a
+/// pages' retry budget is spent, or the token endpoint unreachable, busy or
+/// answered by something other than Entra ID — on a
 /// tenant that can read it IS
 /// [`AuditCoverageGap::SignInActivity`]: unused-app detection silently stopped
 /// working for this run, so it must not be cached or shown as an all-clear,
@@ -391,13 +392,24 @@ pub(crate) async fn prefetch_sign_in_activity(
 
 /// The token half of [`prefetch_sign_in_activity`]: a failed `AuditLog.Read.All`
 /// pre-acquire. A missing consent sets `consent_required` (the "Grant consent"
-/// button); only an unreachable token endpoint — `network`, the auth plane's
-/// code for `AuthError::Http` — is the transient gap. A `/token` 429 or 5xx
-/// arrives as the unclassified `token_exchange` (`post_token` reports every
-/// unrecognised non-2xx that way, 4xx included), so it stays *unavailable*
-/// rather than calling a permanent refusal transient.
+/// button). The transient gap is a token endpoint that never gave Entra's
+/// verdict, so says nothing about the tenant's entitlement:
+///
+/// * `network` (`AuthError::Http`) — unreachable;
+/// * `service_unavailable` (`AuthError::ServiceUnavailable`) — a 429/5xx the
+///   token POST's own retry budget did not clear;
+/// * `unexpected_responder` (`AuthError::UnexpectedResponder`) — a proxy,
+///   firewall or portal answered in Entra's place (a block page is the
+///   network's doing, not the tenant's licensing).
+///
+/// Anything else — `token_exchange` (an unrecognised non-2xx, 4xx included),
+/// a keyring failure — stays *unavailable* rather than calling a permanent
+/// refusal transient.
 pub(crate) fn sign_in_pre_acquire_outcome(ui: &UiError) -> SignInPrefetch {
-    let transient = ui.code == "network";
+    let transient = matches!(
+        ui.code.as_str(),
+        "network" | "service_unavailable" | "unexpected_responder"
+    );
     tracing::info!(
         code = %ui.code,
         "AuditLog.Read.All token unavailable; skipping unused-app detection"

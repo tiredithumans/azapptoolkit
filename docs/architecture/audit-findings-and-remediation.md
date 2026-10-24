@@ -406,7 +406,8 @@ compromise flag must be re-read by every run, and the payload is one row per fla
   Rule 22 never fires on an unchecked assumption. The sign-in report follows the same split
   (`prefetch_sign_in_activity` → `sign_in_activity_outcome`): no consent / license / role is
   unavailable; a transient failure — the report throttled, failing (5xx) or unreachable once
-  `scoped_get_retried`'s budget is spent, or an unreachable token endpoint — is
+  `scoped_get_retried`'s budget is spent, or a token endpoint that was unreachable, busy
+  (`service_unavailable`) or answered by a proxy (`unexpected_responder`) — is
   `AuditCoverageGap::SignInActivity`, and the Findings pane's unused-detection notes (and the
   export's coverage note) then say to re-run rather than to grant consent.
 - **Scoring:** `apply_service_principal_risk` adds +20 (alone ⇒ High; stacks any other finding to
