@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use azapptoolkit_core::restore_plan::remap_required_resource_access;
 
 use crate::commands::permissions::grant_admin_consent_to_app_core;
+use crate::commands::progress::ProgressSink;
 use crate::dto::backup::{ManualItem, RestoreReport, RestoredApp};
 use crate::state::CancelToken;
 
-use super::PassCtx;
 use super::plan::Withheld;
 use super::wire::CreatedApp;
+use super::{PassCtx, RestoreProgress};
 
 /// Pass-3 work for one app: re-grant admin consent — but only for exactly the
 /// declared permissions the plan classified.
@@ -119,13 +120,14 @@ fn rra_fingerprint(
 /// reports an app it did not reach as well).
 ///
 /// Stops at the next app on `cancel` (flagging the report) and on a dead
-/// session.
+/// session. Ticks `progress` once per app whose consent it settles.
 pub(super) async fn pass3_reconsent(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
     withheld: &HashMap<String, Withheld>,
     cancel: &CancelToken,
     report: &mut RestoreReport,
+    progress: &mut RestoreProgress<'_, impl ProgressSink>,
 ) {
     let session = ctx.session;
     debug_assert_eq!(
@@ -178,8 +180,10 @@ pub(super) async fn pass3_reconsent(
                     }
                 ),
             });
+            progress.tick(&c.backup.display_name);
             continue;
         }
         reconsent(ctx, c, &mut report.apps[idx], &mut report.manual_items).await;
+        progress.tick(&c.backup.display_name);
     }
 }

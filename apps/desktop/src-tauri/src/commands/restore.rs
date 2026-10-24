@@ -258,8 +258,18 @@ async fn run_restore(
         approved,
         ..
     } = run;
-    let total = backup.app_registrations.len();
-    emit(progress, 0, total, None);
+    // Where each pass's work ends, cumulatively — see `RestoreProgress`.
+    let apps = backup.app_registrations.len();
+    let consenting = backup
+        .app_registrations
+        .iter()
+        .filter(|a| a.admin_consent_granted)
+        .count();
+    let pass2_end = 2 * apps;
+    let pass3_end = pass2_end + consenting;
+    let pass4_end = pass3_end + backup.enterprise_apps.len();
+    let total = pass4_end + backup.managed_identities.len();
+    let mut progress = RestoreProgress::start(progress, total);
 
     let mut report = RestoreReport::default();
     // Per-run principal-resolution memo (UPN/group display name → destination
@@ -277,7 +287,7 @@ async fn run_restore(
     // ---- Pass 1: create shells ----
     let (app_id_remap, created) = pass1_create_or_adopt(
         client,
-        progress,
+        &mut progress,
         &cancel,
         &run,
         &session,
@@ -285,6 +295,7 @@ async fn run_restore(
         &mut report,
     )
     .await;
+    progress.reach(apps);
 
     // ---- Pass 2: wire references + regenerate secrets (per created app) ----
     // Every app the backup owns, recreated or not: a pre-authorized client in
@@ -308,11 +319,23 @@ async fn run_restore(
         &mut principals,
         &cancel,
         &mut report,
+        &mut progress,
     )
     .await;
+    // Apps Pass 1 refused or failed to create have nothing to wire.
+    progress.reach(pass2_end);
 
     // ---- Pass 3: re-consent (after all apps wired, so resources exist) ----
-    pass3_reconsent(&ctx, &created, &withheld, &cancel, &mut report).await;
+    pass3_reconsent(
+        &ctx,
+        &created,
+        &withheld,
+        &cancel,
+        &mut report,
+        &mut progress,
+    )
+    .await;
+    progress.reach(pass3_end);
 
     // ---- Pass 4: enterprise applications ----
     // Re-apply access (assignments + group memberships + settings) for SPs that
@@ -325,8 +348,10 @@ async fn run_restore(
         &mut principals,
         &cancel,
         &mut report,
+        &mut progress,
     )
     .await;
+    progress.reach(pass4_end);
 
     // ---- Pass 5: managed identities ----
     // MIs are Azure resources — they can't be created here. Re-bind Graph
@@ -342,6 +367,7 @@ async fn run_restore(
             &mut report,
             &session,
             &cancel,
+            &mut progress,
         )
         .await;
     }
@@ -355,7 +381,7 @@ async fn run_restore(
     report.session_expired = session.is_dead();
     // Every text field echoes the file somewhere; bound them all once, here.
     bound_report_text(&mut report);
-    emit(progress, total, total, None);
+    progress.finish();
     let effects = RestoreEffects {
         created_any: !created.is_empty(),
         rebound_any: report
@@ -405,6 +431,62 @@ pub fn cancel_restore(state: State<'_, AppState>) {
 }
 
 // ---------------- internals ----------------
+
+/// Restore progress across all five passes, as `restore-progress` events.
+///
+/// `total` is every unit of work the run can do: each app twice (Pass 1
+/// creates or adopts it, Pass 2 wires it), each app whose admin consent Pass 3
+/// re-grants, and each enterprise app (Pass 4) and managed identity (Pass 5).
+/// It once counted only Pass 1, so the bar sat full at "N/N" while the rest of
+/// the run — wiring, secrets, consent, assignments, role re-binds — went on
+/// with nothing moving. A pass [`tick`](Self::tick)s once per item it settles;
+/// [`reach`](Self::reach) then moves past the items it had no work for (an app
+/// Pass 1 did not create, one with no consent to re-grant), so `done` only
+/// ever grows.
+pub(super) struct RestoreProgress<'p, P> {
+    sink: &'p P,
+    done: usize,
+    total: usize,
+}
+
+impl<'p, P: ProgressSink> RestoreProgress<'p, P> {
+    /// Emits `0/total`.
+    pub(super) fn start(sink: &'p P, total: usize) -> Self {
+        let progress = Self {
+            sink,
+            done: 0,
+            total,
+        };
+        progress.send(None);
+        progress
+    }
+
+    /// One item settled — `name` is the file's name for it.
+    pub(super) fn tick(&mut self, name: &str) {
+        self.done = (self.done + 1).min(self.total);
+        self.send(Some(name.to_string()));
+    }
+
+    /// The end of a pass, as a cumulative count: whatever it did not tick
+    /// counts as settled.
+    pub(super) fn reach(&mut self, end: usize) {
+        let end = end.min(self.total);
+        if end > self.done {
+            self.done = end;
+            self.send(None);
+        }
+    }
+
+    /// The run is over, finished or stopped.
+    fn finish(&mut self) {
+        self.done = self.total;
+        self.send(None);
+    }
+
+    fn send(&self, current_app: Option<String>) {
+        emit(self.sink, self.done, self.total, current_app);
+    }
+}
 
 fn emit(progress: &impl ProgressSink, done: usize, total: usize, current_app: Option<String>) {
     let payload = BulkProgress {

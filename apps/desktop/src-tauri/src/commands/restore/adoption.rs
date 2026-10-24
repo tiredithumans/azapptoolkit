@@ -19,7 +19,7 @@ use crate::state::CancelToken;
 
 use super::principals::{PrincipalMemo, resolve_principal};
 use super::wire::{CreatedApp, expired_at_backup};
-use super::{RestoreRun, emit};
+use super::{RestoreProgress, RestoreRun};
 
 /// Prefix of the tag every app created by a restore carries; the suffix is the
 /// app's **source** appId, the one key that survives the tenant move.
@@ -581,7 +581,7 @@ pub(super) fn fic_key(fic: &FederatedIdentityCredential, cloud: CloudEnvironment
 /// cancelled either way, and emits one progress tick per app it settles.
 pub(super) async fn pass1_create_or_adopt(
     client: &GraphClient,
-    progress: &impl ProgressSink,
+    progress: &mut RestoreProgress<'_, impl ProgressSink>,
     cancel: &CancelToken,
     run: &RestoreRun<'_>,
     session: &SessionDead,
@@ -594,13 +594,11 @@ pub(super) async fn pass1_create_or_adopt(
         operator_oid,
         ..
     } = *run;
-    let total = backup.app_registrations.len();
     // source_app_id → new app id, for remapping cross-app references.
     let mut app_id_remap: HashMap<String, String> = HashMap::new();
     // The apps we actually created, paired with their backup + new ids, so
     // passes 2–3 wire exactly those.
     let mut created: Vec<CreatedApp> = Vec::new();
-    let mut done = 0;
     for app in &backup.app_registrations {
         if cancel.is_cancelled() {
             report.cancelled = true;
@@ -633,8 +631,7 @@ pub(super) async fn pass1_create_or_adopt(
                     display_name: app.display_name.clone(),
                     reason,
                 });
-                done += 1;
-                emit(progress, done, total, Some(app.display_name.clone()));
+                progress.tick(&app.display_name);
                 continue;
             }
             Adoption::Adopt {
@@ -660,8 +657,7 @@ pub(super) async fn pass1_create_or_adopt(
                     live_secrets,
                     warnings,
                 });
-                done += 1;
-                emit(progress, done, total, Some(app.display_name.clone()));
+                progress.tick(&app.display_name);
                 continue;
             }
             Adoption::Create => {}
@@ -718,8 +714,7 @@ pub(super) async fn pass1_create_or_adopt(
                 });
             }
         }
-        done += 1;
-        emit(progress, done, total, Some(app.display_name.clone()));
+        progress.tick(&app.display_name);
     }
     (app_id_remap, created)
 }

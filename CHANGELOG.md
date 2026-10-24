@@ -21,6 +21,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - A cancelled or interrupted restore now lists every app it created, and marks the ones it did not finish.
 - A restore that can't identify a permission while running now says so, not "not approved in the plan".
 - A restore re-run that keeps an existing same-named secret now shows its key id, when it was added and its hint.
+- Restore progress now keeps moving through every step, instead of sitting full once the apps are created.
 
 ### Security
 

@@ -3,15 +3,16 @@
 
 use std::collections::HashSet;
 
+use crate::commands::progress::ProgressSink;
 use crate::dto::backup::{
     EnterpriseAppBackup, ManualItem, PrincipalRef, RestoreApproval, RestoreReport,
     RestoredEnterpriseApp,
 };
 use crate::state::CancelToken;
 
-use super::PassCtx;
 use super::plan::app_approval;
 use super::principals::{PrincipalMemo, owner_label, resolve_principal};
+use super::{PassCtx, RestoreProgress};
 
 /// Default-access app role (the all-zero GUID) — present on every SP, so an
 /// assignment to it never needs role remapping.
@@ -215,7 +216,7 @@ pub(super) fn map_assignee_role_id(
 /// recreated; group memberships only for an app `approved` names.
 ///
 /// Stops at the next enterprise app on `cancel` (flagging the report) and on a
-/// dead session.
+/// dead session. Ticks `progress` once per enterprise app it settles.
 pub(super) async fn pass4_enterprise(
     ctx: &PassCtx<'_>,
     enterprise_apps: &[EnterpriseAppBackup],
@@ -223,6 +224,7 @@ pub(super) async fn pass4_enterprise(
     principals: &mut PrincipalMemo,
     cancel: &CancelToken,
     report: &mut RestoreReport,
+    progress: &mut RestoreProgress<'_, impl ProgressSink>,
 ) {
     let session = ctx.session;
     for ent in enterprise_apps {
@@ -245,5 +247,6 @@ pub(super) async fn pass4_enterprise(
             cancel,
         )
         .await;
+        progress.tick(&ent.display_name);
     }
 }

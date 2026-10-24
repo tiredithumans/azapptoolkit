@@ -408,7 +408,10 @@ them; the report still lists every app Pass 1 created or adopted, with its new
 ids: one Pass 2 never reached is a "not wired" entry, and one whose federated
 credential, owner or secret loop was cut short says how many were left, both
 flagged `RestoredApp.incomplete` (the DR view's Not finished), which keeps
-`report.apps` index-aligned with Pass 1's apps), emits `restore-progress`, and
+`report.apps` index-aligned with Pass 1's apps), emits `restore-progress` across
+all five passes (`RestoreProgress`: the total is each app twice — create, wire —
+plus each consenting app, enterprise app and managed identity; every pass ticks
+as it settles an item, and the DR view reads "Restoring done/total"), and
 busts the destination's list
 caches (`invalidate_app_lists`) when anything was created. The `RestoreReport`
 carries the new ids, the show-once regenerated secrets, unresolved owners,

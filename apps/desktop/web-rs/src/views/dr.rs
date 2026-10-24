@@ -538,7 +538,8 @@ fn RestoreCard() -> impl IntoView {
                         let label = p.current_app.clone().map(|n| format!(" — {n}")).unwrap_or_default();
                         view! {
                             <ProgressBar value=Signal::derive(move || pct) />
-                            <p class="dr-view__progress">{format!("Created {}/{}", p.done, p.total)}{label}</p>
+                            // Work items across all five passes, not just the creates.
+                            <p class="dr-view__progress">{format!("Restoring {}/{}", p.done, p.total)}{label}</p>
                         }
                     })
                 }}

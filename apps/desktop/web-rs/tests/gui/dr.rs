@@ -51,6 +51,30 @@ async fn backup_progress_renders_count_and_throttle_notice() {
     assert!(ts::body_contains("2 concurrent"));
 }
 
+/// Restore progress reads as the run's work, not just its creates: the
+/// backend counts every pass's items, so the label says "Restoring", never
+/// "Created N/N" sitting full while wiring and consent go on.
+#[wasm_bindgen_test]
+async fn restore_progress_reads_as_the_whole_run() {
+    ts::reset();
+    let _m = ts::mount_view(|| view! { <DisasterRecoveryView /> });
+    ts::tick().await;
+    ts::tick().await;
+
+    ts::emit_event(
+        names::RESTORE_PROGRESS,
+        &azapptoolkit_dto::bulk::BulkProgress {
+            done: 3,
+            total: 7,
+            current_app: Some("App A".into()),
+            cancelled: false,
+            in_flight_cap: None,
+        },
+    );
+    ts::wait_for(|| ts::body_contains("Restoring 3/7 — App A")).await;
+    assert!(!ts::body_contains("Created 3/7"));
+}
+
 /// A minimal manifest — the view only passes it back to `restore_tenant`.
 fn backup() -> TenantBackup {
     TenantBackup {

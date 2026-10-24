@@ -565,6 +565,29 @@ fn graph_over(server: &wiremock::MockServer, dead: bool) -> GraphClient {
     )
 }
 
+/// Pass 5 on its own, its progress ticks recorded nowhere a test reads.
+async fn rebind_mis(
+    client: &GraphClient,
+    mis: &[ManagedIdentityBackup],
+    approved: &HashSet<RestoreApproval>,
+    report: &mut RestoreReport,
+    session: &SessionDead,
+    cancel: &CancelToken,
+) {
+    let sink = crate::commands::test_support::Recorder::default();
+    let mut progress = RestoreProgress::start(&sink, mis.len());
+    restore_managed_identities(
+        client,
+        mis,
+        approved,
+        report,
+        session,
+        cancel,
+        &mut progress,
+    )
+    .await;
+}
+
 fn two_mis() -> Vec<ManagedIdentityBackup> {
     ["mi-one", "mi-two"]
         .into_iter()
@@ -592,7 +615,7 @@ async fn a_failed_mi_listing_is_reported_once_not_as_missing_identities() {
     let session = SessionDead::new();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &two_mis(),
         &HashSet::new(),
@@ -623,7 +646,7 @@ async fn a_dead_session_during_the_mi_listing_latches() {
     let session = SessionDead::new();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &two_mis(),
         &HashSet::new(),
@@ -1641,6 +1664,82 @@ async fn a_cancel_between_passes_is_reported_and_skips_consent() {
         "the app had nothing left to wire: {:?}",
         report.apps[0].warnings
     );
+}
+
+/// Progress covers every pass: the total counts each app twice (create,
+/// wire), each consenting app, each enterprise app and each managed identity,
+/// and each pass ticks as it settles an item — the bar once sat at "2/2"
+/// from the end of Pass 1 to the end of the run.
+#[tokio::test]
+async fn progress_advances_through_every_pass() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_graph_sp(&server).await;
+    mount_live_apps(&server).await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let mut backup = manifest(vec![
+        consenting_app(SRC_A, "App A"),
+        AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "App B".into(),
+            ..Default::default()
+        },
+    ]);
+    backup.enterprise_apps = vec![EnterpriseAppBackup {
+        source_app_id: SRC_B.into(),
+        display_name: "Ent B".into(),
+        ..Default::default()
+    }];
+    backup.managed_identities = vec![ManagedIdentityBackup {
+        source_app_id: SRC_C.into(),
+        display_name: "mi-one".into(),
+        ..Default::default()
+    }];
+    let sink = crate::commands::test_support::Recorder::default();
+    let approved: HashSet<RestoreApproval> = HashSet::from([app_approval(SRC_A)]);
+
+    let (report, _) = run_restore(
+        &client,
+        &sink,
+        never_cancelled(),
+        RestoreRun {
+            backup: &backup,
+            tenant_id: "dst-tenant",
+            cloud: CloudEnvironment::Commercial,
+            operator_oid: Some("operator-oid"),
+            approved: &approved,
+        },
+    )
+    .await;
+    assert!(!report.cancelled, "{report:?}");
+
+    let ticks: Vec<crate::dto::bulk::BulkProgress> =
+        sink.payloads(crate::dto::events::RESTORE_PROGRESS);
+    // 2 apps × 2 + 1 consenting + 1 enterprise app + 1 managed identity.
+    assert!(ticks.iter().all(|t| t.total == 7), "{ticks:?}");
+    assert_eq!(ticks.first().map(|t| t.done), Some(0));
+    assert_eq!(ticks.last().map(|t| t.done), Some(7));
+    assert!(
+        ticks.windows(2).all(|w| w[0].done <= w[1].done),
+        "done never goes back: {ticks:?}"
+    );
+    let ticked = |name: &str, done: usize| {
+        ticks
+            .iter()
+            .any(|t| t.done == done && t.current_app.as_deref() == Some(name))
+    };
+    assert!(
+        ticked("App A", 1) && ticked("App B", 2),
+        "Pass 1: {ticks:?}"
+    );
+    assert!(
+        ticked("App A", 3) && ticked("App B", 4),
+        "Pass 2: {ticks:?}"
+    );
+    assert!(ticked("App A", 5), "Pass 3: {ticks:?}");
+    assert!(ticked("Ent B", 6), "Pass 4: {ticks:?}");
+    assert!(ticked("mi-one", 7), "Pass 5: {ticks:?}");
 }
 
 /// Plain apps: no consent, credentials or owners, so nothing needs approval.
@@ -2856,7 +2955,7 @@ async fn duplicate_destination_mi_names_become_a_manual_item() {
         ..Default::default()
     }];
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &HashSet::new(),
@@ -2921,7 +3020,7 @@ async fn an_unapproved_mi_gets_no_app_role() {
     // An APP approval with the same id does not approve the identity.
     let app_only = HashSet::from([app_approval(SRC_A)]);
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &app_only,
@@ -2946,7 +3045,7 @@ async fn an_unapproved_mi_gets_no_app_role() {
         source_app_id: SRC_A.into(),
     }]);
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &approved,
@@ -3322,7 +3421,7 @@ async fn a_cancel_during_pass_5_stops_at_the_next_identity() {
         .collect();
     let mut report = RestoreReport::default();
 
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &mis,
         &approved,
@@ -3387,7 +3486,7 @@ async fn an_identity_of_another_subtype_is_not_matched_by_name() {
     const GRANTS: &str = "/servicePrincipals/sp-1/appRoleAssignments";
 
     let mut report = RestoreReport::default();
-    restore_managed_identities(
+    rebind_mis(
         &client,
         &[mi(MiSubtype::SystemAssigned)],
         &approved,
@@ -3408,7 +3507,7 @@ async fn an_identity_of_another_subtype_is_not_matched_by_name() {
 
     for subtype in [MiSubtype::UserAssigned, MiSubtype::Unknown] {
         let mut report = RestoreReport::default();
-        restore_managed_identities(
+        rebind_mis(
             &client,
             &[mi(subtype)],
             &approved,

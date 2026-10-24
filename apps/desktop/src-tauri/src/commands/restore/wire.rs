@@ -18,16 +18,17 @@ use azapptoolkit_graph::client::{
     FederatedCredentialRequest, ImplicitGrantSettingsPatch,
 };
 
+use crate::commands::progress::ProgressSink;
 use crate::dto::backup::{
     AppRegistrationBackup, CredentialMeta, ManualItem, PrincipalRef, RegeneratedSecret,
     RestoreReport, RestoredApp,
 };
 use crate::state::CancelToken;
 
-use super::PassCtx;
 use super::adoption::{FicKey, LiveSecret, fic_key};
 use super::plan::Withheld;
 use super::principals::{PrincipalMemo, owner_label, resolve_principal};
+use super::{PassCtx, RestoreProgress};
 
 /// Keeps only the redirect URIs that pass `core::redirect`, recording each
 /// rejection in the restore report.
@@ -605,6 +606,7 @@ fn not_wired(c: &CreatedApp) -> RestoredApp {
 /// Stops at the next app on `cancel` (flagging the report) and on a dead
 /// session — and still reports every app it did not reach ([`not_wired`]), so
 /// `report.apps` stays index-aligned with `created`, which Pass 3 relies on.
+/// Ticks `progress` once per app it wires.
 pub(super) async fn pass2_wire(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
@@ -613,6 +615,7 @@ pub(super) async fn pass2_wire(
     principals: &mut PrincipalMemo,
     cancel: &CancelToken,
     report: &mut RestoreReport,
+    progress: &mut RestoreProgress<'_, impl ProgressSink>,
 ) {
     let session = ctx.session;
     for (i, c) in created.iter().enumerate() {
@@ -639,5 +642,6 @@ pub(super) async fn pass2_wire(
         .await;
         report.apps.push(restored);
         report.manual_items.extend(trusts);
+        progress.tick(&c.backup.display_name);
     }
 }
