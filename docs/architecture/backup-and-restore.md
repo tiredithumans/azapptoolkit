@@ -92,7 +92,10 @@ feeds both the plan's `invalid_manifest` blocker and the refusal.
 The file itself is read through the shared `export::read_capped_utf8`, capped at
 `MAX_BACKUP_BYTES` (256 MiB — far above a large tenant's manifest) by the read,
 not by a size check the file could outgrow; a non-UTF-8 file is refused with an
-error naming its encoding.
+error naming its encoding. A file that does not parse is re-read as plain JSON
+(`not_a_backup`) to say what it is when it can: a `schemaVersion` above this
+build's is "written by a newer version" (its new fields are what failed), and an
+object with `apps` and `manualItems` is a restore report picked by mistake.
 
 Three object classes:
 
@@ -144,7 +147,10 @@ of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
 Each batched read returns `Vec<Result<T>>` in input order; a **whole-batch
 failure degrades to per-object reads** for that chunk (never failing the backup),
 and a per-object failure skips (or partially captures) just that object,
-recorded in `skipped`. Concurrency is **adaptive**: a
+recorded in `skipped`. A chunk *task* that panicked or was aborted is different:
+its objects are gone with no `skipped` entry, so `collect_chunk` latches it and
+the backup fails (`internal`, "nothing was captured — run the backup again")
+rather than reading as complete. Concurrency is **adaptive**: a
 shared `ConcurrencyThrottle` (`commands/throttle.rs`, the audit's tracker)
 wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
 and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
@@ -153,7 +159,10 @@ and recovers it when quiet; the cap is fed to `dispatch_capped` and emitted as
 It is long-running, so it claims (once, before the first await) its own
 `backup_cancel` token (cancelled only by `cancel_backup`, so neither a restore
 nor an audit/bulk run can stop it; checked at chunk boundaries) and emits
-`backup-progress` (`BulkProgress` shape) events the DR view renders. A cancelled
+`backup-progress` (`BulkProgress` shape) events the DR view renders — the first
+one, `0/0`, before the index enumeration, which on a cold cache is a full
+directory scan; the view shows a total of 0 as "Reading the tenant's app and
+service-principal lists…". A cancelled
 run is an **error**, not a truncated success — a partial backup is a dangerous DR
 artifact. `save_backup_to_file` writes JSON only (the manifest is a structured
 restore artifact, not a spreadsheet) via the shared `save_export_via_dialog`.
