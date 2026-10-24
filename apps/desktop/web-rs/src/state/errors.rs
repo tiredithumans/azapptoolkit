@@ -172,7 +172,10 @@ impl Session {
     /// is theirs to repeat. The twin of [`Self::spawn_scope_consent`], with the
     /// same feature keys and the same "retry" wording (the lever never holds
     /// the failed operation, so it cannot replay it). A failed round trip
-    /// re-raises the lever the same way.
+    /// re-raises the lever the same way — unless it found a different gap: a
+    /// dead session gets Re-authenticate, and a missing consent (a non-Graph
+    /// audience's silent acquisition, `step_up_where_required`) Grant consent,
+    /// since `prompt=login` can fix neither.
     pub fn spawn_scope_step_up(&self, feature: &'static str) {
         let session = *self;
         leptos::task::spawn_local(async move {
@@ -188,7 +191,9 @@ impl Session {
                 Ok(()) => {
                     session.toast_success("Verified — retry the action that failed.");
                 }
-                Err(e) if session.report_if_session_dead(&e) => {}
+                Err(e)
+                    if session.report_if_session_dead(&e)
+                        || session.report_consent_required(&e, feature) => {}
                 Err(e) => session.push_step_up_lever(
                     feature,
                     auth_hints::lever_failure_message("Couldn't complete verification", &e),

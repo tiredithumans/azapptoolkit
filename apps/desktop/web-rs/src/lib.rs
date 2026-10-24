@@ -156,11 +156,12 @@ fn Root() -> impl IntoView {
     // already — the friction this whole path exists to remove. The demo build
     // starts signed in and never asks.
     let restoring = RwSignal::new(!cfg!(feature = "demo"));
-    // Raised when the launch restore got no verdict from Entra ID (unreachable,
-    // a proxy or portal in its place, throttled or down): the sign-in card then
-    // offers a Retry of the silent restore. Shared with the card so its Retry
-    // and this launch attempt are one code path.
-    let restore_unreachable = RwSignal::new(false);
+    // The code of a launch restore that got no verdict from Entra ID
+    // (unreachable, a proxy or portal in its place, throttled or down): the
+    // sign-in card then offers a Retry of the silent restore and says which.
+    // Shared with the card so its Retry and this launch attempt are one code
+    // path.
+    let restore_failure = RwSignal::new(None::<String>);
     // The restore fence (`views::sign_in::attempt_restore`): moved when the
     // operator stops waiting or signs in, so a late restore lands nothing.
     let restore_generation = RwSignal::new(0u64);
@@ -181,7 +182,7 @@ fn Root() -> impl IntoView {
         // recovery and already says what to do. An operator who chose "Sign in
         // instead" meanwhile moved the fence, so this attempt lands nothing.
         if configured {
-            views::sign_in::attempt_restore(session, restore_unreachable, restore_generation).await;
+            views::sign_in::attempt_restore(session, restore_failure, restore_generation).await;
         }
         restoring.set(false);
     });
@@ -218,8 +219,10 @@ fn Root() -> impl IntoView {
                             None if restoring.get() => {
                                 view! {
                                     <RestoringSession on_sign_in_instead=Callback::new(move |()| {
-                                        views::sign_in::abandon_restore(restore_generation);
-                                        restoring.set(false);
+                                        views::sign_in::stop_waiting_for_restore(
+                                            restoring,
+                                            restore_generation,
+                                        )
                                     }) />
                                 }
                                     .into_any()
@@ -228,7 +231,7 @@ fn Root() -> impl IntoView {
                                 view! {
                                     <SignInScreen
                                         tenant=tenant_id.clone()
-                                        restore_unreachable=restore_unreachable
+                                        restore_failure=restore_failure
                                         restore_generation=restore_generation
                                         // Drops back to the (prefilled) config
                                         // form. Sign-in is the only surface an

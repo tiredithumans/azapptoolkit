@@ -26,7 +26,7 @@ fn mount_offline_card() -> ts::Mounted {
             <SignInScreen
                 tenant="test-tenant".to_string()
                 on_reconfigure=Callback::new(|_| ())
-                restore_unreachable=RwSignal::new(true)
+                restore_failure=RwSignal::new(Some("network".to_string()))
             />
         }
     });
@@ -109,16 +109,65 @@ async fn a_slow_restore_offers_to_sign_in_instead() {
     });
     assert!(ts::body_contains("Restoring your session"));
     assert!(
-        !ts::body_contains("Still trying"),
+        !ts::body_contains("Still restoring"),
         "a quick restore stays a bare spinner"
     );
 
-    ts::wait_for(|| ts::body_contains("Still trying to reach Entra ID")).await;
+    ts::wait_for(|| ts::body_contains("Still restoring your session")).await;
     ts::click(".signin-restore-skip");
     assert!(
         chose.load(Ordering::SeqCst),
         "Sign in instead ends the wait"
     );
+}
+
+/// The card's own Sign in moves the restore fence, so a Retry still in flight
+/// cannot sign a session in behind the browser sign-in.
+#[wasm_bindgen_test]
+async fn signing_in_from_the_card_moves_the_restore_fence() {
+    ts::reset();
+    ts::mock_ok("sign_in", &fixtures::sign_in_outcome(ts::test_tenant()));
+    let generation = RwSignal::new(0u64);
+    let m = ts::mount_view(move || {
+        view! {
+            <SignInScreen
+                tenant="test-tenant".to_string()
+                on_reconfigure=Callback::new(|_| ())
+                restore_generation=generation
+            />
+        }
+    });
+    m.session.active_tenant.set(None);
+
+    ts::click_button_labelled("Sign in with Entra ID");
+    ts::wait_for(|| ts::call_count("sign_in") == 1).await;
+    assert_eq!(
+        generation.get_untracked(),
+        1,
+        "the Sign in click moved the fence"
+    );
+}
+
+/// A proxy (or an unavailable Entra ID) at launch is not a network problem:
+/// the callout says what the sign-in hint says, and still offers Retry.
+#[wasm_bindgen_test]
+async fn a_proxy_at_launch_is_named_in_the_restore_callout() {
+    ts::reset();
+    let m = ts::mount_view(|| {
+        view! {
+            <SignInScreen
+                tenant="test-tenant".to_string()
+                on_reconfigure=Callback::new(|_| ())
+                restore_failure=RwSignal::new(Some("unexpected_responder".to_string()))
+            />
+        }
+    });
+    m.session.active_tenant.set(None);
+
+    ts::wait_for(|| ts::body_contains("Couldn't restore your session")).await;
+    assert!(ts::body_contains("proxy"));
+    assert!(!ts::body_contains("check your network connection"));
+    assert!(ts::query(".signin-restore-retry").is_some());
 }
 
 #[wasm_bindgen_test]

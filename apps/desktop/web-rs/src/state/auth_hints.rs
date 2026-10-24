@@ -21,7 +21,7 @@ use azapptoolkit_dto::UiError;
 /// leave the app to search it.
 pub fn recovery_hint(code: &str, message: &str) -> &'static str {
     if let Some(specific) = aadsts_hint(message) {
-        return specific;
+        return specific.hint;
     }
     match code {
         "network" => "Check your network connection, then retry.",
@@ -32,10 +32,11 @@ pub fn recovery_hint(code: &str, message: &str) -> &'static str {
              or TLS inspection. Allow your cloud's login host \
              (login.microsoftonline.com), then retry."
         }
-        // Entra (or the path to it) throttled or failed through the retry
-        // budget: nothing to fix in the configuration.
+        // A 429/5xx the retry policy did not clear — Entra's own, or a
+        // gateway's in front of it: nothing to fix in the configuration.
         "service_unavailable" => {
-            "Entra ID is busy or temporarily unavailable — wait a minute, then retry."
+            "Entra ID, or a proxy in between, is busy or unavailable — wait a minute, \
+             then retry."
         }
         "keyring" => {
             "The OS credential store couldn't be reached — unlock your \
@@ -74,6 +75,17 @@ pub fn recovery_hint(code: &str, message: &str) -> &'static str {
     }
 }
 
+/// One row of [`AADSTS_HINTS`].
+struct AadstsHint {
+    /// The numeric part of every `AADSTSnnnnn` code the row covers.
+    codes: &'static [&'static str],
+    hint: &'static str,
+    /// The hint names a control only the sign-in card has (its Change link),
+    /// so a failed recovery lever — after a sign-in with these very ids —
+    /// shows the failure's own message instead.
+    card_only: bool,
+}
+
 /// The `AADSTSnnnnn` codes an operator actually hits at sign-in, each translated
 /// into the step that clears it.
 ///
@@ -81,85 +93,114 @@ pub fn recovery_hint(code: &str, message: &str) -> &'static str {
 /// generic one, so anything not listed here falls back to the code-level hint
 /// rather than guessing — and the raw code stays on the error line above the
 /// hint either way, for anyone filing a ticket.
-fn aadsts_hint(message: &str) -> Option<&'static str> {
+const AADSTS_HINTS: &[AadstsHint] = &[
+    // The two "you are pointed at the wrong directory" shapes. A well-formed but
+    // wrong tenant GUID fails exactly like this, so the hint points at the
+    // card's own Change link, which reopens the config form holding both ids —
+    // Settings is behind the sign-in that just failed.
+    AadstsHint {
+        codes: &["90002", "900023"],
+        hint: "That tenant doesn't resolve. Select Change above to correct the tenant \
+               ID — a well-formed but wrong GUID fails exactly this way.",
+        card_only: true,
+    },
+    AadstsHint {
+        codes: &["700016", "700054"],
+        hint: "No app registration with this client ID exists in the configured \
+               tenant. Select Change above to check the client ID, or that you're \
+               pointed at the right tenant.",
+        card_only: true,
+    },
+    // Right tenant, wrong account.
+    AadstsHint {
+        codes: &["50020", "50034", "500011"],
+        hint: "Your account isn't in this tenant (or is a guest without access here) — \
+               use an account from the configured tenant.",
+        card_only: false,
+    },
+    AadstsHint {
+        codes: &["50105"],
+        hint: "Your account isn't assigned to this application. An administrator has \
+               to assign you, or turn off the assignment requirement on it.",
+        card_only: false,
+    },
+    AadstsHint {
+        codes: &["50126"],
+        hint: "That username or password was rejected — retry, or reset your password.",
+        card_only: false,
+    },
+    // Consent. Distinct from a decline: one needs an admin, the other needs the
+    // same operator to accept the prompt.
+    AadstsHint {
+        codes: &["65001"],
+        hint: "An administrator needs to grant this app consent in the tenant before \
+               anyone can sign in to it.",
+        card_only: false,
+    },
+    AadstsHint {
+        codes: &["65004"],
+        hint: "Consent was declined. Retry and accept the permissions prompt to continue.",
+        card_only: false,
+    },
+    // Policy interrupts: retrying alone will not clear a CA block.
+    AadstsHint {
+        codes: &["53003"],
+        hint: "A Conditional Access policy blocked this sign-in. You may need a \
+               compliant or joined device, or your identity admin has to allow this \
+               app in the policy.",
+        card_only: false,
+    },
+    AadstsHint {
+        codes: &["50076", "50079", "50158"],
+        hint: "Entra needs additional verification. Retry and complete the \
+               multi-factor prompt.",
+        card_only: false,
+    },
+    // What the app sends (`http://127.0.0.1:{port}`) and what the README
+    // registers: Entra matches the loopback host, not `localhost`.
+    AadstsHint {
+        codes: &["50011"],
+        hint: "Entra rejected the redirect URI. This build's app registration needs a \
+               loopback (http://127.0.0.1) redirect URI under Mobile and desktop \
+               applications.",
+        card_only: false,
+    },
+];
+
+/// The [`AADSTS_HINTS`] row for the first `AADSTSnnnnn` code in `message`.
+fn aadsts_hint(message: &str) -> Option<&'static AadstsHint> {
     let idx = message.find("AADSTS")?;
     let digits: String = message[idx + "AADSTS".len()..]
         .chars()
         .take_while(|c| c.is_ascii_digit())
         .collect();
-    Some(match digits.as_str() {
-        // The two "you are pointed at the wrong directory" shapes. A well-formed
-        // but wrong tenant GUID fails exactly like this, so the hint points at
-        // the card's own Change link, which reopens the config form holding
-        // both ids — Settings is behind the sign-in that just failed.
-        "90002" | "900023" => {
-            "That tenant doesn't resolve. Select Change above to correct the tenant \
-             ID — a well-formed but wrong GUID fails exactly this way."
-        }
-        "700016" | "700054" => {
-            "No app registration with this client ID exists in the configured \
-             tenant. Select Change above to check the client ID, or that you're \
-             pointed at the right tenant."
-        }
-        // Right tenant, wrong account.
-        "50020" | "50034" | "500011" => {
-            "Your account isn't in this tenant (or is a guest without access here). \
-             Sign in with an account from the configured tenant."
-        }
-        "50105" => {
-            "Your account isn't assigned to this application. An administrator has \
-             to assign you, or turn off the assignment requirement on it."
-        }
-        "50126" => "That username or password was rejected — retry, or reset your password.",
-        // Consent. Distinct from a decline: one needs an admin, the other needs
-        // the same operator to accept the prompt.
-        "65001" => {
-            "An administrator needs to grant this app consent in the tenant before \
-             anyone can sign in to it."
-        }
-        "65004" => "Consent was declined. Retry and accept the permissions prompt to continue.",
-        // Policy interrupts: retrying alone will not clear a CA block.
-        "53003" => {
-            "A Conditional Access policy blocked this sign-in. You may need a \
-             compliant or joined device, or your identity admin has to allow this \
-             app in the policy."
-        }
-        "50076" | "50079" | "50158" => {
-            "Entra needs additional verification. Retry and complete the \
-             multi-factor prompt."
-        }
-        // What the app sends (`http://127.0.0.1:{port}`) and what the README
-        // registers: Entra matches the loopback host, not `localhost`.
-        "50011" => {
-            "Entra rejected the redirect URI. This build's app registration needs a \
-             loopback (http://127.0.0.1) redirect URI under Mobile and desktop \
-             applications."
-        }
-        _ => return None,
-    })
+    AADSTS_HINTS
+        .iter()
+        .find(|row| row.codes.contains(&digits.as_str()))
 }
 
 /// The message of a recovery lever re-pushed because the lever itself failed:
 /// `prefix` ("Couldn't re-authenticate"), then the step that clears `e`.
 ///
-/// [`recovery_hint`], except where it would point at the configured ids: the
-/// session was signed in with those, so an `authorization` or `token_exchange`
-/// failure without a known AADSTS code is something else (the round trip
-/// completed as a different account, a nonce mismatch) and its own message —
-/// shown before this change, never logged — says what.
+/// [`recovery_hint`], except where it would point at the configured ids or the
+/// card's Change link: the session was signed in with those ids, so an
+/// `authorization` or `token_exchange` failure without a known AADSTS code is
+/// something else (the round trip completed as a different account, a nonce
+/// mismatch), and a card-only AADSTS row cannot be acted on from a toast —
+/// there the failure's own message, shown before this change and never
+/// logged, says what.
 pub(crate) fn lever_failure_message(prefix: &str, e: &UiError) -> String {
-    let detail = match e.code.as_str() {
-        "authorization" | "token_exchange" if aadsts_hint(&e.message).is_none() => {
-            e.message.as_str()
-        }
-        code => recovery_hint(code, &e.message),
+    let detail = match (e.code.as_str(), aadsts_hint(&e.message)) {
+        (_, Some(row)) if row.card_only => e.message.as_str(),
+        ("authorization" | "token_exchange", None) => e.message.as_str(),
+        (code, _) => recovery_hint(code, &e.message),
     };
     format!("{prefix} — {detail}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{aadsts_hint, lever_failure_message, recovery_hint};
+    use super::{AADSTS_HINTS, aadsts_hint, lever_failure_message, recovery_hint};
     use azapptoolkit_dto::UiError;
 
     #[test]
@@ -226,13 +267,15 @@ mod tests {
         );
         assert!(hint.contains("proxy"), "{hint}");
         assert!(hint.contains("login.microsoftonline.com"), "{hint}");
+        // A gateway's 502/503/504 lands here too, so it is not pinned on Entra.
         let busy = recovery_hint("service_unavailable", "HTTP 503");
         assert!(busy.contains("wait a minute"), "{busy}");
+        assert!(busy.contains("proxy"), "{busy}");
     }
 
     #[test]
     fn the_redirect_uri_hint_names_the_loopback_ip_the_app_sends() {
-        let hint = aadsts_hint("invalid_request (AADSTS50011)").unwrap();
+        let hint = aadsts_hint("invalid_request (AADSTS50011)").unwrap().hint;
         assert!(hint.contains("http://127.0.0.1"), "{hint}");
         assert!(!hint.contains("localhost"), "{hint}");
     }
@@ -250,26 +293,57 @@ mod tests {
         );
     }
 
+    /// What only the sign-in card has: its Change link and its Sign in button.
+    fn names_a_card_control(text: &str) -> bool {
+        text.contains("Change") || text.contains("Sign in")
+    }
+
     #[test]
-    fn no_hint_names_a_control_only_the_sign_in_card_has() {
-        // The table also feeds a failed lever's toast, whose button is
-        // Re-authenticate / Grant consent / Verify identity — not Sign in.
-        for code in [
+    fn a_lever_never_names_a_control_only_the_sign_in_card_has() {
+        // A failed lever's toast offers Re-authenticate / Grant consent /
+        // Verify identity — never the card's Change link or Sign in button —
+        // whatever code or AADSTS row the failure carries.
+        let codes = [
             "network",
             "unexpected_responder",
             "service_unavailable",
             "keyring",
             "keyring_unavailable",
+            "authorization",
+            "consent_required",
+            "token_exchange",
             "loopback",
             "cancelled",
             "something_new",
-        ] {
-            let hint = recovery_hint(code, "x");
-            assert!(!hint.contains("Sign in"), "{code}: {hint}");
+        ];
+        for code in codes {
+            let text = lever_failure_message("Couldn't", &UiError::new(code, "x", false));
+            assert!(!names_a_card_control(&text), "{code}: {text}");
+            for row in AADSTS_HINTS {
+                for aadsts in row.codes {
+                    let e = UiError::new(code, format!("access_denied (AADSTS{aadsts})"), false);
+                    let text = lever_failure_message("Couldn't", &e);
+                    assert!(
+                        !names_a_card_control(&text),
+                        "{code} AADSTS{aadsts}: {text}"
+                    );
+                }
+            }
         }
-        for aadsts in ["65004", "50076", "50079", "50158"] {
-            let hint = aadsts_hint(&format!("x (AADSTS{aadsts})")).unwrap();
-            assert!(!hint.contains("Sign in"), "AADSTS{aadsts}: {hint}");
+    }
+
+    #[test]
+    fn a_hint_naming_a_card_control_is_flagged_card_only() {
+        // The flag is what keeps such a hint out of a lever's toast; a new row
+        // that points at the card must say so.
+        for row in AADSTS_HINTS {
+            assert_eq!(
+                row.card_only,
+                names_a_card_control(row.hint),
+                "AADSTS{:?}: {}",
+                row.codes,
+                row.hint
+            );
         }
     }
 
@@ -289,8 +363,8 @@ mod tests {
         // Load-bearing split: 65001 needs an administrator, 65004 needs this
         // same operator to accept the prompt. One hint for both sends half the
         // people to the wrong place.
-        let needed = aadsts_hint("invalid_grant (AADSTS65001)").unwrap();
-        let declined = aadsts_hint("invalid_grant (AADSTS65004)").unwrap();
+        let needed = aadsts_hint("invalid_grant (AADSTS65001)").unwrap().hint;
+        let declined = aadsts_hint("invalid_grant (AADSTS65004)").unwrap().hint;
         assert!(needed.contains("administrator"), "{needed}");
         assert!(
             declined.contains("accept the permissions prompt"),
@@ -330,5 +404,15 @@ mod tests {
         );
         let text = lever_failure_message("Couldn't grant consent", &declined);
         assert!(text.contains("accept the permissions prompt"), "{text}");
+        // A wrong-directory code can only be fixed from the card (Change), so
+        // a toast says what failed instead of pointing at a link it lacks.
+        let wrong_tenant = UiError::new(
+            "authorization",
+            "authorization request failed: invalid_request (AADSTS90002)",
+            true,
+        );
+        let text = lever_failure_message("Couldn't re-authenticate", &wrong_tenant);
+        assert!(text.contains("AADSTS90002"), "{text}");
+        assert!(!text.contains("Change"), "{text}");
     }
 }
