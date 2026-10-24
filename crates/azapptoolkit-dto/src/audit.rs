@@ -36,7 +36,7 @@ pub struct AuditRunResult {
     /// Whether the tenant's app-management policies were readable this run
     /// (`Policy.Read.All`, the default policy + per-app override pair). When
     /// `false`, no credential-lifetime advisory could be made. Deliberately
-    /// NOT a [`Self::degraded`] gap like the sign-in report: the advisory adds
+    /// NOT a [`Self::degraded`] gap, like an unavailable sign-in report: the advisory adds
     /// operator context, it never hides a finding, and a tenant without the
     /// policy feature (or its consent) must not read as permanently degraded.
     #[serde(default)]
@@ -96,8 +96,8 @@ pub struct AuditRunResult {
     /// AAP.
     ///
     /// Deliberately NOT a [`Self::degraded`] gap: the degrade over-reports and
-    /// never under-reports, so the run stays cacheable — the same call as the
-    /// sign-in report precedent. It still has to be *said*, on the org-wide
+    /// never under-reports, so the run stays cacheable — the same call as an
+    /// *unavailable* sign-in report. It still has to be *said*, on the org-wide
     /// mailbox group and in every export ([`MAILBOX_SCOPING_UNRESOLVED`]).
     /// Defaults to `true` so a run cached before the field existed reads as
     /// it was presented then.
@@ -329,6 +329,17 @@ pub enum AuditCoverageGap {
     /// under-reports delegated risk while looking complete. It used to log at
     /// `info!` and return empty, so the run was cached as authoritative.
     DelegatedConsentGrants,
+    /// The service-principal sign-in activity report could not be read
+    /// because of a transient failure (throttled, a 5xx, the network — at the
+    /// report or at the token endpoint) on a tenant that can otherwise read it.
+    ///
+    /// Not the *unavailable* case — no consent, no P1/P2 license or no
+    /// reporting role — which only switches unused-app detection off, like
+    /// [`AuditCoverageGap::RiskyServicePrincipals`]'s split: most tenants are
+    /// not entitled, and a permanent banner would train operators to ignore
+    /// it. A transient failure means the detection silently stopped working
+    /// for this run, so an unused app reads as not flagged.
+    SignInActivity,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -380,6 +391,11 @@ impl AuditCoverageGap {
                 "The Identity Protection risky-service-principal report could not be read, so \
                  this run did not check for compromised or risky service principals — one may \
                  be flagged in Identity Protection while reading clean here."
+            }
+            AuditCoverageGap::SignInActivity => {
+                "The sign-in activity report could not be read just now (Microsoft Graph was \
+                 throttling or unreachable), so this run did not check for unused applications \
+                 — re-run to include them."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
@@ -463,6 +479,7 @@ mod tests {
             AuditCoverageGap::RiskyServicePrincipals,
             AuditCoverageGap::SharePointOnlineGrants,
             AuditCoverageGap::DelegatedConsentGrants,
+            AuditCoverageGap::SignInActivity,
             AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");

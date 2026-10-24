@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, ResourcePermission};
 use azapptoolkit_core::cache::Cache;
-use azapptoolkit_core::models::ServicePrincipal;
+use azapptoolkit_core::models::{ServicePrincipal, ServicePrincipalSignInActivity};
 use azapptoolkit_core::scoping::{
     OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
 };
@@ -351,50 +351,102 @@ pub(crate) async fn prefetch_sp_index(
     }
 }
 
-/// The `servicePrincipalSignInActivities` report → `(available,
-/// consent_required, appId -> last sign-in)`. Pre-acquires the
-/// `AuditLog.Read.All` token with a typed call so a *missing-consent* failure (→
-/// `consent_required`, a "Grant consent" button) is distinguishable from a
-/// license/availability one. Either failure disables unused-app detection
-/// (`available = false` ⇒ no app is flagged "unused").
+/// What the run learned from the sign-in activity report: `(available,
+/// consent_required, appId -> last sign-in, gap)`.
+pub(crate) type SignInPrefetch = (
+    bool,
+    bool,
+    Arc<HashMap<String, Option<DateTime<Utc>>>>,
+    Option<AuditCoverageGap>,
+);
+
+/// The `servicePrincipalSignInActivities` report → [`SignInPrefetch`].
+/// Pre-acquires the `AuditLog.Read.All` token with a typed call so a
+/// *missing-consent* failure (→ `consent_required`, a "Grant consent" button)
+/// is distinguishable from a license/availability one. Any failure disables
+/// unused-app detection (`available = false` ⇒ no app is flagged "unused").
+///
+/// **Unavailable ≠ gap**, the [`prefetch_risky_service_principals`] split: a
+/// tenant that has not consented the scope, lacks Entra ID P1/P2 or whose
+/// operator holds no reporting role reads as *unavailable* — no gap, no
+/// degraded banner, since most tenants are not entitled. A **transient**
+/// failure — throttled, 5xx or unreachable, at the report or at the token
+/// endpoint — on a tenant that can read it IS
+/// [`AuditCoverageGap::SignInActivity`]: unused-app detection silently stopped
+/// working for this run, so it must not be cached or shown as an all-clear,
+/// and nothing should tell the operator to grant a consent already in place.
 pub(crate) async fn prefetch_sign_in_activity(
     state: &AppState,
     client: &GraphClient,
     tenant_id: &str,
-) -> (bool, bool, Arc<HashMap<String, Option<DateTime<Utc>>>>) {
+) -> SignInPrefetch {
     match state.ensure_audit_log_token(tenant_id).await {
-        Ok(()) => match client.list_service_principal_sign_in_activities().await {
-            Ok(items) => {
-                let map: HashMap<String, Option<DateTime<Utc>>> = items
-                    .into_iter()
-                    .filter_map(|a| {
-                        a.app_id.map(|id| {
-                            (
-                                id,
-                                a.last_sign_in_activity
-                                    .and_then(|s| s.last_sign_in_date_time),
-                            )
-                        })
-                    })
-                    .collect();
-                (true, false, Arc::new(map))
-            }
-            Err(err) => {
-                tracing::info!(
-                    ?err,
-                    "sign-in activity report unavailable; skipping unused-app detection"
-                );
-                (false, false, Arc::new(HashMap::new()))
-            }
-        },
+        Ok(()) => {
+            sign_in_activity_outcome(client.list_service_principal_sign_in_activities().await)
+        }
         Err(err) => {
+            // `AuthError::Http`: the token endpoint was unreachable — the
+            // transient case, not an entitlement answer.
+            let transient = matches!(err, azapptoolkit_auth::AuthError::Http(_));
             let ui = UiError::from(err);
             let consent_required = ui.is_consent_required();
             tracing::info!(
                 code = %ui.code,
                 "AuditLog.Read.All token unavailable; skipping unused-app detection"
             );
-            (false, consent_required, Arc::new(HashMap::new()))
+            (
+                false,
+                consent_required,
+                Arc::new(HashMap::new()),
+                transient.then_some(AuditCoverageGap::SignInActivity),
+            )
+        }
+    }
+}
+
+/// The report read's half of [`prefetch_sign_in_activity`], once the token is
+/// in hand: rows → the appId map; a transient failure (`is_retryable`:
+/// throttled, 5xx, network — the lazy refresh's `network_error` included) → the
+/// coverage gap; any other failure (403 license / role, an opaque token
+/// failure) → unavailable. Never `consent_required`: the pre-acquire answered
+/// that.
+pub(crate) fn sign_in_activity_outcome(
+    read: azapptoolkit_graph::Result<Vec<ServicePrincipalSignInActivity>>,
+) -> SignInPrefetch {
+    match read {
+        Ok(items) => {
+            let map: HashMap<String, Option<DateTime<Utc>>> = items
+                .into_iter()
+                .filter_map(|a| {
+                    a.app_id.map(|id| {
+                        (
+                            id,
+                            a.last_sign_in_activity
+                                .and_then(|s| s.last_sign_in_date_time),
+                        )
+                    })
+                })
+                .collect();
+            (true, false, Arc::new(map), None)
+        }
+        Err(err) if err.is_retryable() => {
+            tracing::warn!(
+                code = err.ui_code(),
+                "sign-in activity report read failed; unused-app coverage gap"
+            );
+            (
+                false,
+                false,
+                Arc::new(HashMap::new()),
+                Some(AuditCoverageGap::SignInActivity),
+            )
+        }
+        Err(err) => {
+            tracing::info!(
+                code = err.ui_code(),
+                "sign-in activity report unavailable; skipping unused-app detection"
+            );
+            (false, false, Arc::new(HashMap::new()), None)
         }
     }
 }
