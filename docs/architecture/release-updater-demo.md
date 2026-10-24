@@ -109,6 +109,10 @@ with `UpdatesDisabled::menu_label()` (tooltip: `description()`, one definition s
 backend's `updates_disabled` error from `perform_update`). The updater plugin logs check failures
 itself; the command layer logs only what it does not — building the updater and install failures.
 
+A team build (IDs or cloud baked from `.env`) that takes an in-app update is replaced by the
+**public** build, which bakes nothing, and drops to the first-run config screen: team builds ship
+the MSI / `.deb` (never offered an update) or set the opt-out — README "Baked into a team build".
+
 ### Transfer budget and failure classes
 
 The plugin sets no HTTP timeout, so both commands build the updater through

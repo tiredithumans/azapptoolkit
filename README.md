@@ -482,10 +482,20 @@ them to azapptoolkit one of three ways:
   ```
 - **Baked into a team build.** If you're an admin packaging a build for a
   whole team, copy `.env.example` to `.env` at the repo root, fill in the
-  two GUIDs, and run `cargo tauri build`. The values are baked into the
+  two GUIDs, and run `just build-windows` (or `just build-macos` /
+  `just build-linux` on those hosts). The values are baked into the
   installer at compile time (see `apps/desktop/src-tauri/build.rs`), so
   recipients install and launch with no per-workstation configuration (the
   setup screen is skipped). See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
+
+  > **A team build must not take in-app updates.** The in-app updater
+  > installs the *public* release, which has no baked IDs or cloud: after
+  > it, the app shows the **Configure your tenant** screen (and signs in to
+  > the commercial cloud). Hand out the MSI (Windows) or `.deb` (Linux) —
+  > the in-app updater never touches those — or turn updates off for the
+  > team with `"auto_update": false` in `settings.json` or
+  > `AZAPPTOOLKIT_AUTO_UPDATE=0` (see [Opting out](#opting-out)); on macOS
+  > the opt-out is the only way.
 
 The resolution order is **environment variable → in-app `settings.json` →
 baked-in value → unset**; while unset, sign-in can't succeed and the
