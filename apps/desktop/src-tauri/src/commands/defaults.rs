@@ -38,7 +38,7 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
     UserSettings::mutate(&config_dir, |settings| {
         settings.apply_tenant_defaults(&tenant_id, defaults);
     })
-    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
+    .map_err(|e| super::config::settings_write_error(&e))?;
     Ok(())
 }
 

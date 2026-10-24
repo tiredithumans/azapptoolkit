@@ -90,15 +90,19 @@ in-app save beats a freshly baked `.env`: clear its `client_id` /
 `tenant_id` or re-save in the Tenant connection tab. The startup log line
 `resolved auth config` records which tier won for each ID, and Settings →
 Tenant connection names an active env or baked source. `build.rs` prints a
-`cargo:warning` when a `.env` ID is empty or not a GUID. `.env` is
-git-ignored; check in only `.env.example`.
+`cargo:warning` when a `.env` ID is empty or not a GUID, or when
+`AZAPPTOOLKIT_CLOUD` names a cloud `CloudEnvironment::parse` does not know.
+`.env` is git-ignored; check in only `.env.example`.
 
 A sovereign-cloud team build can bake the cloud the same way: uncomment
 `AZAPPTOOLKIT_CLOUD=usgov` (or `usgovdod` / `china`) in `.env`, and
 `build.rs` emits it as `AZAPPTOOLKIT_BUILD_CLOUD`. At runtime the cloud
 resolves as env var → baked-in value → commercial
 (`CloudEnvironment::from_env_or`); an unrecognized value logs a warning
-and falls through to the next layer.
+and falls through to the next layer, and `get_auth_config` reports it
+(`cloud_warning`, from `CloudEnvironment::select_with_warning`) so the
+sign-in card names the ignored value and the valid ones beside the cloud it
+will use.
 
 ## Bulk create from a file
 

@@ -17,8 +17,24 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::config;
-use crate::components::ui::{Card, Spinner};
+use crate::components::support_paths::SupportPathsBlock;
+use crate::components::ui::{Callout, Card, Spinner};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
+
+/// The startup warning for a `settings.json` that exists but could not be read
+/// (`AuthConfigStatus::settings_error`): the backend's sentence names the file
+/// and where it broke, and the paths below it let the operator open it. Shared
+/// by the config screen and the sign-in card, the two surfaces in front of
+/// Settings.
+#[component]
+pub fn SettingsErrorCallout(message: String) -> impl IntoView {
+    view! {
+        <Callout tone="warn" role="alert" class="settings-error">
+            <span class="ui-text">{message}</span>
+            <SupportPathsBlock />
+        </Callout>
+    }
+}
 
 #[component]
 pub fn ConfigScreen(
@@ -28,9 +44,17 @@ pub fn ConfigScreen(
     /// otherwise correct pair — not typing both from scratch.
     client_id: String,
     tenant_id: String,
+    /// `AuthConfigStatus::settings_error`: a `settings.json` the app could not
+    /// read at startup. Saving would be refused over it, so it is named before
+    /// the operator types anything.
+    #[prop(optional_no_strip)]
+    settings_error: Option<String>,
 ) -> impl IntoView {
     let client_id = RwSignal::new(client_id);
     let tenant_id = RwSignal::new(tenant_id);
+    // The callout already shows the paths; the form's error area would repeat
+    // them.
+    let paths_on_error = settings_error.is_none();
 
     view! {
         <main class="signin-shell">
@@ -46,7 +70,12 @@ pub fn ConfigScreen(
                      you in — see the README's first-run configuration section for how to create \
                      the registration."
                 </span>
-                <AuthConfigForm client_id=client_id tenant_id=tenant_id />
+                {settings_error.map(|message| view! { <SettingsErrorCallout message=message /> })}
+                <AuthConfigForm
+                    client_id=client_id
+                    tenant_id=tenant_id
+                    support_paths_on_error=paths_on_error
+                />
             </Card>
         </main>
     }
@@ -68,6 +97,10 @@ pub fn AuthConfigForm(
     /// open in the workspace with it.
     #[prop(default = false)]
     confirm_restart: bool,
+    /// Show the log folder and settings file under a save error. On for the
+    /// first-run screen, which has no Settings page to find them on.
+    #[prop(default = false)]
+    support_paths_on_error: bool,
 ) -> impl IntoView {
     let busy = RwSignal::new(false);
     let confirming = RwSignal::new(false);
@@ -144,6 +177,7 @@ pub fn AuthConfigForm(
                     view! {
                         <span class="ui-text signin-error">{msg}</span>
                         <span class="ui-text signin-hint">{hint}</span>
+                        {support_paths_on_error.then(|| view! { <SupportPathsBlock /> })}
                     }
                 })
         }}
@@ -175,6 +209,10 @@ fn config_error_hint(code: &str) -> &'static str {
         "invalid_tenant_id" => {
             "The Directory (tenant) ID must be a GUID — copy it from the registration's \
              Overview page. A domain like contoso.onmicrosoft.com isn't accepted."
+        }
+        "settings_unreadable" => {
+            "settings.json is damaged — fix the JSON or move it aside, then retry. Nothing \
+             was written over it."
         }
         "io" => {
             "Couldn't write settings.json — check that the app's config folder is \

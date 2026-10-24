@@ -146,6 +146,9 @@ fn Root() -> impl IntoView {
             tenant_id: String::new(),
             client_id_source: ConfigSource::Unset,
             tenant_id_source: ConfigSource::Unset,
+            cloud: String::new(),
+            cloud_warning: None,
+            settings_error: None,
         })
     } else {
         None::<AuthConfigStatus>
@@ -201,12 +204,19 @@ fn Root() -> impl IntoView {
                 // (saved to settings.json) before any sign-in.
                 Some(status) if !status.configured => {
                     view! {
-                        <ConfigScreen client_id=status.client_id tenant_id=status.tenant_id />
+                        <ConfigScreen
+                            client_id=status.client_id
+                            tenant_id=status.tenant_id
+                            settings_error=status.settings_error
+                        />
                     }
                         .into_any()
                 }
                 Some(status) => {
                     let tenant_id = status.tenant_id;
+                    let cloud = status.cloud;
+                    let cloud_warning = status.cloud_warning;
+                    let settings_error = status.settings_error;
                     view! {
                         {move || match tenant.get() {
                             Some(_) => view! { <AuthedShell /> }.into_any(),
@@ -231,6 +241,9 @@ fn Root() -> impl IntoView {
                                 view! {
                                     <SignInScreen
                                         tenant=tenant_id.clone()
+                                        cloud=cloud.clone()
+                                        cloud_warning=cloud_warning.clone()
+                                        settings_error=settings_error.clone()
                                         restore_failure=restore_failure
                                         restore_generation=restore_generation
                                         // Drops back to the (prefilled) config

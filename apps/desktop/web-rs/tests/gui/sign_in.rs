@@ -189,3 +189,73 @@ async fn a_browser_that_would_not_open_shows_the_sign_in_link_until_the_flow_end
     ts::emit_event(names::AUTH_BROWSER_FALLBACK, &None::<String>);
     ts::wait_for(|| ts::query(".browser-fallback").is_none()).await;
 }
+
+/// The card names the cloud it is about to sign in to, and an
+/// AZAPPTOOLKIT_CLOUD it ignored is said out loud — with the values that work —
+/// rather than leaving a sovereign-cloud operator at the commercial login.
+#[wasm_bindgen_test]
+async fn the_card_names_the_cloud_and_warns_about_an_ignored_cloud_value() {
+    ts::reset();
+    let m = ts::mount_view(|| {
+        view! {
+            <SignInScreen
+                tenant="test-tenant".to_string()
+                on_reconfigure=Callback::new(|_| ())
+                cloud="Commercial (global)"
+                cloud_warning=Some(
+                    "AZAPPTOOLKIT_CLOUD \"usgovv\" (from the environment variable) is not a cloud \
+                     azapptoolkit knows, so it was ignored and sign-in uses Commercial (global). \
+                     Valid values: commercial, usgov, usgovdod, china — correct it, then restart \
+                     azapptoolkit."
+                        .to_string(),
+                )
+            />
+        }
+    });
+    m.session.active_tenant.set(None);
+
+    ts::wait_for(|| {
+        ts::body_contains("Signing in to test-tenant on the Commercial (global) cloud")
+    })
+    .await;
+    assert!(ts::query(".signin-cloud-warning").is_some());
+    let warning = ts::text(".signin-cloud-warning");
+    assert!(warning.contains("\"usgovv\""), "{warning}");
+    assert!(warning.contains("usgovdod"), "{warning}");
+}
+
+/// Without a warning there is no callout, and an older backend's empty cloud
+/// leaves the line as it was.
+#[wasm_bindgen_test]
+async fn a_known_cloud_shows_no_warning() {
+    ts::reset();
+    let m = ts::mount_view(|| {
+        view! {
+            <SignInScreen tenant="test-tenant".to_string() on_reconfigure=Callback::new(|_| ()) />
+        }
+    });
+    m.session.active_tenant.set(None);
+    ts::wait_for(|| ts::body_contains("Signing in to test-tenant · ")).await;
+    assert!(ts::query(".signin-cloud-warning").is_none());
+}
+
+/// A failed sign-in shows where the log is, since that is where its detail is.
+#[wasm_bindgen_test]
+async fn a_failed_sign_in_shows_the_support_paths() {
+    ts::reset();
+    ts::mock_err(
+        "sign_in",
+        &fixtures::ui_error("token_exchange", "AADSTS700016: application not found"),
+    );
+    ts::mock_ok("get_support_paths", &fixtures::support_paths());
+    let m = ts::mount_view(|| {
+        view! {
+            <SignInScreen tenant="test-tenant".to_string() on_reconfigure=Callback::new(|_| ()) />
+        }
+    });
+    m.session.active_tenant.set(None);
+
+    ts::click_button_labelled("Sign in with Entra ID");
+    ts::wait_for(|| ts::body_contains("Sign-in failed")).await;
+    ts::wait_for(|| ts::body_contains(&fixtures::support_paths().log_dir)).await;
+}

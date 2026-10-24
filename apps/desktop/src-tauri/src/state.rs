@@ -288,6 +288,14 @@ pub struct AppState {
     pub client_id_source: ConfigSource,
     /// Which resolution tier supplied [`Self::tenant_id`].
     pub tenant_id_source: ConfigSource,
+    /// The sentence for an `AZAPPTOOLKIT_CLOUD` that named an unknown cloud
+    /// and was ignored ([`CloudEnvironment::select_with_warning`]); reported by
+    /// `get_auth_config` so the sign-in card can say so.
+    pub cloud_warning: Option<String>,
+    /// Why `settings.json` was ignored at startup, when it exists but could not
+    /// be read ([`UserSettings::stored_reporting`]): the path and where it
+    /// broke, never its contents. Reported by `get_auth_config`.
+    pub settings_error: Option<String>,
     pub cache: Arc<Cache>,
     /// Single-flight gates, keyed by cache key. See [`AppState::single_flight`].
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -343,7 +351,21 @@ impl AppState {
     pub fn new() -> Self {
         // The user's persisted IDs (first-run config screen) sit between env
         // vars and the build-time bake in the resolution order.
-        let settings = UserSettings::stored(&crate::config_directory());
+        let (settings, settings_problem) =
+            UserSettings::stored_reporting(&crate::config_directory());
+        // Read leniently (a damaged file must not stop the app), but said out
+        // loud: every value in it — the saved IDs, the tenant defaults, the
+        // update opt-out — is silently replaced by a default otherwise.
+        let settings_error = settings_problem.map(|p| {
+            format!(
+                "{} could not be read ({}), so azapptoolkit started without it: the IDs, tenant \
+                 defaults and update opt-out saved there are not in effect, and updates are \
+                 offered even if you turned them off. Fix the JSON or move the file aside, then \
+                 restart.",
+                p.path.display(),
+                p.reason
+            )
+        });
         let (client_id, client_id_source) = resolve(
             "AZAPPTOOLKIT_CLIENT_ID",
             settings.client_id.as_deref(),
@@ -370,11 +392,8 @@ impl AppState {
                 "AZAPPTOOLKIT_CLIENT_ID is not set; sign-in will fail until configured (first-run screen)."
             );
         }
-        let auth = EntraAuthService::new_in_cloud(
-            client_id.clone(),
-            tenant_id.clone(),
-            CloudEnvironment::from_env_or(BUILD_CLOUD),
-        );
+        let (cloud, cloud_warning) = CloudEnvironment::from_env_or_with_warning(BUILD_CLOUD);
+        let auth = EntraAuthService::new_in_cloud(client_id.clone(), tenant_id.clone(), cloud);
         // Both ids are public identifiers (docs/DEVELOPMENT.md) and the auth
         // crate already logs the tenant; only the values and their sources are
         // recorded here, never the rest of settings.json.
@@ -392,6 +411,8 @@ impl AppState {
             tenant_id,
             client_id_source,
             tenant_id_source,
+            cloud_warning,
+            settings_error,
             cache: Cache::new(),
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::new()),
@@ -456,6 +477,8 @@ impl AppState {
             tenant_id: tenant_id.to_string(),
             client_id_source: ConfigSource::Settings,
             tenant_id_source: ConfigSource::Settings,
+            cloud_warning: None,
+            settings_error: None,
             cache,
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::from([(tenant_id.to_string(), client)])),
