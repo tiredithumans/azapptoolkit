@@ -1907,7 +1907,15 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // index accessors ([`CACHED_ACCESSORS`]) started counting: search, the
     // directory-status probe and eight other tenant-wide scans read the cache
     // one call away from the command body, where a `cache.get` scan cannot see.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 31;
+    // 40 once every Graph-client read-through counted too (not only the
+    // `*_cached` one): seven commands answered through them with no proof
+    // (`list_app_permission_grants`, `list_resource_permissions`,
+    // `list_resource_permission_counts`, `get_app_sign_in_activity`,
+    // `list_conditional_access_for_app`, `remediate_scope_sharepoint_access`,
+    // `remediate_disable_sign_in`), and `get_app_credential_policy` /
+    // `list_credential_usage` already proved theirs. 41 with
+    // `get_cached_directory_index_status`, the pairing notice's cache-only read.
+    const KNOWN_CACHE_READING_COMMANDS: usize = 41;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \
@@ -1967,13 +1975,17 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// path returns before any request is sent — so the call counts as the read.
 ///
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
-/// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
-/// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 15] = [
+/// the accessor definitions: a new `*_cached` / `*_hit` accessor, or a new Graph
+/// client read-through, that is missing here would make every command reading
+/// through it invisible to this rule.
+const CACHED_ACCESSORS: [&str; 26] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
     "credential_expirations_cached(",
+    // Home's App Registrations counts: the cached rows, or the scan's pre-join
+    // counts when the SP index is unreadable.
+    "app_registration_counts_cached(",
     "apps_pairing_hit(",
     "credential_expirations_hit(",
     "indexes_cached(",
@@ -1990,31 +2002,55 @@ const CACHED_ACCESSORS: [&str; 15] = [
     // `managed_identity.rs`).
     "enterprise_rows_cached(",
     "managed_identity_rows_cached(",
+    // The Graph client's read-throughs, whatever their names: each hit returns
+    // before any token is minted, so a command answering through one answers
+    // from cache alone exactly like one reading an index. Seven commands did,
+    // with no session proof, while this list named only the commands tree's
+    // accessors (`list_app_permission_grants`, `list_resource_permissions`,
+    // `list_resource_permission_counts`, `get_app_sign_in_activity`,
+    // `list_conditional_access_for_app`, `remediate_scope_sharepoint_access`,
+    // `remediate_disable_sign_in`).
+    "list_app_role_assigned_to_cached(",
+    "list_all_oauth2_grants(",
+    "resolve_resource_sp(",
+    "get_service_principal_by_app_id(",
+    "get_service_principal_by_app_id_lean(",
+    "list_service_principal_sign_in_activities(",
+    "list_app_credential_sign_in_activities(",
+    "get_default_app_management_policy(",
+    "list_app_management_policies(",
+    "list_app_management_policies_for_app(",
 ];
 
 /// First cache read in flattened text: a direct `…cache.get(`,
-/// `…cache.get_typed(` or `…cache.get::<T>(`, or a call to one of the
-/// [`CACHED_ACCESSORS`] that reads the cache on the caller's behalf. The direct
-/// form is a scan rather than a substring list because the turbofish carries an
-/// arbitrary type between `::<` and `(` — including nested generics like
-/// `Vec<MailScopeEntry>`, whose `>>` defeats a naive pattern.
+/// `…cache.get_typed(` or `…cache.get::<T>(` ([`first_direct_cache_read`]), or
+/// a call to one of the [`CACHED_ACCESSORS`] that reads the cache on the
+/// caller's behalf.
 fn first_cache_read(flat: &str) -> Option<usize> {
-    let mut direct = None;
-    let mut from = 0usize;
-    while let Some(hit) = flat[from..].find("cache.get") {
-        let at = from + hit;
-        let rest = &flat[at + "cache.get".len()..];
-        if rest.starts_with('(') || rest.starts_with("_typed") || rest.starts_with("::<") {
-            direct = Some(at);
-            break;
-        }
-        from = at + "cache.get".len();
-    }
+    let direct = first_direct_cache_read(flat);
     let via_accessor = CACHED_ACCESSORS.iter().filter_map(|a| flat.find(a)).min();
     match (direct, via_accessor) {
         (Some(d), Some(a)) => Some(d.min(a)),
         (d, a) => d.or(a),
     }
+}
+
+/// First direct cache read in flattened text: `…cache.get(`,
+/// `…cache.get_typed(` or `…cache.get::<T>(`. A scan rather than a substring
+/// list because the turbofish carries an arbitrary type between `::<` and `(`
+/// — including nested generics like `Vec<MailScopeEntry>`, whose `>>` defeats
+/// a naive pattern.
+fn first_direct_cache_read(flat: &str) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(hit) = flat[from..].find("cache.get") {
+        let at = from + hit;
+        let rest = &flat[at + "cache.get".len()..];
+        if rest.starts_with('(') || rest.starts_with("_typed") || rest.starts_with("::<") {
+            return Some(at);
+        }
+        from = at + "cache.get".len();
+    }
+    None
 }
 
 /// The first session proof: `prove_tenant_session`, or the `tenant_context`
@@ -2199,8 +2235,18 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
 /// `arm_roles.rs`, `exchange/mail_scopes.rs`, `search.rs`, `gallery.rs`), so the
 /// ratchet walks the whole commands tree rather than one file: a production fn
 /// with the suffix whose body reads the cache — directly, or through another
-/// accessor — is an accessor, and the discovered set must equal the list in
-/// both directions. `command_modules()` already leaves out the `tests.rs`
+/// accessor — is an accessor.
+///
+/// The Graph client is walked too, without the suffix gate: its read-throughs
+/// are named for what they fetch (`resolve_resource_sp`,
+/// `list_all_oauth2_grants`), not for the cache, so any production fn there
+/// whose own body reads the cache directly is an accessor — not transitively,
+/// since a client method calling a read-through is itself one only if a
+/// command can reach the hit through it, and every such method reads the
+/// cache in its own body. The prewarm helpers ([`GRAPH_PREWARMS`]) are
+/// exempt: they return `()`, so no answer comes back from their hits. The
+/// discovered set must equal the list in both directions.
+/// `command_modules()` already leaves out the `tests.rs`
 /// siblings and strips inline test modules; `test_support` and the handler-test
 /// modules are skipped by [`mounted_test_only`]; and a suffixed helper that
 /// reads no cache (`search::probe_hit`) is not an accessor.
@@ -2227,8 +2273,40 @@ fn every_index_accessor_counts_as_a_cache_read() {
             }
         }
     }
+    let mut prewarms_seen: Vec<String> = Vec::new();
+    for (name, src) in graph_client_modules() {
+        for f in super::sources::functions_in(&src) {
+            let (flat, _) = flatten_out_whitespace(&f.body);
+            if first_direct_cache_read(&flat).is_none() {
+                continue;
+            }
+            if GRAPH_PREWARMS.contains(&f.name.as_str()) {
+                assert!(
+                    returns_unit(&src, &f),
+                    "`{}` is exempt as a prewarm that returns `()`, but now returns a value                      a command could answer from — list it in CACHED_ACCESSORS instead",
+                    f.name
+                );
+                prewarms_seen.push(f.name.clone());
+                continue;
+            }
+            discovered.insert(f.name.clone());
+            // Prefixed so a graph file never aliases a commands module of the
+            // same name in the module floor below.
+            modules.insert(format!("graph::{name}"));
+        }
+    }
+    for prewarm in GRAPH_PREWARMS {
+        assert!(
+            prewarms_seen.iter().any(|p| p == prewarm),
+            "`{prewarm}` is exempt but no longer reads the cache — drop the exemption"
+        );
+    }
+    // 16 commands-tree accessors (15 plus the App Registrations counts reader)
+    // and the Graph client's 10 read-throughs = 26, across at least the five
+    // commands modules plus four graph files (directory, policies,
+    // roles_grants, service_principals).
     assert!(
-        discovered.len() >= 15 && modules.len() >= 5,
+        discovered.len() >= 26 && modules.len() >= 9,
         "found only {discovered:?} across {modules:?} — the scan is broken"
     );
     let listed: std::collections::BTreeSet<String> = CACHED_ACCESSORS
@@ -2247,6 +2325,26 @@ fn every_index_accessor_counts_as_a_cache_read() {
         "CACHED_ACCESSORS names fns that no longer read the cache (or no longer exist): \
          {stale:?}"
     );
+}
+
+/// Graph-client fns that read the cache only to skip what is already cached and
+/// return `()`: no answer comes back from their hits, so a command calling one
+/// is not answering from cache. Each must still return `()`
+/// ([`returns_unit`]).
+const GRAPH_PREWARMS: &[&str] = &["prewarm_sps"];
+
+/// Whether `f`, found in `src`, declares no return type: nothing but
+/// whitespace (and no `->`) between its parameter list and its body.
+fn returns_unit(src: &str, f: &super::sources::Function) -> bool {
+    let header = format!("fn {}(", f.name);
+    let Some(at) = src.find(&header) else {
+        return false;
+    };
+    let after_params = at + header.len() + f.params.len() + 1;
+    src[after_params..]
+        .split('{')
+        .next()
+        .is_some_and(|between| !between.contains("->"))
 }
 
 /// A full `/applications` list scan has exactly one caching home:

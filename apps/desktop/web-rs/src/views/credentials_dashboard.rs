@@ -20,7 +20,8 @@ use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, Callout, CopyableId};
 use crate::state::use_session;
 use crate::util::{
-    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, credential_status_badge, fmt_date,
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, contains_ignore_case, count_noun,
+    credential_status_badge, fmt_date,
 };
 
 #[component]
@@ -74,9 +75,11 @@ pub fn CredentialsDashboard() -> impl IntoView {
                     })
             }
             matches=move |r: &CredentialRowDto, facet: &str, q: &str| {
+                // `contains_ignore_case` is true for an empty query, and
+                // allocates nothing per row for an ASCII name.
                 matches_facet(r, facet)
-                    && (q.is_empty() || r.app_display_name.to_lowercase().contains(q)
-                        || r.app_id.to_lowercase().contains(q))
+                    && (contains_ignore_case(&r.app_display_name, q)
+                        || contains_ignore_case(&r.app_id, q))
             }
             row=move |r: CredentialRowDto| credential_row(session, r).into_any()
         />

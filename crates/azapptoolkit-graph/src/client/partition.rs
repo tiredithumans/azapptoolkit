@@ -23,11 +23,18 @@
 //!   few rows short would drop exactly those principals. Anything off falls
 //!   back to the serial read and logs a `warn`. A structural refusal (a row
 //!   outside its prefix, a row no slice can hold) pins the collection serial.
-//!   A lag-type one is judged by the serial read it falls back to: when every
-//!   row the serial read returned was already in the slices' union, the
-//!   slices were complete and only `/$count` was stale (the index lags a
-//!   delete), so nothing is held against the collection; otherwise it counts,
-//!   and [`MAX_LAG_REFUSALS`] in a row pin the collection serial.
+//!   A slice still throttled (429) when its retries ran out is transient: it
+//!   says nothing about the filter or the index, so it is not a lag strike
+//!   (it neither counts nor clears one) and the next scan slices again. It
+//!   has its own, looser bound instead: [`MAX_TRANSIENT_REFUSALS`] throttled
+//!   waves with no validated merge between them pin the collection serial,
+//!   since sixteen concurrent chains are then only adding to the load. Any
+//!   other lag-type refusal (a server or network error included) is judged
+//!   by the serial read it falls back to: when every row the serial read
+//!   returned was already in the slices' union, the slices were complete and
+//!   only `/$count` was stale (the index lags a delete), so nothing is held
+//!   against the collection; otherwise it counts, and [`MAX_LAG_REFUSALS`] in
+//!   a row pin the collection serial.
 //! - The residual gap is the index lag itself: `/$count` comes from the
 //!   eventually-consistent index while plain slices read the directory, so a
 //!   principal with no `appId` created inside the lag window is in neither
@@ -57,6 +64,9 @@ pub(crate) struct SliceMemo {
     pub(crate) mode: Option<SliceMode>,
     /// Lag-type refusals in a row; a merge that validated resets it.
     pub(crate) lag_refusals: u8,
+    /// Throttled waves ([`Refusal::SliceTransient`]) in a row; a merge that
+    /// validated resets it.
+    pub(crate) transient_refusals: u8,
 }
 
 /// The slice prefixes: a GUID's first character is one lowercase hex digit.
@@ -73,6 +83,14 @@ const MIN_PAGES_TO_PARTITION: u64 = 4;
 /// client's lifetime: enough to ride out one index-lag window, not enough to
 /// pay 16 wasted chains on every scan of a tenant that never validates.
 const MAX_LAG_REFUSALS: u8 = 2;
+
+/// Throttled slice waves in a row (no validated merge between them) before a
+/// collection is pinned serial for the client's lifetime. Looser than
+/// [`MAX_LAG_REFUSALS`]: a 429 says nothing about the slicing, so a couple of
+/// busy scans must not cost the session its fast read, but a tenant throttled
+/// scan after scan is better served by one chain than by sixteen that each
+/// fail and then pay the serial read anyway.
+const MAX_TRANSIENT_REFUSALS: u8 = 3;
 
 /// Why a sliced read was refused. `Err` from [`merge_slices`] names the check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,9 +110,15 @@ pub(crate) enum Refusal {
     /// since the union is then short by design.
     CountShortfall,
     /// A slice failed for a reason that says nothing about the filter: a 400
-    /// on a continuation page, or a throttle, server or network error its
-    /// retries could not outwait, on any page. The wave is incomplete.
+    /// on a continuation page, or a server or network error its retries could
+    /// not outwait, on any page. The wave is incomplete.
     SliceFailed,
+    /// A slice was still throttled (429) when its retries ran out, on any
+    /// page. The wave is incomplete, and the refusal is about Graph's load,
+    /// not the slicing: it counts toward [`MAX_TRANSIENT_REFUSALS`], never
+    /// [`MAX_LAG_REFUSALS`], so two busy minutes do not pin a tenant serial
+    /// (and leave it on the slow read for the client's lifetime).
+    SliceTransient,
     /// A mode that validated before answered 400 on a slice's page one.
     ModeRejected,
 }
@@ -109,6 +133,13 @@ impl Refusal {
         )
     }
 
+    /// A transient refusal says nothing about the slicing: it neither counts
+    /// toward [`MAX_LAG_REFUSALS`] nor clears those strikes, and is bounded by
+    /// [`MAX_TRANSIENT_REFUSALS`] instead.
+    pub(crate) fn is_transient(self) -> bool {
+        matches!(self, Refusal::SliceTransient)
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Refusal::SlicePageLimit => "slice_page_limit",
@@ -117,6 +148,7 @@ impl Refusal {
             Refusal::ProbeRowMissing => "probe_row_missing",
             Refusal::CountShortfall => "count_shortfall",
             Refusal::SliceFailed => "slice_failed",
+            Refusal::SliceTransient => "slice_transient",
             Refusal::ModeRejected => "mode_rejected",
         }
     }
@@ -307,7 +339,9 @@ impl GraphClient {
                 }
                 // A continuation 400, or a throttle, server or network error
                 // the retries could not outwait on any page, says nothing
-                // about the filter: the serial read supplies this scan.
+                // about the filter: the serial read supplies this scan. A
+                // throttle is Graph's load, bounded on its own; the rest are
+                // judged like a refused merge.
                 Err(SliceError::Graph(err))
                     if err.is_retryable() || matches!(err, GraphError::Api { status: 400, .. }) =>
                 {
@@ -318,9 +352,12 @@ impl GraphClient {
                         code = %err.ui_code(),
                         "a slice failed; reading serially"
                     );
-                    return self
-                        .refuse(path, probe, cap, Refusal::SliceFailed.into(), count)
-                        .await;
+                    let reason = if matches!(err, GraphError::Throttled { .. }) {
+                        Refusal::SliceTransient
+                    } else {
+                        Refusal::SliceFailed
+                    };
+                    return self.refuse(path, probe, cap, reason.into(), count).await;
                 }
                 Err(SliceError::Graph(err)) => return Err(err),
             };
@@ -329,6 +366,7 @@ impl GraphClient {
                     self.update_slice_memo(path, |memo| {
                         memo.mode = Some(mode);
                         memo.lag_refusals = 0;
+                        memo.transient_refusals = 0;
                     });
                     let strategy = match mode {
                         SliceMode::Advanced => "partitioned_advanced",
@@ -356,11 +394,14 @@ impl GraphClient {
     /// A structural refusal pins the collection serial before the read (so a
     /// serial read that then fails does not buy the wasted wave again), and so
     /// does a serial result holding a row no slice could have returned. A
-    /// lag-type refusal is judged by that result: when every row the serial
-    /// read returned was already in the slices' union (and nothing was cut by
-    /// the cap), the slices were complete and only `/$count` was stale, so the
-    /// refusal is not held against the collection; otherwise it is counted,
-    /// and [`MAX_LAG_REFUSALS`] in a row pin the collection serial.
+    /// transient refusal ([`Refusal::is_transient`]) leaves the lag strikes as
+    /// they were and counts toward [`MAX_TRANSIENT_REFUSALS`] instead. Any
+    /// other lag-type refusal is judged by that result: when
+    /// every row the serial read returned was already in the slices' union
+    /// (and nothing was cut by the cap), the slices were complete and only
+    /// `/$count` was stale, so the refusal is not held against the collection;
+    /// otherwise it is counted, and [`MAX_LAG_REFUSALS`] in a row pin the
+    /// collection serial.
     async fn refuse<T>(
         &self,
         path: &'static str,
@@ -389,9 +430,17 @@ impl GraphClient {
             && !truncated
             && !union.is_empty()
             && rows.iter().all(|r| union.contains(r.object_id()));
+        // A transient refusal is Graph being busy, not wrong: no lag strike,
+        // and no clear either — a wave that never finished proved nothing
+        // about the merge. It has its own bound.
         self.update_slice_memo(path, |memo| {
             if structural {
                 memo.mode = Some(SliceMode::Serial);
+            } else if reason.is_transient() {
+                memo.transient_refusals = memo.transient_refusals.saturating_add(1);
+                if memo.transient_refusals >= MAX_TRANSIENT_REFUSALS {
+                    memo.mode = Some(SliceMode::Serial);
+                }
             } else if !slices_were_complete {
                 memo.lag_refusals = memo.lag_refusals.saturating_add(1);
                 if memo.lag_refusals >= MAX_LAG_REFUSALS {
@@ -615,6 +664,9 @@ mod tests {
         assert!(!Refusal::CountShortfall.is_structural());
         assert!(!Refusal::ProbeRowMissing.is_structural());
         assert!(!Refusal::SliceFailed.is_structural());
+        assert!(!Refusal::SliceTransient.is_structural());
+        assert!(Refusal::SliceTransient.is_transient());
+        assert!(!Refusal::SliceFailed.is_transient());
         assert!(!Refusal::ModeRejected.is_structural());
     }
 

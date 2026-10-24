@@ -162,6 +162,9 @@ pub async fn remediate_scope_sharepoint_access(
     site_urls: Vec<String>,
     role: String,
 ) -> Result<SiteScopeResult, UiError> {
+    // The SP lookup below can answer from the client's cache; the proof keeps
+    // that true however the reads ahead of it change.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let graph = state.graph_for(&tenant_id);
     let app = graph.get_application(&object_id).await?;
     let sp = graph
@@ -199,6 +202,9 @@ pub async fn remediate_disable_sign_in(
     tenant_id: String,
     object_id: String,
 ) -> Result<(), UiError> {
+    // The SP lookup below can answer from the client's cache; the proof keeps
+    // that true however the reads ahead of it change.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let app = client.get_application(&object_id).await?;
     let sp = client

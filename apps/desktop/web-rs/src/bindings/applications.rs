@@ -17,12 +17,22 @@ pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> 
 
 /// Coverage of the shared service-principal index. Read by the Enterprise
 /// Applications and Managed Identities lists, which render *filtered subsets*
-/// of that index and so cannot detect its truncation from their own row counts
-/// the way the App Registrations list can.
+/// of that index and so cannot detect its truncation from their own row counts,
+/// and by the App Registrations list, whose pair links are joined from it.
 ///
 /// Fallible on purpose: a failure costs the truncation notice, never the list.
 pub async fn get_directory_index_status(tenant_id: &str) -> Result<DirectoryIndexStatus, UiError> {
     invoke_result("get_directory_index_status", TenantArg { tenant_id }).await
+}
+
+/// [`get_directory_index_status`] answered from the backend's cache alone:
+/// `None` when the SP index is not cached, and never a directory scan. The App
+/// Registrations list's pairing notice reads this, so a warm visit never
+/// starts (or retries) an SP-index scan just to draw a notice.
+pub async fn get_cached_directory_index_status(
+    tenant_id: &str,
+) -> Result<Option<DirectoryIndexStatus>, UiError> {
+    invoke_result("get_cached_directory_index_status", TenantArg { tenant_id }).await
 }
 
 /// Returns the full set of app registrations (paginated to completion on the

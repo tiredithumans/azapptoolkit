@@ -74,10 +74,12 @@ struct SearchRow {
 /// could NOT see.
 ///
 /// `index_truncated` covers BOTH halves: the service-principal index at
-/// `SP_INDEX_MAX` (the signal `IndexCapNotice` renders on the three inventory
-/// lists) and the app-registration index at `APPS_MAX`. It is carried here
-/// rather than re-derived per query for two reasons: after the two halves are merged the
-/// rows are indistinguishable, so the count is unrecoverable; and re-asking the
+/// `SP_INDEX_MAX` (the signal the Enterprise Applications and Managed Identities
+/// lists render through `IndexCapNotice`, and App Registrations through
+/// `PairingCapNotice` for its pair links) and the app-registration index at
+/// `APPS_MAX`. It is carried here rather than re-derived per query for two
+/// reasons: after the two halves are merged the rows are indistinguishable, so
+/// the count is unrecoverable; and re-asking the
 /// index would put a second tenant-wide read back on the debounced keystroke
 /// path this whole cache exists to keep clear. It is a property of the snapshot,
 /// so it is cached with the snapshot.

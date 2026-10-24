@@ -14,6 +14,10 @@ After 0.34.1, each change is one line written for the person using the app.
 - Sign-in hints now cover the 5-minute timeout and local listener errors, and name the http://127.0.0.1 redirect URI.
 - A failed Re-authenticate, Grant consent or Verify identity keeps its button and says what to fix instead of vanishing.
 - A session restore at launch that takes more than a few seconds now offers Sign in instead of an endless spinner.
+- App Registrations now warns when a tenant has too many service principals to show every app's enterprise app link.
+- Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
+- Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
+- A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
 
 ### Security
 

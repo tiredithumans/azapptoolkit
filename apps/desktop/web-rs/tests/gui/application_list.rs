@@ -15,6 +15,8 @@ use chrono::{Duration, Utc};
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use azapptoolkit_web_rs::bindings::applications::DirectoryIndexStatus;
+use azapptoolkit_web_rs::components::index_cap_notice::pairing_cap_message;
 use azapptoolkit_web_rs::ipc_mock;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::application_list::ApplicationList;
@@ -428,6 +430,83 @@ async fn empty_tenant_shows_create_cta() {
     ts::wait_for(|| ts::query(".ui-empty__title").is_some()).await;
     assert_eq!(ts::text(".ui-empty__title"), "No app registrations yet");
     assert!(ts::text(".ui-empty").contains("New app"));
+}
+
+/// The rows are app registrations, so the SP index's cap hides none of them —
+/// it hides their pairing. An app whose service principal is past the cap
+/// shows no pair link and exports no `PairedEnterpriseAppId`, exactly like an
+/// app with no enterprise application, and the row count cannot say so: the
+/// list has to ask the backend. It asks the cache-only form, so drawing the
+/// notice never starts an SP-index scan.
+#[wasm_bindgen_test]
+async fn a_truncated_sp_index_says_the_pair_links_are_partial() {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM"]),
+    );
+    ts::mock_ok(
+        "get_cached_directory_index_status",
+        &Some(DirectoryIndexStatus {
+            sp_index_truncated: true,
+            sp_index_cap: 10_000,
+        }),
+    );
+
+    let _mounted = ts::mount_view(|| view! { <ApplicationList /> });
+
+    ts::wait_until("the pairing cap notice", || {
+        ts::body_contains(&pairing_cap_message(10_000))
+    })
+    .await;
+    assert!(
+        ts::body_contains("PairedEnterpriseAppId"),
+        "the notice names the export column it also covers"
+    );
+    assert_eq!(
+        ts::call_count("get_directory_index_status"),
+        0,
+        "the fetching form would scan a cold SP index just for the notice"
+    );
+}
+
+/// Mounts the list with `status` as the cache-only index status and waits
+/// until that reply has had time to render.
+async fn mount_with_cached_status(
+    status: Option<DirectoryIndexStatus>,
+) -> azapptoolkit_web_rs::test_support::Mounted {
+    ts::reset();
+    ts::mock_ok(
+        "list_applications_with_pairing",
+        &fixtures::apps(&["Contoso CRM"]),
+    );
+    ts::mock_ok("get_cached_directory_index_status", &status);
+    let mounted = ts::mount_view(|| view! { <ApplicationList /> });
+    ts::wait_for(|| ts::text(COUNT) == "1 app registrations").await;
+    ts::wait_for(|| ts::call_count("get_cached_directory_index_status") >= 1).await;
+    // The reply resolves and the notice's `Suspend` settles a tick or two later.
+    for _ in 0..5 {
+        ts::tick().await;
+    }
+    mounted
+}
+
+#[wasm_bindgen_test]
+async fn an_untruncated_sp_index_adds_no_pairing_notice() {
+    let _mounted = mount_with_cached_status(Some(DirectoryIndexStatus {
+        sp_index_truncated: false,
+        sp_index_cap: 10_000,
+    }))
+    .await;
+    assert!(!ts::body_contains("PairedEnterpriseAppId"));
+}
+
+/// An SP index that is not cached draws no notice — and no scan to find out.
+#[wasm_bindgen_test]
+async fn an_uncached_sp_index_adds_no_pairing_notice_and_no_scan() {
+    let _mounted = mount_with_cached_status(None).await;
+    assert!(!ts::body_contains("PairedEnterpriseAppId"));
+    assert_eq!(ts::call_count("get_directory_index_status"), 0);
 }
 
 #[wasm_bindgen_test]

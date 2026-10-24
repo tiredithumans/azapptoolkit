@@ -36,9 +36,14 @@ Two rules ride alongside the key prefix:
   client factory call is not a proof**: `graph_for` / `exchange_for` / `arm_for` / `keyvault_for`
   only build token adapters, and no token is fetched until a request is sent. Reads through the
   index accessors (`sp_index_cached` / `app_name_index_cached` / `indexes_cached` / `*_hit` /
-  `search_corpus` / `load_gallery_corpus`) count as cache reads. Pinned by
+  `search_corpus` / `load_gallery_corpus`) count as cache reads, and so does every Graph-client
+  read-through, whatever its name (`resolve_resource_sp`, `get_service_principal_by_app_id`,
+  `list_all_oauth2_grants`, `list_app_role_assigned_to_cached`, the cached policy and sign-in
+  activity reads): their hit returns before any token is minted. Pinned by
   `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session` (and
-  `every_index_accessor_counts_as_a_cache_read`).
+  `every_index_accessor_counts_as_a_cache_read`, which discovers the commands tree's suffixed
+  accessors and every Graph-client fn that reads the cache directly, bar the `()`-returning
+  prewarm).
 - **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
   scan to rebuild (the two indexes, the search corpus, the App Registrations / Enterprise Apps /
   Managed Identities lists and the credential-expiry roll-up). A pinned per-app entry can never be
@@ -84,7 +89,13 @@ enumerating deeper than another silently knows about principals the other does n
 defined once, in `azapptoolkit_dto::applications`, so the App Registrations list's cap notice in the
 frontend reads the same constant as the backend's enumerations; the SP-index lists learn
 `SP_INDEX_MAX` at runtime from `get_directory_index_status` (`DirectoryIndexStatus`, also in the
-dto crate).
+dto crate). The App Registrations list asks too, for its pair links: its rows are not capped by the
+SP index, but the paired-Enterprise-App join is, so an app whose SP is past the cap shows no pair
+link and exports an empty `PairedEnterpriseAppId`. It reads the cache-only form,
+`get_cached_directory_index_status` (`None` when the index is not cached, never a scan), so a warm
+visit never starts an SP-index scan just to draw the notice. `index_cap_notice.rs` holds one
+wording per thing a cap hides: `index_cap_message` (rows), `pairing_cap_message` (pair links),
+`corpus_cap_message` (search results).
 
 ### One `/applications` list scan
 
@@ -99,7 +110,10 @@ the scan, so a credential write landing mid-scan refuses the two credential-bear
 leaves the name index. The SP side of the pairing join goes through `sp_index_cached`, never the
 client directly, and is joined rather than required: an unreadable SP index fails only the pairing
 rows (`AppListScan::rows` is a `Result`), so the roll-up and the name index still land and global
-search keeps its application half.
+search keeps its application half. So do Home's App Registrations counts: `AppListScan::counts` is
+taken before the join (`AppRegistrationCounts::of` reads no pair), and
+`app_registration_counts_cached` returns it when the rows fail. Nothing new is pinned for that
+case, so the next counts read scans again, as the list does.
 
 - **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
   `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.
@@ -614,10 +628,14 @@ slices: every `appId` is a GUID, so its first hex digit puts each row in exactly
    slice's **page one** in plain mode retries once as an advanced query, a 400 there falls back to
    serial. The mode that worked (or `Serial`) is remembered per collection on the per-tenant
    `GraphClient`, which the sign-out sweep drops. A slice that fails for a reason that says nothing
-   about the filter (a 400 on a continuation page; a throttle, server or network error its retries
-   could not outwait, on any page; a 400 on page one of a mode that validated before) reads that
-   scan serially and is judged like a refused merge (step 4). A slice whose page one holds a row
-   outside its prefix stops there, before paging the whole collection sixteen times over.
+   about the filter reads that scan serially. A 400 on a continuation page, a 400 on page one of a
+   mode that validated before, or a server or network error its retries could not outwait is
+   judged like a refused merge (step 4). A slice still **throttled** (429) when its retries ran out,
+   on any page, is transient: it is no lag strike (and clears none), so the next scan slices again,
+   but it has its own bound — the third throttled wave with no validated merge between them pins
+   the collection serial, since sixteen chains that each fail and then pay the serial read anyway
+   only add to the load. A slice whose page one holds a row outside its prefix stops there, before
+   paging the whole collection sixteen times over.
 4. **Fail closed.** `merge_slices` de-duplicates by object id in prefix order and refuses the merge
    when a row sits outside its slice's prefix, a row has no `appId` (no slice can hold it), a row of
    the unfiltered page one is in no slice, the union is short of `/$count` **by any amount** (the
@@ -629,8 +647,10 @@ slices: every `appId` is a GUID, so its first hex digit puts each row in exactly
    filter misbehaved. What the client then remembers depends on the reason. A **structural**
    refusal (a prefix mismatch, a page-limit stop, a row with no `appId` on page one) pins the
    collection serial for the client's lifetime, before the serial read; so does any scan whose
-   rows include a principal with no `appId`. A **lag-type** one (the count short, a page-one row
-   missing from the slices, a slice that failed) is judged by the serial read it falls back to:
+   rows include a principal with no `appId`. A throttled one counts only toward its own bound
+   (step 3). A **lag-type** one (the count short, a page-one row missing from the slices, a
+   continuation 400, a known mode's page-one 400, a server or network error) is judged by the
+   serial read it falls back to:
    when every row the serial read returned was already in the slices' union, the slices were
    complete and only `/$count` was stale (the index still counts a just-deleted object), so nothing
    is held against the collection and the next scan slices again; otherwise the slices really
@@ -693,7 +713,13 @@ backwards), the terminal event, and the lost-task reconciliation. The sweep's pe
 reported (a panic or an abort) may have landed its write, so it becomes a failure row coded
 `lost_task` (`dto::bulk::LOST_TASK`) rather than vanishing: the delete busts the list tier, the
 consent grant busts it too (its client SP may exist), and the expired-secret sweep drops that
-app's credential tier.
+app's credential tier. The driver also counts what it dispatched (`CappedRun::dispatched`). Delete
+and grant read their reach off their outcome lists, but the sweep reports only apps with something
+to say, so it returns `apps_checked` (its unreadable apps plus the dispatched ones, less any app
+the stop caught before its first `removePassword`) and the bar says "Checked X of Y" and names the
+tail a Cancel or a dead session never attempted. An app the stop caught part-way is a row coded
+`interrupted` (`dto::bulk::INTERRUPTED`, never re-auth-fatal) unless it already carries a failure,
+and the summary counts those as "stopped part-way".
 
 ## The site-sweep cache invalidates on site-permission mutations
 

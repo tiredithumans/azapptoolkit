@@ -36,7 +36,7 @@ impl BulkError {
     /// remaining item in the run would fail the same way. The bulk driver stops
     /// on this rather than burning through the rest of the selection.
     pub fn is_reauth_fatal(&self) -> bool {
-        UiError::new(self.code.clone(), String::new(), self.retryable).is_reauth_fatal()
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
     }
 }
 
@@ -52,6 +52,15 @@ impl std::fmt::Display for BulkError {
 /// rather than re-run blind. Never re-auth-fatal: the run carries on past it.
 /// Carried by [`BulkError::code`] and [`BulkDeleteFailure::code`].
 pub const LOST_TASK: &str = "lost_task";
+
+/// The code on an expired-secret sweep row whose app a Cancel or a dead session
+/// stopped part-way: some of its expired secrets were tried, the rest never
+/// were, so they are still there and a re-run finishes the app. (An app
+/// stopped before its first removal gets no row: it was never checked, and
+/// counts toward the unattempted tail instead.) Never re-auth-fatal: the
+/// dead-session code, when there is one, rides its own row. Carried by
+/// [`BulkError::code`].
+pub const INTERRUPTED: &str = "interrupted";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkProgress {
@@ -82,9 +91,23 @@ pub struct AppRemovalSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkRemoveExpiredResult {
+    /// Selected apps that were read and evaluated — the whole readable
+    /// selection, whether or not the sweep then reached them.
     pub apps_scanned: usize,
+    /// Only the apps with something to report (a removal, a failure), so a
+    /// short list is the healthy case, not a stopped run.
     pub summaries: Vec<AppRemovalSummary>,
     pub cancelled: bool,
+    /// How many selected apps the sweep actually checked: the ones whose read
+    /// failed (each is a row in `summaries`) plus the ones it dispatched,
+    /// less any dispatched app stopped before its first removal. Below the
+    /// selection size only when Cancel or a dead session stopped the run, and
+    /// the gap is the tail it never attempted — the one number
+    /// `apps_scanned` and `summaries` cannot give. Always `Some` from this
+    /// backend; optional on the wire — additive and skipped when absent — so
+    /// older payloads still decode (and read as "reach unknown").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_checked: Option<usize>,
 }
 
 /// One app a bulk delete could not remove.

@@ -94,6 +94,7 @@ pub async fn get_app_sign_in_activity(
     tenant_id: String,
     app_id: String,
 ) -> Result<SignInActivityDto, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     // Distinguish a missing-consent rejection from a license / availability one
     // up front (mirrors `run_audit`).
     if let Err(err) = state.ensure_audit_log_token(&tenant_id).await {

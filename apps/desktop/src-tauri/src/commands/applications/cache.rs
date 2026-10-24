@@ -12,7 +12,7 @@ use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch};
 use azapptoolkit_core::models::{Application, PasswordCredential, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
-use crate::dto::applications::ApplicationListRowDto;
+use crate::dto::applications::{AppRegistrationCounts, ApplicationListRowDto};
 use crate::dto::credentials::CredentialRowDto;
 use crate::state::AppState;
 
@@ -740,6 +740,40 @@ pub(crate) async fn apps_pairing_cached(
         return Ok(cached);
     }
     super::scan_app_list(state, tenant_id).await?.rows
+}
+
+/// Home's App Registrations counts: the cached list rows counted on a hit and,
+/// on a miss, the shared scan's own counts ([`super::AppListScan::counts`]),
+/// taken before the pairing join. [`AppRegistrationCounts::of`] reads no pair,
+/// so an unreadable SP index — which fails [`apps_pairing_cached`] and the list
+/// — still answers the card. No key is pinned for that degraded answer: the
+/// rows were never stored, so the next read scans again, as the list's does.
+pub(crate) async fn app_registration_counts_cached(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<AppRegistrationCounts, GraphError> {
+    if let Some(cached) = apps_pairing_hit(&state.cache, tenant_id) {
+        tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "apps_pairing", "hit");
+        return Ok(AppRegistrationCounts::of(&cached));
+    }
+    tracing::debug!(target: "azapptoolkit::cache", kind = "Lists", key = "apps_pairing", "miss");
+    let gate = app_scan_gate(state, tenant_id);
+    let waiting = std::time::Instant::now();
+    let _held = gate.lock().await;
+    // Re-check: the scan we queued behind has already populated the cache.
+    if let Some(cached) = apps_pairing_hit(&state.cache, tenant_id) {
+        served_after_wait("apps_pairing", waiting);
+        return Ok(AppRegistrationCounts::of(&cached));
+    }
+    let scan = super::scan_app_list(state, tenant_id).await?;
+    if let Err(err) = &scan.rows {
+        tracing::debug!(
+            target: "azapptoolkit::cache",
+            code = %err.ui_code(),
+            "SP index unreadable; app registration counts answered without the pairing join"
+        );
+    }
+    Ok(scan.counts)
 }
 
 /// The tenant-wide credential-expiry roll-up, read through

@@ -1171,6 +1171,15 @@ fn register_fixtures() {
             sp_index_cap: 10_000,
         },
     );
+    // The App Registrations pairing notice's cache-only form: the index is
+    // "cached" and untruncated, so that notice stays hidden too.
+    mock_ok(
+        "get_cached_directory_index_status",
+        &Some(DirectoryIndexStatus {
+            sp_index_truncated: false,
+            sp_index_cap: 10_000,
+        }),
+    );
 
     let owners = demo_owners();
     let sp_app_ids: HashMap<String, String> = enterprise

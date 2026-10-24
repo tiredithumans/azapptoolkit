@@ -45,10 +45,11 @@ pub struct GlobalSearchResults {
     /// principals or app registrations) had itself truncated at
     /// [`Self::corpus_cap`], so the results cover only that subset.
     ///
-    /// The same signal the three inventory lists render through `IndexCapNotice`
-    /// — search was blind to it, the worse half of the same bug: a partial list
-    /// at least shows *something*, while a search over a capped corpus answers
-    /// "No matches." for a principal that is genuinely present.
+    /// The same signal the inventory lists render through `IndexCapNotice` /
+    /// `PairingCapNotice` — search was blind to it, the worse half of the same
+    /// bug: a partial list at least shows *something*, while a search over a
+    /// capped corpus answers "No matches." for a principal that is genuinely
+    /// present.
     #[serde(default)]
     pub corpus_truncated: bool,
     /// The index cap itself, so the notice can name the number without the
