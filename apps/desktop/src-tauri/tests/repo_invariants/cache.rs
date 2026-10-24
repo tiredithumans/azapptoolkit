@@ -1907,7 +1907,9 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // index accessors ([`CACHED_ACCESSORS`]) started counting: search, the
     // directory-status probe and eight other tenant-wide scans read the cache
     // one call away from the command body, where a `cache.get` scan cannot see.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 31;
+    // 32 once the Graph client's `list_app_role_assigned_to_cached` counted too:
+    // `list_app_permission_grants` answers through it, and had no proof.
+    const KNOWN_CACHE_READING_COMMANDS: usize = 32;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \
@@ -1969,7 +1971,7 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 16] = [
+const CACHED_ACCESSORS: [&str; 17] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
@@ -1993,6 +1995,12 @@ const CACHED_ACCESSORS: [&str; 16] = [
     // `managed_identity.rs`).
     "enterprise_rows_cached(",
     "managed_identity_rows_cached(",
+    // A Graph-client read-through (`roles_grants.rs`), not a command helper:
+    // its hit returns before any token is minted, so a command answering
+    // through it answers from cache alone exactly like one reading an index.
+    // `list_app_permission_grants` did, with no session proof, while this list
+    // named only the commands tree's accessors.
+    "list_app_role_assigned_to_cached(",
 ];
 
 /// First cache read in flattened text: a direct `…cache.get(`,
@@ -2200,7 +2208,9 @@ fn the_cache_read_detector_sees_the_forms_rustfmt_actually_produces() {
 /// plus the two unsuffixed corpora, and they live in several command modules
 /// (`applications/cache.rs`, `enterprise_application.rs`, `managed_identity.rs`,
 /// `arm_roles.rs`, `exchange/mail_scopes.rs`, `search.rs`, `gallery.rs`), so the
-/// ratchet walks the whole commands tree rather than one file: a production fn
+/// ratchet walks the whole commands tree rather than one file — plus the Graph
+/// client, whose suffixed read-throughs (`list_app_role_assigned_to_cached`)
+/// answer from its cache just as directly: a production fn
 /// with the suffix whose body reads the cache — directly, or through another
 /// accessor — is an accessor, and the discovered set must equal the list in
 /// both directions. `command_modules()` already leaves out the `tests.rs`
@@ -2212,10 +2222,15 @@ fn every_index_accessor_counts_as_a_cache_read() {
     const UNSUFFIXED: &[&str] = &["search_corpus", "load_gallery_corpus"];
     let mut discovered: std::collections::BTreeSet<String> = Default::default();
     let mut modules: std::collections::BTreeSet<String> = Default::default();
-    for (name, src) in super::sources::command_modules() {
-        if mounted_test_only(&name) {
-            continue;
-        }
+    let commands = super::sources::command_modules()
+        .into_iter()
+        .filter(|(name, _)| !mounted_test_only(name));
+    // Prefixed so a graph file can never alias a commands module of the same
+    // name in the module floor below.
+    let graph = graph_client_modules()
+        .into_iter()
+        .map(|(name, src)| (format!("graph::{name}"), src));
+    for (name, src) in commands.chain(graph) {
         for f in super::sources::functions_in(&src) {
             let candidate = f.name.ends_with("_cached")
                 || f.name.ends_with("_hit")
@@ -2230,8 +2245,11 @@ fn every_index_accessor_counts_as_a_cache_read() {
             }
         }
     }
+    // 15 commands-tree accessors, the App Registrations counts reader and the
+    // Graph client's `list_app_role_assigned_to_cached` = 17, across at least
+    // the five commands modules plus `graph::roles_grants.rs`.
     assert!(
-        discovered.len() >= 16 && modules.len() >= 5,
+        discovered.len() >= 17 && modules.len() >= 6,
         "found only {discovered:?} across {modules:?} — the scan is broken"
     );
     let listed: std::collections::BTreeSet<String> = CACHED_ACCESSORS

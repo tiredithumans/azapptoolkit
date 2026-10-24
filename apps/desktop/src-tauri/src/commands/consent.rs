@@ -24,6 +24,7 @@ use azapptoolkit_core::models::AdminConsentRequestPolicy;
 use azapptoolkit_core::scoping::{
     MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
 };
+use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::sp_index_cached;
 use crate::commands::export::csv_field;
@@ -180,6 +181,10 @@ pub async fn list_app_permission_grants(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<AppPermissionGrantDto>, UiError> {
+    // Both reads below can answer from the Graph client's cache (the resolved
+    // resource SP and `list_app_role_assigned_to_cached`) without a token, and
+    // `graph_for` only builds token adapters, so it is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
 
     // Scan the resources concurrently — one appRoleAssignedTo call each. A
@@ -308,7 +313,15 @@ async fn read_consent_posture(state: &AppState, tenant_id: &str) -> TenantConsen
     match (authz, acw) {
         (Ok(authz), Ok(acw)) => consent_posture_from(&authz, acw),
         (authz, acw) => {
-            tracing::info!(?authz, ?acw, tenant = %tenant_id, "consent posture: policy pair incomplete; unknown");
+            // The failed reads' codes only. The half that DID read is the
+            // tenant's whole policy payload, and a `?authz` wrote that into
+            // the daily file log on every mount that lost the other half.
+            tracing::info!(
+                tenant = %tenant_id,
+                authz = authz.as_ref().err().map_or("ok", GraphError::ui_code),
+                admin_consent_workflow = acw.as_ref().err().map_or("ok", GraphError::ui_code),
+                "consent posture: policy pair incomplete; unknown"
+            );
             TenantConsentPostureDto::default()
         }
     }
