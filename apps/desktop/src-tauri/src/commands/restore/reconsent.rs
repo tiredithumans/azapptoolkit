@@ -90,6 +90,22 @@ pub(super) async fn reconsent(
     }
 }
 
+/// Marks each of `created` whose backup had admin consent unfinished, in its
+/// report entry (`apps`, index-aligned): the run stopped before Pass 3 reached
+/// it. It once read as a finished app that simply has no consent.
+fn not_reconsented(created: &[CreatedApp], apps: &mut [RestoredApp]) {
+    for (c, out) in created.iter().zip(apps) {
+        if c.backup.admin_consent_granted {
+            out.incomplete = true;
+            out.warnings.push(
+                "admin consent not re-granted — the restore stopped before reaching it; run it \
+                 again with the same backup"
+                    .into(),
+            );
+        }
+    }
+}
+
 /// Sorted, case-folded form of a declared-permissions list, for comparing the
 /// live app against the remapped backup.
 fn rra_fingerprint(
@@ -120,7 +136,9 @@ fn rra_fingerprint(
 /// reports an app it did not reach as well).
 ///
 /// Stops at the next app on `cancel` (flagging the report) and on a dead
-/// session. Ticks `progress` once per app whose consent it settles.
+/// session, marking every app it did not reach whose consent the backup asks
+/// for unfinished ([`not_reconsented`]). Ticks `progress` once per app whose
+/// consent it settles.
 pub(super) async fn pass3_reconsent(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
@@ -138,9 +156,9 @@ pub(super) async fn pass3_reconsent(
     for (idx, c) in created.iter().enumerate() {
         if cancel.is_cancelled() {
             report.cancelled = true;
-            break;
         }
-        if session.is_dead() {
+        if cancel.is_cancelled() || session.is_dead() {
+            not_reconsented(&created[idx..], &mut report.apps[idx..]);
             break;
         }
         if !c.backup.admin_consent_granted {

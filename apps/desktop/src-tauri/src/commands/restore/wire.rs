@@ -528,13 +528,25 @@ pub(super) async fn wire_application(
 
     out.certificates_needing_manual_upload = certificates_to_reupload(app);
 
+    // The loops above check before each item, but a session can die in a step
+    // that is not a loop — a PATCH, or the last credential, owner or secret
+    // write — and every later write then failed the same way.
+    if session.is_dead() && !out.incomplete {
+        out.incomplete = true;
+        out.warnings.push(
+            "stopped before finishing: the sign-in session ended while this app was being wired \
+             — run the restore again with the same backup to finish it"
+                .into(),
+        );
+    }
+
     (out, trusts)
 }
 
-/// The kept secret's key id, when it was added and its hint — what tells the
-/// secret an earlier run issued from a planted one that copied its name.
+/// The kept secret's key id, start date and hint — what tells the secret an
+/// earlier run issued from a planted one that copied its name.
 fn live_secret_label(live: &LiveSecret) -> String {
-    let created = live.created.map_or_else(
+    let valid_from = live.valid_from.map_or_else(
         || "an unknown time".to_string(),
         |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
     );
@@ -543,7 +555,7 @@ fn live_secret_label(live: &LiveSecret) -> String {
         .as_deref()
         .map(|h| format!(", hint '{h}'"))
         .unwrap_or_default();
-    format!("key id {}, added {created}{hint}", live.key_id)
+    format!("key id {}, valid from {valid_from}{hint}", live.key_id)
 }
 
 /// Certificates can't be restored (the private key never left the source), so

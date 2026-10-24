@@ -56,8 +56,8 @@ pub(super) enum Adoption {
 pub(super) struct LiveSecret {
     pub(super) name: String,
     pub(super) key_id: String,
-    /// Its `startDateTime`: when the secret was added.
-    pub(super) created: Option<DateTime<Utc>>,
+    /// Its `startDateTime`: when the secret became valid.
+    pub(super) valid_from: Option<DateTime<Utc>>,
     /// The first characters of its value, as Entra shows them.
     pub(super) hint: Option<String>,
 }
@@ -152,7 +152,7 @@ pub(super) fn adoption_for(
                         Some(LiveSecret {
                             name: p.display_name.clone()?,
                             key_id: p.key_id.clone(),
-                            created: p.start_date_time,
+                            valid_from: p.start_date_time,
                             hint: p.hint.clone(),
                         })
                     })

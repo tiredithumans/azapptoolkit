@@ -30,6 +30,7 @@ use azapptoolkit_graph::{GraphClient, GraphError};
 use crate::commands::applications::{extract_auth_fields, indexes_cached};
 use crate::commands::dispatch::{SessionDead, batch_or_serial, dispatch_capped};
 use crate::commands::progress::{ProgressSink, emit_progress};
+use crate::commands::restore::check_manifest_schema;
 use crate::commands::throttle::{FanOutMeter, FanOutTicker};
 use crate::dto::UiError;
 use crate::dto::backup::{
@@ -37,7 +38,7 @@ use crate::dto::backup::{
     CredentialMeta, EnterpriseAppBackup, ManagedIdentityBackup, PrincipalRef, SkippedObject,
     TenantBackup,
 };
-use crate::dto::bulk::BulkProgress;
+use crate::dto::bulk::{BulkProgress, LOST_TASK};
 use crate::dto::managed_identity::MiSubtype;
 use crate::state::{AppState, CancelToken};
 
@@ -298,9 +299,11 @@ fn collect_chunk<T>(
 
 /// A backup that lost a chunk's task is an error: the objects in it are
 /// missing with no record of it, the partial manifest the cancel rule refuses.
+/// Coded like the bulk runs' lost task ([`LOST_TASK`]); a backup only reads, so
+/// running it again is safe.
 fn lost_task_err() -> UiError {
     UiError::new(
-        "internal",
+        LOST_TASK,
         "a backup task failed; nothing was captured — run the backup again",
         true,
     )
@@ -372,7 +375,8 @@ fn read_backup_file(path: &std::path::Path, cap: u64) -> Result<TenantBackup, Ui
 
 /// Why `content` did not parse as a backup, in the operator's terms where the
 /// file says what it is instead: a backup from a newer build (whose fields
-/// this one cannot read), or a restore report picked by mistake — both of
+/// this one cannot read — refused by the restore's own
+/// [`check_manifest_schema`]), or a restore report picked by mistake — both of
 /// which once surfaced as a bare serde message ("missing field
 /// `schemaVersion`").
 fn not_a_backup(content: &str, err: &serde_json::Error) -> UiError {
@@ -381,13 +385,9 @@ fn not_a_backup(content: &str, err: &serde_json::Error) -> UiError {
     if let Some(version) = object
         .and_then(|o| o.get("schemaVersion"))
         .and_then(serde_json::Value::as_u64)
-        .filter(|v| *v > u64::from(BACKUP_SCHEMA_VERSION))
+        && let Err(newer) = check_manifest_schema(u32::try_from(version).unwrap_or(u32::MAX))
     {
-        return UiError::serde(format!(
-            "This backup was written by a newer version of azapptoolkit (manifest schema \
-             {version}; this version reads up to {BACKUP_SCHEMA_VERSION}). Update azapptoolkit \
-             to load it."
-        ));
+        return newer;
     }
     if object.is_some_and(|o| o.contains_key("apps") && o.contains_key("manualItems")) {
         return UiError::serde(
@@ -1119,11 +1119,12 @@ mod tests {
             read_backup_file(&file.0, MAX_BACKUP_BYTES).unwrap_err()
         };
 
+        // The restore's own refusal of a newer manifest: one rule, one code.
         let newer = read(br#"{ "schemaVersion": 99, "createdAt": "not a date" }"#);
-        assert_eq!(newer.code, "serde");
+        assert_eq!(newer.code, "schema_too_new");
         assert!(
-            newer.message.contains("newer version of azapptoolkit")
-                && newer.message.contains("schema 99"),
+            newer.message.contains("schema version 99")
+                && newer.message.contains("update azapptoolkit first"),
             "{}",
             newer.message
         );
@@ -1171,7 +1172,7 @@ mod tests {
         assert_eq!(out.len(), 2, "the other chunks still land");
 
         let err = lost_task_err();
-        assert_eq!(err.code, "internal");
+        assert_eq!(err.code, LOST_TASK);
         assert!(
             err.message.contains("nothing was captured"),
             "{}",

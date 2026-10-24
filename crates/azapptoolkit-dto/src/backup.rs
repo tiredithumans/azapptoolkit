@@ -624,7 +624,8 @@ pub struct ManualItem {
     pub reason: String,
 }
 
-/// One successfully recreated app registration and its follow-ups.
+/// An app registration the run created (or adopted), with its new ids and its
+/// follow-ups — fully wired unless [`Self::incomplete`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoredApp {

@@ -727,10 +727,12 @@ fn RestorePlanView(
             {cloud.map(|m| view! {
                 <Callout tone="danger" role="alert">
                     {format!(
-                        "This backup is from the \"{}\" cloud, but this app targets \"{}\". \
-                         Restore is blocked — set AZAPPTOOLKIT_CLOUD={} and relaunch \
-                         azapptoolkit, or use a build configured for the backup's cloud.",
-                        m.backup_cloud.as_str(), m.destination_cloud.as_str(), m.backup_cloud.as_str(),
+                        "This backup is from the \"{b}\" cloud, but this app targets \"{}\". \
+                         Restore is blocked. If this tenant is in the \"{b}\" cloud, relaunch \
+                         with AZAPPTOOLKIT_CLOUD={b} (and a client ID registered in that cloud), \
+                         or use a build configured for it.",
+                        m.destination_cloud.as_str(),
+                        b = m.backup_cloud.as_str(),
                     )}
                 </Callout>
             })}
@@ -1132,11 +1134,12 @@ fn RestoreReportView(
                                     </span>
                                 })}
                                 {incomplete.then(|| view! {
-                                    <Badge
-                                        label="Not finished"
-                                        tone=BadgeTone::Warning
+                                    <span
+                                        class="dr-view__badge"
                                         title="The restore stopped before wiring this app fully — run it again with the same backup file to finish it"
-                                    />
+                                    >
+                                        "Not finished"
+                                    </span>
                                 })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {

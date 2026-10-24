@@ -50,7 +50,9 @@ impl std::fmt::Display for BulkError {
 /// dispatched but ended without reporting an outcome (a panic or an abort).
 /// Its write may have landed, so the row tells the operator to check the app
 /// rather than re-run blind. Never re-auth-fatal: the run carries on past it.
-/// Carried by [`BulkError::code`] and [`BulkDeleteFailure::code`].
+/// Carried by [`BulkError::code`] and [`BulkDeleteFailure::code`] — and by the
+/// error of a DR backup that lost a chunk's task (a read, so that run fails
+/// whole and is simply run again).
 pub const LOST_TASK: &str = "lost_task";
 
 /// The code on an expired-secret sweep row whose app a Cancel or a dead session

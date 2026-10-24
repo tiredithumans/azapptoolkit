@@ -85,7 +85,8 @@ use crate::state::{AppState, CancelToken};
 use adoption::pass1_create_or_adopt;
 use enterprise::pass4_enterprise;
 use managed_identities::restore_managed_identities;
-use manifest::{bound_report_text, cap_report_value, check_manifest_schema, validate_manifest};
+pub(super) use manifest::check_manifest_schema;
+use manifest::{bound_report_text, cap_report_value, validate_manifest};
 use plan::{backup_apps, build_restore_plan, privileged_restore_items, unapproved_apps};
 use principals::PrincipalMemo;
 use reconsent::pass3_reconsent;
@@ -151,11 +152,11 @@ pub async fn restore_tenant(
         return Err(UiError::validation(
             "cloud_mismatch",
             format!(
-                "backup is from cloud '{}', but this build targets '{}' — set \
-                 AZAPPTOOLKIT_CLOUD={} and relaunch azapptoolkit to restore it",
-                backup.cloud.as_str(),
+                "backup is from cloud '{b}', but this build targets '{}'. If this tenant is in \
+                 the '{b}' cloud, relaunch with AZAPPTOOLKIT_CLOUD={b} (and a client ID \
+                 registered in that cloud), or use a build configured for it.",
                 cloud.as_str(),
-                backup.cloud.as_str()
+                b = backup.cloud.as_str(),
             ),
         ));
     }
@@ -463,7 +464,8 @@ impl<'p, P: ProgressSink> RestoreProgress<'p, P> {
         progress
     }
 
-    /// One item settled — `name` is the file's name for it.
+    /// One item settled — `name` is the file's name for it, capped like the
+    /// report's by [`emit`].
     pub(super) fn tick(&mut self, name: &str) {
         self.done = (self.done + 1).min(self.total);
         self.send(Some(name.to_string()));

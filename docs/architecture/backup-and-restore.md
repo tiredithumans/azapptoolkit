@@ -94,8 +94,9 @@ The file itself is read through the shared `export::read_capped_utf8`, capped at
 not by a size check the file could outgrow; a non-UTF-8 file is refused with an
 error naming its encoding. A file that does not parse is re-read as plain JSON
 (`not_a_backup`) to say what it is when it can: a `schemaVersion` above this
-build's is "written by a newer version" (its new fields are what failed), and an
-object with `apps` and `manualItems` is a restore report picked by mistake.
+build's gets the restore's own `check_manifest_schema` refusal (`schema_too_new`
+— its new fields are what failed), and an object with `apps` and `manualItems`
+is a restore report picked by mistake.
 
 Three object classes:
 
@@ -149,7 +150,8 @@ failure degrades to per-object reads** for that chunk (never failing the backup)
 and a per-object failure skips (or partially captures) just that object,
 recorded in `skipped`. A chunk *task* that panicked or was aborted is different:
 its objects are gone with no `skipped` entry, so `collect_chunk` latches it and
-the backup fails (`internal`, "nothing was captured — run the backup again")
+the backup fails (`lost_task`, the bulk runs' `LOST_TASK` code: "nothing was
+captured — run the backup again")
 rather than reading as complete. Concurrency is **adaptive**: a
 shared `ConcurrencyThrottle` (`commands/throttle.rs`, the audit's tracker)
 wired as the Graph client's `ThrottleObserver` halves the chunk cap on each 429
@@ -234,8 +236,9 @@ unapproved MI, Pass 5 re-binds no role. Each withheld set is a `ManualItem`
 ("not approved in the plan"); the app is still created and wired (permissions
 declared, URIs, secrets, role assignments). A classification read that fails
 makes the permission `Unknown`, so a transient error withholds rather than
-grants — and since the plan may never have asked about that app, its consent's
-runbook item says a permission could not be identified when the restore ran
+grants — and when that failed read is the only reason the app needs approval
+(the plan may never have asked about it), its consent's runbook item says a
+permission could not be identified when the restore ran
 (`Withheld::lookup_failed`) rather than "not approved in the plan". A dead
 session while planning is an error, not a plan of unknowns.
 
@@ -353,8 +356,8 @@ with no subject, can never be matched and is foreign): the standing access an
 owner check cannot see. A credential the operator added after an earlier run is
 refused the same way — the item says to finish the app by hand or remove it and
 re-run. A same-named secret is the one residue; Pass 2 reports it rather than
-keeping it silently, naming the live secret's key id, when it was added and its
-hint (carried from the tag lookup as `LiveSecret`) so the operator can compare it
+keeping it silently, naming the live secret's key id, start date and hint
+(carried from the tag lookup as `LiveSecret`) so the operator can compare it
 with the earlier run's report. Last, the hit's existing **service principal** is
 checked (`check_service_principal`), whether or not the manifest says the app had
 one: it is the other half of the app, Pass 1 only ensures it exists, and Pass 3
@@ -417,7 +420,8 @@ them; the report still lists every app Pass 1 created or adopted, with its new
 ids: one Pass 2 never reached is a "not wired" entry, and one whose federated
 credential, owner or secret loop was cut short says how many were left, both
 flagged `RestoredApp.incomplete` (the DR view's Not finished), which keeps
-`report.apps` index-aligned with Pass 1's apps), emits `restore-progress` across
+`report.apps` index-aligned with `created`; so is a consenting app Pass 3 did
+not reach, and an app whose session died in a step that is not a loop), emits `restore-progress` across
 all five passes (`RestoreProgress`: the total is each app twice — create, wire —
 plus each consenting app, enterprise app and managed identity; every pass ticks
 as it settles an item, and the DR view reads "Restoring done/total"), and
@@ -508,4 +512,5 @@ toast says the report was lost and the secrets need reissuing, never "save the
 report"; a backup that lands that way says to back up again. Each card's Cancel
 reads "Cancelling…" and stays disabled until the run ends (a backup stops only
 at its next chunk boundary), and a cloud-mismatch block names the
-`AZAPPTOOLKIT_CLOUD` value to relaunch with.
+`AZAPPTOOLKIT_CLOUD` value to relaunch with (and a client ID registered in that
+cloud) beside using a build configured for it.

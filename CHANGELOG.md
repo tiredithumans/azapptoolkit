@@ -20,14 +20,14 @@ After 0.34.1, each change is one line written for the person using the app.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
 - A cancelled or interrupted restore now lists every app it created, and marks the ones it did not finish.
 - A restore that can't identify a permission while running now says so, not "not approved in the plan".
-- A restore re-run that keeps an existing same-named secret now shows its key id, when it was added and its hint.
+- A restore re-run that keeps an existing same-named secret now shows its key id, start date and hint.
 - Restore progress now keeps moving through every step, instead of sitting full once the apps are created.
 - Signing out now asks first while a restore runs or its report holds secret values you haven't saved.
 - A restore that finishes after you signed out and back in now says its report was lost, not to save it.
 - Cancel on a backup or restore now reads "Cancelling…" until the run stops.
-- A restore blocked by a cloud mismatch now names the AZAPPTOOLKIT_CLOUD value to relaunch with.
+- A restore blocked by a cloud mismatch now says which AZAPPTOOLKIT_CLOUD value to relaunch with.
 - A backup now shows that it started while it reads the tenant's app lists, instead of nothing.
-- A backup whose background task fails now stops with an error instead of saving a file with apps missing.
+- A backup whose background task fails now stops with an error instead of reporting Ready with apps missing.
 - Loading a restore report or a newer build's backup now says which it is, not a raw parse error.
 
 ### Security

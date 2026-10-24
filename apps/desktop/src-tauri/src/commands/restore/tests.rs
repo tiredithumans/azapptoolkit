@@ -471,7 +471,7 @@ fn adoption_for_creates_adopts_or_refuses() {
             live_secrets: vec![LiveSecret {
                 name: "ci".into(),
                 key_id: "key-1".into(),
-                created: chrono::DateTime::from_timestamp(1_000_700, 0),
+                valid_from: chrono::DateTime::from_timestamp(1_000_700, 0),
                 hint: Some("Ab1".into()),
             }],
         }
@@ -1367,7 +1367,7 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
     c.live_secrets = vec![LiveSecret {
         name: "ci".into(),
         key_id: "key-live-1".into(),
-        created: Some("2026-01-02T03:04:00Z".parse().unwrap()),
+        valid_from: Some("2026-01-02T03:04:00Z".parse().unwrap()),
         hint: Some("Ab1".into()),
     }];
 
@@ -1392,7 +1392,7 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         out.unresolved_owners
     );
     // The kept secret is named by what tells it from a planted copy of the
-    // name: its key id, when it was added, and its hint.
+    // name: its key id, start date and hint.
     let kept = out
         .warnings
         .iter()
@@ -1400,7 +1400,7 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         .unwrap_or_else(|| panic!("{:?}", out.warnings));
     assert!(
         kept.contains("key id key-live-1")
-            && kept.contains("added 2026-01-02 03:04 UTC")
+            && kept.contains("valid from 2026-01-02 03:04 UTC")
             && kept.contains("hint 'Ab1'"),
         "{kept}"
     );
@@ -1659,10 +1659,17 @@ async fn a_cancel_between_passes_is_reported_and_skips_consent() {
         "Pass 3 must not run after a cancel"
     );
     assert!(!report.apps[0].consent_granted);
+    // Pass 2 finished it; the consent the backup asks for is what is missing.
+    let warnings = &report.apps[0].warnings;
+    assert!(report.apps[0].incomplete, "{warnings:?}");
     assert!(
-        !report.apps[0].incomplete,
-        "the app had nothing left to wire: {:?}",
-        report.apps[0].warnings
+        warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted"))
+            && !warnings
+                .iter()
+                .any(|w| w.starts_with("stopped before finishing")),
+        "{warnings:?}"
     );
 }
 
@@ -1918,7 +1925,9 @@ async fn a_failed_resource_read_at_run_time_withholds_consent_with_its_own_reaso
             id: USER_READ_SCOPE.into(),
             r#type: "Scope".into(),
         }];
-    let backup = manifest(vec![app]);
+    // An application permission needs approval whatever it is, so the plan
+    // asked about App B: its reason stays "not approved in the plan".
+    let backup = manifest(vec![app, consenting_app(SRC_B, "App B")]);
 
     let (report, _) = restore(&client, &backup, never_cancelled(), &[]).await;
 
@@ -1943,7 +1952,120 @@ async fn a_failed_resource_read_at_run_time_withholds_consent_with_its_own_reaso
         "{:?}",
         report.apps[0].warnings
     );
+    let asked = report
+        .manual_items
+        .iter()
+        .find(|m| m.display_name == "App B")
+        .expect("App B's withheld consent is a runbook item");
+    assert!(
+        asked.reason.contains("not approved in the plan")
+            && !asked.reason.contains("could not be identified"),
+        "{}",
+        asked.reason
+    );
     assert!(!report.session_expired, "a 403 is not a dead session");
+}
+
+/// A cancel during Pass 3 leaves each later consenting app without the
+/// consent the backup asks for: those are marked unfinished, never reported
+/// as finished apps that simply have none.
+#[tokio::test]
+async fn a_cancel_during_pass_3_marks_the_unreached_consent_unfinished() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_graph_sp(&server).await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while Pass 3 re-reads App A, the first consent.
+    Mock::given(method("GET"))
+        .and(path("/applications/obj-a"))
+        .respond_with(move |_: &Request| {
+            flag.cancel();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "obj-a",
+                "appId": "app-a",
+                "displayName": "App A",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [{ "id": APP_RW_ROLE, "type": "Role" }]
+                }]
+            }))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_live_apps(&server).await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let backup = manifest(vec![
+        consenting_app(SRC_A, "App A"),
+        consenting_app(SRC_B, "App B"),
+    ]);
+
+    let (report, _) = restore(&client, &backup, cancel, &[SRC_A, SRC_B]).await;
+
+    assert!(report.cancelled);
+    assert!(!consent_attempted(&server, "app-b").await);
+    let b = &report.apps[1];
+    assert!(b.incomplete && !b.consent_granted, "{b:?}");
+    assert!(
+        b.warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted")),
+        "{:?}",
+        b.warnings
+    );
+    assert!(
+        !report.apps[0]
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("admin consent not re-granted")),
+        "App A was reached: {:?}",
+        report.apps[0].warnings
+    );
+}
+
+/// A session that dies in a step that is not a loop — here the
+/// authentication PATCH — leaves the app part-wired, and says so.
+#[tokio::test]
+async fn a_session_that_dies_in_a_patch_marks_the_app_incomplete() {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    let server = MockServer::start().await;
+    mount_fallback(&server).await;
+    // Reads succeed; the first write finds the session dead.
+    let client = GraphClient::with_base_url(
+        "tenant-test",
+        StaticTokenProvider::new("tok"),
+        crate::commands::test_support::dies_after(0),
+        azapptoolkit_core::cache::Cache::new(),
+        server.uri(),
+    );
+    let session = SessionDead::new();
+    let c = created(AppRegistrationBackup {
+        display_name: "App A".into(),
+        web_redirect_uris: vec!["https://good.contoso.com/cb".into()],
+        ..Default::default()
+    });
+
+    let (out, _) = wire_application(
+        &pass_ctx(&client, &session, &HashMap::new()),
+        &c,
+        &BackupApps::default(),
+        &mut PrincipalMemo::new(),
+        &never_cancelled(),
+        false,
+    )
+    .await;
+
+    assert!(session.is_dead());
+    assert!(out.incomplete, "{out:?}");
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("the sign-in session ended while this app was being wired")),
+        "{:?}",
+        out.warnings
+    );
 }
 
 /// The plan names what the file grants and which items need approval:
