@@ -88,3 +88,47 @@ async fn a_dead_session_behind_the_roles_read_offers_reauthentication() {
     ts::wait_for(|| ts::query(".toast__action").is_some()).await;
     assert_eq!(ts::text(".toast__action"), "Re-authenticate");
 }
+
+/// A Conditional Access step-up behind the roles read is not shown as its raw
+/// AADSTS text: the banner says what is needed and carries its own Verify
+/// identity lever, which re-runs the check once verified — and the sink adds
+/// no second lever beside it.
+#[wasm_bindgen_test]
+async fn a_step_up_behind_the_roles_read_offers_verify_identity_inline() {
+    ts::reset();
+    let mut report = fixtures::readiness_report();
+    report.directory_roles_indeterminate = true;
+    report.directory_roles_error = Some(fixtures::ui_error(
+        "interaction_required",
+        "interaction required (AADSTS50076)",
+    ));
+    ts::mock_ok("check_readiness", &report);
+    ts::mock_ok("request_scope_step_up", &());
+
+    let _m = ts::mount_view(|| {
+        view! {
+            <ToastHost />
+            <ReadinessView />
+        }
+    });
+
+    ts::wait_for(|| ts::query(".readiness__roles-error").is_some()).await;
+    let banner = ts::text(".readiness__roles-error");
+    assert!(banner.contains("verify your identity"), "{banner}");
+    assert!(!banner.contains("AADSTS50076"), "{banner}");
+    assert!(
+        ts::query(".toast__action").is_none(),
+        "no second lever from the sink"
+    );
+
+    ts::click_button_labelled("Verify identity & retry");
+    ts::wait_for(|| ts::call_count("request_scope_step_up") == 1).await;
+    assert_eq!(
+        ts::last_call("request_scope_step_up")
+            .unwrap()
+            .arg_str("feature")
+            .as_deref(),
+        Some("write")
+    );
+    ts::wait_for(|| ts::call_count("check_readiness") == 2).await;
+}

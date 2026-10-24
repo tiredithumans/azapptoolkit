@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use parking_lot::Mutex;
 use tauri::State;
 
 use azapptoolkit_auth::AuthError;
@@ -32,8 +33,8 @@ use crate::state::{AppState, ConsentFeature};
 /// The other two planes answer in about a second; an ARM host that drops
 /// traffic (an egress allow-list that admits Graph only) held the whole page
 /// for the ARM retry budget instead — ~47 s per blocked call, far longer over a
-/// subscription fan-out. Past this the Azure rows read "?" with a re-check
-/// note, never Missing.
+/// subscription fan-out. Past this the Azure rows keep what the sweep had
+/// confirmed and read "?" with a re-check note for the rest, never Missing.
 const AZURE_PLANE_BUDGET: Duration = Duration::from_secs(15);
 
 /// What the Azure-RBAC sweep produced for the role half of the Azure plane.
@@ -43,26 +44,34 @@ enum AzureRoles {
     Held(HashSet<String>),
     /// Couldn't be enumerated (no signed-in oid, no ARM consent, an ARM error).
     Unavailable,
-    /// The sweep ran past [`AZURE_PLANE_BUDGET`] and was abandoned.
-    TimedOut,
+    /// The sweep ran past [`AZURE_PLANE_BUDGET`] and was abandoned, holding
+    /// what the subscriptions it did reach confirmed. Still a superset check:
+    /// a confirmed assignment is `Have`, anything else `Unknown` (this plane
+    /// never emits Missing), so a partial set loses nothing true.
+    TimedOut(HashSet<String>),
 }
 
 /// Runs the Azure-RBAC sweep under `budget`, so a blocked ARM egress costs the
-/// page at most that long. Split out so the bound is testable on a paused
-/// clock.
+/// page at most that long. The sweep records each subscription's assignments
+/// into `found` as they land, so a timeout keeps what was already confirmed.
+/// Split out so the bound is testable on a paused clock.
 async fn azure_plane_within(
     budget: Duration,
-    sweep: impl std::future::Future<Output = Option<HashSet<String>>>,
+    found: &Mutex<HashSet<String>>,
+    sweep: impl std::future::Future<Output = Option<()>>,
 ) -> AzureRoles {
+    let collected = || std::mem::take(&mut *found.lock());
     match tokio::time::timeout(budget, sweep).await {
-        Ok(Some(held)) => AzureRoles::Held(held),
+        Ok(Some(())) => AzureRoles::Held(collected()),
         Ok(None) => AzureRoles::Unavailable,
         Err(_) => {
+            let partial = collected();
             tracing::warn!(
                 budget_secs = budget.as_secs(),
-                "readiness: Azure role-assignment sweep timed out; Azure rows read unknown"
+                confirmed = partial.len(),
+                "readiness: Azure role-assignment sweep timed out; unconfirmed Azure rows read unknown"
             );
-            AzureRoles::TimedOut
+            AzureRoles::TimedOut(partial)
         }
     }
 }
@@ -103,11 +112,13 @@ pub async fn check_readiness(
     }));
 
     // Azure-RBAC plane: enumerate the user's direct role assignments once
-    // (best-effort, bounded by `AZURE_PLANE_BUDGET`). Anything but a finished
-    // sweep => the Azure capabilities fall back to "?".
+    // (best-effort, bounded by `AZURE_PLANE_BUDGET`). What isn't confirmed
+    // falls back to "?".
+    let azure_found = Mutex::new(HashSet::new());
     let azure_fut = azure_plane_within(
         AZURE_PLANE_BUDGET,
-        enumerate_azure_role_ids(&state, &tenant_id),
+        &azure_found,
+        enumerate_azure_role_ids(&state, &tenant_id, &azure_found),
     );
 
     // The three planes share no inputs — Graph directory roles, token-endpoint
@@ -218,56 +229,66 @@ fn role_for(
 /// group-inherited roles), so this only ever upgrades to `Have` on a confirmed
 /// assignment — it never reports `Missing` (which could be a false alarm for a
 /// role held via a group). It stays `Unknown` otherwise, a timed-out sweep
-/// included.
+/// included — which still upgrades whatever it confirmed before the budget.
 fn azure_role_verdict(cap: &Capability, azure: &AzureRoles) -> (Verdict, String) {
     let roles: Vec<&str> = cap.role_names().collect();
-    match azure {
-        AzureRoles::TimedOut => (
-            Verdict::Unknown,
-            format!(
-                "Timed out: Azure Resource Manager didn't answer within {} seconds, so your Azure \
-                 role assignments couldn't be checked — re-check later with Refresh token (top \
-                 right).",
-                AZURE_PLANE_BUDGET.as_secs()
-            ),
-        ),
+    let (held, timed_out) = match azure {
         // Couldn't enumerate (no ARM consent / no signed-in oid / ARM error).
-        AzureRoles::Unavailable => (
+        AzureRoles::Unavailable => {
+            return (
+                Verdict::Unknown,
+                format!(
+                    "Azure RBAC is granted per subscription/resource — grant this app Azure access \
+                     (or activate the {} role in PIM) so readiness can check it.",
+                    roles.join(" / ")
+                ),
+            );
+        }
+        AzureRoles::Held(held) => (held, false),
+        AzureRoles::TimedOut(partial) => (partial, true),
+    };
+    if roles
+        .iter()
+        .any(|name| azapptoolkit_core::azure_roles::azure_role_satisfied(name, held))
+    {
+        (
+            Verdict::Have,
+            "Active Azure role assignment (direct).".to_string(),
+        )
+    } else if timed_out {
+        (
             Verdict::Unknown,
             format!(
-                "Azure RBAC is granted per subscription/resource — grant this app Azure access (or \
-                 activate the {} role in PIM) so readiness can check it.",
+                "Timed out: the Azure role-assignment check didn't finish within {} seconds, and \
+                 the subscriptions it reached showed no direct {} assignment — re-check later \
+                 with Refresh token (top right).",
+                AZURE_PLANE_BUDGET.as_secs(),
                 roles.join(" / ")
             ),
-        ),
-        AzureRoles::Held(held) => {
-            if roles
-                .iter()
-                .any(|name| azapptoolkit_core::azure_roles::azure_role_satisfied(name, held))
-            {
-                (
-                    Verdict::Have,
-                    "Active Azure role assignment (direct).".to_string(),
-                )
-            } else {
-                (
-                    Verdict::Unknown,
-                    format!(
-                        "No direct Azure role assignment found — you may still hold {} via a group \
-                         (not visible here) or on a specific resource; check Resource Access.",
-                        roles.join(" / ")
-                    ),
-                )
-            }
-        }
+        )
+    } else {
+        (
+            Verdict::Unknown,
+            format!(
+                "No direct Azure role assignment found — you may still hold {} via a group (not \
+                 visible here) or on a specific resource; check Resource Access.",
+                roles.join(" / ")
+            ),
+        )
     }
 }
 
-/// Best-effort: the set of Azure role-definition GUIDs **directly** assigned to
-/// the signed-in user across all their subscriptions. `None` when it can't be
-/// determined (no signed-in oid, missing ARM consent, or an ARM error) — the
-/// caller then reports Azure capabilities as "?" rather than guessing.
-async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<HashSet<String>> {
+/// Best-effort: records into `found` the Azure role-definition GUIDs
+/// **directly** assigned to the signed-in user, subscription by subscription
+/// as each answers (so [`azure_plane_within`]'s timeout keeps what landed).
+/// `None` when it can't be determined at all (no signed-in oid, missing ARM
+/// consent, or an ARM error listing subscriptions) — the caller then reports
+/// Azure capabilities as "?" rather than guessing.
+async fn enumerate_azure_role_ids(
+    state: &AppState,
+    tenant_id: &str,
+    found: &Mutex<HashSet<String>>,
+) -> Option<()> {
     let oid = state.auth.tenant_context(tenant_id)?.account_oid;
     if oid.is_empty() {
         return None;
@@ -281,7 +302,7 @@ async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<H
     // large estate (the cost scaled with the operator's subscription count).
     // Partial enumeration beats none — a subscription we can't read is skipped,
     // not fatal; a 403 is terminal in the ARM transport, so it fails fast.
-    let ids: HashSet<String> = stream::iter(subs)
+    stream::iter(subs)
         .map(|sub| {
             let arm = arm.clone();
             let oid = oid.clone();
@@ -303,18 +324,18 @@ async fn enumerate_azure_role_ids(state: &AppState, tenant_id: &str) -> Option<H
             }
         })
         .buffer_unordered(ARM_CONCURRENCY)
-        .collect::<Vec<Vec<_>>>()
-        .await
-        .into_iter()
-        .flatten()
-        .filter_map(|a| {
-            a.properties
-                .role_definition_id
-                .as_deref()
-                .and_then(azapptoolkit_core::azure_roles::role_id_tail)
+        .for_each(|assignments| {
+            let ids = assignments.into_iter().filter_map(|a| {
+                a.properties
+                    .role_definition_id
+                    .as_deref()
+                    .and_then(azapptoolkit_core::azure_roles::role_id_tail)
+            });
+            found.lock().extend(ids);
+            std::future::ready(())
         })
-        .collect();
-    Some(ids)
+        .await;
+    Some(())
 }
 
 /// The scope half's detail line. A missing scope is named in `cloud`'s form
@@ -462,34 +483,59 @@ mod tests {
     }
 
     /// A blocked ARM egress no longer holds the page: past the budget the
-    /// sweep is abandoned and the Azure rows read "?" with a re-check note —
-    /// never Missing, which would be a false alarm.
+    /// sweep is abandoned, what it had confirmed still counts, and the other
+    /// Azure rows read "?" with a re-check note — never Missing, which would be
+    /// a false alarm.
     #[tokio::test(start_paused = true)]
-    async fn a_stalled_azure_sweep_times_out_to_unknown_within_the_budget() {
+    async fn a_stalled_azure_sweep_times_out_keeping_what_it_confirmed() {
+        // Reader (azure_role_reads) landed from one subscription before the
+        // next one stalled.
+        let reader = "acdd72a7-3385-48ef-bd42-f606fba81ae7".to_string();
+        let found = Mutex::new(HashSet::new());
         let started = tokio::time::Instant::now();
-        let azure = azure_plane_within(
-            AZURE_PLANE_BUDGET,
-            std::future::pending::<Option<HashSet<String>>>(),
-        )
+        let azure = azure_plane_within(AZURE_PLANE_BUDGET, &found, async {
+            found.lock().insert(reader.clone());
+            std::future::pending::<Option<()>>().await
+        })
         .await;
-        assert!(matches!(azure, AzureRoles::TimedOut), "{azure:?}");
         assert_eq!(started.elapsed(), AZURE_PLANE_BUDGET);
+        let AzureRoles::TimedOut(partial) = &azure else {
+            panic!("{azure:?}");
+        };
+        assert!(partial.contains(&reader));
 
+        let (v, _) = role_for(capability("azure_role_reads").unwrap(), &[], false, &azure);
+        assert_eq!(
+            v,
+            Verdict::Have,
+            "a confirmed assignment survives the timeout"
+        );
         let (v, detail) = role_for(capability("keyvault_secrets").unwrap(), &[], false, &azure);
         assert_eq!(v, Verdict::Unknown);
         assert!(detail.starts_with("Timed out"), "{detail}");
+        assert!(
+            detail.contains("didn't finish within 15 seconds"),
+            "{detail}"
+        );
         assert!(detail.contains("re-check"), "{detail}");
 
-        // A sweep that answers inside the budget is used as-is.
-        let reader = "acdd72a7-3385-48ef-bd42-f606fba81ae7".to_string();
-        let azure = azure_plane_within(AZURE_PLANE_BUDGET, async move {
+        // A sweep that finishes inside the budget is used as-is.
+        let found = Mutex::new(HashSet::new());
+        let azure = azure_plane_within(AZURE_PLANE_BUDGET, &found, async {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            Some(HashSet::from([reader]))
+            found.lock().insert(reader.clone());
+            Some(())
         })
         .await;
-        let (v, _) = role_for(capability("azure_role_reads").unwrap(), &[], false, &azure);
-        assert_eq!(v, Verdict::Have);
-        let unavailable = azure_plane_within(AZURE_PLANE_BUDGET, async { None }).await;
+        assert!(
+            matches!(&azure, AzureRoles::Held(h) if h.contains(&reader)),
+            "{azure:?}"
+        );
+        let unavailable =
+            azure_plane_within(AZURE_PLANE_BUDGET, &Mutex::new(HashSet::new()), async {
+                None
+            })
+            .await;
         assert!(matches!(unavailable, AzureRoles::Unavailable));
     }
 

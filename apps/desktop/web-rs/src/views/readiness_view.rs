@@ -25,7 +25,14 @@ use azapptoolkit_dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 
 use crate::bindings::readiness;
 use crate::components::ui::{Badge, BadgeTone, Callout, SectionHeader, SkeletonList};
-use crate::state::use_session;
+use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
+use crate::state::{Session, use_session};
+
+/// The consent feature the roles read rides: a Graph read on the sign-in
+/// scopes, which the backend steps up on for every Graph feature
+/// (`step_up_where_required`), `"write"` being the Graph default the toast sink
+/// uses too.
+const ROLES_READ_FEATURE: &str = "write";
 
 /// (badge tone, label) for a verdict pill.
 fn verdict_meta(v: Verdict) -> (BadgeTone, &'static str) {
@@ -133,7 +140,7 @@ fn item_card(item: ReadinessItem, pim_url: Option<String>) -> impl IntoView {
     }
 }
 
-fn render_report(rep: ReadinessReport) -> impl IntoView {
+fn render_report(rep: ReadinessReport, session: Session) -> impl IntoView {
     let indeterminate = rep.directory_roles_indeterminate;
     let pim_url = rep.pim_activation_url.clone();
     // The backend's own error, not a guess at one: the read rides the sign-in
@@ -147,17 +154,36 @@ fn render_report(rep: ReadinessReport) -> impl IntoView {
                  \"?\"."
                 {roles_error
                     .map(|e| {
-                        view! {
-                            " "
-                            {e.message}
-                            {(!e.code.is_empty())
-                                .then(|| {
-                                    view! {
-                                        <span class="ui-load-error__code">
-                                            {format!(" [{}]", e.code)}
-                                        </span>
-                                    }
-                                })}
+                        if e.is_interaction_required() {
+                            // A Conditional Access step-up: the AADSTS text is
+                            // nothing the operator can act on, so the shared
+                            // wording and its inline lever, which re-runs the
+                            // check once verified.
+                            view! {
+                                " "
+                                {VERIFY_IDENTITY_MESSAGE}
+                                <VerifyIdentityButton
+                                    features=&[ROLES_READ_FEATURE]
+                                    on_verified=Callback::new(move |()| {
+                                        session.bump_readiness_reload()
+                                    })
+                                />
+                            }
+                                .into_any()
+                        } else {
+                            view! {
+                                " "
+                                {e.message}
+                                {(!e.code.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <span class="ui-load-error__code">
+                                                {format!(" [{}]", e.code)}
+                                            </span>
+                                        }
+                                    })}
+                            }
+                                .into_any()
                         }
                     })}
             </Callout>
@@ -215,15 +241,19 @@ pub fn ReadinessView() -> impl IntoView {
             match tenant {
                 Some(t) => {
                     let result = readiness::check_readiness(&t.tenant_id).await;
-                    // A dead session behind the roles read gets the
-                    // Re-authenticate lever, once per check (the toast is
-                    // keyed, so a re-run replaces it) — and never for a
+                    // The recovery lever for the roles read, once per check
+                    // (the toast is keyed, so a re-run replaces it): a dead
+                    // session, a rejected token or a missing consent from the
+                    // shared sink. A step-up is the exception — the banner
+                    // carries its own Verify identity button, and a second
+                    // lever from the sink would duplicate it. Never for a
                     // tenant signed out of while the check ran.
                     if session.is_active_tenant(&t.tenant_id)
                         && let Ok(rep) = &result
                         && let Some(e) = &rep.directory_roles_error
+                        && !e.is_interaction_required()
                     {
-                        session.report_if_session_lost(e);
+                        session.report_recovery_action(e, ROLES_READ_FEATURE);
                     }
                     Some(result)
                 }
@@ -285,7 +315,7 @@ pub fn ReadinessView() -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        Some(Ok(rep)) => render_report(rep).into_any(),
+                        Some(Ok(rep)) => render_report(rep, session).into_any(),
                     }
                 })
             }}
