@@ -566,6 +566,71 @@ async fn cae_remints_only_once() {
     assert!(matches!(err, GraphError::Unauthorized), "got {err:?}");
 }
 
+/// Mints the base token, then fails the claims re-mint with `code` — the
+/// shape a dead session, a step-up or an unreachable token endpoint takes
+/// at the CAE re-mint.
+struct FailingRemintProvider(&'static str);
+#[async_trait::async_trait]
+impl azapptoolkit_core::token::BearerProvider for FailingRemintProvider {
+    async fn bearer(&self) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
+        Ok("tok".into())
+    }
+    async fn bearer_with_claims(
+        &self,
+        _claims: &str,
+    ) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
+        Err(azapptoolkit_core::token::TokenError::new(
+            self.0,
+            "re-mint failed",
+        ))
+    }
+}
+
+/// A failed CAE re-mint keeps the classification the token layer gave it, so
+/// the operator gets that failure's lever (Re-authenticate, Verify identity,
+/// a transient Retry) instead of a "Refresh token" that cannot fix it. Only an
+/// unclassified failure is the bare rejected-token 401.
+#[tokio::test]
+async fn a_failed_cae_remint_keeps_the_classified_token_error() {
+    for (code, want) in [
+        ("refresh_missing", "refresh_missing"),
+        ("not_signed_in", "not_signed_in"),
+        ("interaction_required", "interaction_required"),
+        ("consent_required", "consent_required"),
+        ("network_error", "network_error"),
+        ("token_error", "unauthorized"),
+        ("something_new", "unauthorized"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "WWW-Authenticate",
+                r#"Bearer realm="", error="insufficient_claims", claims="eyJhIjoxfQ""#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider: Arc<dyn azapptoolkit_core::token::BearerProvider> =
+            Arc::new(FailingRemintProvider(code));
+        let client = GraphClient::with_base_url(
+            "tenant-test",
+            provider.clone(),
+            provider,
+            Cache::new(),
+            server.uri(),
+        );
+        let err = client.get_application("obj-1").await.unwrap_err();
+        assert_eq!(err.ui_code(), want, "{code}: {err:?}");
+        // The fatal ones are what stop a long-running fan-out.
+        assert_eq!(
+            matches!(&err, GraphError::Token(t) if t.is_reauth_fatal()),
+            azapptoolkit_core::reauth::is_reauth_fatal(code),
+            "{code}"
+        );
+    }
+}
+
 // ── Retry class, end to end ────────────────────────────────────────────────
 // `retry_class_for` decides whether a request whose outcome is unknown may be
 // replayed. The policy itself is unit-tested in `core::http_retry`; these pin

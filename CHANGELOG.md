@@ -18,6 +18,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
+- When Microsoft Graph revokes a token and renewing it fails, the app now offers the right fix, not just Refresh token.
 
 ### Security
 

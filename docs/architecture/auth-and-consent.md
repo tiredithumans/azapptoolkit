@@ -363,9 +363,14 @@ which a sign-out/sign-in cycle would.
   why instead of re-running an op that would read disposed signals and panic. Direct `report_command_error` callers hold no op to
   re-run and keep a plain toast.
 - `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
-  couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one
-  401 doesn't prove the session dead, so a fan-out keeps going. The Exchange/Key Vault/ARM 401
-  hints and `premium_feature_err` point at the same control, never at signing out. The toast shows
+  couldn't satisfy for an unclassified reason) gets the **Refresh token** action but is deliberately
+  NOT re-auth-fatal: one 401 doesn't prove the session dead, so a fan-out keeps going. A re-mint
+  that fails *classified* (`core::reauth::passthrough_code` knows its code — a dead session, a
+  step-up, a missing consent, an unreachable token endpoint) leaves the Graph transport as
+  `GraphError::Token` with that code instead, so it gets its own lever and a dead session still
+  stops a fan-out (pinned by `a_failed_cae_remint_keeps_the_classified_token_error`). The
+  Exchange/Key Vault/ARM 401 hints and `premium_feature_err` point at the same control, never at
+  signing out. The toast shows
   that curated text (`UiError::unauthorized_guidance`, everything past the shared
   `core::reauth::UNAUTHORIZED_STATUS` line) and falls back to a generic lead only for a bare 401,
   because the hint's "if it persists" advice is all that separates a persistent 401 from a
