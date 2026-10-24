@@ -317,8 +317,11 @@ impl GraphClient {
     /// Security Administrator / Global Reader role on the signed-in user. `Err` when the token /
     /// consent / license / role is missing, so callers degrade (no data ⇒ no "unused app" flags).
     ///
-    /// Deliberately bypasses the shared retry/throttle loop: an optional report — a failure is
-    /// handled, not retried. The `nextLink` still rides the privileged bearer and is
+    /// Every page rides the retrying transport (`scoped_get_retried`): the report runs to
+    /// up to 200 pages on the slowest, most rate-limited endpoint in the crate, and a one-shot
+    /// read turned one 429 or 5xx on any page into "no sign-in data" for the whole audit run. A
+    /// 403 (license / role) or 404 is still terminal — only a 429/5xx/network failure is replayed,
+    /// with `Retry-After` honored. The `nextLink` rides the privileged bearer and is
     /// attacker-influenced server output, so pages follow via `collect_pages_from` (like
     /// [`Self::get_json_absolute_with`] and [`Self::list_conditional_access_policies`]):
     /// origin-checking each nextLink before the token attaches, bounded at `MAX_PAGES` against
@@ -355,9 +358,12 @@ impl GraphClient {
         let watch = self
             .cache
             .generation_for(CacheKind::Permissions, &cache_key);
-        let first: Paged<ServicePrincipalSignInActivity> = self.scoped_get(token, &url).await?;
+        let first: Paged<ServicePrincipalSignInActivity> =
+            self.scoped_get_retried(token, &url).await?;
         let out = self
-            .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
+            .collect_pages_from(first, |u| async move {
+                self.scoped_get_retried(token, &u).await
+            })
             .await?;
         self.cache.put_if_current(watch, &out);
         Ok(out)
@@ -370,7 +376,9 @@ impl GraphClient {
     /// `AuditLog.Read.All` token ([`Self::with_audit_log_token`]) and the same
     /// read-through cache pattern as [`Self::list_service_principal_sign_in_activities`]:
     /// read-only telemetry, one fetch per tenant per TTL window, sign-out sweep
-    /// is sufficient staleness handling.
+    /// is sufficient staleness handling — and the same retrying page reads, so
+    /// a transient 429/5xx on one page is ridden out rather than dropping the
+    /// whole report.
     ///
     /// A credential with no row here is **unknown**, not unused — the preview
     /// report's coverage (does it list never-used credentials?) is not
@@ -400,9 +408,12 @@ impl GraphClient {
         let watch = self
             .cache
             .generation_for(CacheKind::Permissions, &cache_key);
-        let first: Paged<AppCredentialSignInActivity> = self.scoped_get(token, &url).await?;
+        let first: Paged<AppCredentialSignInActivity> =
+            self.scoped_get_retried(token, &url).await?;
         let out = self
-            .collect_pages_from(first, |u| async move { self.scoped_get(token, &u).await })
+            .collect_pages_from(first, |u| async move {
+                self.scoped_get_retried(token, &u).await
+            })
             .await?;
         self.cache.put_if_current(watch, &out);
         Ok(out)

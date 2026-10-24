@@ -24,6 +24,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - A refused Activity or Conditional Access read now names the roles that can read it instead of asking for admin consent.
 - The Permissions tab's mailbox Scope banner now offers Re-authenticate when your session has expired.
 - An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
+- The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
 
 ### Security
 
