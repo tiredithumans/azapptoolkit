@@ -18,6 +18,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Security
 
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
+- Security fix for a timing weakness in a cryptography helper that the app's hashing code depends on.
 
 ## [0.34.1] - 2026-10-15
 
