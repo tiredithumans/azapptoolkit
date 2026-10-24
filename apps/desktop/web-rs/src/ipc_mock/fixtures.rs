@@ -23,7 +23,7 @@ use azapptoolkit_dto::bulk::{BulkProgress, BulkStageCertOutcome, BulkStageCertRe
 use azapptoolkit_dto::config::{AuthConfigStatus, ConfigSource};
 use azapptoolkit_dto::consent::{AppPermissionGrantDto, OAuth2GrantDto, TenantConsentPostureDto};
 use azapptoolkit_dto::credentials::{CredentialRowDto, CredentialUsageDto};
-use azapptoolkit_dto::diagnostics::CacheStatsDto;
+use azapptoolkit_dto::diagnostics::{CacheStatsDto, SupportPaths};
 use azapptoolkit_dto::enterprise_application::{
     AppAssignmentDto, AppRoleTargetKind, AppRolesView, ApplicationTemplateDto,
     EnterpriseApplicationDetail, EnterpriseApplicationDto, GalleryAppSummary,
@@ -1025,6 +1025,15 @@ pub fn cache_stats() -> CacheStatsDto {
         audit_ttl_secs: 600,
         lists_ttl_secs: 120,
         max_cache_size: 512,
+    }
+}
+
+/// Where a (Windows) install keeps its logs and settings file — the Settings
+/// tab, config screen, sign-in card and update splash show these.
+pub fn support_paths() -> SupportPaths {
+    SupportPaths {
+        log_dir: r"C:\Users\alex\AppData\Local\azapptoolkit\logs".to_string(),
+        settings_file: r"C:\Users\alex\AppData\Roaming\azapptoolkit\settings.json".to_string(),
     }
 }
 

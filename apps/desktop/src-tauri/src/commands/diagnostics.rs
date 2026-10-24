@@ -1,12 +1,41 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tauri::State;
 
 use azapptoolkit_core::cache::{Cache, CacheKind};
+use azapptoolkit_core::settings::SETTINGS_FILE;
 
 use crate::dto::UiError;
-use crate::dto::diagnostics::{CacheKindDto, CacheStatsDto, ListCacheKindDto, SetCacheConfigInput};
+use crate::dto::diagnostics::{
+    CacheKindDto, CacheStatsDto, ListCacheKindDto, SetCacheConfigInput, SupportPaths,
+};
 use crate::state::AppState;
+
+/// Where this install writes its logs and its `settings.json`, so the UI can
+/// show both with a Copy button: Settings → Tenant connection, and under a
+/// failing sign-in, config save or update — the moments an operator is told
+/// to "check the log" without knowing the per-OS folder (README "Logs").
+/// Absolute even when no home folder was found and the config directory fell
+/// back to the working directory; `io` when that cannot be resolved.
+#[tauri::command]
+pub fn get_support_paths() -> Result<SupportPaths, UiError> {
+    support_paths_in(&crate::log_directory(), &crate::config_directory())
+}
+
+/// [`get_support_paths`] over explicit folders, so the shape is testable
+/// without the process environment.
+fn support_paths_in(log_dir: &Path, config_dir: &Path) -> Result<SupportPaths, UiError> {
+    let absolute = |p: PathBuf| {
+        std::path::absolute(&p)
+            .map(|p| p.display().to_string())
+            .map_err(|e| UiError::io(format!("Could not resolve {}: {e}", p.display())))
+    };
+    Ok(SupportPaths {
+        log_dir: absolute(log_dir.to_path_buf())?,
+        settings_file: absolute(config_dir.join(SETTINGS_FILE))?,
+    })
+}
 
 #[tauri::command]
 pub fn cache_stats(state: State<'_, AppState>) -> CacheStatsDto {
@@ -192,7 +221,7 @@ pub fn set_cache_config(
 
 #[cfg(test)]
 mod tests {
-    use super::invalidate_list_cache_in;
+    use super::{invalidate_list_cache_in, support_paths_in};
     use crate::commands::applications::{search_corpus_key, sp_index_hit, sp_index_store};
     use crate::commands::managed_identity::mi_key;
     use crate::dto::diagnostics::ListCacheKindDto;
@@ -233,6 +262,23 @@ mod tests {
                 "{label}: another tenant's SP index was dropped"
             );
         }
+    }
+
+    /// The settings path names the file itself, and a relative fallback (no
+    /// home folder found) is still shown as a path the operator can open.
+    #[test]
+    fn support_paths_are_absolute_and_name_the_settings_file() {
+        let paths =
+            support_paths_in(std::path::Path::new("logs"), std::path::Path::new(".")).unwrap();
+        let log_dir = std::path::Path::new(&paths.log_dir);
+        let settings = std::path::Path::new(&paths.settings_file);
+        assert!(log_dir.is_absolute(), "{}", paths.log_dir);
+        assert!(settings.is_absolute(), "{}", paths.settings_file);
+        assert!(log_dir.ends_with("logs"));
+        assert_eq!(
+            settings.file_name().and_then(|f| f.to_str()),
+            Some(azapptoolkit_core::settings::SETTINGS_FILE)
+        );
     }
 
     #[test]

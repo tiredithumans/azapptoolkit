@@ -144,3 +144,23 @@ async fn tenant_connection_tab_names_an_active_env_override() {
         "AZAPPTOOLKIT_CLIENT_ID and AZAPPTOOLKIT_TENANT_ID"
     ));
 }
+
+/// Settings sits behind the sign-in that may be failing, so the Tenant
+/// connection tab is one of several places the log folder and settings file
+/// are shown — copyable, without knowing the per-OS layout.
+#[wasm_bindgen_test]
+async fn tenant_connection_tab_shows_where_the_logs_and_settings_live() {
+    ts::reset();
+    ts::mock_ok("get_tenant_defaults", &fixtures::tenant_defaults());
+    ts::mock_ok("get_auth_config", &fixtures::configured());
+    ts::mock_ok("get_support_paths", &fixtures::support_paths());
+    let paths = fixtures::support_paths();
+
+    let _m = ts::mount_view(|| view! { <SettingsView /> });
+    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
+    ts::click(".ui-tabs button:nth-of-type(4)");
+    ts::wait_for(|| ts::body_contains(&paths.log_dir)).await;
+    assert!(ts::body_contains(&paths.settings_file));
+    assert!(ts::body_contains("Logs folder"));
+    assert_eq!(ts::query_all(".support-paths .copy-block").len(), 2);
+}

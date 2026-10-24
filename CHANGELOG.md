@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Added
+
+- Settings → Tenant connection, sign-in, setup and a failed update now show where the logs and settings.json are.
+
 ### Fixed
 
 - A Conditional Access block or device rule for one service no longer signs you out; it offers Verify identity instead.

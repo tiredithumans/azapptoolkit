@@ -1426,6 +1426,8 @@ fn register_fixtures() {
     // Groups scope and the Exchange scope typeahead.
     mock_ok("get_tenant_defaults", &f::tenant_defaults());
     mock_ok("set_tenant_defaults", &());
+    // Settings → Tenant connection shows where logs and settings.json live.
+    mock_ok("get_support_paths", &f::support_paths());
     mock_ok("search_users", &f::directory_user_search());
     mock_ok("search_groups", &f::directory_group_search());
     mock_ok("search_distribution_lists", &f::distribution_list_search());

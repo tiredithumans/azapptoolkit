@@ -1,4 +1,4 @@
-//! Cache-diagnostics IPC DTOs.
+//! Cache-diagnostics and support-path IPC DTOs.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,20 @@ pub enum CacheKindDto {
     Audit,
     Lists,
     All,
+}
+
+/// Where this install keeps the two files support asks for, from
+/// `get_support_paths`: shown with a Copy button in Settings → Tenant
+/// connection and wherever sign-in, the config save or an update fails, so an
+/// operator can find the log or the settings file without knowing the
+/// per-OS layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportPaths {
+    /// The folder holding the daily `azapptoolkit.YYYY-MM-DD.log` files.
+    pub log_dir: String,
+    /// The `settings.json` file (it may not exist yet on a fresh install).
+    pub settings_file: String,
 }
 
 /// Which list shape to invalidate. Sent by the per-page Refresh button.

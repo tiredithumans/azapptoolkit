@@ -150,6 +150,7 @@ pub fn run() {
             commands::diagnostics::invalidate_list_cache,
             commands::diagnostics::set_cache_enabled,
             commands::diagnostics::set_cache_config,
+            commands::diagnostics::get_support_paths,
             commands::keyvault::kv_list_secrets,
             commands::keyvault::kv_get_secret,
             commands::keyvault::rotate_app_credential,
@@ -477,7 +478,7 @@ fn install_panic_hook() {
     }));
 }
 
-fn log_directory() -> PathBuf {
+pub(crate) fn log_directory() -> PathBuf {
     #[cfg(target_os = "windows")]
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(not(target_os = "windows"))]
