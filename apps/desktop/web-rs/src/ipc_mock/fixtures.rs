@@ -122,6 +122,9 @@ pub fn configured_from(source: ConfigSource) -> AuthConfigStatus {
         tenant_id: "22222222-2222-2222-2222-222222222222".to_string(),
         client_id_source: source,
         tenant_id_source: source,
+        cloud: "Commercial (global)".to_string(),
+        cloud_warning: None,
+        settings_error: None,
     }
 }
 

@@ -36,11 +36,21 @@ fn baked_env_name(key: &str) -> Option<&'static str> {
     }
 }
 
-/// A `cargo:warning` for a baked client/tenant id that cannot work, so a
-/// mistyped team-build `.env` is caught at build time instead of at sign-in.
-/// `None` for a usable value and for every other key (`AZAPPTOOLKIT_CLOUD` is
-/// validated at runtime). Never echoes the value.
+/// A `cargo:warning` for a baked value that cannot work, so a mistyped
+/// team-build `.env` is caught at build time instead of at sign-in: an empty or
+/// non-GUID client/tenant id, or an `AZAPPTOOLKIT_CLOUD` no build knows (the
+/// app would ignore it and sign in to the commercial cloud). `None` for a
+/// usable value and for every other key. Never echoes the value.
 fn bake_warning(key: &str, value: &str) -> Option<String> {
+    if key == "AZAPPTOOLKIT_CLOUD" {
+        return (!is_known_cloud(value)).then(|| {
+            format!(
+                "AZAPPTOOLKIT_CLOUD in .env is not a known cloud ({}); the app will ignore it \
+                 and sign in to the commercial cloud",
+                CLOUD_NAMES.join(", ")
+            )
+        });
+    }
     if !matches!(key, "AZAPPTOOLKIT_CLIENT_ID" | "AZAPPTOOLKIT_TENANT_ID") {
         return None;
     }
@@ -51,6 +61,33 @@ fn bake_warning(key: &str, value: &str) -> Option<String> {
         return Some(format!("{key} in .env is not a GUID; sign-in will fail"));
     }
     None
+}
+
+/// The canonical cloud names an operator is told to use (`CloudEnvironment::ALL`
+/// in `as_str` form).
+const CLOUD_NAMES: &[&str] = &["commercial", "usgov", "usgovdod", "china"];
+
+/// Whether `value` names a cloud `CloudEnvironment::parse` accepts, aliases
+/// included; blank is the commercial default, so not a mistake. A local copy
+/// because a build script cannot import `azapptoolkit-core`; a conformance test
+/// keeps the two in step.
+fn is_known_cloud(value: &str) -> bool {
+    const ALIASES: &[&str] = &[
+        "public",
+        "global",
+        "azurecloud",
+        "gcchigh",
+        "gcc-high",
+        "usgovernment",
+        "azureusgovernment",
+        "dod",
+        "usgovernmentdod",
+        "21vianet",
+        "mooncake",
+        "azurechinacloud",
+    ];
+    let v = value.trim().to_ascii_lowercase();
+    v.is_empty() || CLOUD_NAMES.contains(&v.as_str()) || ALIASES.contains(&v.as_str())
 }
 
 /// Strict 8-4-4-4-12 hex check (case-insensitive). A local copy because a
@@ -176,9 +213,61 @@ mod tests {
                 "the value is never echoed"
             );
         }
-        // Only the two ids are checked; the cloud name is validated at runtime.
-        assert_eq!(bake_warning("AZAPPTOOLKIT_CLOUD", "usgov"), None);
         assert_eq!(bake_warning("OTHER", ""), None);
+    }
+
+    /// A cloud the app would ignore warns at build time, naming the valid
+    /// values but not the mistyped one; a known cloud (or none) is quiet.
+    #[test]
+    fn an_unknown_baked_cloud_warns_without_echoing_it() {
+        for ok in ["usgov", " China ", "GCC-High", "", "commercial"] {
+            assert_eq!(bake_warning("AZAPPTOOLKIT_CLOUD", ok), None, "{ok:?}");
+        }
+        let bad = bake_warning("AZAPPTOOLKIT_CLOUD", "usgovv").expect("an unknown cloud warns");
+        assert!(bad.contains("AZAPPTOOLKIT_CLOUD"), "{bad}");
+        assert!(bad.contains("usgovdod"), "{bad}");
+        assert!(!bad.contains("usgovv"), "the value is never echoed: {bad}");
+    }
+
+    /// The build script's cloud check must agree with the runtime's one
+    /// vocabulary, `CloudEnvironment::parse`, or a team build would warn about a
+    /// cloud the app accepts (or stay quiet about one it ignores).
+    #[test]
+    fn the_local_cloud_check_matches_cloud_environment_parse() {
+        use azapptoolkit_core::cloud::CloudEnvironment;
+        let names: Vec<&str> = CloudEnvironment::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(CLOUD_NAMES, names.as_slice());
+        for s in [
+            "commercial",
+            "public",
+            "global",
+            "azurecloud",
+            "usgov",
+            "gcchigh",
+            "gcc-high",
+            "usgovernment",
+            "azureusgovernment",
+            "usgovdod",
+            "dod",
+            "usgovernmentdod",
+            "china",
+            "21vianet",
+            "mooncake",
+            "azurechinacloud",
+            " USGov ",
+            "",
+            "   ",
+            "usgovv",
+            "gcc",
+            "azure",
+            "us-gov",
+        ] {
+            assert_eq!(
+                is_known_cloud(s),
+                CloudEnvironment::parse(s).is_some(),
+                "disagree on {s:?}"
+            );
+        }
     }
 
     /// The build script's local GUID check must agree with the command layer's

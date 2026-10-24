@@ -12,7 +12,14 @@ use wasm_bindgen_test::*;
 
 use azapptoolkit_web_rs::bindings::config::ConfigSource;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
+use azapptoolkit_web_rs::views::config_screen::ConfigScreen;
 use azapptoolkit_web_rs::views::settings_view::SettingsView;
+use azapptoolkit_web_rs::views::sign_in::SignInScreen;
+
+/// What the startup reader says about a damaged settings.json (path and where
+/// it broke — never what the file holds).
+const SETTINGS_ERROR: &str = "/home/alex/.local/share/azapptoolkit/settings.json could not be \
+    read (invalid JSON at line 3, column 5), so azapptoolkit started without it.";
 
 /// Every text input's current value in the active tab pane.
 fn input_values() -> Vec<String> {
@@ -163,4 +170,78 @@ async fn tenant_connection_tab_shows_where_the_logs_and_settings_live() {
     assert!(ts::body_contains(&paths.settings_file));
     assert!(ts::body_contains("Logs folder"));
     assert_eq!(ts::query_all(".support-paths .copy-block").len(), 2);
+}
+
+/// A save over a damaged settings.json is refused (writing over it would lose
+/// the tenant defaults) — and the hint says the file is the problem, not the
+/// folder's permissions, with the paths to go and fix it.
+#[wasm_bindgen_test]
+async fn a_save_over_a_damaged_settings_file_says_to_fix_or_move_it() {
+    ts::reset();
+    ts::mock_err(
+        "set_auth_config",
+        &fixtures::ui_error(
+            "settings_unreadable",
+            "settings.json is damaged: /x/settings.json exists but could not be read (invalid \
+             JSON at line 1, column 2); fix it or move it aside — it was left unchanged.",
+        ),
+    );
+    ts::mock_ok("get_support_paths", &fixtures::support_paths());
+    let configured = fixtures::configured();
+    let (client, tenant) = (configured.client_id.clone(), configured.tenant_id.clone());
+
+    let _m = ts::mount_view(move || {
+        view! { <ConfigScreen client_id=client tenant_id=tenant /> }
+    });
+    ts::click_button_labelled("Save & restart");
+    ts::wait_for(|| ts::body_contains("settings.json is damaged — fix the JSON or move it aside"))
+        .await;
+    assert!(ts::body_contains("/x/settings.json"));
+    assert!(!ts::body_contains(
+        "check that the app's config folder is writable"
+    ));
+    assert_eq!(
+        ts::call_count("restart_app"),
+        0,
+        "a refused save never relaunches"
+    );
+    // The first-run screen has no Settings page behind it: the paths show here.
+    ts::wait_for(|| ts::body_contains(&fixtures::support_paths().settings_file)).await;
+}
+
+/// A settings.json the app could not read at startup is named before anything
+/// is typed or signed in — on both screens in front of Settings — instead of
+/// the app silently running on defaults.
+#[wasm_bindgen_test]
+async fn a_damaged_settings_file_at_startup_is_named_on_both_screens() {
+    ts::reset();
+    ts::mock_ok("get_support_paths", &fixtures::support_paths());
+
+    let config = ts::mount_view(|| {
+        view! {
+            <ConfigScreen
+                client_id=String::new()
+                tenant_id=String::new()
+                settings_error=Some(SETTINGS_ERROR.to_string())
+            />
+        }
+    });
+    ts::wait_for(|| ts::query(".settings-error").is_some()).await;
+    assert!(ts::text(".settings-error").contains("invalid JSON at line 3, column 5"));
+    ts::wait_for(|| ts::body_contains(&fixtures::support_paths().log_dir)).await;
+    drop(config);
+
+    let sign_in = ts::mount_view(|| {
+        view! {
+            <SignInScreen
+                tenant="test-tenant".to_string()
+                on_reconfigure=Callback::new(|_| ())
+                settings_error=Some(SETTINGS_ERROR.to_string())
+            />
+        }
+    });
+    sign_in.session.active_tenant.set(None);
+    ts::wait_for(|| ts::query(".settings-error").is_some()).await;
+    assert!(ts::text(".settings-error").contains("started without it"));
+    assert!(ts::body_contains("Sign in with Entra ID"));
 }

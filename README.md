@@ -330,6 +330,12 @@ The env var takes precedence over the settings file when both are
 present. With auto-update disabled the app makes no network calls to
 the updater endpoint at any point in the session.
 
+If `settings.json` can't be read — a typo from a hand edit, say — the app
+starts without it, so the opt-out (and the IDs and tenant defaults saved
+there) are not in effect until it is fixed. The sign-in and configuration
+screens say so, naming the file and the line and column where it broke;
+saving settings is refused rather than writing over the file.
+
 ## Requirements
 
 - Windows 10 or newer (primary target), macOS on Apple Silicon, or a
@@ -488,7 +494,10 @@ bake it in instead, by adding `AZAPPTOOLKIT_CLOUD` to `.env` before building
 switches the Entra login, Microsoft Graph, Exchange Online, Key Vault, ARM and
 Log Analytics endpoints, and the SSO wizard's application template and
 app-owner URLs, to that cloud's hosts. The app registration must be created in
-the matching national-cloud admin center.
+the matching national-cloud admin center. The sign-in card names the cloud it
+will sign in to; a value the app doesn't recognise is ignored (the next layer,
+or commercial, is used), and the card says so and lists the valid values. A
+team build whose `.env` names an unknown cloud also gets a build warning.
 
 ## Logs
 
