@@ -11,6 +11,7 @@
 //! so the page loads even for a user who lacks every optional scope.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use tauri::State;
@@ -26,6 +27,45 @@ use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::dto::UiError;
 use crate::dto::readiness::{ReadinessItem, ReadinessReport, Verdict};
 use crate::state::{AppState, ConsentFeature};
+
+/// How long the Azure-RBAC plane may take before the page gives up on it.
+/// The other two planes answer in about a second; an ARM host that drops
+/// traffic (an egress allow-list that admits Graph only) held the whole page
+/// for the ARM retry budget instead — ~47 s per blocked call, far longer over a
+/// subscription fan-out. Past this the Azure rows read "?" with a re-check
+/// note, never Missing.
+const AZURE_PLANE_BUDGET: Duration = Duration::from_secs(15);
+
+/// What the Azure-RBAC sweep produced for the role half of the Azure plane.
+#[derive(Debug)]
+enum AzureRoles {
+    /// The role-definition GUIDs directly assigned to the signed-in user.
+    Held(HashSet<String>),
+    /// Couldn't be enumerated (no signed-in oid, no ARM consent, an ARM error).
+    Unavailable,
+    /// The sweep ran past [`AZURE_PLANE_BUDGET`] and was abandoned.
+    TimedOut,
+}
+
+/// Runs the Azure-RBAC sweep under `budget`, so a blocked ARM egress costs the
+/// page at most that long. Split out so the bound is testable on a paused
+/// clock.
+async fn azure_plane_within(
+    budget: Duration,
+    sweep: impl std::future::Future<Output = Option<HashSet<String>>>,
+) -> AzureRoles {
+    match tokio::time::timeout(budget, sweep).await {
+        Ok(Some(held)) => AzureRoles::Held(held),
+        Ok(None) => AzureRoles::Unavailable,
+        Err(_) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                "readiness: Azure role-assignment sweep timed out; Azure rows read unknown"
+            );
+            AzureRoles::TimedOut
+        }
+    }
+}
 
 /// Builds the readiness report for `tenant_id`. Never cached — the whole point is
 /// freshness after a PIM activation; the underlying token probes reuse the
@@ -63,20 +103,30 @@ pub async fn check_readiness(
     }));
 
     // Azure-RBAC plane: enumerate the user's direct role assignments once
-    // (best-effort). `None` => the Azure capabilities fall back to "?".
-    let azure_fut = enumerate_azure_role_ids(&state, &tenant_id);
+    // (best-effort, bounded by `AZURE_PLANE_BUDGET`). Anything but a finished
+    // sweep => the Azure capabilities fall back to "?".
+    let azure_fut = azure_plane_within(
+        AZURE_PLANE_BUDGET,
+        enumerate_azure_role_ids(&state, &tenant_id),
+    );
 
     // The three planes share no inputs — Graph directory roles, token-endpoint
     // scope probes and the ARM sweep are independent — so they run concurrently
     // and the page's cold latency is the slowest single plane rather than their
     // sum. Each still degrades on its own: a failure here is never fatal.
-    let (active_roles, scope_verdicts, azure_held) = tokio::join!(roles_fut, scopes_fut, azure_fut);
+    let (active_roles, scope_verdicts, azure_roles) =
+        tokio::join!(roles_fut, scopes_fut, azure_fut);
 
-    let active_roles = active_roles.inspect_err(|err| {
-        tracing::warn!(?err, "readiness: couldn't read active directory roles");
-    });
-    let directory_roles_indeterminate = active_roles.is_err();
-    let active_roles = active_roles.unwrap_or_default();
+    // Kept as the client's own error, so the page names the real cause (a
+    // dead session, a 403, an unreachable Graph) instead of guessing one.
+    let (active_roles, directory_roles_error) = match active_roles {
+        Ok(roles) => (roles, None),
+        Err(err) => {
+            tracing::warn!(?err, "readiness: couldn't read active directory roles");
+            (Vec::new(), Some(UiError::from(err)))
+        }
+    };
+    let directory_roles_indeterminate = directory_roles_error.is_some();
     let scope_verdicts: HashMap<&'static str, Verdict> = scope_verdicts.into_iter().collect();
 
     let cloud = state.auth.cloud();
@@ -86,7 +136,7 @@ pub async fn check_readiness(
             cap,
             &active_roles,
             directory_roles_indeterminate,
-            azure_held.as_ref(),
+            &azure_roles,
         );
 
         let (scope_verdict, scope_detail) = match cap.scope_feature {
@@ -117,20 +167,20 @@ pub async fn check_readiness(
     Ok(ReadinessReport {
         items,
         directory_roles_indeterminate,
+        directory_roles_error,
         pim_activation_url: Some(state.auth.cloud().pim_my_roles_url()),
     })
 }
 
 /// The role half of a capability — pure, so it's unit-tested without a client.
 /// `directory_unreadable` is true when `/me` directory roles couldn't be read,
-/// turning every directory-role capability into "?". `azure_held` is the set of
-/// Azure role-definition GUIDs directly assigned to the signed-in user (`None`
-/// when they couldn't be enumerated), used for the Azure-RBAC plane.
+/// turning every directory-role capability into "?". `azure` is what the
+/// Azure-RBAC sweep found for the Azure plane.
 fn role_for(
     cap: &Capability,
     active_roles: &[ActiveDirectoryRole],
     directory_unreadable: bool,
-    azure_held: Option<&HashSet<String>>,
+    azure: &AzureRoles,
 ) -> (Verdict, String) {
     match cap.role_detect {
         RoleDetect::DirectoryRole => {
@@ -159,7 +209,7 @@ fn role_for(
                 ),
             }
         }
-        RoleDetect::Indeterminate => azure_role_verdict(cap, azure_held),
+        RoleDetect::Indeterminate => azure_role_verdict(cap, azure),
     }
 }
 
@@ -167,12 +217,22 @@ fn role_for(
 /// Only direct assignments are visible (the `principalId` filter doesn't return
 /// group-inherited roles), so this only ever upgrades to `Have` on a confirmed
 /// assignment — it never reports `Missing` (which could be a false alarm for a
-/// role held via a group). It stays `Unknown` otherwise.
-fn azure_role_verdict(cap: &Capability, azure_held: Option<&HashSet<String>>) -> (Verdict, String) {
+/// role held via a group). It stays `Unknown` otherwise, a timed-out sweep
+/// included.
+fn azure_role_verdict(cap: &Capability, azure: &AzureRoles) -> (Verdict, String) {
     let roles: Vec<&str> = cap.role_names().collect();
-    match azure_held {
+    match azure {
+        AzureRoles::TimedOut => (
+            Verdict::Unknown,
+            format!(
+                "Timed out: Azure Resource Manager didn't answer within {} seconds, so your Azure \
+                 role assignments couldn't be checked — re-check later with Refresh token (top \
+                 right).",
+                AZURE_PLANE_BUDGET.as_secs()
+            ),
+        ),
         // Couldn't enumerate (no ARM consent / no signed-in oid / ARM error).
-        None => (
+        AzureRoles::Unavailable => (
             Verdict::Unknown,
             format!(
                 "Azure RBAC is granted per subscription/resource — grant this app Azure access (or \
@@ -180,7 +240,7 @@ fn azure_role_verdict(cap: &Capability, azure_held: Option<&HashSet<String>>) ->
                 roles.join(" / ")
             ),
         ),
-        Some(held) => {
+        AzureRoles::Held(held) => {
             if roles
                 .iter()
                 .any(|name| azapptoolkit_core::azure_roles::azure_role_satisfied(name, held))
@@ -311,7 +371,7 @@ mod tests {
                 "62e90394-69f5-4237-9190-012177145e10",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("Global Administrator"));
@@ -331,7 +391,7 @@ mod tests {
                 "f28a1f50-f6e7-4571-818b-6a12f2af6b6c",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("SharePoint Administrator"));
@@ -347,7 +407,7 @@ mod tests {
                 "fe930be7-5e62-47db-91af-98c3a49a38b1",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Cloud Application Administrator"));
@@ -355,7 +415,12 @@ mod tests {
 
     #[test]
     fn missing_role_detail_covers_eligible_and_unassigned() {
-        let (v, detail) = role_for(capability("provisioning_read").unwrap(), &[], false, None);
+        let (v, detail) = role_for(
+            capability("provisioning_read").unwrap(),
+            &[],
+            false,
+            &AzureRoles::Unavailable,
+        );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("PIM"), "{detail}");
         assert!(detail.contains("assignment"), "{detail}");
@@ -365,7 +430,7 @@ mod tests {
     #[test]
     fn directory_unreadable_is_unknown() {
         let cap = capability("app_registrations").unwrap();
-        let (v, _) = role_for(cap, &[], true, None);
+        let (v, _) = role_for(cap, &[], true, &AzureRoles::Unavailable);
         assert_eq!(v, Verdict::Unknown);
     }
 
@@ -373,7 +438,7 @@ mod tests {
     fn azure_rbac_unknown_when_not_enumerable() {
         // No ARM enumeration available (None) => "?" with a grant-access nudge.
         let cap = capability("keyvault_secrets").unwrap();
-        let (v, detail) = role_for(cap, &[], false, None);
+        let (v, detail) = role_for(cap, &[], false, &AzureRoles::Unavailable);
         assert_eq!(v, Verdict::Unknown);
         assert!(detail.contains("Azure"));
     }
@@ -382,13 +447,8 @@ mod tests {
     fn azure_rbac_have_when_a_direct_assignment_satisfies() {
         // azure_role_reads needs "Reader"; a held Reader assignment => Have.
         let reader = "acdd72a7-3385-48ef-bd42-f606fba81ae7".to_string();
-        let held: HashSet<String> = HashSet::from([reader]);
-        let (v, _) = role_for(
-            capability("azure_role_reads").unwrap(),
-            &[],
-            false,
-            Some(&held),
-        );
+        let held = AzureRoles::Held(HashSet::from([reader]));
+        let (v, _) = role_for(capability("azure_role_reads").unwrap(), &[], false, &held);
         assert_eq!(v, Verdict::Have);
     }
 
@@ -396,14 +456,41 @@ mod tests {
     fn azure_rbac_unknown_not_missing_when_no_direct_assignment() {
         // Enumeration succeeded but the required role isn't directly held: stay
         // Unknown (it may be group-inherited), never falsely Missing.
-        let held: HashSet<String> = HashSet::new();
-        let (v, _) = role_for(
-            capability("keyvault_secrets").unwrap(),
-            &[],
-            false,
-            Some(&held),
-        );
+        let held = AzureRoles::Held(HashSet::new());
+        let (v, _) = role_for(capability("keyvault_secrets").unwrap(), &[], false, &held);
         assert_eq!(v, Verdict::Unknown);
+    }
+
+    /// A blocked ARM egress no longer holds the page: past the budget the
+    /// sweep is abandoned and the Azure rows read "?" with a re-check note —
+    /// never Missing, which would be a false alarm.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_azure_sweep_times_out_to_unknown_within_the_budget() {
+        let started = tokio::time::Instant::now();
+        let azure = azure_plane_within(
+            AZURE_PLANE_BUDGET,
+            std::future::pending::<Option<HashSet<String>>>(),
+        )
+        .await;
+        assert!(matches!(azure, AzureRoles::TimedOut), "{azure:?}");
+        assert_eq!(started.elapsed(), AZURE_PLANE_BUDGET);
+
+        let (v, detail) = role_for(capability("keyvault_secrets").unwrap(), &[], false, &azure);
+        assert_eq!(v, Verdict::Unknown);
+        assert!(detail.starts_with("Timed out"), "{detail}");
+        assert!(detail.contains("re-check"), "{detail}");
+
+        // A sweep that answers inside the budget is used as-is.
+        let reader = "acdd72a7-3385-48ef-bd42-f606fba81ae7".to_string();
+        let azure = azure_plane_within(AZURE_PLANE_BUDGET, async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Some(HashSet::from([reader]))
+        })
+        .await;
+        let (v, _) = role_for(capability("azure_role_reads").unwrap(), &[], false, &azure);
+        assert_eq!(v, Verdict::Have);
+        let unavailable = azure_plane_within(AZURE_PLANE_BUDGET, async { None }).await;
+        assert!(matches!(unavailable, AzureRoles::Unavailable));
     }
 
     #[test]
@@ -419,7 +506,7 @@ mod tests {
                 "29232cdf-9323-42fd-ade2-1d097af3e4de",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Have);
         assert!(detail.contains("Exchange Administrator"));
@@ -432,7 +519,7 @@ mod tests {
                 "62e90394-69f5-4237-9190-012177145e10",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Have);
     }
@@ -447,7 +534,7 @@ mod tests {
                 "fe930be7-5e62-47db-91af-98c3a49a38b1",
             )],
             false,
-            None,
+            &AzureRoles::Unavailable,
         );
         assert_eq!(v, Verdict::Missing);
         assert!(detail.contains("Exchange Administrator"));

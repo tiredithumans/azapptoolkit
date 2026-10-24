@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::UiError;
+
 /// Whether a requirement is confirmed met (✓ `Have`), confirmed missing
 /// (✗ `Missing`), or couldn't be determined (? `Unknown`). `Unknown` is the
 /// graceful-degradation verdict — the checklist never hard-fails when a probe
@@ -51,6 +53,12 @@ pub struct ReadinessReport {
     /// directory-role verdict is `Unknown`), so the UI can show one banner
     /// instead of N "?"s.
     pub directory_roles_indeterminate: bool,
+    /// Why the active directory roles couldn't be read, when they couldn't —
+    /// the banner shows its message, and a dead session (`refresh_missing` /
+    /// `not_signed_in`) raises the Re-authenticate lever. `None` from an older
+    /// backend.
+    #[serde(default)]
+    pub directory_roles_error: Option<UiError>,
     /// The cloud-correct PIM "My roles" link (`CloudEnvironment::pim_my_roles_url`),
     /// shown under a directory-role row that reads Missing so an eligible
     /// operator can activate in one click. `None` from an older backend.
