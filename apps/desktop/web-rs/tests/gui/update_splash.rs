@@ -41,6 +41,10 @@ async fn an_unverified_update_disables_retry_and_points_at_the_manual_install() 
     ts::click_button_labelled("Update & restart");
     ts::wait_for(|| ts::body_contains("failed its signature check")).await;
     assert!(ts::body_contains("Releases page"));
+    // Not "install the same payload by hand": it may have been tampered with.
+    assert!(ts::body_contains("may have been altered or corrupted"));
+    assert!(ts::body_contains("ideally from another network"));
+    assert!(!ts::body_contains("run its installer instead"));
     assert!(
         !ts::button_labelled_enabled("Update & restart"),
         "a retry would download the same unverifiable bytes"
@@ -74,4 +78,23 @@ async fn a_network_failure_leaves_update_and_restart_for_another_try() {
     ts::wait_for(|| ts::body_contains("Couldn't reach the update server")).await;
     assert!(!ts::body_contains("Releases page"));
     assert!(ts::button_labelled_enabled("Update & restart"));
+}
+
+/// An install that failed for another reason is not a tampering warning: it
+/// points at the manual install of the same release.
+#[wasm_bindgen_test]
+async fn a_failed_install_points_at_the_manual_install_without_a_tampering_warning() {
+    ts::reset();
+    ts::mock_err(
+        "perform_update",
+        &fixtures::ui_error("updater", "invalid updater binary format"),
+    );
+    let _m = mount_splash();
+
+    ts::wait_for(|| ts::has_button_labelled("Update & restart")).await;
+    ts::click_button_labelled("Update & restart");
+    ts::wait_for(|| ts::body_contains("invalid updater binary format")).await;
+    assert!(ts::body_contains("run its installer instead"));
+    assert!(!ts::body_contains("altered or corrupted"));
+    assert!(!ts::button_labelled_enabled("Update & restart"));
 }
