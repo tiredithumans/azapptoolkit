@@ -3714,6 +3714,12 @@ h3 {
   font-weight: var(--weight-medium);
   color: var(--text-muted);
 }
+/* `components::support_paths` — the log folder and settings file, stacked. */
+.support-paths {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
 /* "Copy all details" sits between the lede and the fields it copies, so the
    affordance is visible before the operator starts copying values one at a
    time. Left-aligned and not stretched: it is one action, not a form row. */
