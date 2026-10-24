@@ -22,6 +22,7 @@ use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_menu_keynav::use_menu_keynav;
 use crate::hooks::use_shortcuts::use_shortcuts;
 use crate::state::{ActiveView, use_session};
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
     deleted_apps_dialog::DeletedAppsDialog, gallery_dialog::GalleryDialog,
@@ -52,7 +53,10 @@ pub fn AppShell(children: Children) -> impl IntoView {
     // In-flight flag so the button reads "Signing out…" (and can't be
     // double-clicked) while the backend clears the keyring + caches.
     let signing_out = RwSignal::new(false);
-    let on_sign_out = move |_| {
+    // Asked before a sign-out that would discard a running restore's report or
+    // an unsaved one's one-time secret values (`dr_unsaved_secrets`).
+    let confirm_sign_out = RwSignal::new(false);
+    let sign_out = move || {
         let session = session;
         if signing_out.get() {
             return;
@@ -93,6 +97,13 @@ pub fn AppShell(children: Children) -> impl IntoView {
             });
         } else {
             session.set_active_tenant(None);
+        }
+    };
+    let on_sign_out = move |_| {
+        if session.tenant_ui.dr_unsaved_secrets.get_untracked() {
+            confirm_sign_out.set(true);
+        } else {
+            sign_out();
         }
     };
 
@@ -448,8 +459,10 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         role="menuitem"
                                         disabled=move || signing_out.get()
                                         on:click=move |ev| {
-                                            on_sign_out(ev);
+                                            // Menu first — see "Cache diagnostics": the
+                                            // sign-out confirmation may open.
                                             menu_open.set(false);
+                                            on_sign_out(ev);
                                         }
                                     >
                                         <span class="nav__icon"><Icon name=IconName::LogOut size=16 /></span>
@@ -530,6 +543,20 @@ pub fn AppShell(children: Children) -> impl IntoView {
             />
             <UpdateSplash open=update_open info=update_info />
             <ReleaseNotesDialog open=release_notes_open />
+            // Confirm, not block: the operator may mean it, and a dead
+            // restore's secrets are reissued either way.
+            <ConfirmDialog
+                open=confirm_sign_out
+                title="Sign out?"
+                body="A restore is running or its report holds one-time secret values you haven't saved. Signing out discards them. Sign out anyway?"
+                confirm_label="Sign out anyway"
+                cancel_label="Stay signed in"
+                on_confirm=Callback::new(move |()| {
+                    confirm_sign_out.set(false);
+                    sign_out();
+                })
+                on_close=Callback::new(move |()| confirm_sign_out.set(false))
+            />
             <ToastHost />
             <ToolDialogs />
         </div>

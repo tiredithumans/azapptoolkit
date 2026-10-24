@@ -22,6 +22,10 @@ After 0.34.1, each change is one line written for the person using the app.
 - A restore that can't identify a permission while running now says so, not "not approved in the plan".
 - A restore re-run that keeps an existing same-named secret now shows its key id, when it was added and its hint.
 - Restore progress now keeps moving through every step, instead of sitting full once the apps are created.
+- Signing out now asks first while a restore runs or its report holds secret values you haven't saved.
+- A restore that finishes after you signed out and back in now says its report was lost, not to save it.
+- Cancel on a backup or restore now reads "Cancelling…" until the run stops.
+- A restore blocked by a cloud mismatch now names the AZAPPTOOLKIT_CLOUD value to relaunch with.
 
 ### Security
 

@@ -488,4 +488,15 @@ dialog's Done for a restore — which drops it, after a confirmation while the
 report is unsaved. **Load backup file…** waits while an unsaved report is on
 screen, and clears a saved one only once a file is chosen; a new restore and
 sign-out also drop it. It is never cleared on navigation, because the values
-cannot be shown again.
+cannot be shown again. Sign-out is the one way to drop it without the view's own
+confirmation, and the backend restore keeps running until the session fence stops
+it — so while a restore runs, or its report holds secret values nobody saved,
+`RestoreCard` sets `TenantScopedUi::dr_unsaved_secrets` and the shell's Sign Out
+asks first (confirm, not block: a dead restore's secrets are reissued either way).
+A restore that lands after its card is gone — signed out and back in to the same
+tenant while it ran — cannot keep its report (`report.try_set` hands it back): its
+toast says the report was lost and the secrets need reissuing, never "save the
+report"; a backup that lands that way says to back up again. Each card's Cancel
+reads "Cancelling…" and stays disabled until the run ends (a backup stops only
+at its next chunk boundary), and a cloud-mismatch block names the
+`AZAPPTOOLKIT_CLOUD` value to relaunch with.

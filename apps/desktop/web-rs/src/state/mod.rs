@@ -258,6 +258,14 @@ pub struct TenantScopedUi {
     // of scrolling the next tenant's list to the previous one's row.
     pub apps_scroll_top: RwSignal<f64>,
     pub enterprise_scroll_top: RwSignal<f64>,
+    // True while the DR view's restore runs, or while its report holds
+    // one-time secret values nobody has saved. That report lives in the DR
+    // view under the tenant-gated shell, so sign-out discards it — and the
+    // values cannot be shown again — while the backend restore keeps minting
+    // until the session fence stops it. The shell's Sign Out asks first while
+    // this is set. Kept by `RestoreCard`, which clears it on unmount;
+    // tenant-scoped so it never outlives the tenant whose report it guards.
+    pub dr_unsaved_secrets: RwSignal<bool>,
 }
 
 impl TenantScopedUi {
@@ -294,6 +302,7 @@ impl TenantScopedUi {
             app_names: RwSignal::new(Arc::new(HashMap::new())),
             apps_scroll_top: RwSignal::new(0.0),
             enterprise_scroll_top: RwSignal::new(0.0),
+            dr_unsaved_secrets: RwSignal::new(false),
         }
     }
 
@@ -335,6 +344,7 @@ impl TenantScopedUi {
         self.app_names.set(Arc::new(HashMap::new()));
         self.apps_scroll_top.set(0.0);
         self.enterprise_scroll_top.set(0.0);
+        self.dr_unsaved_secrets.set(false);
     }
 }
 
@@ -552,6 +562,7 @@ mod tests {
             )])));
             ui.apps_scroll_top.set(5200.0);
             ui.enterprise_scroll_top.set(5200.0);
+            ui.dr_unsaved_secrets.set(true);
 
             session.set_active_tenant(None);
 
@@ -589,6 +600,7 @@ mod tests {
             ui.app_names.with_untracked(|m| assert!(m.is_empty()));
             assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
             assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);
+            assert!(!ui.dr_unsaved_secrets.get_untracked());
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });

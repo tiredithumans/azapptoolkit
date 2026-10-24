@@ -28,7 +28,8 @@ use crate::state::{Session, provide_session, use_session};
 // `test_support` unchanged.
 pub use crate::ipc_mock::fixtures;
 pub use crate::ipc_mock::{
-    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, set_unmocked_mode,
+    RecordedCall, Unmocked, call_count, emit_event, last_call, mock_err, mock_ok, mock_pending,
+    resolve_pending, set_unmocked_mode,
 };
 
 /// Marks a mount host so [`sweep_orphaned_mounts`] can find one left behind.

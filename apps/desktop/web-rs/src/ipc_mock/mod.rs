@@ -49,6 +49,10 @@ pub enum Unmocked {
 enum RouteResult {
     Ok(JsValue),
     Err(JsValue),
+    /// Never settles on its own — the command stays in flight, so a test can
+    /// act while it runs (press Cancel, unmount the view) and then settle it
+    /// with [`resolve_pending`].
+    Pending,
 }
 
 /// One recorded `invoke` call, for asserting that a click fired the right
@@ -93,6 +97,9 @@ thread_local! {
     static INSTALLED: RefCell<bool> = const { RefCell::new(false) };
     /// How to answer a command with no registered route.
     static UNMOCKED: RefCell<Unmocked> = const { RefCell::new(Unmocked::LoudReject) };
+    /// The `resolve` functions of [`RouteResult::Pending`] calls still in
+    /// flight, by command.
+    static PENDING: RefCell<HashMap<String, Vec<Function>>> = RefCell::new(HashMap::new());
 }
 
 pub fn window() -> web_sys::Window {
@@ -175,10 +182,15 @@ pub fn ensure_installed() {
             r.borrow().get(&cmd).map(|res| match res {
                 RouteResult::Ok(v) => RouteResult::Ok(v.clone()),
                 RouteResult::Err(e) => RouteResult::Err(e.clone()),
+                RouteResult::Pending => RouteResult::Pending,
             })
         }) {
             Some(RouteResult::Ok(v)) => Promise::resolve(&v).into(),
             Some(RouteResult::Err(e)) => Promise::reject(&e).into(),
+            Some(RouteResult::Pending) => Promise::new(&mut |resolve, _reject| {
+                PENDING.with(|p| p.borrow_mut().entry(cmd.clone()).or_default().push(resolve));
+            })
+            .into(),
             None => match UNMOCKED.with(|u| *u.borrow()) {
                 // Test harness: surface the gap instead of hanging on a
                 // never-resolving resource.
@@ -259,6 +271,7 @@ pub fn reset() {
     FN_ROUTES.with(|r| r.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     LISTENERS.with(|l| l.borrow_mut().clear());
+    PENDING.with(|p| p.borrow_mut().clear());
     UNMOCKED.with(|u| *u.borrow_mut() = Unmocked::LoudReject);
 }
 
@@ -283,6 +296,25 @@ pub fn mock_err(cmd: &str, err: &azapptoolkit_dto::UiError) {
     ensure_installed();
     let e = wire_value(err);
     ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), RouteResult::Err(e)));
+}
+
+/// Mock `cmd` to stay in flight: its Promise never settles until
+/// [`resolve_pending`] — for a test that acts while a long run is going (its
+/// Cancel, an unmount mid-run).
+pub fn mock_pending(cmd: &str) {
+    ensure_installed();
+    ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), RouteResult::Pending));
+}
+
+/// Settles every in-flight [`mock_pending`] call of `cmd` with `value`;
+/// returns how many there were.
+pub fn resolve_pending<T: Serialize>(cmd: &str, value: &T) -> usize {
+    let v = wire_value(value);
+    let waiting = PENDING.with(|p| p.borrow_mut().remove(cmd).unwrap_or_default());
+    for resolve in &waiting {
+        let _ = resolve.call1(&JsValue::NULL, &v);
+    }
+    waiting.len()
 }
 
 /// Mock `cmd` with an **args-aware** handler: `f` receives the call's arguments

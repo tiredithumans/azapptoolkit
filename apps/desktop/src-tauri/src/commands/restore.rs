@@ -151,9 +151,11 @@ pub async fn restore_tenant(
         return Err(UiError::validation(
             "cloud_mismatch",
             format!(
-                "backup is from cloud '{}', but this build targets '{}'",
+                "backup is from cloud '{}', but this build targets '{}' — set \
+                 AZAPPTOOLKIT_CLOUD={} and relaunch azapptoolkit to restore it",
                 backup.cloud.as_str(),
-                cloud.as_str()
+                cloud.as_str(),
+                backup.cloud.as_str()
             ),
         ));
     }
