@@ -4,8 +4,13 @@
 //! effective EXO "Role Management" RBAC role, or `Exchange.ManageAsApp` isn't
 //! consented. Offers "Grant consent & retry" when the failure is
 //! `consent_required`, "Verify identity & retry" when it is
-//! `interaction_required` (an Exchange MFA policy), plus a plain Retry. Shared by the managed-identity and
-//! enterprise-app held-permission views so the affordance stays identical.
+//! `interaction_required` (an Exchange MFA policy), plus a plain Retry. A dead
+//! session (`refresh_missing` / `not_signed_in`) or a rejected token gets the
+//! session's own lever instead — the Re-authenticate / Refresh token toast —
+//! and keeps the Retry for once that lever has run (nothing else re-runs the
+//! lookup after a re-authentication).
+//! Shared by the app-registration, managed-identity and enterprise-app
+//! permission views so the affordance stays identical.
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
@@ -15,6 +20,12 @@ use crate::bindings::auth;
 use crate::components::ui::{Callout, FormError};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_command::use_command;
+use crate::state::use_session;
+
+/// The banner's text for a dead session: the lever is the toast, then the
+/// banner's own Retry re-runs the scope lookup.
+const SESSION_EXPIRED: &str =
+    "your session has expired. Re-authenticate from the notice, then select Retry.";
 
 #[component]
 pub fn ScopeUnavailableBanner(
@@ -32,8 +43,18 @@ pub fn ScopeUnavailableBanner(
     // A Conditional Access step-up for Exchange (`interaction_required`): our
     // wording, not the AADSTS text, and the Exchange step-up as its lever.
     let needs_step_up = error.is_interaction_required();
+    // A dead session or a rejected token needs the session's lever, which no
+    // inline button here can offer: raise it once per mount (the toast dedupes
+    // by key, so a pane re-rendering the banner stacks nothing) — and never
+    // while signed out, when it would surface at the next sign-in.
+    let session = use_session();
+    if session.active_tenant.with_untracked(Option::is_some) {
+        session.report_if_session_lost(&error);
+    }
     let message = if needs_step_up {
         VERIFY_IDENTITY_MESSAGE.to_string()
+    } else if error.is_reauth_fatal() {
+        SESSION_EXPIRED.to_string()
     } else {
         error.message.clone()
     };

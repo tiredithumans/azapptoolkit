@@ -60,10 +60,13 @@ pub const CONSENT_REQUIRED: &str = "consent_required";
 pub const INTERACTION_REQUIRED: &str = "interaction_required";
 
 /// The wire code for a rejected access token — a client 401 (a revoked token,
-/// or a Continuous Access Evaluation claims challenge the silent re-mint
-/// couldn't satisfy). Deliberately NOT in [`REAUTH_FATAL_CODES`]: one 401 does
-/// not prove the session is dead. One literal, read by every client's
-/// `ui_code()` (`http_error_enum!`) and by `UiError::is_unauthorized`.
+/// or a Continuous Access Evaluation claims challenge whose silent re-mint
+/// failed *unclassified*; a re-mint failure [`passthrough_code`] recognises —
+/// a dead session, a step-up, a missing consent, an unreachable token
+/// endpoint — keeps that code instead). Deliberately NOT in
+/// [`REAUTH_FATAL_CODES`]: one 401 does not prove the session is dead. One
+/// literal, read by every client's `ui_code()` (`http_error_enum!`) and by
+/// `UiError::is_unauthorized`.
 pub const UNAUTHORIZED: &str = "unauthorized";
 
 /// The `Display` of every client's `Unauthorized` variant — the bare status

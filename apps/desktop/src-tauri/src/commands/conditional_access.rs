@@ -2,8 +2,10 @@
 //!
 //! Reads tenant Conditional Access policies via the on-demand `Policy.Read.All`
 //! token and reports which ones apply to a given app (by its appId / client id).
-//! Degrades gracefully: a tenant without consent or an Entra ID P1/P2 license
-//! surfaces a friendly "unavailable" message rather than a hard error.
+//! Degrades gracefully: a tenant without an Entra ID P1/P2 license (or an
+//! account without a policy-reading role) surfaces a friendly "unavailable"
+//! message rather than a hard error, while a missing consent, a dead session or
+//! a step-up keeps its own code so the tab can offer that failure's lever.
 
 use tauri::State;
 
@@ -13,7 +15,7 @@ use azapptoolkit_graph::GraphError;
 use crate::commands::graph_err;
 use crate::dto::UiError;
 use crate::dto::conditional_access::ConditionalAccessPolicyDto;
-use crate::state::AppState;
+use crate::state::{AppState, ConsentFeature};
 
 /// Conditional Access policies that apply to `app_id` (the application's appId /
 /// client id), most-relevant first. Empty when none apply.
@@ -27,6 +29,12 @@ use crate::state::AppState;
 /// existed). A failed SP read is logged and also degrades to "skip the
 /// client axis" — the tab then over-shows (resource-axis rows keep their
 /// "may apply" codes) rather than hide a policy that gates the app.
+///
+/// The `Policy.Read.All` token is pre-acquired (the
+/// `get_enterprise_app_provisioning` pattern), so a missing consent arrives
+/// typed as `consent_required` and the tab offers "Grant consent & retry" for
+/// the `policy` feature — the one consent that also enables the
+/// app-management-policy reads; a dead session or a step-up arrives typed too.
 #[tauri::command]
 pub async fn list_conditional_access_for_app(
     state: State<'_, AppState>,
@@ -34,6 +42,10 @@ pub async fn list_conditional_access_for_app(
     app_id: String,
 ) -> Result<Vec<ConditionalAccessPolicyDto>, UiError> {
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    state
+        .ensure_feature_token(&tenant_id, ConsentFeature::Policy)
+        .await
+        .map_err(UiError::from)?;
     let client = state.graph_for(&tenant_id);
     let policies = client
         .list_conditional_access_policies()
@@ -309,16 +321,17 @@ fn state_rank(state: &str) -> u8 {
 }
 
 /// Graceful, body-safe error mapping for the Conditional Access tab. Shares the
-/// premium/consent mapping with the Activity tab (see
-/// [`graph_err::premium_feature_err`]): a missing license vs. consent gets a
-/// distinct message, every variant degrades to `ca_unavailable`, and a raw Graph
-/// body is never leaked.
+/// premium/role mapping with the Activity tab (see
+/// [`graph_err::premium_feature_err`]): a missing license vs. role gets a
+/// distinct message, every Graph failure degrades to `ca_unavailable` (a
+/// classified token failure keeps its own code), and a raw Graph body is never
+/// leaked.
 fn map_ca_err(err: GraphError) -> UiError {
     graph_err::premium_feature_err(
         "ca_unavailable",
         "Conditional Access",
         "Conditional Access",
-        "Policy.Read.All",
+        "conditional_access",
         err,
     )
 }
@@ -581,19 +594,23 @@ mod tests {
         // before any prose is involved. Both still share the one
         // `ca_unavailable` code (the documented `premium_feature_err` design).
         assert!(graph_err::looks_like_missing_license(LICENSE_BODY));
-        // A consent-style denial (no license keywords) must classify as consent,
-        // not license — guards the dropped " p1"/" p2" substring false-match.
+        // A privilege denial (no license keywords) must classify as a role
+        // gap, not license — guards the dropped " p1"/" p2" substring
+        // false-match.
         assert!(!graph_err::looks_like_missing_license(CONSENT_BODY));
 
         let license = map_ca_err(GraphError::Forbidden(LICENSE_BODY.into()));
         assert_eq!(license.code, "ca_unavailable");
         assert!(license.message.contains("license"));
 
-        let consent = map_ca_err(GraphError::Forbidden(CONSENT_BODY.into()));
-        assert_eq!(consent.code, "ca_unavailable");
-        assert!(consent.message.contains("consent"));
-        // Neither a missing license nor missing consent fixes itself on retry.
-        assert!(!license.retryable && !consent.retryable);
+        // The role gap names the roles that can read policies (the catalog
+        // remediation), not admin consent — that fails at /token, typed.
+        let role = map_ca_err(GraphError::Forbidden(CONSENT_BODY.into()));
+        assert_eq!(role.code, "ca_unavailable");
+        assert!(role.message.contains("Security Reader"), "{}", role.message);
+        assert!(!role.message.contains("requires admin consent"));
+        // Neither a missing license nor a missing role fixes itself on retry.
+        assert!(!license.retryable && !role.retryable);
 
         let server = map_ca_err(GraphError::Server {
             status: 503,

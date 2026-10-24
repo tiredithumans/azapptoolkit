@@ -89,3 +89,25 @@ async fn a_403_names_the_role_gap_without_a_consent_button() {
     assert!(ts::body_contains("Hybrid Identity Administrator"));
     assert!(!ts::body_contains(GRANT));
 }
+
+/// The tab renders `FeatureLoadError`, which raises the session's lever itself:
+/// a dead session gets Re-authenticate (not a bare message) and keeps Retry.
+#[wasm_bindgen_test]
+async fn a_dead_session_raises_reauthenticate_and_keeps_retry() {
+    ts::reset();
+    ts::mock_err(
+        "get_enterprise_app_provisioning",
+        &fixtures::ui_error("refresh_missing", "refresh token missing"),
+    );
+    let m = mount();
+
+    ts::wait_until("the Re-authenticate toast", || {
+        m.session.toasts.with_untracked(|l| {
+            l.iter()
+                .any(|t| t.action_label.as_deref() == Some("Re-authenticate"))
+        })
+    })
+    .await;
+    assert!(ts::has_button_labelled("Retry"));
+    assert!(!ts::body_contains(GRANT));
+}

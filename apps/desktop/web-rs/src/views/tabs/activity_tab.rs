@@ -1,8 +1,9 @@
 //! Activity / change-log tab — recent directory audit entries for a directory
 //! object (an app registration or an enterprise application) and, optionally, a
 //! second related object id (its paired SP / app registration). Read-only;
-//! degrades gracefully when AuditLog.Read.All is un-consented or the tenant
-//! lacks an Entra ID P1/P2 license.
+//! degrades gracefully when the tenant lacks an Entra ID P1/P2 license or the
+//! account a reporting role, and offers the lever for every other failure
+//! (Grant consent for AuditLog.Read.All, Verify identity, Re-authenticate).
 
 use std::sync::Arc;
 
@@ -11,10 +12,8 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
-use crate::bindings::auth;
-use crate::components::ui::{
-    Badge, BadgeTone, Callout, DataTable, DetailLoadError, Skeleton, SkeletonList,
-};
+use crate::components::feature_load_error::FeatureLoadError;
+use crate::components::ui::{Badge, BadgeTone, Callout, DataTable, Skeleton, SkeletonList};
 use crate::state::use_session;
 
 use crate::util::{fmt_datetime, no_tenant};
@@ -57,7 +56,7 @@ pub fn ActivityPanel(
 
     view! {
         <div class="activity-tab">
-            <SignInSummary app_id=app_id />
+            <SignInSummary app_id=app_id reload=reload />
             <header class="row-between">
                 <strong>"Recent directory changes"</strong>
                 <Button
@@ -75,22 +74,10 @@ pub fn ActivityPanel(
                 {move || Suspend::new(async move {
                     match logs.await {
                         Ok(list) => activity_table(list).into_any(),
-                        // Graceful degradation: the backend tags missing
-                        // consent/license as "activity_unavailable".
-                        Err(e) if e.code == "activity_unavailable" => {
-                            view! { <Callout tone="warn">{e.message}</Callout> }.into_any()
-                        }
-                        // Anything else is a real failure (429, network, …) and
-                        // must offer a way out, not just a message.
-                        Err(e) => {
-                            view! {
-                                <DetailLoadError
-                                    error=e
-                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
-                                />
-                            }
-                                .into_any()
-                        }
+                        // Every failure gets its lever: consent, step-up, the
+                        // session's toast, the backend's "activity_unavailable"
+                        // notice (license / role / transient), or Retry.
+                        Err(e) => activity_error(e, reload).into_any(),
                     }
                 })}
             </Suspense>
@@ -100,13 +87,18 @@ pub fn ActivityPanel(
 
 /// Per-app sign-in summary above the change log: the SP's most recent recorded
 /// sign-in, so an admin can gauge "is this still used?" before disabling or
-/// deleting. Read-only; degrades gracefully (missing scope/license ⇒ a notice,
-/// missing consent ⇒ a "Grant consent & retry" button) and never blocks the
-/// change log below — the backend always returns a populated DTO.
+/// deleting. Read-only; degrades gracefully (missing license/role ⇒ a notice)
+/// and never blocks the change log below.
+///
+/// Holds **no lever of its own**: both halves read on the one
+/// `AuditLog.Read.All` token, so a missing consent, a step-up or a dead session
+/// fails the change log the same way, and its `FeatureLoadError` is the one
+/// place offering the fix — this half only names the cause in a muted line.
+/// It shares the panel's `reload`, so that fix (or the header's Refresh)
+/// re-runs both halves.
 #[component]
-fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
+fn SignInSummary(#[prop(into)] app_id: Signal<String>, reload: RwSignal<u32>) -> impl IntoView {
     let session = use_session();
-    let reload = RwSignal::new(0_u32);
 
     let activity = LocalResource::new(move || {
         let tenant = session.active_tenant.get();
@@ -137,39 +129,14 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                             };
                             view! { <span class="ui-text">{text}</span> }.into_any()
                         }
+                        // The change log below reads on the same token and
+                        // fails the same way, so its `FeatureLoadError` holds
+                        // the one lever; this half only says why it's empty.
                         Ok(dto) if dto.consent_required => {
-                            let msg = dto.message.unwrap_or_default();
-                            let grant = move |_| {
-                                leptos::task::spawn_local(async move {
-                                    let Some(t) = session.active_tenant.get_untracked() else {
-                                        return;
-                                    };
-                                    let res =
-                                        auth::request_scope_consent(&t.tenant_id, "audit_log")
-                                            .await;
-                                    // Answered minutes later, perhaps after a
-                                    // sign-out: no toast for the next sign-in.
-                                    if !session.is_active_tenant(&t.tenant_id) {
-                                        return;
-                                    }
-                                    match res {
-                                        Ok(()) => reload.update(|n| *n += 1),
-                                        Err(e) => {
-                                            session.report_command_error_for(&e, "audit_log");
-                                        }
-                                    }
-                                });
-                            };
                             view! {
-                                <Callout tone="warn">
-                                    {msg}
-                                    <Button
-                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                        on_click=Box::new(grant)
-                                    >
-                                        "Grant consent & retry"
-                                    </Button>
-                                </Callout>
+                                <span class="ui-text muted">
+                                    "Needs AuditLog.Read.All consent — grant it below."
+                                </span>
                             }
                                 .into_any()
                         }
@@ -180,18 +147,42 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                                 .into_any()
                         }
                         Err(e) => {
-                            view! {
-                                <DetailLoadError
-                                    error=e
-                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
-                                />
-                            }
+                            view! { <span class="ui-text muted">{sign_in_summary_note(&e)}</span> }
                                 .into_any()
                         }
                     }
                 })}
             </Suspense>
         </div>
+    }
+}
+
+/// The sign-in summary's muted line for a failed read — the cause only; the
+/// change log's `FeatureLoadError` (or the session's toast) carries the lever.
+fn sign_in_summary_note(e: &azapptoolkit_dto::UiError) -> &'static str {
+    if e.is_interaction_required() {
+        "Needs identity verification — verify it below."
+    } else if e.is_reauth_fatal() || e.is_unauthorized() {
+        "Unavailable until your session is renewed — see the notice."
+    } else if e.is_consent_required() {
+        "Needs AuditLog.Read.All consent — grant it below."
+    } else {
+        "Couldn't read sign-in activity just now — use Refresh."
+    }
+}
+
+/// The change log's load failure — the Activity tab's one lever surface (the
+/// sign-in summary above reads on the same `audit_log` token and defers to it).
+fn activity_error(e: azapptoolkit_dto::UiError, reload: RwSignal<u32>) -> impl IntoView {
+    view! {
+        <FeatureLoadError
+            error=e
+            consent_feature="audit_log"
+            step_up_features=&["audit_log"]
+            consent_text="The activity log needs admin consent to AuditLog.Read.All."
+            unavailable_code="activity_unavailable"
+            on_retry=Callback::new(move |()| reload.update(|n| *n += 1))
+        />
     }
 }
 

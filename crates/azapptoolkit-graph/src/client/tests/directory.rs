@@ -305,6 +305,81 @@ async fn sign_in_activities_follow_next_link_on_the_audit_token() {
     assert!(matches!(err, GraphError::Protocol(_)), "got {err:?}");
 }
 
+/// The report's pages ride the retrying transport: a 429 on page 2 (of up to
+/// 200, on the most rate-limited endpoint) is ridden out and the report still
+/// completes, where the one-shot read turned it into "no sign-in data" for the
+/// whole audit. A 403 on a page stays terminal — it is an entitlement answer.
+#[tokio::test]
+async fn a_throttled_sign_in_activity_page_is_retried_and_the_report_completes() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    let first_page = || {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-1"}],
+            "@odata.nextLink": format!("{uri}/reports/servicePrincipalSignInActivities?page=2")
+        }))
+    };
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param_is_missing("page"))
+        .respond_with(first_page())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-2"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&uri).with_audit_log_token(StaticTokenProvider::new("a"));
+    let rows = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap();
+    let ids: Vec<_> = rows.iter().filter_map(|r| r.app_id.as_deref()).collect();
+    assert_eq!(ids, ["app-1", "app-2"]);
+
+    // A 403 on a page is not retried: one request, and the report fails.
+    let denied = MockServer::start().await;
+    let denied_uri = denied.uri();
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param_is_missing("page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"appId": "app-1"}],
+            "@odata.nextLink":
+                format!("{denied_uri}/reports/servicePrincipalSignInActivities?page=2")
+        })))
+        .mount(&denied)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Insufficient privileges"))
+        .expect(1)
+        .mount(&denied)
+        .await;
+    let client = make_client(&denied_uri).with_audit_log_token(StaticTokenProvider::new("a"));
+    let err = client
+        .list_service_principal_sign_in_activities()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}
+
 #[tokio::test]
 async fn credential_activities_parse_and_follow_paging_on_the_audit_token() {
     let server = MockServer::start().await;

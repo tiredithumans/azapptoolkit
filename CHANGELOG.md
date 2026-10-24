@@ -18,6 +18,14 @@ After 0.34.1, each change is one line written for the person using the app.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
+- When Microsoft Graph revokes a token and renewing it fails, the app now offers the right fix, not just Refresh token.
+- A refused SharePoint site URL now says what is wrong with it (a port, a password, the host or a path part).
+- The Activity and Conditional Access tabs now offer Grant consent, Verify identity or Re-authenticate when they fail.
+- A refused Activity or Conditional Access read now names the roles that can read it instead of asking for admin consent.
+- The Permissions tab's mailbox Scope banner now offers Re-authenticate when your session has expired.
+- An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
+- The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
+- The Activity, Conditional Access and Provisioning tabs now say when Entra ID is busy or a proxy answered instead.
 
 ### Security
 

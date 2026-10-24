@@ -718,12 +718,24 @@ impl GraphClient {
                             );
                             cae_retried = true;
                         }
+                        // A classified failure (a dead session, a step-up, a
+                        // missing consent, the token endpoint unreachable)
+                        // names its own lever, so it travels as `Token` and
+                        // `ui_code()` passes it through; only an unclassified
+                        // one is the bare rejected-token 401.
                         Err(e) => {
                             tracing::info!(
+                                code = %e.code,
                                 detail = %e,
-                                "CAE claims challenge could not be satisfied silently; re-auth needed"
+                                "CAE claims challenge could not be satisfied silently"
                             );
-                            return Err(GraphError::Unauthorized);
+                            return Err(
+                                if azapptoolkit_core::reauth::passthrough_code(&e.code).is_some() {
+                                    GraphError::Token(e)
+                                } else {
+                                    GraphError::Unauthorized
+                                },
+                            );
                         }
                     }
                 }
@@ -951,13 +963,18 @@ pub(crate) fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// Maps a non-success status from the one-shot scoped read
-/// ([`GraphClient::scoped_get`], now its only user — the scoped writes ride the
-/// retrying transport) to the same typed error the retrying transport returns,
-/// so a throttled scoped read surfaces as [`GraphError::Throttled`] (ui code
-/// `throttled`, retryable) rather than a generic `Api`. Only the mapping is
-/// shared — `scoped_get` still deliberately skips the retry/throttle loop.
-fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
+/// Maps a non-success status to the same typed error the retrying transport
+/// returns, so a throttled read surfaces as [`GraphError::Throttled`] (ui code
+/// `throttled`, retryable) rather than a generic `Api`. The one status table
+/// for the reads that don't come through the retrying core: the one-shot
+/// scoped read ([`GraphClient::scoped_get`] — only the mapping is shared, it
+/// still deliberately skips the retry/throttle loop) and each `$batch`
+/// sub-response (`batch::map_batch_response`), which must type exactly like
+/// the GET sent alone. The retrying core keeps its own inline match, because
+/// it also decides retry vs done and catches the CAE challenge; the two are
+/// pinned to agree on every error status by
+/// `the_retrying_core_and_map_error_status_agree_on_every_error_status`.
+pub(super) fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
     let body = sanitize_error_body(&body);
     match code {
         401 => GraphError::Unauthorized,

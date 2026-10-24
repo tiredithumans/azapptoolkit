@@ -2,7 +2,10 @@
 
 use super::*;
 
-use super::prefetch::{prefetch_admin_consent_grants, prefetch_office365_role_grants};
+use super::prefetch::{
+    prefetch_admin_consent_grants, prefetch_office365_role_grants, sign_in_activity_outcome,
+    sign_in_pre_acquire_outcome,
+};
 use super::score::{
     combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
     merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
@@ -594,6 +597,37 @@ fn degraded_gaps_are_listed_by_description_not_by_flag() {
     assert!(json.contains("permissionResolution"));
 }
 
+/// The export's unused-detection note follows the workbench: a transient
+/// sign-in read failure says to re-run, never to get a consent or license that
+/// may already be in place; an unavailable report names all three causes.
+#[test]
+fn the_unused_detection_note_matches_the_cause_in_every_export() {
+    let items = vec![sample("App A")];
+    let gap = AuditExportCoverage {
+        sign_in_report_available: false,
+        degraded: vec![AuditCoverageGap::SignInActivity],
+        ..complete(1)
+    };
+    for text in [
+        audit_to_html(&items, &gap),
+        export_audit_csv(items.clone(), &gap),
+    ] {
+        assert!(text.contains("be read just now"), "{text}");
+        assert!(!text.contains("needs AuditLog.Read.All consent"), "{text}");
+    }
+
+    let unavailable = AuditExportCoverage {
+        sign_in_report_available: false,
+        ..complete(1)
+    };
+    let csv = export_audit_csv(items, &unavailable);
+    assert!(
+        csv.contains("AuditLog.Read.All consent, an Entra ID P1/P2 license and a reporting role"),
+        "{csv}"
+    );
+    assert!(!csv.contains("be read just now"));
+}
+
 /// Unresolved mailbox scoping is a caveat, not a gap: the run is complete
 /// and cacheable, yet every export has to carry the sentence the org-wide
 /// mailbox group shows, or an over-reported finding reads as confirmed.
@@ -853,6 +887,161 @@ async fn an_unprobed_mail_permission_marks_scoping_unresolved() {
         "the Graph index must resolve, or the flag proves nothing"
     );
     assert!(ctx.mail_scoping_unresolved.load(Ordering::Acquire));
+}
+
+// ── The sign-in report: unavailable ≠ gap ──────────────────────────────
+//
+// A tenant that cannot read the report (no P1/P2, no reporting role) only
+// switches unused-app detection off; a transient failure on one that can is a
+// hole in this run, so it must keep the run out of the cache and off the
+// all-clear — and the findings must not ask for a consent already granted.
+
+async fn mock_sign_in_report(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+    use wiremock::matchers::{method, path};
+    wiremock::Mock::given(method("GET"))
+        .and(path("/reports/servicePrincipalSignInActivities"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// A client whose `AuditLog.Read.All` token is in hand — the state after
+/// `prefetch_sign_in_activity`'s pre-acquire succeeded.
+fn sign_in_client(server: &wiremock::MockServer) -> GraphClient {
+    let token: Arc<dyn BearerProvider> = StaticTokenProvider::new("tok");
+    GraphClient::with_base_url(
+        "tenant-test",
+        token.clone(),
+        token.clone(),
+        Cache::new(),
+        server.uri(),
+    )
+    .with_audit_log_token(token)
+}
+
+#[tokio::test]
+async fn a_transient_sign_in_report_failure_is_a_gap_and_the_run_is_not_cached() {
+    for response in [
+        wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"),
+        wiremock::ResponseTemplate::new(429).insert_header("Retry-After", "0"),
+    ] {
+        let server = wiremock::MockServer::start().await;
+        mock_sign_in_report(&server, response).await;
+        let client = sign_in_client(&server);
+
+        let (available, consent_required, map, gap) =
+            sign_in_activity_outcome(client.list_service_principal_sign_in_activities().await);
+        assert!(
+            !available && map.is_empty(),
+            "no data, so no app is flagged"
+        );
+        assert!(!consent_required, "a 5xx / 429 is not a missing consent");
+        assert_eq!(gap, Some(AuditCoverageGap::SignInActivity));
+        let degraded: Vec<AuditCoverageGap> = gap.into_iter().collect();
+        assert!(
+            !run_is_cacheable(false, false, &degraded),
+            "a run whose unused-app check silently failed must not cache as clean"
+        );
+    }
+    // An unreachable token endpoint at the lazy refresh is the same class.
+    let (_, _, _, gap) = sign_in_activity_outcome(Err(azapptoolkit_graph::GraphError::Token(
+        TokenError::new("network_error", "unreachable"),
+    )));
+    assert_eq!(gap, Some(AuditCoverageGap::SignInActivity));
+}
+
+#[tokio::test]
+async fn an_unentitled_sign_in_report_is_unavailable_not_a_gap() {
+    for body in [
+        // No P1/P2 license.
+        r#"{"error":{"code":"Authentication_RequestFromNonPremiumTenantOrB2CTenant"}}"#,
+        // No reporting role.
+        r#"{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges"}}"#,
+    ] {
+        let server = wiremock::MockServer::start().await;
+        mock_sign_in_report(
+            &server,
+            wiremock::ResponseTemplate::new(403).set_body_string(body),
+        )
+        .await;
+        let client = sign_in_client(&server);
+
+        let (available, consent_required, _, gap) =
+            sign_in_activity_outcome(client.list_service_principal_sign_in_activities().await);
+        assert!(!available && !consent_required);
+        assert_eq!(gap, None, "an unentitled tenant must not read as degraded");
+        assert!(run_is_cacheable(false, false, &[]));
+    }
+    // A missing consent surfacing at the read (the pre-acquire normally
+    // answers it) is not a gap either.
+    let (_, _, _, gap) = sign_in_activity_outcome(Err(azapptoolkit_graph::GraphError::Token(
+        TokenError::new("consent_required", "AADSTS65001"),
+    )));
+    assert_eq!(gap, None);
+}
+
+/// The pre-acquire half: a token endpoint that never gave Entra's verdict —
+/// unreachable (`AuthError::Http` → `network`), still busy after its retries
+/// (`ServiceUnavailable`) or answered by a proxy (`UnexpectedResponder`) — is
+/// the transient gap; a missing consent is the grant button, not a gap; an
+/// unclassified `/token` refusal stays unavailable.
+#[test]
+fn a_failed_pre_acquire_is_a_gap_only_when_entra_never_answered() {
+    use azapptoolkit_auth::AuthError;
+    for ui in [
+        // `AuthError::Http` wraps a `reqwest::Error`, which a unit test can't
+        // build; `From<AuthError>` maps it to `network` (pinned in the dto).
+        UiError::new("network", "connection refused", true),
+        UiError::from(AuthError::ServiceUnavailable {
+            status: 503,
+            detail: "temporarily_unavailable (AADSTS90033)".into(),
+        }),
+        UiError::from(AuthError::UnexpectedResponder {
+            status: 403,
+            content_type_class: "html",
+        }),
+    ] {
+        let (available, consent_required, _, gap) = sign_in_pre_acquire_outcome(&ui);
+        assert!(!available && !consent_required, "{}", ui.code);
+        assert_eq!(gap, Some(AuditCoverageGap::SignInActivity), "{}", ui.code);
+    }
+    assert!(!run_is_cacheable(
+        false,
+        false,
+        &[AuditCoverageGap::SignInActivity]
+    ));
+
+    let (_, consent_required, _, gap) =
+        sign_in_pre_acquire_outcome(&UiError::new("consent_required", "AADSTS65001", false));
+    assert!(consent_required);
+    assert_eq!(gap, None);
+
+    let (_, consent_required, _, gap) =
+        sign_in_pre_acquire_outcome(&UiError::new("token_exchange", "HTTP 400", true));
+    assert!(!consent_required);
+    assert_eq!(gap, None);
+}
+
+#[tokio::test]
+async fn a_readable_sign_in_report_maps_each_app_to_its_last_sign_in() {
+    let server = wiremock::MockServer::start().await;
+    mock_sign_in_report(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [
+                { "appId": "app-1", "lastSignInActivity": { "lastSignInDateTime": "2026-10-01T00:00:00Z" } },
+                { "appId": "app-2", "lastSignInActivity": null }
+            ]
+        })),
+    )
+    .await;
+    let client = sign_in_client(&server);
+    let (available, _, map, gap) =
+        sign_in_activity_outcome(client.list_service_principal_sign_in_activities().await);
+    assert!(available);
+    assert_eq!(gap, None);
+    assert!(map.get("app-1").is_some_and(Option::is_some));
+    assert_eq!(map.get("app-2"), Some(&None));
 }
 
 async fn mock_grants(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {

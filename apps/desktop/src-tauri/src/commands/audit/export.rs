@@ -126,11 +126,22 @@ fn coverage_sentences(scored: usize, coverage: &AuditExportCoverage) -> Vec<Stri
         );
     }
     if !coverage.sign_in_report_available {
+        // The workbench's split (`findings.rs`): a transient read failure is
+        // fixed by re-running, not by the consent/license the report needs.
         out.push(
-            "Unused-app detection was off for this run — it needs the sign-in activity report \
-             (AuditLog.Read.All and Entra ID P1/P2), so no application here could be flagged \
-             unused."
-                .to_string(),
+            if coverage
+                .degraded
+                .contains(&AuditCoverageGap::SignInActivity)
+            {
+                "Unused-app detection was off for this run — the sign-in activity report \
+                 couldn't be read just now, so no application here could be flagged unused. \
+                 Re-run to include it."
+            } else {
+                "Unused-app detection was off for this run — the sign-in activity report needs \
+                 AuditLog.Read.All consent, an Entra ID P1/P2 license and a reporting role, so \
+                 no application here could be flagged unused."
+            }
+            .to_string(),
         );
     }
     if !coverage.mailbox_scoping_resolved {
