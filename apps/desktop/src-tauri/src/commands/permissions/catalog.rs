@@ -112,6 +112,9 @@ pub async fn list_resource_permissions(
     tenant_id: String,
     resource_app_id: String,
 ) -> Result<ResourcePermissions, UiError> {
+    // `resolve_resource_sp` can answer from the client's cache before any
+    // token is minted, and `graph_for` is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let sp = client
         .resolve_resource_sp(&resource_app_id)
@@ -176,6 +179,9 @@ pub async fn list_resource_permission_counts(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<Vec<CatalogResourceSummary>, UiError> {
+    // Every row can come from `resolve_resource_sp`'s cache hit, before any
+    // token is minted; `graph_for` is not a session proof.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let summaries = futures::future::join_all(
         azapptoolkit_permissions::bundled_resources_slice()

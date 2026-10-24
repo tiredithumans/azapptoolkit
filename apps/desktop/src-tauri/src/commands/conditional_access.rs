@@ -33,6 +33,7 @@ pub async fn list_conditional_access_for_app(
     tenant_id: String,
     app_id: String,
 ) -> Result<Vec<ConditionalAccessPolicyDto>, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let policies = client
         .list_conditional_access_policies()

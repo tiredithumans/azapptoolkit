@@ -36,12 +36,14 @@ Two rules ride alongside the key prefix:
   client factory call is not a proof**: `graph_for` / `exchange_for` / `arm_for` / `keyvault_for`
   only build token adapters, and no token is fetched until a request is sent. Reads through the
   index accessors (`sp_index_cached` / `app_name_index_cached` / `indexes_cached` / `*_hit` /
-  `search_corpus` / `load_gallery_corpus`) count as cache reads, and so do the Graph client's
-  suffixed read-throughs (`list_app_role_assigned_to_cached`): their hit returns before any token
-  is minted. Pinned by
+  `search_corpus` / `load_gallery_corpus`) count as cache reads, and so does every Graph-client
+  read-through, whatever its name (`resolve_resource_sp`, `get_service_principal_by_app_id`,
+  `list_all_oauth2_grants`, `list_app_role_assigned_to_cached`, the cached policy and sign-in
+  activity reads): their hit returns before any token is minted. Pinned by
   `repo_invariants::cache::a_command_answering_from_cache_alone_checks_the_session` (and
-  `every_index_accessor_counts_as_a_cache_read`, which discovers accessors in the commands tree and
-  the Graph client).
+  `every_index_accessor_counts_as_a_cache_read`, which discovers the commands tree's suffixed
+  accessors and every Graph-client fn that reads the cache directly, bar the `()`-returning
+  prewarm).
 - **Never pin a per-object key.** Pinning is for the handful of entries that cost a full directory
   scan to rebuild (the two indexes, the search corpus, the App Registrations / Enterprise Apps /
   Managed Identities lists and the credential-expiry roll-up). A pinned per-app entry can never be
