@@ -26,6 +26,8 @@ After 0.34.1, each change is one line written for the person using the app.
 - The sign-in card names the cloud it signs in to, and warns when AZAPPTOOLKIT_CLOUD holds a value it doesn't know.
 - An update that fails its signature check or install now points you to the Releases page instead of a retry.
 - An update check or download that stalls now fails after a minute instead of leaving Updating… on screen.
+- Access Readiness says why your directory roles couldn't be read, and offers Re-authenticate if the session ended.
+- Access Readiness no longer waits minutes when Azure can't be reached; its rows show ? with a timed-out note.
 
 ### Security
 

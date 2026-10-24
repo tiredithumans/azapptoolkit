@@ -136,12 +136,30 @@ fn item_card(item: ReadinessItem, pim_url: Option<String>) -> impl IntoView {
 fn render_report(rep: ReadinessReport) -> impl IntoView {
     let indeterminate = rep.directory_roles_indeterminate;
     let pim_url = rep.pim_activation_url.clone();
+    // The backend's own error, not a guess at one: the read rides the sign-in
+    // scopes, so a "missing consent" explanation could never be the cause. An
+    // older backend sends no error; the banner then says only what happened.
+    let roles_error = rep.directory_roles_error.clone();
     let banner = indeterminate.then(|| {
         view! {
-            <Callout tone="warn">
+            <Callout tone="warn" class="readiness__roles-error">
                 "Couldn't read your active directory roles, so directory-role requirements show as \
-                 \"?\". This is usually a missing Directory.Read.All consent or a tenant that \
-                 restricts directory reads."
+                 \"?\"."
+                {roles_error
+                    .map(|e| {
+                        view! {
+                            " "
+                            {e.message}
+                            {(!e.code.is_empty())
+                                .then(|| {
+                                    view! {
+                                        <span class="ui-load-error__code">
+                                            {format!(" [{}]", e.code)}
+                                        </span>
+                                    }
+                                })}
+                        }
+                    })}
             </Callout>
         }
     });
@@ -195,7 +213,20 @@ pub fn ReadinessView() -> impl IntoView {
         let _ = session.readiness_reload.get();
         async move {
             match tenant {
-                Some(t) => Some(readiness::check_readiness(&t.tenant_id).await),
+                Some(t) => {
+                    let result = readiness::check_readiness(&t.tenant_id).await;
+                    // A dead session behind the roles read gets the
+                    // Re-authenticate lever, once per check (the toast is
+                    // keyed, so a re-run replaces it) — and never for a
+                    // tenant signed out of while the check ran.
+                    if session.is_active_tenant(&t.tenant_id)
+                        && let Ok(rep) = &result
+                        && let Some(e) = &rep.directory_roles_error
+                    {
+                        session.report_if_session_lost(e);
+                    }
+                    Some(result)
+                }
                 None => None,
             }
         }
