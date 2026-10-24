@@ -40,13 +40,26 @@ pub(super) enum Adoption {
     Adopt {
         object_id: String,
         app_id: String,
-        /// Display names of the secrets it already holds, so Pass 2 does not
-        /// issue them a second time.
-        live_secret_names: Vec<String>,
+        /// The named secrets it already holds, so Pass 2 does not issue them a
+        /// second time — and names the one it keeps by key id.
+        live_secrets: Vec<LiveSecret>,
     },
     /// Something carries the tag but cannot safely be taken for this app;
     /// the reason becomes a runbook item and nothing is created.
     Refuse(String),
+}
+
+/// A named secret an adoption candidate already holds, as the tag lookup read
+/// it. Pass 2 keeps a same-named one rather than issuing it again, and prints
+/// these so the operator can tell it from a planted copy of the name.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LiveSecret {
+    pub(super) name: String,
+    pub(super) key_id: String,
+    /// Its `startDateTime`: when the secret was added.
+    pub(super) created: Option<DateTime<Utc>>,
+    /// The first characters of its value, as Entra shows them.
+    pub(super) hint: Option<String>,
 }
 
 /// Pure Pass-1 decision on the tag lookup. Adoption needs the tag, the exact
@@ -56,8 +69,8 @@ pub(super) enum Adoption {
 /// created. Anything else fails closed — never a second copy, and never a hit
 /// holding a certificate or secret the manifest does not account for. An
 /// `Adopt` here is still provisional: [`decide_adoption`] checks the hit's
-/// owners and federated credentials before Pass 1
-/// takes it.
+/// owners, federated credentials and service principal before Pass 1 takes
+/// it.
 pub(super) fn adoption_for(
     app: &AppRegistrationBackup,
     hits: &[Application],
@@ -132,10 +145,17 @@ pub(super) fn adoption_for(
             Adoption::Adopt {
                 object_id: hit.id.clone(),
                 app_id: hit.app_id.clone(),
-                live_secret_names: hit
+                live_secrets: hit
                     .password_credentials
                     .iter()
-                    .filter_map(|p| p.display_name.clone())
+                    .filter_map(|p| {
+                        Some(LiveSecret {
+                            name: p.display_name.clone()?,
+                            key_id: p.key_id.clone(),
+                            created: p.start_date_time,
+                            hint: p.hint.clone(),
+                        })
+                    })
                     .collect(),
             }
         }
@@ -233,8 +253,8 @@ pub(super) fn unexpected_owners(
 }
 
 /// The whole Pass-1 decision for one manifest app: tag lookup, [`adoption_for`],
-/// then the owner and federated-credential checks that make an adoption
-/// provable.
+/// then the owner, federated-credential and service-principal checks that make
+/// an adoption provable.
 ///
 /// The tag and the display name are both writable by anyone allowed to register
 /// apps, and source appIds are not secret — so a pre-seeded app with the right
@@ -243,8 +263,10 @@ pub(super) fn unexpected_owners(
 /// planter as an owner. An app this restore created has no owners but the
 /// operator (`operator_oid`, the signed-in account in the destination) and the
 /// manifest's own owners (resolved through the run's `principals` memo, which
-/// Pass 2 then reuses), so any other owner is refused by name. Every read that
-/// fails refuses too: neither adopting nor creating blind is safe.
+/// Pass 2 then reuses), so any other owner is refused by name. The app's
+/// existing service principal is held to the same rule, and to holding no
+/// credential at all ([`check_service_principal`]). Every read that fails
+/// refuses too: neither adopting nor creating blind is safe.
 pub(super) async fn decide_adoption(
     client: &GraphClient,
     app: &AppRegistrationBackup,
@@ -289,31 +311,18 @@ pub(super) async fn decide_adoption(
             ));
         }
     };
-    let mut allowed: HashSet<String> = operator_oid
-        .filter(|oid| !oid.is_empty())
-        .map(str::to_owned)
-        .into_iter()
-        .collect();
-    // Resolve the manifest's owners only when someone besides the operator owns it.
-    if owners.iter().any(|o| !allowed.contains(&o.id)) {
-        for owner in &app.owners {
-            if let Ok(id) = resolve_principal(client, principals, owner, session).await {
-                allowed.insert(id);
-            }
-        }
-    }
+    let mut owners_allowed = OwnersAllowed::new(operator_oid);
     // A lookup that failed because the session died leaves that owner out of
-    // `allowed`; refusing "owners this restore did not set" would then send
-    // the operator after a problem that does not exist.
-    if session.is_dead() {
-        return Adoption::Refuse(format!(
-            "The sign-in session ended while checking '{}' (appId {app_id}), which carries this \
-             app's restore tag, so it was neither adopted nor created again. Sign in again and \
-             run the restore again.",
-            app.display_name
-        ));
+    // the allowed set; refusing "owners this restore did not set" would then
+    // send the operator after a problem that does not exist.
+    if owners_allowed
+        .cover(&owners, client, app, principals, session)
+        .await
+        .is_err()
+    {
+        return session_ended(app, app_id);
     }
-    let extra = unexpected_owners(&owners, &allowed);
+    let extra = unexpected_owners(&owners, &owners_allowed.ids);
     if !extra.is_empty() {
         return Adoption::Refuse(format!(
             "'{}' (appId {app_id}) carries this app's restore tag, but it has owners this restore \
@@ -373,7 +382,172 @@ pub(super) async fn decide_adoption(
             foreign.join(", ")
         ));
     }
+    if let Some(refusal) = check_service_principal(
+        client,
+        app,
+        app_id,
+        &mut owners_allowed,
+        principals,
+        session,
+    )
+    .await
+    {
+        return refusal;
+    }
     adoption
+}
+
+/// The refusal when the session died while an adoption candidate was checked.
+fn session_ended(app: &AppRegistrationBackup, app_id: &str) -> Adoption {
+    Adoption::Refuse(format!(
+        "The sign-in session ended while checking '{}' (appId {app_id}), which carries this \
+         app's restore tag, so it was neither adopted nor created again. Sign in again and run \
+         the restore again.",
+        app.display_name
+    ))
+}
+
+/// The destination object ids an adoption candidate's owners may have: the
+/// operator, and — resolved only once someone else turns up — the manifest's
+/// own owners, through the run's principal memo.
+struct OwnersAllowed {
+    ids: HashSet<String>,
+    manifest_resolved: bool,
+}
+
+impl OwnersAllowed {
+    fn new(operator_oid: Option<&str>) -> Self {
+        Self {
+            ids: operator_oid
+                .filter(|oid| !oid.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            manifest_resolved: false,
+        }
+    }
+
+    /// Resolves the manifest's owners into the set when one of `owners` is
+    /// not the operator. `Err` when the session died meanwhile: a lookup it
+    /// failed left that owner out, so the set proves nothing.
+    async fn cover(
+        &mut self,
+        owners: &[DirectoryObject],
+        client: &GraphClient,
+        app: &AppRegistrationBackup,
+        principals: &mut PrincipalMemo,
+        session: &SessionDead,
+    ) -> Result<(), ()> {
+        if !self.manifest_resolved && owners.iter().any(|o| !self.ids.contains(&o.id)) {
+            self.manifest_resolved = true;
+            for owner in &app.owners {
+                if let Ok(id) = resolve_principal(client, principals, owner, session).await {
+                    self.ids.insert(id);
+                }
+            }
+        }
+        if session.is_dead() { Err(()) } else { Ok(()) }
+    }
+}
+
+/// The adoption check on the candidate's existing service principal, or
+/// `None` when it passes (or there is none yet — Pass 1 then creates it).
+///
+/// The service principal is the other half of the app, and Pass 1 only
+/// ensures it exists: a password or certificate on it signs in as this app,
+/// and an owner of it can add one — with the consent Pass 3 then grants. A
+/// restore never adds a credential or an owner to a service principal, so
+/// any credential refuses (one the operator added after an earlier run too:
+/// this cannot tell it from a planted one), and an owner must be one the app
+/// registration itself may have. The read is live, never cached: a cached
+/// copy from before a credential was added would let it through. A failed
+/// read refuses like every other.
+async fn check_service_principal(
+    client: &GraphClient,
+    app: &AppRegistrationBackup,
+    app_id: &str,
+    owners_allowed: &mut OwnersAllowed,
+    principals: &mut PrincipalMemo,
+    session: &SessionDead,
+) -> Option<Adoption> {
+    let sp = match client
+        .get_service_principal_credentials_by_app_id(app_id)
+        .await
+    {
+        Ok(Some(sp)) => sp,
+        Ok(None) => return None,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            return Some(Adoption::Refuse(format!(
+                "Couldn't read the service principal of '{}' (appId {app_id}), which carries this \
+                 app's restore tag ({e}), so it was neither adopted nor created again. Run the \
+                 restore again once the read succeeds.",
+                app.display_name
+            )));
+        }
+    };
+    let credentials: Vec<String> = sp
+        .password_credentials
+        .iter()
+        .map(|p| {
+            p.display_name.clone().map_or_else(
+                || format!("secret {}", p.key_id),
+                |n| format!("secret '{n}'"),
+            )
+        })
+        .chain(sp.key_credentials.iter().map(|k| {
+            k.display_name.clone().map_or_else(
+                || format!("certificate {}", k.key_id),
+                |n| format!("certificate '{n}'"),
+            )
+        }))
+        .collect();
+    if !credentials.is_empty() {
+        return Some(Adoption::Refuse(format!(
+            "'{}' (appId {app_id}) carries this app's restore tag, but its service principal \
+             holds credential(s) a restore never adds ({}). Each lets whoever holds it sign in as \
+             this app, so it was not adopted (that would give it this app's permissions and admin \
+             consent) and not created again. If you added them yourself after an earlier run, \
+             finish this app by hand or remove them from the enterprise application and run the \
+             restore again; otherwise find out who added them, and delete the app to have the \
+             restore recreate it.",
+            app.display_name,
+            credentials.join(", ")
+        )));
+    }
+    let sp_owners = match client.list_service_principal_owners(&sp.id).await {
+        Ok(owners) => owners,
+        Err(e) => {
+            session.note_code(e.ui_code());
+            return Some(Adoption::Refuse(format!(
+                "Couldn't read the owners of the service principal of '{}' (appId {app_id}), \
+                 which carries this app's restore tag ({e}), so it was neither adopted nor \
+                 created again. Run the restore again once the read succeeds.",
+                app.display_name
+            )));
+        }
+    };
+    if owners_allowed
+        .cover(&sp_owners, client, app, principals, session)
+        .await
+        .is_err()
+    {
+        return Some(session_ended(app, app_id));
+    }
+    let extra = unexpected_owners(&sp_owners, &owners_allowed.ids);
+    if !extra.is_empty() {
+        return Some(Adoption::Refuse(format!(
+            "'{}' (appId {app_id}) carries this app's restore tag, but its service principal has \
+             owners this restore did not set: {}. An owner can add a credential to it and sign in \
+             as this app, so it was not adopted (that would give it this app's permissions and \
+             admin consent) and not created again. Find out who added them: if they are \
+             legitimate, remove them from the enterprise application's owners and run the restore \
+             again; otherwise delete the app to have the restore recreate it.",
+            app.display_name,
+            extra.join(", ")
+        )));
+    }
+    None
 }
 
 /// The fields a federated credential is matched on between the manifest and a
@@ -466,7 +640,7 @@ pub(super) async fn pass1_create_or_adopt(
             Adoption::Adopt {
                 object_id,
                 app_id,
-                live_secret_names,
+                live_secrets,
             } => {
                 let mut warnings = Vec::new();
                 // The earlier run may have died between the app POST and its
@@ -483,7 +657,7 @@ pub(super) async fn pass1_create_or_adopt(
                     new_object_id: object_id,
                     new_app_id: app_id,
                     adopted: true,
-                    live_secret_names,
+                    live_secrets,
                     warnings,
                 });
                 done += 1;
@@ -531,7 +705,7 @@ pub(super) async fn pass1_create_or_adopt(
                     new_object_id: res.application.id,
                     new_app_id: res.application.app_id,
                     adopted: false,
-                    live_secret_names: Vec::new(),
+                    live_secrets: Vec::new(),
                     warnings,
                 });
             }

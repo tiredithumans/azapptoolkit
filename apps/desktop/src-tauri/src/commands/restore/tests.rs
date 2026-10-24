@@ -457,7 +457,10 @@ fn adoption_for_creates_adopts_or_refuses() {
     // secrets it already holds.
     let mut same = hit("1", "App A");
     same.password_credentials = vec![PasswordCredential {
+        key_id: "key-1".into(),
         display_name: Some("ci".into()),
+        hint: Some("Ab1".into()),
+        start_date_time: chrono::DateTime::from_timestamp(1_000_700, 0),
         ..Default::default()
     }];
     assert_eq!(
@@ -465,7 +468,12 @@ fn adoption_for_creates_adopts_or_refuses() {
         Adoption::Adopt {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
-            live_secret_names: vec!["ci".into()],
+            live_secrets: vec![LiveSecret {
+                name: "ci".into(),
+                key_id: "key-1".into(),
+                created: chrono::DateTime::from_timestamp(1_000_700, 0),
+                hint: Some("Ab1".into()),
+            }],
         }
     );
 
@@ -702,6 +710,53 @@ async fn mount_tagged_hit(server: &wiremock::MockServer, owners: serde_json::Val
         .mount(server)
         .await;
     mount_tagged_fics(server, serde_json::json!([]), 5).await;
+    mount_tagged_sp(server, serde_json::json!([]), 5).await;
+    mount_tagged_sp_owners(server, serde_json::json!([]), 5).await;
+}
+
+/// The tagged hit's service principal (`sp-1`), read live with its
+/// credentials once the app's own checks pass. A test that plants a
+/// credential mounts again at a higher priority (lower number).
+async fn mount_tagged_sp(
+    server: &wiremock::MockServer,
+    passwords: serde_json::Value,
+    priority: u8,
+) {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", "appId eq 'app-1'"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "sp-1",
+                "appId": "app-1",
+                "displayName": "App A",
+                "passwordCredentials": passwords,
+                "keyCredentials": []
+            }]
+        })))
+        .with_priority(priority)
+        .mount(server)
+        .await;
+}
+
+/// The owners of the tagged hit's service principal.
+async fn mount_tagged_sp_owners(
+    server: &wiremock::MockServer,
+    owners: serde_json::Value,
+    priority: u8,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/owners"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": owners })),
+        )
+        .with_priority(priority)
+        .mount(server)
+        .await;
 }
 
 /// The tagged hit's federated credentials, read after its owners pass. A
@@ -830,8 +885,120 @@ async fn a_tagged_app_owned_only_by_the_operator_is_adopted() {
         Adoption::Adopt {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
-            live_secret_names: Vec::new(),
+            live_secrets: Vec::new(),
         }
+    );
+}
+
+/// The service principal is the other half of the app: a secret or
+/// certificate on it signs in as this app once Pass 3 consents. A restore
+/// never adds one, so any credential there refuses the adoption.
+#[tokio::test]
+async fn a_tagged_app_whose_service_principal_holds_a_credential_is_not_adopted() {
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(
+        &server,
+        serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+    )
+    .await;
+    mount_tagged_sp(
+        &server,
+        serde_json::json!([{ "keyId": "k-sp", "displayName": "backdoor" }]),
+        1,
+    )
+    .await;
+    let client = graph_over(&server, false);
+
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("a credential on the service principal must block adoption");
+    };
+    assert!(
+        reason.contains("service principal") && reason.contains("secret 'backdoor'"),
+        "{reason}"
+    );
+    // The credential read is live, never a cached copy from before it was added.
+    let reads = requests(&server, "GET", "/servicePrincipals").await;
+    assert!(
+        reads.iter().any(|r| r
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("passwordCredentials")),
+        "the service principal is read with its credentials"
+    );
+}
+
+/// An owner of the service principal can add a credential to it, so one the
+/// restore did not set refuses the adoption just as an app owner does.
+#[tokio::test]
+async fn a_tagged_app_with_a_foreign_sp_owner_is_not_adopted() {
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(
+        &server,
+        serde_json::json!([{ "id": "operator-oid", "userPrincipalName": "admin@contoso.com" }]),
+    )
+    .await;
+    mount_tagged_sp_owners(
+        &server,
+        serde_json::json!([
+            { "id": "operator-oid", "userPrincipalName": "admin@contoso.com" },
+            { "id": "mallory-oid", "userPrincipalName": "mallory@contoso.com" }
+        ]),
+        1,
+    )
+    .await;
+    let client = graph_over(&server, false);
+
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("a foreign service-principal owner must block adoption");
+    };
+    assert!(
+        reason.contains("service principal") && reason.contains("mallory@contoso.com"),
+        "{reason}"
+    );
+    assert!(!reason.contains("admin@contoso.com"), "{reason}");
+}
+
+/// Both service-principal reads fail closed, like the tag, owner and
+/// credential reads before them.
+#[tokio::test]
+async fn a_failed_service_principal_read_refuses_the_adoption() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let operator = serde_json::json!([{ "id": "operator-oid" }]);
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(&server, operator.clone()).await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let client = graph_over(&server, false);
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("an unreadable service principal must block adoption");
+    };
+    assert!(
+        reason.contains("Couldn't read the service principal"),
+        "{reason}"
+    );
+
+    let server = wiremock::MockServer::start().await;
+    mount_tagged_hit(&server, operator).await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1/owners"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let client = graph_over(&server, false);
+    let Adoption::Refuse(reason) = decide(&client, &SessionDead::new()).await else {
+        panic!("unreadable service-principal owners must block adoption");
+    };
+    assert!(
+        reason.contains("Couldn't read the owners of the service principal"),
+        "{reason}"
     );
 }
 
@@ -1036,7 +1203,7 @@ fn created(app: AppRegistrationBackup) -> CreatedApp {
         new_object_id: "new-obj".into(),
         new_app_id: "new-app".into(),
         adopted: false,
-        live_secret_names: Vec::new(),
+        live_secrets: Vec::new(),
         warnings: Vec::new(),
     }
 }
@@ -1174,7 +1341,12 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         ..Default::default()
     });
     c.adopted = true;
-    c.live_secret_names = vec!["ci".into()];
+    c.live_secrets = vec![LiveSecret {
+        name: "ci".into(),
+        key_id: "key-live-1".into(),
+        created: Some("2026-01-02T03:04:00Z".parse().unwrap()),
+        hint: Some("Ab1".into()),
+    }];
 
     let (out, _) = wire(&client, &c).await;
 
@@ -1196,12 +1368,18 @@ async fn an_adopted_app_skips_existing_owners_and_secrets() {
         "{:?}",
         out.unresolved_owners
     );
+    // The kept secret is named by what tells it from a planted copy of the
+    // name: its key id, when it was added, and its hint.
+    let kept = out
+        .warnings
+        .iter()
+        .find(|w| w.contains("secret 'ci' already exists"))
+        .unwrap_or_else(|| panic!("{:?}", out.warnings));
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("secret 'ci' already exists")),
-        "{:?}",
-        out.warnings
+        kept.contains("key id key-live-1")
+            && kept.contains("added 2026-01-02 03:04 UTC")
+            && kept.contains("hint 'Ab1'"),
+        "{kept}"
     );
 }
 
@@ -1330,7 +1508,9 @@ async fn mount_live_apps(server: &MockServer) {
 }
 
 /// Whether Pass 3 got as far as ensuring `app_id`'s service principal —
-/// the first step of an actual consent.
+/// the first step of an actual consent. Pass 1's live credential read of an
+/// adoption candidate's service principal (it selects `passwordCredentials`)
+/// is not one.
 async fn consent_attempted(server: &MockServer, app_id: &str) -> bool {
     server
         .received_requests()
@@ -1338,9 +1518,11 @@ async fn consent_attempted(server: &MockServer, app_id: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|r| {
+            let query = r.url.query().unwrap_or_default();
             r.method.as_str() == "GET"
                 && r.url.path() == "/servicePrincipals"
-                && r.url.query().unwrap_or_default().contains(app_id)
+                && query.contains(app_id)
+                && !query.contains("passwordCredentials")
         })
 }
 

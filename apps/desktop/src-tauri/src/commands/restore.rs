@@ -30,9 +30,10 @@
 //! re-run finds it and finishes wiring it rather than creating it twice. The tag
 //! and the display name are both writable by anyone who may register apps, so a
 //! hit is adopted only once it is also provably this restore's: created after
-//! the backup, owned by nobody but the operator and the manifest's owners, and
+//! the backup, owned by nobody but the operator and the manifest's owners,
 //! holding no credential (secret, certificate, federated credential) the
-//! manifest does not account for. Anything else — an ambiguous or unprovable
+//! manifest does not account for, and with a service principal (if it has one)
+//! holding no credential at all and no other owner. Anything else — an ambiguous or unprovable
 //! match, or a read that failed — is a runbook item and never a blind create.
 //!
 //! Secret/cert values can't be restored: secrets are regenerated (the show-once

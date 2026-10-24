@@ -30,6 +30,39 @@ async fn service_principal_lookup_caches_by_app_id() {
     assert_eq!(sp2.unwrap().id, "sp-1");
 }
 
+/// The credential read is live every time: a cached service principal from
+/// before a credential was added must not answer it, and it seeds no cache.
+#[tokio::test]
+async fn service_principal_credentials_are_read_live() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param(
+            "$select",
+            "id,appId,displayName,passwordCredentials,keyCredentials",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{
+                "id": "sp-1",
+                "appId": "app-1",
+                "displayName": "Demo App",
+                "passwordCredentials": [{ "keyId": "k-1", "displayName": "planted" }]
+            }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    for _ in 0..2 {
+        let sp = client
+            .get_service_principal_credentials_by_app_id("app-1")
+            .await
+            .unwrap()
+            .expect("the app has a service principal");
+        assert_eq!(sp.password_credentials[0].key_id, "k-1");
+    }
+}
+
 #[tokio::test]
 async fn list_managed_identities_filters_by_sp_type() {
     let server = MockServer::start().await;

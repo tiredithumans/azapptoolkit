@@ -344,10 +344,22 @@ with no subject, can never be matched and is foreign): the standing access an
 owner check cannot see. A credential the operator added after an earlier run is
 refused the same way — the item says to finish the app by hand or remove it and
 re-run. A same-named secret is the one residue; Pass 2 reports it rather than
-keeping it silently. Only then does the app join the remap: its SP is ensured (the earlier run may
-have died between the two POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
+keeping it silently, naming the live secret's key id, when it was added and its
+hint (carried from the tag lookup as `LiveSecret`) so the operator can compare it
+with the earlier run's report. Last, the hit's existing **service principal** is
+checked (`check_service_principal`), whether or not the manifest says the app had
+one: it is the other half of the app, Pass 1 only ensures it exists, and Pass 3
+consents onto it. It is read live — `get_service_principal_credentials_by_app_id`,
+never the SP cache, since a cached copy could predate a planted credential — with
+its owners (`list_service_principal_owners`). Any password or certificate on it
+refuses (a restore never adds one, so one the operator added after an earlier run
+is refused too, with the same two ways out), and so does an owner outside the set
+the app's own owners are held to (the operator and the manifest's resolved
+owners); a failed read of either refuses like the rest. Only then does the app
+join the remap: its SP is ensured (the earlier run may have died between the two
+POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
 
-A failed lookup — of the tag, of the owners or of the federated credentials — **fails closed** into a
+A failed lookup — of the tag, of the owners, of the federated credentials or of the service principal — **fails closed** into a
 `ManualItem` too: creating blind is how a re-run duplicates the estate, and
 adopting blind is how someone else's app is granted this one's consent. For an adopted app Pass 2 re-applies the
 full-replace PATCHes as-is and skips what is already there among the additive

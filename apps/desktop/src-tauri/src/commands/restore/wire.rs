@@ -25,7 +25,7 @@ use crate::dto::backup::{
 use crate::state::CancelToken;
 
 use super::PassCtx;
-use super::adoption::{FicKey, fic_key};
+use super::adoption::{FicKey, LiveSecret, fic_key};
 use super::plan::Withheld;
 use super::principals::{PrincipalMemo, owner_label, resolve_principal};
 
@@ -95,8 +95,8 @@ pub(super) struct CreatedApp {
     pub(super) new_app_id: String,
     /// Recognised by its restore tag rather than created by this run.
     pub(super) adopted: bool,
-    /// For an adopted app, the display names of the secrets it already holds.
-    pub(super) live_secret_names: Vec<String>,
+    /// For an adopted app, the named secrets it already holds.
+    pub(super) live_secrets: Vec<LiveSecret>,
     /// Pass-1 warnings to carry into the app's report entry.
     pub(super) warnings: Vec<String>,
 }
@@ -480,7 +480,7 @@ pub(super) async fn wire_application(
     // for one already expired when the backup was taken, and not for one an
     // earlier run of this restore already issued on an adopted app (matched by
     // name, as a multiset, so two same-named secrets still count as two).
-    let mut already_issued = c.live_secret_names.clone();
+    let mut already_issued = c.live_secrets.clone();
     for (i, meta) in app.secrets.iter().enumerate() {
         if cancel.is_cancelled() || session.is_dead() {
             stopped_before(&mut out, app.secrets.len() - i, app.secrets.len(), "secret");
@@ -500,12 +500,13 @@ pub(super) async fn wire_application(
             ));
             continue;
         }
-        if let Some(pos) = already_issued.iter().position(|n| *n == name) {
-            already_issued.swap_remove(pos);
+        if let Some(pos) = already_issued.iter().position(|s| s.name == name) {
+            let live = already_issued.swap_remove(pos);
             out.warnings.push(format!(
-                "secret '{name}' already exists — not issued again. If an earlier restore run \
-                 issued it, its value is in that run's report; compare its key id with that \
-                 report, and remove it if it isn't that one"
+                "secret '{name}' already exists ({}) — not issued again. If an earlier restore \
+                 run issued it, its value is in that run's report: compare this key id with that \
+                 report, and remove the secret if it isn't that one",
+                live_secret_label(&live)
             ));
             continue;
         }
@@ -527,6 +528,21 @@ pub(super) async fn wire_application(
     out.certificates_needing_manual_upload = certificates_to_reupload(app);
 
     (out, trusts)
+}
+
+/// The kept secret's key id, when it was added and its hint — what tells the
+/// secret an earlier run issued from a planted one that copied its name.
+fn live_secret_label(live: &LiveSecret) -> String {
+    let created = live.created.map_or_else(
+        || "an unknown time".to_string(),
+        |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+    );
+    let hint = live
+        .hint
+        .as_deref()
+        .map(|h| format!(", hint '{h}'"))
+        .unwrap_or_default();
+    format!("key id {}, added {created}{hint}", live.key_id)
 }
 
 /// Certificates can't be restored (the private key never left the source), so

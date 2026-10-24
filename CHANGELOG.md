@@ -20,9 +20,11 @@ After 0.34.1, each change is one line written for the person using the app.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
 - A cancelled or interrupted restore now lists every app it created, and marks the ones it did not finish.
 - A restore that can't identify a permission while running now says so, not "not approved in the plan".
+- A restore re-run that keeps an existing same-named secret now shows its key id, when it was added and its hint.
 
 ### Security
 
+- A restore re-run no longer takes over an app whose service principal has a credential or an unknown owner.
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
 - Security fix for a timing weakness in a cryptography helper that the app's hashing code depends on.
 
