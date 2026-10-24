@@ -16,8 +16,9 @@ fn main() {
 /// `baked_env_name`), so an admin can produce a single distributable installer
 /// without requiring every recipient to set environment variables themselves.
 /// Runtime env vars and the user's in-app `settings.json` still override the
-/// baked-in values — see `state.rs`. An empty or non-GUID client/tenant id
-/// prints a `cargo:warning` (a non-GUID one is still baked).
+/// baked-in values — see `state.rs`. An empty or non-GUID client/tenant id,
+/// or an `AZAPPTOOLKIT_CLOUD` the app does not know, prints a `cargo:warning`
+/// (a non-GUID id or unknown cloud is still baked).
 fn bake_client_config() {
     let env_path = workspace_root().join(".env");
     println!("cargo:rerun-if-changed={}", env_path.display());

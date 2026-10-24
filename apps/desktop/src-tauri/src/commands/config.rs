@@ -5,7 +5,7 @@
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::identity::canonical_tenant_id;
-use azapptoolkit_core::settings::UserSettings;
+use azapptoolkit_core::settings::{SettingsUnreadable, UserSettings};
 
 use crate::dto::UiError;
 
@@ -25,6 +25,9 @@ pub fn get_auth_config(state: State<'_, AppState>) -> AuthConfigStatus {
         tenant_id: state.display_tenant_id().to_string(),
         client_id_source: state.client_id_source,
         tenant_id_source: state.tenant_id_source,
+        cloud: state.auth.cloud().display_name().to_string(),
+        cloud_warning: state.cloud_warning.clone(),
+        settings_error: state.settings_error.clone(),
     }
 }
 
@@ -44,8 +47,32 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
         settings.client_id = Some(client_id);
         settings.tenant_id = Some(tenant_id);
     })
-    .map_err(|e| UiError::io(format!("Could not write settings.json: {e}")))?;
+    .map_err(|e| settings_write_error(&e))?;
     Ok(())
+}
+
+/// The `UiError` for a `settings.json` save that `UserSettings::mutate`
+/// refused or could not complete. A file that exists but cannot be used is
+/// `settings_unreadable`, naming the file — "check the folder is writable"
+/// would send the operator the wrong way. Damaged JSON is not retryable
+/// (nothing changes until it is fixed or moved aside); a file that could not
+/// be READ is (a permission, an antivirus scan or a sync client holding it
+/// can clear), and the frontend's hint tells the two apart by that flag. Any
+/// other failure is the generic, retryable `io`. Shared by every Settings
+/// save.
+pub(crate) fn settings_write_error(e: &std::io::Error) -> UiError {
+    match SettingsUnreadable::find(e) {
+        Some(refusal) if refusal.is_parse_error() => UiError::validation(
+            "settings_unreadable",
+            format!("settings.json is damaged: {refusal}."),
+        ),
+        Some(refusal) => UiError::new(
+            "settings_unreadable",
+            format!("settings.json couldn't be read: {refusal}."),
+            true,
+        ),
+        None => UiError::io(format!("Could not write settings.json: {e}")),
+    }
 }
 
 /// The IDs `set_auth_config` would save, or the validation error it returns.
@@ -103,6 +130,52 @@ mod tests {
             let err = save_with_tenant(rejected).expect_err(rejected);
             assert_eq!(err.code, "invalid_tenant_id", "{rejected}");
         }
+    }
+
+    /// A damaged file is its own code naming the file, not retryable; one that
+    /// can't be read is the same code, retryable, pointing at its access; any
+    /// other write failure stays the retryable `io`.
+    #[test]
+    fn a_refused_save_over_a_damaged_file_is_settings_unreadable() {
+        let dir = std::env::temp_dir().join(format!(
+            "azapptoolkit-config-unreadable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(azapptoolkit_core::settings::SETTINGS_FILE);
+        std::fs::write(&file, b"{ not json").unwrap();
+
+        let refused = UserSettings::mutate(&dir, |_| ()).unwrap_err();
+        let err = settings_write_error(&refused);
+        assert_eq!(err.code, "settings_unreadable");
+        assert!(!err.retryable);
+        assert!(
+            err.message.contains(&file.display().to_string()),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("line 1"), "{}", err.message);
+        assert!(err.message.contains("is damaged"), "{}", err.message);
+
+        // A directory in the file's place: it exists, and it can't be read.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let refused = UserSettings::mutate(&dir, |_| ()).unwrap_err();
+        let err = settings_write_error(&refused);
+        assert_eq!(err.code, "settings_unreadable");
+        assert!(err.retryable, "a lock or a permission can clear");
+        assert!(err.message.contains("couldn't be read"), "{}", err.message);
+        assert!(
+            err.message.contains("check its permissions"),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains("damaged"), "{}", err.message);
+
+        let other = settings_write_error(&std::io::Error::other("disk full"));
+        assert_eq!(other.code, "io");
+        assert!(other.retryable);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An uppercase GUID is accepted but saved lowercase: Entra's `tid` is

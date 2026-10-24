@@ -5,8 +5,13 @@ use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
 pub use azapptoolkit_dto::diagnostics::{
-    CacheKindDto, CacheStatsDto, ListCacheKindDto, SetCacheConfigInput,
+    CacheKindDto, CacheStatsDto, ListCacheKindDto, SetCacheConfigInput, SupportPaths,
 };
+
+/// Where this install keeps its logs and `settings.json` (absolute paths).
+pub async fn get_support_paths() -> Result<SupportPaths, UiError> {
+    invoke_result("get_support_paths", ()).await
+}
 
 pub async fn cache_stats() -> CacheStatsDto {
     invoke("cache_stats", ()).await

@@ -17,8 +17,24 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::config;
-use crate::components::ui::{Card, Spinner};
+use crate::components::support_paths::SupportPathsBlock;
+use crate::components::ui::{Callout, Card, Spinner};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
+
+/// The startup warning for a `settings.json` that exists but could not be read
+/// (`AuthConfigStatus::settings_error`): the backend's sentence names the file
+/// and where it broke, and the paths below it let the operator open it. Shared
+/// by the config screen and the sign-in card, the two surfaces in front of
+/// Settings.
+#[component]
+pub fn SettingsErrorCallout(message: String) -> impl IntoView {
+    view! {
+        <Callout tone="warn" role="alert" class="settings-error">
+            <span class="ui-text">{message}</span>
+            <SupportPathsBlock />
+        </Callout>
+    }
+}
 
 #[component]
 pub fn ConfigScreen(
@@ -28,9 +44,17 @@ pub fn ConfigScreen(
     /// otherwise correct pair — not typing both from scratch.
     client_id: String,
     tenant_id: String,
+    /// `AuthConfigStatus::settings_error`: a `settings.json` the app could not
+    /// read at startup. Saving would be refused over it, so it is named before
+    /// the operator types anything.
+    #[prop(optional_no_strip)]
+    settings_error: Option<String>,
 ) -> impl IntoView {
     let client_id = RwSignal::new(client_id);
     let tenant_id = RwSignal::new(tenant_id);
+    // The callout already shows the paths; the form's error area would repeat
+    // them.
+    let paths_on_error = settings_error.is_none();
 
     view! {
         <main class="signin-shell">
@@ -46,7 +70,12 @@ pub fn ConfigScreen(
                      you in — see the README's first-run configuration section for how to create \
                      the registration."
                 </span>
-                <AuthConfigForm client_id=client_id tenant_id=tenant_id />
+                {settings_error.map(|message| view! { <SettingsErrorCallout message=message /> })}
+                <AuthConfigForm
+                    client_id=client_id
+                    tenant_id=tenant_id
+                    support_paths_on_error=paths_on_error
+                />
             </Card>
         </main>
     }
@@ -68,6 +97,10 @@ pub fn AuthConfigForm(
     /// open in the workspace with it.
     #[prop(default = false)]
     confirm_restart: bool,
+    /// Show the log folder and settings file under a save error. On for the
+    /// first-run screen, which has no Settings page to find them on.
+    #[prop(default = false)]
+    support_paths_on_error: bool,
 ) -> impl IntoView {
     let busy = RwSignal::new(false);
     let confirming = RwSignal::new(false);
@@ -92,7 +125,8 @@ pub fn AuthConfigForm(
                     // this returns are fixed in the fields behind it, not in
                     // the dialog.
                     confirming.set(false);
-                    error.set(Some((e.message, config_error_hint(&e.code))));
+                    let hint = config_error_hint(&e.code, e.retryable);
+                    error.set(Some((e.message, hint)));
                     busy.set(false);
                 }
             }
@@ -144,6 +178,7 @@ pub fn AuthConfigForm(
                     view! {
                         <span class="ui-text signin-error">{msg}</span>
                         <span class="ui-text signin-hint">{hint}</span>
+                        {support_paths_on_error.then(|| view! { <SupportPathsBlock /> })}
                     }
                 })
         }}
@@ -166,7 +201,10 @@ pub fn AuthConfigForm(
 }
 
 /// One actionable recovery step per `UiError.code` from `set_auth_config`.
-fn config_error_hint(code: &str) -> &'static str {
+/// `settings_unreadable` covers two causes the backend marks apart by
+/// `retryable`: damaged JSON (fix or move it) and a file that couldn't be read
+/// at all (its permissions, or a program holding it, which can clear).
+fn config_error_hint(code: &str, retryable: bool) -> &'static str {
     match code {
         "invalid_client_id" => {
             "The Application (client) ID must be a GUID — copy it from the app \
@@ -176,10 +214,38 @@ fn config_error_hint(code: &str) -> &'static str {
             "The Directory (tenant) ID must be a GUID — copy it from the registration's \
              Overview page. A domain like contoso.onmicrosoft.com isn't accepted."
         }
+        "settings_unreadable" if retryable => {
+            "settings.json couldn't be read — check its permissions or whether another \
+             program (an antivirus scan, a sync client) has it open, then retry."
+        }
+        "settings_unreadable" => {
+            "settings.json is damaged — fix the JSON or move it aside, then retry. Nothing \
+             was written over it."
+        }
         "io" => {
             "Couldn't write settings.json — check that the app's config folder is \
              writable (not blocked by permissions or disk space), then retry."
         }
         _ => "Double-check the IDs and try again.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_error_hint;
+
+    /// A damaged file and an unreadable one need different fixes, and neither
+    /// is the folder's permissions (the generic `io` hint).
+    #[test]
+    fn a_settings_file_that_cannot_be_used_gets_the_hint_for_its_cause() {
+        let damaged = config_error_hint("settings_unreadable", false);
+        assert!(
+            damaged.contains("fix the JSON or move it aside"),
+            "{damaged}"
+        );
+        let unreadable = config_error_hint("settings_unreadable", true);
+        assert!(unreadable.contains("check its permissions"), "{unreadable}");
+        assert!(!unreadable.contains("fix the JSON"), "{unreadable}");
+        assert!(config_error_hint("io", true).contains("config folder is writable"));
     }
 }

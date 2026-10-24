@@ -30,6 +30,7 @@ use crate::bindings::defaults::{
 };
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::owner_picker::OwnerPicker;
+use crate::components::support_paths::SupportPathsBlock;
 use crate::components::ui::{Callout, DetailSkeleton, SectionHeader, Spinner, TabBar, TabBarItem};
 use crate::state::use_session;
 use crate::util::parse_lines;
@@ -412,6 +413,12 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                                     tenant_id=conn_tenant_id
                                     confirm_restart=true
                                 />
+                                <h3>"Logs and settings file"</h3>
+                                <span class="ui-text hint">
+                                    "Where this computer keeps azapptoolkit's logs and settings.json — \
+                                     attach the day's log to a support request."
+                                </span>
+                                <SupportPathsBlock />
                             </section>
                         }
                             .into_any()
