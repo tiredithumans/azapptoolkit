@@ -135,6 +135,22 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                         .get()
                                         .map(|e| {
                                             let manual = needs_manual_install(&e);
+                                            // A signature that did not verify means the bytes
+                                            // that arrived are not the ones that were signed:
+                                            // fetching the same payload by hand over the same
+                                            // path proves nothing, so the advice is a fresh copy
+                                            // from the release page, ideally over another network.
+                                            let (before, after) = if e.code == "update_unverified" {
+                                                (
+                                                    "The download may have been altered or corrupted on the way, so it wasn't installed. Get the release from the ",
+                                                    " in a browser — ideally from another network — and install it from there. The log folder below has the details.",
+                                                )
+                                            } else {
+                                                (
+                                                    "Update & restart can't get past this. Download the new version from the ",
+                                                    " and run its installer instead. The log folder below has the details.",
+                                                )
+                                            };
                                             view! {
                                                 <Callout tone="warn" role="alert">
                                                     <span class="ui-text">{e.message}</span>
@@ -142,7 +158,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                                         .then(|| {
                                                             view! {
                                                                 <span class="ui-text update-splash__manual">
-                                                                    "Update & restart can't get past this. Download the new version from the "
+                                                                    {before}
                                                                     <a
                                                                         class="link-btn"
                                                                         href=RELEASES_URL
@@ -151,7 +167,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                                                     >
                                                                         "Releases page"
                                                                     </a>
-                                                                    " and run its installer instead. The log folder below has the details."
+                                                                    {after}
                                                                 </span>
                                                                 <SupportPathsBlock settings_file=false />
                                                             }
