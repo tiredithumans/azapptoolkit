@@ -91,7 +91,7 @@ builds elements, never raw HTML, and turns a link into an anchor only for an `ht
 ### Who is offered an update
 
 `commands::updater::update_policy(auto_update, bundle_type())` gates **both** commands before any
-network call (`update_gate()` precedes `app.updater()`; pinned by
+network call (`update_gate()` precedes `app.updater_builder()`; pinned by
 `repo_invariants/release.rs::updater_commands_consult_the_update_gate_before_the_network`):
 
 - `Msi` → the deployment tooling owns updates; `Deb | Rpm` → the package manager. `latest.json`
