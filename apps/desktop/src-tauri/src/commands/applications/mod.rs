@@ -90,10 +90,33 @@ pub async fn get_directory_index_status(
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     let client = state.graph_for(&tenant_id);
     let sps = cache::sp_index_cached(&state, &client, &tenant_id).await?;
-    Ok(DirectoryIndexStatus {
-        sp_index_truncated: sps.len() >= SP_INDEX_MAX,
+    Ok(directory_index_status(sps.len()))
+}
+
+/// [`get_directory_index_status`] from the cache alone: `None` when the SP
+/// index is not cached for this tenant, and never a scan.
+///
+/// For the App Registrations list's pairing notice. Its rows join the SP index
+/// on the scan that produced them, so a list that loaded had the index in hand;
+/// on a warm visit whose index has since been dropped (a per-list Refresh of an
+/// SP-index list drops only `sp_index`), the fetching form would start a full
+/// directory scan just to draw a notice. No index cached means no notice.
+#[tauri::command]
+pub async fn get_cached_directory_index_status(
+    state: State<'_, AppState>,
+    tenant_id: String,
+) -> Result<Option<DirectoryIndexStatus>, UiError> {
+    // Cache-only by construction: nothing here would ever need a token.
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    Ok(cache::sp_index_hit(&state.cache, &tenant_id).map(|sps| directory_index_status(sps.len())))
+}
+
+/// The coverage an SP index of `sp_count` rows reports.
+fn directory_index_status(sp_count: usize) -> DirectoryIndexStatus {
+    DirectoryIndexStatus {
+        sp_index_truncated: sp_count >= SP_INDEX_MAX,
         sp_index_cap: SP_INDEX_MAX,
-    })
+    }
 }
 
 /// One full `/applications` list scan, projected three ways (plus the Home

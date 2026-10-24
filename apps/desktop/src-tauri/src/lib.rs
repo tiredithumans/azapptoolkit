@@ -73,6 +73,7 @@ pub fn run() {
             commands::applications::list_applications_with_pairing,
             commands::applications::get_app_registration_counts,
             commands::applications::get_directory_index_status,
+            commands::applications::get_cached_directory_index_status,
             commands::applications::save_applications_to_file,
             commands::applications::get_application_detail,
             commands::applications::invalidate_application_detail,

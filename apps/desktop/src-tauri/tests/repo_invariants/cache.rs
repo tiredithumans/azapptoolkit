@@ -1913,8 +1913,9 @@ fn a_command_answering_from_cache_alone_checks_the_session() {
     // `list_resource_permission_counts`, `get_app_sign_in_activity`,
     // `list_conditional_access_for_app`, `remediate_scope_sharepoint_access`,
     // `remediate_disable_sign_in`), and `get_app_credential_policy` /
-    // `list_credential_usage` already proved theirs.
-    const KNOWN_CACHE_READING_COMMANDS: usize = 40;
+    // `list_credential_usage` already proved theirs. 41 with
+    // `get_cached_directory_index_status`, the pairing notice's cache-only read.
+    const KNOWN_CACHE_READING_COMMANDS: usize = 41;
     assert!(
         checked.len() >= KNOWN_CACHE_READING_COMMANDS,
         "the cache-read detector found only {} command(s) but at least {} answer from cache \

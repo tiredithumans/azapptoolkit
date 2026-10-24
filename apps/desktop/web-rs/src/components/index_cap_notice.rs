@@ -7,8 +7,11 @@
 //! each row's "Jump to paired Enterprise Application" link and the export's
 //! `PairedEnterpriseAppId` are joined from that index, so an app whose service
 //! principal lies past the cap reads exactly like an app with none
-//! ([`PairingCapNotice`], worded by [`pairing_cap_message`]). The Enterprise
-//! Applications and Managed Identities lists
+//! ([`PairingCapNotice`], worded by [`pairing_cap_message`]). That notice reads
+//! the index status from the cache alone: the rows joined the index on the scan
+//! that produced them, so it is cached whenever the list loaded through it, and
+//! a warm visit must not start an SP-index scan just to draw a notice. The
+//! Enterprise Applications and Managed Identities lists
 //! cannot: both are filtered subsets of the SP index
 //! (one drops managed identities, the other keeps only them), so their row
 //! counts sit below the cap even on a tenant whose index truncated — a
@@ -84,21 +87,37 @@ pub fn IndexCapNotice(
     // `Copy` handle: the Suspend closure must stay `FnMut`, and a captured
     // `String` would move out of it on first call.
     let noun = StoredValue::new(noun);
-    sp_index_cap_callout(move |cap| index_cap_message(cap, &noun.get_value()))
+    sp_index_cap_callout(
+        move |cap| index_cap_message(cap, &noun.get_value()),
+        StatusRead::Fetch,
+    )
 }
 
 /// The App Registrations list's notice: [`pairing_cap_message`] when the shared
-/// SP index truncated, else nothing. Same fallible read as [`IndexCapNotice`].
+/// SP index truncated, else nothing. Unlike [`IndexCapNotice`] it reads the
+/// status from the cache alone (`get_cached_directory_index_status`): an index
+/// that is not cached draws no notice rather than a directory scan.
 #[component]
 pub fn PairingCapNotice() -> impl IntoView {
-    sp_index_cap_callout(pairing_cap_message)
+    sp_index_cap_callout(pairing_cap_message, StatusRead::CachedOnly)
+}
+
+/// Where a notice reads the SP index's coverage from.
+#[derive(Clone, Copy)]
+enum StatusRead {
+    /// `get_directory_index_status`: through the index, seeding it when cold.
+    /// The SP-index lists need that index anyway.
+    Fetch,
+    /// `get_cached_directory_index_status`: the cache alone, `None` when cold.
+    CachedOnly,
 }
 
 /// The one read-and-render behind both notices: a warn [`Callout`] worded by
-/// `message(cap)` once `get_directory_index_status` reports the SP index
-/// truncated for the active tenant, nothing otherwise (or on any failure).
+/// `message(cap)` once the status `read` returns reports the SP index truncated
+/// for the active tenant, nothing otherwise (or on any failure).
 fn sp_index_cap_callout(
     message: impl Fn(usize) -> String + Copy + Send + Sync + 'static,
+    read: StatusRead,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;
@@ -106,11 +125,17 @@ fn sp_index_cap_callout(
     let status = LocalResource::new(move || {
         let tenant = tenant.get();
         async move {
-            match tenant {
-                Some(t) => applications::get_directory_index_status(&t.tenant_id)
+            let t = tenant?;
+            match read {
+                StatusRead::Fetch => applications::get_directory_index_status(&t.tenant_id)
                     .await
                     .ok(),
-                None => None,
+                StatusRead::CachedOnly => {
+                    applications::get_cached_directory_index_status(&t.tenant_id)
+                        .await
+                        .ok()
+                        .flatten()
+                }
             }
         }
     });
