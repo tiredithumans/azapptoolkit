@@ -370,6 +370,46 @@ async fn degraded_run_without_findings_is_not_an_all_clear() {
     assert!(strip_text().contains("could not run"));
 }
 
+/// A sign-in report that failed transiently is a coverage gap, not a consent
+/// gap: the strip lists it and the unused-detection note says to re-run —
+/// never to grant a consent that is already in place. A missing consent keeps
+/// its "grant consent" note.
+#[wasm_bindgen_test]
+async fn a_transient_sign_in_failure_says_re_run_not_grant_consent() {
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            sign_in_report_available: false,
+            degraded: vec![AuditCoverageGap::SignInActivity],
+            ..cached_run()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Missing or single owner")).await;
+    assert!(strip_text().contains(AuditCoverageGap::SignInActivity.description()));
+    ts::wait_for(|| ts::body_contains("couldn't be read just now. Re-run to include it.")).await;
+    assert!(
+        !ts::body_contains("Grant consent above"),
+        "{}",
+        ts::body_text()
+    );
+    drop(m);
+
+    ts::reset();
+    ts::mock_ok(
+        "get_cached_audit",
+        &AuditRunResult {
+            sign_in_report_available: false,
+            sign_in_consent_required: true,
+            ..cached_run()
+        },
+    );
+    let _m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Grant consent above and re-run to enable it.")).await;
+    assert!(!ts::body_contains("couldn't be read just now"));
+}
+
 /// Org-wide reach the toolkit can't confine is scored, so it must be visible
 /// on the findings-first pane: two advisory groups (the legacy-resource advice
 /// differs from the rest), no bulk Fix, and never folded into the fixable

@@ -399,10 +399,14 @@ compromise flag must be re-read by every run, and the payload is one row per fla
   `Authentication_RequestFromNonPremiumTenantOrB2CTenant`) means the check reads as *unavailable* —
   no coverage gap, no degraded banner, following the sign-in-report precedent that most tenants
   are not entitled. A genuine failed read on an entitled tenant IS
-  `AuditCoverageGap::RiskyServicePrincipals`: unlike the sign-in report, a failed risky read means
-  the security check silently stopped working, so the run is degraded — never cached, never shown
-  as an all-clear. While unavailable, `ScoreCtx::risk_for` answers `None` even for a principal
-  present in the map; Rule 22 never fires on an unchecked assumption.
+  `AuditCoverageGap::RiskyServicePrincipals`: a failed risky read means the security check
+  silently stopped working, so the run is degraded — never cached, never shown as an all-clear.
+  While unavailable, `ScoreCtx::risk_for` answers `None` even for a principal present in the map;
+  Rule 22 never fires on an unchecked assumption. The sign-in report follows the same split
+  (`prefetch_sign_in_activity` → `sign_in_activity_outcome`): no consent / license / role is
+  unavailable, a transient failure — throttled, 5xx, unreachable, at the report or at the token
+  endpoint — is `AuditCoverageGap::SignInActivity`, and the Findings pane's unused-detection notes
+  then say to re-run rather than to grant consent.
 - **Scoring:** `apply_service_principal_risk` adds +20 (alone ⇒ High; stacks any other finding to
   Critical — a CHANGELOG-gated ranking shift), the `RISKY_SERVICE_PRINCIPAL` marker issue, and a
   `DisableSignIn` Fix while the SP is still enabled. It runs BEFORE the unused post-pass, which
