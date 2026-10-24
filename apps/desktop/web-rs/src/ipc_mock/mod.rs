@@ -175,6 +175,10 @@ pub fn ensure_installed() {
             return match reply {
                 RouteResult::Ok(v) => Promise::resolve(&v).into(),
                 RouteResult::Err(e) => Promise::reject(&e).into(),
+                RouteResult::Pending => Promise::new(&mut |resolve, _reject| {
+                    PENDING.with(|p| p.borrow_mut().entry(cmd.clone()).or_default().push(resolve));
+                })
+                .into(),
             };
         }
 
