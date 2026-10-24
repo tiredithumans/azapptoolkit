@@ -10,7 +10,8 @@
 //! `docs/architecture/frontend-workspace.md`).
 //!
 //! This shard holds the scoping cluster — everything that mounts the ScopeWizard / permission
-//! picker, which is the other large shared subtree.
+//! picker, which is the other large shared subtree (the Permissions tab's Scope banner included) —
+//! plus the small Activity / Conditional Access panels, kept here for the 60 s runner budget.
 #![cfg(target_arch = "wasm32")]
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -27,6 +28,10 @@ mod managed_identity_scoping;
 mod orgwide_scope_callout;
 #[path = "gui/permission_picker.rs"]
 mod permission_picker;
+#[path = "gui/premium_tabs.rs"]
+mod premium_tabs;
+#[path = "gui/scope_banner.rs"]
+mod scope_banner;
 #[path = "gui/scope_wizard.rs"]
 mod scope_wizard;
 #[path = "gui/sharepoint_item_scopes.rs"]
