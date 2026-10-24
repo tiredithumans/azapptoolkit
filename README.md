@@ -296,6 +296,12 @@ Update payloads are verified against a public key baked into the build at
 release time — a payload that fails signature verification is rejected
 before any bytes touch disk. A failed update check or install never blocks
 the app; it is logged (see [Logs](#logs)) and retried on a later launch.
+A download that receives nothing for a minute is abandoned rather than left
+hanging. When an update fails its signature check or fails to install, the
+changelog screen says so, turns **Update & restart** off (a retry would fail
+the same way) and points you at the
+[Releases page](https://github.com/tiredithumans/azapptoolkit/releases) to
+install the new version by hand, with the log folder to look in.
 
 On macOS, expect a keychain-access prompt on the first launch after each
 update (the build is unsigned) — choose **Always Allow**; see

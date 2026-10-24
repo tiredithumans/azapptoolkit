@@ -658,8 +658,9 @@ fn docs_only_ci_detector_runs_the_tests_that_pin_docs() {
 
 /// The documented opt-out and the MSI / .deb / .rpm formats are honoured only
 /// if both updater commands ask `update_gate` BEFORE they touch the updater
-/// plugin — `app.updater()` is the first step towards the release endpoint.
-/// The gate was once documented but never read by either command.
+/// plugin — building the updater (`app.updater()`, or `app.updater_builder()`
+/// to give its client a transfer budget) is the first step towards the release
+/// endpoint. The gate was once documented but never read by either command.
 #[test]
 fn updater_commands_consult_the_update_gate_before_the_network() {
     let commands = super::sources::commands();
@@ -677,15 +678,22 @@ fn updater_commands_consult_the_update_gate_before_the_network() {
                 cmd.module
             )
         });
-        let network = cmd.body.find(".updater()").unwrap_or_else(|| {
-            panic!(
-                "`{name}` ({}) no longer calls `.updater()` — the scan cannot place the gate",
-                cmd.module
-            )
-        });
+        // The FIRST touch of the plugin, whichever spelling: a body that kept
+        // a late `.updater_builder(` but grew an early `.updater()` must fail.
+        let network = [".updater()", ".updater_builder("]
+            .into_iter()
+            .filter_map(|needle| cmd.body.find(needle))
+            .min()
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{name}` ({}) no longer calls `.updater()` or `.updater_builder(` — the \
+                     scan cannot place the gate",
+                    cmd.module
+                )
+            });
         assert!(
             gate < network,
-            "`{name}` ({}) reaches `.updater()` before `update_gate()`: an opted-out or \
+            "`{name}` ({}) builds the updater before `update_gate()`: an opted-out or \
              externally managed install would still contact the release endpoint",
             cmd.module
         );
