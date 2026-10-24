@@ -1,4 +1,4 @@
-use super::super::transport::parse_claims_challenge;
+use super::super::transport::{map_error_status, parse_claims_challenge};
 use super::super::*;
 use super::common::*;
 
@@ -485,6 +485,42 @@ fn parse_claims_challenge_extracts_only_insufficient_claims() {
         parse_claims_challenge(r#"Bearer error="insufficient_claims""#),
         None
     );
+}
+
+/// The retrying core keeps its own inline status match (it also decides retry
+/// vs done and catches the CAE challenge), while the one-shot scoped read and
+/// every `$batch` sub-response go through `map_error_status`. Both must give
+/// the same answer for every error status, or one Graph failure would type
+/// differently depending on the path that fetched it. A retried status runs
+/// out the budget (`Retry-After: 0` keeps that instant) and must then surface
+/// as the same variant `map_error_status` names.
+#[tokio::test]
+async fn the_retrying_core_and_map_error_status_agree_on_every_error_status() {
+    let server = MockServer::start().await;
+    let body = r#"{"error":{"code":"x","message":"nope"}}"#;
+    let statuses: [u16; 14] = [
+        400, 401, 403, 404, 405, 409, 412, 422, 429, 500, 501, 502, 503, 504,
+    ];
+    for status in statuses {
+        Mock::given(method("GET"))
+            .and(path(format!("/applications/s{status}")))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+    }
+    let client = make_client(&server.uri());
+    for status in statuses {
+        let retried = client
+            .get_application(&format!("s{status}"))
+            .await
+            .unwrap_err();
+        let table = map_error_status(status, body.to_string(), Some(0));
+        assert_eq!(format!("{retried:?}"), format!("{table:?}"), "{status}");
+    }
 }
 
 /// Returns the base token normally, a distinct token when re-minted for a
