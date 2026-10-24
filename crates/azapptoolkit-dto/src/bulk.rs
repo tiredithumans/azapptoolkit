@@ -82,9 +82,22 @@ pub struct AppRemovalSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkRemoveExpiredResult {
+    /// Selected apps that were read and evaluated — the whole readable
+    /// selection, whether or not the sweep then reached them.
     pub apps_scanned: usize,
+    /// Only the apps with something to report (a removal, a failure), so a
+    /// short list is the healthy case, not a stopped run.
     pub summaries: Vec<AppRemovalSummary>,
     pub cancelled: bool,
+    /// How many selected apps the sweep actually checked: the ones whose read
+    /// failed (each is a row in `summaries`) plus the ones it dispatched. Below
+    /// the selection size only when Cancel or a dead session stopped the
+    /// fan-out, and the gap is the tail it never attempted — the one number
+    /// `apps_scanned` and `summaries` cannot give. Always `Some` from this
+    /// backend; optional on the wire — additive and skipped when absent — so
+    /// older payloads still decode (and read as "reach unknown").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_checked: Option<usize>,
 }
 
 /// One app a bulk delete could not remove.

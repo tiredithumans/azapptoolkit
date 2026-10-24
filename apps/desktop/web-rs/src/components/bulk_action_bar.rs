@@ -138,8 +138,8 @@ struct Parsed {
     /// stopping there is what let a Cancel at item 12 of 40 read as a finished
     /// run over 12 apps, with the 28 untouched ones unmentioned.
     ///
-    /// `None` where reach is genuinely not derivable — see
-    /// [`parse_remove_expired`].
+    /// `None` where reach is genuinely not derivable — a credential sweep
+    /// answered without `apps_checked`; see [`parse_remove_expired`].
     reached: Option<usize>,
     /// Object ids that no longer exist and must leave the selection. Delete
     /// only, and only the ids Graph confirmed gone.
@@ -150,7 +150,8 @@ struct Parsed {
 
 impl Parsed {
     /// A run whose outcome count *is* its reach — every command but the
-    /// credential sweep — and which strands no ids.
+    /// credential sweep, which reports its reach separately — and which
+    /// strands no ids.
     fn new(summary: String, failures: Vec<BulkFailure>, reached: usize, cancelled: bool) -> Self {
         Parsed {
             summary,
@@ -927,7 +928,7 @@ pub fn BulkActionBar(
                     .map(|r| parse_grant(r, label_for)),
                 BulkAction::RemoveExpired => bulk::bulk_remove_expired_credentials(tid, &ids)
                     .await
-                    .map(parse_remove_expired),
+                    .map(|r| parse_remove_expired(r, attempted)),
                 BulkAction::RemoveRedundant => bulk::bulk_remove_redundant_permissions(tid, &ids)
                     .await
                     .map(|r| parse_redundant(r, label_for)),
@@ -1393,15 +1394,19 @@ fn parse_grant(r: bulk::BulkGrantResult, label_for: impl Fn(&str) -> String) -> 
     )
 }
 
-/// Summarises a credential sweep. The only parse with **no derivable reach**:
-/// `summaries` holds just the apps that had something to remove or that failed,
-/// so a short list is the healthy case ("nothing expired"), not a stopped run —
-/// and `apps_scanned` is the whole filtered set whether or not the fan-out
-/// dispatched it. Claiming an unattempted tail from those two numbers would be
-/// a guess, so this leans on `(cancelled)` and, for a run the session killed,
-/// on the fatal code the failure list carries, until the backend reports what
-/// it dispatched.
-fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
+/// Summarises a credential sweep. The only parse whose reach is **not** its
+/// outcome count: `summaries` holds just the apps that had something to remove
+/// or that failed, so a short list is the healthy case ("nothing expired"), not
+/// a stopped run — and `apps_scanned` is the whole readable selection whether
+/// or not the fan-out dispatched it. Reach is `apps_checked` instead (the apps
+/// the sweep could not read plus the ones it dispatched), and a run that
+/// stopped short says "Checked X of Y" rather than "Scanned" the selection.
+///
+/// A payload without `apps_checked` (an older backend) has no derivable reach:
+/// claiming an unattempted tail from the other two numbers would be a guess, so
+/// that shape leans on `(cancelled)` and, for a run the session killed, on the
+/// fatal code the failure list carries.
+fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult, attempted: usize) -> Parsed {
     let fails: Vec<BulkFailure> = r
         .summaries
         .iter()
@@ -1431,23 +1436,29 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult) -> Parsed {
         .iter()
         .filter(|s| !s.removed_key_ids.is_empty())
         .count();
-    // With no reach to count, a run the session killed would otherwise read
-    // as a complete sweep: say it stopped, beside the re-auth prompt the
-    // failure's code raises.
-    let stopped = if session_dead_error(&fails).is_some() {
-        " Stopped when the session expired; the remaining apps were not checked."
-    } else {
-        ""
+    // A run the session killed would otherwise read as a complete sweep: say
+    // it stopped, beside the re-auth prompt the failure's code raises. With a
+    // reach, the unattempted note names the tail; without one, this is all
+    // there is to say about it.
+    let stopped = match (session_dead_error(&fails).is_some(), r.apps_checked) {
+        (false, _) => "",
+        (true, Some(_)) => " Stopped when the session expired.",
+        (true, None) => " Stopped when the session expired; the remaining apps were not checked.",
+    };
+    let checked = match r.apps_checked {
+        Some(checked) if checked < attempted => format!(
+            "Checked {checked} of {}",
+            count_noun(attempted, "app", "apps")
+        ),
+        _ => format!("Scanned {}", count_noun(r.apps_scanned, "app", "apps")),
     };
     Parsed {
         summary: format!(
-            "Scanned {}; {} had expired creds removed{}.{stopped}",
-            count_noun(r.apps_scanned, "app", "apps"),
-            removed,
+            "{checked}; {removed} had expired creds removed{}.{stopped}",
             cancelled_suffix(r.cancelled)
         ),
         failures: fails,
-        reached: None,
+        reached: r.apps_checked,
         deleted: Vec::new(),
         cancelled: r.cancelled,
     }
@@ -2376,14 +2387,19 @@ mod tests {
 
     /// The credential sweep reports only the apps that HAD expired credentials,
     /// so a short summary list is the healthy case. Deriving an unattempted
-    /// count from it would invent skipped apps on every clean sweep.
+    /// count from it would invent skipped apps on every clean sweep — so a
+    /// payload without `apps_checked` (an older backend) claims none.
     #[test]
     fn an_underivable_reach_never_claims_apps_were_skipped() {
-        let p = parse_remove_expired(bulk::BulkRemoveExpiredResult {
-            apps_scanned: 40,
-            summaries: Vec::new(),
-            cancelled: true,
-        });
+        let p = parse_remove_expired(
+            bulk::BulkRemoveExpiredResult {
+                apps_scanned: 40,
+                summaries: Vec::new(),
+                cancelled: true,
+                apps_checked: None,
+            },
+            40,
+        );
         assert_eq!(p.reached, None);
         assert_eq!(unattempted_note(40, p.reached, true), "");
         assert!(
@@ -2392,6 +2408,46 @@ mod tests {
              supports, so it has to be there: {}",
             p.summary
         );
+    }
+
+    /// A sweep cancelled after checking 10 of 40 apps used to say "Scanned 40
+    /// apps" — `apps_scanned` is the readable selection, reached or not — and
+    /// never mention the 30 it did not check. `apps_checked` is its reach.
+    #[test]
+    fn a_sweep_stopped_short_names_the_apps_it_never_checked() {
+        let p = parse_remove_expired(
+            bulk::BulkRemoveExpiredResult {
+                apps_scanned: 40,
+                summaries: Vec::new(),
+                cancelled: true,
+                apps_checked: Some(10),
+            },
+            40,
+        );
+        assert_eq!(p.reached, Some(10));
+        assert!(p.summary.contains("Checked 10 of 40 apps"), "{}", p.summary);
+        assert!(!p.summary.contains("Scanned"), "{}", p.summary);
+        let note = unattempted_note(40, p.reached, true);
+        assert!(note.contains("30 apps were never attempted"), "{note}");
+        assert!(!p.is_clean(40));
+    }
+
+    /// A sweep that checked the whole selection keeps the plain summary and
+    /// adds no note, whether or not anything was removed.
+    #[test]
+    fn a_sweep_that_checked_everything_reads_as_scanned() {
+        let p = parse_remove_expired(
+            bulk::BulkRemoveExpiredResult {
+                apps_scanned: 40,
+                summaries: Vec::new(),
+                cancelled: false,
+                apps_checked: Some(40),
+            },
+            40,
+        );
+        assert_eq!(p.summary, "Scanned 40 apps; 0 had expired creds removed.");
+        assert_eq!(unattempted_note(40, p.reached, true), "");
+        assert!(p.is_clean(40));
     }
 
     /// A cancelled delete must strand nothing: only the ids Graph confirmed

@@ -705,7 +705,10 @@ backwards), the terminal event, and the lost-task reconciliation. The sweep's pe
 reported (a panic or an abort) may have landed its write, so it becomes a failure row coded
 `lost_task` (`dto::bulk::LOST_TASK`) rather than vanishing: the delete busts the list tier, the
 consent grant busts it too (its client SP may exist), and the expired-secret sweep drops that
-app's credential tier.
+app's credential tier. The driver also counts what it dispatched (`CappedRun::dispatched`). Delete
+and grant read their reach off their outcome lists, but the sweep reports only apps with something
+to say, so it returns `apps_checked` (its unreadable apps plus the dispatched ones) and the bar
+says "Checked X of Y" and names the tail a Cancel or a dead session never attempted.
 
 ## The site-sweep cache invalidates on site-permission mutations
 

@@ -534,6 +534,12 @@ async fn sweep_one(
 /// reported app joins it when it has something to say (a removal, a failure);
 /// a lost one always does, as a [`LOST_TASK`] row named through `name_of`: its
 /// task ended without reporting, and some of its removals may have landed.
+///
+/// `apps_checked` is those unreadable apps plus every app the fan-out
+/// dispatched: what the sweep reached, so the bar can name the tail a Cancel or
+/// a dead session left unattempted. `summaries` cannot say it (a clean app is
+/// no row) and neither can `apps_scanned` (the readable selection, dispatched
+/// or not).
 fn finish_expired_sweep(
     cache: &Cache,
     tenant_id: &str,
@@ -545,8 +551,11 @@ fn finish_expired_sweep(
     let CappedRun {
         outcomes,
         lost,
+        dispatched,
         cancelled,
     } = run;
+    // Before any reported row joins: only the unreadable apps are in it yet.
+    let apps_checked = summaries.len() + dispatched;
     summaries.extend(outcomes.into_iter().filter(|summary| {
         !summary.removed_key_ids.is_empty()
             || !summary.failed_key_ids.is_empty()
@@ -589,6 +598,7 @@ fn finish_expired_sweep(
         apps_scanned,
         summaries,
         cancelled,
+        apps_checked: Some(apps_checked),
     }
 }
 
@@ -681,6 +691,7 @@ fn finish_bulk_delete(
     let CappedRun {
         outcomes,
         lost,
+        dispatched: _,
         cancelled,
     } = run;
     let mut deleted = Vec::new();
@@ -825,6 +836,7 @@ fn finish_bulk_grant(cache: &Cache, tenant_id: &str, run: CappedRun<GrantItem>) 
     let CappedRun {
         outcomes: items,
         lost,
+        dispatched: _,
         cancelled,
     } = run;
     // True if any app's grant created a brand-new SP — that adds Enterprise App
@@ -1609,6 +1621,11 @@ struct CappedRun<O> {
     /// abort). Its write may have landed, so the command reports each one as a
     /// [`LOST_TASK`] failure row and treats that app as mutated.
     lost: Vec<String>,
+    /// How many items were dispatched: below `items.len()` only when Cancel or
+    /// the dead session stopped the spawn gate. Delete and grant read their
+    /// reach off their outcome lists; the expired-secret sweep cannot (a clean
+    /// app reports nothing worth a row), so it reports this instead.
+    dispatched: usize,
     /// Stopped by the operator's Cancel — never by the dead session, whose
     /// fatal code rides the outcomes instead (see [`stopped_by_cancel`]).
     cancelled: bool,
@@ -1628,7 +1645,8 @@ struct CappedRun<O> {
 ///   or a dead session stops dispatch while the tasks in flight drain;
 /// - the dead-session latch, noted from each outcome's
 ///   [`BulkOutcome::session_fatal`];
-/// - the dispatched list, and `lost` = dispatched − reported;
+/// - the dispatched list (its length is `dispatched`), and `lost` =
+///   dispatched − reported;
 /// - `cancelled`, through [`stopped_by_cancel`].
 ///
 /// It ticks and emits on the collect side, which the dispatcher runs serially,
@@ -1711,6 +1729,7 @@ where
     )
     .await;
 
+    let dispatched_count = dispatched.len();
     // Dispatched minus reported. The set borrows the reported ids, so it is
     // scoped to end before `outcomes` moves into the result.
     let lost: Vec<String> = {
@@ -1736,6 +1755,7 @@ where
     CappedRun {
         outcomes,
         lost,
+        dispatched: dispatched_count,
         cancelled,
     }
 }
@@ -2286,6 +2306,7 @@ mod tests {
             .await;
             assert_eq!(run.outcomes.len(), 3);
             assert!(run.lost.is_empty());
+            assert_eq!(run.dispatched, 3);
             assert!(!run.cancelled);
 
             let events = progress(&rec);
@@ -2336,6 +2357,7 @@ mod tests {
             .await;
             assert_eq!(spawned.load(Ordering::SeqCst), 0, "nothing may be written");
             assert!(run.outcomes.is_empty() && run.lost.is_empty());
+            assert_eq!(run.dispatched, 0);
             assert!(run.cancelled);
             // The initial event and the terminal one, which reports nothing
             // processed and the cancellation.
@@ -2372,6 +2394,7 @@ mod tests {
             )
             .await;
             assert_eq!(spawned.load(Ordering::SeqCst), 1, "`b` is never spawned");
+            assert_eq!(run.dispatched, 1);
             assert_eq!(run.outcomes.len(), 1, "the in-flight `a` still reports");
             assert!(run.lost.is_empty());
             assert!(run.cancelled);
@@ -2645,11 +2668,74 @@ mod tests {
                     .is_some_and(BulkError::is_reauth_fatal)
             );
             assert_eq!(result.apps_scanned, 3);
+            assert_eq!(
+                result.apps_checked,
+                Some(2),
+                "`a` and `b` were dispatched; the dead session stopped `c`"
+            );
             assert!(!result.cancelled);
             // The landed removal drops its app's credential tier, which keeps
             // the indexes.
             assert!(!detail_cached(&state, TENANT, "a"));
             assert!(indexes_intact(&state, TENANT));
+        }
+
+        /// A Cancel mid-sweep must not read as a sweep of the whole selection:
+        /// `apps_scanned` is every readable app whether or not it was reached,
+        /// and a clean app is no row, so `apps_checked` is the only count of
+        /// what the sweep actually checked — the unreadable apps (each already
+        /// a row) plus what it dispatched.
+        #[tokio::test]
+        async fn a_cancelled_sweep_reports_only_the_apps_it_checked() {
+            let state = state();
+            let flag = CancelFlag::new();
+            let cancel = flag.claim();
+            let session = SessionDead::new();
+            // One in flight: `a` runs alone and presses Cancel while it does.
+            let meter = FanOutMeter::detached(1);
+            let run = run_bulk_capped(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                &meter,
+                vec![
+                    removal("a", &["k1"], None),
+                    removal("b", &["k2"], None),
+                    removal("c", &[], None),
+                    removal("d", &[], None),
+                ],
+                |o| o.object_id().to_string(),
+                |o| {
+                    let presses = (o.object_id() == "a").then(|| flag.clone());
+                    async move {
+                        if let Some(flag) = presses {
+                            flag.cancel();
+                        }
+                        o
+                    }
+                },
+            )
+            .await;
+            assert_eq!(run.dispatched, 1);
+            // The fifth selected app could not be read: a row, and checked.
+            let unreadable = vec![removal("x", &[], Some(err("not_found")))];
+            let result = finish_expired_sweep(&state.cache, TENANT, 4, unreadable, run, |id| {
+                id.to_string()
+            });
+
+            assert!(result.cancelled);
+            assert_eq!(result.apps_scanned, 4);
+            assert_eq!(
+                result.apps_checked,
+                Some(2),
+                "the unreadable `x` and the dispatched `a` — never the 5 selected"
+            );
+            let ids: Vec<&str> = result
+                .summaries
+                .iter()
+                .map(|s| s.object_id.as_str())
+                .collect();
+            assert_eq!(ids, ["x", "a"]);
         }
 
         #[tokio::test]
