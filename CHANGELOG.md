@@ -18,6 +18,8 @@ After 0.34.1, each change is one line written for the person using the app.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
+- A cancelled or interrupted restore now lists every app it created, and marks the ones it did not finish.
+- A restore that can't identify a permission while running now says so, not "not approved in the plan".
 
 ### Security
 

@@ -1001,6 +1001,7 @@ const MAIL_SEND_ROLE: &str = "b633e1c5-b582-4048-a93e-9f11b44c7e96";
 const USER_READ_SCOPE: &str = "e1fe6dd8-ba31-4d61-89e7-88639da4683d";
 const SRC_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const SRC_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+const SRC_C: &str = "cccccccc-0000-0000-0000-000000000003";
 
 /// Answers whatever a test did not mount: 204 for a PATCH, an empty page
 /// for anything else. A test mounts only what it asserts on and reads the
@@ -1238,11 +1239,18 @@ fn manifest(apps: Vec<AppRegistrationBackup>) -> TenantBackup {
 /// Pass 1's create answers with an object id derived from the display
 /// name ("App A" → `obj-a`), so each app's later requests are tellable.
 async fn mount_create(server: &MockServer) {
+    mount_create_then(server, |_| {}).await;
+}
+
+/// [`mount_create`], calling `on_create` with each created app's display
+/// name before answering — where a test cancels the run.
+async fn mount_create_then(server: &MockServer, on_create: impl Fn(&str) + Send + Sync + 'static) {
     Mock::given(method("POST"))
         .and(path("/applications"))
-        .respond_with(|req: &Request| {
+        .respond_with(move |req: &Request| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             let name = body["displayName"].as_str().unwrap_or_default().to_string();
+            on_create(&name);
             let tag = name
                 .rsplit(' ')
                 .next()
@@ -1446,6 +1454,215 @@ async fn a_cancel_between_passes_is_reported_and_skips_consent() {
         "Pass 3 must not run after a cancel"
     );
     assert!(!report.apps[0].consent_granted);
+    assert!(
+        !report.apps[0].incomplete,
+        "the app had nothing left to wire: {:?}",
+        report.apps[0].warnings
+    );
+}
+
+/// Plain apps: no consent, credentials or owners, so nothing needs approval.
+fn plain_apps(names: &[(&str, &str)]) -> TenantBackup {
+    manifest(
+        names
+            .iter()
+            .map(|(src, name)| AppRegistrationBackup {
+                source_app_id: (*src).into(),
+                display_name: (*name).into(),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
+/// The report entries of a run that stopped before wiring: one per app Pass 1
+/// created, in order, each with its new ids and flagged unfinished.
+fn assert_reported_unwired(report: &RestoreReport, tags: &[&str]) {
+    assert_eq!(report.apps.len(), tags.len(), "{report:?}");
+    for (app, tag) in report.apps.iter().zip(tags) {
+        assert_eq!(app.new_app_id, format!("app-{tag}"));
+        assert_eq!(app.new_object_id, format!("obj-{tag}"));
+        assert!(app.incomplete, "{app:?}");
+        assert!(
+            app.warnings.iter().any(|w| w.starts_with("not wired")),
+            "{:?}",
+            app.warnings
+        );
+    }
+}
+
+/// A cancel during Pass 1 keeps every app it already created in the report,
+/// with its new ids, flagged unfinished — the report is the operator's only
+/// record of what exists. It once listed none of them ("Restored 0 apps").
+#[tokio::test]
+async fn a_cancel_during_pass_1_reports_every_created_app() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while App B is being created.
+    mount_create_then(&server, move |name| {
+        if name == "App B" {
+            flag.cancel();
+        }
+    })
+    .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let backup = plain_apps(&[(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+
+    let (report, effects) = restore(&client, &backup, cancel, &[]).await;
+
+    assert!(report.cancelled);
+    assert!(!report.session_expired);
+    assert!(effects.created_any);
+    assert_reported_unwired(&report, &["a", "b"]);
+    assert_eq!(
+        requests(&server, "POST", "/applications").await.len(),
+        2,
+        "App C is never created after the cancel"
+    );
+    assert!(
+        requests(&server, "PATCH", "/applications/obj-a")
+            .await
+            .is_empty(),
+        "nothing is wired after a cancel"
+    );
+}
+
+/// The same when the session dies during Pass 1: the apps it created are all
+/// reported, unwired, with the run marked as stopped by the expired session.
+#[tokio::test]
+async fn a_dead_session_during_pass_1_reports_every_created_app() {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    mount_fallback(&server).await;
+    // Reads succeed; the third write (App C's create) finds the session dead.
+    let client = GraphClient::with_base_url(
+        "tenant-test",
+        StaticTokenProvider::new("tok"),
+        crate::commands::test_support::dies_after(2),
+        azapptoolkit_core::cache::Cache::new(),
+        server.uri(),
+    );
+    let backup = plain_apps(&[(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+
+    let (report, _) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(report.session_expired);
+    assert_reported_unwired(&report, &["a", "b"]);
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert_eq!(report.failures[0].display_name, "App C");
+}
+
+/// A cancel inside an app's secret loop marks that app unfinished and says how
+/// much was left — it once read as a finished app with fewer secrets.
+#[tokio::test]
+async fn a_cancel_inside_the_secret_loop_marks_the_app_incomplete() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    // The operator cancels while the first secret is issued.
+    Mock::given(method("POST"))
+        .and(path("/applications/new-obj/addPassword"))
+        .respond_with(move |_: &Request| {
+            flag.cancel();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keyId": "key-1",
+                "displayName": "ci",
+                "secretText": "s3cr3t"
+            }))
+        })
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let secret = |name: &str| CredentialMeta {
+        display_name: Some(name.into()),
+        ..Default::default()
+    };
+    let c = created(AppRegistrationBackup {
+        display_name: "App A".into(),
+        secrets: vec![secret("ci"), secret("deploy"), secret("ops")],
+        ..Default::default()
+    });
+
+    let (out, _) = wire_application(
+        &pass_ctx(&client, &SessionDead::new(), &HashMap::new()),
+        &c,
+        &BackupApps::default(),
+        &mut PrincipalMemo::new(),
+        &cancel,
+        false,
+    )
+    .await;
+
+    assert_eq!(out.regenerated_secrets.len(), 1, "the issued one is kept");
+    assert!(out.incomplete);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("stopped before finishing: 2 of 3 secrets not processed")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        requests(&server, "POST", "/applications/new-obj/addPassword")
+            .await
+            .len(),
+        1
+    );
+}
+
+/// A consent withheld because its API could not be read during the run says
+/// so — the plan may never have asked about it, so "not approved in the plan"
+/// would send the operator looking for a checkbox that was never shown.
+#[tokio::test]
+async fn a_failed_resource_read_at_run_time_withholds_consent_with_its_own_reason() {
+    let server = MockServer::start().await;
+    mount_create(&server).await;
+    // Microsoft Graph's service principal cannot be read: User.Read, low-risk
+    // in the plan, is unidentified now.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", format!("appId eq '{GRAPH}'")))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let mut app = consenting_app(SRC_A, "App A");
+    app.required_resource_access[0].resource_access =
+        vec![azapptoolkit_core::models::ResourceAccess {
+            id: USER_READ_SCOPE.into(),
+            r#type: "Scope".into(),
+        }];
+    let backup = manifest(vec![app]);
+
+    let (report, _) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(!consent_attempted(&server, "app-a").await);
+    let item = report
+        .manual_items
+        .iter()
+        .find(|m| m.display_name == "App A")
+        .expect("the withheld consent is a runbook item");
+    assert!(
+        item.reason
+            .contains("could not be identified when the restore ran")
+            && !item.reason.contains("not approved in the plan"),
+        "{}",
+        item.reason
+    );
+    assert!(
+        report.apps[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("could not be identified when the restore ran")),
+        "{:?}",
+        report.apps[0].warnings
+    );
+    assert!(!report.session_expired, "a 403 is not a dead session");
 }
 
 /// The plan names what the file grants and which items need approval:

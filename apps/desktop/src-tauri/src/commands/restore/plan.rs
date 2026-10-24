@@ -266,6 +266,17 @@ pub(super) async fn privileged_restore_items(
     backup: &TenantBackup,
     session: &SessionDead,
 ) -> Vec<PrivilegedRestoreItem> {
+    classify(client, backup, session).await.0
+}
+
+/// [`privileged_restore_items`], plus the consent resources it could not
+/// read: a lookup that failed, or one a dead session stopped before. Every
+/// permission on one of those is `Unknown`, whatever the plan showed.
+async fn classify(
+    client: &GraphClient,
+    backup: &TenantBackup,
+    session: &SessionDead,
+) -> (Vec<PrivilegedRestoreItem>, HashSet<String>) {
     // Exact, as `remap_required_resource_access` (Pass 2's resource remap) is.
     let in_backup: HashSet<&str> = backup
         .app_registrations
@@ -275,7 +286,12 @@ pub(super) async fn privileged_restore_items(
     // Ignoring case, as Pass 2's `plan_pre_authorized` is: a client is foreign
     // here exactly when the run would write it as listed.
     let backup_apps = backup_apps(backup);
-    let resources = resolve_resources(client, &consent_resources(backup), session).await;
+    let resource_ids = consent_resources(backup);
+    let resources = resolve_resources(client, &resource_ids, session).await;
+    let unread: HashSet<String> = resource_ids
+        .into_iter()
+        .filter(|id| matches!(resources.get(id), None | Some(ResourceLookup::Failed)))
+        .collect();
     let mut items = Vec::new();
     for app in &backup.app_registrations {
         let (app_roles, delegated_scopes) = if app.admin_consent_granted {
@@ -425,7 +441,7 @@ pub(super) async fn privileged_restore_items(
             ..Default::default()
         });
     }
-    items
+    (items, unread)
 }
 
 /// The label a permission gets in a report line: its value, else its id.
@@ -459,16 +475,29 @@ pub(super) fn app_approval(source_app_id: &str) -> RestoreApproval {
     }
 }
 
+/// Why the run withholds an app's standing access, for the report.
+#[derive(Debug, Default)]
+pub(super) struct Withheld {
+    /// The permissions its admin consent would have granted.
+    pub(super) consent: Vec<String>,
+    /// A permission its consent covers could not be identified when the run
+    /// classified it — reading its API in the destination failed — so it
+    /// counted as `Unknown`. The plan may never have asked about this app,
+    /// which "not approved in the plan" would then misstate.
+    pub(super) lookup_failed: bool,
+}
+
 /// The app registrations whose standing access the run withholds: approval
 /// required ([`PrivilegedRestoreItem::requires_approval`]) and not given. Maps
-/// source appId → the permissions its admin consent would have granted, for the
-/// report. Skips the reads entirely when every app is approved.
+/// source appId → what its admin consent would have granted, and whether a
+/// failed read made it need approval ([`Withheld`]), for the report. Skips the
+/// reads entirely when every app is approved.
 pub(super) async fn unapproved_apps(
     client: &GraphClient,
     backup: &TenantBackup,
     approved: &HashSet<RestoreApproval>,
     session: &SessionDead,
-) -> HashMap<String, Vec<String>> {
+) -> HashMap<String, Withheld> {
     let any_unapproved = backup
         .app_registrations
         .iter()
@@ -476,8 +505,16 @@ pub(super) async fn unapproved_apps(
     if !any_unapproved {
         return HashMap::new();
     }
-    privileged_restore_items(client, backup, session)
-        .await
+    let (items, unread) = classify(client, backup, session).await;
+    let lookup_failed = |source_app_id: &str| {
+        backup
+            .app_registrations
+            .iter()
+            .filter(|a| a.source_app_id == source_app_id && a.admin_consent_granted)
+            .flat_map(|a| &a.required_resource_access)
+            .any(|r| unread.contains(&r.resource_app_id))
+    };
+    items
         .into_iter()
         .filter(|i| {
             i.kind == PrivilegedKind::App
@@ -491,7 +528,14 @@ pub(super) async fn unapproved_apps(
                 .chain(&i.delegated_scopes)
                 .map(permission_label)
                 .collect();
-            (i.source_app_id, consent)
+            let lookup_failed = lookup_failed(&i.source_app_id);
+            (
+                i.source_app_id,
+                Withheld {
+                    consent,
+                    lookup_failed,
+                },
+            )
         })
         .collect()
 }

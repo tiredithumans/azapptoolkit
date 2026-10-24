@@ -222,6 +222,7 @@ pub(super) fn bound_report_text(report: &mut RestoreReport) {
         warnings,
         consent_granted: _,
         adopted: _,
+        incomplete: _,
     } in apps
     {
         cap_report_value(display_name);

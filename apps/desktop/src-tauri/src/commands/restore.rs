@@ -43,8 +43,10 @@
 //! Long-running, so it polls its own `AppState.restore_cancel` token (stopped
 //! only by `cancel_restore`, never by a backup's Cancel) and emits
 //! `restore-progress`. A cancel stops at the next item in whichever pass is
-//! running, and the report flags the run cancelled (partial); a re-run adopts
-//! the already-created, tagged apps and finishes wiring them.
+//! running, and the report flags the run cancelled (partial) — still listing
+//! every app Pass 1 created, each it stopped before wiring fully flagged
+//! `incomplete`; a re-run adopts the already-created, tagged apps and finishes
+//! wiring them.
 //!
 //! Split by phase: this file holds the commands and `run_restore`, which runs
 //! the passes in order; `manifest` (schema and shape checks, echo bounds),
@@ -346,8 +348,9 @@ async fn run_restore(
     // Unlike the read-only fan-outs, which return `session.err(..)` rather than
     // a partial result, a restore has already created objects in the tenant —
     // discarding the report would leave the operator with no record of what
-    // exists. So the report comes back, flagged, and the front end pairs the
-    // flag with the re-auth prompt.
+    // exists. So the report comes back, flagged, with every app Pass 1 created
+    // or adopted — one Pass 2 did not finish (or never reached) marked
+    // `incomplete` — and the front end pairs the flag with the re-auth prompt.
     report.session_expired = session.is_dead();
     // Every text field echoes the file somewhere; bound them all once, here.
     bound_report_text(&mut report);

@@ -358,6 +358,50 @@ async fn an_expired_session_during_restore_asks_for_re_authentication() {
     );
 }
 
+/// An app the run created but stopped before wiring fully is listed — it
+/// exists in the tenant — and marked, so it never reads as a finished one.
+#[wasm_bindgen_test]
+async fn an_app_the_run_did_not_finish_is_marked_not_finished() {
+    let _m = run_restore(RestoreReport {
+        apps: vec![
+            RestoredApp {
+                display_name: "App A".into(),
+                ..Default::default()
+            },
+            RestoredApp {
+                display_name: "App B".into(),
+                new_app_id: "app-b".into(),
+                incomplete: true,
+                warnings: vec!["not wired — the restore stopped before reaching this app".into()],
+                ..Default::default()
+            },
+        ],
+        cancelled: true,
+        ..Default::default()
+    })
+    .await;
+    let body = ts::body_text();
+    assert!(
+        body.contains("Restored 2 apps, 1 not finished"),
+        "the summary counts the unfinished app: {body}"
+    );
+    assert!(
+        body.contains("new appId app-b"),
+        "its new id is listed: {body}"
+    );
+    assert_eq!(
+        ts::query_all(".dr-view__report-app")
+            .iter()
+            .filter(|el| el
+                .text_content()
+                .unwrap_or_default()
+                .contains("Not finished"))
+            .count(),
+        1,
+        "only the unfinished app is marked"
+    );
+}
+
 /// A report holding one show-once regenerated secret.
 fn report_with_a_secret() -> RestoreReport {
     RestoreReport {

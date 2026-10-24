@@ -964,12 +964,16 @@ fn RestoreReportView(
     let total_secrets: usize = apps.iter().map(|a| a.regenerated_secrets.len()).sum();
     let has_secrets = total_secrets > 0;
     let app_count = apps.len();
+    // Apps the run created (or adopted) but stopped before wiring fully: they
+    // exist in the tenant, so they are listed — marked, never as finished.
+    let unfinished = apps.iter().filter(|a| a.incomplete).count();
     view! {
         <div class="dr-view__result">
             <p class="dr-view__summary">
                 {format!(
-                    "Restored {}{}. {} regenerated.",
+                    "Restored {}{}{}. {} regenerated.",
                     count_noun(app_count, "app", "apps"),
+                    if unfinished > 0 { format!(", {unfinished} not finished") } else { String::new() },
                     match (cancelled, session_expired) {
                         (_, true) => " (stopped early — the sign-in session expired)",
                         (true, false) => " (cancelled before completing — partial)",
@@ -980,7 +984,7 @@ fn RestoreReportView(
             </p>
             <Show when=move || session_expired>
                 <Callout tone="warn">
-                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Everything listed below was created and wired; anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
+                    "The sign-in session expired part-way through this restore, so it stopped where it had got to rather than completing. Every app listed below exists in this tenant; those marked Not finished were not fully wired, and anything absent was not attempted. Re-authenticate and run the restore again with the same backup file — apps this restore already created carry a restore tag and are recognised and finished rather than created twice."
                 </Callout>
             </Show>
             <Show when=move || has_secrets>
@@ -1011,6 +1015,7 @@ fn RestoreReportView(
                         warnings,
                         consent_granted,
                         adopted,
+                        incomplete,
                         ..
                     } = a;
                     view! {
@@ -1019,7 +1024,19 @@ fn RestoreReportView(
                                 <strong>{display_name}</strong>
                                 <span class="dr-view__report-id">{format!("new appId {new_app_id}")}</span>
                                 {consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
-                                {adopted.then(|| view! { <span class="dr-view__badge">"already restored — completed"</span> })}
+                                // "completed" only when this run did finish it.
+                                {adopted.then(|| view! {
+                                    <span class="dr-view__badge">
+                                        {if incomplete { "already restored" } else { "already restored — completed" }}
+                                    </span>
+                                })}
+                                {incomplete.then(|| view! {
+                                    <Badge
+                                        label="Not finished"
+                                        tone=BadgeTone::Warning
+                                        title="The restore stopped before wiring this app fully — run it again with the same backup file to finish it"
+                                    />
+                                })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {
                                 <ul class="dr-view__secrets">

@@ -573,8 +573,10 @@ pub struct RestoreReport {
     #[serde(default)]
     pub manual_items: Vec<ManualItem>,
     /// True when the run stopped early — either cancelled by the operator or
-    /// aborted because the session died (see [`Self::session_expired`]); the
-    /// apps that *were* created are still fully wired and reported.
+    /// aborted because the session died (see [`Self::session_expired`]). Every
+    /// app the run created or adopted is still in [`Self::apps`] with its new
+    /// ids; one it stopped before wiring fully is flagged
+    /// [`RestoredApp::incomplete`].
     pub cancelled: bool,
     /// True when the run stopped because the sign-in session died mid-restore
     /// (a re-auth-fatal error), rather than the operator cancelling.
@@ -649,6 +651,13 @@ pub struct RestoredApp {
     /// this run recognised it and finished wiring it instead of duplicating it.
     #[serde(default)]
     pub adopted: bool,
+    /// The run stopped (a cancel, or a dead session) before this app was fully
+    /// wired: it exists in the tenant, but some of its configuration,
+    /// credentials, owners or secrets — or all of them — were not restored;
+    /// its warnings say which. Running the restore again with the same backup
+    /// adopts it by its restore tag and finishes it.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 /// A regenerated client secret. `secret_value` is plaintext and shown once —

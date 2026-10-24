@@ -225,7 +225,10 @@ unapproved MI, Pass 5 re-binds no role. Each withheld set is a `ManualItem`
 ("not approved in the plan"); the app is still created and wired (permissions
 declared, URIs, secrets, role assignments). A classification read that fails
 makes the permission `Unknown`, so a transient error withholds rather than
-grants. A dead session while planning is an error, not a plan of unknowns.
+grants — and since the plan may never have asked about that app, its consent's
+runbook item says a permission could not be identified when the restore ran
+(`Withheld::lookup_failed`) rather than "not approved in the plan". A dead
+session while planning is an error, not a plan of unknowns.
 
 **Consent grants only what the plan showed.** `grant_admin_consent_core`
 consents the *live* app's `requiredResourceAccess`, and the plan classified the
@@ -389,7 +392,12 @@ the next item in whichever pass is running — including inside each pass's
 per-item loops (owners, secrets, federated credentials, assignees, group
 memberships, managed identities) and the report flags the run
 cancelled, so a re-run adopts the already-created, tagged apps and finishes
-them), emits `restore-progress`, and busts the destination's list
+them; the report still lists every app Pass 1 created or adopted, with its new
+ids: one Pass 2 never reached is a "not wired" entry, and one whose federated
+credential, owner or secret loop was cut short says how many were left, both
+flagged `RestoredApp.incomplete` (the DR view's Not finished), which keeps
+`report.apps` index-aligned with Pass 1's apps), emits `restore-progress`, and
+busts the destination's list
 caches (`invalidate_app_lists`) when anything was created. The `RestoreReport`
 carries the new ids, the show-once regenerated secrets, unresolved owners,
 certificates needing manual re-upload, per-app warnings, and hard failures.

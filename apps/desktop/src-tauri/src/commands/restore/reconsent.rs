@@ -10,6 +10,7 @@ use crate::dto::backup::{ManualItem, RestoreReport, RestoredApp};
 use crate::state::CancelToken;
 
 use super::PassCtx;
+use super::plan::Withheld;
 use super::wire::CreatedApp;
 
 /// Pass-3 work for one app: re-grant admin consent — but only for exactly the
@@ -112,19 +113,26 @@ fn rra_fingerprint(
 /// Pass 3 of [`run_restore`](super::run_restore): re-grant admin consent
 /// ([`reconsent`]) for each created or adopted app that had it — after Pass 2
 /// wired every app, so a custom resource's SP and scopes already exist. An app
-/// in `withheld` (not approved in the plan) gets a warning and a runbook item
-/// instead. `report.apps` holds Pass 2's entries, index-aligned with `created`.
+/// in `withheld` (not approved in the plan, or made to need approval by a read
+/// that failed during the run) gets a warning and a runbook item instead.
+/// `report.apps` holds Pass 2's entries, index-aligned with `created` (Pass 2
+/// reports an app it did not reach as well).
 ///
 /// Stops at the next app on `cancel` (flagging the report) and on a dead
 /// session.
 pub(super) async fn pass3_reconsent(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
-    withheld: &HashMap<String, Vec<String>>,
+    withheld: &HashMap<String, Withheld>,
     cancel: &CancelToken,
     report: &mut RestoreReport,
 ) {
     let session = ctx.session;
+    debug_assert_eq!(
+        report.apps.len(),
+        created.len(),
+        "Pass 2 reports one entry per created app, in order"
+    );
     for (idx, c) in created.iter().enumerate() {
         if cancel.is_cancelled() {
             report.cancelled = true;
@@ -138,21 +146,35 @@ pub(super) async fn pass3_reconsent(
         }
         // Not approved in the plan: the file asks for tenant-wide consent the
         // operator has not agreed to grant. The app is still restored; the
-        // consent becomes a runbook item.
+        // consent becomes a runbook item. A permission whose API could not be
+        // read during the run is unidentified, and withheld the same way — but
+        // the plan may never have asked about it, so the item says why.
         if let Some(held) = withheld.get(&c.backup.source_app_id) {
-            report.apps[idx]
-                .warnings
-                .push("admin consent skipped: not approved in the plan".into());
+            let (warning, why) = if held.lookup_failed {
+                (
+                    "admin consent skipped: a permission could not be identified when the \
+                     restore ran",
+                    "a permission it covers could not be identified when the restore ran \
+                     (reading its API in this tenant failed), so the consent was withheld \
+                     rather than granted unseen",
+                )
+            } else {
+                (
+                    "admin consent skipped: not approved in the plan",
+                    "not approved in the plan",
+                )
+            };
+            report.apps[idx].warnings.push(warning.into());
             report.manual_items.push(ManualItem {
                 display_name: c.backup.display_name.clone(),
                 reason: format!(
-                    "Admin consent skipped: not approved in the plan. The backup asks for \
-                     tenant-wide consent to {}. Review them, then grant consent from the app's \
-                     Permissions tab if they are intended.",
-                    if held.is_empty() {
+                    "Admin consent skipped: {why}. The backup asks for tenant-wide consent to {}. \
+                     Review them, then grant consent from the app's Permissions tab if they are \
+                     intended.",
+                    if held.consent.is_empty() {
                         "its declared permissions".to_string()
                     } else {
-                        held.join(", ")
+                        held.consent.join(", ")
                     }
                 ),
             });
