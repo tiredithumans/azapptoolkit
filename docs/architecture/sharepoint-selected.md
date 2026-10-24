@@ -144,7 +144,9 @@ a Graph, ARM or Key Vault client method splices into a `format!` path to the sam
   `\`, `:` or `.`, a host with an empty label (`.` and `..` parse as hosts), credentials, a port or
   a non-http(s) scheme. The id Graph answers with must itself be a single path segment. The item
   resolver's `url_host_and_segments` applies the same segment rule, because its output is spliced
-  into `root:/{path}:` drive addressing. Refusals never echo the input.
+  into `root:/{path}:` drive addressing. A site-URL refusal names the check that failed (not a URL,
+  not http(s), credentials, a port, a bad host, a bad segment) from a fixed sentence, so the
+  operator knows what to fix; refusals never echo the input.
 - **Site, drive, list, item and permission ids** in every read, grant and DELETE (and in the
   `$batch` sub-URLs `SelectedTarget::path` builds from an app's `spItem` tags) go through
   `validate::require_path_segment` (the `azapptoolkit-arm` / `azapptoolkit-keyvault` pattern):
