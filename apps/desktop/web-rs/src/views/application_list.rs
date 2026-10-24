@@ -22,6 +22,7 @@ use crate::components::date_range_filter::DateRangeFilter;
 use crate::components::export_menu::ExportMenu;
 use crate::components::filter_chip::FilterChip;
 use crate::components::icon::{Icon, IconName};
+use crate::components::index_cap_notice::PairingCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
@@ -623,6 +624,11 @@ fn LoadedApps(
                     </Callout>
                 }
             })}
+        // The SP index's cap, which this list's own row count cannot see: the
+        // rows are app registrations, but every pair link (and the export's
+        // `PairedEnterpriseAppId`) is joined from that index, so an app whose
+        // service principal is past it reads as one with no enterprise app.
+        <PairingCapNotice />
         // Sits directly above the rows it reorders, outside the collapsed
         // filter drawer: a sort an operator cannot see is a sort they will not
         // use, and it is not a filter — it never changes the result count.

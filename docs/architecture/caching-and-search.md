@@ -84,7 +84,10 @@ enumerating deeper than another silently knows about principals the other does n
 defined once, in `azapptoolkit_dto::applications`, so the App Registrations list's cap notice in the
 frontend reads the same constant as the backend's enumerations; the SP-index lists learn
 `SP_INDEX_MAX` at runtime from `get_directory_index_status` (`DirectoryIndexStatus`, also in the
-dto crate).
+dto crate). So does the App Registrations list, for its pair links: its rows are not capped by the
+SP index, but the paired-Enterprise-App join is, so an app whose SP is past the cap shows no pair
+link and exports an empty `PairedEnterpriseAppId`. `index_cap_notice.rs` holds one wording per
+cap: `index_cap_message` (rows), `pairing_cap_message` (pair links), `corpus_cap_message` (search).
 
 ### One `/applications` list scan
 

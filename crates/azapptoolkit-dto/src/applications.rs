@@ -41,14 +41,16 @@ pub struct DeletedAppsDto {
 }
 
 /// Coverage of the shared per-tenant service-principal index, for the surfaces
-/// that render a filtered *subset* of it.
+/// that render a filtered *subset* of it or join against it.
 ///
 /// The App Registrations list can detect its own truncation (`total >=
 /// APPS_MAX`) because its rows ARE the capped set. The Enterprise Applications
 /// and Managed Identities lists cannot — both filter the SP index down
 /// (dropping / keeping only managed identities) — so their row counts sit
 /// below the cap even on a tenant whose index truncated, and a `len() >= cap`
-/// check would never fire. They ask this instead.
+/// check would never fire. They ask this instead, and so does the App
+/// Registrations list for its pair links: those are joined from the SP index,
+/// so an app whose service principal is past its cap shows none.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryIndexStatus {
     /// The SP index hit its row cap, so every surface reading it covers only

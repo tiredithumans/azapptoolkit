@@ -17,8 +17,8 @@ pub async fn get_organization(tenant_id: &str) -> Result<Organization, UiError> 
 
 /// Coverage of the shared service-principal index. Read by the Enterprise
 /// Applications and Managed Identities lists, which render *filtered subsets*
-/// of that index and so cannot detect its truncation from their own row counts
-/// the way the App Registrations list can.
+/// of that index and so cannot detect its truncation from their own row counts,
+/// and by the App Registrations list, whose pair links are joined from it.
 ///
 /// Fallible on purpose: a failure costs the truncation notice, never the list.
 pub async fn get_directory_index_status(tenant_id: &str) -> Result<DirectoryIndexStatus, UiError> {
