@@ -267,10 +267,13 @@ impl Session {
     }
 
     /// When `e` is a rejected access token (`unauthorized` — a client 401: a
-    /// revoked token, or a Continuous Access Evaluation claims challenge the
-    /// silent re-mint couldn't satisfy), show the persistent error toast whose
-    /// action re-mints it in place (see [`Self::spawn_refresh_token`]) and
-    /// return `true`; otherwise show nothing and return `false`.
+    /// revoked token, or a Continuous Access Evaluation claims challenge whose
+    /// silent re-mint failed *unclassified*; a classified re-mint failure — a
+    /// dead session, a step-up, a missing consent, an unreachable token
+    /// endpoint — arrives with its own code and lever instead), show the
+    /// persistent error toast whose action re-mints it in place (see
+    /// [`Self::spawn_refresh_token`]) and return `true`; otherwise show
+    /// nothing and return `false`.
     ///
     /// Deliberately NOT a re-auth-fatal code (`core::reauth::REAUTH_FATAL_CODES`):
     /// one 401 does not prove the session is dead, so a fan-out keeps going
