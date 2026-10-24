@@ -31,6 +31,8 @@ After 0.34.1, each change is one line written for the person using the app.
 - Loading a restore report or a newer build's backup now says which it is, not a raw parse error.
 - When Microsoft Graph revokes a token and renewing it fails, the app now offers the right fix, not just Refresh token.
 - A refused SharePoint site URL now says what is wrong with it (a port, a password, the host or a path part).
+- The Activity and Conditional Access tabs now offer Grant consent, Verify identity or Re-authenticate when they fail.
+- A refused Activity or Conditional Access read now names the roles that can read it instead of asking for admin consent.
 
 ### Security
 

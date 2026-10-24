@@ -7,8 +7,10 @@ use crate::bindings::AppIdArgs;
 pub use azapptoolkit_dto::conditional_access::ConditionalAccessPolicyDto;
 
 /// Conditional Access policies that apply to `app_id` (the application's appId /
-/// client id). Degrades gracefully when Policy.Read.All is un-consented /
-/// unlicensed (`code == "ca_unavailable"`).
+/// client id). Degrades gracefully when the tenant is unlicensed or the account
+/// lacks a policy-reading role (`code == "ca_unavailable"`); a missing consent
+/// arrives as `consent_required`, and a dead session or step-up keeps its own
+/// code.
 pub async fn list_conditional_access_for_app(
     tenant_id: &str,
     app_id: &str,

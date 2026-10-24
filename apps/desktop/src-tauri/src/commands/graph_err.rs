@@ -1,13 +1,17 @@
-//! Shared error mapping for premium / admin-consent-gated Graph reads.
+//! Shared error mapping for premium / role-gated Graph reads.
 //!
 //! Several detail-pane tabs (Activity log, Conditional Access, …) read Graph
-//! surfaces that need an Entra ID P1/P2 license *and* admin consent. They all
-//! want the same behaviour on failure: degrade to a graceful, body-safe message
-//! (never leak a raw Graph body), distinguish a missing license from missing
-//! consent, and keep only transient classes `retryable`. Keeping that logic in
-//! one place stops the per-tab copies from drifting apart — they previously had
-//! two definitions of the license heuristic that had already diverged.
+//! surfaces that need an Entra ID P1/P2 license, a consented on-demand scope
+//! *and* a role that can read them. They all want the same behaviour on
+//! failure: degrade to a graceful, body-safe message (never leak a raw Graph
+//! body), distinguish a missing license from a missing role, keep a classified
+//! token failure's own code so the UI can offer its lever, and keep only
+//! transient classes `retryable`. Keeping that logic in one place stops the
+//! per-tab copies from drifting apart — they previously had two definitions of
+//! the license heuristic that had already diverged.
 
+use azapptoolkit_core::capabilities::capability;
+use azapptoolkit_core::reauth::passthrough_code;
 use azapptoolkit_graph::GraphError;
 
 use crate::dto::UiError;
@@ -26,11 +30,11 @@ pub(crate) fn forbidden_remediation(err: &UiError, capability_key: &str) -> Opti
     if err.code != "forbidden" {
         return None;
     }
-    azapptoolkit_core::capabilities::capability(capability_key).map(|c| c.remediation)
+    capability(capability_key).map(|c| c.remediation)
 }
 
 /// True when a 403 body looks like a missing-license rejection rather than a
-/// missing-consent one. Graph encodes the body as JSON, so `error.code` and
+/// missing-role one. Graph encodes the body as JSON, so `error.code` and
 /// `error.message` are both present in the raw string — a lowercased substring
 /// scan covers both. `requestfromnonpremium` is Graph's actual license-denial
 /// code; the broader words back it up. Bare `" p1"`/`" p2"` are deliberately
@@ -42,31 +46,40 @@ pub(crate) fn looks_like_missing_license(body: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
-/// Every role that can grant tenant-wide admin consent, from the capabilities
-/// catalog's `admin_consent` entry, joined for a sentence. `None` only if the
-/// entry were ever removed.
-fn admin_consent_roles() -> Option<String> {
-    azapptoolkit_core::capabilities::capability("admin_consent")
-        .map(|c| c.role_names().collect::<Vec<_>>().join(", "))
-}
-
-/// Maps a Graph error from a premium/admin-consent-gated read into a graceful,
+/// Maps a Graph error from a premium / role-gated read into a graceful,
 /// body-safe [`UiError`] so the tab degrades instead of failing the surrounding
 /// detail pane. `code` is the feature's `*_unavailable` code; `title` is the
 /// sentence-start noun phrase ("The activity log" / "Conditional Access") and
 /// `feature` its mid-sentence form ("the activity log" / "Conditional Access");
-/// `scope` is the Graph permission it needs (e.g. "AuditLog.Read.All").
+/// `capability_key` is its capabilities-catalog entry (`"audit_reports"` /
+/// `"conditional_access"`), whose scope and remediation the messages name —
+/// this file hardcodes no role or scope.
 ///
-/// The missing-consent branch names the roles from the capabilities catalog's
-/// `admin_consent` entry (see [`admin_consent_roles`]); this file hardcodes no
-/// role names.
+/// A **classified token failure keeps its own code** (anything
+/// `core::reauth::passthrough_code` knows: a dead session, a Conditional
+/// Access step-up, a missing consent, an unreachable token endpoint). Each has
+/// a lever the UI offers — Re-authenticate, Verify identity, Grant consent, a
+/// transient Retry — and folding it into `*_unavailable` told the operator to
+/// go and get admin consent for a failure no consent fixes, while a dead
+/// session no longer read as one. Only an opaque token error degrades.
+///
+/// A **non-license 403 is not a missing consent**: an un-consented scope
+/// fails at `/token` (AADSTS65001 → `consent_required`, above) before Graph
+/// is ever called, so a Graph 403 means the signed-in account lacks a role
+/// that can read the surface. Its message is the catalog's remediation.
 pub(crate) fn premium_feature_err(
     code: &str,
     title: &str,
     feature: &str,
-    scope: &str,
+    capability_key: &str,
     err: GraphError,
 ) -> UiError {
+    if let GraphError::Token(t) = &err
+        && passthrough_code(&t.code).is_some()
+    {
+        return UiError::from(err);
+    }
+    let catalog = capability(capability_key);
     let msg = |retryable: bool, message: String| UiError {
         code: code.to_string(),
         message,
@@ -82,24 +95,26 @@ pub(crate) fn premium_feature_err(
                     ),
                 )
             } else {
-                let ask = match admin_consent_roles() {
-                    Some(roles) => format!(
-                        "Ask an administrator with one of these roles to grant it: {roles}. Then reopen this tab."
-                    ),
-                    None => "Ask an administrator who can grant admin consent to grant it, then reopen this tab.".to_string(),
-                };
+                let remediation = catalog.map_or(
+                    "Ask an administrator which role can read it, then reopen this tab.",
+                    |c| c.remediation,
+                );
                 msg(
                     false,
-                    format!("{title} requires admin consent for {scope}. {ask}"),
+                    format!("Microsoft Graph refused {feature} for your account. {remediation}"),
                 )
             }
         }
-        GraphError::Token(_) => msg(
-            false,
-            format!(
-                "Couldn't acquire {scope} consent for {feature}. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected."
-            ),
-        ),
+        GraphError::Token(_) => {
+            let scope =
+                catalog.map_or_else(|| "the extra scope".to_string(), |c| c.scopes.join(" + "));
+            msg(
+                false,
+                format!(
+                    "Couldn't acquire {scope} for {feature}. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected."
+                ),
+            )
+        }
         GraphError::Unauthorized => msg(
             false,
             format!(
@@ -140,49 +155,80 @@ mod tests {
     }
 
     #[test]
-    fn license_vs_consent_split_and_retryable_classification() {
+    fn license_vs_role_split_and_retryable_classification() {
         let license = premium_feature_err(
             "activity_unavailable",
             "The activity log",
             "the activity log",
-            "AuditLog.Read.All",
+            "audit_reports",
             GraphError::Forbidden("doesn't have premium license".into()),
         );
         assert_eq!(license.code, "activity_unavailable");
         assert!(license.message.contains("license"));
         assert!(!license.retryable);
 
-        let consent = premium_feature_err(
-            "ca_unavailable",
-            "Conditional Access",
-            "Conditional Access",
-            "Policy.Read.All",
-            GraphError::Forbidden("Insufficient privileges".into()),
-        );
-        assert!(consent.message.contains("consent"));
-        assert!(consent.message.contains("Policy.Read.All"));
-        assert!(!consent.retryable);
-        // The roles come from the catalog's `admin_consent` entry, so every
-        // role that can grant the consent is named, not just one.
+        // A non-license 403 is a role gap, not a missing consent (that fails
+        // at /token as `consent_required`, before Graph is called): the
+        // message is the feature's own catalog remediation, and never sends
+        // the operator to an admin-consent granter.
         let admin_consent =
             azapptoolkit_core::capabilities::capability("admin_consent").expect("catalog entry");
-        for role in admin_consent.role_names() {
-            assert!(
-                consent.message.contains(role),
-                "consent message omits {role}: {}",
-                consent.message
+        for (code, title, feature, key) in [
+            (
+                "ca_unavailable",
+                "Conditional Access",
+                "Conditional Access",
+                "conditional_access",
+            ),
+            (
+                "activity_unavailable",
+                "The activity log",
+                "the activity log",
+                "audit_reports",
+            ),
+        ] {
+            let role = premium_feature_err(
+                code,
+                title,
+                feature,
+                key,
+                GraphError::Forbidden("Insufficient privileges".into()),
             );
+            assert_eq!(role.code, code);
+            assert!(!role.retryable);
+            let remediation = azapptoolkit_core::capabilities::capability(key)
+                .expect("catalog entry")
+                .remediation;
+            assert!(
+                role.message.contains(remediation),
+                "{key}: {}",
+                role.message
+            );
+            assert!(
+                !role.message.contains("requires admin consent"),
+                "{key}: {}",
+                role.message
+            );
+            for granter in admin_consent.role_names() {
+                // Global Administrator also reads every surface, so it may
+                // appear in a remediation; the consent-only granters may not.
+                if granter == "Global Administrator" {
+                    continue;
+                }
+                assert!(
+                    !role.message.contains(granter),
+                    "{key} names the consent granter {granter}: {}",
+                    role.message
+                );
+            }
         }
-        assert!(consent.message.contains("Privileged Role Administrator"));
-        assert!(consent.message.contains("Global Administrator"));
-        assert!(!consent.message.contains("Ask a Global Administrator"));
 
         // Transient classes stay retryable and never leak the raw body.
         let transient = premium_feature_err(
             "ca_unavailable",
             "Conditional Access",
             "Conditional Access",
-            "Policy.Read.All",
+            "conditional_access",
             GraphError::Server {
                 status: 503,
                 body: "secret-internal".into(),
@@ -192,13 +238,52 @@ mod tests {
         assert!(!transient.message.contains("secret-internal"));
     }
 
+    /// A classified token failure keeps its code so the UI offers its lever
+    /// (Re-authenticate, Verify identity, Grant consent, a transient Retry);
+    /// only an opaque one degrades to the feature's `*_unavailable` notice.
+    #[test]
+    fn a_classified_token_failure_keeps_its_code() {
+        use azapptoolkit_core::reauth::{PASSTHROUGH_NON_FATAL_CODES, REAUTH_FATAL_CODES};
+        use azapptoolkit_core::token::TokenError;
+        for &code in REAUTH_FATAL_CODES.iter().chain(PASSTHROUGH_NON_FATAL_CODES) {
+            let e = premium_feature_err(
+                "ca_unavailable",
+                "Conditional Access",
+                "Conditional Access",
+                "conditional_access",
+                GraphError::Token(TokenError::new(code, "boom")),
+            );
+            assert_eq!(e.code, code);
+            assert_eq!(
+                e.is_reauth_fatal(),
+                azapptoolkit_core::reauth::is_reauth_fatal(code),
+                "{code}"
+            );
+            // Only the unreachable token endpoint is worth retrying as-is.
+            assert_eq!(e.retryable, code == "network_error", "{code}");
+        }
+        let opaque = premium_feature_err(
+            "activity_unavailable",
+            "The activity log",
+            "the activity log",
+            "audit_reports",
+            GraphError::Token(TokenError::opaque("user declined")),
+        );
+        assert_eq!(opaque.code, "activity_unavailable");
+        assert!(
+            opaque.message.contains("AuditLog.Read.All"),
+            "{}",
+            opaque.message
+        );
+    }
+
     #[test]
     fn a_rejected_token_points_at_refresh_token_not_sign_in() {
         let e = premium_feature_err(
             "ca_unavailable",
             "Conditional Access",
             "Conditional Access",
-            "Policy.Read.All",
+            "conditional_access",
             GraphError::Unauthorized,
         );
         assert!(e.message.contains("Refresh token"), "{}", e.message);

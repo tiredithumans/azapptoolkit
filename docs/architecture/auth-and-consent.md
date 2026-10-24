@@ -151,7 +151,7 @@ Some features need admin-consent/premium scopes beyond the sign-in bundle:
 |---|---|
 | `Synchronization.Read.All` | SCIM provisioning |
 | `AuditLog.Read.All` | Directory activity / change log (the Activity tab), **and** the two sign-in reports: the service-principal sign-in-activity report behind the audit's unused-app detection, **and** the beta `reports/appCredentialSignInActivities` behind the unused-credential advisory and the Credentials tab's Last-used column (that one is **Global cloud only** — a sovereign cloud reads it as unavailable and the feature stays off). Both reports' least-privileged scope is `AuditLog.Read.All`, **not** `Reports.Read.All`. |
-| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token` — the CA tab's "Grant consent" covers the policy reads too (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
+| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token`, so the Conditional Access tab's own "Grant consent & retry" (its read pre-acquires the token, so a missing consent arrives typed) also enables the policy reads (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
 | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. The same token also reads the admin center's **custom claims policy** (beta `servicePrincipals/{id}/claimsPolicy`; see "Attributes & claims: what the admin center shows" below). |
 | `Sites.FullControl.All` | SharePoint `Sites.Selected` — list/grant/revoke a site's per-app permissions in the Permissions tab's SharePoint site access section. The site-permission endpoints require it even for **reads**, since the verb-selected read token only holds `Directory.Read.All`. |
 | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` (one token) | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Learn's "Add members" table documents the pair for a `servicePrincipal` member (Graph must also write the SP); `Application.ReadWrite.All` is already in the write bundle, so this widens nothing. Deliberately the membership-only group scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
@@ -223,6 +223,16 @@ caller picks the CAE slot by hand. Examples:
 - `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab turns
   `consent_required` into "Grant consent & retry" for the `sync` feature and reloads; a 403 keeps
   a role/license message instead
+- `list_directory_audits_for_app` / `get_app_sign_in_activity` (`ensure_audit_log_token`) and
+  `list_conditional_access_for_app` (`ensure_feature_token(ConsentFeature::Policy)`) — the
+  Activity and Conditional Access tabs (`views::tabs::feature_load_error::FeatureLoadError`) turn
+  `consent_required` into "Grant consent & retry" for `audit_log` / `policy`, `interaction_required`
+  into "Verify identity & retry", raise the session's lever for a dead session or rejected token,
+  and keep the backend's `activity_unavailable` / `ca_unavailable` notice for a license or role
+  gap. `graph_err::premium_feature_err` keeps any classified token code
+  (`core::reauth::passthrough_code`) instead of folding it into `*_unavailable`, and words a
+  non-license 403 from the feature's catalog remediation (`audit_reports` /
+  `conditional_access`) — a missing consent fails at `/token`, never as a Graph 403
 - `run_audit` — pre-acquires the `AuditLog.Read.All` token so the Security-audit view can offer a
   "Grant consent & re-run" button that enables the **Unused** tab. The sign-in activity report
   behind it is gated on that scope + Entra ID P1/P2;

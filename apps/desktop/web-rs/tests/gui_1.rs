@@ -39,6 +39,8 @@ mod expose_api_tab;
 mod federated_tab;
 #[path = "gui/open_items_dock.rs"]
 mod open_items_dock;
+#[path = "gui/premium_tabs.rs"]
+mod premium_tabs;
 #[path = "gui/provisioning_tab.rs"]
 mod provisioning_tab;
 #[path = "gui/sso_claims.rs"]

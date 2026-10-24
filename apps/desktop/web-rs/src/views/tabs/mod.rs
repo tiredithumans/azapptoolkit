@@ -7,6 +7,7 @@ pub mod conditional_access_tab;
 pub mod credentials_tab;
 pub mod enterprise_tab;
 pub mod expose_api_tab;
+pub mod feature_load_error;
 pub mod federated_scenarios;
 pub mod federated_tab;
 pub mod overview_tab;
