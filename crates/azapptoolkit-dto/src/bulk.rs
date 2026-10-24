@@ -36,7 +36,7 @@ impl BulkError {
     /// remaining item in the run would fail the same way. The bulk driver stops
     /// on this rather than burning through the rest of the selection.
     pub fn is_reauth_fatal(&self) -> bool {
-        UiError::new(self.code.clone(), String::new(), self.retryable).is_reauth_fatal()
+        azapptoolkit_core::reauth::is_reauth_fatal(&self.code)
     }
 }
 
