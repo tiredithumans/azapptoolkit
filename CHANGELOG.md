@@ -22,7 +22,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
-- A damaged settings.json is now named on the sign-in and setup screens, and a save says to fix it or move it aside.
+- A settings.json that can't be read or is damaged is now named on the sign-in and setup screens, with what to do.
 - The sign-in card names the cloud it signs in to, and warns when AZAPPTOOLKIT_CLOUD holds a value it doesn't know.
 - An update that fails its signature check or install now points you to the Releases page instead of a retry.
 - An update check or download that stalls now fails after a minute instead of leaving Updating… on screen.

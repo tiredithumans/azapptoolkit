@@ -125,7 +125,8 @@ pub fn AuthConfigForm(
                     // this returns are fixed in the fields behind it, not in
                     // the dialog.
                     confirming.set(false);
-                    error.set(Some((e.message, config_error_hint(&e.code))));
+                    let hint = config_error_hint(&e.code, e.retryable);
+                    error.set(Some((e.message, hint)));
                     busy.set(false);
                 }
             }
@@ -200,7 +201,10 @@ pub fn AuthConfigForm(
 }
 
 /// One actionable recovery step per `UiError.code` from `set_auth_config`.
-fn config_error_hint(code: &str) -> &'static str {
+/// `settings_unreadable` covers two causes the backend marks apart by
+/// `retryable`: damaged JSON (fix or move it) and a file that couldn't be read
+/// at all (its permissions, or a program holding it, which can clear).
+fn config_error_hint(code: &str, retryable: bool) -> &'static str {
     match code {
         "invalid_client_id" => {
             "The Application (client) ID must be a GUID — copy it from the app \
@@ -209,6 +213,10 @@ fn config_error_hint(code: &str) -> &'static str {
         "invalid_tenant_id" => {
             "The Directory (tenant) ID must be a GUID — copy it from the registration's \
              Overview page. A domain like contoso.onmicrosoft.com isn't accepted."
+        }
+        "settings_unreadable" if retryable => {
+            "settings.json couldn't be read — check its permissions or whether another \
+             program (an antivirus scan, a sync client) has it open, then retry."
         }
         "settings_unreadable" => {
             "settings.json is damaged — fix the JSON or move it aside, then retry. Nothing \
@@ -219,5 +227,25 @@ fn config_error_hint(code: &str) -> &'static str {
              writable (not blocked by permissions or disk space), then retry."
         }
         _ => "Double-check the IDs and try again.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_error_hint;
+
+    /// A damaged file and an unreadable one need different fixes, and neither
+    /// is the folder's permissions (the generic `io` hint).
+    #[test]
+    fn a_settings_file_that_cannot_be_used_gets_the_hint_for_its_cause() {
+        let damaged = config_error_hint("settings_unreadable", false);
+        assert!(
+            damaged.contains("fix the JSON or move it aside"),
+            "{damaged}"
+        );
+        let unreadable = config_error_hint("settings_unreadable", true);
+        assert!(unreadable.contains("check its permissions"), "{unreadable}");
+        assert!(!unreadable.contains("fix the JSON"), "{unreadable}");
+        assert!(config_error_hint("io", true).contains("config folder is writable"));
     }
 }

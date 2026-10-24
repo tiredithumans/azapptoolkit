@@ -71,9 +71,13 @@ fn default_true() -> bool {
 /// JSON (a hand-edit typo).
 ///
 /// [`UserSettings::mutate`] refuses with it inside its `io::Error` — found
-/// again by [`Self::find`], so a command can tell "the file is damaged" from
-/// "the folder is not writable" — and [`UserSettings::stored_reporting`] hands
-/// it to startup, which otherwise reads such a file as empty without a word.
+/// again by [`Self::find`], so a command can tell "the file is damaged" or
+/// "the file can't be read" from "the folder is not writable" — and
+/// [`UserSettings::stored_reporting`] hands it to startup, which otherwise
+/// reads such a file as empty without a word. The two causes need different
+/// fixes ([`Self::is_parse_error`]): a damaged file is edited or moved aside,
+/// an unreadable one is a permission or another program holding it, which may
+/// clear on its own.
 ///
 /// Names the path and the failure, never the file's contents: a parse error is
 /// described by serde's category plus line and column only, because serde's
@@ -89,11 +93,25 @@ pub struct SettingsUnreadable {
 
 impl SettingsUnreadable {
     fn read_failed(path: &Path, e: &std::io::Error) -> Self {
+        // Normalised away from `InvalidData` so that kind means "parsed and
+        // rejected" alone ([`Self::is_parse_error`]); `fs::read` does not
+        // produce it, but nothing guarantees that.
+        let kind = match e.kind() {
+            std::io::ErrorKind::InvalidData => std::io::ErrorKind::Other,
+            kind => kind,
+        };
         Self {
             path: path.to_path_buf(),
             reason: e.to_string(),
-            kind: e.kind(),
+            kind,
         }
+    }
+
+    /// The file was read but is not valid settings JSON (fix it or move it
+    /// aside), as opposed to a file that could not be read at all (check its
+    /// permissions, or whether another program has it open).
+    pub fn is_parse_error(&self) -> bool {
+        self.kind == std::io::ErrorKind::InvalidData
     }
 
     fn parse_failed(path: &Path, e: &serde_json::Error) -> Self {
@@ -121,12 +139,23 @@ impl SettingsUnreadable {
 
 impl std::fmt::Display for SettingsUnreadable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} exists but could not be read ({}); fix it or move it aside — it was left unchanged",
-            self.path.display(),
-            self.reason
-        )
+        if self.is_parse_error() {
+            write!(
+                f,
+                "{} is not valid settings JSON ({}); fix it or move it aside — it was left \
+                 unchanged",
+                self.path.display(),
+                self.reason
+            )
+        } else {
+            write!(
+                f,
+                "{} couldn't be read ({}) — check its permissions or whether another program \
+                 has it open; it was left unchanged",
+                self.path.display(),
+                self.reason
+            )
+        }
     }
 }
 
@@ -180,10 +209,14 @@ impl UserSettings {
     /// whatever the file says.
     pub fn load(config_dir: &Path) -> Self {
         let mut s = Self::stored(config_dir);
-        if let Some(env_override) = auto_update_env_override() {
-            s.auto_update = env_override;
-        }
+        s.auto_update = s.effective_auto_update();
         s
+    }
+
+    /// `auto_update` as [`Self::load`] resolves it: the
+    /// `AZAPPTOOLKIT_AUTO_UPDATE` override when set, else this value.
+    pub fn effective_auto_update(&self) -> bool {
+        auto_update_env_override().unwrap_or(self.auto_update)
     }
 
     /// Read, modify and write `settings.json` under a process-wide lock.
@@ -708,6 +741,8 @@ mod tests {
 
         let err = UserSettings::mutate(dir.path(), |_| ()).unwrap_err();
         let refusal = SettingsUnreadable::find(&err).expect("the refusal downcasts");
+        assert!(refusal.is_parse_error());
+        assert!(err.to_string().contains("fix it or move it aside"), "{err}");
         assert_eq!(refusal.path, path);
         assert_eq!(
             refusal.reason,
@@ -754,11 +789,18 @@ mod tests {
             s.client_id = Some("c".into());
         });
 
-        assert!(result.is_err());
+        let err = result.unwrap_err();
         // The discriminating half: before the fix the rename also failed on a
         // directory, but only after the mutation ran against defaults.
         assert!(!called, "the mutation ran against defaults");
         assert!(path.is_dir());
+        // Not "damaged": nothing was parsed, and the fix is the file's access,
+        // not its JSON.
+        let refusal = SettingsUnreadable::find(&err).expect("the refusal downcasts");
+        assert!(!refusal.is_parse_error());
+        let shown = err.to_string();
+        assert!(shown.contains("check its permissions"), "{shown}");
+        assert!(!shown.contains("fix it or move it aside"), "{shown}");
     }
 
     /// A blank file holds nothing to lose; refusing it would wedge every write.
