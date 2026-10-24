@@ -102,7 +102,10 @@ the scan, so a credential write landing mid-scan refuses the two credential-bear
 leaves the name index. The SP side of the pairing join goes through `sp_index_cached`, never the
 client directly, and is joined rather than required: an unreadable SP index fails only the pairing
 rows (`AppListScan::rows` is a `Result`), so the roll-up and the name index still land and global
-search keeps its application half.
+search keeps its application half. So do Home's App Registrations counts: `AppListScan::counts` is
+taken before the join (`AppRegistrationCounts::of` reads no pair), and
+`app_registration_counts_cached` returns it when the rows fail. Nothing new is pinned for that
+case, so the next counts read scans again, as the list does.
 
 - **Lock order is scan gate → SP gate.** `scan_app_list` must never call `app_name_index_cached` or
   `indexes_cached`: both take the scan gate, and tokio's `Mutex` is not re-entrant.

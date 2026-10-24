@@ -96,14 +96,20 @@ pub async fn get_directory_index_status(
     })
 }
 
-/// One full `/applications` list scan, projected three ways. See
-/// [`scan_app_list`].
+/// One full `/applications` list scan, projected three ways (plus the Home
+/// counts). See [`scan_app_list`].
 pub(crate) struct AppListScan {
     /// The App Registrations list rows (`apps_pairing`) — the same `Arc` the
     /// typed cache entry holds. The only projection that needs the SP index
     /// (the paired-Enterprise-App join), so the only one an unreadable index
-    /// fails: the two below still landed.
+    /// fails: the rest still landed.
     pub(crate) rows: Result<Arc<Vec<ApplicationListRowDto>>, GraphError>,
+    /// Home's App Registrations counts, taken from the rows BEFORE the pairing
+    /// join ([`AppRegistrationCounts::of`] reads no pair), so an unreadable SP
+    /// index fails the list but not the card. Not cached on its own: a warm
+    /// read counts the cached rows, and a degraded one scans again, as the
+    /// list does.
+    pub(crate) counts: AppRegistrationCounts,
     /// The tenant-wide credential-expiry roll-up (`credential_expirations`).
     pub(crate) credentials: Arc<Vec<CredentialRowDto>>,
     /// The app-name index (`app_name_index`), stripped to
@@ -212,21 +218,26 @@ pub(crate) async fn scan_app_list(
     let lean: Vec<Application> = apps.iter().map(cache::app_name_index_row).collect();
     let names = cache::app_name_index_store_if_current(&state.cache, lean, name_watch);
 
+    // The rows are built unpaired and counted before the join: the counts read
+    // no pair, so Home's App Registrations card survives an SP index the list
+    // cannot.
+    let mut unpaired: Vec<ApplicationListRowDto> = apps
+        .into_iter()
+        .map(|application| ApplicationListRowDto::from_application(application, None, now))
+        .collect();
+    let counts = AppRegistrationCounts::of(&unpaired);
+
     let rows = sps.map(|(sps, _)| {
         let by_app_id: HashMap<&str, &str> = sps
             .iter()
             .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
             .collect();
-        let rows: Arc<Vec<ApplicationListRowDto>> = Arc::new(
-            apps.into_iter()
-                .map(|application| {
-                    let paired = by_app_id
-                        .get(application.app_id.as_str())
-                        .map(|id| (*id).to_string());
-                    ApplicationListRowDto::from_application(application, paired, now)
-                })
-                .collect(),
-        );
+        for row in &mut unpaired {
+            row.paired_service_principal_id = by_app_id
+                .get(row.app_id.as_str())
+                .map(|id| (*id).to_string());
+        }
+        let rows: Arc<Vec<ApplicationListRowDto>> = Arc::new(unpaired);
 
         // Pinned: a tenant-wide index (one paginated scan over every app
         // registration), not a per-object entry — it must not be evictable by
@@ -241,6 +252,7 @@ pub(crate) async fn scan_app_list(
 
     Ok(AppListScan {
         rows,
+        counts,
         credentials,
         names,
     })
@@ -286,15 +298,16 @@ pub async fn list_applications_with_pairing(
 
 /// Home's App Registrations card: the three numbers, reduced here from the
 /// same cached rows [`list_applications_with_pairing`] returns, so the webview
-/// never decodes the whole list to count it.
+/// never decodes the whole list to count it. They read no pairing, so an
+/// unreadable SP index, which fails the list, still answers them (see
+/// [`cache::app_registration_counts_cached`]).
 #[tauri::command]
 pub async fn get_app_registration_counts(
     state: State<'_, AppState>,
     tenant_id: String,
 ) -> Result<AppRegistrationCounts, UiError> {
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
-    let rows = cache::apps_pairing_cached(&state, &tenant_id).await?;
-    Ok(AppRegistrationCounts::of(&rows))
+    Ok(cache::app_registration_counts_cached(&state, &tenant_id).await?)
 }
 
 #[tauri::command]
@@ -873,7 +886,7 @@ mod handler_tests {
         Mock::given(method("GET"))
             .and(path("/v1.0/applications"))
             .respond_with(ResponseTemplate::new(200).set_body_json(app_page()))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -887,6 +900,13 @@ mod handler_tests {
             .expect("the app side read");
 
         assert!(scan.rows.is_err(), "rows need the SP join");
+        // Home's counts read no pairing, so they come back with the rest.
+        let counts = AppRegistrationCounts {
+            total: 1,
+            with_secrets: 1,
+            with_certs: 0,
+        };
+        assert_eq!(scan.counts, counts);
         assert_eq!(scan.credentials.len(), 1);
         assert_eq!(scan.names.len(), 1);
         assert!(credential_expirations_hit(&state.cache, TENANT).is_some());
@@ -900,6 +920,16 @@ mod handler_tests {
                 .len(),
             1
         );
+        // The counts reader answers through the failed join too. Nothing new
+        // was pinned for it, so it scans again — the second `/applications`
+        // read — exactly as the list's next attempt would.
+        assert_eq!(
+            app_registration_counts_cached(&state, TENANT)
+                .await
+                .expect("counts survive an unreadable SP index"),
+            counts
+        );
+        assert!(apps_pairing_hit(&state.cache, TENANT).is_none());
     }
 
     /// Answers the `/applications` page after running a credential-only

@@ -1969,11 +1969,14 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// Module-level so `every_index_accessor_counts_as_a_cache_read` can hold it to
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor that is missing
 /// here would make every command reading through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 15] = [
+const CACHED_ACCESSORS: [&str; 16] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
     "credential_expirations_cached(",
+    // Home's App Registrations counts: the cached rows, or the scan's pre-join
+    // counts when the SP index is unreadable.
+    "app_registration_counts_cached(",
     "apps_pairing_hit(",
     "credential_expirations_hit(",
     "indexes_cached(",
@@ -2228,7 +2231,7 @@ fn every_index_accessor_counts_as_a_cache_read() {
         }
     }
     assert!(
-        discovered.len() >= 15 && modules.len() >= 5,
+        discovered.len() >= 16 && modules.len() >= 5,
         "found only {discovered:?} across {modules:?} — the scan is broken"
     );
     let listed: std::collections::BTreeSet<String> = CACHED_ACCESSORS
