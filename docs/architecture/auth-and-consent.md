@@ -45,11 +45,13 @@ honours for Graph / ARM writes).
 an OAuth error body — a TLS-inspecting proxy's or WAF's block page, a captive portal, an unfollowed
 3xx — or a 200 whose body is not JSON is `AuthError::UnexpectedResponder { status,
 content_type_class }` (code `unexpected_responder`; the class is `html`/`json`/`text`/`other`/
-`untyped`, never the body, which such a responder commonly fills with the intercepted request). A
-429 or 5xx that outlasts the retry budget (or asks for too long a `Retry-After`) is
+`untyped`, never the body, which such a responder commonly fills with the intercepted request); so
+is an oversized body unless it is a JSON success. A 429 or 5xx the retry policy did not clear — a
+refresh grant after its retries, an authorization-code grant at once (a 5xx is never replayed on a
+single-use code), or a `Retry-After` too long to wait — is
 `AuthError::ServiceUnavailable { status, detail }` (code `service_unavailable`, `detail` the
-redacted AAD error or the body's class). Both used to be `token_exchange`, whose hint sent the
-operator to re-check the client and tenant ids; both are retryable, never re-auth-fatal, and stay
+redacted AAD error or the body's class). They used to be `token_exchange` (a non-JSON 200 was
+`serde`), whose hint sent the operator to re-check the client and tenant ids; both are retryable, never re-auth-fatal, and stay
 `token_error` on the client plane (the token POST already spent the retry budget).
 
 **The `/token` response is distrusted at the edges.** Its client follows no redirects (a 307/308
@@ -85,7 +87,10 @@ redeems it for the sign-in read scopes through the ordinary silent-refresh path.
 the *configured* tenant: an account remembered under a different directory is refused rather than
 used to address someone else's keyring entry. Every empty case — nothing stored, signed out, tenant
 repointed, token revoked, keyring locked — returns `Ok(None)`, not an error, and lands on the normal
-sign-in card; a failed attempt removes the context again so it can never leave a half-live session.
+sign-in card; a failed attempt removes the context again so it can never leave a half-live session
+— unless the session epoch moved meanwhile (the operator chose "Sign in instead" and signed in while
+the refresh was in flight): `restore_session` captures the fence with its registration and then
+leaves the registry, the cache and the keyring (`delete_refresh_token_if`) to the newer session.
 The restore failures returned as an error are a token endpoint that gave no verdict
 (`commands::auth::RETRY_CAN_RESTORE`): unreachable (`network`: offline, a proxy down), answered by
 something else (`unexpected_responder`: a captive portal, a TLS-inspecting proxy) or throttled /
@@ -95,8 +100,11 @@ restore (`views::sign_in::attempt_restore`, shared by `Root`'s launch attempt an
 instead of sending the operator to a browser that can't get through either. Such a restore can run
 for a minute or more, so the `RestoringSession` card offers **Sign in instead** after
 `SLOW_RESTORE_AFTER` (5 s); that moves the restore fence (`attempt_restore`'s `generation`, which
-the card's own Sign in also moves), so a late answer never signs a session in under the operator's
-browser sign-in nor repaints the offline callout. The remembered UPN and display
+the card's own Sign in also moves, and whose Retry is disabled while that sign-in is open), so a
+late answer never signs a session in under the operator's browser sign-in nor repaints the offline
+callout. The callout keeps the failure's code: `network` says to check the connection, while
+`unexpected_responder` / `service_unavailable` show the shared hint (a proxy or an unavailable
+endpoint, where checking the network would not help). The remembered UPN and display
 name are only what was true at the last sign-in: when the restoring refresh returns an id token, its
 `tid`/`oid` must match the remembered context (`ensure_same_identity`; a mismatch is refused,
 leaves nothing cached, deletes the foreign refresh token just rotated into the remembered keyring
@@ -343,7 +351,10 @@ which a sign-out/sign-in cycle would.
   SAME sticky lever with "Couldn't re-authenticate / grant consent / complete verification — {hint}"
   (`state::auth_hints::lever_failure_message`), never an auto-dismissing error — the failure it
   recovers is still there; a consent or step-up that finds the session dead raises Re-authenticate
-  instead, and nothing lands once the tenant changed. The stack cap (`MAX_TOASTS`) drops transient
+  instead, a step-up that finds consent missing raises Grant consent, and nothing lands once the
+  tenant changed. An AADSTS hint that points at the sign-in card (its Change link, for the
+  wrong-tenant / wrong-client codes) is flagged `card_only` in `AADSTS_HINTS` and never reaches a
+  toast; the failure's own message is shown there instead. The stack cap (`MAX_TOASTS`) drops transient
   toasts before any sticky one (`Toast::is_sticky`: an error with an action). Only `CommandState::run_toast_err` adds **Retry**
   (`report_command_error_with_retry`), for a failure the backend marks `retryable` (throttled,
   5xx, network) and no recovery lever outranks; the Retry is pinned to the tenant the call ran for,
