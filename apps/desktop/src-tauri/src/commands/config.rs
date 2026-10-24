@@ -52,16 +52,24 @@ pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiErr
 }
 
 /// The `UiError` for a `settings.json` save that `UserSettings::mutate`
-/// refused or could not complete. A file that exists but cannot be read or
-/// parsed is `settings_unreadable`, naming the file (not retryable: nothing
-/// changes until the operator fixes or moves it, and "check the folder is
-/// writable" would send them the wrong way); any other failure is the
-/// generic, retryable `io`. Shared by every Settings save.
+/// refused or could not complete. A file that exists but cannot be used is
+/// `settings_unreadable`, naming the file — "check the folder is writable"
+/// would send the operator the wrong way. Damaged JSON is not retryable
+/// (nothing changes until it is fixed or moved aside); a file that could not
+/// be READ is (a permission, an antivirus scan or a sync client holding it
+/// can clear), and the frontend's hint tells the two apart by that flag. Any
+/// other failure is the generic, retryable `io`. Shared by every Settings
+/// save.
 pub(crate) fn settings_write_error(e: &std::io::Error) -> UiError {
     match SettingsUnreadable::find(e) {
-        Some(refusal) => UiError::validation(
+        Some(refusal) if refusal.is_parse_error() => UiError::validation(
             "settings_unreadable",
             format!("settings.json is damaged: {refusal}."),
+        ),
+        Some(refusal) => UiError::new(
+            "settings_unreadable",
+            format!("settings.json couldn't be read: {refusal}."),
+            true,
         ),
         None => UiError::io(format!("Could not write settings.json: {e}")),
     }
@@ -124,10 +132,9 @@ mod tests {
         }
     }
 
-    /// An uppercase GUID is accepted but saved lowercase: Entra's `tid` is
-    /// lowercase and the sign-in and launch-restore checks compare verbatim.
-    /// A damaged file is its own code naming the file; any other write failure
-    /// stays the retryable `io`.
+    /// A damaged file is its own code naming the file, not retryable; one that
+    /// can't be read is the same code, retryable, pointing at its access; any
+    /// other write failure stays the retryable `io`.
     #[test]
     fn a_refused_save_over_a_damaged_file_is_settings_unreadable() {
         let dir = std::env::temp_dir().join(format!(
@@ -148,6 +155,22 @@ mod tests {
             err.message
         );
         assert!(err.message.contains("line 1"), "{}", err.message);
+        assert!(err.message.contains("is damaged"), "{}", err.message);
+
+        // A directory in the file's place: it exists, and it can't be read.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let refused = UserSettings::mutate(&dir, |_| ()).unwrap_err();
+        let err = settings_write_error(&refused);
+        assert_eq!(err.code, "settings_unreadable");
+        assert!(err.retryable, "a lock or a permission can clear");
+        assert!(err.message.contains("couldn't be read"), "{}", err.message);
+        assert!(
+            err.message.contains("check its permissions"),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains("damaged"), "{}", err.message);
 
         let other = settings_write_error(&std::io::Error::other("disk full"));
         assert_eq!(other.code, "io");
@@ -155,6 +178,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An uppercase GUID is accepted but saved lowercase: Entra's `tid` is
+    /// lowercase and the sign-in and launch-restore checks compare verbatim.
     #[test]
     fn tenant_is_saved_in_the_lowercase_tid_spelling() {
         let (_, tenant) = validated_ids(
