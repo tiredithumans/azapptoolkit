@@ -29,6 +29,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - A backup now shows that it started while it reads the tenant's app lists, instead of nothing.
 - A backup whose background task fails now stops with an error instead of reporting Ready with apps missing.
 - Loading a restore report or a newer build's backup now says which it is, not a raw parse error.
+- When Microsoft Graph revokes a token and renewing it fails, the app now offers the right fix, not just Refresh token.
 
 ### Security
 

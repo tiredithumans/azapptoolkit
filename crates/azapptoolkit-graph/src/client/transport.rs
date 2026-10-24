@@ -718,12 +718,24 @@ impl GraphClient {
                             );
                             cae_retried = true;
                         }
+                        // A classified failure (a dead session, a step-up, a
+                        // missing consent, the token endpoint unreachable)
+                        // names its own lever, so it travels as `Token` and
+                        // `ui_code()` passes it through; only an unclassified
+                        // one is the bare rejected-token 401.
                         Err(e) => {
                             tracing::info!(
+                                code = %e.code,
                                 detail = %e,
-                                "CAE claims challenge could not be satisfied silently; re-auth needed"
+                                "CAE claims challenge could not be satisfied silently"
                             );
-                            return Err(GraphError::Unauthorized);
+                            return Err(
+                                if azapptoolkit_core::reauth::passthrough_code(&e.code).is_some() {
+                                    GraphError::Token(e)
+                                } else {
+                                    GraphError::Unauthorized
+                                },
+                            );
                         }
                     }
                 }
