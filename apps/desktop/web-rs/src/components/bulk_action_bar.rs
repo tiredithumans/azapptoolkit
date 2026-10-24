@@ -1399,8 +1399,11 @@ fn parse_grant(r: bulk::BulkGrantResult, label_for: impl Fn(&str) -> String) -> 
 /// or that failed, so a short list is the healthy case ("nothing expired"), not
 /// a stopped run — and `apps_scanned` is the whole readable selection whether
 /// or not the fan-out dispatched it. Reach is `apps_checked` instead (the apps
-/// the sweep could not read plus the ones it dispatched), and a run that
-/// stopped short says "Checked X of Y" rather than "Scanned" the selection.
+/// the sweep could not read plus the ones it dispatched, less any it stopped
+/// before their first removal), and a run that stopped short says "Checked X
+/// of Y" rather than "Scanned" the selection. An app the stop caught part-way
+/// is a failure row coded [`bulk::INTERRUPTED`] (its remaining expired secrets
+/// are still there), and the summary counts those too.
 ///
 /// A payload without `apps_checked` (an older backend) has no derivable reach:
 /// claiming an unattempted tail from the other two numbers would be a guess, so
@@ -1436,6 +1439,16 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult, attempted: usize) -> P
         .iter()
         .filter(|s| !s.removed_key_ids.is_empty())
         .count();
+    // Apps the stop caught between their keys: "had expired creds removed"
+    // alone would read as finished.
+    let part_way = match fails
+        .iter()
+        .filter(|f| f.code.as_deref() == Some(bulk::INTERRUPTED))
+        .count()
+    {
+        0 => String::new(),
+        n => format!("; {n} stopped part-way"),
+    };
     // A run the session killed would otherwise read as a complete sweep: say
     // it stopped, beside the re-auth prompt the failure's code raises. With a
     // reach, the unattempted note names the tail; without one, this is all
@@ -1454,7 +1467,7 @@ fn parse_remove_expired(r: bulk::BulkRemoveExpiredResult, attempted: usize) -> P
     };
     Parsed {
         summary: format!(
-            "{checked}; {removed} had expired creds removed{}.{stopped}",
+            "{checked}; {removed} had expired creds removed{part_way}{}.{stopped}",
             cancelled_suffix(r.cancelled)
         ),
         failures: fails,
@@ -2430,6 +2443,44 @@ mod tests {
         let note = unattempted_note(40, p.reached, true);
         assert!(note.contains("30 apps were never attempted"), "{note}");
         assert!(!p.is_clean(40));
+    }
+
+    /// An app a Cancel caught between its keys is not finished: it is a
+    /// failure row (still selected for a re-run), and the summary says how
+    /// many stopped part-way rather than counting them as cleaned.
+    #[test]
+    fn a_sweep_stopped_part_way_says_so() {
+        let p = parse_remove_expired(
+            bulk::BulkRemoveExpiredResult {
+                apps_scanned: 40,
+                summaries: vec![bulk::AppRemovalSummary {
+                    object_id: "obj-1".into(),
+                    display_name: "Contoso CRM".into(),
+                    removed_key_ids: vec!["k1".into()],
+                    failed_key_ids: Vec::new(),
+                    error: Some(bulk::BulkError {
+                        code: bulk::INTERRUPTED.into(),
+                        message: "the run stopped before 2 more expired secrets were removed; \
+                                  re-run to finish"
+                            .into(),
+                        retryable: false,
+                    }),
+                }],
+                cancelled: true,
+                apps_checked: Some(10),
+            },
+            40,
+        );
+        assert_eq!(
+            p.summary,
+            "Checked 10 of 40 apps; 1 had expired creds removed; 1 stopped part-way (cancelled)."
+        );
+        assert_eq!(p.failures.len(), 1);
+        assert_eq!(p.failures[0].object_id.as_deref(), Some("obj-1"));
+        assert!(
+            session_dead_error(&p.failures).is_none(),
+            "an interruption is not a dead session"
+        );
     }
 
     /// A sweep that checked the whole selection keeps the plain summary and

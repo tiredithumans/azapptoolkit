@@ -53,6 +53,15 @@ impl std::fmt::Display for BulkError {
 /// Carried by [`BulkError::code`] and [`BulkDeleteFailure::code`].
 pub const LOST_TASK: &str = "lost_task";
 
+/// The code on an expired-secret sweep row whose app a Cancel or a dead session
+/// stopped part-way: some of its expired secrets were tried, the rest never
+/// were, so they are still there and a re-run finishes the app. (An app
+/// stopped before its first removal gets no row: it was never checked, and
+/// counts toward the unattempted tail instead.) Never re-auth-fatal: the
+/// dead-session code, when there is one, rides its own row. Carried by
+/// [`BulkError::code`].
+pub const INTERRUPTED: &str = "interrupted";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkProgress {
     pub done: usize,
@@ -90,9 +99,10 @@ pub struct BulkRemoveExpiredResult {
     pub summaries: Vec<AppRemovalSummary>,
     pub cancelled: bool,
     /// How many selected apps the sweep actually checked: the ones whose read
-    /// failed (each is a row in `summaries`) plus the ones it dispatched. Below
-    /// the selection size only when Cancel or a dead session stopped the
-    /// fan-out, and the gap is the tail it never attempted — the one number
+    /// failed (each is a row in `summaries`) plus the ones it dispatched,
+    /// less any dispatched app stopped before its first removal. Below the
+    /// selection size only when Cancel or a dead session stopped the run, and
+    /// the gap is the tail it never attempted — the one number
     /// `apps_scanned` and `summaries` cannot give. Always `Some` from this
     /// backend; optional on the wire — additive and skipped when absent — so
     /// older payloads still decode (and read as "reach unknown").

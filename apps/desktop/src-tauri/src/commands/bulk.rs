@@ -39,7 +39,7 @@ use crate::dto::bulk::{
     BulkDisableSignInResult, BulkError, BulkGrantOutcome, BulkGrantResult, BulkOwnerOutcome,
     BulkProgress, BulkRemoveExpiredResult, BulkRemoveRedundantOutcome, BulkRemoveRedundantResult,
     BulkRestoreOutcome, BulkRestoreResult, BulkScopeOutcome, BulkScopeResult, BulkStageCertOutcome,
-    BulkStageCertResult, LOST_TASK,
+    BulkStageCertResult, INTERRUPTED, LOST_TASK,
 };
 use crate::dto::permissions::PermissionKind;
 use crate::state::{AppState, CancelToken};
@@ -145,14 +145,31 @@ impl CappedOutcome for GrantItem {
     }
 }
 
-impl CappedOutcome for AppRemovalSummary {
+impl CappedOutcome for SweepItem {
     fn object_id(&self) -> &str {
-        &self.object_id
+        &self.summary.object_id
     }
 
     fn progress_label(&self) -> String {
-        self.display_name.clone()
+        self.summary.display_name.clone()
     }
+}
+
+impl BulkOutcome for SweepItem {
+    fn session_fatal(&self) -> bool {
+        self.summary.session_fatal()
+    }
+}
+
+/// One app of the expired-secret sweep: its row, plus how many of its expired
+/// secrets a Cancel or a dead session stopped it from trying. That count picks
+/// the row's fate in [`finish_expired_sweep`] and never reaches the bar as a
+/// number: an app stopped before its first `removePassword` was never checked
+/// (no row, and not in `apps_checked`), one stopped part-way gets an
+/// [`INTERRUPTED`] row.
+struct SweepItem {
+    summary: AppRemovalSummary,
+    unattempted: usize,
 }
 
 /// Rejects a bulk-create spec that cannot possibly succeed, without touching
@@ -480,7 +497,7 @@ async fn sweep_one(
     session: &SessionDead,
     app: Application,
     now: chrono::DateTime<chrono::Utc>,
-) -> AppRemovalSummary {
+) -> SweepItem {
     let expired_key_ids = expired_password_key_ids(&app, now);
     let Application {
         id: object_id,
@@ -517,12 +534,18 @@ async fn sweep_one(
             }
         }
     }
-    AppRemovalSummary {
-        object_id,
-        display_name,
-        removed_key_ids: removed,
-        failed_key_ids: failed,
-        error,
+    // Every key the loop broke before: a Cancel, a sibling's dead-session
+    // latch, or this app's own fatal failure.
+    let unattempted = expired_key_ids.len() - removed.len() - failed.len();
+    SweepItem {
+        summary: AppRemovalSummary {
+            object_id,
+            display_name,
+            removed_key_ids: removed,
+            failed_key_ids: failed,
+            error,
+        },
+        unattempted,
     }
 }
 
@@ -535,17 +558,23 @@ async fn sweep_one(
 /// a lost one always does, as a [`LOST_TASK`] row named through `name_of`: its
 /// task ended without reporting, and some of its removals may have landed.
 ///
-/// `apps_checked` is those unreadable apps plus every app the fan-out
-/// dispatched: what the sweep reached, so the bar can name the tail a Cancel or
-/// a dead session left unattempted. `summaries` cannot say it (a clean app is
-/// no row) and neither can `apps_scanned` (the readable selection, dispatched
-/// or not).
+/// A Cancel or a dead session can stop a dispatched app's key loop too. One
+/// stopped before its first `removePassword` was never checked: it gets no
+/// row and joins the unattempted tail. One stopped part-way keeps its row,
+/// marked [`INTERRUPTED`] unless it already carries a failure, since its
+/// remaining expired secrets are still there.
+///
+/// `apps_checked` is the unreadable apps plus every app the fan-out
+/// dispatched, less those never started: what the sweep reached, so the bar
+/// can name the tail a Cancel or a dead session left unattempted. `summaries`
+/// cannot say it (a clean app is no row) and neither can `apps_scanned` (the
+/// readable selection, dispatched or not).
 fn finish_expired_sweep(
     cache: &Cache,
     tenant_id: &str,
     apps_scanned: usize,
     mut summaries: Vec<AppRemovalSummary>,
-    run: CappedRun<AppRemovalSummary>,
+    run: CappedRun<SweepItem>,
     name_of: impl Fn(&str) -> String,
 ) -> BulkRemoveExpiredResult {
     let CappedRun {
@@ -555,12 +584,38 @@ fn finish_expired_sweep(
         cancelled,
     } = run;
     // Before any reported row joins: only the unreadable apps are in it yet.
-    let apps_checked = summaries.len() + dispatched;
-    summaries.extend(outcomes.into_iter().filter(|summary| {
-        !summary.removed_key_ids.is_empty()
-            || !summary.failed_key_ids.is_empty()
-            || summary.error.is_some()
-    }));
+    let unreadable = summaries.len();
+    let mut never_started = 0usize;
+    for SweepItem {
+        mut summary,
+        unattempted,
+    } in outcomes
+    {
+        let tried_any = !summary.removed_key_ids.is_empty() || !summary.failed_key_ids.is_empty();
+        if unattempted > 0 && !tried_any {
+            never_started += 1;
+            continue;
+        }
+        if unattempted > 0 && summary.error.is_none() {
+            summary.error = Some(BulkError {
+                code: INTERRUPTED.into(),
+                message: if unattempted == 1 {
+                    "the run stopped before 1 more expired secret was removed; re-run to finish"
+                        .into()
+                } else {
+                    format!(
+                        "the run stopped before {unattempted} more expired secrets were removed; \
+                         re-run to finish"
+                    )
+                },
+                retryable: false,
+            });
+        }
+        if tried_any || summary.error.is_some() {
+            summaries.push(summary);
+        }
+    }
+    let apps_checked = unreadable + dispatched - never_started;
 
     // Invalidate however the run ended: the removals that already landed are
     // real, so the caches are stale either way. The only mutation here is
@@ -2243,6 +2298,22 @@ mod tests {
             }
         }
 
+        /// A sweep task's outcome that tried every expired key it had.
+        fn swept(id: &str, removed: &[&str], error: Option<BulkError>) -> SweepItem {
+            SweepItem {
+                summary: removal(id, removed, error),
+                unattempted: 0,
+            }
+        }
+
+        /// A sweep task's outcome stopped with `unattempted` keys left.
+        fn stopped(id: &str, removed: &[&str], unattempted: usize) -> SweepItem {
+            SweepItem {
+                summary: removal(id, removed, None),
+                unattempted,
+            }
+        }
+
         fn granted(id: &str, n: usize) -> GrantItem {
             GrantItem {
                 outcome: BulkGrantOutcome {
@@ -2443,7 +2514,7 @@ mod tests {
             let client = state.graph_for(TENANT);
             let cancel = CancelFlag::new().claim();
             let session = SessionDead::new();
-            let summary = sweep_one(
+            let item = sweep_one(
                 &client,
                 &cancel,
                 &session,
@@ -2451,6 +2522,8 @@ mod tests {
                 fixed_now(),
             )
             .await;
+            assert_eq!(item.unattempted, 1, "`k3` is never attempted");
+            let summary = item.summary;
             assert_eq!(summary.removed_key_ids, ["k1"]);
             assert_eq!(summary.failed_key_ids, ["k2"], "`k3` is never attempted");
             assert_eq!(
@@ -2463,7 +2536,7 @@ mod tests {
             assert_eq!(remove_password_calls(&server).await, 1);
 
             // ...and a sibling's latch stops a task before its first key.
-            let summary = sweep_one(
+            let item = sweep_one(
                 &client,
                 &cancel,
                 &session,
@@ -2471,7 +2544,9 @@ mod tests {
                 fixed_now(),
             )
             .await;
+            let summary = &item.summary;
             assert!(summary.removed_key_ids.is_empty() && summary.failed_key_ids.is_empty());
+            assert_eq!(item.unattempted, 1, "stopped before its first key");
             assert_eq!(remove_password_calls(&server).await, 1);
         }
 
@@ -2494,7 +2569,8 @@ mod tests {
                 app_with_expired(&["k1", "k2", "k3"]),
                 fixed_now(),
             )
-            .await;
+            .await
+            .summary;
             assert!(summary.removed_key_ids.is_empty());
             assert_eq!(summary.failed_key_ids, ["k1", "k2"]);
             // `k1`'s 404 came first, but the row carries the code that tells
@@ -2530,7 +2606,7 @@ mod tests {
                 .await;
             let client = state.graph_for(TENANT);
             let session = SessionDead::new();
-            let summary = sweep_one(
+            let item = sweep_one(
                 &client,
                 &cancel,
                 &session,
@@ -2538,12 +2614,98 @@ mod tests {
                 fixed_now(),
             )
             .await;
-            assert_eq!(summary.removed_key_ids, ["k1"]);
-            assert!(summary.failed_key_ids.is_empty() && summary.error.is_none());
+            assert_eq!(item.summary.removed_key_ids, ["k1"]);
+            assert!(item.summary.failed_key_ids.is_empty() && item.summary.error.is_none());
+            assert_eq!(item.unattempted, 1);
             assert_eq!(
                 remove_password_calls(&server).await,
                 1,
                 "`k2` is never sent"
+            );
+        }
+
+        /// A Cancel or a dead session can stop a dispatched app's own key loop.
+        /// Stopped before its first `removePassword`, the app was never
+        /// checked: no row, and not in `apps_checked`, so the bar names it in
+        /// the unattempted tail. Stopped part-way, it keeps a row saying its
+        /// remaining expired secrets are still there.
+        #[tokio::test]
+        async fn an_app_stopped_before_its_first_removal_is_not_checked() {
+            let state = state();
+            let cancel = CancelFlag::new().claim();
+            let session = SessionDead::new();
+            let run = drive(
+                &Recorder::default(),
+                &cancel,
+                &session,
+                4,
+                vec![
+                    swept("a", &["k1"], None),
+                    stopped("b", &["k2"], 2),
+                    stopped("c", &[], 3),
+                    swept("d", &[], None),
+                ],
+                None,
+            )
+            .await;
+            assert_eq!(run.dispatched, 4);
+            let result = finish_expired_sweep(&state.cache, TENANT, 4, Vec::new(), run, |id| {
+                id.to_string()
+            });
+
+            assert_eq!(
+                result.apps_checked,
+                Some(3),
+                "`c` was dispatched but stopped before its first key; `d` had nothing to remove"
+            );
+            let mut rows: Vec<(&str, Option<&str>)> = result
+                .summaries
+                .iter()
+                .map(|s| {
+                    (
+                        s.object_id.as_str(),
+                        s.error.as_ref().map(|e| e.code.as_str()),
+                    )
+                })
+                .collect();
+            rows.sort_unstable();
+            assert_eq!(
+                rows,
+                [("a", None), ("b", Some(INTERRUPTED))],
+                "`c` gets no row: it joins the unattempted tail"
+            );
+            let b = result
+                .summaries
+                .iter()
+                .find(|s| s.object_id == "b")
+                .unwrap();
+            let message = &b.error.as_ref().unwrap().message;
+            assert!(message.contains("2 more expired secrets"), "{message}");
+            assert!(!b.error.as_ref().unwrap().is_reauth_fatal());
+        }
+
+        /// An app whose own fatal failure stopped it keeps the fatal code in
+        /// its one error slot — that is what prompts re-authentication — rather
+        /// than the interrupted marker.
+        #[test]
+        fn a_fatal_stop_keeps_its_code_over_the_interrupted_marker() {
+            let state = state();
+            let mut item = stopped("a", &[], 2);
+            item.summary.failed_key_ids = vec!["k1".into()];
+            item.summary.error = Some(err("refresh_missing"));
+            let run = CappedRun {
+                outcomes: vec![item],
+                lost: Vec::new(),
+                dispatched: 1,
+                cancelled: false,
+            };
+            let result = finish_expired_sweep(&state.cache, TENANT, 1, Vec::new(), run, |id| {
+                id.to_string()
+            });
+            assert_eq!(result.apps_checked, Some(1), "its first key was tried");
+            assert_eq!(
+                result.summaries[0].error.as_ref().map(|e| e.code.as_str()),
+                Some("refresh_missing")
             );
         }
 
@@ -2644,9 +2806,9 @@ mod tests {
                 &session,
                 1,
                 vec![
-                    removal("a", &["k1"], None),
-                    removal("b", &["k2"], Some(err("refresh_missing"))),
-                    removal("c", &["k3"], None),
+                    swept("a", &["k1"], None),
+                    swept("b", &["k2"], Some(err("refresh_missing"))),
+                    swept("c", &["k3"], None),
                 ],
                 None,
             )
@@ -2699,10 +2861,10 @@ mod tests {
                 &session,
                 &meter,
                 vec![
-                    removal("a", &["k1"], None),
-                    removal("b", &["k2"], None),
-                    removal("c", &[], None),
-                    removal("d", &[], None),
+                    swept("a", &["k1"], None),
+                    swept("b", &["k2"], None),
+                    swept("c", &[], None),
+                    swept("d", &[], None),
                 ],
                 |o| o.object_id().to_string(),
                 |o| {
@@ -2778,7 +2940,7 @@ mod tests {
                 &cancel,
                 &session,
                 1,
-                vec![removal("a", &[], None), removal("b", &["k"], None)],
+                vec![swept("a", &[], None), swept("b", &["k"], None)],
                 Some("b"),
             )
             .await;
@@ -2832,6 +2994,18 @@ mod tests {
             assert!(!delete_outcome("a", Some(LOST_TASK)).session_fatal());
             assert!(!delete_outcome("a", Some("forbidden")).session_fatal());
             assert!(!deleted("a").session_fatal());
+            assert!(
+                !swept(
+                    "a",
+                    &[],
+                    Some(BulkError {
+                        code: INTERRUPTED.into(),
+                        message: String::new(),
+                        retryable: false,
+                    })
+                )
+                .session_fatal()
+            );
             assert!(
                 !removal(
                     "a",

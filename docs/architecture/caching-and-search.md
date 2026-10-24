@@ -715,8 +715,11 @@ reported (a panic or an abort) may have landed its write, so it becomes a failur
 consent grant busts it too (its client SP may exist), and the expired-secret sweep drops that
 app's credential tier. The driver also counts what it dispatched (`CappedRun::dispatched`). Delete
 and grant read their reach off their outcome lists, but the sweep reports only apps with something
-to say, so it returns `apps_checked` (its unreadable apps plus the dispatched ones) and the bar
-says "Checked X of Y" and names the tail a Cancel or a dead session never attempted.
+to say, so it returns `apps_checked` (its unreadable apps plus the dispatched ones, less any app
+the stop caught before its first `removePassword`) and the bar says "Checked X of Y" and names the
+tail a Cancel or a dead session never attempted. An app the stop caught part-way is a row coded
+`interrupted` (`dto::bulk::INTERRUPTED`, never re-auth-fatal) unless it already carries a failure,
+and the summary counts those as "stopped part-way".
 
 ## The site-sweep cache invalidates on site-permission mutations
 
