@@ -23,9 +23,13 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Fixed
 
 - App Registrations now warns when a tenant has too many service principals to show every app's enterprise app link.
-- Big tenants keep loading their lists quickly after Microsoft Graph throttles a scan, instead of slowing for the session.
+- Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
 - A stopped Remove expired credentials run now says how many apps it checked and how many it never attempted.
+
+### Security
+
+- Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
 
 ## [0.34.1] - 2026-10-15
 

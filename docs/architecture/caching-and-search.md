@@ -623,12 +623,14 @@ slices: every `appId` is a GUID, so its first hex digit puts each row in exactly
    slice's **page one** in plain mode retries once as an advanced query, a 400 there falls back to
    serial. The mode that worked (or `Serial`) is remembered per collection on the per-tenant
    `GraphClient`, which the sign-out sweep drops. A slice that fails for a reason that says nothing
-   about the filter reads that scan serially. A 400 on a continuation page, or on page one of a
-   mode that validated before, is judged like a refused merge (step 4). A throttle, server or
-   network error its retries could not outwait, on any page, is **transient**: it is never held
-   against the collection (no strike, no clear), so the next scan slices again however many scans
-   in a row were throttled. A slice whose page one holds a row outside its prefix stops there,
-   before paging the whole collection sixteen times over.
+   about the filter reads that scan serially. A 400 on a continuation page, a 400 on page one of a
+   mode that validated before, or a server or network error its retries could not outwait is
+   judged like a refused merge (step 4). A slice still **throttled** (429) when its retries ran out,
+   on any page, is transient: it is no lag strike (and clears none), so the next scan slices again,
+   but it has its own bound — the third throttled wave with no validated merge between them pins
+   the collection serial, since sixteen chains that each fail and then pay the serial read anyway
+   only add to the load. A slice whose page one holds a row outside its prefix stops there, before
+   paging the whole collection sixteen times over.
 4. **Fail closed.** `merge_slices` de-duplicates by object id in prefix order and refuses the merge
    when a row sits outside its slice's prefix, a row has no `appId` (no slice can hold it), a row of
    the unfiltered page one is in no slice, the union is short of `/$count` **by any amount** (the
@@ -640,9 +642,10 @@ slices: every `appId` is a GUID, so its first hex digit puts each row in exactly
    filter misbehaved. What the client then remembers depends on the reason. A **structural**
    refusal (a prefix mismatch, a page-limit stop, a row with no `appId` on page one) pins the
    collection serial for the client's lifetime, before the serial read; so does any scan whose
-   rows include a principal with no `appId`. A transient one (step 3) changes nothing. A
-   **lag-type** one (the count short, a page-one row missing from the slices, a continuation 400,
-   a known mode's page-one 400) is judged by the serial read it falls back to:
+   rows include a principal with no `appId`. A throttled one counts only toward its own bound
+   (step 3). A **lag-type** one (the count short, a page-one row missing from the slices, a
+   continuation 400, a known mode's page-one 400, a server or network error) is judged by the
+   serial read it falls back to:
    when every row the serial read returned was already in the slices' union, the slices were
    complete and only `/$count` was stale (the index still counts a just-deleted object), so nothing
    is held against the collection and the next scan slices again; otherwise the slices really

@@ -521,43 +521,144 @@ async fn a_continuation_400_reads_serially_without_rejecting_the_mode() {
     server.verify().await;
 }
 
+/// Slice `7`'s responder: `status` (with `Retry-After: 0`, so the retries are
+/// instant) while `failing` is set, its three rows once it is cleared.
+struct SwitchableSlice7 {
+    status: u16,
+    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl wiremock::Respond for SwitchableSlice7 {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            ResponseTemplate::new(self.status).insert_header("retry-after", "0")
+        } else {
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "value": slice_rows('7', 3) }))
+        }
+    }
+}
+
+/// Mounts slice `7` failing with `status`; clearing the returned flag lets it
+/// answer again.
+async fn mount_failing_slice_7(
+    server: &MockServer,
+    status: u16,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .and(query_param("$filter", "startswith(appId,'7')"))
+        .respond_with(SwitchableSlice7 {
+            status,
+            failing: failing.clone(),
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+    failing
+}
+
+/// Runs one scan, asserts it returned the whole tenant, and reports whether it
+/// sent any slice request.
+async fn scan_sliced(client: &GraphClient, server: &MockServer) -> bool {
+    let before = slice_requests(server).await.0;
+    let sps = client.list_service_principals_index().await.unwrap();
+    assert_eq!(row_ids(&sps), all_ids());
+    slice_requests(server).await.0 > before
+}
+
 /// A slice whose throttling outlasts the retry budget does not fail the scan:
-/// the serial read supplies it, and the mode is kept, so the next scan slices
-/// again. A throttle says nothing about the filter or the index, so it is no
-/// strike either: a tenant throttled scan after scan keeps slicing, where two
-/// such waves used to pin it serial for the client's lifetime (the continuation
-/// 400 above, which IS counted, pins on the second).
+/// the serial read supplies it. A 429 says nothing about the filter or the
+/// index, so it is no lag strike — the second throttled scan still slices,
+/// where two such waves used to pin the collection serial for the client's
+/// lifetime — but it has its own bound: the third throttled wave in a row
+/// pins it, since sixteen chains that each fail and then pay the serial read
+/// anyway only add to the load.
 #[tokio::test]
 async fn a_slice_out_of_retries_reads_serially() {
     let server = MockServer::start().await;
     mount_probe(&server).await;
     mount_count(&server, 48).await;
-    Mock::given(method("GET"))
-        .and(path("/servicePrincipals"))
-        .and(query_param("$filter", "startswith(appId,'7')"))
-        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
-        .with_priority(1)
-        .mount(&server)
-        .await;
+    let _throttled = mount_failing_slice_7(&server, 429).await;
+    mount_plain_slice_rows(&server, None).await;
+    mount_serial_rest(&server, 4).await;
+
+    let client = make_client(&server.uri());
+    for scan in 1..=3 {
+        assert!(
+            scan_sliced(&client, &server).await,
+            "throttled scan {scan} must still slice"
+        );
+    }
+    assert!(
+        !scan_sliced(&client, &server).await,
+        "three throttled waves in a row pin the collection serial"
+    );
+    assert_eq!(
+        slice_requests(&server).await.1,
+        0,
+        "a throttle must not retry as an advanced query"
+    );
+    server.verify().await;
+}
+
+/// The throttle bound counts waves in a row: a merge that validates between
+/// them clears it, like the lag strikes, so a tenant throttled now and then
+/// is never pinned by throttles spread across the session.
+#[tokio::test]
+async fn a_validated_merge_clears_the_throttle_count() {
+    let server = MockServer::start().await;
+    mount_probe(&server).await;
+    mount_count(&server, 48).await;
+    mount_plain_slice_rows(&server, None).await;
+    // Five throttled scans fall back to the serial read; the clean one does not.
+    mount_serial_rest(&server, 5).await;
+
+    let client = make_client(&server.uri());
+    let throttled = mount_failing_slice_7(&server, 429).await;
+    for _ in 0..2 {
+        assert!(scan_sliced(&client, &server).await);
+    }
+    throttled.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        scan_sliced(&client, &server).await,
+        "the clean scan validates"
+    );
+    throttled.store(true, std::sync::atomic::Ordering::SeqCst);
+    for scan in 4..=6 {
+        assert!(
+            scan_sliced(&client, &server).await,
+            "scan {scan} must still slice: the validated merge cleared the earlier throttles"
+        );
+    }
+    server.verify().await;
+}
+
+/// Only a throttle is transient. A slice out of retries on a server error is
+/// judged like any failed wave — a strike, since its empty union can never
+/// prove the slices complete — so two in a row pin the collection serial, as
+/// before.
+#[tokio::test]
+async fn a_slice_out_of_retries_on_a_server_error_is_a_strike() {
+    let server = MockServer::start().await;
+    mount_probe(&server).await;
+    mount_count(&server, 48).await;
+    let _failing = mount_failing_slice_7(&server, 503).await;
     mount_plain_slice_rows(&server, None).await;
     mount_serial_rest(&server, 3).await;
 
     let client = make_client(&server.uri());
-    let mut sliced = 0;
-    for scan in 1..=3 {
-        let sps = client.list_service_principals_index().await.unwrap();
-        assert_eq!(row_ids(&sps), all_ids());
-        let (now, advanced) = slice_requests(&server).await;
+    for scan in 1..=2 {
         assert!(
-            now > sliced,
-            "scan {scan} must still slice: a throttled wave is never a strike"
+            scan_sliced(&client, &server).await,
+            "scan {scan} slices; the strikes are only being counted"
         );
-        assert_eq!(
-            advanced, 0,
-            "a throttle must not retry as an advanced query"
-        );
-        sliced = now;
     }
+    assert!(
+        !scan_sliced(&client, &server).await,
+        "two server-error waves in a row pin the collection serial"
+    );
     server.verify().await;
 }
 
