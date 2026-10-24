@@ -4,6 +4,7 @@ use super::*;
 
 use super::prefetch::{
     prefetch_admin_consent_grants, prefetch_office365_role_grants, sign_in_activity_outcome,
+    sign_in_pre_acquire_outcome,
 };
 use super::score::{
     combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
@@ -596,6 +597,37 @@ fn degraded_gaps_are_listed_by_description_not_by_flag() {
     assert!(json.contains("permissionResolution"));
 }
 
+/// The export's unused-detection note follows the workbench: a transient
+/// sign-in read failure says to re-run, never to get a consent or license that
+/// may already be in place; an unavailable report names all three causes.
+#[test]
+fn the_unused_detection_note_matches_the_cause_in_every_export() {
+    let items = vec![sample("App A")];
+    let gap = AuditExportCoverage {
+        sign_in_report_available: false,
+        degraded: vec![AuditCoverageGap::SignInActivity],
+        ..complete(1)
+    };
+    for text in [
+        audit_to_html(&items, &gap),
+        export_audit_csv(items.clone(), &gap),
+    ] {
+        assert!(text.contains("be read just now"), "{text}");
+        assert!(!text.contains("needs AuditLog.Read.All consent"), "{text}");
+    }
+
+    let unavailable = AuditExportCoverage {
+        sign_in_report_available: false,
+        ..complete(1)
+    };
+    let csv = export_audit_csv(items, &unavailable);
+    assert!(
+        csv.contains("AuditLog.Read.All consent, an Entra ID P1/P2 license and a reporting role"),
+        "{csv}"
+    );
+    assert!(!csv.contains("be read just now"));
+}
+
 /// Unresolved mailbox scoping is a caveat, not a gap: the run is complete
 /// and cacheable, yet every export has to carry the sentence the org-wide
 /// mailbox group shows, or an over-reported finding reads as confirmed.
@@ -945,6 +977,32 @@ async fn an_unentitled_sign_in_report_is_unavailable_not_a_gap() {
     let (_, _, _, gap) = sign_in_activity_outcome(Err(azapptoolkit_graph::GraphError::Token(
         TokenError::new("consent_required", "AADSTS65001"),
     )));
+    assert_eq!(gap, None);
+}
+
+/// The pre-acquire half: an unreachable token endpoint (`AuthError::Http` →
+/// `network`) is the transient gap; a missing consent is the grant button, not
+/// a gap; an unclassified `/token` refusal stays unavailable.
+#[test]
+fn a_failed_pre_acquire_is_a_gap_only_when_the_token_endpoint_is_unreachable() {
+    let (available, consent_required, _, gap) =
+        sign_in_pre_acquire_outcome(&UiError::new("network", "connection refused", true));
+    assert!(!available && !consent_required);
+    assert_eq!(gap, Some(AuditCoverageGap::SignInActivity));
+    assert!(!run_is_cacheable(
+        false,
+        false,
+        &[AuditCoverageGap::SignInActivity]
+    ));
+
+    let (_, consent_required, _, gap) =
+        sign_in_pre_acquire_outcome(&UiError::new("consent_required", "AADSTS65001", false));
+    assert!(consent_required);
+    assert_eq!(gap, None);
+
+    let (_, consent_required, _, gap) =
+        sign_in_pre_acquire_outcome(&UiError::new("token_exchange", "HTTP 400", true));
+    assert!(!consent_required);
     assert_eq!(gap, None);
 }
 

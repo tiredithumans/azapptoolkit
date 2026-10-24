@@ -370,8 +370,9 @@ pub(crate) type SignInPrefetch = (
 /// tenant that has not consented the scope, lacks Entra ID P1/P2 or whose
 /// operator holds no reporting role reads as *unavailable* — no gap, no
 /// degraded banner, since most tenants are not entitled. A **transient**
-/// failure — throttled, 5xx or unreachable, at the report or at the token
-/// endpoint — on a tenant that can read it IS
+/// failure — the report throttled, failing (5xx) or unreachable once its
+/// pages' retry budget is spent, or the token endpoint unreachable — on a
+/// tenant that can read it IS
 /// [`AuditCoverageGap::SignInActivity`]: unused-app detection silently stopped
 /// working for this run, so it must not be cached or shown as an all-clear,
 /// and nothing should tell the operator to grant a consent already in place.
@@ -384,24 +385,29 @@ pub(crate) async fn prefetch_sign_in_activity(
         Ok(()) => {
             sign_in_activity_outcome(client.list_service_principal_sign_in_activities().await)
         }
-        Err(err) => {
-            // `AuthError::Http`: the token endpoint was unreachable — the
-            // transient case, not an entitlement answer.
-            let transient = matches!(err, azapptoolkit_auth::AuthError::Http(_));
-            let ui = UiError::from(err);
-            let consent_required = ui.is_consent_required();
-            tracing::info!(
-                code = %ui.code,
-                "AuditLog.Read.All token unavailable; skipping unused-app detection"
-            );
-            (
-                false,
-                consent_required,
-                Arc::new(HashMap::new()),
-                transient.then_some(AuditCoverageGap::SignInActivity),
-            )
-        }
+        Err(err) => sign_in_pre_acquire_outcome(&UiError::from(err)),
     }
+}
+
+/// The token half of [`prefetch_sign_in_activity`]: a failed `AuditLog.Read.All`
+/// pre-acquire. A missing consent sets `consent_required` (the "Grant consent"
+/// button); only an unreachable token endpoint — `network`, the auth plane's
+/// code for `AuthError::Http` — is the transient gap. A `/token` 429 or 5xx
+/// arrives as the unclassified `token_exchange` (`post_token` reports every
+/// unrecognised non-2xx that way, 4xx included), so it stays *unavailable*
+/// rather than calling a permanent refusal transient.
+pub(crate) fn sign_in_pre_acquire_outcome(ui: &UiError) -> SignInPrefetch {
+    let transient = ui.code == "network";
+    tracing::info!(
+        code = %ui.code,
+        "AuditLog.Read.All token unavailable; skipping unused-app detection"
+    );
+    (
+        false,
+        ui.is_consent_required(),
+        Arc::new(HashMap::new()),
+        transient.then_some(AuditCoverageGap::SignInActivity),
+    )
 }
 
 /// The report read's half of [`prefetch_sign_in_activity`], once the token is
