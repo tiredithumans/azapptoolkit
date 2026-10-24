@@ -99,8 +99,9 @@ public release from `latest.json`, which has no IDs or cloud baked in, so an
 updated team build drops to the first-run config screen (and the commercial
 cloud). Ship the MSI (Windows) or `.deb` (Linux) — `update_policy` never
 offers those an update — or have the team set `"auto_update": false` in
-`settings.json` / `AZAPPTOOLKIT_AUTO_UPDATE=0`, the only option for the macOS
-`.app`.
+`settings.json` (the route for the macOS `.app`, which doesn't inherit shell
+environment variables when opened from Finder or the Dock) or, on Windows and
+Linux, `AZAPPTOOLKIT_AUTO_UPDATE=0`.
 
 A sovereign-cloud team build can bake the cloud the same way: uncomment
 `AZAPPTOOLKIT_CLOUD=usgov` (or `usgovdod` / `china`) in `.env`, and

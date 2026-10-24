@@ -321,7 +321,9 @@ confirmation). To stop the checks entirely, there are two ways:
 - **Environment variable** — set `AZAPPTOOLKIT_AUTO_UPDATE=0` (also
   accepts `false` / `off` / `no`) in the user or machine environment
   before launching the app. Useful for CI runners and for MDM/Group
-  Policy deployments that wrap the launcher.
+  Policy deployments that wrap the launcher. On macOS an app opened from
+  Finder or the Dock doesn't inherit shell environment variables, so use the
+  settings file there.
 - **Settings file** — drop a JSON file at the platform's app-data
   folder:
   - Windows: `%APPDATA%\azapptoolkit\settings.json`
@@ -493,9 +495,10 @@ them to azapptoolkit one of three ways:
   > it, the app shows the **Configure your tenant** screen (and signs in to
   > the commercial cloud). Hand out the MSI (Windows) or `.deb` (Linux) —
   > the in-app updater never touches those — or turn updates off for the
-  > team with `"auto_update": false` in `settings.json` or
-  > `AZAPPTOOLKIT_AUTO_UPDATE=0` (see [Opting out](#opting-out)); on macOS
-  > the opt-out is the only way.
+  > team (see [Opting out](#opting-out)): `"auto_update": false` in
+  > `settings.json`, which is the route on macOS (an app opened from Finder
+  > or the Dock doesn't see shell environment variables), or on Windows and
+  > Linux `AZAPPTOOLKIT_AUTO_UPDATE=0`.
 
 The resolution order is **environment variable → in-app `settings.json` →
 baked-in value → unset**; while unset, sign-in can't succeed and the
@@ -523,9 +526,11 @@ Each day's log is a file named `azapptoolkit.YYYY-MM-DD.log`, in:
 - macOS: `~/Library/Application Support/azapptoolkit/logs/`
 - Linux: `~/.local/share/azapptoolkit/logs/`
 
-Settings → Tenant connection shows this folder and your `settings.json` with
-a **Copy** button, and so do a failed sign-in, the configuration screen and a
-failed update — the places you are most likely to need them.
+Settings → Tenant connection shows this folder and your `settings.json`, each
+with a **Copy** button. Both also show under a failed sign-in, under a save
+that fails on the **Configure your tenant** screen, and in the warning about a
+`settings.json` the app couldn't read; an update that fails in a way **Update
+& restart** can't retry shows the log folder.
 
 The newest 14 files (about two weeks) are kept and older ones are deleted. Each line names the component that wrote it, and a backend crash (panic) is written to the same file with a backtrace. The first lines of each run record the app version, OS, architecture, cloud and tenant. On macOS and Linux the folder is readable by your account only. If the folder can't be written, the app still starts and logs to the console instead.
 
