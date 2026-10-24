@@ -46,9 +46,9 @@ use azapptoolkit_core::identity::{SignInOutcome, TenantContext, canonical_tenant
 
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
-    AccessToken, PurgeOutcome, TokenCache, delete_refresh_token, delete_refresh_token_if_current,
-    delete_refresh_token_then, ensure_keyring_store, load_refresh_token, save_refresh_token_if,
-    scope_key,
+    AccessToken, PurgeOutcome, TokenCache, delete_refresh_token, delete_refresh_token_if,
+    delete_refresh_token_if_current, delete_refresh_token_then, ensure_keyring_store,
+    load_refresh_token, save_refresh_token_if, scope_key,
 };
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
@@ -346,11 +346,19 @@ impl EntraAuthService {
                             target: "auth",
                             %status,
                             limit = MAX_TOKEN_RESPONSE_BYTES,
+                            content_type = content_type.as_deref().unwrap_or("<none>"),
                             "AAD token endpoint response exceeded the size limit"
                         );
-                        return Attempt::Done(Err(AuthError::TokenExchange(
-                            "token response too large".into(),
-                        )));
+                        // Only a JSON success is a (broken) Entra answer; a
+                        // big error status or page is a proxy's block page
+                        // or an outage, and says so.
+                        let entra_shaped = status.is_success()
+                            && content_type_class(content_type.as_deref()) == "json";
+                        return Attempt::Done(Err(if entra_shaped {
+                            AuthError::TokenExchange("token response too large".into())
+                        } else {
+                            not_entras_answer(status, content_type.as_deref())
+                        }));
                     }
                     body.extend_from_slice(&chunk);
                 }
@@ -372,16 +380,11 @@ impl EntraAuthService {
                         content_type = content_type.as_deref().unwrap_or("<none>"),
                         "AAD token endpoint returned success with a non-JSON body"
                     );
-                    Err(AuthError::UnexpectedResponder {
-                        status: status.as_u16(),
-                        content_type_class: content_type_class(content_type.as_deref()),
-                    })
+                    Err(not_entras_answer(status, content_type.as_deref()))
                 }
                 Err(e) => Err(e.into()),
             });
         }
-        let throttled_or_down =
-            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
         let err = if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&body) {
             // Log the OAuth error code, the AADSTS numeric code, and the
             // correlation id for operators, but never the raw
@@ -398,7 +401,7 @@ impl EntraAuthService {
                 // Entra answered, but with a throttle or an outage rather than
                 // a verdict on the request: nothing to fix in the config, and
                 // the refresh token is untouched.
-                AuthError::TokenExchange(detail) if throttled_or_down => {
+                AuthError::TokenExchange(detail) if is_throttle_or_outage(status) => {
                     AuthError::ServiceUnavailable {
                         status: status.as_u16(),
                         detail,
@@ -422,20 +425,7 @@ impl EntraAuthService {
                 content_type = content_type.as_deref().unwrap_or("<none>"),
                 "AAD token endpoint returned non-success without TokenErrorBody"
             );
-            let content_type_class = content_type_class(content_type.as_deref());
-            if throttled_or_down {
-                // A gateway's 502/503/504 or a bare 429: the path to Entra is
-                // throttled or down, whoever wrote the page.
-                AuthError::ServiceUnavailable {
-                    status: status.as_u16(),
-                    detail: format!("{content_type_class} body"),
-                }
-            } else {
-                AuthError::UnexpectedResponder {
-                    status: status.as_u16(),
-                    content_type_class,
-                }
-            }
+            not_entras_answer(status, content_type.as_deref())
         };
         if retry_after_secs.is_some_and(|s| s > TOKEN_RETRY_AFTER_MAX_SECS) {
             // Waiting it out would hold the caller's per-scope refresh lock
@@ -467,6 +457,32 @@ impl EntraAuthService {
 /// but a token call runs under the per-(tenant, scope) refresh lock, so every
 /// same-key caller would queue behind the wait.
 const TOKEN_RETRY_AFTER_MAX_SECS: u64 = 30;
+
+/// A 429 or a 5xx: the path to Entra is throttled or down, whoever answered.
+fn is_throttle_or_outage(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// The error for a `/token` answer that is not Entra's verdict — no OAuth
+/// error body, a success that is not JSON, or an oversized page:
+/// [`AuthError::ServiceUnavailable`] for a throttle or an outage (a gateway's
+/// 502/503/504, a bare 429 — whoever wrote the page), else
+/// [`AuthError::UnexpectedResponder`] (a proxy's block page, a portal, an
+/// unfollowed 3xx). Metadata only: the status and the content-type class.
+fn not_entras_answer(status: reqwest::StatusCode, content_type: Option<&str>) -> AuthError {
+    let content_type_class = content_type_class(content_type);
+    if is_throttle_or_outage(status) {
+        AuthError::ServiceUnavailable {
+            status: status.as_u16(),
+            detail: format!("{content_type_class} body"),
+        }
+    } else {
+        AuthError::UnexpectedResponder {
+            status: status.as_u16(),
+            content_type_class,
+        }
+    }
+}
 
 /// The coarse class of a `/token` response's `Content-Type` — the one detail of
 /// a non-Entra answer worth reporting ("an HTML page answered" says "a proxy"),
@@ -1320,9 +1336,19 @@ impl EntraAuthService {
         // shown as signed into. `InvalidGrant` already removes it; the removal
         // is idempotent and also covers the failures that don't (a network
         // outage, a locked keyring), leaving the service exactly as found.
-        self.known_tenants
-            .lock()
-            .insert(tenant.tenant_id.clone(), tenant.clone());
+        //
+        // Fenced like every other late store: the launch screen lets the
+        // operator stop waiting and sign in while this refresh is still in
+        // flight, and that `sign_in` moves the epoch and registers its own
+        // context. From then on this restore must leave the registry, the
+        // cache and the keyring to the newer session — a remove here would
+        // un-register it, and every cache-only command would then fail the
+        // session check right after a good sign-in.
+        let fence = {
+            let mut registry = self.known_tenants.lock();
+            registry.insert(tenant.tenant_id.clone(), tenant.clone());
+            self.session_epoch()
+        };
         let cae_claims = build_cae_claims(None);
         let acquired = self
             .acquire_token(
@@ -1335,32 +1361,61 @@ impl EntraAuthService {
         let id_claims = match acquired {
             Ok((_, id_claims)) => id_claims,
             Err(err) => {
-                self.known_tenants.lock().remove(&tenant.tenant_id);
+                let mut registry = self.known_tenants.lock();
+                if self.session_epoch() == fence {
+                    registry.remove(&tenant.tenant_id);
+                }
                 return Err(err);
             }
         };
         match restored_context(tenant, id_claims) {
             Ok(fresh) => {
-                self.known_tenants
-                    .lock()
-                    .insert(fresh.tenant_id.clone(), fresh.clone());
+                let mut registry = self.known_tenants.lock();
+                if self.session_epoch() != fence {
+                    // Superseded: the newer session's registration stands,
+                    // and this one was never shown to the operator.
+                    return Err(AuthError::NotSignedIn);
+                }
+                registry.insert(fresh.tenant_id.clone(), fresh.clone());
+                drop(registry);
                 Ok(SignInOutcome { tenant: fresh })
             }
             Err(err) => {
                 // The grant succeeded, so a token of the wrong (or an unknown)
-                // identity is already cached: drop it with the context.
-                self.cache.invalidate_tenant(&tenant.tenant_id);
-                self.known_tenants.lock().remove(&tenant.tenant_id);
+                // identity is already cached: drop it with the context —
+                // unless a newer session owns both by now (its own sign-in
+                // already swept this token: a store either lands before that
+                // sweep or is refused after the move).
+                let current = {
+                    let mut registry = self.known_tenants.lock();
+                    let current = self.session_epoch() == fence;
+                    if current {
+                        self.cache.invalidate_tenant(&tenant.tenant_id);
+                        registry.remove(&tenant.tenant_id);
+                    }
+                    current
+                };
+                if !current {
+                    // Superseded, as above — and not `Authorization`, which
+                    // would have the command drop the remembered pointer the
+                    // newer sign-in just wrote.
+                    return Err(AuthError::NotSignedIn);
+                }
                 if matches!(err, AuthError::Authorization(_)) {
                     // A proven mismatch: the refresh token just rotated into
                     // the remembered `{tenant}:{oid}` entry is someone else's,
                     // and keeping it would repeat this refresh + refusal on
                     // every launch. Best-effort — the restore is refused
-                    // either way; the caller drops the remembered pointer.
-                    if delete_refresh_token_off_worker(&tenant.tenant_id, &tenant.account_oid)
-                        .await
-                        .is_err()
-                    {
+                    // either way; the caller drops the remembered pointer. The
+                    // fence is re-checked under the keyring's chunk-set lock,
+                    // so a sign-in that lands meanwhile keeps its token.
+                    let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+                    let epoch = Arc::clone(&self.session_epoch);
+                    let deleted = tokio::task::spawn_blocking(move || {
+                        delete_refresh_token_if(&t, &oid, || epoch.load(Ordering::SeqCst) == fence)
+                    })
+                    .await;
+                    if !matches!(deleted, Ok(Ok(_))) {
                         tracing::warn!(
                             target: "auth",
                             "could not delete the mismatched stored sign-in"
@@ -2187,6 +2242,7 @@ mod tests {
                 "load_refresh_token(",
                 "delete_refresh_token_then(",
                 "delete_refresh_token(",
+                "delete_refresh_token_if(",
                 "delete_refresh_token_if_current(",
             ]
             .iter()
@@ -2328,6 +2384,70 @@ mod tests {
         let svc = signed_in_service(auth_root, tenant, oid);
         svc.known_tenants.lock().clear();
         svc
+    }
+
+    /// The launch card lets the operator stop waiting ("Sign in instead") and
+    /// sign in while the restore's refresh is still in flight. Whatever that
+    /// refresh comes back with — a dead token, or a good one late — the
+    /// restore must not un-register the newer session: it used to remove the
+    /// tenant unconditionally, and every cache-only command then failed the
+    /// session check right after a good sign-in.
+    #[tokio::test]
+    async fn a_restore_that_finishes_after_a_sign_in_leaves_the_new_session_alone() {
+        for (case, response) in [
+            (
+                "dead token",
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "AADSTS70008: The refresh token has expired."
+                })),
+            ),
+            ("late success", token_ok("late-restore")),
+        ] {
+            let server = MockServer::start().await;
+            let tenant = format!("restore-race-{}", case.replace(' ', "-"));
+            let tenant = tenant.as_str();
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .respond_with(response.set_delay(std::time::Duration::from_millis(300)))
+                .mount(&server)
+                .await;
+            let svc = relaunched_service(server.uri(), tenant, "remembered-oid");
+            let remembered = TenantContext {
+                tenant_id: tenant.into(),
+                account_oid: "remembered-oid".into(),
+                username: None,
+                display_name: None,
+            };
+            let newer = TenantContext {
+                account_oid: "signed-in-oid".into(),
+                ..remembered.clone()
+            };
+            let sign_in_lands = async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // What `sign_in` does once its browser round trip completes.
+                let mut registry = svc.known_tenants.lock();
+                svc.cache.invalidate_tenant(tenant);
+                registry.remove(tenant);
+                svc.bump_session_epoch();
+                registry.insert(tenant.into(), newer.clone());
+            };
+
+            let (result, ()) = tokio::join!(svc.restore_session(&remembered), sign_in_lands);
+
+            assert!(result.is_err(), "{case}: {result:?}");
+            assert_eq!(
+                svc.tenant_context(tenant).map(|t| t.account_oid).as_deref(),
+                Some("signed-in-oid"),
+                "{case}: the newer session's registration must survive"
+            );
+            assert!(
+                svc.cache
+                    .get(tenant, &svc.default_graph_read_scopes(), true)
+                    .is_none(),
+                "{case}: the superseded restore cached nothing"
+            );
+        }
     }
 
     /// Offline at launch: the token endpoint is unreachable, which is not a
@@ -3532,6 +3652,41 @@ mod tests {
             "{result:?}"
         );
         assert!(svc.cache.get(tenant, &arm_scopes(), false).is_none());
+    }
+
+    /// A big block page is still a block page: past the cap, only a JSON
+    /// success reads as a broken Entra answer; an error page is named for what
+    /// it is, so the operator is not sent to re-check the ids.
+    #[tokio::test]
+    async fn an_oversized_proxy_page_is_not_a_token_exchange_failure() {
+        for (status, expected) in [(403, "unexpected_responder"), (503, "service_unavailable")] {
+            let server = MockServer::start().await;
+            let tenant = format!("oversized-page-{status}");
+            let tenant = tenant.as_str();
+            let page = format!("<html>{}</html>", "x".repeat(MAX_TOKEN_RESPONSE_BYTES));
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .respond_with(
+                    // An oversized body ends the attempt unread, so the 503
+                    // is not retried.
+                    ResponseTemplate::new(status).set_body_raw(page, "text/html"),
+                )
+                .mount(&server)
+                .await;
+            let svc = signed_in_service(server.uri(), tenant, "oversized-page-oid");
+
+            let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+            let code = match &result {
+                Err(AuthError::UnexpectedResponder {
+                    status: 403,
+                    content_type_class: "html",
+                }) => "unexpected_responder",
+                Err(AuthError::ServiceUnavailable { status: 503, .. }) => "service_unavailable",
+                _ => "other",
+            };
+            assert_eq!(code, expected, "{status}: {result:?}");
+        }
     }
 
     /// A keyring that refuses the rotated refresh token on a SILENT refresh

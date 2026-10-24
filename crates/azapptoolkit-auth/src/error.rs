@@ -68,10 +68,13 @@ pub enum AuthError {
         content_type_class: &'static str,
     },
 
-    /// The `/token` endpoint stayed throttled (429) or failing (5xx) through
-    /// the retry budget, or asked for a `Retry-After` too long to wait under
-    /// the refresh lock. Nothing was rejected: the refresh token is untouched
-    /// and a later retry can succeed. `detail` is the redacted AAD error
+    /// The `/token` endpoint answered 429 or 5xx and the retry policy did not
+    /// clear it: a refresh grant still failing after its retries, an
+    /// authorization-code grant at once (a 5xx after the single-use code may
+    /// have been redeemed is never replayed; only a 429 is), or a
+    /// `Retry-After` too long to wait under the refresh lock. Nothing was
+    /// rejected: the refresh token is untouched and a later retry can
+    /// succeed. `detail` is the redacted AAD error
     /// (`"{error} (AADSTSnnnnn)"`) when Entra sent one, else the body's
     /// content-type class — never the body.
     #[error(

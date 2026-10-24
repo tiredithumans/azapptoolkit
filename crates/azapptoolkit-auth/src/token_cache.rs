@@ -577,6 +577,25 @@ pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {
     delete_chunks(tenant_id, account_oid)
 }
 
+/// [`delete_refresh_token`], but only while `still_current()` holds —
+/// evaluated under the chunk-set lock, the twin of [`save_refresh_token_if`]:
+/// a sign-in that moved the session epoch first keeps the token it is about to
+/// store (its save waits on the lock), and one that moves it after finds this
+/// delete already done. Returns whether anything was deleted.
+pub fn delete_refresh_token_if(
+    tenant_id: &str,
+    account_oid: &str,
+    still_current: impl FnOnce() -> bool,
+) -> Result<bool> {
+    ensure_keyring_store()?;
+    let _guard = CHUNK_SET_LOCK.lock();
+    if !still_current() {
+        return Ok(false);
+    }
+    delete_chunks(tenant_id, account_oid)?;
+    Ok(true)
+}
+
 /// What [`delete_refresh_token_if_current`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PurgeOutcome {

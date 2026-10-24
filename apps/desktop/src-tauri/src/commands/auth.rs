@@ -233,8 +233,10 @@ pub async fn request_scope_consent(
 /// Completes a Conditional Access step-up for an optional `feature`'s audience
 /// (e.g. `"arm"`, `"exchange"`, `"log_analytics"`). The recovery path the UI's
 /// "Verify identity" levers invoke after a command fails with the
-/// `interaction_required` code (MFA, registration or an external challenge a
-/// policy demands for that resource): one browser round trip with
+/// `interaction_required` code — a Conditional Access policy interrupting
+/// that resource's silent grant (MFA, registration, an external challenge, a
+/// device or app requirement, or an outright block, whose reason the browser
+/// page then names): one browser round trip with
 /// `prompt=login`, pinned to the signed-in account, that seeds the token cache
 /// so the retried command's silent acquisition succeeds. The session is never
 /// dropped — that code does not purge the refresh token.
