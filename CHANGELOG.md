@@ -14,14 +14,6 @@ After 0.34.1, each change is one line written for the person using the app.
 - Sign-in hints now cover the 5-minute timeout and local listener errors, and name the http://127.0.0.1 redirect URI.
 - A failed Re-authenticate, Grant consent or Verify identity keeps its button and says what to fix instead of vanishing.
 - A session restore at launch that takes more than a few seconds now offers Sign in instead of an endless spinner.
-
-### Security
-
-- Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
-- Security fix for a timing weakness in a cryptography helper that the app's hashing code depends on.
-
-### Fixed
-
 - App Registrations now warns when a tenant has too many service principals to show every app's enterprise app link.
 - Big tenants no longer lose fast list loading for the session after Microsoft Graph throttles two scans in a row.
 - Home's App Registrations counts still load when the tenant's enterprise applications can't be read.
@@ -30,6 +22,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Security
 
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.
+- Security fix for a timing weakness in a cryptography helper that the app's hashing code depends on.
 
 ## [0.34.1] - 2026-10-15
 
