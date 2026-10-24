@@ -107,7 +107,20 @@ network call (`update_gate()` precedes `app.updater()`; pinned by
 `Disabled { reason }`); the shell records `Disabled` silently and relabels the account-menu item
 with `UpdatesDisabled::menu_label()` (tooltip: `description()`, one definition shared with the
 backend's `updates_disabled` error from `perform_update`). The updater plugin logs check failures
-itself; the command layer logs only what it does not — `app.updater()` and install failures.
+itself; the command layer logs only what it does not — building the updater and install failures.
+
+### Transfer budget and failure classes
+
+The plugin sets no HTTP timeout, so both commands build the updater through
+`app.updater_builder()` + `with_transfer_budget` (the shared `http_retry::CONNECT_TIMEOUT` and a
+60 s **read** timeout, `UPDATE_READ_TIMEOUT` — not a total one, which would cut a slow but moving
+download); the gate-ordering pin accepts either `.updater()` or `.updater_builder(` as the first
+touch of the plugin. `update_error_class` maps the plugin's error: a signature that does not verify
+or a signed-version mismatch → `update_unverified`; a transfer failure (`Reqwest`, `Network`,
+`ReleaseNotFound`) → `network_error`, the one retryable class (`http_retry::is_retryable_code`);
+everything else → `updater`. For a non-retryable error the splash disables **Update & restart**
+(a retry would fail the same way), links the Releases page for a manual install and shows the log
+folder (`components::support_paths`); a newer `info` clears the error.
 
 ### Release notes are rendered summary-first
 

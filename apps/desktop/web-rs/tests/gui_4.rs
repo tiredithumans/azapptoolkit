@@ -43,3 +43,5 @@ mod shell;
 mod shortcuts;
 #[path = "gui/sign_in.rs"]
 mod sign_in;
+#[path = "gui/update_splash.rs"]
+mod update_splash;

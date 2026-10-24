@@ -2,26 +2,56 @@
 //! notes (from the updater manifest) with an "Update & restart" action that
 //! downloads, installs, and relaunches — streaming download progress. Opened
 //! from the launch-check toast or the nav "Check for updates" button.
+//!
+//! A failure a retry cannot clear — an update whose signature did not verify,
+//! an install that failed — disables "Update & restart" and points at the
+//! manual install (the Releases page) and the log folder instead of offering
+//! the same failing click again.
 
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
+
+use azapptoolkit_dto::UiError;
 
 use crate::bindings::events;
 use crate::bindings::updater::{self, UpdateInfo, UpdateProgress};
 use crate::components::changelog_notes::ChangelogNotes;
 use crate::components::modal_shell::ModalShell;
+use crate::components::support_paths::SupportPathsBlock;
 use crate::components::ui::{Callout, ProgressBar};
 use crate::hooks::use_progress_stream::use_progress_stream;
+
+/// Where a release can be downloaded and installed by hand.
+const RELEASES_URL: &str = "https://github.com/tiredithumans/azapptoolkit/releases";
+
+/// Whether `e` leaves only the manual install: not retryable, and not the
+/// "updates are off for this install" refusal, whose own message already says
+/// who updates it.
+fn needs_manual_install(e: &UiError) -> bool {
+    !e.retryable && e.code != "updates_disabled"
+}
 
 #[component]
 pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) -> impl IntoView {
     let updating = RwSignal::new(false);
-    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let error: RwSignal<Option<UiError>> = RwSignal::new(None);
     let progress: RwSignal<Option<UpdateProgress>> = RwSignal::new(None);
     use_progress_stream(progress, events::updater_progress);
+    // A failure a retry cannot clear keeps Update & restart off: clicking it
+    // again would download the same unverifiable bytes, or fail the same way.
+    let blocked = move || error.with(|e| e.as_ref().is_some_and(|e| !e.retryable));
+    // A later check that found a newer release is a different download: the
+    // last failure no longer applies to it.
+    Effect::new(move |seen: Option<Option<String>>| {
+        let version = info.with(|i| i.as_ref().map(|i| i.version.clone()));
+        if seen.is_some_and(|seen| seen != version) {
+            error.set(None);
+        }
+        version
+    });
 
     let do_update = move |_| {
-        if updating.get() {
+        if updating.get() || blocked() {
             return;
         }
         updating.set(true);
@@ -38,7 +68,7 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                     open.set(false);
                 }
                 Err(e) => {
-                    error.set(Some(e.message));
+                    error.set(Some(e));
                     updating.set(false);
                 }
             }
@@ -101,13 +131,40 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                         })
                                 }}
                                 {move || {
-                                    error.get().map(|e| view! { <Callout tone="warn">{e}</Callout> })
+                                    error
+                                        .get()
+                                        .map(|e| {
+                                            let manual = needs_manual_install(&e);
+                                            view! {
+                                                <Callout tone="warn" role="alert">
+                                                    <span class="ui-text">{e.message}</span>
+                                                    {manual
+                                                        .then(|| {
+                                                            view! {
+                                                                <span class="ui-text update-splash__manual">
+                                                                    "Update & restart can't get past this. Download the new version from the "
+                                                                    <a
+                                                                        class="link-btn"
+                                                                        href=RELEASES_URL
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                    >
+                                                                        "Releases page"
+                                                                    </a>
+                                                                    " and run its installer instead. The log folder below has the details."
+                                                                </span>
+                                                                <SupportPathsBlock settings_file=false />
+                                                            }
+                                                        })}
+                                                </Callout>
+                                            }
+                                        })
                                 }}
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(do_update)
-                                        disabled=Signal::derive(move || updating.get())
+                                        disabled=Signal::derive(move || updating.get() || blocked())
                                     >
                                         {move || if updating.get() { "Updating…" } else { "Update & restart" }}
                                     </Button>
