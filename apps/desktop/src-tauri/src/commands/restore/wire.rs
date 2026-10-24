@@ -607,6 +607,9 @@ fn not_wired(c: &CreatedApp) -> RestoredApp {
 /// session — and still reports every app it did not reach ([`not_wired`]), so
 /// `report.apps` stays index-aligned with `created`, which Pass 3 relies on.
 /// Ticks `progress` once per app it wires.
+// Eight, not a struct: `PassCtx` holds what every pass shares, and the token
+// stays a parameter so the repo invariants find this as a cancel runner.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn pass2_wire(
     ctx: &PassCtx<'_>,
     created: &[CreatedApp],
