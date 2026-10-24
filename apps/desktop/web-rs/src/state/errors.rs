@@ -43,19 +43,66 @@ impl Session {
 
     /// The one interactive re-authentication round trip and what follows it:
     /// on success re-run a mounted Access Readiness checklist (the new session
-    /// may carry different roles) and toast; on failure toast the reason.
-    /// Every in-place re-auth goes through here, so a new post-re-auth side
-    /// effect is added once.
+    /// may carry different roles) and toast; on failure raise the
+    /// Re-authenticate lever again, saying what clears the failure — the
+    /// session is still dead, so an auto-dismissing error would leave no way
+    /// back. Every in-place re-auth goes through here, so a new post-re-auth
+    /// side effect is added once.
     async fn reauth_in_place(self, tenant: &TenantContext) {
-        match crate::bindings::auth::reauthenticate(tenant).await {
+        let result = crate::bindings::auth::reauthenticate(tenant).await;
+        // Signed out or switched tenant while the browser was open: neither
+        // the outcome nor the lever belongs to the session now showing.
+        if !self.is_active_tenant(&tenant.tenant_id) {
+            return;
+        }
+        match result {
             Ok(_) => {
                 self.bump_readiness_reload();
                 self.toast_success("Re-authenticated — retry the action that failed.");
             }
             Err(e) => {
-                self.toast_error(format!("Couldn't re-authenticate: {}", e.message), None);
+                self.push_reauth_lever(auth_hints::lever_failure_message(
+                    "Couldn't re-authenticate",
+                    &e,
+                ));
             }
         }
+    }
+
+    /// The sticky **Re-authenticate** toast (key `reauth`) whose action runs
+    /// [`Self::spawn_reauth`].
+    fn push_reauth_lever(&self, message: impl Into<String>) {
+        let session = *self;
+        self.push_recovery_toast(
+            "reauth".to_string(),
+            message,
+            "Re-authenticate",
+            std::rc::Rc::new(move || session.spawn_reauth()),
+        );
+    }
+
+    /// The sticky **Grant consent** toast (key `consent:{feature}`) whose
+    /// action runs [`Self::spawn_scope_consent`].
+    fn push_consent_lever(&self, feature: &'static str, message: impl Into<String>) {
+        let session = *self;
+        self.push_recovery_toast(
+            format!("consent:{feature}"),
+            message,
+            "Grant consent",
+            std::rc::Rc::new(move || session.spawn_scope_consent(feature)),
+        );
+    }
+
+    /// The sticky **Verify identity** toast (key `step-up:{feature}`) whose
+    /// action runs [`Self::spawn_scope_step_up`].
+    fn push_step_up_lever(&self, feature: &'static str, message: impl Into<String>) {
+        let session = *self;
+        self.push_recovery_toast(
+            format!("step-up:{feature}"),
+            message,
+            "Verify identity",
+            std::rc::Rc::new(move || session.spawn_scope_step_up(feature)),
+        );
     }
 
     /// When `e` means the **session is dead** — the refresh token
@@ -75,13 +122,7 @@ impl Session {
         if !e.is_reauth_fatal() {
             return false;
         }
-        let session = *self;
-        self.push_recovery_toast(
-            "reauth".to_string(),
-            "Your session has expired — re-authenticate to continue.",
-            "Re-authenticate",
-            std::rc::Rc::new(move || session.spawn_reauth()),
-        );
+        self.push_reauth_lever("Your session has expired — re-authenticate to continue.");
         true
     }
 
@@ -97,19 +138,30 @@ impl Session {
     ///
     /// `feature` is a key the backend's `AppState::consent_scopes_for` accepts
     /// (`"write"`, `"exchange"`, `"sharepoint"`, `"arm"`, …).
+    ///
+    /// A failed round trip raises the same lever again, saying what clears the
+    /// failure — the consent is still missing — unless the session turned out
+    /// dead, which no consent can fix: then the Re-authenticate lever.
     pub fn spawn_scope_consent(&self, feature: &'static str) {
         let session = *self;
         leptos::task::spawn_local(async move {
             let Some(tenant) = session.active_tenant.get_untracked() else {
                 return;
             };
-            match crate::bindings::auth::request_scope_consent(&tenant.tenant_id, feature).await {
+            let result =
+                crate::bindings::auth::request_scope_consent(&tenant.tenant_id, feature).await;
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match result {
                 Ok(()) => {
                     session.toast_success("Consent granted — retry the action that failed.");
                 }
-                Err(e) => {
-                    session.toast_error(format!("Couldn't grant consent: {}", e.message), None);
-                }
+                Err(e) if session.report_if_session_dead(&e) => {}
+                Err(e) => session.push_consent_lever(
+                    feature,
+                    auth_hints::lever_failure_message("Couldn't grant consent", &e),
+                ),
             }
         });
     }
@@ -119,23 +171,28 @@ impl Session {
     /// interactive step the resource demands — then tell the user the action
     /// is theirs to repeat. The twin of [`Self::spawn_scope_consent`], with the
     /// same feature keys and the same "retry" wording (the lever never holds
-    /// the failed operation, so it cannot replay it).
+    /// the failed operation, so it cannot replay it). A failed round trip
+    /// re-raises the lever the same way.
     pub fn spawn_scope_step_up(&self, feature: &'static str) {
         let session = *self;
         leptos::task::spawn_local(async move {
             let Some(tenant) = session.active_tenant.get_untracked() else {
                 return;
             };
-            match crate::bindings::auth::request_scope_step_up(&tenant.tenant_id, feature).await {
+            let result =
+                crate::bindings::auth::request_scope_step_up(&tenant.tenant_id, feature).await;
+            if !session.is_active_tenant(&tenant.tenant_id) {
+                return;
+            }
+            match result {
                 Ok(()) => {
                     session.toast_success("Verified — retry the action that failed.");
                 }
-                Err(e) => {
-                    session.toast_error(
-                        format!("Couldn't complete verification: {}", e.message),
-                        None,
-                    );
-                }
+                Err(e) if session.report_if_session_dead(&e) => {}
+                Err(e) => session.push_step_up_lever(
+                    feature,
+                    auth_hints::lever_failure_message("Couldn't complete verification", &e),
+                ),
             }
         });
     }
@@ -296,12 +353,9 @@ impl Session {
         if !e.is_consent_required() {
             return false;
         }
-        let session = *self;
-        self.push_recovery_toast(
-            format!("consent:{feature}"),
+        self.push_consent_lever(
+            feature,
             "This tenant hasn't consented to the permissions this action needs.",
-            "Grant consent",
-            std::rc::Rc::new(move || session.spawn_scope_consent(feature)),
         );
         true
     }
@@ -334,12 +388,9 @@ impl Session {
         if !e.is_interaction_required() {
             return false;
         }
-        let session = *self;
-        self.push_recovery_toast(
-            format!("step-up:{feature}"),
+        self.push_step_up_lever(
+            feature,
             crate::components::verify_identity_button::VERIFY_IDENTITY_MESSAGE,
-            "Verify identity",
-            std::rc::Rc::new(move || session.spawn_scope_step_up(feature)),
         );
         true
     }

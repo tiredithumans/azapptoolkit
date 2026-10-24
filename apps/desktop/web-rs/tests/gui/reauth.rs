@@ -274,6 +274,87 @@ async fn a_failed_inline_step_up_says_so_and_does_not_retry() {
     );
 }
 
+/// A failed lever used to end in an auto-dismissing "Couldn't re-authenticate:
+/// …" toast: the session still dead, and no way back until another command
+/// happened to fail. The same lever comes back, sticky, saying what clears the
+/// failure — and it works the second time.
+#[wasm_bindgen_test]
+async fn a_failed_reauth_raises_the_lever_again_with_what_clears_it() {
+    ts::reset();
+    ts::mock_err(
+        "reauthenticate",
+        &fixtures::ui_error(
+            "cancelled",
+            "sign-in was cancelled or not completed in the browser",
+        ),
+    );
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("refresh_missing", "session expired"));
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    ts::click(".toast__action");
+
+    ts::wait_for(|| ts::body_contains("Couldn't re-authenticate")).await;
+    assert!(ts::body_contains("not finished within 5 minutes"));
+    assert_eq!(ts::text(".toast__action"), "Re-authenticate");
+    assert_eq!(ts::query_all(".toast").len(), 1, "one lever, not a stack");
+
+    ts::mock_ok(
+        "reauthenticate",
+        &SignInOutcome {
+            tenant: ts::test_tenant(),
+        },
+    );
+    ts::click(".toast__action");
+    ts::wait_for(|| ts::body_contains("Re-authenticated")).await;
+    assert_eq!(ts::call_count("reauthenticate"), 2);
+}
+
+/// The toast's step-up lever (not the inline button) re-raises itself too.
+#[wasm_bindgen_test]
+async fn a_failed_step_up_from_the_toast_offers_verify_identity_again() {
+    ts::reset();
+    ts::mock_err(
+        "request_scope_step_up",
+        &fixtures::ui_error(
+            "cancelled",
+            "sign-in was cancelled or not completed in the browser",
+        ),
+    );
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("interaction_required", "verify"));
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    ts::click(".toast__action");
+
+    ts::wait_for(|| ts::body_contains("Couldn't complete verification")).await;
+    assert_eq!(ts::text(".toast__action"), "Verify identity");
+    assert_eq!(ts::call_count("request_scope_step_up"), 1);
+}
+
+/// A consent round trip that finds the session dead re-raises the lever that
+/// can fix THAT — Re-authenticate — not another Grant consent.
+#[wasm_bindgen_test]
+async fn a_consent_lever_that_finds_the_session_dead_offers_reauth() {
+    ts::reset();
+    ts::mock_err(
+        "request_scope_consent",
+        &fixtures::ui_error("not_signed_in", "not signed in"),
+    );
+    let m = ts::mount_view(|| view! { <ToastHost /> });
+
+    m.session
+        .report_command_error(&fixtures::ui_error("consent_required", "AADSTS65001"));
+    ts::wait_for(|| ts::query(".toast__action").is_some()).await;
+    assert_eq!(ts::text(".toast__action"), "Grant consent");
+    ts::click(".toast__action");
+
+    ts::wait_for(|| ts::body_contains("session has expired")).await;
+    assert_eq!(ts::text(".toast__action"), "Re-authenticate");
+}
+
 /// A step-up on the Graph read scopes (tenant-wide MFA or sign-in frequency)
 /// comes back from the silent refresh as `interaction_required`; the in-place
 /// `reauthenticate` (`prompt=login` on exactly those scopes) is its step-up.

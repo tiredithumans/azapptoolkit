@@ -7,11 +7,15 @@
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use azapptoolkit_dto::events as names;
 use azapptoolkit_web_rs::bindings::TenantContext;
 use azapptoolkit_web_rs::components::browser_fallback_notice::BrowserFallbackNotice;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
-use azapptoolkit_web_rs::views::sign_in::SignInScreen;
+use azapptoolkit_web_rs::views::sign_in::{RestoringSession, SignInScreen};
 
 /// The sign-in card as `Root` paints it after a launch restore that could not
 /// reach Entra ID. `mount_view` presets a signed-in tenant; the card is only
@@ -83,6 +87,38 @@ async fn a_retry_that_finds_no_session_falls_back_to_the_plain_card() {
     assert_eq!(ts::call_count("restore_session"), 1);
     assert!(m.session.active_tenant.get_untracked().is_none());
     assert!(ts::body_contains("Sign in with Entra ID"));
+}
+
+/// An unreachable or throttled token endpoint can hold the launch restore for
+/// a minute or more behind a bare spinner. Past a few seconds the card says so
+/// and offers to stop waiting (`Root` then moves the restore fence, so the late
+/// answer lands nothing — pinned natively by `views::sign_in` tests).
+#[wasm_bindgen_test]
+async fn a_slow_restore_offers_to_sign_in_instead() {
+    ts::reset();
+    let chose = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&chose);
+    let _m = ts::mount_view(move || {
+        let seen = Arc::clone(&seen);
+        view! {
+            <RestoringSession
+                on_sign_in_instead=Callback::new(move |()| seen.store(true, Ordering::SeqCst))
+                slow_after=Duration::from_millis(10)
+            />
+        }
+    });
+    assert!(ts::body_contains("Restoring your session"));
+    assert!(
+        !ts::body_contains("Still trying"),
+        "a quick restore stays a bare spinner"
+    );
+
+    ts::wait_for(|| ts::body_contains("Still trying to reach Entra ID")).await;
+    ts::click(".signin-restore-skip");
+    assert!(
+        chose.load(Ordering::SeqCst),
+        "Sign in instead ends the wait"
+    );
 }
 
 #[wasm_bindgen_test]
