@@ -10,10 +10,16 @@ Access tokens are refreshed lazily (~60s before expiry) behind a shared mutex; r
 persist in the OS keyring, access tokens never touch disk (in-memory, zeroized on drop). Write
 scopes are consented **incrementally** on first write — a browse-only session holds no
 mutate-capable token. Error codes distinguish failure modes (`not_signed_in`, `keyring`,
-`keyring_unavailable`, `token_exchange`, `network`, `authorization`, `consent_required`,
-`interaction_required`, `cancelled`). `keyring_unavailable` is a credential store that could not be
+`keyring_unavailable`, `token_exchange`, `unexpected_responder`, `service_unavailable`, `network`,
+`loopback`, `authorization`, `consent_required`, `interaction_required`, `cancelled`), and the
+sign-in card and a failed recovery lever read one hint table for them
+(`web-rs` `state::auth_hints`, worded so it names no control only one surface has).
+`keyring_unavailable` is a credential store that could not be
 registered at all (on Linux: no Secret Service provider on the session bus) — memoised for the
-process, so its sign-in hint says to start one and restart, never to "unlock" it.
+process, so its sign-in hint says to start one and restart, never to "unlock" it. `sign_in`
+registers the store before its browser round trip (`ensure_keyring_store` on the blocking pool;
+it touches no credential, so it never prompts), so a machine without one is told before the
+operator signs in rather than after; there is deliberately no session-only fallback.
 
 **The cache keys on CAE-ness.** Access tokens are cached per `(tenant, scope_key, cae)`. Every Graph
 adapter is `ScopedTokenAdapter::new_cae` (tokens minted with the `cp1` client capability, revoked
@@ -35,14 +41,28 @@ per-scope lock across the backoff (intended for a short wait — same-key waiter
 result instead of re-POSTing into the same throttle — but not for the minutes the shared policy
 honours for Graph / ARM writes).
 
+**A `/token` answer that is not Entra's verdict says so.** A non-success response whose body is not
+an OAuth error body — a TLS-inspecting proxy's or WAF's block page, a captive portal, an unfollowed
+3xx — or a 200 whose body is not JSON is `AuthError::UnexpectedResponder { status,
+content_type_class }` (code `unexpected_responder`; the class is `html`/`json`/`text`/`other`/
+`untyped`, never the body, which such a responder commonly fills with the intercepted request); so
+is an oversized body unless it is a JSON success. A 429 or 5xx the retry policy did not clear — a
+refresh grant after its retries, an authorization-code grant at once (a 5xx is never replayed on a
+single-use code), or a `Retry-After` too long to wait — is
+`AuthError::ServiceUnavailable { status, detail }` (code `service_unavailable`, `detail` the
+redacted AAD error or the body's class). They used to be `token_exchange` (a non-JSON 200 was
+`serde`), whose hint sent the operator to re-check the client and tenant ids; both are retryable, never re-auth-fatal, and stay
+`token_error` on the client plane (the token POST already spent the retry budget).
+
 **The `/token` response is distrusted at the edges.** Its client follows no redirects (a 307/308
 would replay the code + verifier or the refresh token to the `Location` host; a 3xx is a terminal
-`token_exchange`), the body is read into a wiped buffer capped at `MAX_TOKEN_RESPONSE_BYTES`
+`unexpected_responder`), the body is read into a wiped buffer capped at `MAX_TOKEN_RESPONSE_BYTES`
 (64 KiB — "token response too large", never parsed), and `expires_in` is capped at
 `MAX_TOKEN_TTL_SECS` (2 days) before any date arithmetic, which used to panic under the refresh lock
 on an absurd value.
 
-**An abandoned browser round trip is `cancelled`.** The redirect wait (`REDIRECT_WAIT`, 300 s)
+**An abandoned browser round trip is `cancelled`.** (Its hint covers both: "closed, or not finished
+within 5 minutes".) The redirect wait (`REDIRECT_WAIT`, 300 s)
 timing out, or Entra redirecting `access_denied` with `error_subcode=cancel` or with no AADSTS code
 in its description, is `AuthError::Cancelled`. A coded `access_denied` (AADSTS65004, a declined
 consent) stays `authorization`.
@@ -67,12 +87,24 @@ redeems it for the sign-in read scopes through the ordinary silent-refresh path.
 the *configured* tenant: an account remembered under a different directory is refused rather than
 used to address someone else's keyring entry. Every empty case — nothing stored, signed out, tenant
 repointed, token revoked, keyring locked — returns `Ok(None)`, not an error, and lands on the normal
-sign-in card; a failed attempt removes the context again so it can never leave a half-live session.
-The one restore failure returned as an error is an unreachable token endpoint (`network`: offline, a
-captive portal, a proxy down) — the refresh token is untouched (only `InvalidGrant` purges it), so
-the launch screen shows a warning Callout with a Retry of the silent restore
-(`views::sign_in::attempt_restore`, shared by `Root`'s launch attempt and the button) instead of
-sending the operator to a browser that can't load Entra ID either. The remembered UPN and display
+sign-in card; a failed attempt removes the context again so it can never leave a half-live session
+— unless the session epoch moved meanwhile (the operator chose "Sign in instead" and signed in while
+the refresh was in flight): `restore_session` captures the fence with its registration and then
+leaves the registry, the cache and the keyring (`delete_refresh_token_if`) to the newer session.
+The restore failures returned as an error are a token endpoint that gave no verdict
+(`commands::auth::RETRY_CAN_RESTORE`): unreachable (`network`: offline, a proxy down), answered by
+something else (`unexpected_responder`: a captive portal, a TLS-inspecting proxy) or throttled /
+down past the retry budget (`service_unavailable`) — the refresh token is untouched (only
+`InvalidGrant` purges it), so the launch screen shows a warning Callout with a Retry of the silent
+restore (`views::sign_in::attempt_restore`, shared by `Root`'s launch attempt and the button)
+instead of sending the operator to a browser that can't get through either. Such a restore can run
+for a minute or more, so the `RestoringSession` card offers **Sign in instead** after
+`SLOW_RESTORE_AFTER` (5 s); that moves the restore fence (`attempt_restore`'s `generation`, which
+the card's own Sign in also moves, and whose Retry is disabled while that sign-in is open), so a
+late answer never signs a session in under the operator's browser sign-in nor repaints the offline
+callout. The callout keeps the failure's code: `network` says to check the connection, while
+`unexpected_responder` / `service_unavailable` show the shared hint (a proxy or an unavailable
+endpoint, where checking the network would not help). The remembered UPN and display
 name are only what was true at the last sign-in: when the restoring refresh returns an id token, its
 `tid`/`oid` must match the remembered context (`ensure_same_identity`; a mismatch is refused,
 leaves nothing cached, deletes the foreign refresh token just rotated into the remembered keyring
@@ -201,7 +233,13 @@ caller picks the CAE slot by hand. Examples:
 A Conditional Access policy can demand an interactive step — MFA, registration, an external
 challenge — for **one resource** (a "Require MFA for Azure management" or authentication-strength
 policy). The silent grant for that audience then fails `interaction_required` / `login_required`,
-or `invalid_grant` carrying AADSTS50074/50076/50079/50158. `classify_token_error` maps all of these
+or `invalid_grant` carrying one of `wire::CONDITIONAL_ACCESS_CODES` — AADSTS50074/50076/50078/50079/
+50158 (MFA, expired MFA, registration, an external challenge), 53000–53002 (a compliant or joined
+device, an approved client app), 53004 (proof-up) and the outright blocks 53003/530032. The blocks
+are not fixable by MFA, but a purge was worse (below); as `interaction_required` they get the
+step-up for that one resource, whose browser page names the policy. Only a dead token —
+AADSTS70008 expired, 70000 revoked, 50173 password change, 70043 sign-in frequency — stays
+`InvalidGrant`. `classify_token_error` maps all of the interrupts
 to `AuthError::InteractionRequired` (code **`interaction_required`**) — after the consent check, so a
 consent gap still wins — and `access_token_inner` does **not** purge on it: the refresh token is
 still valid for every other audience (MSAL keeps the account on `InteractionRequiredAuthError`).
@@ -309,8 +347,15 @@ which a sign-out/sign-in cycle would.
   take the whole `report_recovery_action` ladder; global search points its status row at the toast.
   A recovery toast dedupes by lever + feature (`Session::push_recovery_toast`: `reauth`,
   `refresh-token:{text}`, `consent:{feature}`, `step-up:{feature}`), so a burst of failures raises
-  one lever, and the stack cap (`MAX_TOASTS`) drops transient toasts before any sticky one
-  (`Toast::is_sticky`: an error with an action). Only `CommandState::run_toast_err` adds **Retry**
+  one lever. A lever whose own round trip fails (a closed tab, a timeout, a proxy) re-raises the
+  SAME sticky lever with "Couldn't re-authenticate / grant consent / complete verification — {hint}"
+  (`state::auth_hints::lever_failure_message`), never an auto-dismissing error — the failure it
+  recovers is still there; a consent or step-up that finds the session dead raises Re-authenticate
+  instead, a step-up that finds consent missing raises Grant consent, and nothing lands once the
+  tenant changed. An AADSTS hint that points at the sign-in card (its Change link, for the
+  wrong-tenant / wrong-client codes) is flagged `card_only` in `AADSTS_HINTS` and never reaches a
+  toast; the failure's own message is shown there instead. The stack cap (`MAX_TOASTS`) drops transient
+  toasts before any sticky one (`Toast::is_sticky`: an error with an action). Only `CommandState::run_toast_err` adds **Retry**
   (`report_command_error_with_retry`), for a failure the backend marks `retryable` (throttled,
   5xx, network) and no recovery lever outranks; the Retry is pinned to the tenant the call ran for,
   because toasts survive a tenant switch, and bounded by the owning component: a sticky toast

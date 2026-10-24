@@ -37,6 +37,9 @@ fn token_error(err: AuthError) -> TokenError {
 /// `TokenExchange` (auth-plane `token_exchange`) deliberately stays
 /// `token_error`: `post_token` reports every unrecognised non-2xx — 4xx
 /// included — that way, so calling it transient would retry permanent failures.
+/// So do `unexpected_responder` (a proxy's block page does not clear on a
+/// replay) and `service_unavailable`: the token POST already spent the shared
+/// retry budget on that 429/5xx, and a client-plane retry would multiply it.
 fn client_plane_code(auth_code: &str) -> &'static str {
     match auth_code {
         // The auth plane spells a transport failure `network` (From<AuthError>:
@@ -179,6 +182,20 @@ mod tests {
             ),
             (
                 || AuthError::TokenExchange("HTTP 400".into()),
+                "token_error",
+            ),
+            (
+                || AuthError::UnexpectedResponder {
+                    status: 403,
+                    content_type_class: "html",
+                },
+                "token_error",
+            ),
+            (
+                || AuthError::ServiceUnavailable {
+                    status: 503,
+                    detail: "untyped body".into(),
+                },
                 "token_error",
             ),
             (|| AuthError::Authorization("boom".into()), "token_error"),

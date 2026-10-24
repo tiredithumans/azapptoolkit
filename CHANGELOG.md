@@ -6,6 +6,15 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- A Conditional Access block or device rule for one service no longer signs you out; it offers Verify identity instead.
+- Sign-in now says when a proxy, firewall or unavailable Entra ID answered; at launch it says so and offers Retry.
+- On Linux without a credential store, sign-in now says so before it opens the browser rather than after you sign in.
+- Sign-in hints now cover the 5-minute timeout and local listener errors, and name the http://127.0.0.1 redirect URI.
+- A failed Re-authenticate, Grant consent or Verify identity keeps its button and says what to fix instead of vanishing.
+- A session restore at launch that takes more than a few seconds now offers Sign in instead of an endless spinner.
+
 ### Security
 
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.

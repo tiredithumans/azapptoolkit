@@ -22,6 +22,7 @@ use crate::components::toast::{Toast, ToastAction, ToastKind};
 //
 // Rust allows several `impl Session` blocks in one crate, so this costs nothing
 // at the type level: `Session` is still one struct with one API.
+pub(crate) mod auth_hints;
 mod errors;
 mod navigation;
 mod open_items;

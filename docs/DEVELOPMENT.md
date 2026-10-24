@@ -490,8 +490,8 @@ Invariants every change must preserve (the audit/review baseline for auth-adjace
   Windows Credential Manager caps a blob at 2560 UTF-16 bytes (don't collapse the chunking).
   On Linux the only store is the Secret Service via zbus (`zbus_secret_service_keyring_store`); a
   missing provider surfaces as `keyring_unavailable` (`AuthError::KeyringUnavailable`, memoised for
-  the process), distinct from `keyring` (a store that exists but refused, e.g. locked). There is no
-  in-memory fallback for the refresh token.
+  the process), distinct from `keyring` (a store that exists but refused, e.g. locked); `sign_in`
+  checks for it before opening the browser. There is no in-memory fallback for the refresh token.
   Exactly what is wiped from the heap: `AccessToken` on drop; the refresh token on load (each
   keyring chunk and the combined buffer) and on save (each chunk string); the `/token` response
   body buffer and the parsed access/refresh/id tokens (`TokenResponse`'s token fields are

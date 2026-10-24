@@ -156,10 +156,15 @@ fn Root() -> impl IntoView {
     // already — the friction this whole path exists to remove. The demo build
     // starts signed in and never asks.
     let restoring = RwSignal::new(!cfg!(feature = "demo"));
-    // Raised when the launch restore could not reach Entra ID (`network`): the
-    // sign-in card then offers a Retry of the silent restore. Shared with the
-    // card so its Retry and this launch attempt are one code path.
-    let restore_unreachable = RwSignal::new(false);
+    // The code of a launch restore that got no verdict from Entra ID
+    // (unreachable, a proxy or portal in its place, throttled or down): the
+    // sign-in card then offers a Retry of the silent restore and says which.
+    // Shared with the card so its Retry and this launch attempt are one code
+    // path.
+    let restore_failure = RwSignal::new(None::<String>);
+    // The restore fence (`views::sign_in::attempt_restore`): moved when the
+    // operator stops waiting or signs in, so a late restore lands nothing.
+    let restore_generation = RwSignal::new(0u64);
     // Chained into the config probe rather than spawned beside it: the restore
     // is only meaningful once the app HAS a client/tenant to redeem a refresh
     // token against, and one task is also what makes "exactly once" structural.
@@ -168,14 +173,16 @@ fn Root() -> impl IntoView {
         let status = bindings::config::get_auth_config().await;
         let configured = status.configured;
         config.set(Some(status));
-        // Only an unreachable Entra ID (offline, captive portal, proxy down)
-        // gets a surface: a warning Callout with Retry on the sign-in card, since
-        // the stored session is intact and "sign in" would open a browser that
-        // can't load either. Every other failure — nothing stored, a revoked
+        // Only a token endpoint that gave no verdict (offline, a captive portal
+        // or proxy in Entra's place, throttled or down) gets a surface: a
+        // warning Callout with Retry on the sign-in card, since the stored
+        // session is intact and "sign in" would open a browser that can't get
+        // through either. Every other failure — nothing stored, a revoked
         // token, a locked keyring — lands on the untouched card, which is the
-        // recovery and already says what to do.
+        // recovery and already says what to do. An operator who chose "Sign in
+        // instead" meanwhile moved the fence, so this attempt lands nothing.
         if configured {
-            views::sign_in::attempt_restore(session, restore_unreachable).await;
+            views::sign_in::attempt_restore(session, restore_failure, restore_generation).await;
         }
         restoring.set(false);
     });
@@ -207,12 +214,25 @@ fn Root() -> impl IntoView {
                             // restore has had its one chance, so a session that
                             // is about to come back never shows a sign-in button
                             // the operator can reach for and lose mid-click.
-                            None if restoring.get() => view! { <RestoringSession /> }.into_any(),
+                            // Up to the operator, though: past a few seconds
+                            // the card offers to stop waiting and sign in.
+                            None if restoring.get() => {
+                                view! {
+                                    <RestoringSession on_sign_in_instead=Callback::new(move |()| {
+                                        views::sign_in::stop_waiting_for_restore(
+                                            restoring,
+                                            restore_generation,
+                                        )
+                                    }) />
+                                }
+                                    .into_any()
+                            }
                             None => {
                                 view! {
                                     <SignInScreen
                                         tenant=tenant_id.clone()
-                                        restore_unreachable=restore_unreachable
+                                        restore_failure=restore_failure
+                                        restore_generation=restore_generation
                                         // Drops back to the (prefilled) config
                                         // form. Sign-in is the only surface an
                                         // install pointed at the wrong tenant

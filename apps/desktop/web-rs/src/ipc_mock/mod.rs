@@ -72,8 +72,9 @@ impl RecordedCall {
 type IpcClosure = Closure<dyn Fn(JsValue, JsValue) -> JsValue>;
 
 /// An args-aware route: given a call's arguments (camelCase JSON), produce the
-/// already-serialized reply. Registered by [`mock_each`] for per-id fixtures.
-type DynRoute = Box<dyn Fn(&serde_json::Value) -> JsValue>;
+/// already-serialized reply — a resolve ([`mock_each`], per-id fixtures) or a
+/// reject ([`mock_err_each`]).
+type DynRoute = Box<dyn Fn(&serde_json::Value) -> RouteResult>;
 
 thread_local! {
     static ROUTES: RefCell<HashMap<String, RouteResult>> = RefCell::new(HashMap::new());
@@ -163,8 +164,11 @@ pub fn ensure_installed() {
         }
 
         // Args-aware handlers (per-id fixtures) win over static routes.
-        if let Some(v) = FN_ROUTES.with(|r| r.borrow().get(&cmd).map(|h| h(&json))) {
-            return Promise::resolve(&v).into();
+        if let Some(reply) = FN_ROUTES.with(|r| r.borrow().get(&cmd).map(|h| h(&json))) {
+            return match reply {
+                RouteResult::Ok(v) => Promise::resolve(&v).into(),
+                RouteResult::Err(e) => Promise::reject(&e).into(),
+            };
         }
 
         match ROUTES.with(|r| {
@@ -291,7 +295,20 @@ where
     F: Fn(&serde_json::Value) -> T + 'static,
 {
     ensure_installed();
-    let handler: DynRoute = Box::new(move |args| wire_value(&f(args)));
+    let handler: DynRoute = Box::new(move |args| RouteResult::Ok(wire_value(&f(args))));
+    FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
+}
+
+/// [`mock_each`] for a rejection: `f` runs when the command is invoked — before
+/// the caller's `.await` resumes — and returns the `UiError` to reject with. A
+/// test uses that moment to change state under an in-flight call (switch the
+/// tenant while a browser round trip is "open").
+pub fn mock_err_each<F>(cmd: &str, f: F)
+where
+    F: Fn(&serde_json::Value) -> azapptoolkit_dto::UiError + 'static,
+{
+    ensure_installed();
+    let handler: DynRoute = Box::new(move |args| RouteResult::Err(wire_value(&f(args))));
     FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
 }
 

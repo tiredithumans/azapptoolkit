@@ -23,9 +23,11 @@ pub async fn sign_in() -> Result<SignInOutcome, UiError> {
 /// revoked); the backend deliberately reports every such case this way, so a
 /// caller shows the normal sign-in card rather than an error.
 ///
-/// `Err` means exactly one thing: Entra ID was unreachable (code `network`).
-/// The stored session is intact, so the caller offers a Retry
-/// (`views::sign_in::attempt_restore`).
+/// `Err` means exactly one thing: the token endpoint gave no verdict on the
+/// stored session — unreachable (`network`), answered by something other than
+/// Entra ID (`unexpected_responder`), or throttled / down
+/// (`service_unavailable`). The stored session is intact, so the caller offers
+/// a Retry (`views::sign_in::attempt_restore`).
 pub async fn restore_session() -> Result<Option<TenantContext>, UiError> {
     invoke_result("restore_session", ()).await
 }

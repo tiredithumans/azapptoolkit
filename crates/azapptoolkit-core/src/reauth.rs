@@ -48,10 +48,11 @@ pub fn is_reauth_fatal(code: &str) -> bool {
 /// `UiError::is_consent_required`.
 pub const CONSENT_REQUIRED: &str = "consent_required";
 
-/// The wire code for a Conditional Access step-up on one resource
+/// The wire code for a Conditional Access interrupt on one resource
 /// (`AuthError::InteractionRequired` — `interaction_required` /
-/// `login_required`, AADSTS50074/50076/50079/50158: MFA, registration, an
-/// external challenge). Per-resource, not fatal: the refresh token stays valid
+/// `login_required`, or `invalid_grant` with AADSTS50074/50076/50078/50079/
+/// 50158 or 53000–53004/530032: MFA, registration, an external challenge, a
+/// device or app requirement, or an outright policy block). Per-resource, not fatal: the refresh token stays valid
 /// for every other audience, so it is deliberately NOT in
 /// [`REAUTH_FATAL_CODES`]. Not retryable either — a silent grant cannot satisfy
 /// the challenge; the recovery is an interactive step-up. One literal, read by
