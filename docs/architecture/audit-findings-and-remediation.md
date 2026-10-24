@@ -385,8 +385,9 @@ success with every `DowngradeOutcome` flag `false`.
 ## The risky-service-principal signal (Rule 22)
 
 The run's tenant-wide Identity Protection read — ONE `GET /identityProtection/riskyServicePrincipals`
-per audit, paged with `$top = MAX_PAGE_SIZE`, served by the one-shot `scoped_get` (premium reports
-deliberately skip the retry budget; a first-page 404 is an empty answer). Only
+per audit, paged with `$top = MAX_PAGE_SIZE`, served by the one-shot `scoped_get` (it
+deliberately skips the retry budget — unlike the two sign-in reports, whose up-to-200 pages ride
+`scoped_get_retried`; a first-page 404 is an empty answer). Only
 `confirmedCompromised` / `atRisk` rows are kept, keyed by `servicePrincipalId` — the SP **object**
 id, the same join key the grant matrices use — and joined onto audit rows in BOTH phases
 (`score_one` and `score_sp_only`), never via a per-principal read. Deliberately **uncached**: a
@@ -422,7 +423,8 @@ compromise flag must be re-read by every run, and the payload is one row per fla
 One tenant-wide read per audit — `GET /beta/reports/appCredentialSignInActivities` (beta preview,
 **Global cloud only**, `AuditLog.Read.All`) — returns the last observed sign-in use of every
 credential, per origin. Same transport shape as the sign-in report (`$top = MAX_PAGE_SIZE`,
-origin-checked paging), but unlike the risky read it IS read-through cached
+origin-checked paging, each page on `scoped_get_retried`), but unlike the risky read it IS
+read-through cached
 (`{tenant}|app_credential_sign_in_activities` under `CacheKind::Permissions`): last-used moves on
 a days-scale, and the identical read backs the Credentials tab's `list_credential_usage`, so a
 fresh audit warms the tab and vice versa. Rows fold into one `"appId|keyId" → CredentialActivity`
