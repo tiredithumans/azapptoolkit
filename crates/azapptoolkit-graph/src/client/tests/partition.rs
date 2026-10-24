@@ -523,7 +523,10 @@ async fn a_continuation_400_reads_serially_without_rejecting_the_mode() {
 
 /// A slice whose throttling outlasts the retry budget does not fail the scan:
 /// the serial read supplies it, and the mode is kept, so the next scan slices
-/// again.
+/// again. A throttle says nothing about the filter or the index, so it is no
+/// strike either: a tenant throttled scan after scan keeps slicing, where two
+/// such waves used to pin it serial for the client's lifetime (the continuation
+/// 400 above, which IS counted, pins on the second).
 #[tokio::test]
 async fn a_slice_out_of_retries_reads_serially() {
     let server = MockServer::start().await;
@@ -537,18 +540,24 @@ async fn a_slice_out_of_retries_reads_serially() {
         .mount(&server)
         .await;
     mount_plain_slice_rows(&server, None).await;
-    mount_serial_rest(&server, 2).await;
+    mount_serial_rest(&server, 3).await;
 
     let client = make_client(&server.uri());
-    let sps = client.list_service_principals_index().await.unwrap();
-    assert_eq!(row_ids(&sps), all_ids());
-    let (first, _) = slice_requests(&server).await;
-    let sps = client.list_service_principals_index().await.unwrap();
-    assert_eq!(row_ids(&sps), all_ids());
-    assert!(
-        slice_requests(&server).await.0 > first,
-        "one failed wave must not pin the collection serial"
-    );
+    let mut sliced = 0;
+    for scan in 1..=3 {
+        let sps = client.list_service_principals_index().await.unwrap();
+        assert_eq!(row_ids(&sps), all_ids());
+        let (now, advanced) = slice_requests(&server).await;
+        assert!(
+            now > sliced,
+            "scan {scan} must still slice: a throttled wave is never a strike"
+        );
+        assert_eq!(
+            advanced, 0,
+            "a throttle must not retry as an advanced query"
+        );
+        sliced = now;
+    }
     server.verify().await;
 }
 
