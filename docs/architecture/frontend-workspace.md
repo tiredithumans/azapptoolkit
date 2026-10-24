@@ -55,7 +55,13 @@ surfaces reuse it rather than re-implementing the markup.
   their tabs/sections, all three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a
   context `class`. A `Suspend` `Err` arm never renders `form-error` / `FormError` directly — pinned
   by `repo_invariants/commands.rs`, with a reasoned exemption list for the typed searches whose
-  `String` error it cannot take.
+  `String` error it cannot take. A tab that reads on its own on-demand scope (Activity,
+  Conditional Access, Provisioning) renders `components::feature_load_error::FeatureLoadError`
+  instead, which falls back to `DetailLoadError` and adds the levers: "Grant consent & retry" for
+  `consent_required`, `VerifyIdentityButton` for `interaction_required`, the backend's
+  `*_unavailable` notice or a `forbidden_lead` role/license notice. It raises the session toast
+  (`Session::report_if_session_lost`) itself, once per mount and never while signed out — the
+  `ScopeUnavailableBanner` contract — so the caller only renders it from its `Err` arm.
 - **Inline error** — `components::ui::FormError` (`.form-error` + `role="alert"`, so an error that
   appears after an action is announced); `DetailLoadError` uses it for its message. Never write
   `<Body1 class="form-error">` by hand — pinned by `repo_invariants/commands.rs`.

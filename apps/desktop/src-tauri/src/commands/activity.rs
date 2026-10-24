@@ -98,13 +98,14 @@ pub async fn list_directory_audits_for_app(
 /// (or `consent_required = true`), so the surrounding Activity tab keeps
 /// rendering directory changes. The `AuditLog.Read.All` token is pre-acquired
 /// with a typed call (like `run_audit`) so a missing-consent failure is
-/// distinguishable and can drive a "Grant consent & retry" button.
+/// distinguishable (the summary then defers to the change log's "Grant consent
+/// & retry", which reads on the same token).
 ///
-/// The one `Err` is a token failure that has its own lever — a dead session
-/// (`refresh_missing` / `not_signed_in`), a Conditional Access step-up
-/// (`interaction_required`) or an unreachable token endpoint — so the summary
-/// can raise Re-authenticate / Verify identity / Retry instead of claiming the
-/// report needs admin consent.
+/// The one `Err` is a token failure other than a missing consent — a dead
+/// session, a Conditional Access step-up, an unreachable token endpoint, any
+/// other `/token` refusal — returned as-is, like `list_directory_audits_for_app`'s
+/// pre-acquire, so the tab shows the real cause instead of claiming the report
+/// needs admin consent.
 #[tauri::command]
 pub async fn get_app_sign_in_activity(
     state: State<'_, AppState>,
@@ -131,10 +132,9 @@ pub async fn get_app_sign_in_activity(
 }
 
 /// The summary for a failed `AuditLog.Read.All` pre-acquire. A missing consent
-/// is the consent-required DTO (the grant button); a failure with its own lever
-/// keeps its code (the `premium_feature_err` rule) — `network` is the auth
-/// plane's spelling of an unreachable token endpoint, which Retry fixes and
-/// admin consent does not; anything else is the generic "unavailable" notice.
+/// is the consent-required DTO; every other failure is returned as-is (the
+/// `list_directory_audits_for_app` rule), so its code reaches the tab — the
+/// pre-acquire knows nothing about a license, so it must not claim one.
 fn sign_in_token_failure(ui: UiError) -> Result<SignInActivityDto, UiError> {
     if ui.is_consent_required() {
         return Ok(SignInActivityDto {
@@ -142,12 +142,7 @@ fn sign_in_token_failure(ui: UiError) -> Result<SignInActivityDto, UiError> {
             ..sign_in_unavailable(SIGN_IN_NEEDS_CONSENT)
         });
     }
-    if ui.is_reauth_fatal() || ui.is_interaction_required() || ui.code == "network" {
-        return Err(ui);
-    }
-    Ok(sign_in_unavailable(
-        "Couldn't acquire AuditLog.Read.All for sign-in activity; it needs admin consent and an Entra ID P1/P2 license.",
-    ))
+    Err(ui)
 }
 
 /// The most recent recorded sign-in for `app_id` within the report, or `None`
@@ -213,7 +208,7 @@ fn map_sign_in_err(err: GraphError) -> Result<SignInActivityDto, UiError> {
             }
         }
         GraphError::Token(_) => sign_in_unavailable(
-            "Couldn't acquire AuditLog.Read.All for sign-in activity; it needs admin consent (and Entra ID P1/P2).",
+            "Couldn't acquire AuditLog.Read.All for sign-in activity right now; the rest of the app is unaffected.",
         ),
         GraphError::Unauthorized => sign_in_unavailable(
             "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen sign-in activity.",
@@ -517,8 +512,10 @@ mod tests {
         assert!(!opaque.available && !opaque.consent_required);
     }
 
-    /// The same split for the `AuditLog.Read.All` pre-acquire, whose failures
-    /// arrive in the auth plane's spelling (`network`, not `network_error`).
+    /// The `AuditLog.Read.All` pre-acquire: a missing consent is the summary's
+    /// consent DTO; every other failure keeps its own code (auth-plane
+    /// spelling) instead of becoming a "needs admin consent and a license"
+    /// notice the pre-acquire cannot know is true.
     #[test]
     fn a_failed_pre_acquire_keeps_its_lever() {
         let consent = sign_in_token_failure(UiError::new("consent_required", "x", false)).unwrap();
@@ -528,11 +525,11 @@ mod tests {
             "not_signed_in",
             "interaction_required",
             "network",
+            "token_exchange",
+            "keyring",
         ] {
             let err = sign_in_token_failure(UiError::new(code, "x", false)).expect_err(code);
             assert_eq!(err.code, code);
         }
-        let other = sign_in_token_failure(UiError::new("token_exchange", "x", true)).unwrap();
-        assert!(!other.available && !other.consent_required);
     }
 }

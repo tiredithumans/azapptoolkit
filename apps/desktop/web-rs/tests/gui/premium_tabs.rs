@@ -6,8 +6,9 @@
 //! feature (`audit_log` / `policy`), a dead session must raise the session's
 //! Re-authenticate lever, a step-up must offer "Verify identity & retry", and
 //! only the backend's `*_unavailable` notice (license / role) stays a plain
-//! message. Mounts the shared panels directly, like `provisioning_tab` mounts
-//! its content (same shard, same detail-pane cluster).
+//! message. The sign-in summary above the change log reads on the same token
+//! and holds no lever of its own, so each lever appears once. Mounts the
+//! shared panels directly, like `provisioning_tab` mounts its content.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -51,6 +52,14 @@ fn mock_sign_in_ok() {
             message: None,
         },
     );
+}
+
+/// How many buttons carry exactly `label` — the tab must offer each lever once.
+fn buttons_labelled(label: &str) -> usize {
+    ts::query_all("button")
+        .into_iter()
+        .filter(|b| b.text_content().unwrap_or_default().trim() == label)
+        .count()
 }
 
 /// Every toast's action label, in order.
@@ -147,7 +156,11 @@ async fn a_ca_step_up_offers_verify_identity() {
 #[wasm_bindgen_test]
 async fn a_dead_session_on_the_activity_tab_raises_reauthenticate() {
     ts::reset();
-    mock_sign_in_ok();
+    // Both halves read on the one token, so both fail.
+    ts::mock_err(
+        "get_app_sign_in_activity",
+        &fixtures::ui_error("refresh_missing", "refresh token missing"),
+    );
     ts::mock_err(
         "list_directory_audits_for_app",
         &fixtures::ui_error("refresh_missing", "refresh token missing"),
@@ -159,15 +172,28 @@ async fn a_dead_session_on_the_activity_tab_raises_reauthenticate() {
         toast_actions(&m).contains(&Some("Re-authenticate".to_string()))
     })
     .await;
-    // … and the inline failure keeps its Retry, with no grant button.
+    // … and the change log keeps its Retry — once: the summary only names the
+    // cause — with no grant button.
+    ts::wait_for(|| ts::body_contains("until your session is renewed")).await;
     ts::wait_for(|| ts::has_button_labelled("Retry")).await;
+    assert_eq!(buttons_labelled("Retry"), 1);
     assert!(!ts::has_button_labelled(GRANT));
 }
 
 #[wasm_bindgen_test]
 async fn the_activity_tab_grants_the_audit_log_consent_and_reloads() {
     ts::reset();
-    mock_sign_in_ok();
+    // Both halves lack the consent: the summary's DTO says so, the change log
+    // fails typed.
+    ts::mock_ok(
+        "get_app_sign_in_activity",
+        &SignInActivityDto {
+            available: false,
+            consent_required: true,
+            last_sign_in_date_time: None,
+            message: Some("Sign-in activity needs admin consent for AuditLog.Read.All.".into()),
+        },
+    );
     ts::mock_err(
         "list_directory_audits_for_app",
         &fixtures::ui_error("consent_required", "consent required (AADSTS65001)"),
@@ -175,7 +201,9 @@ async fn the_activity_tab_grants_the_audit_log_consent_and_reloads() {
     let m = mount_activity();
 
     ts::wait_for(|| ts::has_button_labelled(GRANT)).await;
-    assert!(ts::body_contains("AuditLog.Read.All"));
+    ts::wait_for(|| ts::body_contains("Needs AuditLog.Read.All consent — grant it below.")).await;
+    // One lever for the one missing consent, on the change log.
+    assert_eq!(buttons_labelled(GRANT), 1);
     // A consent gap has its own button; the sink adds no second lever.
     assert!(
         toast_actions(&m).iter().flatten().next().is_none(),
@@ -184,6 +212,7 @@ async fn the_activity_tab_grants_the_audit_log_consent_and_reloads() {
     );
 
     ts::mock_ok("request_scope_consent", &());
+    mock_sign_in_ok();
     ts::mock_ok(
         "list_directory_audits_for_app",
         &Vec::<serde_json::Value>::new(),
@@ -197,5 +226,8 @@ async fn the_activity_tab_grants_the_audit_log_consent_and_reloads() {
             .as_deref(),
         Some("audit_log")
     );
+    // The shared reload re-runs both halves.
     ts::wait_for(|| ts::body_contains("No recent changes recorded in the audit window.")).await;
+    ts::wait_for(|| ts::body_contains("No sign-in recorded in the reporting window.")).await;
+    assert_eq!(ts::call_count("get_app_sign_in_activity"), 2);
 }
