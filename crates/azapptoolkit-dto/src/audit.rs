@@ -330,8 +330,9 @@ pub enum AuditCoverageGap {
     /// `info!` and return empty, so the run was cached as authoritative.
     DelegatedConsentGrants,
     /// The service-principal sign-in activity report could not be read
-    /// because of a transient failure (throttled, a 5xx, the network — at the
-    /// report or at the token endpoint) on a tenant that can otherwise read it.
+    /// because of a transient failure — the report throttled, failing (5xx)
+    /// or unreachable after the retry budget, or the token endpoint
+    /// unreachable — on a tenant that can otherwise read it.
     ///
     /// Not the *unavailable* case — no consent, no P1/P2 license or no
     /// reporting role — which only switches unused-app detection off, like
@@ -394,8 +395,8 @@ impl AuditCoverageGap {
             }
             AuditCoverageGap::SignInActivity => {
                 "The sign-in activity report could not be read just now (Microsoft Graph was \
-                 throttling or unreachable), so this run did not check for unused applications \
-                 — re-run to include them."
+                 throttling, failing or unreachable), so this run did not check for unused \
+                 applications — re-run to include them."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."

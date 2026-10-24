@@ -404,9 +404,10 @@ compromise flag must be re-read by every run, and the payload is one row per fla
   While unavailable, `ScoreCtx::risk_for` answers `None` even for a principal present in the map;
   Rule 22 never fires on an unchecked assumption. The sign-in report follows the same split
   (`prefetch_sign_in_activity` → `sign_in_activity_outcome`): no consent / license / role is
-  unavailable, a transient failure — throttled, 5xx, unreachable, at the report or at the token
-  endpoint — is `AuditCoverageGap::SignInActivity`, and the Findings pane's unused-detection notes
-  then say to re-run rather than to grant consent.
+  unavailable; a transient failure — the report throttled, failing (5xx) or unreachable once
+  `scoped_get_retried`'s budget is spent, or an unreachable token endpoint — is
+  `AuditCoverageGap::SignInActivity`, and the Findings pane's unused-detection notes (and the
+  export's coverage note) then say to re-run rather than to grant consent.
 - **Scoring:** `apply_service_principal_risk` adds +20 (alone ⇒ High; stacks any other finding to
   Critical — a CHANGELOG-gated ranking shift), the `RISKY_SERVICE_PRINCIPAL` marker issue, and a
   `DisableSignIn` Fix while the SP is still enabled. It runs BEFORE the unused post-pass, which

@@ -554,14 +554,16 @@ fn finding_group_view(
 
 /// Why unused-app detection is off, under the actionable groups. Only a
 /// missing consent is fixed by the grant button above; a transient read
-/// failure is fixed by re-running, and a license or role gap by neither.
+/// failure is fixed by re-running. The fallback names all three causes: a
+/// cached run reads back `sign_in_consent_required = false`
+/// (`commands/audit/cache.rs`), so it cannot rule out the consent.
 fn unused_detection_off_note(read_failed: bool, consent_needed: bool) -> &'static str {
     if read_failed {
         "Unused-app detection is off for this run — the sign-in activity report couldn't be read just now. Re-run to include it."
     } else if consent_needed {
         "Unused-app detection is off for this run — it needs the sign-in activity report (AuditLog.Read.All and Entra ID P1/P2). Grant consent above and re-run to enable it."
     } else {
-        "Unused-app detection is off for this run — the sign-in activity report needs an Entra ID P1/P2 license and a reporting role (see Access Readiness)."
+        "Unused-app detection is off for this run — the sign-in activity report needs AuditLog.Read.All consent, an Entra ID P1/P2 license and a reporting role (see Access Readiness)."
     }
 }
 
@@ -572,6 +574,6 @@ fn unused_group_no_signal_note(read_failed: bool, consent_needed: bool) -> &'sta
     } else if consent_needed {
         "The sign-in activity report wasn't available for this run, so unused detection carries no signal — grant consent above and re-run."
     } else {
-        "The sign-in activity report wasn't available for this run (it needs an Entra ID P1/P2 license and a reporting role), so unused detection carries no signal."
+        "The sign-in activity report wasn't available for this run (it needs AuditLog.Read.All consent, an Entra ID P1/P2 license and a reporting role), so unused detection carries no signal."
     }
 }

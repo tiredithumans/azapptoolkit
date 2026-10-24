@@ -237,8 +237,10 @@ caller picks the CAE slot by hand. Examples:
   "Grant consent & re-run" button that enables the **Unused** tab. The sign-in activity report
   behind it is gated on that scope + Entra ID P1/P2;
   `AuditRunResult.sign_in_report_available`/`sign_in_consent_required` drive the banner/empty state.
-  A transient failure (throttled, 5xx, unreachable — at the report or the token endpoint) is
-  `AuditCoverageGap::SignInActivity` instead: the run is degraded (never cached, never an
+  A transient failure — the report throttled, failing (5xx) or unreachable, or the token endpoint
+  unreachable (`AuthError::Http`) — is `AuditCoverageGap::SignInActivity` instead (the report's
+  pages ride `scoped_get_retried`, so the gap is what is left after the retry budget): the run is
+  degraded (never cached, never an
   all-clear) and the findings say to re-run, not to grant a consent already in place.
 
 ## A step-up is not a dead session
