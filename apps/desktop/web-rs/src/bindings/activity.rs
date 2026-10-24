@@ -17,8 +17,9 @@ struct ListArgs<'a> {
 
 /// Recent directory changes targeting two related directory objects (an app
 /// registration and its paired service principal, in either order). Degrades
-/// gracefully when AuditLog.Read.All is un-consented / unlicensed
-/// (`code == "activity_unavailable"`).
+/// gracefully when the tenant is unlicensed or the account lacks a reporting
+/// role (`code == "activity_unavailable"`); a missing consent arrives as
+/// `consent_required`, and a dead session or step-up keeps its own code.
 pub async fn list_directory_audits_for_app(
     tenant_id: &str,
     primary_object_id: &str,
@@ -36,8 +37,10 @@ pub async fn list_directory_audits_for_app(
 }
 
 /// Most recent recorded sign-in for an app's service principal (keyed on appId).
-/// Always `Ok` — a missing scope/license/consent comes back as a populated
-/// `SignInActivityDto` with `available = false` (or `consent_required = true`).
+/// A missing scope/license/consent comes back `Ok` as a populated
+/// `SignInActivityDto` with `available = false` (or `consent_required = true`);
+/// the one `Err` is a token failure with its own lever (a dead session, a
+/// step-up, an unreachable token endpoint).
 pub async fn get_app_sign_in_activity(
     tenant_id: &str,
     app_id: &str,

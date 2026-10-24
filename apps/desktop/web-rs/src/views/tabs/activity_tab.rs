@@ -1,8 +1,9 @@
 //! Activity / change-log tab — recent directory audit entries for a directory
 //! object (an app registration or an enterprise application) and, optionally, a
 //! second related object id (its paired SP / app registration). Read-only;
-//! degrades gracefully when AuditLog.Read.All is un-consented or the tenant
-//! lacks an Entra ID P1/P2 license.
+//! degrades gracefully when the tenant lacks an Entra ID P1/P2 license or the
+//! account a reporting role, and offers the lever for every other failure
+//! (Grant consent for AuditLog.Read.All, Verify identity, Re-authenticate).
 
 use std::sync::Arc;
 
@@ -12,10 +13,9 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::activity::{self, ActivityLogItem};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::auth;
-use crate::components::ui::{
-    Badge, BadgeTone, Callout, DataTable, DetailLoadError, Skeleton, SkeletonList,
-};
+use crate::components::ui::{Badge, BadgeTone, Callout, DataTable, Skeleton, SkeletonList};
 use crate::state::use_session;
+use crate::views::tabs::feature_load_error::FeatureLoadError;
 
 use crate::util::{fmt_datetime, no_tenant};
 
@@ -50,14 +50,26 @@ pub fn ActivityPanel(
             let Some(t) = tenant else {
                 return Err(no_tenant());
             };
-            activity::list_directory_audits_for_app(&t.tenant_id, &primary, secondary.as_deref())
-                .await
+            let res = activity::list_directory_audits_for_app(
+                &t.tenant_id,
+                &primary,
+                secondary.as_deref(),
+            )
+            .await;
+            // The panel's own levers cover consent and step-up; a dead session
+            // or rejected token needs the sink's — unless the tenant moved on.
+            if let Err(e) = &res
+                && session.is_active_tenant(&t.tenant_id)
+            {
+                session.report_if_session_lost(e);
+            }
+            res
         }
     });
 
     view! {
         <div class="activity-tab">
-            <SignInSummary app_id=app_id />
+            <SignInSummary app_id=app_id reload=reload />
             <header class="row-between">
                 <strong>"Recent directory changes"</strong>
                 <Button
@@ -75,22 +87,10 @@ pub fn ActivityPanel(
                 {move || Suspend::new(async move {
                     match logs.await {
                         Ok(list) => activity_table(list).into_any(),
-                        // Graceful degradation: the backend tags missing
-                        // consent/license as "activity_unavailable".
-                        Err(e) if e.code == "activity_unavailable" => {
-                            view! { <Callout tone="warn">{e.message}</Callout> }.into_any()
-                        }
-                        // Anything else is a real failure (429, network, …) and
-                        // must offer a way out, not just a message.
-                        Err(e) => {
-                            view! {
-                                <DetailLoadError
-                                    error=e
-                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
-                                />
-                            }
-                                .into_any()
-                        }
+                        // Every failure gets its lever: consent, step-up, the
+                        // backend's "activity_unavailable" notice (license /
+                        // role / transient), or Retry.
+                        Err(e) => activity_error(e, reload).into_any(),
                     }
                 })}
             </Suspense>
@@ -102,11 +102,15 @@ pub fn ActivityPanel(
 /// sign-in, so an admin can gauge "is this still used?" before disabling or
 /// deleting. Read-only; degrades gracefully (missing scope/license ⇒ a notice,
 /// missing consent ⇒ a "Grant consent & retry" button) and never blocks the
-/// change log below — the backend always returns a populated DTO.
+/// change log below — the backend returns a populated DTO for everything but a
+/// token failure with its own lever.
+///
+/// Shares the panel's `reload`: both halves read on the one `AuditLog.Read.All`
+/// token, so a grant, a step-up or a Retry from either half reloads both
+/// rather than leaving the other showing a lever that no longer applies.
 #[component]
-fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
+fn SignInSummary(#[prop(into)] app_id: Signal<String>, reload: RwSignal<u32>) -> impl IntoView {
     let session = use_session();
-    let reload = RwSignal::new(0_u32);
 
     let activity = LocalResource::new(move || {
         let tenant = session.active_tenant.get();
@@ -116,7 +120,15 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
             let Some(t) = tenant else {
                 return Err(no_tenant());
             };
-            activity::get_app_sign_in_activity(&t.tenant_id, &app_id).await
+            let res = activity::get_app_sign_in_activity(&t.tenant_id, &app_id).await;
+            // A dead session or rejected token needs the sink's lever (deduped
+            // with the change log's, which reads on the same token).
+            if let Err(e) = &res
+                && session.is_active_tenant(&t.tenant_id)
+            {
+                session.report_if_session_lost(e);
+            }
+            res
         }
     });
 
@@ -179,19 +191,28 @@ fn SignInSummary(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        Err(e) => {
-                            view! {
-                                <DetailLoadError
-                                    error=e
-                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
-                                />
-                            }
-                                .into_any()
-                        }
+                        // A token failure with its own lever (a dead session,
+                        // a step-up, an unreachable token endpoint).
+                        Err(e) => activity_error(e, reload).into_any(),
                     }
                 })}
             </Suspense>
         </div>
+    }
+}
+
+/// The Activity tab's load failure, for the change log and the sign-in summary
+/// alike: both read on the `audit_log` feature's token.
+fn activity_error(e: azapptoolkit_dto::UiError, reload: RwSignal<u32>) -> impl IntoView {
+    view! {
+        <FeatureLoadError
+            error=e
+            consent_feature="audit_log"
+            step_up_features=&["audit_log"]
+            unavailable_code="activity_unavailable"
+            consent_text="The activity log needs admin consent to AuditLog.Read.All."
+            on_retry=Callback::new(move |()| reload.update(|n| *n += 1))
+        />
     }
 }
 

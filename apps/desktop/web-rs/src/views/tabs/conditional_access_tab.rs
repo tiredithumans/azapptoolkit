@@ -1,6 +1,9 @@
 //! Conditional Access tab — which CA policies apply to this app, and what they
-//! enforce. Read-only; degrades gracefully when Policy.Read.All is un-consented
-//! or the tenant lacks an Entra ID P1/P2 license.
+//! enforce. Read-only; degrades gracefully when the tenant lacks an Entra ID
+//! P1/P2 license or the account a policy-reading role, and offers the lever for
+//! every other failure — its own "Grant consent & retry" for Policy.Read.All
+//! (the `policy` feature, which also enables the credential-lifetime policy
+//! reads), Verify identity, Re-authenticate.
 
 use std::sync::Arc;
 
@@ -10,8 +13,9 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{Badge, BadgeTone, Callout, DataTable, DetailLoadError, SkeletonList};
+use crate::components::ui::{Badge, BadgeTone, DataTable, SkeletonList};
 use crate::state::use_session;
+use crate::views::tabs::feature_load_error::FeatureLoadError;
 
 use crate::util::no_tenant;
 
@@ -37,7 +41,16 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
             let Some(t) = tenant else {
                 return Err(no_tenant());
             };
-            conditional_access::list_conditional_access_for_app(&t.tenant_id, &app_id).await
+            let res =
+                conditional_access::list_conditional_access_for_app(&t.tenant_id, &app_id).await;
+            // The panel's own levers cover consent and step-up; a dead session
+            // or rejected token needs the sink's — unless the tenant moved on.
+            if let Err(e) = &res
+                && session.is_active_tenant(&t.tenant_id)
+            {
+                session.report_if_session_lost(e);
+            }
+            res
         }
     });
 
@@ -63,15 +76,18 @@ pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl Into
                 {move || Suspend::new(async move {
                     match policies.await {
                         Ok(list) => ca_table(list).into_any(),
-                        Err(e) if e.code == "ca_unavailable" => {
-                            view! { <Callout tone="warn">{e.message}</Callout> }.into_any()
-                        }
-                        // A real failure (429, network, …) — offer a way out.
+                        // Every failure gets its lever: consent, step-up, the
+                        // backend's "ca_unavailable" notice (license / role /
+                        // transient), or Retry.
                         Err(e) => {
                             view! {
-                                <DetailLoadError
+                                <FeatureLoadError
                                     error=e
-                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                    consent_feature="policy"
+                                    step_up_features=&["policy"]
+                                    unavailable_code="ca_unavailable"
+                                    consent_text="Conditional Access needs admin consent to Policy.Read.All (the same consent enables the credential-lifetime policy checks)."
+                                    on_retry=Callback::new(move |()| reload.update(|n| *n += 1))
                                 />
                             }
                                 .into_any()
