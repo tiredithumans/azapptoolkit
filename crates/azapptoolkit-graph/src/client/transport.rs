@@ -970,7 +970,10 @@ pub(crate) fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
 /// scoped read ([`GraphClient::scoped_get`] — only the mapping is shared, it
 /// still deliberately skips the retry/throttle loop) and each `$batch`
 /// sub-response (`batch::map_batch_response`), which must type exactly like
-/// the GET sent alone.
+/// the GET sent alone. The retrying core keeps its own inline match, because
+/// it also decides retry vs done and catches the CAE challenge; the two are
+/// pinned to agree on every error status by
+/// `the_retrying_core_and_map_error_status_agree_on_every_error_status`.
 pub(super) fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
     let body = sanitize_error_body(&body);
     match code {

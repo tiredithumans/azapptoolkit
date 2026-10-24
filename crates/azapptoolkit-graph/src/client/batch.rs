@@ -105,11 +105,13 @@ pub(crate) fn rejoin_refused<T>(
         .collect()
 }
 
-/// Maps one inner batch response to the typed result an individual GET yields.
-/// The status table is the transport's own ([`map_error_status`]), which also
-/// applies the top-level body cap: a sub-response feeds the same variants, the
-/// same logs and the same toasts, so a second copy of the table could only
-/// drift.
+/// Maps one inner batch response to the typed result an individual GET yields,
+/// through [`map_error_status`] — the table the one-shot scoped read uses too,
+/// which also applies the top-level body cap: a sub-response feeds the same
+/// variants, the same logs and the same toasts. The retrying core keeps its own
+/// inline match (it also decides retry vs done and catches the CAE challenge);
+/// `the_retrying_core_and_map_error_status_agree_on_every_error_status` pins
+/// the two to the same answer.
 fn map_batch_response<T: DeserializeOwned>(r: BatchSubResponse) -> Result<T> {
     let code = r.status;
     if (200..300).contains(&code) {
@@ -397,22 +399,51 @@ fn retried_sub_status(status: u16) -> bool {
 mod tests {
     use super::*;
 
-    /// A `$batch` sub-response types exactly like the same GET sent alone:
-    /// every status, the body cap and the inner `Retry-After` go through the
-    /// transport's one status table.
+    /// What each inner status types as — the variants an individual GET
+    /// yields, the inner `Retry-After` carried on a 429, and the
+    /// sub-response's JSON body carried as its text. A literal table, so a
+    /// change to `map_error_status` that would retype a sub-response fails
+    /// here.
     #[test]
-    fn a_sub_response_maps_through_the_transports_status_table() {
-        let body = serde_json::json!({ "error": { "code": "x", "message": "nope\u{7}" } });
-        for status in [400, 401, 403, 404, 409, 429, 500, 502, 503, 504] {
+    fn a_sub_response_types_like_the_get_sent_alone() {
+        let body = serde_json::json!({ "error": { "message": "nope" } });
+        let text = body.to_string();
+        for (status, want) in [
+            (400, "Api(400)"),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (404, "NotFound"),
+            (409, "Api(409)"),
+            (429, "Throttled(Some(7))"),
+            (500, "Server(500)"),
+            (502, "Server(502)"),
+            (503, "Server(503)"),
+            (504, "Server(504)"),
+        ] {
             let sub = BatchSubResponse {
                 id: "0".into(),
                 status,
                 body: body.clone(),
                 headers: HashMap::from([("Retry-After".to_string(), "7".to_string())]),
             };
-            let batched = map_batch_response::<serde_json::Value>(sub).unwrap_err();
-            let alone = map_error_status(status, body.to_string(), Some(7));
-            assert_eq!(format!("{batched:?}"), format!("{alone:?}"), "{status}");
+            let got = match map_batch_response::<serde_json::Value>(sub).unwrap_err() {
+                GraphError::Api { status, body: b } => {
+                    assert_eq!(b, text, "{status}");
+                    format!("Api({status})")
+                }
+                GraphError::Unauthorized => "Unauthorized".to_string(),
+                GraphError::Forbidden(b) => {
+                    assert_eq!(b, text, "{status}");
+                    "Forbidden".to_string()
+                }
+                GraphError::NotFound(_) => "NotFound".to_string(),
+                GraphError::Throttled { retry_after_secs } => {
+                    format!("Throttled({retry_after_secs:?})")
+                }
+                GraphError::Server { status, .. } => format!("Server({status})"),
+                other => format!("{other:?}"),
+            };
+            assert_eq!(got, want, "{status}");
         }
     }
 }
