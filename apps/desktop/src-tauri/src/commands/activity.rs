@@ -525,6 +525,8 @@ mod tests {
             "not_signed_in",
             "interaction_required",
             "network",
+            "service_unavailable",
+            "unexpected_responder",
             "token_exchange",
             "keyring",
         ] {

@@ -8,7 +8,8 @@
 //! Conditional Access step-up (`interaction_required`) gets "Verify identity &
 //! retry", the feature's own `*_unavailable` code (worded by the backend) or a
 //! 403 with a `forbidden_lead` a notice, and anything else `DetailLoadError`
-//! with Retry.
+//! with Retry — worded with the sign-in card's shared hint
+//! (`state::auth_hints`) when the token endpoint was busy or a proxy answered.
 //!
 //! **The session levers are raised here, not by the caller.** A dead session
 //! or a rejected token needs the session's toast (`Session::report_if_session_lost`),
@@ -25,6 +26,7 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::auth;
 use crate::components::ui::{Callout, DetailLoadError};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
+use crate::state::auth_hints::lever_failure_message;
 use crate::state::use_session;
 
 #[component]
@@ -118,6 +120,25 @@ pub fn FeatureLoadError(
         }
         .into_any()
     } else {
-        view! { <DetailLoadError error=error on_retry=on_retry /> }.into_any()
+        view! { <DetailLoadError error=token_hint(error) on_retry=on_retry /> }.into_any()
+    }
+}
+
+/// A pre-acquire that never got Entra's verdict — the token endpoint still
+/// busy after its retries (`service_unavailable`) or a proxy answering in its
+/// place (`unexpected_responder`) — reads the sign-in card's own hint
+/// (`state::auth_hints`), so both surfaces tell the operator the same thing.
+/// Every other error keeps its message.
+fn token_hint(error: UiError) -> UiError {
+    if matches!(
+        error.code.as_str(),
+        "service_unavailable" | "unexpected_responder"
+    ) {
+        UiError {
+            message: lever_failure_message("Couldn't get this tab's token", &error),
+            ..error
+        }
+    } else {
+        error
     }
 }

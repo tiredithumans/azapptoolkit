@@ -153,6 +153,26 @@ async fn a_ca_step_up_offers_verify_identity() {
     ts::wait_for(|| ts::body_contains("No Conditional Access policies target this app.")).await;
 }
 
+/// A token endpoint that stayed busy (B1's `service_unavailable`) is not
+/// Entra's verdict on the tenant: the tab shows the sign-in card's shared hint
+/// and keeps Retry, never a consent or license claim.
+#[wasm_bindgen_test]
+async fn a_busy_token_endpoint_reads_the_shared_hint_and_keeps_retry() {
+    ts::reset();
+    ts::mock_err(
+        "list_conditional_access_for_app",
+        &fixtures::ui_error(
+            "service_unavailable",
+            "the sign-in service is throttling or temporarily unavailable (HTTP 503: x)",
+        ),
+    );
+    let _m = mount_ca();
+
+    ts::wait_for(|| ts::body_contains("busy or unavailable — wait a minute, then retry.")).await;
+    assert!(ts::has_button_labelled("Retry"));
+    assert!(!ts::has_button_labelled(GRANT));
+}
+
 #[wasm_bindgen_test]
 async fn a_dead_session_on_the_activity_tab_raises_reauthenticate() {
     ts::reset();
