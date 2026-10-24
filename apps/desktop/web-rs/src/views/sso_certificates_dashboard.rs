@@ -25,7 +25,10 @@ use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
 use crate::components::ui::{Badge, BadgeTone, Callout, CopyableId};
 use crate::state::use_session;
-use crate::util::{EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, credential_status_badge};
+use crate::util::{
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, contains_ignore_case, count_noun,
+    credential_status_badge,
+};
 
 #[component]
 pub fn SsoCertificatesDashboard() -> impl IntoView {
@@ -166,9 +169,11 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                     })
             }
             matches=move |r: &SsoCertificateRowDto, facet: &str, q: &str| {
+                // `contains_ignore_case` is true for an empty query, and
+                // allocates nothing per row for an ASCII name.
                 matches_facet(r, facet)
-                    && (q.is_empty() || r.display_name.to_lowercase().contains(q)
-                        || r.app_id.to_lowercase().contains(q))
+                    && (contains_ignore_case(&r.display_name, q)
+                        || contains_ignore_case(&r.app_id, q))
             }
                 row=move |r: SsoCertificateRowDto| sso_cert_row(session, selection, r).into_any()
             />
