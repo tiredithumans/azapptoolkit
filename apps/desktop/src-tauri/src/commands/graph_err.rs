@@ -111,7 +111,7 @@ pub(crate) fn premium_feature_err(
             msg(
                 false,
                 format!(
-                    "Couldn't acquire {scope} for {feature}. It needs admin consent (and Entra ID P1/P2); the rest of the app is unaffected."
+                    "Couldn't acquire {scope} for {feature} right now; the rest of the app is unaffected."
                 ),
             )
         }
@@ -272,6 +272,12 @@ mod tests {
         assert_eq!(opaque.code, "activity_unavailable");
         assert!(
             opaque.message.contains("AuditLog.Read.All"),
+            "{}",
+            opaque.message
+        );
+        // An unclassified token failure is not known to be a consent gap.
+        assert!(
+            !opaque.message.contains("admin consent"),
             "{}",
             opaque.message
         );

@@ -1,16 +1,22 @@
-//! The load-failure surface of a detail-pane tab that reads a premium Graph
-//! surface on its own on-demand scope (Activity, Conditional Access) — one
-//! lever per failure class, so none is a dead end.
+//! The load-failure surface of a detail-pane tab that reads on its own
+//! on-demand scope (Activity, Conditional Access, Provisioning) — one lever per
+//! failure class, so none is a dead end. The primitive for that pattern, as
+//! `DetailLoadError` is for a plain load failure (which it falls back to).
 //!
 //! The backend pre-acquires the tab's token, so a missing consent arrives
 //! typed (`consent_required`) and gets the grant round trip here, a
 //! Conditional Access step-up (`interaction_required`) gets "Verify identity &
-//! retry", the feature's own `*_unavailable` code (no license, no role, a
-//! transient read failure — worded by the backend) a notice, and anything else
-//! `DetailLoadError` with Retry. A dead session or a rejected token needs the
-//! session's lever, not an inline one: the tab raises it right after its
-//! await (`Session::report_if_session_lost`), where it can check the tenant.
-//! The same split as the Provisioning tab, which grew it first.
+//! retry", the feature's own `*_unavailable` code (worded by the backend) or a
+//! 403 with a `forbidden_lead` a notice, and anything else `DetailLoadError`
+//! with Retry.
+//!
+//! **The session levers are raised here, not by the caller.** A dead session
+//! or a rejected token needs the session's toast (`Session::report_if_session_lost`),
+//! which no inline button can offer; this component raises it once per mount
+//! (the toast dedupes by key, so a tab re-rendering it stacks nothing) and
+//! never while signed out, when it would surface at the next sign-in — the
+//! `ScopeUnavailableBanner` contract. A caller only renders it from its `Err`
+//! arm and passes the reload.
 
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
@@ -25,20 +31,30 @@ use crate::state::use_session;
 pub fn FeatureLoadError(
     error: UiError,
     /// The consent feature whose scope the tab reads (`"audit_log"`,
-    /// `"policy"`) — what "Grant consent & retry" requests.
+    /// `"policy"`, `"sync"`) — what "Grant consent & retry" requests.
     consent_feature: &'static str,
     /// The same feature as a step-up list, for `VerifyIdentityButton`.
     step_up_features: &'static [&'static str],
-    /// The tab's graceful-degradation code (`"activity_unavailable"`,
-    /// `"ca_unavailable"`), whose message the backend already worded.
-    unavailable_code: &'static str,
     /// What the tab says when its scope is not consented yet.
     consent_text: &'static str,
+    /// The tab's graceful-degradation code (`"activity_unavailable"`,
+    /// `"ca_unavailable"`), whose message the backend already worded.
+    #[prop(optional)]
+    unavailable_code: Option<&'static str>,
+    /// When set, a `forbidden` (403) error is a role / license notice: this
+    /// sentence, then the backend's message (which carries the catalog
+    /// remediation) — for a tab whose backend does not fold the 403 into an
+    /// `*_unavailable` code.
+    #[prop(optional)]
+    forbidden_lead: Option<&'static str>,
     /// Re-run the tab's load (after a grant, a step-up or a Retry click).
     #[prop(into)]
     on_retry: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
+    if session.active_tenant.with_untracked(Option::is_some) {
+        session.report_if_session_lost(&error);
+    }
     let consenting = RwSignal::new(false);
     let on_consent = move |_| {
         // One browser round trip at a time: a double click must not open two.
@@ -91,8 +107,16 @@ pub fn FeatureLoadError(
             </Callout>
         }
         .into_any()
-    } else if error.code == unavailable_code {
+    } else if unavailable_code == Some(error.code.as_str()) {
         view! { <Callout tone="warn">{error.message}</Callout> }.into_any()
+    } else if let Some(lead) = forbidden_lead.filter(|_| error.code == "forbidden") {
+        view! {
+            <Callout tone="warn">
+                <span class="ui-text">{lead}</span>
+                <span class="ui-text">{error.message}</span>
+            </Callout>
+        }
+        .into_any()
     } else {
         view! { <DetailLoadError error=error on_retry=on_retry /> }.into_any()
     }

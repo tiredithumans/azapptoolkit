@@ -220,16 +220,18 @@ caller picks the CAE slot by hand. Examples:
   the attempted change and offers "Grant consent & retry", replaying it after the grant
 - the `commands::exchange` commands — they build their client via `exchange_client_checked` →
   `ensure_exchange_token`, so the Exchange/Permissions tabs can offer "Grant consent & retry"
-- `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab turns
-  `consent_required` into "Grant consent & retry" for the `sync` feature and reloads; a 403 keeps
-  a role/license message instead
+- `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab
+  (`FeatureLoadError` with a `forbidden_lead`) turns `consent_required` into "Grant consent &
+  retry" for the `sync` feature and reloads; a 403 keeps a role/license message instead
 - `list_directory_audits_for_app` / `get_app_sign_in_activity` (`ensure_audit_log_token`) and
   `list_conditional_access_for_app` (`ensure_feature_token(ConsentFeature::Policy)`) — the
-  Activity and Conditional Access tabs (`views::tabs::feature_load_error::FeatureLoadError`) turn
+  Activity and Conditional Access tabs (`components::feature_load_error::FeatureLoadError`) turn
   `consent_required` into "Grant consent & retry" for `audit_log` / `policy`, `interaction_required`
   into "Verify identity & retry", raise the session's lever for a dead session or rejected token,
   and keep the backend's `activity_unavailable` / `ca_unavailable` notice for a license or role
-  gap. `graph_err::premium_feature_err` keeps any classified token code
+  gap. The Activity tab's sign-in summary reads on the same token and holds no lever of its own:
+  it names the cause in a muted line and defers to the change log's, so the tab shows one button.
+  `graph_err::premium_feature_err` keeps any classified token code
   (`core::reauth::passthrough_code`) instead of folding it into `*_unavailable`, and words a
   non-license 403 from the feature's catalog remediation (`audit_reports` /
   `conditional_access`) — a missing consent fails at `/token`, never as a Graph 403
@@ -357,9 +359,10 @@ which a sign-out/sign-in cycle would.
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
   is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
   text as well). Surfaces with their own consent / step-up button (the Permission Tester, the
-  Resource Access Sites and Key Vault sweeps, the Activity and Conditional Access tabs, the
-  Scope-column `ScopeUnavailableBanner` — which also drops its Retry for a dead session) call only
-  the session levers first (`report_if_session_lost`) and show
+  Resource Access Sites and Key Vault sweeps, the Activity / Conditional Access / Provisioning tabs
+  through `components::feature_load_error::FeatureLoadError`, the Scope-column
+  `ScopeUnavailableBanner` — the last two raise it themselves, once per mount) call only the
+  session levers first (`report_if_session_lost`) and show
   their inline text when it returns false; ones without (the mailbox probe, the Key Vault browser)
   take the whole `report_recovery_action` ladder; global search points its status row at the toast.
   A recovery toast dedupes by lever + feature (`Session::push_recovery_toast`: `reauth`,

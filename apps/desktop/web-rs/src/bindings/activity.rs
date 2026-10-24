@@ -39,8 +39,8 @@ pub async fn list_directory_audits_for_app(
 /// Most recent recorded sign-in for an app's service principal (keyed on appId).
 /// A missing scope/license/consent comes back `Ok` as a populated
 /// `SignInActivityDto` with `available = false` (or `consent_required = true`);
-/// the one `Err` is a token failure with its own lever (a dead session, a
-/// step-up, an unreachable token endpoint).
+/// the one `Err` is any other token failure (a dead session, a step-up, an
+/// unreachable token endpoint, a `/token` refusal), with its own code.
 pub async fn get_app_sign_in_activity(
     tenant_id: &str,
     app_id: &str,
