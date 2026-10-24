@@ -52,19 +52,37 @@ impl CloudEnvironment {
         }
     }
 
-    /// Lenient parse of a cloud identifier (case-insensitive, common aliases).
-    /// `None` for an unrecognized value so the caller can warn rather than
-    /// silently defaulting.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "commercial" | "public" | "global" | "azurecloud" => Some(Self::Commercial),
-            "usgov" | "gcchigh" | "gcc-high" | "usgovernment" | "azureusgovernment" => {
-                Some(Self::UsGov)
-            }
-            "usgovdod" | "dod" | "usgovernmentdod" => Some(Self::UsGovDod),
-            "china" | "21vianet" | "mooncake" | "azurechinacloud" => Some(Self::China),
-            _ => None,
+    /// Every spelling [`Self::parse`] accepts for this cloud, lowercase, the
+    /// canonical [`Self::as_str`] first, then the common aliases. The one
+    /// vocabulary: `parse` reads it, and the desktop build script's
+    /// `.env` check is held to it by a conformance test.
+    pub fn accepted_names(&self) -> &'static [&'static str] {
+        match self {
+            Self::Commercial => &["commercial", "public", "global", "azurecloud"],
+            Self::UsGov => &[
+                "usgov",
+                "gcchigh",
+                "gcc-high",
+                "usgovernment",
+                "azureusgovernment",
+            ],
+            Self::UsGovDod => &["usgovdod", "dod", "usgovernmentdod"],
+            Self::China => &["china", "21vianet", "mooncake", "azurechinacloud"],
         }
+    }
+
+    /// Lenient parse of a cloud identifier (case-insensitive, trimmed, any of
+    /// [`Self::accepted_names`]; blank is the commercial default). `None` for
+    /// an unrecognized value so the caller can warn rather than silently
+    /// defaulting.
+    pub fn parse(s: &str) -> Option<Self> {
+        let name = s.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            return Some(Self::Commercial);
+        }
+        Self::ALL
+            .into_iter()
+            .find(|c| c.accepted_names().contains(&name.as_str()))
     }
 
     /// Resolves the cloud from its layers: the runtime `AZAPPTOOLKIT_CLOUD` env
@@ -529,6 +547,22 @@ mod tests {
             CloudEnvironment::China,
         ] {
             assert_eq!(CloudEnvironment::parse(c.as_str()).unwrap(), c);
+        }
+    }
+
+    /// Each accepted name leads with the canonical one, parses back to its own
+    /// cloud in any case, and belongs to exactly one cloud.
+    #[test]
+    fn accepted_names_are_canonical_first_and_unambiguous() {
+        let mut seen = std::collections::HashSet::new();
+        for c in CloudEnvironment::ALL {
+            assert_eq!(c.accepted_names()[0], c.as_str(), "{c:?}");
+            for name in c.accepted_names() {
+                assert_eq!(*name, name.to_ascii_lowercase(), "{name}");
+                assert_eq!(CloudEnvironment::parse(name), Some(c), "{name}");
+                assert_eq!(CloudEnvironment::parse(&name.to_ascii_uppercase()), Some(c));
+                assert!(seen.insert(*name), "{name} names two clouds");
+            }
         }
     }
 

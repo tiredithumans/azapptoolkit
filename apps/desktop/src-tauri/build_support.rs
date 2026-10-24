@@ -70,9 +70,15 @@ const CLOUD_NAMES: &[&str] = &["commercial", "usgov", "usgovdod", "china"];
 /// Whether `value` names a cloud `CloudEnvironment::parse` accepts, aliases
 /// included; blank is the commercial default, so not a mistake. A local copy
 /// because a build script cannot import `azapptoolkit-core`; a conformance test
-/// keeps the two in step.
+/// holds it to `CloudEnvironment::accepted_names` in both directions.
 fn is_known_cloud(value: &str) -> bool {
-    const ALIASES: &[&str] = &[
+    let v = value.trim().to_ascii_lowercase();
+    v.is_empty() || CLOUD_NAMES.contains(&v.as_str()) || local_cloud_aliases().contains(&v.as_str())
+}
+
+/// The non-canonical spellings [`is_known_cloud`] accepts.
+fn local_cloud_aliases() -> &'static [&'static str] {
+    &[
         "public",
         "global",
         "azurecloud",
@@ -85,9 +91,7 @@ fn is_known_cloud(value: &str) -> bool {
         "21vianet",
         "mooncake",
         "azurechinacloud",
-    ];
-    let v = value.trim().to_ascii_lowercase();
-    v.is_empty() || CLOUD_NAMES.contains(&v.as_str()) || ALIASES.contains(&v.as_str())
+    ]
 }
 
 /// Strict 8-4-4-4-12 hex check (case-insensitive). A local copy because a
@@ -230,44 +234,48 @@ mod tests {
     }
 
     /// The build script's cloud check must agree with the runtime's one
-    /// vocabulary, `CloudEnvironment::parse`, or a team build would warn about a
-    /// cloud the app accepts (or stay quiet about one it ignores).
+    /// vocabulary, or a team build would warn about a cloud the app accepts (or
+    /// stay quiet about one it ignores). The names come from the type itself
+    /// (`CloudEnvironment::ALL` and each one's `accepted_names`, which `parse`
+    /// reads), so an alias added there fails here until the copy learns it.
     #[test]
     fn the_local_cloud_check_matches_cloud_environment_parse() {
         use azapptoolkit_core::cloud::CloudEnvironment;
-        let names: Vec<&str> = CloudEnvironment::ALL.iter().map(|c| c.as_str()).collect();
-        assert_eq!(CLOUD_NAMES, names.as_slice());
-        for s in [
-            "commercial",
-            "public",
-            "global",
-            "azurecloud",
-            "usgov",
-            "gcchigh",
-            "gcc-high",
-            "usgovernment",
-            "azureusgovernment",
-            "usgovdod",
-            "dod",
-            "usgovernmentdod",
-            "china",
-            "21vianet",
-            "mooncake",
-            "azurechinacloud",
-            " USGov ",
-            "",
-            "   ",
-            "usgovv",
-            "gcc",
-            "azure",
-            "us-gov",
-        ] {
-            assert_eq!(
-                is_known_cloud(s),
-                CloudEnvironment::parse(s).is_some(),
-                "disagree on {s:?}"
-            );
+        let canonical: Vec<&str> = CloudEnvironment::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(CLOUD_NAMES, canonical.as_slice());
+        let mut accepted = 0;
+        for cloud in CloudEnvironment::ALL {
+            for name in cloud.accepted_names() {
+                for spelling in [
+                    name.to_string(),
+                    name.to_ascii_uppercase(),
+                    format!(" {name} "),
+                ] {
+                    assert!(
+                        is_known_cloud(&spelling),
+                        "the build would warn about {spelling:?}"
+                    );
+                }
+                accepted += 1;
+            }
         }
+        // The other direction: nothing the copy accepts is ignored at runtime.
+        for local in ["", "   "].iter().chain(CLOUD_NAMES) {
+            assert!(CloudEnvironment::parse(local).is_some(), "{local:?}");
+        }
+        for unknown in ["usgovv", "gcc", "azure", "us-gov", "commercial-cloud"] {
+            assert_eq!(
+                is_known_cloud(unknown),
+                CloudEnvironment::parse(unknown).is_some()
+            );
+            assert!(!is_known_cloud(unknown), "{unknown:?}");
+        }
+        // Every alias the local copy holds is one the runtime accepts too.
+        assert_eq!(
+            accepted,
+            CLOUD_NAMES.len() + local_cloud_aliases().len(),
+            "the local copy accepts a spelling `accepted_names` does not"
+        );
     }
 
     /// The build script's local GUID check must agree with the command layer's
