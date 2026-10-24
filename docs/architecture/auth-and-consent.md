@@ -352,7 +352,9 @@ which a sign-out/sign-in cycle would.
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
   is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
   text as well). Surfaces with their own consent / step-up button (the Permission Tester, the
-  Resource Access Sites and Key Vault sweeps) call only `report_if_session_dead` first and show
+  Resource Access Sites and Key Vault sweeps, the Activity and Conditional Access tabs, the
+  Scope-column `ScopeUnavailableBanner` — which also drops its Retry for a dead session) call only
+  the session levers first (`report_if_session_lost`) and show
   their inline text when it returns false; ones without (the mailbox probe, the Key Vault browser)
   take the whole `report_recovery_action` ladder; global search points its status row at the toast.
   A recovery toast dedupes by lever + feature (`Session::push_recovery_toast`: `reauth`,
