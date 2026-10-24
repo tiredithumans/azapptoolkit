@@ -951,13 +951,15 @@ pub(crate) fn parse_claims_challenge(www_authenticate: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// Maps a non-success status from the one-shot scoped read
-/// ([`GraphClient::scoped_get`], now its only user — the scoped writes ride the
-/// retrying transport) to the same typed error the retrying transport returns,
-/// so a throttled scoped read surfaces as [`GraphError::Throttled`] (ui code
-/// `throttled`, retryable) rather than a generic `Api`. Only the mapping is
-/// shared — `scoped_get` still deliberately skips the retry/throttle loop.
-fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
+/// Maps a non-success status to the same typed error the retrying transport
+/// returns, so a throttled read surfaces as [`GraphError::Throttled`] (ui code
+/// `throttled`, retryable) rather than a generic `Api`. The one status table
+/// for the reads that don't come through the retrying core: the one-shot
+/// scoped read ([`GraphClient::scoped_get`] — only the mapping is shared, it
+/// still deliberately skips the retry/throttle loop) and each `$batch`
+/// sub-response (`batch::map_batch_response`), which must type exactly like
+/// the GET sent alone.
+pub(super) fn map_error_status(code: u16, body: String, retry_after: Option<u64>) -> GraphError {
     let body = sanitize_error_body(&body);
     match code {
         401 => GraphError::Unauthorized,
