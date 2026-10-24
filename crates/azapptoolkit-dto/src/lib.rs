@@ -237,6 +237,11 @@ mod backend_conv {
                 AuthError::ConsentRequired(_) => ("consent_required", false),
                 AuthError::InteractionRequired(_) => ("interaction_required", false),
                 AuthError::TokenExchange(_) => ("token_exchange", true),
+                // Not Entra's verdict: a proxy or portal answered, or the
+                // endpoint stayed throttled / down. The refresh token is
+                // untouched, so neither is re-auth-fatal; a retry can succeed.
+                AuthError::UnexpectedResponder { .. } => ("unexpected_responder", true),
+                AuthError::ServiceUnavailable { .. } => ("service_unavailable", true),
                 AuthError::Authorization(_) => ("authorization", true),
                 AuthError::Loopback(_) => ("loopback", true),
                 AuthError::StateMismatch => ("state_mismatch", false),
@@ -298,6 +303,22 @@ mod backend_conv {
                 (
                     AuthError::TokenExchange("boom".into()),
                     "token_exchange",
+                    true,
+                ),
+                (
+                    AuthError::UnexpectedResponder {
+                        status: 403,
+                        content_type_class: "html",
+                    },
+                    "unexpected_responder",
+                    true,
+                ),
+                (
+                    AuthError::ServiceUnavailable {
+                        status: 503,
+                        detail: "temporarily_unavailable (AADSTS90033)".into(),
+                    },
+                    "service_unavailable",
                     true,
                 ),
                 (

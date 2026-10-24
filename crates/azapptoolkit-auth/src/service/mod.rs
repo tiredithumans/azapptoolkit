@@ -47,7 +47,8 @@ use azapptoolkit_core::identity::{SignInOutcome, TenantContext, canonical_tenant
 use crate::error::{AuthError, Result};
 use crate::token_cache::{
     AccessToken, PurgeOutcome, TokenCache, delete_refresh_token, delete_refresh_token_if_current,
-    delete_refresh_token_then, load_refresh_token, save_refresh_token_if, scope_key,
+    delete_refresh_token_then, ensure_keyring_store, load_refresh_token, save_refresh_token_if,
+    scope_key,
 };
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
@@ -162,6 +163,12 @@ pub struct EntraAuthService {
     /// default), a launch failure is only logged. Installed by the app via
     /// [`Self::set_browser_fallback`].
     browser_fallback: Mutex<Option<BrowserFallback>>,
+    /// Registers the OS credential store before `sign_in` opens the browser.
+    /// Always `token_cache::ensure_keyring_store` in the app; a field (not a
+    /// direct call) for the same reason as [`Self::open_browser`] — the test
+    /// binary shares one memoised mock store, so a test stands in for a
+    /// machine that has none.
+    ensure_store: fn() -> Result<()>,
 }
 
 impl EntraAuthService {
@@ -194,6 +201,7 @@ impl EntraAuthService {
             http: token_http_client(),
             open_browser: Box::new(open_system_browser),
             browser_fallback: Mutex::new(None),
+            ensure_store: ensure_keyring_store,
         })
     }
 
@@ -309,7 +317,7 @@ impl EntraAuthService {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok()),
         );
-        // Captured before the body consumes `resp`: on the non-Entra branch
+        // Captured before the body consumes `resp`: on the non-Entra branches
         // below it is the one genuinely diagnostic, non-content signal — an
         // `text/html` here says "a proxy answered", which is the question an
         // operator is asking.
@@ -351,8 +359,29 @@ impl EntraAuthService {
             }
         }
         if status.is_success() {
-            return Attempt::Done(serde_json::from_slice(&body).map_err(Into::into));
+            return Attempt::Done(match serde_json::from_slice::<TokenResponse>(&body) {
+                Ok(token) => Ok(token),
+                // JSON of the wrong shape is a broken Entra answer (`serde`);
+                // a body that is not JSON at all is a portal or proxy that
+                // answered 200 in Entra's place.
+                Err(e) if !e.is_data() => {
+                    tracing::warn!(
+                        target: "auth",
+                        %status,
+                        bytes = body.len(),
+                        content_type = content_type.as_deref().unwrap_or("<none>"),
+                        "AAD token endpoint returned success with a non-JSON body"
+                    );
+                    Err(AuthError::UnexpectedResponder {
+                        status: status.as_u16(),
+                        content_type_class: content_type_class(content_type.as_deref()),
+                    })
+                }
+                Err(e) => Err(e.into()),
+            });
         }
+        let throttled_or_down =
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
         let err = if let Ok(err_body) = serde_json::from_slice::<TokenErrorBody>(&body) {
             // Log the OAuth error code, the AADSTS numeric code, and the
             // correlation id for operators, but never the raw
@@ -365,7 +394,18 @@ impl EntraAuthService {
                 correlation_id = err_body.correlation_id.as_deref().unwrap_or(""),
                 "AAD token endpoint rejected request"
             );
-            classify_token_error(&err_body)
+            match classify_token_error(&err_body) {
+                // Entra answered, but with a throttle or an outage rather than
+                // a verdict on the request: nothing to fix in the config, and
+                // the refresh token is untouched.
+                AuthError::TokenExchange(detail) if throttled_or_down => {
+                    AuthError::ServiceUnavailable {
+                        status: status.as_u16(),
+                        detail,
+                    }
+                }
+                classified => classified,
+            }
         } else {
             // Body wasn't a TokenErrorBody. Tracing is wired to a daily rolling
             // FILE appender at info, so this lands on disk — and every other AAD
@@ -382,7 +422,20 @@ impl EntraAuthService {
                 content_type = content_type.as_deref().unwrap_or("<none>"),
                 "AAD token endpoint returned non-success without TokenErrorBody"
             );
-            AuthError::TokenExchange(format!("HTTP {status}"))
+            let content_type_class = content_type_class(content_type.as_deref());
+            if throttled_or_down {
+                // A gateway's 502/503/504 or a bare 429: the path to Entra is
+                // throttled or down, whoever wrote the page.
+                AuthError::ServiceUnavailable {
+                    status: status.as_u16(),
+                    detail: format!("{content_type_class} body"),
+                }
+            } else {
+                AuthError::UnexpectedResponder {
+                    status: status.as_u16(),
+                    content_type_class,
+                }
+            }
         };
         if retry_after_secs.is_some_and(|s| s > TOKEN_RETRY_AFTER_MAX_SECS) {
             // Waiting it out would hold the caller's per-scope refresh lock
@@ -415,10 +468,37 @@ impl EntraAuthService {
 /// same-key caller would queue behind the wait.
 const TOKEN_RETRY_AFTER_MAX_SECS: u64 = 30;
 
+/// The coarse class of a `/token` response's `Content-Type` — the one detail of
+/// a non-Entra answer worth reporting ("an HTML page answered" says "a proxy"),
+/// and safe to: it is metadata, never content.
+fn content_type_class(content_type: Option<&str>) -> &'static str {
+    let Some(content_type) = content_type else {
+        return "untyped";
+    };
+    let media = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if media == "text/html" || media == "application/xhtml+xml" {
+        "html"
+    } else if media == "application/json" || media.ends_with("+json") {
+        "json"
+    } else if media.starts_with("text/") {
+        "text"
+    } else if media.is_empty() {
+        "untyped"
+    } else {
+        "other"
+    }
+}
+
 /// The `/token` HTTP client. Redirects are never followed: a 307/308 would
 /// replay the POST body — the authorization code + PKCE verifier, or the
 /// refresh token — to whatever host the `Location` names. A 3xx instead lands
-/// in `token_attempt`'s non-success branch as a terminal `TokenExchange`.
+/// in `token_attempt`'s non-success branch as a terminal
+/// [`AuthError::UnexpectedResponder`].
 ///
 /// No response compression (`.no_gzip()`): the body carries the access and
 /// refresh tokens, read into a `Zeroizing` buffer; an inflate buffer would hold
@@ -595,6 +675,11 @@ impl EntraAuthService {
                 self.tenant_id
             )));
         }
+        // A sign-in the keyring cannot keep fails at its end
+        // (`RefreshTokenSave::Required`). A machine with no credential store at
+        // all (Linux without a Secret Service) is knowable now: say so before
+        // the operator spends a browser round trip — and an MFA prompt — on it.
+        self.ensure_credential_store().await?;
         // The Graph read scopes: minted CAE, the slot `graph_for` reads.
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
@@ -659,6 +744,16 @@ impl EntraAuthService {
             .lock()
             .insert(tenant_id.clone(), tenant.clone());
         Ok(SignInOutcome { tenant })
+    }
+
+    /// Registers the OS credential store (memoised for the process; touches no
+    /// credential, so it never prompts) — `KeyringUnavailable` when there is
+    /// none. On the blocking pool: the first registration is an OS round trip
+    /// (a D-Bus call on Linux).
+    async fn ensure_credential_store(&self) -> Result<()> {
+        tokio::task::spawn_blocking(self.ensure_store)
+            .await
+            .map_err(|e| AuthError::Keyring(format!("keyring registration task failed: {e}")))?
     }
 
     /// Obtains **interactive incremental consent** for `scopes`: one fresh
@@ -1459,6 +1554,7 @@ mod tests {
             http: token_http_client(),
             open_browser,
             browser_fallback: Mutex::new(None),
+            ensure_store: ensure_keyring_store,
         }
     }
 
@@ -1781,6 +1877,24 @@ mod tests {
             opened.load(Ordering::SeqCst),
             0,
             "no wasted browser round trip"
+        );
+        assert!(svc.known_tenants.lock().is_empty());
+    }
+
+    /// No credential store (Linux without a Secret Service) used to surface
+    /// only after the browser round trip, when the refresh token could not be
+    /// saved. It is knowable before: the browser is never opened.
+    #[tokio::test]
+    async fn sign_in_without_a_credential_store_fails_before_opening_the_browser() {
+        let mut svc = fresh_service("http://localhost".into(), "no-store-tenant", no_browser());
+        svc.ensure_store = || Err(AuthError::KeyringUnavailable("no session bus".into()));
+
+        let result = svc.sign_in().await;
+
+        assert!(
+            matches!(&result, Err(AuthError::KeyringUnavailable(m)) if m == "no session bus"),
+            "{:?}",
+            result.err()
         );
         assert!(svc.known_tenants.lock().is_empty());
     }
@@ -2655,7 +2769,10 @@ mod tests {
         let result = svc.sign_in().await;
 
         assert!(
-            matches!(&result, Err(AuthError::TokenExchange(m)) if m.contains("500")),
+            matches!(
+                &result,
+                Err(AuthError::ServiceUnavailable { status: 500, .. })
+            ),
             "{result:?}"
         );
         server.verify().await;
@@ -2850,6 +2967,38 @@ mod tests {
             svc.cache.get(tenant, &read, true).unwrap().token,
             "graph-read"
         );
+    }
+
+    /// A Conditional Access block for one resource arrives as `invalid_grant`
+    /// (AADSTS53003). Classified as a dead token it purged the keyring and the
+    /// tenant, and re-authenticating on the Graph read scopes never met an
+    /// ARM-scoped policy — so the purge repeated on every ARM call.
+    #[tokio::test]
+    async fn a_conditional_access_block_keeps_the_refresh_token_and_session() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("ca-block-tenant", "ca-block-oid");
+        mount_token_error(
+            &server,
+            tenant,
+            serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS53003: Access has been blocked by Conditional Access policies. The access policy does not allow token issuance."
+            }),
+        )
+        .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(&result, Err(AuthError::InteractionRequired(m)) if m.contains("AADSTS53003")),
+            "{result:?}"
+        );
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert!(svc.known_tenants.lock().get(tenant).is_some());
     }
 
     #[tokio::test]
@@ -3219,10 +3368,142 @@ mod tests {
         let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
 
         assert!(
-            matches!(&result, Err(AuthError::TokenExchange(m)) if m.contains("307")),
+            matches!(
+                &result,
+                Err(AuthError::UnexpectedResponder { status: 307, .. })
+            ),
             "{result:?}"
         );
         server.verify().await;
+    }
+
+    // ---- V19: a non-Entra responder is named as one, never as Entra ----
+
+    /// A TLS-inspecting proxy's block page at `/token` used to read as
+    /// "Entra rejected the token exchange — verify the ids". It is reported as
+    /// a foreign responder: status and content-type class only, never the page,
+    /// and nothing is purged.
+    #[tokio::test]
+    async fn a_proxy_block_page_is_an_unexpected_responder() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("proxy-403-tenant", "proxy-403-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(403).set_body_raw(
+                "<html><body>Blocked by policy: refresh_token=SECRET</body></html>",
+                "text/html; charset=utf-8",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        let err = result.expect_err("a block page is no token");
+        assert!(
+            matches!(
+                err,
+                AuthError::UnexpectedResponder {
+                    status: 403,
+                    content_type_class: "html"
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("SECRET"), "{err}");
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert!(svc.known_tenants.lock().get(tenant).is_some());
+        server.verify().await;
+    }
+
+    /// A captive portal answering 200 with a page is not a malformed Entra
+    /// token (`serde`) either.
+    #[tokio::test]
+    async fn a_success_that_is_not_json_is_an_unexpected_responder() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("portal-200-tenant", "portal-200-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<html>Sign in to Wi-Fi</html>", "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(AuthError::UnexpectedResponder {
+                    status: 200,
+                    content_type_class: "html"
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// Entra's own throttle, past the wait the refresh lock allows, is not a
+    /// config error (`token_exchange`): it is `ServiceUnavailable`, with the
+    /// redacted AAD code, and nothing is purged.
+    #[tokio::test]
+    async fn a_terminal_throttle_is_service_unavailable() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("throttle-json-tenant", "throttle-json-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", (TOKEN_RETRY_AFTER_MAX_SECS + 1).to_string())
+                    .set_body_json(serde_json::json!({
+                        "error": "temporarily_unavailable",
+                        "error_description": "AADSTS50196: The server terminated an operation because it encountered a client request loop."
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AuthError::ServiceUnavailable { status: 429, detail })
+                    if detail == "temporarily_unavailable (AADSTS50196)"
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
+        );
+        server.verify().await;
+    }
+
+    #[test]
+    fn content_type_classes_are_coarse_metadata() {
+        for (header, class) in [
+            (None, "untyped"),
+            (Some(""), "untyped"),
+            (Some("text/html; charset=utf-8"), "html"),
+            (Some("TEXT/HTML"), "html"),
+            (Some("application/xhtml+xml"), "html"),
+            (Some("application/json; charset=utf-8"), "json"),
+            (Some("application/problem+json"), "json"),
+            (Some("text/plain"), "text"),
+            (Some("application/octet-stream"), "other"),
+        ] {
+            assert_eq!(content_type_class(header), class, "{header:?}");
+        }
     }
 
     /// A body past the cap is refused before parsing — a well-formed token

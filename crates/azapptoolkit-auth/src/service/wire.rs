@@ -70,13 +70,16 @@ pub(super) struct TokenErrorBody {
 /// rejection (AADSTS65001 "not consented", 65004 "user declined", or the
 /// `consent_required` OAuth code) is recoverable via interactive consent and
 /// must be distinguished *first* — unlike [`AuthError::InvalidGrant`], it must
-/// NOT purge the refresh token. A Conditional Access step-up
-/// (`interaction_required` / `login_required`, or `invalid_grant` carrying
-/// AADSTS50074/50076/50079/50158 — MFA, registration, an external challenge)
-/// comes next: the refresh token is still good for other audiences, so it is
+/// NOT purge the refresh token. A Conditional Access interrupt comes next
+/// (`interaction_required` / `login_required`, or `invalid_grant` carrying one
+/// of [`CONDITIONAL_ACCESS_CODES`] — MFA, registration, an external challenge,
+/// a device or app requirement, or an outright policy block): the refresh token
+/// is still good for other audiences, so it is
 /// [`AuthError::InteractionRequired`], never a purge. What remains of
-/// `invalid_grant` means the refresh token is dead; the rest is a generic
-/// exchange failure. The carried string is always the UI-safe redacted summary.
+/// `invalid_grant` (AADSTS70008 expired, 70000 revoked, 50173 invalidated by a
+/// password change, 70043 past the sign-in frequency) means the refresh token
+/// is dead; the rest is a generic exchange failure. The carried string is
+/// always the UI-safe redacted summary.
 pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     let safe = redacted_aad_error(body);
     let aadsts = body
@@ -92,10 +95,9 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
         body.error.as_str(),
         "interaction_required" | "login_required"
     ) || (body.error == "invalid_grant"
-        && matches!(
-            aadsts.as_deref(),
-            Some("AADSTS50074" | "AADSTS50076" | "AADSTS50079" | "AADSTS50158")
-        ))
+        && aadsts
+            .as_deref()
+            .is_some_and(|code| CONDITIONAL_ACCESS_CODES.contains(&code)))
     {
         return AuthError::InteractionRequired(safe);
     }
@@ -104,6 +106,40 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     }
     AuthError::TokenExchange(safe)
 }
+
+/// The AADSTS codes Entra wraps in `invalid_grant` when a Conditional Access
+/// policy interrupts ONE resource's silent grant, while the refresh token stays
+/// valid for every other audience — so each is
+/// [`AuthError::InteractionRequired`], never a purge:
+///
+/// - 50074 / 50076 — strong authentication (MFA) is required;
+/// - 50078 — the MFA presented has expired and must be done again;
+/// - 50079 — the user must register for MFA;
+/// - 50158 — an external security challenge was not satisfied;
+/// - 53000 / 53001 — the policy requires a compliant / domain-joined device;
+/// - 53002 — the policy requires an approved client app;
+/// - 53003 — the policy blocks access outright;
+/// - 53004 — the user must complete MFA registration (proof-up) first;
+/// - 530032 — blocked by a security policy.
+///
+/// The blocks (53003, 530032) are not fixable by MFA, but purging for them was
+/// worse: it signed the operator out of every audience, and re-authenticating
+/// on the Graph read scopes never meets a policy scoped to ARM or Exchange, so
+/// the purge repeated. As `interaction_required` they get the "Verify identity"
+/// step-up for the one resource, whose browser page names the policy.
+pub(super) const CONDITIONAL_ACCESS_CODES: &[&str] = &[
+    "AADSTS50074",
+    "AADSTS50076",
+    "AADSTS50078",
+    "AADSTS50079",
+    "AADSTS50158",
+    "AADSTS53000",
+    "AADSTS53001",
+    "AADSTS53002",
+    "AADSTS53003",
+    "AADSTS53004",
+    "AADSTS530032",
+];
 
 /// Builds a UI-safe summary of an AAD error response. Keeps the canonical
 /// OAuth error code (e.g. `invalid_client`) and the AADSTS numeric code if
@@ -377,6 +413,31 @@ mod aad_redaction_tests {
                 "invalid_grant",
                 Some("AADSTS50158: External security challenge not satisfied."),
             ),
+            (
+                "invalid_grant",
+                Some("AADSTS50078: Presented multi-factor authentication has expired."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS53000: Device is not in required device state: compliant."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS53001: Device is not in required device state: domain_joined."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS53002: Application used is not an approved application."),
+            ),
+            (
+                "invalid_grant",
+                Some("AADSTS53003: Access has been blocked by Conditional Access policies."),
+            ),
+            ("invalid_grant", Some("AADSTS53004: Proof up required.")),
+            (
+                "invalid_grant",
+                Some("AADSTS530032: Blocked by security policy."),
+            ),
         ] {
             let body = TokenErrorBody {
                 error: error.into(),
@@ -410,17 +471,51 @@ mod aad_redaction_tests {
 
     #[test]
     fn expired_refresh_token_stays_invalid_grant() {
-        // A genuinely dead refresh token (70008) must still purge — it is NOT
-        // a consent problem.
-        let body = TokenErrorBody {
-            error: "invalid_grant".into(),
-            error_description: Some("AADSTS70008: The refresh token has expired...".into()),
-            correlation_id: None,
-        };
-        assert!(matches!(
-            classify_token_error(&body),
-            AuthError::InvalidGrant(_)
-        ));
+        // A genuinely dead refresh token must still purge — it is NOT a
+        // consent or Conditional Access problem: expired (70008), revoked
+        // (70000), invalidated by a password change (50173), past the
+        // sign-in frequency (70043).
+        for description in [
+            "AADSTS70008: The refresh token has expired...",
+            "AADSTS70000: The provided grant has been revoked...",
+            "AADSTS50173: The provided grant has expired due to it being revoked...",
+            "AADSTS70043: The refresh token has expired or is invalid due to sign-in frequency checks...",
+        ] {
+            let body = TokenErrorBody {
+                error: "invalid_grant".into(),
+                error_description: Some(description.into()),
+                correlation_id: None,
+            };
+            assert!(
+                matches!(classify_token_error(&body), AuthError::InvalidGrant(_)),
+                "{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_conditional_access_code_is_matched_whole_not_by_prefix() {
+        // 530032 is listed, 5300 and 530033 are not: the extractor takes every
+        // digit, and the list is compared whole.
+        for (description, interaction) in [
+            ("AADSTS530032: Blocked by security policy.", true),
+            ("AADSTS530033: Something else.", false),
+            ("AADSTS5300: Something else.", false),
+        ] {
+            let body = TokenErrorBody {
+                error: "invalid_grant".into(),
+                error_description: Some(description.into()),
+                correlation_id: None,
+            };
+            assert_eq!(
+                matches!(
+                    classify_token_error(&body),
+                    AuthError::InteractionRequired(_)
+                ),
+                interaction,
+                "{description}"
+            );
+        }
     }
 
     #[test]

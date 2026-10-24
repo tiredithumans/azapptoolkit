@@ -85,12 +85,15 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiErro
 /// is logged so a persistent failure is still diagnosable — the code only,
 /// since an AAD message routinely embeds tenant and user GUIDs.
 ///
-/// The ONE exception is an unreachable token endpoint (`network`: offline, a
-/// captive portal, a proxy down). There the refresh token is intact — only
-/// `InvalidGrant` purges it — so "sign in" is the wrong instruction (it opens a
-/// browser that can't load Entra ID either), and a retry succeeds once
-/// connectivity returns. That case is an `Err`, which the launch screen answers
-/// with a Retry. See [`restore_outcome`].
+/// The ONE exception is a token endpoint that gave no verdict
+/// ([`RETRY_CAN_RESTORE`]): unreachable (`network`: offline, a proxy down),
+/// answered by something other than Entra ID (`unexpected_responder`: a captive
+/// portal, a TLS-inspecting proxy's block page), or throttled / down past the
+/// retry budget (`service_unavailable`). There the refresh token is intact —
+/// only `InvalidGrant` purges it — so "sign in" is the wrong instruction (it
+/// opens a browser that can't get through either), and a retry succeeds once
+/// the path clears. That case is an `Err`, which the launch screen answers with
+/// a Retry. See [`restore_outcome`].
 #[tauri::command]
 pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<TenantContext>, UiError> {
     let Some(tenant) = state.remembered_account() else {
@@ -124,9 +127,15 @@ fn forgets_the_remembered_account(result: &azapptoolkit_auth::Result<SignInOutco
     matches!(result, Err(AuthError::Authorization(_)))
 }
 
+/// The restore failures a Retry can fix: the token endpoint gave no verdict on
+/// the stored refresh token (unreachable, answered by a non-Entra responder, or
+/// throttled / down past the retry budget), so the token is intact.
+const RETRY_CAN_RESTORE: &[&str] = &["network", "unexpected_responder", "service_unavailable"];
+
 /// [`restore_session`]'s answer for one silent restore attempt: the restored
-/// tenant, `Err` only for `network`, `Ok(None)` for everything else. Split out
-/// so the policy is testable without a `settings.json`.
+/// tenant, `Err` only for a [`RETRY_CAN_RESTORE`] code, `Ok(None)` for
+/// everything else. Split out so the policy is testable without a
+/// `settings.json`.
 fn restore_outcome(
     result: azapptoolkit_auth::Result<SignInOutcome>,
 ) -> Result<Option<TenantContext>, UiError> {
@@ -136,7 +145,7 @@ fn restore_outcome(
             let ui = UiError::from(err);
             // The code only: a `network` message's cause chain can carry the
             // token URL, and with it the tenant GUID.
-            if ui.code == "network" {
+            if RETRY_CAN_RESTORE.contains(&ui.code.as_str()) {
                 tracing::info!(
                     target: "auth",
                     code = %ui.code,
@@ -266,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_outcome_errs_only_when_entra_is_unreachable() {
+    fn restore_outcome_errs_only_when_entra_gave_no_verdict() {
         // reqwest defers an unparseable URL to `build()`, the one public way
         // to get a `reqwest::Error` without a live socket.
         let http = reqwest::Client::new()
@@ -276,11 +285,35 @@ mod tests {
         let err = restore_outcome(Err(AuthError::Http(http))).expect_err("network is an Err");
         assert_eq!(err.code, "network");
 
+        // A proxy's block page, a captive portal, or Entra throttled / down
+        // past the retry budget: no verdict on the stored token, so the launch
+        // offers a Retry, not the sign-in card.
+        for no_verdict in [
+            AuthError::UnexpectedResponder {
+                status: 403,
+                content_type_class: "html",
+            },
+            AuthError::ServiceUnavailable {
+                status: 503,
+                detail: "temporarily_unavailable (AADSTS90033)".into(),
+            },
+            AuthError::ServiceUnavailable {
+                status: 429,
+                detail: "untyped body".into(),
+            },
+        ] {
+            let label = format!("{no_verdict:?}");
+            let err = restore_outcome(Err(no_verdict)).expect_err(&label);
+            assert!(err.retryable, "{label}");
+            assert!(!err.is_reauth_fatal(), "{label}");
+        }
+
         for empty in [
             AuthError::InvalidGrant("x".into()),
             AuthError::RefreshTokenMissing("t".into()),
             AuthError::Keyring("locked".into()),
             AuthError::NotSignedIn,
+            AuthError::TokenExchange("invalid_client (AADSTS7000215)".into()),
         ] {
             let label = format!("{empty:?}");
             assert!(

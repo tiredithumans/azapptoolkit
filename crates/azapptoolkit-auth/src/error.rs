@@ -18,8 +18,8 @@ pub enum AuthError {
     RefreshTokenMissing(String),
 
     /// AAD returned `invalid_grant` for a dead refresh token (e.g. AADSTS70008
-    /// expired, 70000 revoked, 50173 invalidated by a password change); it must
-    /// be discarded. A consent gap ([`AuthError::ConsentRequired`]) or a
+    /// expired, 70000 revoked, 50173 invalidated by a password change, 70043
+    /// past the sign-in frequency); it must be discarded. A consent gap ([`AuthError::ConsentRequired`]) or a
     /// Conditional Access step-up ([`AuthError::InteractionRequired`]) is
     /// classified first and never lands here. The string is the redacted AAD
     /// code for tracing only — do not show it to users.
@@ -36,10 +36,12 @@ pub enum AuthError {
     ConsentRequired(String),
 
     /// AAD requires the user to complete an interactive step — MFA,
-    /// registration, or an external challenge a Conditional Access policy
-    /// demands for THIS resource (`interaction_required` / `login_required`, or
-    /// `invalid_grant` with AADSTS50074/50076/50079/50158). The refresh token is
-    /// still valid for other audiences (MSAL keeps the account on
+    /// registration, an external challenge, a device or app requirement — or
+    /// blocks access outright, by a Conditional Access policy for THIS resource
+    /// (`interaction_required` / `login_required`, or `invalid_grant` with
+    /// AADSTS50074/50076/50078/50079/50158 or 53000–53004/530032 —
+    /// `wire::CONDITIONAL_ACCESS_CODES`). The refresh token is still valid for
+    /// other audiences (MSAL keeps the account on
     /// `InteractionRequiredAuthError`), so it must NOT be purged. Recover via
     /// [`crate::EntraAuthService::step_up_for_scopes`]. The string carries the
     /// redacted AAD code for tracing; show users a generic message.
@@ -48,6 +50,34 @@ pub enum AuthError {
 
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
+
+    /// Something other than Entra ID answered the `/token` request: a
+    /// non-success response whose body is not an OAuth error body (a
+    /// TLS-inspecting proxy's or a WAF's block page, a captive portal, a 3xx
+    /// the client refuses to follow), or a 200 whose body is not JSON. Entra
+    /// rejected nothing, so the refresh token is untouched and a retry can
+    /// succeed once the network path lets the login host through. Metadata
+    /// only — the status and a coarse class of the `Content-Type`
+    /// (`html`/`json`/`text`/`other`/`untyped`) — never the body, which such a
+    /// responder commonly fills with the request it intercepted.
+    #[error(
+        "something other than Entra ID answered the token request (HTTP {status}, {content_type_class} body)"
+    )]
+    UnexpectedResponder {
+        status: u16,
+        content_type_class: &'static str,
+    },
+
+    /// The `/token` endpoint stayed throttled (429) or failing (5xx) through
+    /// the retry budget, or asked for a `Retry-After` too long to wait under
+    /// the refresh lock. Nothing was rejected: the refresh token is untouched
+    /// and a later retry can succeed. `detail` is the redacted AAD error
+    /// (`"{error} (AADSTSnnnnn)"`) when Entra sent one, else the body's
+    /// content-type class — never the body.
+    #[error(
+        "the sign-in service is throttling or temporarily unavailable (HTTP {status}: {detail})"
+    )]
+    ServiceUnavailable { status: u16, detail: String },
 
     #[error("authorization request failed: {0}")]
     Authorization(String),

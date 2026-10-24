@@ -6,6 +6,12 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- A Conditional Access block or device rule for one service no longer signs you out; it offers Verify identity instead.
+- Sign-in now says when a proxy, firewall or busy Entra ID answered, and launch offers Retry rather than the sign-in card.
+- On Linux without a credential store, sign-in now says so before it opens the browser rather than after you sign in.
+
 ### Security
 
 - Security fix for a crash and memory-corruption bug in the library that runs the app's background work.

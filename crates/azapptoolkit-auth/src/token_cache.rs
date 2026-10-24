@@ -29,7 +29,11 @@ pub const KEYRING_SERVICE: &str = "azapptoolkit";
 ///
 /// A registration failure is [`AuthError::KeyringUnavailable`] (no store at
 /// all), never [`AuthError::Keyring`] (a store that exists but refused).
-fn ensure_keyring_store() -> Result<()> {
+///
+/// Also called by `EntraAuthService::sign_in` before its browser round trip, so
+/// a machine with no credential store says so before the operator signs in,
+/// not after. Registering touches no credential, so it never prompts.
+pub(crate) fn ensure_keyring_store() -> Result<()> {
     static STORE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     STORE
         .get_or_init(|| {
