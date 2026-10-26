@@ -41,7 +41,6 @@ After 0.34.1, each change is one line written for the person using the app.
 - An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
 - The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
 - The Activity, Conditional Access and Provisioning tabs now say when Entra ID is busy or a proxy answered instead.
-- A damaged settings.json is now named on the sign-in and setup screens, and a save says to fix it or move it aside.
 - A settings.json that can't be read or is damaged is now named on the sign-in and setup screens, with what to do.
 - The sign-in card names the cloud it signs in to, and warns when AZAPPTOOLKIT_CLOUD holds a value it doesn't know.
 - An update that fails its signature check or install points you to the Releases page and the log folder, not a retry.
