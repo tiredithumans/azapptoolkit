@@ -151,7 +151,7 @@ Some features need admin-consent/premium scopes beyond the sign-in bundle:
 |---|---|
 | `Synchronization.Read.All` | SCIM provisioning |
 | `AuditLog.Read.All` | Directory activity / change log (the Activity tab), **and** the two sign-in reports: the service-principal sign-in-activity report behind the audit's unused-app detection, **and** the beta `reports/appCredentialSignInActivities` behind the unused-credential advisory and the Credentials tab's Last-used column (that one is **Global cloud only** — a sovereign cloud reads it as unavailable and the feature stays off). Both reports' least-privileged scope is `AuditLog.Read.All`, **not** `Reports.Read.All`. |
-| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token` — the CA tab's "Grant consent" covers the policy reads too (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
+| `Policy.Read.All` | Conditional Access visibility (the Conditional Access tab) **and** the app-management-policy reads (tenant default + per-app overrides) behind the Credentials tab's lifetime markers, the add-secret pre-warning, the audit's lifetime advisory and the Home posture line. Both ride the ONE `policy` consent feature / `policy_token`, so the Conditional Access tab's own "Grant consent & retry" (its read pre-acquires the token, so a missing consent arrives typed) also enables the policy reads (v1.0 endpoints, no P1/P2 needed for the lifetime half, unlike CA). |
 | `Policy.ReadWrite.ApplicationConfiguration` + `Application.ReadWrite.All` (one token) | Claims-mapping policies — SAML attribute & claim customization in the SSO wizard / detail "SSO" tab. The policy object itself needs only the Policy scope, but the service-principal `$ref` assign/list/remove need both in the same token, so one bundle (and one consent) covers reading and saving. A failed claims read sets `SsoConfigDto.claims_read_failed`; the SSO tab then turns Save off and offers "Load claims" (consent + reload) rather than saving over claims it never loaded. The same token also reads the admin center's **custom claims policy** (beta `servicePrincipals/{id}/claimsPolicy`; see "Attributes & claims: what the admin center shows" below). |
 | `Sites.FullControl.All` | SharePoint `Sites.Selected` — list/grant/revoke a site's per-app permissions in the Permissions tab's SharePoint site access section. The site-permission endpoints require it even for **reads**, since the verb-selected read token only holds `Directory.Read.All`. |
 | `GroupMember.ReadWrite.All` + `Application.ReadWrite.All` (one token) | Group-membership add/remove for a service principal (the enterprise-app Access tab's "Group memberships" section) — the access model for group-gated APIs like Power BI / Fabric tenant settings. Learn's "Add members" table documents the pair for a `servicePrincipal` member (Graph must also write the SP); `Application.ReadWrite.All` is already in the write bundle, so this widens nothing. Deliberately the membership-only group scope, not `Group.ReadWrite.All` (the app never creates/deletes groups). Membership **reads** ride the sign-in `Directory.Read.All`; only the `$ref` writes need this. |
@@ -220,13 +220,31 @@ caller picks the CAE slot by hand. Examples:
   the attempted change and offers "Grant consent & retry", replaying it after the grant
 - the `commands::exchange` commands — they build their client via `exchange_client_checked` →
   `ensure_exchange_token`, so the Exchange/Permissions tabs can offer "Grant consent & retry"
-- `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab turns
-  `consent_required` into "Grant consent & retry" for the `sync` feature and reloads; a 403 keeps
-  a role/license message instead
+- `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab
+  (`FeatureLoadError` with a `forbidden_lead`) turns `consent_required` into "Grant consent &
+  retry" for the `sync` feature and reloads; a 403 keeps a role/license message instead
+- `list_directory_audits_for_app` / `get_app_sign_in_activity` (`ensure_audit_log_token`) and
+  `list_conditional_access_for_app` (`ensure_feature_token(ConsentFeature::Policy)`) — the
+  Activity and Conditional Access tabs (`components::feature_load_error::FeatureLoadError`) turn
+  `consent_required` into "Grant consent & retry" for `audit_log` / `policy`, `interaction_required`
+  into "Verify identity & retry", raise the session's lever for a dead session or rejected token,
+  and keep the backend's `activity_unavailable` / `ca_unavailable` notice for a license or role
+  gap. The Activity tab's sign-in summary reads on the same token and holds no lever of its own:
+  it names the cause in a muted line and defers to the change log's, so the tab shows one button.
+  `graph_err::premium_feature_err` keeps any classified token code
+  (`core::reauth::passthrough_code`) instead of folding it into `*_unavailable`, and words a
+  non-license 403 from the feature's catalog remediation (`audit_reports` /
+  `conditional_access`) — a missing consent fails at `/token`, never as a Graph 403
 - `run_audit` — pre-acquires the `AuditLog.Read.All` token so the Security-audit view can offer a
   "Grant consent & re-run" button that enables the **Unused** tab. The sign-in activity report
   behind it is gated on that scope + Entra ID P1/P2;
   `AuditRunResult.sign_in_report_available`/`sign_in_consent_required` drive the banner/empty state.
+  A transient failure — the report throttled, failing (5xx) or unreachable, or the token endpoint
+  unreachable (`network`), busy (`service_unavailable`) or answered by a proxy
+  (`unexpected_responder`) — is `AuditCoverageGap::SignInActivity` instead (the report's
+  pages ride `scoped_get_retried`, so the gap is what is left after the retry budget): the run is
+  degraded (never cached, never an
+  all-clear) and the findings say to re-run, not to grant a consent already in place.
 
 ## A step-up is not a dead session
 
@@ -342,7 +360,10 @@ which a sign-out/sign-in cycle would.
   used by both `report_command_error_for` (the central sink behind `run_toast_err`; anything else
   is a plain error toast) and `CommandState::run` (inline-error surfaces, which keep their inline
   text as well). Surfaces with their own consent / step-up button (the Permission Tester, the
-  Resource Access Sites and Key Vault sweeps) call only `report_if_session_dead` first and show
+  Resource Access Sites and Key Vault sweeps, the Activity / Conditional Access / Provisioning tabs
+  through `components::feature_load_error::FeatureLoadError`, the Scope-column
+  `ScopeUnavailableBanner` — the last two raise it themselves, once per mount) call only the
+  session levers first (`report_if_session_lost`) and show
   their inline text when it returns false; ones without (the mailbox probe, the Key Vault browser)
   take the whole `report_recovery_action` ladder; global search points its status row at the toast.
   A recovery toast dedupes by lever + feature (`Session::push_recovery_toast`: `reauth`,
@@ -363,9 +384,14 @@ which a sign-out/sign-in cycle would.
   why instead of re-running an op that would read disposed signals and panic. Direct `report_command_error` callers hold no op to
   re-run and keep a plain toast.
 - `unauthorized` (a client 401 — a revoked token, or a CAE claims challenge the silent re-mint
-  couldn't satisfy) gets the **Refresh token** action but is deliberately NOT re-auth-fatal: one
-  401 doesn't prove the session dead, so a fan-out keeps going. The Exchange/Key Vault/ARM 401
-  hints and `premium_feature_err` point at the same control, never at signing out. The toast shows
+  couldn't satisfy for an unclassified reason) gets the **Refresh token** action but is deliberately
+  NOT re-auth-fatal: one 401 doesn't prove the session dead, so a fan-out keeps going. A re-mint
+  that fails *classified* (`core::reauth::passthrough_code` knows its code — a dead session, a
+  step-up, a missing consent, an unreachable token endpoint) leaves the Graph transport as
+  `GraphError::Token` with that code instead, so it gets its own lever and a dead session still
+  stops a fan-out (pinned by `a_failed_cae_remint_keeps_the_classified_token_error`). The
+  Exchange/Key Vault/ARM 401 hints and `premium_feature_err` point at the same control, never at
+  signing out. The toast shows
   that curated text (`UiError::unauthorized_guidance`, everything past the shared
   `core::reauth::UNAUTHORIZED_STATUS` line) and falls back to a generic lead only for a bare 401,
   because the hint's "if it persists" advice is all that separates a persistent 401 from a

@@ -14,6 +14,7 @@ pub mod detail_header;
 pub mod directory_search;
 pub mod exchange_scoping_section;
 pub mod export_menu;
+pub mod feature_load_error;
 pub mod filter_chip;
 pub mod filter_toggle;
 pub mod global_search;

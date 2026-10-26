@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::bindings::TenantArg;
 pub use azapptoolkit_dto::audit::{
-    AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
+    AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult, CachedAuditSummary,
     MAILBOX_SCOPING_UNRESOLVED,
 };
 

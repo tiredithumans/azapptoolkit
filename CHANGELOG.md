@@ -29,6 +29,14 @@ After 0.34.1, each change is one line written for the person using the app.
 - A backup now shows that it started while it reads the tenant's app lists, instead of nothing.
 - A backup whose background task fails now stops with an error instead of reporting Ready with apps missing.
 - Loading a restore report or a newer build's backup now says which it is, not a raw parse error.
+- When Microsoft Graph revokes a token and renewing it fails, the app now offers the right fix, not just Refresh token.
+- A refused SharePoint site URL now says what is wrong with it (a port, a password, the host or a path part).
+- The Activity and Conditional Access tabs now offer Grant consent, Verify identity or Re-authenticate when they fail.
+- A refused Activity or Conditional Access read now names the roles that can read it instead of asking for admin consent.
+- The Permissions tab's mailbox Scope banner now offers Re-authenticate when your session has expired.
+- An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
+- The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
+- The Activity, Conditional Access and Provisioning tabs now say when Entra ID is busy or a proxy answered instead.
 
 ### Security
 

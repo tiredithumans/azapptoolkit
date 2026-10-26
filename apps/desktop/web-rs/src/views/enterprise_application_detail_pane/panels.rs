@@ -3,7 +3,7 @@
 //! Grouped in one file — each is a small wrapper over a binding / shared panel.
 
 use super::*;
-use crate::components::ui::Callout;
+use crate::components::feature_load_error::FeatureLoadError;
 
 #[component]
 pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
@@ -26,31 +26,6 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
         }
     });
 
-    let consenting = RwSignal::new(false);
-    let on_consent = move |_| {
-        // One browser round trip at a time: a double click must not open two.
-        if consenting.get_untracked() {
-            return;
-        }
-        let Some(t) = session.active_tenant.get_untracked() else {
-            return;
-        };
-        consenting.set(true);
-        leptos::task::spawn_local(async move {
-            let res = auth::request_scope_consent(&t.tenant_id, "sync").await;
-            // The consent prompt is answered minutes later, perhaps after a
-            // sign-out: a toast then would surface at the next sign-in.
-            if !session.is_active_tenant(&t.tenant_id) {
-                return;
-            }
-            match res {
-                Ok(()) => reload.update(|n| *n += 1),
-                Err(e) => session.report_command_error_for(&e, "sync"),
-            }
-            consenting.set(false);
-        });
-    };
-
     view! {
         <header class="row-between">
             <div class="row">
@@ -64,44 +39,19 @@ pub fn ProvisioningContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> 
                     // A missing consent arrives typed (the backend pre-acquires
                     // the Synchronization.Read.All token), so it gets the grant
                     // round trip; a 403 is a role / license gap no consent can
-                    // fix. Every other error (a transient 429, …) keeps Retry.
-                    Err(e) if e.is_consent_required() => {
-                        view! {
-                            <Callout tone="warn">
-                                <span class="ui-text">
-                                    "Provisioning status needs admin consent to Synchronization.Read.All."
-                                </span>
-                                <div class="actions-row">
-                                    <Button
-                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
-                                        on_click=Box::new(on_consent)
-                                        disabled=Signal::derive(move || consenting.get())
-                                    >
-                                        "Grant consent & retry"
-                                    </Button>
-                                </div>
-                            </Callout>
-                        }
-                            .into_any()
-                    }
-                    // The backend splices the `provisioning_read` catalog
-                    // remediation (the roles to activate) into the message.
-                    Err(e) if e.code == "forbidden" => {
-                        view! {
-                            <Callout tone="warn">
-                                <span class="ui-text">
-                                    "Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
-                                </span>
-                                <span class="ui-text">{e.message}</span>
-                            </Callout>
-                        }
-                            .into_any()
-                    }
+                    // fix (the backend splices the `provisioning_read` catalog
+                    // remediation into its message); a dead session gets the
+                    // session's toast; every other error (a transient 429, …)
+                    // keeps Retry.
                     Err(e) => {
                         view! {
-                            <DetailLoadError
+                            <FeatureLoadError
                                 error=e
-                                on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                consent_feature="sync"
+                                step_up_features=&["sync"]
+                                consent_text="Provisioning status needs admin consent to Synchronization.Read.All."
+                                forbidden_lead="Provisioning status is unavailable. Your account needs a role that can read provisioning, and the tenant an Entra ID P1/P2 license."
+                                on_retry=Callback::new(move |()| reload.update(|n| *n += 1))
                             />
                         }
                             .into_any()

@@ -1,4 +1,4 @@
-use super::super::transport::parse_claims_challenge;
+use super::super::transport::{map_error_status, parse_claims_challenge};
 use super::super::*;
 use super::common::*;
 
@@ -487,6 +487,42 @@ fn parse_claims_challenge_extracts_only_insufficient_claims() {
     );
 }
 
+/// The retrying core keeps its own inline status match (it also decides retry
+/// vs done and catches the CAE challenge), while the one-shot scoped read and
+/// every `$batch` sub-response go through `map_error_status`. Both must give
+/// the same answer for every error status, or one Graph failure would type
+/// differently depending on the path that fetched it. A retried status runs
+/// out the budget (`Retry-After: 0` keeps that instant) and must then surface
+/// as the same variant `map_error_status` names.
+#[tokio::test]
+async fn the_retrying_core_and_map_error_status_agree_on_every_error_status() {
+    let server = MockServer::start().await;
+    let body = r#"{"error":{"code":"x","message":"nope"}}"#;
+    let statuses: [u16; 14] = [
+        400, 401, 403, 404, 405, 409, 412, 422, 429, 500, 501, 502, 503, 504,
+    ];
+    for status in statuses {
+        Mock::given(method("GET"))
+            .and(path(format!("/applications/s{status}")))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+    }
+    let client = make_client(&server.uri());
+    for status in statuses {
+        let retried = client
+            .get_application(&format!("s{status}"))
+            .await
+            .unwrap_err();
+        let table = map_error_status(status, body.to_string(), Some(0));
+        assert_eq!(format!("{retried:?}"), format!("{table:?}"), "{status}");
+    }
+}
+
 /// Returns the base token normally, a distinct token when re-minted for a
 /// claims challenge — so a mock can assert which one was used.
 struct CaeProvider;
@@ -564,6 +600,71 @@ async fn cae_remints_only_once() {
     let client = cae_client(server.uri());
     let err = client.get_application("obj-1").await.unwrap_err();
     assert!(matches!(err, GraphError::Unauthorized), "got {err:?}");
+}
+
+/// Mints the base token, then fails the claims re-mint with `code` — the
+/// shape a dead session, a step-up or an unreachable token endpoint takes
+/// at the CAE re-mint.
+struct FailingRemintProvider(&'static str);
+#[async_trait::async_trait]
+impl azapptoolkit_core::token::BearerProvider for FailingRemintProvider {
+    async fn bearer(&self) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
+        Ok("tok".into())
+    }
+    async fn bearer_with_claims(
+        &self,
+        _claims: &str,
+    ) -> std::result::Result<String, azapptoolkit_core::token::TokenError> {
+        Err(azapptoolkit_core::token::TokenError::new(
+            self.0,
+            "re-mint failed",
+        ))
+    }
+}
+
+/// A failed CAE re-mint keeps the classification the token layer gave it, so
+/// the operator gets that failure's lever (Re-authenticate, Verify identity,
+/// a transient Retry) instead of a "Refresh token" that cannot fix it. Only an
+/// unclassified failure is the bare rejected-token 401.
+#[tokio::test]
+async fn a_failed_cae_remint_keeps_the_classified_token_error() {
+    for (code, want) in [
+        ("refresh_missing", "refresh_missing"),
+        ("not_signed_in", "not_signed_in"),
+        ("interaction_required", "interaction_required"),
+        ("consent_required", "consent_required"),
+        ("network_error", "network_error"),
+        ("token_error", "unauthorized"),
+        ("something_new", "unauthorized"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "WWW-Authenticate",
+                r#"Bearer realm="", error="insufficient_claims", claims="eyJhIjoxfQ""#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider: Arc<dyn azapptoolkit_core::token::BearerProvider> =
+            Arc::new(FailingRemintProvider(code));
+        let client = GraphClient::with_base_url(
+            "tenant-test",
+            provider.clone(),
+            provider,
+            Cache::new(),
+            server.uri(),
+        );
+        let err = client.get_application("obj-1").await.unwrap_err();
+        assert_eq!(err.ui_code(), want, "{code}: {err:?}");
+        // The fatal ones are what stop a long-running fan-out.
+        assert_eq!(
+            matches!(&err, GraphError::Token(t) if t.is_reauth_fatal()),
+            azapptoolkit_core::reauth::is_reauth_fatal(code),
+            "{code}"
+        );
+    }
 }
 
 // ── Retry class, end to end ────────────────────────────────────────────────

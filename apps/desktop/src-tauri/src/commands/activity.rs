@@ -3,8 +3,10 @@
 //! Reads Graph `directoryAudits` for a given app (and its paired service
 //! principal) via the on-demand `AuditLog.Read.All` token, flattening each
 //! entry into a display-ready [`ActivityLogItem`]. Degrades gracefully: a
-//! tenant without consent or an Entra ID P1/P2 license surfaces a friendly
-//! "unavailable" message rather than a hard error.
+//! tenant without an Entra ID P1/P2 license (or an account without a reporting
+//! role) surfaces a friendly "unavailable" message rather than a hard error,
+//! while a missing consent, a dead session or a step-up keeps its own code so
+//! the tab can offer that failure's lever.
 
 use chrono::{DateTime, Utc};
 use tauri::State;
@@ -32,6 +34,11 @@ const ACTIVITY_FALLBACK_TOP: u32 = 200;
 /// an app registration and its paired service principal (in either order; both
 /// ids are simply OR-ed into the audit filter) — most-recent first. Always
 /// fetched fresh: activity is live data and the tab's Refresh re-runs this.
+///
+/// The `AuditLog.Read.All` token is pre-acquired (the
+/// `get_enterprise_app_provisioning` pattern), so a missing consent arrives
+/// typed as `consent_required` and the tab offers "Grant consent & retry"; a
+/// dead session or a step-up arrives typed too, never as "needs admin consent".
 #[tauri::command]
 pub async fn list_directory_audits_for_app(
     state: State<'_, AppState>,
@@ -39,6 +46,10 @@ pub async fn list_directory_audits_for_app(
     primary_object_id: String,
     secondary_object_id: Option<String>,
 ) -> Result<Vec<ActivityLogItem>, UiError> {
+    state
+        .ensure_audit_log_token(&tenant_id)
+        .await
+        .map_err(UiError::from)?;
     let mut ids = vec![primary_object_id];
     if let Some(other) = secondary_object_id.filter(|s| !s.is_empty()) {
         ids.push(other);
@@ -87,7 +98,14 @@ pub async fn list_directory_audits_for_app(
 /// (or `consent_required = true`), so the surrounding Activity tab keeps
 /// rendering directory changes. The `AuditLog.Read.All` token is pre-acquired
 /// with a typed call (like `run_audit`) so a missing-consent failure is
-/// distinguishable and can drive a "Grant consent & retry" button.
+/// distinguishable (the summary then defers to the change log's "Grant consent
+/// & retry", which reads on the same token).
+///
+/// The one `Err` is a token failure other than a missing consent — a dead
+/// session, a Conditional Access step-up, an unreachable token endpoint, any
+/// other `/token` refusal — returned as-is, like `list_directory_audits_for_app`'s
+/// pre-acquire, so the tab shows the real cause instead of claiming the report
+/// needs admin consent.
 #[tauri::command]
 pub async fn get_app_sign_in_activity(
     state: State<'_, AppState>,
@@ -98,21 +116,7 @@ pub async fn get_app_sign_in_activity(
     // Distinguish a missing-consent rejection from a license / availability one
     // up front (mirrors `run_audit`).
     if let Err(err) = state.ensure_audit_log_token(&tenant_id).await {
-        let ui = UiError::from(err);
-        if ui.is_consent_required() {
-            return Ok(SignInActivityDto {
-                available: false,
-                consent_required: true,
-                last_sign_in_date_time: None,
-                message: Some(
-                    "Sign-in activity needs admin consent for AuditLog.Read.All (and an Entra ID P1/P2 license)."
-                        .into(),
-                ),
-            });
-        }
-        return Ok(sign_in_unavailable(
-            "Couldn't acquire AuditLog.Read.All for sign-in activity; it needs admin consent and an Entra ID P1/P2 license.",
-        ));
+        return sign_in_token_failure(UiError::from(err));
     }
 
     let client = state.graph_for(&tenant_id);
@@ -123,8 +127,22 @@ pub async fn get_app_sign_in_activity(
             last_sign_in_date_time: pick_last_sign_in(items, &app_id),
             message: None,
         }),
-        Err(err) => Ok(map_sign_in_err(err)),
+        Err(err) => map_sign_in_err(err),
     }
+}
+
+/// The summary for a failed `AuditLog.Read.All` pre-acquire. A missing consent
+/// is the consent-required DTO; every other failure is returned as-is (the
+/// `list_directory_audits_for_app` rule), so its code reaches the tab — the
+/// pre-acquire knows nothing about a license, so it must not claim one.
+fn sign_in_token_failure(ui: UiError) -> Result<SignInActivityDto, UiError> {
+    if ui.is_consent_required() {
+        return Ok(SignInActivityDto {
+            consent_required: true,
+            ..sign_in_unavailable(SIGN_IN_NEEDS_CONSENT)
+        });
+    }
+    Err(ui)
 }
 
 /// The most recent recorded sign-in for `app_id` within the report, or `None`
@@ -140,6 +158,11 @@ fn pick_last_sign_in(
         .and_then(|s| s.last_sign_in_date_time)
 }
 
+/// The consent-required summary's text, shared by the pre-acquire and the
+/// (rarer) consent failure at the report read itself.
+const SIGN_IN_NEEDS_CONSENT: &str =
+    "Sign-in activity needs admin consent for AuditLog.Read.All (and an Entra ID P1/P2 license).";
+
 fn sign_in_unavailable(message: &str) -> SignInActivityDto {
     SignInActivityDto {
         available: false,
@@ -149,23 +172,43 @@ fn sign_in_unavailable(message: &str) -> SignInActivityDto {
     }
 }
 
-/// Maps a Graph error from the sign-in report into a graceful "unavailable" DTO
-/// (never a hard error). Like [`map_activity_err`], never leaks the raw body.
-fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
-    match &err {
+/// Maps a Graph error from the sign-in report into a graceful "unavailable" DTO.
+/// Like [`map_activity_err`], never leaks the raw body, and like it keeps a
+/// classified token failure's own code: a missing consent becomes the
+/// consent-required DTO (the summary's grant button), every other classified
+/// one (`core::reauth::passthrough_code`) the one `Err`, so the summary offers
+/// its lever. A non-license 403 is a reporting-role gap, not a missing consent
+/// (that fails at `/token`, typed): its text is the `audit_reports` catalog
+/// remediation.
+fn map_sign_in_err(err: GraphError) -> Result<SignInActivityDto, UiError> {
+    Ok(match &err {
+        GraphError::Token(t) if t.code == azapptoolkit_core::reauth::CONSENT_REQUIRED => {
+            SignInActivityDto {
+                consent_required: true,
+                ..sign_in_unavailable(SIGN_IN_NEEDS_CONSENT)
+            }
+        }
+        GraphError::Token(t) if azapptoolkit_core::reauth::passthrough_code(&t.code).is_some() => {
+            return Err(UiError::from(err));
+        }
         GraphError::Forbidden(body) => {
             if graph_err::looks_like_missing_license(body) {
                 sign_in_unavailable(
                     "Sign-in activity requires an Entra ID P1 or P2 license, which this tenant doesn't appear to have.",
                 )
             } else {
-                sign_in_unavailable(
-                    "Sign-in activity requires admin consent for AuditLog.Read.All and a supported reader role.",
-                )
+                let remediation = azapptoolkit_core::capabilities::capability("audit_reports")
+                    .map_or(
+                        "Ask an administrator which role can read sign-in reports.",
+                        |c| c.remediation,
+                    );
+                sign_in_unavailable(&format!(
+                    "Microsoft Graph refused the sign-in activity report for your account. {remediation}"
+                ))
             }
         }
         GraphError::Token(_) => sign_in_unavailable(
-            "Couldn't acquire AuditLog.Read.All for sign-in activity; it needs admin consent (and Entra ID P1/P2).",
+            "Couldn't acquire AuditLog.Read.All for sign-in activity right now; the rest of the app is unaffected.",
         ),
         GraphError::Unauthorized => sign_in_unavailable(
             "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen sign-in activity.",
@@ -176,7 +219,7 @@ fn map_sign_in_err(err: GraphError) -> SignInActivityDto {
             )
         }
         _ => sign_in_unavailable("Sign-in activity is unavailable for this app right now."),
-    }
+    })
 }
 
 /// Flattens a Graph audit entry into the display-ready DTO.
@@ -243,7 +286,7 @@ fn map_activity_err(err: GraphError) -> UiError {
         "activity_unavailable",
         "The activity log",
         "the activity log",
-        "AuditLog.Read.All",
+        "audit_reports",
         err,
     )
 }
@@ -327,12 +370,21 @@ mod tests {
         assert!(license.message.contains("license"));
         assert!(!license.retryable);
 
-        let consent = map_activity_err(GraphError::Forbidden("Insufficient privileges".into()));
-        assert_eq!(consent.code, "activity_unavailable");
-        assert!(consent.message.contains("consent"));
+        // A non-license 403 is a reporting-role gap: the catalog says which.
+        let role = map_activity_err(GraphError::Forbidden("Insufficient privileges".into()));
+        assert_eq!(role.code, "activity_unavailable");
+        assert!(role.message.contains("reporting role"), "{}", role.message);
+        assert!(!role.message.contains("requires admin consent"));
 
+        // An opaque token failure still degrades to the notice …
         let token = map_activity_err(GraphError::Token("user declined".into()));
         assert_eq!(token.code, "activity_unavailable");
+        // … but a classified one keeps its code, so the tab offers its lever.
+        let dead = map_activity_err(GraphError::Token(
+            azapptoolkit_core::token::TokenError::new("refresh_missing", "gone"),
+        ));
+        assert_eq!(dead.code, "refresh_missing");
+        assert!(dead.is_reauth_fatal());
     }
 
     #[test]
@@ -395,23 +447,30 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_err_license_vs_consent_and_no_body_leak() {
+    fn sign_in_err_license_vs_role_and_no_body_leak() {
         let license = map_sign_in_err(GraphError::Forbidden(
             "{\"error\":{\"code\":\"Authentication_RequestFromNonPremiumTenantOrB2CTenant\"}}"
                 .into(),
-        ));
+        ))
+        .unwrap();
         assert!(!license.available);
         assert!(!license.consent_required);
         assert!(license.message.unwrap().contains("license"));
 
-        let consent = map_sign_in_err(GraphError::Forbidden("Insufficient privileges".into()));
-        assert!(consent.message.unwrap().contains("consent"));
+        // A non-license 403 names the reporting roles, not admin consent.
+        let role = map_sign_in_err(GraphError::Forbidden("Insufficient privileges".into()))
+            .unwrap()
+            .message
+            .unwrap();
+        assert!(role.contains("reporting role"), "{role}");
+        assert!(!role.contains("requires admin consent"), "{role}");
 
         // Transient / opaque errors degrade without leaking the raw body.
         let transient = map_sign_in_err(GraphError::Server {
             status: 503,
             body: "secret-internal-detail".into(),
-        });
+        })
+        .unwrap();
         assert!(!transient.available);
         assert!(
             !transient
@@ -423,10 +482,56 @@ mod tests {
 
     #[test]
     fn sign_in_err_rejected_token_points_at_refresh_token() {
-        let rejected = map_sign_in_err(GraphError::Unauthorized);
+        let rejected = map_sign_in_err(GraphError::Unauthorized).unwrap();
         assert!(!rejected.available);
         let message = rejected.message.unwrap();
         assert!(message.contains("Refresh token"), "{message}");
         assert!(!message.contains("Sign in again"), "{message}");
+    }
+
+    /// A token failure at the report read keeps its lever: a missing consent
+    /// is the summary's grant button, a dead session / step-up / unreachable
+    /// token endpoint the one `Err`, and only an opaque failure the notice.
+    #[test]
+    fn sign_in_token_failures_keep_their_lever() {
+        use azapptoolkit_core::token::TokenError;
+        let consent =
+            map_sign_in_err(GraphError::Token(TokenError::new("consent_required", "x"))).unwrap();
+        assert!(consent.consent_required && !consent.available);
+        for code in [
+            "refresh_missing",
+            "not_signed_in",
+            "interaction_required",
+            "network_error",
+        ] {
+            let err =
+                map_sign_in_err(GraphError::Token(TokenError::new(code, "x"))).expect_err(code);
+            assert_eq!(err.code, code);
+        }
+        let opaque = map_sign_in_err(GraphError::Token(TokenError::opaque("x"))).unwrap();
+        assert!(!opaque.available && !opaque.consent_required);
+    }
+
+    /// The `AuditLog.Read.All` pre-acquire: a missing consent is the summary's
+    /// consent DTO; every other failure keeps its own code (auth-plane
+    /// spelling) instead of becoming a "needs admin consent and a license"
+    /// notice the pre-acquire cannot know is true.
+    #[test]
+    fn a_failed_pre_acquire_keeps_its_lever() {
+        let consent = sign_in_token_failure(UiError::new("consent_required", "x", false)).unwrap();
+        assert!(consent.consent_required);
+        for code in [
+            "refresh_missing",
+            "not_signed_in",
+            "interaction_required",
+            "network",
+            "service_unavailable",
+            "unexpected_responder",
+            "token_exchange",
+            "keyring",
+        ] {
+            let err = sign_in_token_failure(UiError::new(code, "x", false)).expect_err(code);
+            assert_eq!(err.code, code);
+        }
     }
 }

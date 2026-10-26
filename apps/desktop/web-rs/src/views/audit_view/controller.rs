@@ -14,7 +14,9 @@ use std::sync::Arc;
 use azapptoolkit_core::audit::{PostureCounts, RemediationKind, posture_counts};
 use leptos::prelude::*;
 
-use crate::bindings::audit::{self, AuditExportCoverage, AuditProgress, AuditRunResult};
+use crate::bindings::audit::{
+    self, AuditCoverageGap, AuditExportCoverage, AuditProgress, AuditRunResult,
+};
 use crate::bindings::auth;
 use crate::bindings::events;
 use crate::hooks::use_progress_stream::use_progress_stream;
@@ -47,6 +49,10 @@ pub(crate) struct AuditController {
     /// pane — a full-tenant HashMap per reader per render.
     pub names: Memo<Arc<HashMap<String, String>>>,
     pub report_available: Memo<bool>,
+    /// `true` when the sign-in report failed transiently this run
+    /// (`AuditCoverageGap::SignInActivity`) — the unused-detection notes then
+    /// say to re-run instead of asking for a consent already in place.
+    pub sign_in_read_failed: Memo<bool>,
     /// `false` when the run couldn't check some mail permission against
     /// Exchange mailbox scoping — the org-wide mailbox group then says its
     /// findings may already be confined. `true` with no run (nothing to caveat).
@@ -127,6 +133,12 @@ impl AuditController {
         });
         let report_available = Memo::new(move |_| {
             result.with(|r| r.as_ref().is_some_and(|r| r.sign_in_report_available))
+        });
+        let sign_in_read_failed = Memo::new(move |_| {
+            result.with(|r| {
+                r.as_ref()
+                    .is_some_and(|r| r.degraded.contains(&AuditCoverageGap::SignInActivity))
+            })
         });
         let mailbox_scoping_resolved = Memo::new(move |_| {
             result.with(|r| r.as_ref().is_none_or(|r| r.mailbox_scoping_resolved))
@@ -223,6 +235,7 @@ impl AuditController {
             total_items,
             names,
             report_available,
+            sign_in_read_failed,
             mailbox_scoping_resolved,
             row_done,
             focus_row,

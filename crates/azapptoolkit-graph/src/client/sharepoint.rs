@@ -638,6 +638,25 @@ fn granted_to_v2_body(app_id: &str, app_display_name: &str, roles: &[String]) ->
     })
 }
 
+// Why [`site_lookup_path`] refused a pasted site URL — one fixed sentence per
+// check, so a refusal says what to fix without ever quoting the input.
+const SITE_URL_NOT_A_URL: &str = "it is not a URL";
+const SITE_URL_NOT_WEB: &str = "it is not an https:// or http:// address";
+const SITE_URL_CREDENTIALS: &str = "it embeds a user name or password";
+const SITE_URL_PORT: &str = "it has a port";
+const SITE_URL_BAD_HOST: &str = "its host is not a host name";
+const SITE_URL_BAD_SEGMENT: &str =
+    "a path segment contains ':' or an encoded '/', '\\', ':' or '.'";
+
+/// The refusal for one of the `SITE_URL_*` reasons: the reason plus what a
+/// plain site address looks like, and nothing from the input.
+fn site_url_refusal(reason: &'static str) -> GraphError {
+    GraphError::Protocol(format!(
+        "refusing the site URL: {reason}. Paste a plain SharePoint site address, e.g. \
+         https://contoso.sharepoint.com/sites/Finance"
+    ))
+}
+
 /// Translates a user-supplied SharePoint URL into the Graph `/sites/...`
 /// lookup path used by [`GraphClient::get_site_by_url`].
 ///
@@ -660,31 +679,34 @@ fn granted_to_v2_body(app_id: &str, app_display_name: &str, roles: &[String]) ->
 /// path-addressing pivot: `/sites/Fin:/drive/root:/x` answers with a
 /// driveItem, not a site), an encoded `/`, `\`, `:` or `.`, or a host that is
 /// not a hostname, is refused rather than sent on the `Sites.FullControl.All`
-/// bearer. Refusals never echo the input.
+/// bearer. Each refusal names its reason so the operator knows what to fix,
+/// from a fixed set of sentences — refusals never echo the input.
 fn site_lookup_path(site_url: &str) -> Result<String> {
-    let refuse = || {
-        GraphError::Protocol(
-            "refusing a site URL that is not a plain SharePoint site address".to_string(),
-        )
-    };
+    let refuse = site_url_refusal;
     let trimmed = site_url.trim();
     let absolute = if trimmed.contains("://") {
         trimmed.to_string()
     } else {
         format!("https://{trimmed}")
     };
-    let parsed = Url::parse(&absolute).map_err(|_| refuse())?;
+    let parsed = Url::parse(&absolute).map_err(|_| refuse(SITE_URL_NOT_A_URL))?;
     if !matches!(parsed.scheme(), "https" | "http") {
-        return Err(refuse());
+        return Err(refuse(SITE_URL_NOT_WEB));
     }
     // Credentials and a port have no place in a site address, and silently
     // dropping them would send a request the operator did not read.
-    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.port().is_some() {
-        return Err(refuse());
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(refuse(SITE_URL_CREDENTIALS));
     }
-    let host = parsed.host_str().ok_or_else(refuse)?.to_ascii_lowercase();
+    if parsed.port().is_some() {
+        return Err(refuse(SITE_URL_PORT));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| refuse(SITE_URL_BAD_HOST))?
+        .to_ascii_lowercase();
     if !is_hostname(&host) {
-        return Err(refuse());
+        return Err(refuse(SITE_URL_BAD_HOST));
     }
     let decorated = segs_of(parsed.path());
     let was_decorated = decorated.len() != undecorated_segments(&decorated).len()
@@ -703,7 +725,7 @@ fn site_lookup_path(site_url: &str) -> Result<String> {
         }
     }
     if segs.iter().any(|s| !is_site_path_segment(s)) {
-        return Err(refuse());
+        return Err(refuse(SITE_URL_BAD_SEGMENT));
     }
     let rel = segs.join("/");
     Ok(if rel.is_empty() {
@@ -903,33 +925,68 @@ mod tests {
     /// as `GET /v1.0/me` on the Sites.FullControl.All bearer, and a `:` in a
     /// segment made Graph answer with a driveItem that then deserialised as a
     /// `Site`.
+    ///
+    /// Each refusal names the check that failed, from a fixed sentence: the
+    /// message is exactly the one built for that reason, so no part of the
+    /// typed input can reach it (or the log line behind it).
     #[test]
     fn site_lookup_path_refuses_anything_but_a_plain_site_address() {
-        for bad in [
-            "https://contoso.sharepoint.com/sites/Fin:/drive/root:/x",
-            "https://contoso.sharepoint.com/sites/Fin%2f..%2f..%2fme",
-            "https://contoso.sharepoint.com/sites/Fin%5c..",
-            "https://contoso.sharepoint.com/sites/Fin%3a",
-            "https://contoso.sharepoint.com/sites/Fin%2e%2ex",
-            "https://user:pw@contoso.sharepoint.com/sites/Fin",
-            "https://contoso.sharepoint.com:8443/sites/Fin",
-            "javascript:alert(1)",
-            "file:///etc/passwd",
-            "https://con toso.sharepoint.com/sites/Fin",
-            "https://[::1]/sites/Fin",
+        for (bad, reason) in [
+            (
+                "https://contoso.sharepoint.com/sites/Fin:/drive/root:/x",
+                SITE_URL_BAD_SEGMENT,
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Fin%2f..%2f..%2fme",
+                SITE_URL_BAD_SEGMENT,
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Fin%5c..",
+                SITE_URL_BAD_SEGMENT,
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Fin%3a",
+                SITE_URL_BAD_SEGMENT,
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Fin%2e%2ex",
+                SITE_URL_BAD_SEGMENT,
+            ),
+            (
+                "https://user:pw@contoso.sharepoint.com/sites/Fin",
+                SITE_URL_CREDENTIALS,
+            ),
+            (
+                "https://contoso.sharepoint.com:8443/sites/Fin",
+                SITE_URL_PORT,
+            ),
+            ("javascript:alert(1)", SITE_URL_NOT_A_URL),
+            ("file:///etc/passwd", SITE_URL_NOT_WEB),
+            (
+                "https://con toso.sharepoint.com/sites/Fin",
+                SITE_URL_NOT_A_URL,
+            ),
+            ("https://[::1]/sites/Fin", SITE_URL_BAD_HOST),
             // `.` and `..` parse as hosts, and the transport would then resolve
             // them as dot segments.
-            "https://./sites/Fin",
-            "https://../",
-            ".",
-            "https://contoso..sharepoint.com/sites/Fin",
-            "",
+            ("https://./sites/Fin", SITE_URL_BAD_HOST),
+            ("https://../", SITE_URL_BAD_HOST),
+            (".", SITE_URL_BAD_HOST),
+            (
+                "https://contoso..sharepoint.com/sites/Fin",
+                SITE_URL_BAD_HOST,
+            ),
+            ("", SITE_URL_NOT_A_URL),
         ] {
             let err = site_lookup_path(bad).unwrap_err();
-            assert!(
-                matches!(&err, GraphError::Protocol(m) if m == "refusing a site URL that is not a plain SharePoint site address"),
-                "{bad:?}: {err:?}"
-            );
+            let GraphError::Protocol(message) = &err else {
+                panic!("{bad:?}: {err:?}");
+            };
+            assert!(message.contains(reason), "{bad:?}: {message}");
+            let GraphError::Protocol(expected) = site_url_refusal(reason) else {
+                unreachable!("site_url_refusal builds a Protocol error");
+            };
+            assert_eq!(message, &expected, "{bad:?} must not reach the message");
         }
         // Dot segments are resolved the way a browser resolves them, and the
         // rebuilt path stays inside the host's site tree.

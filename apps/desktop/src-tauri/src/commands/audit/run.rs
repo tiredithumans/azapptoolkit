@@ -168,8 +168,8 @@ pub async fn run_audit(
         // Sign-in activity report (needs AuditLog.Read.All + Entra ID P1/P2 + a
         // supported directory role). A *missing consent* (distinct from a
         // license/availability failure) sets `sign_in_consent_required`,
-        // surfacing a "Grant consent" button; either failure disables unused-app
-        // detection.
+        // surfacing a "Grant consent" button; any failure disables unused-app
+        // detection, and a transient one is also a coverage gap.
         prefetch_sign_in_activity(&state, &client, &tenant_id),
         // ONE tenant-wide per-credential last-used read (same AuditLog.Read.All
         // token; beta, global cloud only). Failure or absence only disables the
@@ -200,7 +200,7 @@ pub async fn run_audit(
     let (apps, truncated) = apps?;
     let (admin_consent_clients, delegated_scopes_by_client, consent_gap) = consent_grants;
     let consent_grants_read = consent_gap.is_none();
-    let (sign_in_available, sign_in_consent_required, sign_in_map) = sign_in;
+    let (sign_in_available, sign_in_consent_required, sign_in_map, sign_in_gap) = sign_in;
     let (credential_usage_available, credential_activity_map) = credential_usage;
     let (app_policy_available, app_policy) = app_policy;
     let (risky_available, risky_by_sp, risky_gap) = risky_sps;
@@ -214,12 +214,17 @@ pub async fn run_audit(
     let (sp_index, sp_index_gap) = sp_index;
     // `mut` because a third kind of gap — per-principal scoring failures — can
     // only be known after the fan-out below has run.
-    let mut degraded: Vec<AuditCoverageGap> =
-        [graph_roles_gap, sp_index_gap, risky_gap, consent_gap]
-            .into_iter()
-            .flatten()
-            .chain(office365_gaps)
-            .collect();
+    let mut degraded: Vec<AuditCoverageGap> = [
+        graph_roles_gap,
+        sp_index_gap,
+        risky_gap,
+        consent_gap,
+        sign_in_gap,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(office365_gaps)
+    .collect();
 
     let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
     client.seed_lean_sps_from_index(&app_ids, &sp_index);
