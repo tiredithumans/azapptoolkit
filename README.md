@@ -296,6 +296,12 @@ Update payloads are verified against a public key baked into the build at
 release time — a payload that fails signature verification is rejected
 before any bytes touch disk. A failed update check or install never blocks
 the app; it is logged (see [Logs](#logs)) and retried on a later launch.
+A download that receives nothing for a minute is abandoned rather than left
+hanging. When an update fails its signature check or fails to install, the
+changelog screen says so, turns **Update & restart** off (a retry would fail
+the same way) and points you at the
+[Releases page](https://github.com/tiredithumans/azapptoolkit/releases) to
+install the new version by hand, with the log folder to look in.
 
 On macOS, expect a keychain-access prompt on the first launch after each
 update (the build is unsigned) — choose **Always Allow**; see
@@ -315,7 +321,9 @@ confirmation). To stop the checks entirely, there are two ways:
 - **Environment variable** — set `AZAPPTOOLKIT_AUTO_UPDATE=0` (also
   accepts `false` / `off` / `no`) in the user or machine environment
   before launching the app. Useful for CI runners and for MDM/Group
-  Policy deployments that wrap the launcher.
+  Policy deployments that wrap the launcher. On macOS an app opened from
+  Finder or the Dock doesn't inherit shell environment variables, so use the
+  settings file there.
 - **Settings file** — drop a JSON file at the platform's app-data
   folder:
   - Windows: `%APPDATA%\azapptoolkit\settings.json`
@@ -329,6 +337,12 @@ confirmation). To stop the checks entirely, there are two ways:
 The env var takes precedence over the settings file when both are
 present. With auto-update disabled the app makes no network calls to
 the updater endpoint at any point in the session.
+
+If `settings.json` can't be read — a typo from a hand edit, say — the app
+starts without it, so the opt-out (and the IDs and tenant defaults saved
+there) are not in effect until it is fixed. The sign-in and configuration
+screens say so, naming the file and the line and column where it broke;
+saving settings is refused rather than writing over the file.
 
 ## Requirements
 
@@ -470,10 +484,21 @@ them to azapptoolkit one of three ways:
   ```
 - **Baked into a team build.** If you're an admin packaging a build for a
   whole team, copy `.env.example` to `.env` at the repo root, fill in the
-  two GUIDs, and run `cargo tauri build`. The values are baked into the
+  two GUIDs, and run `just build-windows` (or `just build-macos` /
+  `just build-linux` on those hosts). The values are baked into the
   installer at compile time (see `apps/desktop/src-tauri/build.rs`), so
   recipients install and launch with no per-workstation configuration (the
   setup screen is skipped). See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
+
+  > **A team build must not take in-app updates.** The in-app updater
+  > installs the *public* release, which has no baked IDs or cloud: after
+  > it, the app shows the **Configure your tenant** screen (and signs in to
+  > the commercial cloud). Hand out the MSI (Windows) or `.deb` (Linux) —
+  > the in-app updater never touches those — or turn updates off for the
+  > team (see [Opting out](#opting-out)): `"auto_update": false` in
+  > `settings.json`, which is the route on macOS (an app opened from Finder
+  > or the Dock doesn't see shell environment variables), or on Windows and
+  > Linux `AZAPPTOOLKIT_AUTO_UPDATE=0`.
 
 The resolution order is **environment variable → in-app `settings.json` →
 baked-in value → unset**; while unset, sign-in can't succeed and the
@@ -488,7 +513,10 @@ bake it in instead, by adding `AZAPPTOOLKIT_CLOUD` to `.env` before building
 switches the Entra login, Microsoft Graph, Exchange Online, Key Vault, ARM and
 Log Analytics endpoints, and the SSO wizard's application template and
 app-owner URLs, to that cloud's hosts. The app registration must be created in
-the matching national-cloud admin center.
+the matching national-cloud admin center. The sign-in card names the cloud it
+will sign in to; a value the app doesn't recognise is ignored (the next layer,
+or commercial, is used), and the card says so and lists the valid values. A
+team build whose `.env` names an unknown cloud also gets a build warning.
 
 ## Logs
 
@@ -497,6 +525,12 @@ Each day's log is a file named `azapptoolkit.YYYY-MM-DD.log`, in:
 - Windows: `%LOCALAPPDATA%\azapptoolkit\logs\` (earlier versions wrote to `%APPDATA%\azapptoolkit\logs\`, which can be deleted)
 - macOS: `~/Library/Application Support/azapptoolkit/logs/`
 - Linux: `~/.local/share/azapptoolkit/logs/`
+
+Settings → Tenant connection shows this folder and your `settings.json`, each
+with a **Copy** button. Both also show under a failed sign-in, under a save
+that fails on the **Configure your tenant** screen, and in the warning about a
+`settings.json` the app couldn't read; an update that fails in a way **Update
+& restart** can't retry shows the log folder.
 
 The newest 14 files (about two weeks) are kept and older ones are deleted. Each line names the component that wrote it, and a backend crash (panic) is written to the same file with a backtrace. The first lines of each run record the app version, OS, architecture, cloud and tenant. On macOS and Linux the folder is readable by your account only. If the folder can't be written, the app still starts and logs to the console instead.
 

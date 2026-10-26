@@ -11,9 +11,11 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::TenantContext;
 use crate::bindings::auth;
+use crate::components::support_paths::SupportPathsBlock;
 use crate::components::ui::{Callout, Card, Spinner};
 use crate::state::auth_hints::recovery_hint;
 use crate::state::{Session, use_session};
+use crate::views::config_screen::SettingsErrorCallout;
 use azapptoolkit_dto::UiError;
 
 /// How long the launch restore may run before its card admits it is slow and
@@ -83,6 +85,18 @@ pub(crate) fn stop_waiting_for_restore(restoring: RwSignal<bool>, generation: Rw
     restoring.set(false);
 }
 
+/// The card's "Signing in to …" line: the tenant, and the cloud when the
+/// backend named one, so a sovereign-cloud operator sees which login it is
+/// about to open before the browser does. Not in parentheses: the cloud names
+/// carry their own ("US Gov (GCC High)").
+fn signing_in_to(tenant: &str, cloud: &str) -> String {
+    if cloud.is_empty() {
+        format!("Signing in to {tenant} · ")
+    } else {
+        format!("Signing in to {tenant} on the {cloud} cloud · ")
+    }
+}
+
 /// What the launch callout says about a restore that got no verdict, by its
 /// code: the shared hint for a foreign responder or an unavailable endpoint
 /// (checking the network would not help there), else the reachability line
@@ -123,6 +137,19 @@ pub fn SignInScreen(
     /// flight cannot land behind the browser sign-in.
     #[prop(optional)]
     restore_generation: RwSignal<u64>,
+    /// The cloud sign-in targets (`AuthConfigStatus::cloud`), named beside the
+    /// tenant. Empty from an older backend, which leaves the line as it was.
+    #[prop(optional, into)]
+    cloud: String,
+    /// `AuthConfigStatus::cloud_warning`: an `AZAPPTOOLKIT_CLOUD` value that
+    /// was ignored, with the valid ones.
+    #[prop(optional_no_strip)]
+    cloud_warning: Option<String>,
+    /// `AuthConfigStatus::settings_error`: a `settings.json` the app could not
+    /// read at startup (Settings, where it would otherwise be fixed, is behind
+    /// this sign-in).
+    #[prop(optional_no_strip)]
+    settings_error: Option<String>,
 ) -> impl IntoView {
     let session = use_session();
     let busy = RwSignal::new(false);
@@ -143,6 +170,9 @@ pub fn SignInScreen(
     // (message, code, hint): the hint translates the machine error code into a
     // recovery step, since a bare `[keyring]` means nothing to most users.
     let error: RwSignal<Option<(String, String, &'static str)>> = RwSignal::new(None);
+    // The settings callout carries the paths already; otherwise a failed
+    // sign-in shows them, since the log is where its detail is.
+    let has_settings_error = settings_error.is_some();
 
     let on_sign_in = move |_| {
         if busy.get() {
@@ -182,6 +212,15 @@ pub fn SignInScreen(
                 <span class="ui-text">
                     "Use Entra ID to manage App Registrations, permissions, and run security audits."
                 </span>
+                {settings_error.map(|message| view! { <SettingsErrorCallout message=message /> })}
+                {cloud_warning
+                    .map(|warning| {
+                        view! {
+                            <Callout tone="warn" role="status" class="signin-cloud-warning">
+                                <span class="ui-text">{warning}</span>
+                            </Callout>
+                        }
+                    })}
                 {move || {
                     restore_failure
                         .get()
@@ -214,7 +253,7 @@ pub fn SignInScreen(
                     .then(|| {
                         view! {
                             <span class="ui-text signin-hint">
-                                {format!("Signing in to {tenant} · ")}
+                                {signing_in_to(&tenant, &cloud)}
                                 <button
                                     type="button"
                                     class="link-btn"
@@ -256,6 +295,7 @@ pub fn SignInScreen(
                                         }
                                     })}
                                 <span class="ui-text signin-hint">{hint}</span>
+                                {(!has_settings_error).then(|| view! { <SupportPathsBlock /> })}
                             }
                         })
                 }}
@@ -326,7 +366,10 @@ pub fn RestoringSession(
 
 #[cfg(test)]
 mod tests {
-    use super::{abandon_restore, land_restore, restore_failure_text, stop_waiting_for_restore};
+    use super::{
+        abandon_restore, land_restore, restore_failure_text, signing_in_to,
+        stop_waiting_for_restore,
+    };
     use crate::bindings::TenantContext;
     use crate::state::{provide_session, use_session};
     use azapptoolkit_dto::UiError;
@@ -408,6 +451,16 @@ mod tests {
                 Some("restore-fence")
             );
         });
+    }
+
+    #[test]
+    fn the_card_names_the_cloud_beside_the_tenant_when_it_has_one() {
+        assert_eq!(
+            signing_in_to("t-1", "US Gov (GCC High)"),
+            "Signing in to t-1 on the US Gov (GCC High) cloud · "
+        );
+        // An older backend sends no cloud: the line reads as it always did.
+        assert_eq!(signing_in_to("t-1", ""), "Signing in to t-1 · ");
     }
 
     #[test]

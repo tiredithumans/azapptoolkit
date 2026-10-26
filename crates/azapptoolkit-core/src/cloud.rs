@@ -28,6 +28,10 @@ pub enum CloudEnvironment {
 }
 
 impl CloudEnvironment {
+    /// Every cloud, in the order the valid `AZAPPTOOLKIT_CLOUD` values are
+    /// listed to an operator.
+    pub const ALL: [Self; 4] = [Self::Commercial, Self::UsGov, Self::UsGovDod, Self::China];
+
     /// Canonical lowercase identifier (round-trips through [`Self::parse`]).
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -48,19 +52,37 @@ impl CloudEnvironment {
         }
     }
 
-    /// Lenient parse of a cloud identifier (case-insensitive, common aliases).
-    /// `None` for an unrecognized value so the caller can warn rather than
-    /// silently defaulting.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "commercial" | "public" | "global" | "azurecloud" => Some(Self::Commercial),
-            "usgov" | "gcchigh" | "gcc-high" | "usgovernment" | "azureusgovernment" => {
-                Some(Self::UsGov)
-            }
-            "usgovdod" | "dod" | "usgovernmentdod" => Some(Self::UsGovDod),
-            "china" | "21vianet" | "mooncake" | "azurechinacloud" => Some(Self::China),
-            _ => None,
+    /// Every spelling [`Self::parse`] accepts for this cloud, lowercase, the
+    /// canonical [`Self::as_str`] first, then the common aliases. The one
+    /// vocabulary: `parse` reads it, and the desktop build script's
+    /// `.env` check is held to it by a conformance test.
+    pub fn accepted_names(&self) -> &'static [&'static str] {
+        match self {
+            Self::Commercial => &["commercial", "public", "global", "azurecloud"],
+            Self::UsGov => &[
+                "usgov",
+                "gcchigh",
+                "gcc-high",
+                "usgovernment",
+                "azureusgovernment",
+            ],
+            Self::UsGovDod => &["usgovdod", "dod", "usgovernmentdod"],
+            Self::China => &["china", "21vianet", "mooncake", "azurechinacloud"],
         }
+    }
+
+    /// Lenient parse of a cloud identifier (case-insensitive, trimmed, any of
+    /// [`Self::accepted_names`]; blank is the commercial default). `None` for
+    /// an unrecognized value so the caller can warn rather than silently
+    /// defaulting.
+    pub fn parse(s: &str) -> Option<Self> {
+        let name = s.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            return Some(Self::Commercial);
+        }
+        Self::ALL
+            .into_iter()
+            .find(|c| c.accepted_names().contains(&name.as_str()))
     }
 
     /// Resolves the cloud from its layers: the runtime `AZAPPTOOLKIT_CLOUD` env
@@ -69,20 +91,48 @@ impl CloudEnvironment {
     /// the next layer. Pure, so the precedence is testable without touching the
     /// process environment.
     pub fn select(env: Option<&str>, baked: Option<&str>) -> Self {
-        for (layer, value) in [("env var", env), ("build-time bake", baked)] {
+        Self::select_with_warning(env, baked).0
+    }
+
+    /// [`Self::select`], plus the operator-facing sentence when a layer named a
+    /// cloud this build does not know — so the sign-in card can say the value
+    /// was ignored (and which cloud is used instead) rather than leave a
+    /// sovereign-cloud operator at a commercial login page wondering why. Names
+    /// the ignored value(s) and lists the valid ones; `None` when nothing was
+    /// ignored.
+    pub fn select_with_warning(env: Option<&str>, baked: Option<&str>) -> (Self, Option<String>) {
+        let mut ignored = Vec::new();
+        let mut chosen = Self::Commercial;
+        for (layer, value) in [("environment variable", env), ("build-time .env", baked)] {
             let Some(v) = value.filter(|v| !v.trim().is_empty()) else {
                 continue;
             };
             match Self::parse(v) {
-                Some(c) => return c,
-                None => tracing::warn!(
-                    value = %v,
-                    layer,
-                    "unrecognized AZAPPTOOLKIT_CLOUD; ignoring it"
-                ),
+                Some(c) => {
+                    chosen = c;
+                    break;
+                }
+                None => {
+                    tracing::warn!(
+                        value = %v,
+                        layer,
+                        "unrecognized AZAPPTOOLKIT_CLOUD; ignoring it"
+                    );
+                    ignored.push(format!("\"{}\" (from the {layer})", v.trim()));
+                }
             }
         }
-        Self::Commercial
+        let warning = (!ignored.is_empty()).then(|| {
+            let valid: Vec<&str> = Self::ALL.iter().map(Self::as_str).collect();
+            format!(
+                "AZAPPTOOLKIT_CLOUD {} is not a cloud azapptoolkit knows, so it was ignored and \
+                 sign-in uses {}. Valid values: {} — correct it, then restart azapptoolkit.",
+                ignored.join(" and "),
+                chosen.display_name(),
+                valid.join(", ")
+            )
+        });
+        (chosen, warning)
     }
 
     /// Reads `AZAPPTOOLKIT_CLOUD` from the process environment, falling back to
@@ -90,8 +140,15 @@ impl CloudEnvironment {
     /// [`Self::Commercial`] — [`Self::select`] over the live env var.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env_or(baked: Option<&str>) -> Self {
+        Self::from_env_or_with_warning(baked).0
+    }
+
+    /// [`Self::from_env_or`] with [`Self::select_with_warning`]'s sentence for
+    /// an ignored value.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_env_or_with_warning(baked: Option<&str>) -> (Self, Option<String>) {
         let env = std::env::var("AZAPPTOOLKIT_CLOUD").ok();
-        Self::select(env.as_deref(), baked)
+        Self::select_with_warning(env.as_deref(), baked)
     }
 
     /// Reads `AZAPPTOOLKIT_CLOUD`, defaulting to [`Self::Commercial`] (no
@@ -339,6 +396,72 @@ mod tests {
         assert_eq!(CloudEnvironment::select(Some(""), Some("")), Commercial);
     }
 
+    /// An ignored value is said out loud: which value, from where, the cloud
+    /// used instead, and the values that would have worked.
+    #[test]
+    fn select_with_warning_names_an_ignored_value_and_the_valid_ones() {
+        use CloudEnvironment::*;
+        for (env, baked) in [
+            (Some("usgov"), Some("china")),
+            (None, Some("china")),
+            (None, None),
+            (Some(" "), Some("")),
+        ] {
+            let (cloud, warning) = CloudEnvironment::select_with_warning(env, baked);
+            assert_eq!(cloud, CloudEnvironment::select(env, baked));
+            assert_eq!(warning, None, "{env:?} / {baked:?}");
+        }
+
+        let (cloud, warning) = CloudEnvironment::select_with_warning(Some("usgovv"), None);
+        assert_eq!(cloud, Commercial);
+        let warning = warning.expect("an ignored value warns");
+        assert!(
+            warning.contains("\"usgovv\" (from the environment variable)"),
+            "{warning}"
+        );
+        assert!(warning.contains("Commercial (global)"), "{warning}");
+        for c in CloudEnvironment::ALL {
+            assert!(
+                warning.contains(c.as_str()),
+                "{warning} lacks {}",
+                c.as_str()
+            );
+        }
+
+        // A bad env var falls through to a good bake, and says so.
+        let (cloud, warning) = CloudEnvironment::select_with_warning(Some("bogus"), Some("china"));
+        assert_eq!(cloud, China);
+        assert!(warning.unwrap().contains("China (21Vianet)"));
+
+        // Both layers bad: both are named.
+        let (_, warning) = CloudEnvironment::select_with_warning(Some("a"), Some("b"));
+        let warning = warning.unwrap();
+        assert!(
+            warning.contains("\"a\" (from the environment variable)"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("\"b\" (from the build-time .env)"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn every_cloud_is_listed_once_and_parses_from_its_own_name() {
+        // Exhaustive (no wildcard): a new cloud must take a place in `ALL`
+        // before this compiles, or the valid-values list would omit it.
+        let place = |c: CloudEnvironment| match c {
+            CloudEnvironment::Commercial => 0,
+            CloudEnvironment::UsGov => 1,
+            CloudEnvironment::UsGovDod => 2,
+            CloudEnvironment::China => 3,
+        };
+        for (i, c) in CloudEnvironment::ALL.iter().enumerate() {
+            assert_eq!(place(*c), i, "{c:?}");
+            assert_eq!(CloudEnvironment::parse(c.as_str()), Some(*c));
+        }
+    }
+
     #[test]
     fn pim_link_stays_in_each_clouds_admin_center() {
         for (cloud, host) in [
@@ -424,6 +547,22 @@ mod tests {
             CloudEnvironment::China,
         ] {
             assert_eq!(CloudEnvironment::parse(c.as_str()).unwrap(), c);
+        }
+    }
+
+    /// Each accepted name leads with the canonical one, parses back to its own
+    /// cloud in any case, and belongs to exactly one cloud.
+    #[test]
+    fn accepted_names_are_canonical_first_and_unambiguous() {
+        let mut seen = std::collections::HashSet::new();
+        for c in CloudEnvironment::ALL {
+            assert_eq!(c.accepted_names()[0], c.as_str(), "{c:?}");
+            for name in c.accepted_names() {
+                assert_eq!(*name, name.to_ascii_lowercase(), "{name}");
+                assert_eq!(CloudEnvironment::parse(name), Some(c), "{name}");
+                assert_eq!(CloudEnvironment::parse(&name.to_ascii_uppercase()), Some(c));
+                assert!(seen.insert(*name), "{name} names two clouds");
+            }
         }
     }
 

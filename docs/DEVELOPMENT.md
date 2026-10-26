@@ -73,7 +73,7 @@ build as normal:
 
 ```bash
 cp .env.example .env       # then edit .env with your client/tenant GUIDs
-just build-windows         # (or `cargo tauri build` for your host target)
+just build-windows         # (or `just build-macos` / `just build-linux` on those hosts)
 ```
 
 The desktop crate's `build.rs` reads `.env` at the workspace root and
@@ -90,15 +90,28 @@ in-app save beats a freshly baked `.env`: clear its `client_id` /
 `tenant_id` or re-save in the Tenant connection tab. The startup log line
 `resolved auth config` records which tier won for each ID, and Settings →
 Tenant connection names an active env or baked source. `build.rs` prints a
-`cargo:warning` when a `.env` ID is empty or not a GUID. `.env` is
-git-ignored; check in only `.env.example`.
+`cargo:warning` when a `.env` ID is empty or not a GUID, or when
+`AZAPPTOOLKIT_CLOUD` names a cloud `CloudEnvironment::parse` does not know.
+`.env` is git-ignored; check in only `.env.example`.
+
+**A baked build must not take in-app updates.** The updater installs the
+public release from `latest.json`, which has no IDs or cloud baked in, so an
+updated team build drops to the first-run config screen (and the commercial
+cloud). Ship the MSI (Windows) or `.deb` (Linux) — `update_policy` never
+offers those an update — or have the team set `"auto_update": false` in
+`settings.json` (the route for the macOS `.app`, which doesn't inherit shell
+environment variables when opened from Finder or the Dock) or, on Windows and
+Linux, `AZAPPTOOLKIT_AUTO_UPDATE=0`.
 
 A sovereign-cloud team build can bake the cloud the same way: uncomment
 `AZAPPTOOLKIT_CLOUD=usgov` (or `usgovdod` / `china`) in `.env`, and
 `build.rs` emits it as `AZAPPTOOLKIT_BUILD_CLOUD`. At runtime the cloud
 resolves as env var → baked-in value → commercial
 (`CloudEnvironment::from_env_or`); an unrecognized value logs a warning
-and falls through to the next layer.
+and falls through to the next layer, and `get_auth_config` reports it
+(`cloud_warning`, from `CloudEnvironment::select_with_warning`) so the
+sign-in card names the ignored value and the valid ones beside the cloud it
+will use.
 
 ## Bulk create from a file
 

@@ -60,6 +60,21 @@ pub struct AuthConfigStatus {
     /// Which tier supplied [`Self::tenant_id`]; see [`Self::client_id_source`].
     #[serde(default)]
     pub tenant_id_source: ConfigSource,
+    /// The cloud sign-in targets, as its display name ("US Gov (GCC High)"),
+    /// named on the sign-in card beside the tenant. Empty from an older backend.
+    #[serde(default)]
+    pub cloud: String,
+    /// Set when `AZAPPTOOLKIT_CLOUD` named a cloud this build does not know and
+    /// was ignored: the ignored value, the cloud used instead and the valid
+    /// values, shown as a warning on the sign-in card.
+    #[serde(default)]
+    pub cloud_warning: Option<String>,
+    /// Set when `settings.json` exists but could not be read at startup, so the
+    /// app is running without it (saved IDs, tenant defaults and the update
+    /// opt-out ignored): the path and where it broke, never its contents.
+    /// Shown as a warning on the config and sign-in screens.
+    #[serde(default)]
+    pub settings_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -72,6 +87,9 @@ mod tests {
             serde_json::from_str(r#"{"configured":true,"clientId":"c","tenantId":"t"}"#).unwrap();
         assert_eq!(s.client_id_source, ConfigSource::Unset);
         assert_eq!(s.tenant_id_source, ConfigSource::Unset);
+        assert!(s.cloud.is_empty());
+        assert_eq!(s.cloud_warning, None);
+        assert_eq!(s.settings_error, None);
     }
 
     #[test]
@@ -82,6 +100,9 @@ mod tests {
             tenant_id: "t".into(),
             client_id_source: ConfigSource::Env,
             tenant_id_source: ConfigSource::Baked,
+            cloud: "US Gov (GCC High)".into(),
+            cloud_warning: Some("w".into()),
+            settings_error: Some("e".into()),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""clientIdSource":"env""#), "{json}");
@@ -89,5 +110,8 @@ mod tests {
         let back: AuthConfigStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back.client_id_source, ConfigSource::Env);
         assert_eq!(back.tenant_id_source, ConfigSource::Baked);
+        assert!(json.contains(r#""cloudWarning":"w""#), "{json}");
+        assert!(json.contains(r#""settingsError":"e""#), "{json}");
+        assert_eq!(back.cloud, "US Gov (GCC High)");
     }
 }

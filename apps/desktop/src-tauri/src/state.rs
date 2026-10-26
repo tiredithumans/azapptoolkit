@@ -132,6 +132,39 @@ impl CancelToken {
     }
 }
 
+/// The startup warning for a `settings.json` that exists but could not be used
+/// (`AuthConfigStatus::settings_error`). A damaged file and an unreadable one
+/// need different fixes, and "updates are offered even if you turned them
+/// off" is said only when they are: an MSI / .deb / .rpm install, or an
+/// `AZAPPTOOLKIT_AUTO_UPDATE=0` override, is never offered one regardless.
+fn settings_error_message(
+    problem: &azapptoolkit_core::settings::SettingsUnreadable,
+    updates_offered: bool,
+) -> String {
+    let (what, fix) = if problem.is_parse_error() {
+        (
+            "is damaged",
+            "Fix the JSON or move the file aside, then restart.",
+        )
+    } else {
+        (
+            "couldn't be read",
+            "Check its permissions or whether another program has it open, then restart.",
+        )
+    };
+    let updates = if updates_offered {
+        ", and updates are offered even if you turned them off"
+    } else {
+        ""
+    };
+    format!(
+        "{} {what} ({}), so azapptoolkit started without it: the IDs, tenant defaults and \
+         update opt-out saved there are not in effect{updates}. {fix}",
+        problem.path.display(),
+        problem.reason
+    )
+}
+
 /// Resolves a client/tenant id from the process environment; see
 /// [`resolve_from`] for the precedence.
 fn resolve(
@@ -288,6 +321,14 @@ pub struct AppState {
     pub client_id_source: ConfigSource,
     /// Which resolution tier supplied [`Self::tenant_id`].
     pub tenant_id_source: ConfigSource,
+    /// The sentence for an `AZAPPTOOLKIT_CLOUD` that named an unknown cloud
+    /// and was ignored ([`CloudEnvironment::select_with_warning`]); reported by
+    /// `get_auth_config` so the sign-in card can say so.
+    pub cloud_warning: Option<String>,
+    /// Why `settings.json` was ignored at startup, when it exists but could not
+    /// be read ([`UserSettings::stored_reporting`]): the path and where it
+    /// broke, never its contents. Reported by `get_auth_config`.
+    pub settings_error: Option<String>,
     pub cache: Arc<Cache>,
     /// Single-flight gates, keyed by cache key. See [`AppState::single_flight`].
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -343,7 +384,21 @@ impl AppState {
     pub fn new() -> Self {
         // The user's persisted IDs (first-run config screen) sit between env
         // vars and the build-time bake in the resolution order.
-        let settings = UserSettings::stored(&crate::config_directory());
+        let (settings, settings_problem) =
+            UserSettings::stored_reporting(&crate::config_directory());
+        // Read leniently (a damaged file must not stop the app), but said out
+        // loud: every value in it — the saved IDs, the tenant defaults, the
+        // update opt-out — is silently replaced by a default otherwise.
+        let settings_error = settings_problem.map(|p| {
+            // What the updater will do with the file's opt-out gone: the
+            // default plus any env override, and the install format.
+            let updates_offered = crate::commands::updater::update_policy(
+                settings.effective_auto_update(),
+                tauri::utils::platform::bundle_type(),
+            )
+            .is_none();
+            settings_error_message(&p, updates_offered)
+        });
         let (client_id, client_id_source) = resolve(
             "AZAPPTOOLKIT_CLIENT_ID",
             settings.client_id.as_deref(),
@@ -370,11 +425,8 @@ impl AppState {
                 "AZAPPTOOLKIT_CLIENT_ID is not set; sign-in will fail until configured (first-run screen)."
             );
         }
-        let auth = EntraAuthService::new_in_cloud(
-            client_id.clone(),
-            tenant_id.clone(),
-            CloudEnvironment::from_env_or(BUILD_CLOUD),
-        );
+        let (cloud, cloud_warning) = CloudEnvironment::from_env_or_with_warning(BUILD_CLOUD);
+        let auth = EntraAuthService::new_in_cloud(client_id.clone(), tenant_id.clone(), cloud);
         // Both ids are public identifiers (docs/DEVELOPMENT.md) and the auth
         // crate already logs the tenant; only the values and their sources are
         // recorded here, never the rest of settings.json.
@@ -392,6 +444,8 @@ impl AppState {
             tenant_id,
             client_id_source,
             tenant_id_source,
+            cloud_warning,
+            settings_error,
             cache: Cache::new(),
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::new()),
@@ -456,6 +510,8 @@ impl AppState {
             tenant_id: tenant_id.to_string(),
             client_id_source: ConfigSource::Settings,
             tenant_id_source: ConfigSource::Settings,
+            cloud_warning: None,
+            settings_error: None,
             cache,
             inflight: Mutex::new(HashMap::new()),
             graph_clients: Mutex::new(HashMap::from([(tenant_id.to_string(), client)])),
@@ -1000,7 +1056,10 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, CancelFlag, ConfigSource, resolve, resolve_from};
+    use super::{
+        AppState, CancelFlag, ConfigSource, UserSettings, resolve, resolve_from,
+        settings_error_message,
+    };
     use azapptoolkit_core::cache::CacheKind;
 
     /// Never set by anything, so the env-var branch of the [`resolve`] wiring
@@ -1008,6 +1067,46 @@ mod tests {
     /// pure [`resolve_from`] (setting a real env var needs the `unsafe`
     /// `std::env::set_var`, and the workspace denies `unsafe_code`).
     const NEVER_SET: &str = "AZAPPTOOLKIT_TEST_NEVER_SET_F484";
+
+    /// The startup warning names the right fix for each cause, and claims
+    /// updates are back on only when this install would really be offered one.
+    #[test]
+    fn the_settings_warning_fits_the_cause_and_the_update_policy() {
+        let dir = std::env::temp_dir().join(format!(
+            "azapptoolkit-state-settings-{}",
+            std::process::id()
+        ));
+        let file = dir.join(azapptoolkit_core::settings::SETTINGS_FILE);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(&file, b"{ \"auto_update\": false,, }").unwrap();
+        let damaged = UserSettings::stored_reporting(&dir).1.expect("damaged");
+        let text = settings_error_message(&damaged, true);
+        assert!(text.contains("is damaged"), "{text}");
+        assert!(
+            text.contains("Fix the JSON or move the file aside"),
+            "{text}"
+        );
+        assert!(
+            text.contains("updates are offered even if you turned them off"),
+            "{text}"
+        );
+        assert!(text.contains(&file.display().to_string()), "{text}");
+        // An MSI / .deb install or an env opt-out: nothing is offered anyway.
+        let managed = settings_error_message(&damaged, false);
+        assert!(!managed.contains("updates are offered"), "{managed}");
+
+        // A file that can't be read at all is not "damaged".
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let unreadable = UserSettings::stored_reporting(&dir).1.expect("unreadable");
+        let text = settings_error_message(&unreadable, false);
+        assert!(text.contains("couldn't be read"), "{text}");
+        assert!(text.contains("Check its permissions"), "{text}");
+        assert!(!text.contains("Fix the JSON"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn resolve_precedence_env_settings_baked_placeholder() {

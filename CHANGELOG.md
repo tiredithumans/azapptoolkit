@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Added
+
+- Settings → Tenant connection, a failed sign-in and a failed setup save now show where the logs and settings.json are.
+
 ### Fixed
 
 - A Conditional Access block or device rule for one service no longer signs you out; it offers Verify identity instead.
@@ -37,6 +41,12 @@ After 0.34.1, each change is one line written for the person using the app.
 - An audit whose sign-in report hit a temporary error now says to re-run, and is no longer kept as a clean scan.
 - The audit's sign-in and credential-use reports now retry a throttled or failing page instead of giving up.
 - The Activity, Conditional Access and Provisioning tabs now say when Entra ID is busy or a proxy answered instead.
+- A settings.json that can't be read or is damaged is now named on the sign-in and setup screens, with what to do.
+- The sign-in card names the cloud it signs in to, and warns when AZAPPTOOLKIT_CLOUD holds a value it doesn't know.
+- An update that fails its signature check or install points you to the Releases page and the log folder, not a retry.
+- An update check or download that stalls now fails after a minute instead of leaving Updating… on screen.
+- Access Readiness says why your directory roles couldn't be read, and offers Re-authenticate if the session ended.
+- Access Readiness no longer waits minutes when Azure can't be reached; its rows show ? with a timed-out note.
 
 ### Security
 

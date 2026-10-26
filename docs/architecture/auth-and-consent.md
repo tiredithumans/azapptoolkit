@@ -449,6 +449,18 @@ Three surfaces read it so the guidance never drifts:
    and Exchange *role* halves are deliberately `Unknown` (not per-user enumerable — verify in PIM /
    use the scoping action).
 
+   A roles read that fails comes back as `ReadinessReport.directory_roles_error` (the client's own
+   `UiError`): the banner shows its message — never a guessed cause; the read rides the sign-in
+   scopes, so "missing consent" cannot be it — and the view hands it to `report_recovery_action`
+   (Graph feature `"write"`) once per check, so a dead session raises the Re-authenticate lever.
+   An `interaction_required` one is the exception: the banner shows `VERIFY_IDENTITY_MESSAGE` and
+   its own `VerifyIdentityButton` (which re-runs the check), and the sink adds no second lever.
+   The Azure-RBAC sweep runs under `AZURE_PLANE_BUDGET` (15 s, `azure_plane_within`): a blocked
+   ARM egress used to hold the whole page for the ARM retry budget. The sweep records each
+   subscription's assignments as they land, so past the budget what it confirmed still reads
+   Have and the other Azure rows read `Unknown` with a "didn't finish — re-check" detail, never
+   Missing.
+
 ## Reply and logout URLs — validated on every write path
 
 A reply URL decides where auth codes are delivered, and a front-channel logout URL is loaded by
