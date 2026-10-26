@@ -13,6 +13,7 @@ use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
 use azapptoolkit_dto::updater::{UpdateCheck, UpdateInfo, UpdatesDisabled};
+use azapptoolkit_web_rs::components::changelog_notes::ChangelogNotes;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::dialogs::cache_diagnostics_dialog::CacheDiagnosticsDialog;
 use azapptoolkit_web_rs::views::shell::AppShell;
@@ -181,21 +182,22 @@ async fn the_account_menu_follows_the_menu_keyboard_contract() {
     .await;
 }
 
-/// Summary-first is the contract: the splash and this dialog show what changed
-/// for the operator, with the implementation detail behind the toggle. A
-/// regression that renders the raw section shows the detail immediately.
+/// Summary-first is the contract: the splash and the release-notes dialog both
+/// render through `ChangelogNotes`, which shows what changed for the operator
+/// with the implementation detail behind the toggle. A regression that renders
+/// the raw section shows the detail immediately. Mounted with fixture notes in
+/// the pre-0.35 shape (a lede followed by rationale) rather than this build's
+/// baked section: entries after 0.34.1 are one line each, so a real release's
+/// notes may have no detail to hide at all.
 #[wasm_bindgen_test]
 async fn release_notes_render_condensed_with_the_detail_behind_a_toggle() {
     ts::reset();
-    let _m = ts::mount_view(|| view! { <AppShell><div /></AppShell> });
-    ts::wait_for(|| ts::query(".shell__tenant-chip").is_some()).await;
-    ts::click(".shell__tenant-chip");
-    ts::wait_for(|| ts::query(".shell__account-version").is_some()).await;
-    ts::click(".shell__account-version .link-btn");
+    let notes = "### Fixed\n\n- **Sign-out clears the cache.** The tenant-scoped caches were \
+                 swept only on sign-in,\n  so a second account could briefly read the first \
+                 account's lists.\n";
+    let _m = ts::mount_view(move || view! { <ChangelogNotes notes=notes.to_string() /> });
     ts::wait_for(|| ts::query(".changelog").is_some()).await;
 
-    // Our changelog always carries entries whose lede is followed by rationale,
-    // so the condensed and full renders must differ for any real release.
     let condensed = ts::text(".changelog").len();
     assert!(
         ts::query(".changelog__toggle").is_some(),
@@ -206,6 +208,25 @@ async fn release_notes_render_condensed_with_the_detail_behind_a_toggle() {
     assert!(
         ts::body_contains("Hide technical details"),
         "the toggle must flip to hiding detail once expanded"
+    );
+}
+
+/// Notes already written one line per change (every release after 0.34.1)
+/// summarise to themselves, so they render whole and offer no toggle that
+/// would swap a block for an identical one.
+#[wasm_bindgen_test]
+async fn one_line_release_notes_render_whole_without_a_toggle() {
+    ts::reset();
+    let notes = "### Fixed\n\n- A one-line entry that says what changed.\n";
+    let _m = ts::mount_view(move || view! { <ChangelogNotes notes=notes.to_string() /> });
+    ts::wait_for(|| ts::query(".changelog").is_some()).await;
+    assert!(
+        ts::text(".changelog").contains("A one-line entry that says what changed."),
+        "a one-line entry must render as written"
+    );
+    assert!(
+        ts::query(".changelog__toggle").is_none(),
+        "notes with no detail to hide must not offer the toggle"
     );
 }
 
