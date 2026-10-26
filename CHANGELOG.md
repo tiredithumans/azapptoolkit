@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-26
+
 ### Added
 
 - Settings → Tenant connection, a failed sign-in and a failed setup save now show where the logs and settings.json are.
