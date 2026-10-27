@@ -272,7 +272,7 @@ mod tests {
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("reqwest client builds")
-            .get("http://[::1")
+            .get("https://[::1")
             .build()
             .expect_err("an unparseable URL");
         let ui = updater_err(E::Reqwest(refused));
