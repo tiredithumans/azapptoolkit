@@ -88,7 +88,7 @@ tracing-appender = "0.2"
 # Utilities
 url = "2"
 async-trait = "0.1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 # `default-features = false` + `std` on purpose: 0.23's default feature set is
 # `["std", "simd-unsafe"]`, and this workspace lints `unsafe_code = "deny"` —
 # base64 sits in the JWT-claim, certificate-thumbprint and client-secret decode
