@@ -81,7 +81,7 @@ jobs:
       # went under the tag ref, unreachable from any later run, and each tag's
       # ~1.7 GiB crowded main's caches out of the 10 GB quota. Pinned by
       # repo_invariants/release.rs.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: just,cargo-audit,cargo-deny@0.20.2
       # main-branch CI runs `just audit` per-merge, but an advisory filed after
@@ -151,7 +151,7 @@ jobs:
 
       # No rust-cache (see the guard job): a tag's caches can never be restored.
 
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           # Pinned like ci.yml's trunk: the minified release bundle stays reproducible.
           tool: just,trunk@0.21.14
