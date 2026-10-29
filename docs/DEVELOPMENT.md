@@ -470,6 +470,10 @@ aggregated `latest.json` and `SHA256SUMS`. Publishing is the deliberate human st
 
 ### Dependabot auto-merge
 
+One `cargo` entry in `.github/dependabot.yml` covers both Cargo trees (`directories`), so a bump of
+a crate both lockfiles resolve arrives as one PR that updates both. Two entries split it into two
+PRs, and each failed CI's `--locked` build on the other lockfile.
+
 `main` requires a PR to be up to date before it merges, and GitHub's auto-merge never updates a
 branch, so two workflows keep auto-merge moving:
 

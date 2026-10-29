@@ -22,10 +22,22 @@ updates:
         patterns:
           - "*"
 
-  # Cargo workspace (root Cargo.toml + Cargo.lock). Registry crates are pinned by
-  # exact version + checksum in Cargo.lock; Dependabot proposes the upgrades.
+  # Both Cargo trees in ONE entry: the root workspace (Cargo.toml + Cargo.lock)
+  # and the WASM frontend, which is EXCLUDED from that workspace (it targets
+  # wasm32-unknown-unknown) and carries its own Cargo.toml + Cargo.lock,
+  # including the git-pinned `tauri-sys` rev. Registry crates are pinned by
+  # exact version + checksum in each lockfile; Dependabot proposes the upgrades.
+  #
+  # They must share one entry because web-rs reaches the root
+  # `[workspace.dependencies]` through its `azapptoolkit-core`/`-dto` path deps,
+  # so one root Cargo.toml line is resolved by BOTH lockfiles. Two separate
+  # entries opened two PRs per bump of such a crate, each editing that line but
+  # only its own lockfile, so CI's `--locked` build failed on the other one
+  # (parking_lot 0.13: #380 + #382, landed together as #384).
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /apps/desktop/web-rs
     schedule:
       interval: weekly
     commit-message:
@@ -56,26 +68,16 @@ updates:
       # 2026-09-14 (`cms 0.3.0-pre.2`).
       - dependency-name: p12-keystore
         versions: [">=0.3"]
+    # Order matters: an update joins the FIRST group it matches.
     groups:
-      # Batch low-risk semver-compatible bumps; majors stay as individual PRs so a
-      # breaking upgrade gets its own review.
+      # Batch low-risk semver-compatible bumps into one PR.
       cargo-minor-patch:
         update-types:
           - minor
           - patch
-
-  # The WASM frontend crate is EXCLUDED from the root workspace (targets
-  # wasm32-unknown-unknown) and carries its own Cargo.toml + Cargo.lock — including
-  # the git-pinned `tauri-sys` rev — so it needs a separate Dependabot entry.
-  - package-ecosystem: cargo
-    directory: /apps/desktop/web-rs
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: deps
-    open-pull-requests-limit: 10
-    groups:
-      cargo-minor-patch:
-        update-types:
-          - minor
-          - patch
+      # Everything left is a major. Each one gets its own PR so a breaking
+      # upgrade gets its own review, and `group-by: dependency-name` makes that
+      # PR cover every directory the crate appears in, so both lockfiles move
+      # together. Majors stay manual: dependabot-auto-merge.yml skips them.
+      cargo-major:
+        group-by: dependency-name
