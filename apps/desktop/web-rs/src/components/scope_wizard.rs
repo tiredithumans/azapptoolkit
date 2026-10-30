@@ -19,7 +19,12 @@
 //! Back: it names the principal, the permission values and the resolved
 //! targets, and — for the scoped Exchange and site paths, which BOTH strip the
 //! app's matching org-wide Entra grants once the scoped access lands — says so
-//! before the apply rather than afterwards in the result toast.
+//! before the apply rather than afterwards in the result toast. An apply that
+//! comes back with warnings stays on step 3 and lists them, with Done in place
+//! of Grant access: the warnings are where the backend says what did NOT happen
+//! (a site or group that failed, org-wide reach the app still holds). The
+//! host's `on_changed` reload waits until the wizard closes, because hosts
+//! rebuild the subtree holding it.
 //!
 //! Step 1 is the full live permission catalog (the [`PermissionPicker`]) as a
 //! multi-select cart, so any permission — scopable or not — can be granted from
@@ -143,8 +148,33 @@ fn consent_scope(mode: ScopeMode) -> &'static str {
     }
 }
 
+/// What an apply did: the one-line summary, plus the warnings the backend
+/// returned with it.
+///
+/// A clean apply toasts the summary and closes. A warned one keeps the wizard
+/// open on the review step with every warning in view — the result toast used
+/// to end in "N warnings." and nothing else, so a `Sites.Selected` conversion
+/// that left the app reaching every site, or a scoped grant whose groups were
+/// never applied, read as done.
+#[derive(Clone)]
+struct Applied {
+    summary: String,
+    warnings: Vec<String>,
+}
+
+impl Applied {
+    /// An apply with nothing to warn about (the org-wide path, whose failures
+    /// are already in its summary).
+    fn clean(summary: String) -> Self {
+        Applied {
+            summary,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
-    let mut s = format!(
+    format!(
         "Scoped “{}”: assigned {}, removed {}.",
         r.scope_name,
         count_noun(r.roles_assigned.len(), "role", "roles"),
@@ -153,15 +183,7 @@ fn exchange_summary(r: &exchange::ExchangeAccessResult) -> String {
             "org-wide grant",
             "org-wide grants"
         ),
-    );
-    if !r.warnings.is_empty() {
-        let _ = write!(
-            s,
-            " {}.",
-            count_noun(r.warnings.len(), "warning", "warnings")
-        );
-    }
-    s
+    )
 }
 
 fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
@@ -177,13 +199,6 @@ fn sharepoint_summary(r: &sharepoint::SiteScopeResult) -> String {
     if r.declared_permission {
         s.push_str(" Added Sites.Selected to the app registration.");
     }
-    if !r.warnings.is_empty() {
-        let _ = write!(
-            s,
-            " {}.",
-            count_noun(r.warnings.len(), "warning", "warnings")
-        );
-    }
     s
 }
 
@@ -197,13 +212,6 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
     }
     if r.declared_permission {
         s.push_str(" Added it to the app registration.");
-    }
-    if !r.warnings.is_empty() {
-        let _ = write!(
-            s,
-            " {}.",
-            count_noun(r.warnings.len(), "warning", "warnings")
-        );
     }
     s
 }
@@ -221,9 +229,9 @@ async fn apply_exchange_scoped(
     target: ScopeTarget,
     items: Vec<PickerSelection>,
     groups: Vec<String>,
-) -> Result<String, UiError> {
+) -> Result<Applied, UiError> {
     let perms = perm_values(&items);
-    if let Some(object_id) = &target.object_id {
+    let r = if let Some(object_id) = &target.object_id {
         for item in &items {
             permissions::declare_app_permission(
                 &tenant_id,
@@ -234,17 +242,10 @@ async fn apply_exchange_scoped(
             )
             .await?;
         }
-        let r = exchange::grant_exchange_mailbox_access(
-            &tenant_id,
-            object_id,
-            Some(&perms),
-            &groups,
-            true,
-        )
-        .await?;
-        Ok(exchange_summary(&r))
+        exchange::grant_exchange_mailbox_access(&tenant_id, object_id, Some(&perms), &groups, true)
+            .await?
     } else {
-        let r = exchange::grant_managed_identity_scoped_exchange_access(
+        exchange::grant_managed_identity_scoped_exchange_access(
             &tenant_id,
             &target.sp_object_id,
             &target.app_id,
@@ -253,14 +254,14 @@ async fn apply_exchange_scoped(
             &groups,
             true,
         )
-        .await?;
-        Ok(exchange_summary(&r))
-    }
+        .await?
+    };
+    Ok(Applied {
+        summary: exchange_summary(&r),
+        warnings: r.warnings,
+    })
 }
 
-/// SharePoint scoped path: grant `Sites.Selected` + per-site access on the given
-/// sites and strip the org-wide `Sites.*` grant (`convert_site_access_to_selected`
-/// handles the grant-before-strip ordering).
 /// SharePoint per-item path: grant the Selected appRole plus per-resource
 /// access on each target.
 ///
@@ -274,7 +275,7 @@ async fn apply_sharepoint_item_scoped(
     target_urls: Vec<String>,
     role: &'static str,
     permission_value: String,
-) -> Result<String, UiError> {
+) -> Result<Applied, UiError> {
     if target.sp_object_id.is_empty() {
         return Err(UiError::validation(
             "no_service_principal",
@@ -292,15 +293,22 @@ async fn apply_sharepoint_item_scoped(
         role,
     )
     .await?;
-    Ok(sharepoint_item_summary(&r))
+    Ok(Applied {
+        summary: sharepoint_item_summary(&r),
+        warnings: r.warnings,
+    })
 }
 
+/// SharePoint scoped path: grant `Sites.Selected` + per-site access on the given
+/// sites and strip the org-wide `Sites.*` grant (`convert_site_access_to_selected`
+/// handles the grant-before-strip ordering). Its warnings include any org-wide
+/// SharePoint reach the app still holds afterwards, which the wizard must show.
 async fn apply_sharepoint_scoped(
     tenant_id: String,
     target: ScopeTarget,
     site_urls: Vec<String>,
     role: &'static str,
-) -> Result<String, UiError> {
+) -> Result<Applied, UiError> {
     if target.sp_object_id.is_empty() {
         return Err(UiError::validation(
             "no_service_principal",
@@ -318,7 +326,10 @@ async fn apply_sharepoint_scoped(
         true,
     )
     .await?;
-    Ok(sharepoint_summary(&r))
+    Ok(Applied {
+        summary: sharepoint_summary(&r),
+        warnings: r.warnings,
+    })
 }
 
 /// Org-wide path: grant the permissions with tenant-wide reach (no scoping).
@@ -329,7 +340,7 @@ async fn apply_orgwide(
     tenant_id: String,
     target: ScopeTarget,
     items: Vec<PickerSelection>,
-) -> Result<String, UiError> {
+) -> Result<Applied, UiError> {
     if let Some(object_id) = &target.object_id {
         let mut failures: Vec<String> = Vec::new();
         for item in &items {
@@ -358,7 +369,7 @@ async fn apply_orgwide(
                 failures.join("; ")
             );
         }
-        Ok(s)
+        Ok(Applied::clean(s))
     } else {
         // Bare SP: app-role grants only, grouped by resource (one call each).
         let mut by_resource: std::collections::BTreeMap<String, Vec<String>> =
@@ -399,7 +410,7 @@ async fn apply_orgwide(
                 failures.join("; ")
             );
         }
-        Ok(s)
+        Ok(Applied::clean(s))
     }
 }
 
@@ -488,7 +499,9 @@ pub fn ScopeWizard(
     #[prop(into)]
     preseed: Signal<Option<PickerSelection>>,
     #[prop(into)] on_close: Callback<()>,
-    /// Fired after a successful grant so the host refreshes detail + scope badges.
+    /// Fired once an apply has landed (a warned one included) so the host
+    /// refreshes detail + scope badges — when the wizard closes, never while it
+    /// is on screen: hosts rebuild the subtree holding it on this reload.
     #[prop(into)]
     on_changed: Callback<()>,
 ) -> impl IntoView {
@@ -525,6 +538,17 @@ pub fn ScopeWizard(
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let needs_consent = RwSignal::new(false);
+    // An apply that landed with warnings: shown on the review step, with Done
+    // in place of Grant access, until the operator closes or goes Back.
+    let warned: RwSignal<Option<Applied>> = RwSignal::new(None);
+    // Set once an apply lands; `on_changed` then runs ONCE, when the wizard
+    // closes (`close()`, or the open Effect for Escape), never mid-review.
+    // Hosts rebuild the subtree holding the wizard on that reload (the app
+    // registration's Permissions tab, the managed identity window), so running
+    // it on a warned apply took the warnings off the screen with it — the
+    // Exchange section holds its reload behind "Dismiss & refresh" for the
+    // same reason.
+    let reload_on_close = RwSignal::new(false);
 
     // The single mechanism this run scopes: `Some(k)` only when the cart is
     // non-empty and every item is an Application permission mapping to the same
@@ -551,14 +575,23 @@ pub fn ScopeWizard(
         busy.set(false);
         error.set(None);
         needs_consent.set(false);
+        warned.set(None);
+        reload_on_close.set(false);
     };
     let close = move || {
+        // Read before `reset()` clears it. A disposed wizard reads as "reload":
+        // only the apply task reaches here after an await, and it has just
+        // landed something.
+        let reload = reload_on_close.try_get_untracked().unwrap_or(true);
         reset();
         // `try_run`: the apply task calls this after an await, when the
         // wizard may already be disposed (the pane closed, or a sign-out and
         // sign-in back into the same tenant while the apply ran), and `run`
         // on a disposed callback panics the window.
         on_close.try_run(());
+        if reload {
+            on_changed.try_run(());
+        }
     };
 
     // Re-anchor the mode (and any mechanism-specific cart state) to the cart as
@@ -580,9 +613,22 @@ pub fn ScopeWizard(
     // Pre-seed on open: a row "Scope…" opens the wizard with one permission
     // already in the cart, jumping to the choose-access step for its mechanism.
     Effect::new(move |_| {
-        if open.get()
-            && let Some(sel) = preseed.get_untracked()
-        {
+        if !open.get() {
+            // Escape closes through the host's `on_close`, never `close()`:
+            // run the reload a landed apply held back, now that its notes are
+            // off the screen. After `close()` the flag is already clear.
+            if reload_on_close.get_untracked() {
+                reload_on_close.set(false);
+                on_changed.try_run(());
+            }
+            return;
+        }
+        // A warned result belongs to the run that produced it. Escape closes
+        // through the host's `on_close`, not `close()`, so without this the
+        // next run's review step would open on the old notes, with Done in
+        // place of Grant access.
+        warned.set(None);
+        if let Some(sel) = preseed.get_untracked() {
             selected.set(vec![sel]);
             anchor();
             step.set(1);
@@ -696,6 +742,7 @@ pub fn ScopeWizard(
         busy.set(true);
         error.set(None);
         needs_consent.set(false);
+        warned.set(None);
         let started_for = tenant_id.clone();
         leptos::task::spawn_local(async move {
             let res = match plan {
@@ -718,10 +765,21 @@ pub fn ScopeWizard(
                 return;
             }
             match res {
-                Ok(summary) => {
-                    session.toast_success(summary);
-                    on_changed.try_run(());
+                Ok(applied) if applied.warnings.is_empty() => {
+                    session.toast_success(applied.summary);
+                    // `close()` runs the host's reload.
+                    reload_on_close.set(true);
                     close();
+                }
+                // Something landed, so the host must refresh — after the
+                // warnings have been read, not now (see `reload_on_close`):
+                // they stay on screen instead of a toast that counted them, as
+                // a conversion that left the app reaching every site must not
+                // read as done (see `Applied`).
+                Ok(applied) => {
+                    reload_on_close.set(true);
+                    warned.set(Some(applied));
+                    busy.set(false);
                 }
                 Err(e) => {
                     if e.is_consent_required() {
@@ -834,7 +892,7 @@ pub fn ScopeWizard(
                 "Grant {perms}, scoped to the chosen mailbox groups. The app will not have org-wide mailbox access.",
             ),
             ScopeMode::Sites => format!(
-                "Grant {perms}, scoped to the chosen sites via Sites.Selected. The app will not have org-wide site access.",
+                "Grant {perms}, scoped to the chosen sites via Sites.Selected. The app will not have org-wide site access through Microsoft Graph's Sites.* permissions; if it reaches every site or file another way, the result says so.",
             ),
             ScopeMode::Items => format!(
                 "Grant {perms}, scoped to the chosen libraries, folders or files. The app reaches nothing else, and permission inheritance is broken on each target.",
@@ -1036,11 +1094,17 @@ pub fn ScopeWizard(
                             // An org-wide apply fails on the Graph WRITE
                             // scopes, not on a mechanism's admin scope —
                             // the same distinction `consent_and_retry`
-                            // now keys on, said out loud.
+                            // now keys on, said out loud. A scoped apply's
+                            // `consent_required` may be either: the
+                            // mechanism's scope, or the Graph write scope its
+                            // declare / appRole grant rides, and the code does
+                            // not say which. So the error's own message (shown
+                            // below) names what failed, and this line says only
+                            // what the button grants.
                             let what = if active_mode.get() == ScopeMode::OrgWide {
                                 "Granting these permissions needs an admin consent."
                             } else {
-                                "Scoping needs an admin consent for this mechanism."
+                                "An admin consent is missing; the error below says for what. Grant consent & retry grants this mechanism's own scope."
                             };
                             view! {
                                 <Callout tone="warn">
@@ -1052,6 +1116,29 @@ pub fn ScopeWizard(
                                     >
                                         "Grant consent & retry"
                                     </Button>
+                                </Callout>
+                            }
+                        })
+                }}
+                {move || {
+                    warned
+                        .get()
+                        .map(|a| {
+                            view! {
+                                <Callout tone="warn" role="status">
+                                    <span class="ui-text">
+                                        {format!(
+                                            "{} Read the notes below: they say what did not happen, or what the app can still reach.",
+                                            a.summary,
+                                        )}
+                                    </span>
+                                    <ul class="warnings">
+                                        {a
+                                            .warnings
+                                            .into_iter()
+                                            .map(|w| view! { <li>{w}</li> })
+                                            .collect_view()}
+                                    </ul>
                                 </Callout>
                             }
                         })
@@ -1079,30 +1166,48 @@ pub fn ScopeWizard(
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     on_click=Box::new(move |_| {
-                        if step.get() == 0 { close() } else { step.update(|s| *s -= 1) }
+                        if step.get() == 0 {
+                            close()
+                        } else {
+                            warned.set(None);
+                            step.update(|s| *s -= 1)
+                        }
                     })
                     disabled=Signal::derive(move || busy.get())
                 >
                     {move || if step.get() == 0 { "Cancel" } else { "Back" }}
                 </Button>
                 <Show when=move || step.get() < 2 fallback=move || {
+                    // A warned apply has landed: the next step is reading its
+                    // notes and closing, not granting the same thing again.
                     view! {
-                        <Button
-                            appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            on_click=Box::new(move |_| run_apply())
-                            disabled=Signal::derive(move || busy.get())
-                        >
-                            {move || {
-                                if busy.get() {
-                                    view! {
-                                        <Spinner />
-                                    }
-                                        .into_any()
-                                } else {
-                                    view! { "Grant access" }.into_any()
+                        <Show
+                            when=move || warned.with(Option::is_some)
+                            fallback=move || {
+                                view! {
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(move |_| run_apply())
+                                        disabled=Signal::derive(move || busy.get())
+                                    >
+                                        {move || {
+                                            if busy.get() {
+                                                view! { <Spinner /> }.into_any()
+                                            } else {
+                                                view! { "Grant access" }.into_any()
+                                            }
+                                        }}
+                                    </Button>
                                 }
-                            }}
-                        </Button>
+                            }
+                        >
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                on_click=Box::new(move |_| close())
+                            >
+                                "Done"
+                            </Button>
+                        </Show>
                     }
                 }>
                     <Button

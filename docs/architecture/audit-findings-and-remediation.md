@@ -201,9 +201,13 @@ Per-mechanism apply (each does grant-before-strip, so a failure never strands th
   group membership) or existing groups.
 - **SharePoint** — `commands::sharepoint::convert_site_access_to_selected` (works for an app SP *and*
   an MI — caller passes the SP object id + app id): grant `Sites.Selected` (idempotent) → grant
-  per-site access → **only if ≥1 site grant landed** strip the broad `Sites.*` grant
-  (`should_remove_orgwide`). Targets: `SiteSelectionPanel` (site URLs + read/write). Graph has **no
-  reverse `appId → sites` lookup**, so the site URL(s) are user-supplied.
+  per-site access, once per site → **only if ≥1 site grant landed** strip Graph's broad `Sites.*`
+  grant (`should_remove_orgwide`) → report any org-wide SharePoint reach still held (a SharePoint
+  Online `Sites.*`, a Graph `Files.*.All`) as a "Scoping is NOT effective" warning, which keeps the
+  audit Fix open and the wizard on its review step (see
+  [sharepoint-selected.md](./sharepoint-selected.md#what-the-sitesselected-conversion-reports)).
+  Targets: `SiteSelectionPanel` (site URLs + read/write). Graph has **no reverse `appId → sites`
+  lookup**, so the site URL(s) are user-supplied.
 - **SharePoint item** — `commands::sharepoint::grant_selected_item_access`: grant the Selected
   appRole (idempotent) → resolve each target URL → reject any whose level the scope cannot reach →
   grant per resource. Strips nothing (see [sharepoint-selected.md](./sharepoint-selected.md#the-selected-family-is-four-levels-not-one)). Targets: `ItemSelectionPanel`, which resolves each
