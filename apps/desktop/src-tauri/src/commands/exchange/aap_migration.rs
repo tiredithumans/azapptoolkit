@@ -165,8 +165,14 @@ pub(super) struct MigratedApp {
 /// removed it. Now the note reflects the tenant the operator reads it against,
 /// and the delete re-verifies live regardless (`delete_exchange_scope_group`).
 /// Taken after a Cancel too (read-only, and the apps that finished have groups
-/// to name). After the session died, the reads fail and every group comes back
-/// with an incomplete check: "review the notes", never "can be cleaned up".
+/// to name). If its reads fail (the session died mid-run and took the Exchange
+/// token with it, say), the groups come back unnamed, as bare DNs, with an
+/// incomplete check: "review the notes", never "can be cleaned up", and no
+/// Delete offer. That includes the groups of apps that finished before the
+/// failure, which their own check used to name and offer, and nothing recovers
+/// them: a migrated app's re-run finds no policy, so it names nothing. That is
+/// fail-closed and truthful (the DN still finds the group, and a delete
+/// re-verifies live). A still-valid Exchange token reads normally.
 pub(super) async fn name_retired_groups(
     exo: &ExchangeClient,
     apps: Vec<MigratedApp>,

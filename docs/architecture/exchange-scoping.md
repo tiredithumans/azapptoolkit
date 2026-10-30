@@ -372,8 +372,13 @@ once per consolidated app, on a scope list that grows by one per migrated app. T
 read cannot stand in: the run deletes policies and creates or repoints scopes. The end of the run is
 also the accurate moment. Checked app by app, a later app's policy naming the same legacy group read
 as a live reference even after that app's migration removed it. The pass runs after a Cancel too
-(read-only). After a dead session its reads fail, so every group reads "review", never "can be
-cleaned up".
+(read-only). If its reads fail (the session died mid-run and took the Exchange token with it, say),
+the groups come back unnamed, as bare DNs, with an incomplete check: "review", never "can be
+cleaned up", and no Delete offer. That includes the groups of apps that finished before the
+failure, which their own check used to name and offer for deletion, and nothing recovers them: a
+migrated app's re-run finds no policy, so it names nothing. That is fail-closed and truthful. The DN
+still finds the group, and a delete re-verifies live anyway. A still-valid Exchange token reads
+normally, whatever happened to the rest of the session.
 
 `delete_exchange_scope_group` is the cleanup, and it is **offered, never automatic**:
 `Remove-DistributionGroup` has no undo (the address starts bouncing), and the checks above cannot see
