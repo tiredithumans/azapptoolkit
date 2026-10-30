@@ -58,8 +58,9 @@ pub struct GeneratedCert {
 /// it. On success the command moves the PEM and the password out with
 /// `mem::take` for the one-time reveal and only borrows the PKCS#12 DER to
 /// encode it, so this wipes the DER and two empty strings. What moved out is
-/// not wiped, and cannot be: the reveal sends the plaintext over IPC, which
-/// copies it into Tauri's serialized reply and the webview's strings.
+/// not wiped here: the reveal DTO has no zeroizing `Drop`, because the copies
+/// IPC makes anyway (Tauri's serialized reply, the webview's strings) cannot
+/// be wiped.
 impl Drop for GeneratedCert {
     fn drop(&mut self) {
         self.private_key_pem.zeroize();

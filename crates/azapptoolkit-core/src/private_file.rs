@@ -51,7 +51,8 @@ pub fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // a reader sees either the old file or the new one, never a partial write,
     // and the 0600 permission tests still hold. The data is synced before the
     // rename and, on unix, the directory after it, so the new file is also the
-    // one an OS crash leaves behind.
+    // one an OS crash leaves behind (best effort: a failed directory sync is
+    // logged, not returned).
     write_via(path, contents, || temp_candidate(path))
 }
 
