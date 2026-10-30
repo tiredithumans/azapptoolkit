@@ -88,7 +88,6 @@ pub fn UploadCertificateDialog(
                 let input = AddCertificateInput {
                     display_name: dn.trim().to_string(),
                     pem_or_base64: body,
-                    end_date_time: None,
                 };
                 async move {
                     applications::add_certificate_credential(&tenant_id, &id, &input).await

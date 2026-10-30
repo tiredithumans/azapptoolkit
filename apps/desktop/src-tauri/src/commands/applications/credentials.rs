@@ -141,7 +141,9 @@ pub async fn remove_password(
 /// and returns what went up (thumbprint + notAfter, read from the certificate).
 /// The paste is parsed first ([`parse_cert_upload`]): a private key, a bundle,
 /// an expired certificate or anything that isn't an X.509 certificate is
-/// refused before anything reaches Graph.
+/// refused before anything reaches Graph. No `endDateTime` is sent: Graph
+/// derives it from the certificate, so the credential's expiry is the notAfter
+/// this reports.
 #[tauri::command]
 pub async fn add_certificate_credential(
     state: State<'_, AppState>,
@@ -169,7 +171,6 @@ pub(crate) async fn add_certificate_credential_core(
         kind: Some("AsymmetricX509Cert".into()),
         usage: Some("Verify".into()),
         key: parsed.key_b64,
-        end_date_time: input.end_date_time,
         ..Default::default()
     };
     client.add_key_credential(object_id, new_cred).await?;
@@ -914,7 +915,6 @@ mod handler_tests {
             AddCertificateInput {
                 display_name: "bundle".to_string(),
                 pem_or_base64: format!("{}{}", generated.cert_pem, generated.private_key_pem),
-                end_date_time: None,
             },
         )
         .await
@@ -931,6 +931,80 @@ mod handler_tests {
                 .unwrap_or_default()
                 .is_empty()
         );
+    }
+
+    /// The two calls `add_key_credential` makes: the live `keyCredentials`
+    /// read (empty here) and the full-array PATCH.
+    async fn mount_key_credential_write(server: &wiremock::MockServer) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "keyCredentials": [] })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    /// The one entry the one `keyCredentials` PATCH appended.
+    async fn appended_key_credential(server: &wiremock::MockServer) -> serde_json::Value {
+        let patches: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PATCH")
+            .map(|r| serde_json::from_slice(&r.body).expect("a JSON body"))
+            .collect();
+        assert_eq!(patches.len(), 1, "one keyCredentials PATCH");
+        let entries = patches[0]["keyCredentials"]
+            .as_array()
+            .expect("the full array");
+        assert_eq!(entries.len(), 1, "one entry appended to an empty array");
+        entries[0].clone()
+    }
+
+    /// Graph derives an uploaded certificate's `endDateTime` from the
+    /// certificate, so none is sent: a date from the webview could disagree
+    /// with the notAfter the reply reports. A payload that still carries the
+    /// `endDateTime` key the input used to have deserializes, and the date
+    /// goes nowhere.
+    #[tokio::test]
+    async fn an_uploaded_certificate_takes_its_expiry_from_the_certificate() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_key_credential_write(&server).await;
+        seed(&state);
+        let generated = crate::cert::generate_self_signed("Upload Test", 30).unwrap();
+        let input: AddCertificateInput = serde_json::from_value(serde_json::json!({
+            "displayName": "uploaded",
+            "pemOrBase64": generated.cert_pem,
+            "endDateTime": "2099-01-01T00:00:00Z",
+        }))
+        .expect("a stale endDateTime key still deserializes");
+
+        let uploaded = add_certificate_credential_core(&state, TENANT, OBJECT, input)
+            .await
+            .expect("the mocked upload succeeds");
+
+        assert_eq!(uploaded.thumbprint, generated.thumbprint);
+        assert_eq!(
+            uploaded.not_after.timestamp(),
+            generated.not_after.unix_timestamp(),
+            "the reply reports the certificate's own notAfter",
+        );
+        let entry = appended_key_credential(&server).await;
+        assert_eq!(entry["key"], generated.cert_der_base64.as_str());
+        assert!(
+            entry.get("endDateTime").is_none(),
+            "Graph must derive the expiry from the certificate: {entry}",
+        );
+        assert!(!detail_cached_here(&state), "the credential tier is busted");
+        assert!(indexes_intact(&state, TENANT));
     }
 
     #[tokio::test]
