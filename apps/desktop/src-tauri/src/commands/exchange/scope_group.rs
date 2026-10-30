@@ -326,18 +326,26 @@ pub(super) async fn consolidate_scope_group(
 
     let copied: Vec<String> = members.iter().map(|m| m.identity.clone()).collect();
 
-    // 1b. What the managed group ALREADY holds. The move means "the managed
-    //     group equals the source", so a member the source doesn't have would be
-    //     a widening, not a copy (`Refusal::ExtraManagedMembers` — e.g. a G1
-    //     copy left by an earlier refused run, before the policy moved to G2).
-    //     A missing group reads as empty (`invoke_optional`). A real run refuses
-    //     here, before writing anything into a group it would not repoint at;
-    //     the post-copy re-read in step 3 is still the authoritative check.
+    // 1b. What the managed group ALREADY holds, read once for two uses.
     //
-    //     Skipped when the live scope ALREADY names the managed group alone:
-    //     its members are then the app's current reach, so nothing can widen,
-    //     and refusing would block every re-run once an operator edits the
-    //     managed group (which is how reach is meant to be edited).
+    //     The extras check. The move means "the managed group equals the
+    //     source", so a member the source doesn't have would be a widening, not
+    //     a copy (`Refusal::ExtraManagedMembers` — e.g. a G1 copy left by an
+    //     earlier refused run, before the policy moved to G2). A missing group
+    //     reads as empty (`invoke_optional`). A real run refuses here, before
+    //     writing anything into a group it would not repoint at; the post-copy
+    //     re-read in step 3 is still the authoritative check. Not applied when
+    //     the live scope ALREADY names the managed group alone: its members are
+    //     then the app's current reach, so nothing can widen, and refusing would
+    //     block every re-run once an operator edits the managed group (which is
+    //     how reach is meant to be edited).
+    //
+    //     The skip set. A source member already in the group is not added again
+    //     in step 2 (`copy_members`). Every such add used to go out anyway — one
+    //     proxied cmdlet of seconds that changed nothing — and re-runs are
+    //     routine: a cancelled copy, a KEPT policy, a refused repoint. So a REAL
+    //     run reads the group even when the live scope already names it; a plan
+    //     copies nothing, so it reads only for the extras check.
     let managed_is_live = match live_filter {
         Some(filter) => matches!(
             exo.get_distribution_group(&group_name).await,
@@ -349,10 +357,15 @@ pub(super) async fn consolidate_scope_group(
         None => false,
     };
     let mut refusal = None;
-    if !managed_is_live {
+    let mut already_in: HashSet<String> = HashSet::new();
+    if !(managed_is_live && dry_run) {
         match exo.list_group_members(&group_name).await {
             Ok(existing) => {
-                let extras = extra_members(&members, &existing);
+                let extras = if managed_is_live {
+                    Vec::new()
+                } else {
+                    extra_members(&members, &existing)
+                };
                 if !extras.is_empty() {
                     let why = Refusal::ExtraManagedMembers(extras).to_string();
                     if !dry_run {
@@ -365,12 +378,18 @@ pub(super) async fn consolidate_scope_group(
                     warnings.push(format!("the move would be refused: {why}"));
                     refusal = Some(why);
                 }
+                already_in = existing
+                    .iter()
+                    .filter_map(source_member)
+                    .map(|m| m.key)
+                    .collect();
             }
             Err(err) if dry_run => warnings.push(format!(
                 "could not read '{group_name}' to check it holds no mailbox beyond the source \
                  ({err}); the move re-checks before repointing"
             )),
-            // A real run re-reads the group after the copy, and that read decides.
+            // A real run re-reads the group after the copy, and that read
+            // decides; an unread group only means no add is skipped.
             Err(_) => {}
         }
     }
@@ -411,7 +430,7 @@ pub(super) async fn consolidate_scope_group(
         }
     };
     let session = SessionDead::new();
-    let copy = copy_members(exo, &group_name, &members, cancel, &session).await;
+    let copy = copy_members(exo, &group_name, &members, &already_in, cancel, &session).await;
     for (identity, err) in &copy.failed {
         warnings.push(format!("could not add {identity} to {group_name}: {err}"));
     }
@@ -520,8 +539,9 @@ pub(super) async fn consolidate_scope_group(
     }
 }
 
-/// What [`copy_members`] did: the keys that landed, the adds that failed for
-/// good (identity, error), and how many never started.
+/// What [`copy_members`] did: the keys that landed (the ones the group already
+/// held included), the adds that failed for good (identity, error), and how
+/// many never started.
 struct MemberCopy {
     landed: HashSet<String>,
     failed: Vec<(String, ExchangeError)>,
@@ -534,17 +554,29 @@ struct MemberCopy {
 /// under the same gates: concurrent adds to one group can collide on Exchange's
 /// "object was modified" conflict, which a second, uncontended attempt clears.
 ///
+/// A member whose key is in `already_in` (the group as the caller read it just
+/// before the copy) gets no add: it counts as landed as it stands, so a stopped
+/// copy still reports it copied and its "N of M not copied" count stays right.
+/// The client would swallow the add's "already a member" reply anyway, but only
+/// after a proxied cmdlet per mailbox — the whole cost of a re-run. Nothing
+/// here is trusted for the repoint: the caller's post-copy re-read decides.
+///
 /// Owned items (not `members.iter()`): a stream of borrowed items trips the
 /// higher-ranked `Send` check `#[tauri::command]` futures must pass.
 async fn copy_members(
     exo: &ExchangeClient,
     group_name: &str,
     members: &[SourceMember],
+    already_in: &HashSet<String>,
     cancel: &CancelToken,
     session: &SessionDead,
 ) -> MemberCopy {
+    let (present, missing): (Vec<SourceMember>, Vec<SourceMember>) = members
+        .iter()
+        .cloned()
+        .partition(|m| already_in.contains(&m.key));
     let outcomes: Vec<(SourceMember, Option<Result<(), ExchangeError>>)> =
-        futures::stream::iter(members.to_vec())
+        futures::stream::iter(missing)
             .map(|m| {
                 let (group_name, session) = (group_name.to_string(), session.clone());
                 async move {
@@ -563,7 +595,7 @@ async fn copy_members(
             .await;
 
     let mut copy = MemberCopy {
-        landed: HashSet::new(),
+        landed: present.into_iter().map(|m| m.key).collect(),
         failed: Vec::new(),
         not_attempted: 0,
     };
@@ -607,8 +639,34 @@ pub(super) async fn retired_scope_groups(
     exo: &ExchangeClient,
     source_dns: &[String],
 ) -> Vec<RetiredScopeGroupDto> {
-    if source_dns.is_empty() {
-        return Vec::new();
+    retired_scope_groups_per_app(exo, &[source_dns])
+        .await
+        .pop()
+        .unwrap_or_default()
+}
+
+/// [`retired_scope_groups`] for several repoints at once: one list per entry
+/// of `per_app`, in order, each holding exactly what a lone call would report
+/// against the same tenant state — on ONE read of each reference authority
+/// and one `Get-Group` per distinct DN, however many apps retired it.
+///
+/// The whole-tenant AAP migration names every consolidated app's retired
+/// groups through this after its last app (`aap_migration::name_retired_groups`).
+/// Asking per app read every management scope and every policy in the tenant
+/// once per app, and the scope list grows by one per migrated app.
+pub(super) async fn retired_scope_groups_per_app(
+    exo: &ExchangeClient,
+    per_app: &[&[String]],
+) -> Vec<Vec<RetiredScopeGroupDto>> {
+    // Each DN once, first-seen order; an app's own list keeps its order below.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let distinct: Vec<&String> = per_app
+        .iter()
+        .flat_map(|dns| dns.iter())
+        .filter(|dn| seen.insert(dn.as_str()))
+        .collect();
+    if distinct.is_empty() {
+        return vec![Vec::new(); per_app.len()];
     }
     // Both reads are org-wide and independent of the per-group loop below.
     let (scopes, policies) = futures::join!(
@@ -619,10 +677,10 @@ pub(super) async fn retired_scope_groups(
     let scopes = scopes.unwrap_or_default();
     let policies = policies.unwrap_or_default();
 
-    // Resolved EXO_READ_CONCURRENCY at a time, in `source_dns` order (`buffered`)
-    // so the result lists the groups in the order the scope named them.
+    // Resolved EXO_READ_CONCURRENCY at a time, in `distinct` order (`buffered`)
+    // so each answer pairs with its DN by position.
     // (Futures collected first — see the source-membership read.)
-    let pending: Vec<_> = source_dns
+    let pending: Vec<_> = distinct
         .iter()
         .map(|dn| async move { exo.get_group(dn).await.ok().flatten() })
         .collect();
@@ -631,28 +689,36 @@ pub(super) async fn retired_scope_groups(
         .collect()
         .await;
 
-    let mut out = Vec::new();
-    for (dn, resolved) in source_dns.iter().zip(resolved) {
-        let group = GroupIdentity {
-            distinguished_name: dn.clone(),
-            name: resolved.as_ref().and_then(|g| g.name.clone()),
-            primary_smtp_address: resolved
-                .as_ref()
-                .and_then(|g| g.primary_smtp_address.clone()),
-        };
-        let still_referenced_by = references_to_group(&group, &scopes, &policies);
-        out.push(RetiredScopeGroupDto {
-            display_name: group.name.clone(),
-            primary_smtp_address: group.primary_smtp_address.clone(),
-            distinguished_name: group.distinguished_name,
-            still_referenced_by,
-            // A group we couldn't resolve can't be matched by name either, so
-            // its policy check is unreliable — report the whole check as
-            // incomplete rather than a clean bill of health.
-            reference_check_complete: readable && resolved.is_some(),
-        });
-    }
-    out
+    // One answer per group, handed to every app that retired it.
+    let answers: HashMap<&str, RetiredScopeGroupDto> = distinct
+        .iter()
+        .zip(resolved)
+        .map(|(dn, resolved)| {
+            let group = GroupIdentity {
+                distinguished_name: (*dn).clone(),
+                name: resolved.as_ref().and_then(|g| g.name.clone()),
+                primary_smtp_address: resolved
+                    .as_ref()
+                    .and_then(|g| g.primary_smtp_address.clone()),
+            };
+            let still_referenced_by = references_to_group(&group, &scopes, &policies);
+            let answer = RetiredScopeGroupDto {
+                display_name: group.name.clone(),
+                primary_smtp_address: group.primary_smtp_address.clone(),
+                distinguished_name: group.distinguished_name,
+                still_referenced_by,
+                // A group we couldn't resolve can't be matched by name either,
+                // so its policy check is unreliable — report the whole check
+                // as incomplete rather than a clean bill of health.
+                reference_check_complete: readable && resolved.is_some(),
+            };
+            (dn.as_str(), answer)
+        })
+        .collect();
+    per_app
+        .iter()
+        .map(|dns| dns.iter().map(|dn| answers[dn.as_str()].clone()).collect())
+        .collect()
 }
 
 /// Deletes a group a consolidation retired — the explicit, separately confirmed

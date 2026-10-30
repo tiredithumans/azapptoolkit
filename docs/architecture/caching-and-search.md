@@ -610,7 +610,14 @@ any new heavy fan-out; don't hand-roll a second tracker or a raw per-item loop:
   sent alone; only a 429 notifies the throttle observer). Advanced queries inside a batch (e.g. `memberOf` `$count`) need the
   **per-sub-request** header form — the outer POST's headers don't reach sub-requests.
   Whole-batch failures must degrade to per-object reads through `dispatch::batch_or_serial`,
-  never fail the run.
+  never fail the run. A helper given more than 20 URLs fails as a whole when any one of its POSTs
+  does, so the fallback re-reads every input, the answered POSTs' too. A metered fan-out therefore
+  hands the helper one POST's worth per task (the DR backup's `BATCH_CHUNK`, the site sweep's
+  `SWEEP_BATCH`, both 20): a task is never wider than one POST per read, so the meter's halving
+  reaches the POSTs, and a failed POST re-reads only its own objects. The site sweep keeps its own
+  per-site loop (`read_site_chunk`), which also stops on Cancel and a dead session
+  (`batch_or_serial` checks neither). Details:
+  [resource-access-and-permission-tester.md](./resource-access-and-permission-tester.md).
 - **`ConcurrencyThrottle`** (`commands/throttle.rs`) — wired as the client's `ThrottleObserver`
   and fed to `dispatch_capped` as `|| meter.limit()`, so the in-flight cap halves on
   429 and recovers when quiet. Wire it through `FanOutMeter::attach(client, cap)` (the audit, the

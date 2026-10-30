@@ -28,15 +28,24 @@ grants behind `Sites.Selected` are invisible from the app side. The sweep builds
 other way: `GraphClient::list_all_sites` enumerates the tenant's sites via `GET /sites?search=*`
 (team/communication sites — the delegated search endpoint does not return personal OneDrive sites,
 and `/sites/getAllSites` is application-permission-only, out of reach by design), then reads each
-site's `/sites/{id}/permissions` on the SharePoint scope — in `$batch` chunks of `SWEEP_BATCH` sites
-under an adaptive cap of `SWEEP_CONCURRENCY` chunk tasks (`ConcurrencyThrottle`, halved on 429s).
-One searchable table answers both directions: filter by app → its granted sites; filter by site →
-the apps that can touch it. Invariants:
+site's `/sites/{id}/permissions` on the SharePoint scope — one task per `$batch` POST of
+`SWEEP_BATCH` (20, Graph's per-POST limit) sites, under an adaptive cap of `SWEEP_CONCURRENCY` (24)
+tasks (`ConcurrencyThrottle`, halved on 429s). The cap therefore counts POSTs: 480 site reads in
+flight at most, one POST (20 reads) at the throttle's floor. Tasks used to be 100 sites, read by the
+graph client four POSTs at a time, so the same 480 peak halved four POSTs at a time and never backed
+off below 80 reads. A POST that fails for good (its retries spent) falls back to per-site reads of
+**its own** sites (`read_site_chunk`). One failed POST used to fail a whole 100-site task, discarding
+the answered POSTs beside it and re-reading all 100 sites. The fallback stops on Cancel and on a dead
+session, noting each failure as it arrives. One searchable table answers both directions: filter by
+app → its granted sites; filter by site → the apps that can touch it. Invariants:
 
 - **Coverage is never overstated.** The per-site read rides the client's retrying transport, so a
   transient 429 is absorbed with `Retry-After` honored; a *persistently* failing site increments
   `sites_failed` (surfaced as "scanned X of Y (Z failed — coverage is partial)") instead of
-  silently reading as "no grants". A cancelled **or partially-failed** run is returned but
+  silently reading as "no grants". So does every site of a task that never came back: a panic or
+  an abort reaches the collector without its chunk, so once a run that was not cancelled is over,
+  `sites_lost` counts what the returned tasks fall short of the total as failed. Uncounted, such a
+  run was cached and read complete. A cancelled **or partially-failed** run is returned but
   **never cached** — the promise extends to the cache. Site enumeration is capped at
   `MAX_SITES_PER_SWEEP` (5000); hitting it sets `SiteSweepResult::truncated` (the graph client's
   `list_all_sites` returns `(sites, truncated)` like every other capped walk), which
@@ -45,7 +54,7 @@ the apps that can touch it. Invariants:
   the flag (the cap is deterministic, so re-sweeping 5000 sites buys the same prefix), and is
   therefore never served as complete; `sweep_is_cacheable` + its table test pin the split.
   `list_site_permissions` follows `nextLink`, so a site whose grant list spans pages is fully
-  counted. Progress streams as `site-sweep-progress` events (one per chunk); the run ends with
+  counted. Progress streams as `site-sweep-progress` events (one per POST); the run ends with
   one `site sweep complete` summary log line.
 - **Org-wide holders don't appear.** Only `Sites.Selected`-model grants create per-site rows; an
   app holding org-wide `Sites.*` reaches every site without appearing here — the view says so and
