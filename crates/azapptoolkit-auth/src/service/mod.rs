@@ -112,6 +112,35 @@ enum RefreshTokenSave {
     BestEffort,
 }
 
+/// What a flow's store does with the tenant's registration. It happens in the
+/// critical section that caches the token, under the fence, so a sign-out or
+/// an account switch can never land between the token and its registration
+/// (see `EntraAuthService::store_token_outcome`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    /// The silent refresh, consent and step-up: the account came from the
+    /// registration, which is left as it is.
+    Keep,
+    /// `reauthenticate` and `restore_session`: registers the context the flow
+    /// proved, never over another account's. Neither moves the epoch, so while
+    /// the tenant is registered neither may change whose session it fences.
+    /// With nothing registered (after a dead-session purge) there is no account
+    /// to compare: `reauthenticate` then takes its caller's context on trust.
+    Claim,
+    /// `sign_in`: the session it just started (it moved the epoch and swept
+    /// the tenant) replaces whatever is registered.
+    Replace,
+}
+
+/// A launch restore's silent acquisition (`EntraAuthService::restore_session`):
+/// the remembered account whose stored refresh token is redeemed (registered
+/// only once the refresh proves it), and the fence the restore captured.
+#[derive(Clone, Copy)]
+struct Restoring<'a> {
+    remembered: &'a TenantContext,
+    fence: u64,
+}
+
 pub struct EntraAuthService {
     client_id: String,
     /// Single-tenant authority. The OAuth authorize/token URLs are
@@ -738,7 +767,7 @@ impl EntraAuthService {
             let mut registry = self.known_tenants.lock();
             self.cache.invalidate_tenant(&tenant_id);
             // The previous account's registration goes too: a concurrent
-            // acquisition between here and the insert below would otherwise
+            // acquisition between here and the store below would otherwise
             // resolve the old account under the new epoch and cache its token
             // in a slot the new account then reads.
             registry.remove(&tenant_id);
@@ -746,6 +775,9 @@ impl EntraAuthService {
         };
         // Initial sign-in: no requested-scope fallback (matches the original
         // `unwrap_or_default`); the grant response always echoes `scope` here.
+        // The store registers the new account in the critical section that
+        // caches its token, under the fence: a sign-out (or a second sign-in)
+        // that moves the epoch from here on leaves nothing registered.
         self.store_token_outcome(
             &tenant,
             &initial_scopes,
@@ -753,12 +785,10 @@ impl EntraAuthService {
             true,
             RefreshTokenSave::Required,
             fence,
+            Registration::Replace,
             token,
         )
         .await?;
-        self.known_tenants
-            .lock()
-            .insert(tenant_id.clone(), tenant.clone());
         Ok(SignInOutcome { tenant })
     }
 
@@ -890,6 +920,7 @@ impl EntraAuthService {
             cae,
             RefreshTokenSave::Required,
             fence,
+            Registration::Keep,
             token,
         )
         .await?;
@@ -966,7 +997,15 @@ impl EntraAuthService {
     /// `fence` is the session epoch the flow captured before its round trip:
     /// once it has moved (a sign-out or an account switch landed meanwhile),
     /// nothing is stored and the call fails `NotSignedIn`, which every
-    /// long-running loop already stops on.
+    /// long-running loop already stops on. It fails the same way while another
+    /// account holds the tenant (unless `registration` is `sign_in`'s
+    /// `Replace`), caching and registering nothing — but that check follows
+    /// the keyring write, so the flow's rotated refresh token is saved by then,
+    /// under its own account's `{tenant}:{oid}` entry.
+    ///
+    /// `registration` is the one place a flow registers its context, in the
+    /// critical section that caches the token and checked the fence: an
+    /// insert after the store could land after a sign-out swept the tenant.
     #[allow(clippy::too_many_arguments)]
     async fn store_token_outcome(
         &self,
@@ -976,6 +1015,7 @@ impl EntraAuthService {
         cae: bool,
         save: RefreshTokenSave,
         fence: u64,
+        registration: Registration,
         mut token: TokenResponse,
     ) -> Result<AccessToken> {
         // A bogus `expires_in` (up to u64::MAX) is capped before any
@@ -1037,10 +1077,12 @@ impl EntraAuthService {
         };
         // Under the registry lock. `sign_in` moves the epoch and sweeps the
         // slots inside it; `sign_out` moves the epoch under the keyring's
-        // chunk-set lock and only then sweeps inside it. Either way a put that
-        // passes this check lands before the sweep, which removes it, and one
-        // checked after the move stores nothing: a late put cannot outlive it.
-        let registry = self.known_tenants.lock();
+        // chunk-set lock and only then sweeps inside it (unless a sign-in moved
+        // it again, and swept, meanwhile). Either way a put that passes this
+        // check lands before the sweep, which removes it, and one checked after
+        // the move stores nothing: a late put cannot outlive it. The
+        // registration rides the same critical section, so it cannot either.
+        let mut registry = self.known_tenants.lock();
         if self.session_epoch() != fence {
             drop(registry);
             tracing::info!(
@@ -1050,8 +1092,25 @@ impl EntraAuthService {
             );
             return Err(AuthError::NotSignedIn);
         }
+        // Only a sign-in or a sign-out moves the epoch, so while the tenant is
+        // registered its account must not change without a move: this token
+        // never seeds another account's live session (only `sign_in`, which
+        // moved it, replaces one). With nothing registered (after a purge)
+        // there is no account to compare.
+        if registration != Registration::Replace && held_by_another_account(&registry, tenant) {
+            drop(registry);
+            tracing::info!(
+                target: "auth",
+                tenant_id = %tenant.tenant_id,
+                "another account is signed in to the tenant; discarding this token"
+            );
+            return Err(AuthError::NotSignedIn);
+        }
         self.cache
             .put(tenant.tenant_id.clone(), cache_scopes, cae, access.clone());
+        if registration != Registration::Keep {
+            registry.insert(tenant.tenant_id.clone(), tenant.clone());
+        }
         drop(registry);
         Ok(access)
     }
@@ -1063,21 +1122,25 @@ impl EntraAuthService {
         claims: Option<&str>,
         bypass_cache: bool,
     ) -> Result<AccessToken> {
-        self.acquire_token(tenant_id, scopes, claims, bypass_cache)
+        self.acquire_token(tenant_id, scopes, claims, bypass_cache, None)
             .await
             .map(|(token, _)| token)
     }
 
-    /// [`Self::access_token_inner`], plus the id token a refresh returned,
-    /// parsed: `None` for a cache hit or a response without one, `Some(Err)`
-    /// for one that does not parse. Only `restore_session` reads it.
+    /// [`Self::access_token_inner`], plus — for a launch restore
+    /// (`restoring`) — the context its refresh proved and registered: `Some`
+    /// exactly then. A restore never takes a cached token (one carries no id
+    /// token, so it proves nothing), redeems the remembered account's token
+    /// rather than a registered one's, and checks the refresh's id token
+    /// before anything is stored.
     async fn acquire_token(
         &self,
         tenant_id: &str,
         scopes: &[String],
         claims: Option<&str>,
         bypass_cache: bool,
-    ) -> Result<(AccessToken, Option<Result<IdClaims>>)> {
+        restoring: Option<Restoring<'_>>,
+    ) -> Result<(AccessToken, Option<TenantContext>)> {
         // A CAE request (`claims` always carries cp1) reads and fills the CAE
         // slot; a plain one the non-CAE slot — never the other's token.
         let cae = claims.is_some();
@@ -1086,7 +1149,8 @@ impl EntraAuthService {
         // post-challenge token already: every challenged request in a fan-out
         // used to re-POST serially under the lock instead of sharing it.
         let before = self.cache.get(tenant_id, scopes, cae);
-        if !bypass_cache
+        if restoring.is_none()
+            && !bypass_cache
             && let Some(existing) = before.as_ref()
             && !existing.needs_refresh(REFRESH_LEEWAY_SECS)
         {
@@ -1095,7 +1159,8 @@ impl EntraAuthService {
 
         let lock = self.refresh_lock_for(tenant_id, scopes);
         let _guard = lock.lock().await;
-        if let Some(fresh) = self.cache.get(tenant_id, scopes, cae)
+        if restoring.is_none()
+            && let Some(fresh) = self.cache.get(tenant_id, scopes, cae)
             && !fresh.needs_refresh(REFRESH_LEEWAY_SECS)
             && (!bypass_cache
                 || before
@@ -1105,13 +1170,16 @@ impl EntraAuthService {
             return Ok((fresh, None));
         }
 
-        let (tenant, fence) = {
-            let registry = self.known_tenants.lock();
-            let tenant = registry
-                .get(tenant_id)
-                .cloned()
-                .ok_or(AuthError::NotSignedIn)?;
-            (tenant, self.session_epoch())
+        let (tenant, fence) = match restoring {
+            Some(restoring) => (restoring.remembered.clone(), restoring.fence),
+            None => {
+                let registry = self.known_tenants.lock();
+                let tenant = registry
+                    .get(tenant_id)
+                    .cloned()
+                    .ok_or(AuthError::NotSignedIn)?;
+                (tenant, self.session_epoch())
+            }
         };
 
         let authority = format!("{}/{}", self.auth_root, tenant.tenant_id);
@@ -1220,13 +1288,23 @@ impl EntraAuthService {
         };
 
         // With `openid` in the set, a refresh returns an id token too: the
-        // account's CURRENT profile (a UPN rename shows up here), which
-        // `restore_session` checks against the remembered one. Every other
-        // caller ignores it, so a malformed one costs them nothing.
-        let id_claims = token
-            .id_token
-            .as_deref()
-            .map(|id| parse_id_token(Some(id.as_str())));
+        // account's CURRENT profile (a UPN rename shows up here). A restore
+        // checks it against the remembered account BEFORE anything is stored,
+        // so a refresh for another (or an unknown) identity leaves neither its
+        // access token nor the refresh token it rotated behind; the proven
+        // context is registered with the token. Every other caller ignores it,
+        // so a malformed one costs them nothing.
+        let (owner, registration) = match restoring {
+            Some(restoring) => {
+                let id_claims = token
+                    .id_token
+                    .as_deref()
+                    .map(|id| parse_id_token(Some(id.as_str())));
+                let fresh = restored_context(restoring.remembered, id_claims)?;
+                (fresh, Registration::Claim)
+            }
+            None => (tenant, Registration::Keep),
+        };
         // Silent path: the keyring write is best-effort. The refresh token we
         // just used is still valid (Entra does not revoke it on rotation), and
         // a write refused at chunk 0 leaves it stored — failing here would
@@ -1234,20 +1312,27 @@ impl EntraAuthService {
         // momentarily locked credential store.
         let access = self
             .store_token_outcome(
-                &tenant,
+                &owner,
                 scopes,
                 scopes,
                 cae,
                 RefreshTokenSave::BestEffort,
                 fence,
+                registration,
                 token,
             )
             .await?;
-        Ok((access, id_claims))
+        Ok((access, restoring.map(|_| owner)))
     }
 
     /// Ends `tenant`'s session: deletes the keyring refresh token, then drops
     /// the cached access tokens and the known-tenant entry.
+    ///
+    /// The token deleted is the registered account's, whatever account
+    /// `tenant` names: a stale or mismatched context used to delete some other
+    /// entry and unregister the live session, leaving its refresh token on disk
+    /// with nothing to address it again. Only when nothing is registered (a
+    /// dead-session purge removed it) does `tenant` address the keyring.
     ///
     /// The keyring delete is the one fallible step, so it goes first: a failure
     /// leaves the known-tenant entry and cached tokens intact (the UI
@@ -1264,20 +1349,39 @@ impl EntraAuthService {
     /// finishes after it sees the moved epoch and stores nothing (keyring or
     /// cache), and a delete that fails leaves the epoch — and so every live
     /// client adapter — exactly as it was, so "still signed in" stays true.
+    /// The sweep after it runs only while that move is the latest one (see
+    /// `Self::sweep_after_sign_out`).
     pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
-        let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+        let account_oid = self
+            .known_tenants
+            .lock()
+            .get(&tenant.tenant_id)
+            .map_or_else(
+                || tenant.account_oid.clone(),
+                |live| live.account_oid.clone(),
+            );
+        let (t, oid) = (tenant.tenant_id.clone(), account_oid);
         let epoch = Arc::clone(&self.session_epoch);
-        tokio::task::spawn_blocking(move || {
-            delete_refresh_token_then(&t, &oid, || {
-                epoch.fetch_add(1, Ordering::SeqCst);
-            })
+        let bumped = tokio::task::spawn_blocking(move || {
+            delete_refresh_token_then(&t, &oid, || epoch.fetch_add(1, Ordering::SeqCst) + 1)
         })
         .await
         .map_err(|e| AuthError::Keyring(format!("keyring delete task failed: {e}")))??;
-        let mut registry = self.known_tenants.lock();
-        self.cache.invalidate_tenant(&tenant.tenant_id);
-        registry.remove(&tenant.tenant_id);
+        self.sweep_after_sign_out(&tenant.tenant_id, bumped);
         Ok(())
+    }
+
+    /// `sign_out`'s in-memory half, once its keyring delete moved the epoch
+    /// to `bumped`: drops the tenant's cached tokens and registration — unless
+    /// the epoch has moved again since. Only a sign-in moves it then, and that
+    /// sign-in swept the tenant itself and registered its own session, which
+    /// this sweep used to drop.
+    fn sweep_after_sign_out(&self, tenant_id: &str, bumped: u64) {
+        let mut registry = self.known_tenants.lock();
+        if self.session_epoch() == bumped {
+            self.cache.invalidate_tenant(tenant_id);
+            registry.remove(tenant_id);
+        }
     }
 
     /// Re-mints `tenant_id`'s access tokens *without* ending the session: drops
@@ -1326,105 +1430,88 @@ impl EntraAuthService {
     /// kept), and its profile claims replace the stored ones — so a UPN rename
     /// reaches `login_hint` and the Exchange `X-AnchorMailbox`; the caller
     /// re-remembers the returned context. Without one, the stored names stand.
+    ///
+    /// The context is registered only once the refresh proved it, together
+    /// with its token, and a tenant that is already registered — a live
+    /// session — is returned as it is: no grant, and never relabelled as the
+    /// remembered account.
     pub async fn restore_session(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
-        // `acquire_token` resolves the account — and therefore the keyring
-        // key — through `known_tenants`, so the context has to be registered
-        // before the grant. This is the one flow where that entry comes off
-        // disk instead of a completed round trip, which is precisely why it must
-        // not outlive a failed attempt: an unproven context left behind would
-        // let any later command mint tokens for a session the operator was never
-        // shown as signed into. `InvalidGrant` already removes it; the removal
-        // is idempotent and also covers the failures that don't (a network
-        // outage, a locked keyring), leaving the service exactly as found.
+        // Only a proven flow registers a tenant (this one too: not until the
+        // refresh proved the remembered account), so a registration here is a
+        // live session. Running the grant over it would relabel it as the
+        // remembered account, and its fresh cached token would pass for proof.
         //
         // Fenced like every other late store: the launch screen lets the
         // operator stop waiting and sign in while this refresh is still in
         // flight, and that `sign_in` moves the epoch and registers its own
         // context. From then on this restore must leave the registry, the
-        // cache and the keyring to the newer session — a remove here would
-        // un-register it, and every cache-only command would then fail the
-        // session check right after a good sign-in.
+        // cache and the keyring to the newer session.
         let fence = {
-            let mut registry = self.known_tenants.lock();
-            registry.insert(tenant.tenant_id.clone(), tenant.clone());
+            let registry = self.known_tenants.lock();
+            if let Some(live) = registry.get(&tenant.tenant_id) {
+                return Ok(SignInOutcome {
+                    tenant: live.clone(),
+                });
+            }
             self.session_epoch()
         };
+        // Unregistered while the refresh is in flight, so no other flow can
+        // resolve (and mint for) an account nothing has proven yet.
         let cae_claims = build_cae_claims(None);
+        let restoring = Restoring {
+            remembered: tenant,
+            fence,
+        };
         let acquired = self
             .acquire_token(
                 &tenant.tenant_id,
                 &self.default_graph_read_scopes(),
                 Some(&cae_claims),
                 false,
+                Some(restoring),
             )
             .await;
-        let id_claims = match acquired {
-            Ok((_, id_claims)) => id_claims,
-            Err(err) => {
-                let mut registry = self.known_tenants.lock();
-                if self.session_epoch() == fence {
-                    registry.remove(&tenant.tenant_id);
-                }
-                return Err(err);
+        let err = match acquired {
+            // Registered by the store, with the token it proved. A restoring
+            // acquisition always returns that context; never fall back to the
+            // unproven one.
+            Ok((_, fresh)) => {
+                return fresh
+                    .map(|tenant| SignInOutcome { tenant })
+                    .ok_or(AuthError::NotSignedIn);
             }
+            Err(err) => err,
         };
-        match restored_context(tenant, id_claims) {
-            Ok(fresh) => {
-                let mut registry = self.known_tenants.lock();
-                if self.session_epoch() != fence {
-                    // Superseded: the newer session's registration stands,
-                    // and this one was never shown to the operator.
-                    return Err(AuthError::NotSignedIn);
-                }
-                registry.insert(fresh.tenant_id.clone(), fresh.clone());
-                drop(registry);
-                Ok(SignInOutcome { tenant: fresh })
-            }
-            Err(err) => {
-                // The grant succeeded, so a token of the wrong (or an unknown)
-                // identity is already cached: drop it with the context —
-                // unless a newer session owns both by now (its own sign-in
-                // already swept this token: a store either lands before that
-                // sweep or is refused after the move).
-                let current = {
-                    let mut registry = self.known_tenants.lock();
-                    let current = self.session_epoch() == fence;
-                    if current {
-                        self.cache.invalidate_tenant(&tenant.tenant_id);
-                        registry.remove(&tenant.tenant_id);
-                    }
-                    current
-                };
-                if !current {
-                    // Superseded, as above — and not `Authorization`, which
-                    // would have the command drop the remembered pointer the
-                    // newer sign-in just wrote.
-                    return Err(AuthError::NotSignedIn);
-                }
-                if matches!(err, AuthError::Authorization(_)) {
-                    // A proven mismatch: the refresh token just rotated into
-                    // the remembered `{tenant}:{oid}` entry is someone else's,
-                    // and keeping it would repeat this refresh + refusal on
-                    // every launch. Best-effort — the restore is refused
-                    // either way; the caller drops the remembered pointer. The
-                    // fence is re-checked under the keyring's chunk-set lock,
-                    // so a sign-in that lands meanwhile keeps its token.
-                    let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
-                    let epoch = Arc::clone(&self.session_epoch);
-                    let deleted = tokio::task::spawn_blocking(move || {
-                        delete_refresh_token_if(&t, &oid, || epoch.load(Ordering::SeqCst) == fence)
-                    })
-                    .await;
-                    if !matches!(deleted, Ok(Ok(_))) {
-                        tracing::warn!(
-                            target: "auth",
-                            "could not delete the mismatched stored sign-in"
-                        );
-                    }
-                }
-                Err(err)
-            }
+        // Nothing of a refused refresh was stored or registered. Only a proven
+        // mismatch (`Authorization`; a silent grant raises it nowhere else)
+        // needs more.
+        if !matches!(err, AuthError::Authorization(_)) {
+            return Err(err);
         }
+        if self.session_epoch() != fence {
+            // Superseded — and not `Authorization`, which would have the
+            // command drop the remembered pointer the newer sign-in just wrote.
+            return Err(AuthError::NotSignedIn);
+        }
+        // The refresh token stored under the remembered `{tenant}:{oid}` is
+        // someone else's, and keeping it would repeat this refresh + refusal
+        // on every launch. Best-effort — the restore is refused either way;
+        // the caller drops the remembered pointer. The fence is re-checked
+        // under the keyring's chunk-set lock, so a sign-in that lands
+        // meanwhile keeps its token.
+        let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+        let epoch = Arc::clone(&self.session_epoch);
+        let deleted = tokio::task::spawn_blocking(move || {
+            delete_refresh_token_if(&t, &oid, || epoch.load(Ordering::SeqCst) == fence)
+        })
+        .await;
+        if !matches!(deleted, Ok(Ok(_))) {
+            tracing::warn!(
+                target: "auth",
+                "could not delete the mismatched stored sign-in"
+            );
+        }
+        Err(err)
     }
 
     /// Deletes the stored refresh token of `account_oid` — the account a
@@ -1467,11 +1554,25 @@ impl EntraAuthService {
     /// Takes the full [`TenantContext`] rather than a bare id because the
     /// `InvalidGrant` that sends the user here purges the `known_tenants` entry
     /// (see `Self::access_token_inner`), so the caller — which still holds the
-    /// context — must supply the `login_hint`/identity to match against.
+    /// context — must supply the `login_hint`/identity to match against. While
+    /// the tenant is registered, the registration says who is signed in: a
+    /// context for another account is refused before the browser opens.
     pub async fn reauthenticate(&self, tenant: &TenantContext) -> Result<SignInOutcome> {
         // Re-auth keeps the session: no bump, but a sign-out that lands during
-        // the browser round trip still wins.
-        let fence = self.session_epoch();
+        // the browser round trip still wins. Nor does it switch a registered
+        // tenant's account. Once a dead-session purge removed the registration
+        // there is none to compare, and the caller's context is taken on trust
+        // (a known gap: closing it needs a tombstone of the purged account).
+        let fence = {
+            let registry = self.known_tenants.lock();
+            if held_by_another_account(&registry, tenant) {
+                return Err(AuthError::Authorization(
+                    "re-authentication was asked for an account other than the one signed in — use Sign Out to switch"
+                        .into(),
+                ));
+            }
+            self.session_epoch()
+        };
         let initial_scopes = self.default_graph_read_scopes();
         let (token, claims) = self
             .run_auth_code_flow(&initial_scopes, "login", tenant.username.as_deref(), true)
@@ -1481,6 +1582,11 @@ impl EntraAuthService {
         // switch tenant/account even with a login_hint.
         ensure_same_identity(&claims, tenant, "re-authentication")?;
 
+        // Restores the (validated) context — a prior `InvalidGrant` removed it,
+        // and `tenant_context()` and every token lookup read `known_tenants` —
+        // with the token, under the fence: a sign-out that landed meanwhile is
+        // not undone by re-registering a tenant whose tokens it swept, and an
+        // account that claimed the tenant meanwhile keeps it.
         self.store_token_outcome(
             tenant,
             &initial_scopes,
@@ -1488,19 +1594,10 @@ impl EntraAuthService {
             true,
             RefreshTokenSave::Required,
             fence,
+            Registration::Claim,
             token,
         )
         .await?;
-        // Restore the (validated) context: a prior `InvalidGrant` removed it, and
-        // `tenant_context()` and every token lookup read `known_tenants`. Under
-        // the fence: a sign-out that landed between the store and here must
-        // not be undone by re-registering a tenant whose tokens it just swept.
-        let mut registry = self.known_tenants.lock();
-        if self.session_epoch() != fence {
-            return Err(AuthError::NotSignedIn);
-        }
-        registry.insert(tenant.tenant_id.clone(), tenant.clone());
-        drop(registry);
         Ok(SignInOutcome {
             tenant: tenant.clone(),
         })
@@ -1551,6 +1648,17 @@ fn restored_context(
             .or_else(|| remembered.display_name.clone()),
         ..remembered.clone()
     })
+}
+
+/// Whether `registry` holds `tenant`'s tenant for a different account — whose
+/// session a flow that keeps the epoch must not touch.
+fn held_by_another_account(
+    registry: &HashMap<String, TenantContext>,
+    tenant: &TenantContext,
+) -> bool {
+    registry
+        .get(&tenant.tenant_id)
+        .is_some_and(|live| live.account_oid != tenant.account_oid)
 }
 
 /// Refuses a token minted for a different identity than the session's. A
@@ -1802,6 +1910,24 @@ mod tests {
             .map(|t| t.as_str().to_string())
     }
 
+    /// Waits until the mock token endpoint has received a request: the point
+    /// a race test lands its interleaved step at, while a delayed response
+    /// holds the flow under test mid-POST.
+    async fn until_a_token_request_arrives(server: &MockServer) {
+        for _ in 0..200 {
+            if !server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("no token request arrived");
+    }
+
     #[tokio::test]
     async fn sign_in_caches_the_read_token_and_registers_the_tenant() {
         let server = MockServer::start().await;
@@ -2039,6 +2165,216 @@ mod tests {
         );
     }
 
+    /// The registration, not the caller's context, says who is signed in: a
+    /// re-authentication handed another account's context while this one is
+    /// live is refused before the browser opens. It used to run, and the
+    /// other account's completed round trip replaced the live session's
+    /// registration and read token under its tenant-keyed data caches.
+    #[tokio::test]
+    async fn reauthenticate_refuses_a_context_for_another_signed_in_account() {
+        let server = MockServer::start().await;
+        let (tenant, live, other) = (
+            "reauth-registry-tenant",
+            "reauth-registry-live-oid",
+            "reauth-registry-other-oid",
+        );
+        let mut svc = signed_in_service(server.uri(), tenant, live);
+        let (nonce, opened) = (Arc::new(Mutex::new(None)), Arc::new(AtomicUsize::new(0)));
+        svc.open_browser = redirecting_opener(nonce.clone(), opened.clone());
+        // Were the browser opened, the other account would complete it.
+        mount_interactive_token(&server, tenant, tenant, Some(other), None, nonce).await;
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("live-read", &read),
+        );
+        let other_context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: other.into(),
+            username: Some("other@contoso.com".into()),
+            display_name: None,
+        };
+
+        let result = svc.reauthenticate(&other_context).await;
+
+        assert!(
+            matches!(result, Err(AuthError::Authorization(_))),
+            "{:?}",
+            result.err()
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0, "no browser round trip");
+        assert_eq!(
+            svc.tenant_context(tenant).map(|t| t.account_oid).as_deref(),
+            Some(live)
+        );
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "live-read"
+        );
+        assert_eq!(stored_token(tenant, other), None);
+        assert_eq!(
+            stored_token(tenant, live).as_deref(),
+            Some("stored-refresh-token")
+        );
+    }
+
+    /// The registered account's own context re-authenticates in place, as the
+    /// Refresh token lever's fallback does while the session is still
+    /// registered (a Graph step-up): only another account is refused.
+    #[tokio::test]
+    async fn reauthenticate_runs_for_the_registered_account() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("reauth-live-tenant", "reauth-live-oid");
+        let mut svc = signed_in_service(server.uri(), tenant, oid);
+        let nonce = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0)));
+        mount_interactive_token(&server, tenant, tenant, Some(oid), None, nonce).await;
+        let context = svc.tenant_context(tenant).unwrap();
+
+        svc.reauthenticate(&context).await.unwrap();
+
+        assert_eq!(svc.tenant_context(tenant), Some(context));
+        assert_eq!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes(), true)
+                .unwrap()
+                .token,
+            "interactive-at"
+        );
+        assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-interactive"));
+    }
+
+    /// Another account claims the tenant while a re-authentication's browser
+    /// round trip is open: nothing was registered to check when it started (a
+    /// dead-session purge), and nothing moves the epoch (a restore, or a
+    /// second re-authentication). The round trip lands nothing over that
+    /// session — neither its token in the read slot nor its context.
+    #[tokio::test]
+    async fn a_reauthentication_lands_nothing_over_an_account_that_claimed_the_tenant() {
+        use wiremock::Respond as _;
+        let server = MockServer::start().await;
+        let (tenant, oid, other) = (
+            "reauth-claimed-tenant",
+            "reauth-claimed-oid",
+            "reauth-claimed-other-oid",
+        );
+        let mut svc = relaunched_service(server.uri(), tenant, oid);
+        let nonce = Arc::new(Mutex::new(None));
+        svc.open_browser = redirecting_opener(nonce.clone(), Arc::new(AtomicUsize::new(0)));
+        let redeem = interactive_token_response(tenant, Some(oid), None, nonce);
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(move |req: &wiremock::Request| {
+                redeem
+                    .respond(req)
+                    .set_delay(std::time::Duration::from_millis(300))
+            })
+            .mount(&server)
+            .await;
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: Some("ada@contoso.com".into()),
+            display_name: None,
+        };
+        let claimant = TenantContext {
+            account_oid: other.into(),
+            ..context.clone()
+        };
+        let read = svc.default_graph_read_scopes();
+        let another_account_claims_the_tenant = async {
+            until_a_token_request_arrives(&server).await;
+            svc.known_tenants.lock().insert(tenant.into(), claimant);
+            svc.cache.put(
+                tenant.to_string(),
+                &read,
+                true,
+                fresh_token("claimant-read", &read),
+            );
+        };
+
+        let (result, ()) = tokio::join!(
+            svc.reauthenticate(&context),
+            another_account_claims_the_tenant
+        );
+
+        assert!(
+            matches!(result, Err(AuthError::NotSignedIn)),
+            "{:?}",
+            result.err()
+        );
+        assert_eq!(
+            svc.tenant_context(tenant).map(|t| t.account_oid).as_deref(),
+            Some(other)
+        );
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "claimant-read"
+        );
+    }
+
+    /// A silent refresh (`Registration::Keep`) took its account from the
+    /// registration and never writes one. If the registration changes while
+    /// its POST is in flight, with no epoch move (a dead-session purge, then
+    /// perhaps another account's re-authentication or restore), it lands
+    /// nothing over the change: an account that claimed the tenant keeps its
+    /// session and its token, and a purged session is never re-registered.
+    #[tokio::test]
+    async fn a_silent_refresh_never_registers_nor_lands_on_another_account() {
+        for claimed in [true, false] {
+            let server = MockServer::start().await;
+            let tenant = format!("keep-mode-{claimed}");
+            let (tenant, oid) = (tenant.as_str(), "keep-mode-oid");
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .respond_with(
+                    token_ok("straggler").set_delay(std::time::Duration::from_millis(300)),
+                )
+                .mount(&server)
+                .await;
+            let svc = signed_in_service(server.uri(), tenant, oid);
+            let arm = arm_scopes();
+            let claimant = TenantContext {
+                account_oid: "keep-mode-claimant-oid".into(),
+                ..svc.tenant_context(tenant).unwrap()
+            };
+            let registration_changes = async {
+                until_a_token_request_arrives(&server).await;
+                let mut registry = svc.known_tenants.lock();
+                svc.cache.invalidate_tenant(tenant);
+                registry.remove(tenant);
+                if claimed {
+                    svc.cache.put(
+                        tenant.to_string(),
+                        &arm,
+                        false,
+                        fresh_token("claimant-arm", &arm),
+                    );
+                    registry.insert(tenant.into(), claimant);
+                }
+            };
+
+            let (result, ()) = tokio::join!(
+                svc.access_token_for_scopes(tenant, &arm),
+                registration_changes
+            );
+
+            let registered = svc.tenant_context(tenant).map(|t| t.account_oid);
+            if claimed {
+                assert!(matches!(result, Err(AuthError::NotSignedIn)), "{result:?}");
+                assert_eq!(registered.as_deref(), Some("keep-mode-claimant-oid"));
+                assert_eq!(
+                    svc.cache.get(tenant, &arm, false).unwrap().token,
+                    "claimant-arm"
+                );
+            } else {
+                assert_eq!(registered, None, "a refresh re-registered a purged session");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn sign_out_keeps_the_whole_session_when_the_keyring_delete_fails() {
         let (tenant, oid) = ("signout-tenant", "signout-oid");
@@ -2083,6 +2419,138 @@ mod tests {
         assert_eq!(stored_token(tenant, oid), None);
     }
 
+    /// Sign-out ends the session the registry holds, whatever context it is
+    /// handed. A context naming another account used to delete that
+    /// account's (absent) keyring entry and unregister the live session,
+    /// leaving its refresh token on disk with nothing to address it again.
+    /// With nothing registered (after a dead-session purge), the handed
+    /// context is all there is.
+    #[tokio::test]
+    async fn sign_out_deletes_the_registered_accounts_token_not_the_callers() {
+        let (tenant, live, other) = (
+            "signout-registry-tenant",
+            "signout-registry-live-oid",
+            "signout-registry-other-oid",
+        );
+        let svc = signed_in_service("http://localhost".into(), tenant, live);
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("live-read", &read),
+        );
+        let stale = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: other.into(),
+            username: None,
+            display_name: None,
+        };
+
+        svc.sign_out(&stale).await.unwrap();
+
+        assert_eq!(stored_token(tenant, live), None, "the live account's token");
+        assert!(svc.tenant_context(tenant).is_none());
+        assert!(svc.cache.get(tenant, &read, true).is_none());
+
+        let (tenant, oid) = ("signout-purged-tenant", "signout-purged-oid");
+        let svc = relaunched_service("http://localhost".into(), tenant, oid);
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: None,
+            display_name: None,
+        };
+
+        svc.sign_out(&context).await.unwrap();
+
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    /// Sign-out sweeps only under its own epoch move. A sign-in that lands
+    /// between its keyring delete and its sweep has moved the epoch again,
+    /// swept the tenant itself and registered its own session, which the sweep
+    /// used to drop: a fresh sign-in left unregistered, its read token gone.
+    /// (The delete runs on the blocking pool, so the interleaving is staged
+    /// step by step: no wiremock gate can hold a flow between the two.)
+    #[tokio::test]
+    async fn a_sign_in_that_lands_during_sign_out_keeps_its_session() {
+        let (tenant, oid) = ("signout-overtaken-tenant", "signout-overtaken-oid");
+        let svc = signed_in_service("http://localhost".into(), tenant, oid);
+        let read = svc.default_graph_read_scopes();
+        // The move `sign_out`'s keyring delete makes.
+        let bumped = svc.bump_session_epoch();
+        // A sign-in lands: its sweep and move, then its store.
+        let newer = TenantContext {
+            account_oid: "signed-in-oid".into(),
+            ..svc.tenant_context(tenant).unwrap()
+        };
+        {
+            let mut registry = svc.known_tenants.lock();
+            svc.cache.invalidate_tenant(tenant);
+            registry.remove(tenant);
+            svc.bump_session_epoch();
+            svc.cache.put(
+                tenant.to_string(),
+                &read,
+                true,
+                fresh_token("signed-in-read", &read),
+            );
+            registry.insert(tenant.into(), newer);
+        }
+
+        svc.sweep_after_sign_out(tenant, bumped);
+
+        assert_eq!(
+            svc.tenant_context(tenant).map(|t| t.account_oid).as_deref(),
+            Some("signed-in-oid")
+        );
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "signed-in-read"
+        );
+
+        // With its own move still the latest, the same sweep ends the session.
+        let bumped = svc.bump_session_epoch();
+        svc.sweep_after_sign_out(tenant, bumped);
+        assert!(svc.tenant_context(tenant).is_none());
+        assert!(svc.cache.get(tenant, &read, true).is_none());
+    }
+
+    /// `sign_out` hands its sweep the epoch its own keyring delete moved to.
+    /// A fresh read there would always be current, so the sweep would drop a
+    /// sign-in that landed in between, yet every behavioural test would pass
+    /// (the staged one above calls the sweep itself). This pins the hand-off.
+    #[test]
+    fn sign_out_fences_its_sweep_on_its_own_bump() {
+        // Normalised so a CRLF checkout (the Windows CI leg) matches the `\n` patterns.
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let (_, body) = production
+            .split_once("pub async fn sign_out(")
+            .expect("sign_out");
+        let (body, _) = body.split_once("\n    }\n").expect("the end of sign_out");
+        let code = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            code.contains("let bumped = tokio::task::spawn_blocking(")
+                && code.contains("fetch_add(1, Ordering::SeqCst) + 1"),
+            "sign_out binds the epoch its keyring delete moved to as `bumped`"
+        );
+        assert!(
+            code.contains("self.sweep_after_sign_out(&tenant.tenant_id, bumped)"),
+            "sign_out fences its sweep on `bumped`"
+        );
+        assert!(
+            !code.contains("session_epoch()"),
+            "sign_out reads no fresh epoch: its sweep is fenced on its own move"
+        );
+    }
+
     /// The re-authentication lands while the old token's refresh is still in
     /// flight: the old token is rejected, the newer one is kept — and used,
     /// once, instead of reporting the live session dead.
@@ -2125,6 +2593,115 @@ mod tests {
         assert_eq!(stored_token(tenant, oid).as_deref(), Some("rt-reauthed"));
         assert!(svc.tenant_context(tenant).is_some());
         server.verify().await;
+    }
+
+    /// The token was replaced while the refresh was in flight AND the session
+    /// moved on (a sign-in or a sign-out landed during the POST): the newer
+    /// token is a newer session's, whose store would refuse anything this
+    /// refresh minted. So no retry — `NotSignedIn` after one POST — and the
+    /// newer token and the registration are left to that session.
+    #[tokio::test]
+    async fn a_superseded_refresh_does_not_retry_into_a_newer_session() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("superseded-moved-tenant", "superseded-moved-oid");
+        let svc = signed_in_service(server.uri(), tenant, oid);
+        // The newer token is never sent.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("rt-newer-session"))
+            .respond_with(token_ok("minted-for-the-newer-session"))
+            .with_priority(1)
+            .expect(0)
+            .mount(&server)
+            .await;
+        // The first POST: the epoch moves and a newer token is stored, as a
+        // sign-in landing meanwhile would, then the old token is rejected.
+        let (t, o) = (tenant.to_string(), oid.to_string());
+        let epoch = Arc::clone(&svc.session_epoch);
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(move |_: &wiremock::Request| {
+                epoch.fetch_add(1, Ordering::SeqCst);
+                save_refresh_token(&t, &o, "rt-newer-session").unwrap();
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "AADSTS70000: refresh token expired"
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(matches!(result, Err(AuthError::NotSignedIn)), "{result:?}");
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("rt-newer-session")
+        );
+        assert!(svc.tenant_context(tenant).is_some());
+        server.verify().await;
+    }
+
+    /// The retry is bounded: the newer token rejected too ends it. Still the
+    /// stored one, the session is dead and purged as usual; replaced again
+    /// meanwhile, the third token is kept for the next refresh. Either way two
+    /// POSTs, never a third.
+    #[tokio::test]
+    async fn a_retried_refresh_that_is_rejected_again_is_not_retried_again() {
+        let rejected = || {
+            ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS70000: refresh token expired"
+            }))
+        };
+        for (case, third) in [("purged", None), ("replaced again", Some("rt-third"))] {
+            let server = MockServer::start().await;
+            let tenant = format!("superseded-twice-{}", case.replace(' ', "-"));
+            let (tenant, oid) = (tenant.as_str(), "superseded-twice-oid");
+            // The retry, with the newer token: rejected as well.
+            let (t, o) = (tenant.to_string(), oid.to_string());
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .and(wiremock::matchers::body_string_contains("rt-reauthed"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if let Some(third) = third {
+                        save_refresh_token(&t, &o, third).unwrap();
+                    }
+                    rejected()
+                })
+                .with_priority(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            // The first POST: a re-authentication stores the newer token
+            // during it, then the old one is rejected.
+            let (t, o) = (tenant.to_string(), oid.to_string());
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .respond_with(move |_: &wiremock::Request| {
+                    save_refresh_token(&t, &o, "rt-reauthed").unwrap();
+                    rejected()
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let svc = signed_in_service(server.uri(), tenant, oid);
+
+            let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+            assert!(
+                matches!(result, Err(AuthError::RefreshTokenMissing(_))),
+                "{case}: {result:?}"
+            );
+            assert_eq!(stored_token(tenant, oid).as_deref(), third, "{case}");
+            assert_eq!(
+                svc.tenant_context(tenant).is_some(),
+                third.is_some(),
+                "{case}"
+            );
+            server.verify().await;
+        }
     }
 
     /// A silent refresh in flight when the operator signs out: its late
@@ -2260,6 +2837,128 @@ mod tests {
         }
         // save, load, the conditional purge and the sign-out delete.
         assert!(calls >= 4, "the scan found only {calls} keyring calls");
+    }
+
+    /// The registry is written only under the fence. A registration (an
+    /// insert, an `entry`, a `get_mut`) lands only with its token, in
+    /// `store_token_outcome`'s one critical section after the fence check; a
+    /// removal only where its critical section checks or moves the epoch;
+    /// every write goes through a guard bound from the lock, where this scan
+    /// can see its critical section; and no child module touches the registry.
+    /// `sign_in` used to register after the store had released the registry
+    /// lock, unfenced, so a sign-out (or a second sign-in) that moved the epoch
+    /// in between left a registration whose tokens it had just swept, or one
+    /// account's context over the next one's token. That window held no await,
+    /// so no interleaving test reaches it; this pins the shape that closes it.
+    #[test]
+    fn the_registry_is_written_only_under_the_fence() {
+        const REGISTERS: [&str; 4] = [".insert(", ".entry(", ".get_mut(", ".extend("];
+        const REMOVES: [&str; 4] = [".remove(", ".clear(", ".retain(", ".drain("];
+        fn code(source: &str) -> Vec<&str> {
+            source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect()
+        }
+        for (file, source) in [
+            ("loopback.rs", include_str!("loopback.rs")),
+            ("scopes.rs", include_str!("scopes.rs")),
+            ("wire.rs", include_str!("wire.rs")),
+        ] {
+            assert!(
+                code(source)
+                    .iter()
+                    .all(|line| !line.contains("known_tenants")),
+                "{file} touches the registry; only mod.rs may, under the fence"
+            );
+        }
+        let production = code(include_str!("mod.rs"));
+        for segment in production.join("\n").split([';', '{', '}']) {
+            let chained = segment.contains("known_tenants")
+                && REGISTERS
+                    .iter()
+                    .chain(&REMOVES)
+                    .any(|w| segment.contains(w));
+            assert!(
+                !chained,
+                "a registry write chained on the lock, with no critical section in sight: {}",
+                segment.trim()
+            );
+        }
+
+        let start = production
+            .iter()
+            .position(|line| line.contains("async fn store_token_outcome("))
+            .expect("store_token_outcome");
+        let end = start
+            + production[start..]
+                .iter()
+                .position(|line| *line == "    }")
+                .expect("the end of store_token_outcome");
+        assert_eq!(
+            production[start..end]
+                .iter()
+                .filter(|line| line.contains("known_tenants.lock()"))
+                .count(),
+            1,
+            "the fence check, the cache put and the registration share one critical section"
+        );
+        let fence = (start..end)
+            .find(|&i| production[i].contains("self.session_epoch() != fence"))
+            .expect("the store checks its fence");
+
+        // Every guard bound from the lock, and the writes made through it.
+        let binding = |line: &str| -> Option<String> {
+            let (lhs, rhs) = line.trim().split_once(" = ")?;
+            rhs.starts_with("self.known_tenants.lock()").then(|| {
+                lhs.trim_start_matches("let ")
+                    .trim_start_matches("mut ")
+                    .to_string()
+            })
+        };
+        let mut guards: Vec<String> = production.iter().filter_map(|l| binding(l)).collect();
+        guards.sort();
+        guards.dedup();
+        let (mut registrations, mut removals) = (0, 0);
+        for (i, line) in production.iter().enumerate() {
+            for guard in &guards {
+                let writes =
+                    |forms: &[&str]| forms.iter().any(|w| line.contains(&format!("{guard}{w}")));
+                if writes(&REGISTERS) {
+                    registrations += 1;
+                    assert!(
+                        fence < i && i < end,
+                        "a registration outside the store's fenced critical section: {}",
+                        line.trim()
+                    );
+                }
+                if writes(&REMOVES) {
+                    removals += 1;
+                    let bound = (0..i)
+                        .rev()
+                        .find(|&b| binding(production[b]).as_ref() == Some(guard))
+                        .expect("the guard the removal writes through");
+                    let section = &production[bound..(i + 2).min(production.len())];
+                    assert!(
+                        section.iter().any(|l| {
+                            l.contains("session_epoch() ==")
+                                || l.contains("session_epoch() !=")
+                                || l.contains("bump_session_epoch()")
+                        }),
+                        "a registry removal whose critical section neither checks nor moves the epoch: {}",
+                        line.trim()
+                    );
+                }
+            }
+        }
+        assert_eq!(registrations, 1, "the store's one registration");
+        assert!(
+            removals >= 3,
+            "sign-in's sweep, the purge and sign-out's sweep: found {removals}"
+        );
     }
 
     async fn mount_token_success(server: &MockServer, tenant: &str, access_token: &str) {
@@ -2526,8 +3225,9 @@ mod tests {
         let result = svc.restore_session(&context).await;
 
         // Revoked overnight: the operator lands on the normal sign-in card, and
-        // the context we speculatively registered is gone — a half-live session
-        // would let a later command mint tokens nobody signed in for.
+        // nothing is registered (a restore registers only what its refresh
+        // proved) — a half-live session would let a later command mint tokens
+        // nobody signed in for.
         assert!(matches!(result, Err(AuthError::RefreshTokenMissing(_))));
         assert!(svc.tenant_context(tenant).is_none());
         assert_eq!(load_refresh_token(tenant, oid).unwrap(), None);
@@ -3805,8 +4505,67 @@ mod tests {
         assert_eq!(stored_token(tenant, oid), None);
     }
 
+    /// `restore_session` deletes the stored refresh token on `Authorization`
+    /// from its silent refresh, and the `restore_session` command drops
+    /// `last_account` on it: both read it as the identity proof's refusal.
+    /// That holds only while no `/token` answer classifies as `Authorization`
+    /// — every OAuth error code, with or without an AADSTS code, maps
+    /// elsewhere, and the classifier's module constructs no such error.
+    #[test]
+    fn no_token_endpoint_error_classifies_as_authorization() {
+        let errors = [
+            "invalid_request",
+            "invalid_client",
+            "invalid_grant",
+            "unauthorized_client",
+            "unsupported_grant_type",
+            "invalid_scope",
+            "access_denied",
+            "interaction_required",
+            "login_required",
+            "consent_required",
+            "server_error",
+            "temporarily_unavailable",
+            "invalid_resource",
+            "an_error_entra_adds_later",
+            "",
+        ];
+        let descriptions = [
+            None,
+            Some("AADSTS50020: User account from another tenant"),
+            Some("AADSTS50076: Multi-factor authentication is required"),
+            Some("AADSTS53003: Access has been blocked by Conditional Access"),
+            Some("AADSTS65001: The user or administrator has not consented"),
+            Some("AADSTS70008: The refresh token has expired"),
+            Some("AADSTS700016: Application not found in the directory"),
+            Some("no code at all"),
+        ];
+        for error in errors {
+            for description in descriptions {
+                let body = TokenErrorBody {
+                    error: error.into(),
+                    error_description: description.map(Into::into),
+                    correlation_id: None,
+                };
+                let classified = classify_token_error(&body);
+                assert!(
+                    !matches!(classified, AuthError::Authorization(_)),
+                    "{error:?} / {description:?} classified as {classified:?}"
+                );
+            }
+        }
+        let wire = include_str!("wire.rs");
+        let production = wire.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !production.contains("AuthError::Authorization"),
+            "wire.rs constructs `Authorization`: a `/token` answer could pass for a refused identity"
+        );
+    }
+
     /// An id token that does not parse has an unknown identity: refused, like
-    /// the interactive flows refuse it — not read as "no id token".
+    /// the interactive flows refuse it — not read as "no id token". The check
+    /// runs before anything is stored, so the refresh token the refused grant
+    /// rotated is never written over the stored one.
     #[tokio::test]
     async fn restore_session_refuses_a_malformed_id_token() {
         let server = MockServer::start().await;
@@ -3817,6 +4576,7 @@ mod tests {
                 "access_token": "restored-token",
                 "expires_in": 3600,
                 "token_type": "Bearer",
+                "refresh_token": "rt-rotated-by-the-refused-grant",
                 "id_token": "not-a-jwt",
             })))
             .mount(&server)
@@ -3841,11 +4601,160 @@ mod tests {
                 .get(tenant, &svc.default_graph_read_scopes(), true)
                 .is_none()
         );
-        // Not a proven mismatch, so the stored token is left alone.
+        // Not a proven mismatch, so the stored token is left alone — and the
+        // refused grant's rotated one never replaced it.
         assert_eq!(
             stored_token(tenant, oid).as_deref(),
             Some("stored-refresh-token")
         );
+    }
+
+    /// Nothing of a restore exists until its refresh proves the remembered
+    /// account. It used to register the remembered context before the grant,
+    /// so a concurrent acquisition minted — and was served — a token for an
+    /// identity the restore went on to refuse, and cached it after the
+    /// refusal had swept the tenant.
+    #[tokio::test]
+    async fn a_restore_in_flight_registers_nothing_and_serves_no_token() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("restore-unproven-tenant", "restore-unproven-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(
+                token_with_id(tenant, "someone-else")
+                    .set_delay(std::time::Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        let svc = relaunched_service(server.uri(), tenant, oid);
+        let remembered = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: Some("ada@contoso.com".into()),
+            display_name: None,
+        };
+        let meanwhile = async {
+            until_a_token_request_arrives(&server).await;
+            let registered = svc.tenant_context(tenant);
+            let minted = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+            (registered, minted)
+        };
+
+        let (result, (registered, minted)) =
+            tokio::join!(svc.restore_session(&remembered), meanwhile);
+
+        assert!(registered.is_none(), "registered unproven: {registered:?}");
+        assert!(matches!(minted, Err(AuthError::NotSignedIn)), "{minted:?}");
+        assert!(
+            matches!(result, Err(AuthError::Authorization(_))),
+            "{result:?}"
+        );
+        assert!(svc.tenant_context(tenant).is_none());
+        assert!(svc.cache.get(tenant, &arm_scopes(), false).is_none());
+        assert!(
+            svc.cache
+                .get(tenant, &svc.default_graph_read_scopes(), true)
+                .is_none()
+        );
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    /// A restore against a live session returns that session as it is: no
+    /// grant, no relabel. It used to register the remembered context over it;
+    /// a fresh cached token then passed for proof (a cache hit carries no id
+    /// token), so another account's session read as the remembered one — and
+    /// with nothing cached, the remembered account's grant failed and
+    /// unregistered the live session.
+    #[tokio::test]
+    async fn restore_session_returns_a_live_session_as_it_is() {
+        for cached in [true, false] {
+            let server = MockServer::start().await;
+            let tenant = format!("restore-live-{cached}");
+            let (tenant, live) = (tenant.as_str(), "restore-live-oid");
+            Mock::given(method("POST"))
+                .respond_with(token_ok("never-minted"))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let svc = signed_in_service(server.uri(), tenant, live);
+            let read = svc.default_graph_read_scopes();
+            if cached {
+                svc.cache.put(
+                    tenant.to_string(),
+                    &read,
+                    true,
+                    fresh_token("live-read", &read),
+                );
+            }
+            let remembered = TenantContext {
+                tenant_id: tenant.into(),
+                account_oid: "restore-remembered-oid".into(),
+                username: Some("old@contoso.com".into()),
+                display_name: None,
+            };
+
+            let outcome = svc.restore_session(&remembered).await;
+
+            let outcome = outcome.unwrap_or_else(|e| panic!("cached {cached}: {e:?}"));
+            assert_eq!(outcome.tenant.account_oid, live, "cached {cached}");
+            assert_eq!(
+                svc.tenant_context(tenant).map(|t| t.account_oid).as_deref(),
+                Some(live),
+                "cached {cached}"
+            );
+            if cached {
+                assert_eq!(
+                    svc.cache.get(tenant, &read, true).unwrap().token,
+                    "live-read"
+                );
+            }
+            assert_eq!(
+                stored_token(tenant, live).as_deref(),
+                Some("stored-refresh-token")
+            );
+            server.verify().await;
+        }
+    }
+
+    /// A cached token proves nothing (a cache hit carries no id token), so a
+    /// restore never takes one: with a straggler's token in the read slot and
+    /// nothing registered, it still runs its grant and checks the id token,
+    /// and the session is registered with the token that proved it.
+    #[tokio::test]
+    async fn a_restore_never_takes_a_cached_token_for_proof() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("restore-leftover-tenant", "restore-leftover-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(token_with_id(tenant, oid))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let svc = relaunched_service(server.uri(), tenant, oid);
+        let read = svc.default_graph_read_scopes();
+        svc.cache.put(
+            tenant.to_string(),
+            &read,
+            true,
+            fresh_token("straggler", &read),
+        );
+        let remembered = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: Some("ada.old@contoso.com".into()),
+            display_name: None,
+        };
+
+        let outcome = svc.restore_session(&remembered).await.unwrap();
+
+        // The profile comes from the refresh's id token: the grant ran.
+        assert_eq!(outcome.tenant.username.as_deref(), Some("ada@contoso.com"));
+        assert_eq!(
+            svc.cache.get(tenant, &read, true).unwrap().token,
+            "restored-token"
+        );
+        assert!(svc.tenant_context(tenant).is_some());
+        server.verify().await;
     }
 
     /// The interactive flows keep failing on a keyring refusal (only the silent

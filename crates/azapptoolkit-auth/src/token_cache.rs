@@ -554,21 +554,21 @@ fn load_chunks(tenant_id: &str, account_oid: &str) -> Result<Option<Zeroizing<St
 }
 
 /// [`delete_refresh_token`], then `on_deleted()` — still under the chunk-set
-/// lock, and only when the delete succeeded. The sign-out path moves the
-/// session epoch there: a refresh that finished before the delete has had its
+/// lock, and only when the delete succeeded — returning what it returned. The
+/// sign-out path moves the session epoch there (and gets the new value back,
+/// to fence its sweep): a refresh that finished before the delete has had its
 /// write removed, one that finishes after it sees the moved epoch and writes
 /// nothing, and a delete that fails leaves the epoch — and so every live
 /// client — exactly as it was.
-pub fn delete_refresh_token_then(
+pub fn delete_refresh_token_then<T>(
     tenant_id: &str,
     account_oid: &str,
-    on_deleted: impl FnOnce(),
-) -> Result<()> {
+    on_deleted: impl FnOnce() -> T,
+) -> Result<T> {
     ensure_keyring_store()?;
     let _guard = CHUNK_SET_LOCK.lock();
     delete_chunks(tenant_id, account_oid)?;
-    on_deleted();
-    Ok(())
+    Ok(on_deleted())
 }
 
 pub fn delete_refresh_token(tenant_id: &str, account_oid: &str) -> Result<()> {

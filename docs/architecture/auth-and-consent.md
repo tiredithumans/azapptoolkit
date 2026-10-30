@@ -87,10 +87,17 @@ redeems it for the sign-in read scopes through the ordinary silent-refresh path.
 the *configured* tenant: an account remembered under a different directory is refused rather than
 used to address someone else's keyring entry. Every empty case — nothing stored, signed out, tenant
 repointed, token revoked, keyring locked — returns `Ok(None)`, not an error, and lands on the normal
-sign-in card; a failed attempt removes the context again so it can never leave a half-live session
-— unless the session epoch moved meanwhile (the operator chose "Sign in instead" and signed in while
-the refresh was in flight): `restore_session` captures the fence with its registration and then
-leaves the registry, the cache and the keyring (`delete_refresh_token_if`) to the newer session.
+sign-in card. A failed attempt leaves nothing behind, because the remembered context is registered
+only once the refresh proved it, with its token, in the critical section that caches it — until
+then no other flow can resolve (or mint for) an account nothing has proven, and no cache-only
+command's session check (`commands::session::prove_tenant_session`) passes on it. `restore_session`
+captures the session-epoch fence when it starts; if the epoch moves meanwhile (the operator chose
+"Sign in instead" and signed in while the refresh was in flight), it leaves the registry, the cache
+and the keyring (`delete_refresh_token_if`) to the newer session. A restore that finds the tenant
+already registered — a live session; only a proven flow registers one — returns that registration
+as it is, with no grant: re-registering the remembered context over it would relabel another
+account's session, and a fresh cached token would pass for proof (a cache hit carries no id token),
+which is also why a restore never takes a cached token.
 The restore failures returned as an error are a token endpoint that gave no verdict
 (`commands::auth::RETRY_CAN_RESTORE`): unreachable (`network`: offline, a proxy down), answered by
 something else (`unexpected_responder`: a captive portal, a TLS-inspecting proxy) or throttled /
@@ -106,13 +113,13 @@ callout. The callout keeps the failure's code: `network` says to check the conne
 `unexpected_responder` / `service_unavailable` show the shared hint (a proxy or an unavailable
 endpoint, where checking the network would not help). The remembered UPN and display
 name are only what was true at the last sign-in: when the restoring refresh returns an id token, its
-`tid`/`oid` must match the remembered context (`ensure_same_identity`; a mismatch is refused,
-leaves nothing cached, deletes the foreign refresh token just rotated into the remembered keyring
-entry, and the command drops `last_account` so the next launch shows sign-in rather than repeating
-the refusal) and its `preferred_username`/`name` replace the stored ones, which the command writes
-back with `remember_account` — so a renamed UPN reaches `login_hint` and `X-AnchorMailbox`. No id
-token → the stored names stand; one that does not parse is refused (unknown identity), as the
-interactive flows refuse it.
+`tid`/`oid` must match the remembered context (`ensure_same_identity`, checked before anything is
+stored; a mismatch is refused, caches nothing, writes no rotated refresh token, deletes the foreign
+one stored under the remembered keyring entry, and the command drops `last_account` so the next
+launch shows sign-in rather than repeating the refusal) and its `preferred_username`/`name` replace
+the stored ones, which the command writes back with `remember_account` — so a renamed UPN reaches
+`login_hint` and `X-AnchorMailbox`. No id token → the stored names stand; one that does not parse
+is refused (unknown identity), as the interactive flows refuse it, and stores nothing either.
 
 **A browser that won't launch offers its link in the app.** When `open_system_browser` fails (no
 default handler, a confined `xdg-open`, a policy blocking the handler), `run_auth_code_flow` hands
@@ -308,14 +315,25 @@ different account errors) — restoring the session **without** dropping the ten
 which a sign-out/sign-in cycle would.
 
 - It takes the full `TenantContext`, not a bare tenant id, because `InvalidGrant` purges
-  `known_tenants` — the front-end still holds the context in `active_tenant`.
+  `known_tenants` — the front-end still holds the context in `active_tenant`. That context is all
+  there is only then: while the tenant is registered, the registration says who is signed in, and a
+  context naming another account is refused (`authorization`) before the browser opens. Three gaps
+  stay open: after a purge the caller's context is still taken on trust (only a forged context can
+  use that, since the UI hands back the backend's own outcome; closing it needs a tombstone of the
+  purged account, because refusing when `remembered_account()` is `None` would lock out an operator
+  whose pointer write failed); a refresh token can be orphaned in the keyring, where nothing
+  addresses it again (a lost `last_account`, a failed best-effort delete, a store refused after its
+  keyring write, a sign-out that read the registered account before its delete while a sign-in
+  switched it); and the command-level `remember_account` / `forget_account` / `forget_tenant` steps
+  are not fenced by the epoch, so overlapping flows can interleave them.
 - The `InvalidGrant` purge is conditional (`token_cache::delete_refresh_token_if_current`): it
   deletes only if the keyring still holds the token that just failed, compared and deleted under
   the chunk-set lock. Refresh locks are per scope set, so a slow refresh can fail with the old token
   after `reauthenticate` stored a new one; that newer session is kept and the refresh is retried
-  once with it (a second rejection then purges as usual). The in-memory cleanup after a purge runs
-  only while the session epoch (below) is unchanged, so a `sign_in` that landed during the POST
-  keeps its registration and slots.
+  once with it (a second rejection then purges as usual, unless a third token replaced it meanwhile,
+  which is kept for the next refresh) — but not once the epoch (below) moved, since the newer token
+  is then a newer session's. The in-memory cleanup after a purge runs only while the session epoch
+  is unchanged, so a `sign_in` that landed during the POST keeps its registration and slots.
 - **A session epoch fences late stores.** `EntraAuthService::session_epoch` moves on `sign_in` and
   `sign_out` (never on `reauthenticate`, `restore_session` or a consent/step-up round trip). Every
   token-yielding flow captures it before its round trip, and `store_token_outcome` stores nothing
@@ -324,6 +342,12 @@ which a sign-out/sign-in cycle would.
   registry lock `sign_in`/`sign_out` hold while they sweep. A late refresh therefore fails
   `NotSignedIn` instead of writing the previous account's rotated refresh token back (stranded,
   since `last_account` is gone) or serving its access token to the next account's writes.
+  A flow's registration rides that same critical section: `store_token_outcome` registers the
+  context (`Registration`: `sign_in` replaces, `reauthenticate` and `restore_session` claim) where
+  it checked the fence and cached the token, so a sign-out or a second sign-in can never land
+  between a token and its registration (`sign_in` used to register after the store, unfenced).
+  And since only the account switches move the epoch, a registered tenant's account never changes
+  without one: no other flow caches a token, or registers, while another account holds the tenant.
   `ScopedTokenAdapter` captures the epoch when built and refuses to mint under a newer one, so a
   write run holding an `Arc<GraphClient>` across a same-tenant account switch stops at the
   dead-session latch rather than minting the new account's tokens (`forget_tenant` drops the client
@@ -333,7 +357,12 @@ which a sign-out/sign-in cycle would.
   clears the token cache and `known_tenants`; so a failure never leaves a refresh token for the
   next launch to restore, and leaves the epoch — and every live client — as it was. A multi-chunk
   (Windows) delete that fails after chunk 0 leaves fragments behind a gap; the retry walks past up
-  to three missing chunks (`delete_chunks`), so a retried sign-out removes them.
+  to three missing chunks (`delete_chunks`), so a retried sign-out removes them. The token it
+  deletes is the registered account's, whatever context it is handed (that context addresses the
+  keyring only when nothing is registered, after a purge): a mismatched one used to leave the live
+  session's refresh token on disk with nothing to address it again. Its sweep runs only while its
+  own epoch move is still the latest (`sweep_after_sign_out`): a sign-in that lands in between
+  has already swept the tenant and registered its own session, which the sweep used to drop.
 - `reauthenticate`, consent and step-up round trips do not move the epoch, so the purge's
   epoch check does not cover them: one landing between the purge's keyring delete and its
   in-memory cleanup still loses its cached tokens and registration (its keyring token survives for
