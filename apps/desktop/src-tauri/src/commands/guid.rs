@@ -4,7 +4,10 @@
 //! validator (re-exported from `azapptoolkit_core::guid`, which the ARM client
 //! shares). Single-sourced so the generator can't drift between domains and
 //! the two former `is_guid` copies (`search` strict-positional vs `config`
-//! split-based) can't diverge again.
+//! split-based) can't diverge again. [`require_app_id`] is the boundary check
+//! for an application (client) id the webview sends.
+
+use crate::dto::UiError;
 
 /// A random v4 GUID in canonical lowercase 8-4-4-4-12 form.
 pub(crate) fn new_v4_guid() -> String {
@@ -38,6 +41,26 @@ pub(crate) fn new_v4_guid() -> String {
 /// The one definition lives in core, where the ARM client uses it too.
 pub(crate) use azapptoolkit_core::guid::is_guid;
 
+/// Refuses an application (client) id the webview sent unless it is a GUID
+/// (`invalid_app_id`).
+///
+/// The graph client keys its per-app service-principal cache as
+/// `{tenant}|{appId}` and the audit's lean projection as
+/// `{tenant}|{appId}|lean`, in one bucket, so an `app_id` of `X|lean` names app
+/// X's lean entry: its lookup misses, and the empty result is stored over X's.
+/// Every command whose `app_id` reaches one of those reads calls this first
+/// (pinned by `trust.rs::every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache`).
+pub(crate) fn require_app_id(app_id: &str) -> Result<(), UiError> {
+    if is_guid(app_id) {
+        Ok(())
+    } else {
+        Err(UiError::validation(
+            "invalid_app_id",
+            "The application (client) ID must be a GUID.",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +76,23 @@ mod tests {
         );
         // Vanishingly unlikely to collide — pins that it's actually random.
         assert_ne!(g, new_v4_guid());
+    }
+
+    /// An app id that is not a GUID never reaches a cache key: `X|lean` is the
+    /// spelling that named another app's lean service-principal entry.
+    #[test]
+    fn an_app_id_must_be_a_guid() {
+        let app = "71487acd-ec93-476d-bd0e-6c8b31831053";
+        assert!(require_app_id(app).is_ok());
+        assert!(require_app_id(&app.to_ascii_uppercase()).is_ok());
+        for bad in [
+            format!("{app}|lean"),
+            "app-1".to_string(),
+            String::new(),
+            format!("{{{app}}}"),
+        ] {
+            let err = require_app_id(&bad).expect_err(&bad);
+            assert_eq!(err.code, "invalid_app_id", "{bad}");
+        }
     }
 }

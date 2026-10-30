@@ -5,6 +5,8 @@
 
 use super::*;
 
+use crate::commands::sharepoint::require_same_app;
+
 /// Whether assignment `a` is the org-wide Entra grant target `t` names.
 ///
 /// Each target names its own resource service principal, so a grant is matched
@@ -147,6 +149,9 @@ pub(super) struct ApplyExchangeMailboxScopeParams<'a> {
     graph: &'a GraphClient,
     exo: &'a ExchangeClient,
     tenant_id: &'a str,
+    /// This tenant's naming patterns (`load_tenant_defaults`), read by the
+    /// caller so the core reads no settings file of its own.
+    tenant_defaults: &'a TenantDefaults,
     app_id: &'a str,
     sp_object_id: &'a str,
     display_name: &'a str,
@@ -224,6 +229,30 @@ pub(super) async fn assign_scoped_roles(
     Ok((roles_assigned, roles_skipped, scoped))
 }
 
+/// What a grant onto an existing scope that confines nothing would do: the
+/// grant's half of the shared `scope_filter_unreadable` refusal
+/// (`existing_scope_filter_checked`).
+pub(super) const GRANT_ONTO_UNRESTRICTED_SCOPE: &str = "Assigning roles against it and removing \
+     the org-wide grants would change what this app reaches in a way that was not asked for.";
+
+/// The grant's refusal when this app's existing scope does not prove exactly
+/// the requested groups (`scope_filter_agrees`): the groups asked for would not
+/// apply, and repointing the scope is not a side effect a grant may have.
+fn scope_group_mismatch(scope_name: &str) -> UiError {
+    UiError::validation(
+        "scope_group_mismatch",
+        format!(
+            "a management scope “{scope_name}” already exists for this app and either confines a \
+             different group set or has a filter that does more than name these groups, and \
+             Exchange keeps the existing scope — so the groups requested here would NOT have been \
+             applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
+             changes what every role assignment using it reaches, so it is a deliberate action, not a \
+             side effect of granting: use “Move to managed group” to consolidate onto the \
+             toolkit-managed group, or edit the scope in Exchange, then grant again."
+        ),
+    )
+}
+
 /// Shared core of a scoped-mailbox grant: register the Exchange service-principal
 /// pointer, resolve `groups` into a management scope, assign each target's
 /// Exchange role scoped to it (idempotent), and — when `remove_unscoped` — strip
@@ -239,6 +268,7 @@ pub(super) async fn apply_exchange_mailbox_scope(
         graph,
         exo,
         tenant_id,
+        tenant_defaults,
         app_id,
         sp_object_id,
         display_name,
@@ -290,85 +320,18 @@ pub(super) async fn apply_exchange_mailbox_scope(
     // the built-in `app_scope_<app_id>`), so a fresh scoped grant and the
     // legacy-AAP migration name their scopes identically. See
     // `TenantDefaults::scope_name_for`.
-    let scope_name = load_tenant_defaults(tenant_id).scope_name_for(app_id);
+    let scope_name = tenant_defaults.scope_name_for(app_id);
     let scope_filter = member_of_group_filter(&dns);
-    // There is exactly one management scope per app (its resolved `scope_name`),
-    // and `ensure_management_scope` keeps an EXISTING scope as-is rather than
-    // rewriting its filter. So if a different permission was already scoped to a
-    // different group set, the groups requested *here* silently won't apply —
-    // warn instead of misleading the user into thinking they took effect.
-    // FAIL CLOSED, not warn-and-proceed. This used to push a warning and fall
-    // through — but the fall-through then assigned roles against the EXISTING
-    // scope and stripped the org-wide Entra grants, so the app ended up confined
-    // to a group set the operator never asked for while its broad access was
-    // removed. When the existing groups are a superset of the request that is an
-    // access-WIDENING outcome delivered behind a warning; when they are a subset
-    // the app silently loses reach it was just granted. Either way the mutation
-    // did not do what was asked.
-    //
-    // Refusing here is safe precisely because nothing access-affecting has
-    // happened yet: only `ensure_service_principal` (an idempotent pointer
-    // registration) has run, so the app is left exactly as it was — org-wide,
-    // which is the status quo the operator was trying to improve, not a
-    // half-applied state. Repointing is a deliberate action with its own
-    // command; see AGENTS.md, "Repointing a management scope is an explicit
-    // action, and fail-closed".
-    //
-    // Matched exhaustively rather than `if let Ok(Some(..))`: that form let BOTH
-    // an `Err` read and a scope with no `RecipientRestrictionFilter` skip the
-    // guard entirely and fall through to assign-then-strip — the exact outcome
-    // the paragraph above says must never happen. An unrestricted or custom
-    // scope carrying this app's name is precisely the case where confining the
-    // app to it, and then removing its org-wide grants, is least likely to be
-    // what the operator meant.
-    match exo.get_management_scope(&scope_name).await {
-        Ok(Some(existing)) => {
-            let Some(existing_filter) = existing.recipient_filter.as_deref() else {
-                return Err(UiError::validation(
-                    "scope_filter_unreadable",
-                    format!(
-                        "a management scope “{scope_name}” already exists for this app but has no recipient \
-                         restriction filter, so it does not confine anything to the groups requested here — \
-                         and Exchange keeps the existing scope rather than replacing it. Assigning roles \
-                         against it and removing the org-wide grants would change what this app reaches in a \
-                         way that was not asked for, so nothing was changed. Review the scope in Exchange, or \
-                         use “Move to managed group” to consolidate onto the toolkit-managed group."
-                    ),
-                ));
-            };
-            // Same confinement, case-folded (Exchange echoes DNs in its own
-            // casing) and fail-closed: a filter that is anything but a pure
-            // `MemberOfGroup` OR-chain naming exactly these groups is never
-            // agreement — not an unreadable clause, and not a filter that
-            // names the right groups and ALSO reaches other mailboxes (`-or
-            // RecipientTypeDetails …`) or inverts them (`-not`). Those used to
-            // compare equal on the DN set alone, so the app's roles were bound
-            // to the existing scope and its org-wide grants stripped against a
-            // reach the report did not describe.
-            let wanted: HashSet<String> = dns.iter().map(|d| fold_dn(d)).collect();
-            if exact_scope_dns(existing_filter) != Some(wanted) {
-                return Err(UiError::validation(
-                    "scope_group_mismatch",
-                    format!(
-                        "a management scope “{scope_name}” already exists for this app and either confines a \
-                         different group set or has a filter that does more than name these groups, and \
-                         Exchange keeps the existing scope — so the groups requested here would NOT have been \
-                         applied, while the org-wide grants were removed. Nothing was changed. Repointing a scope \
-                         changes what every role assignment using it reaches, so it is a deliberate action, not a \
-                         side effect of granting: use “Move to managed group” to consolidate onto the \
-                         toolkit-managed group, or edit the scope in Exchange, then grant again."
-                    ),
-                ));
-            }
-        }
-        // No scope yet — `ensure_management_scope` creates it below with exactly
-        // the requested filter, which is the clean path this guard protects.
-        Ok(None) => {}
-        // Refuse rather than proceed blind. `ensure_management_scope` re-reads
-        // with `?` and so aborts on a *persistent* failure anyway; this closes
-        // the transient case, where the first read errs, the second succeeds,
-        // and the pre-existing scope is never compared at all.
-        Err(err) => return Err(err.into()),
+    // One management scope per app, and `ensure_management_scope` keeps an
+    // existing one as it is: refuse unless that scope already confines exactly
+    // these groups, while nothing access-affecting has happened yet (only the
+    // pointer registration above). The migration's guard, shared:
+    // `existing_scope_filter_checked`, then `scope_filter_agrees`.
+    if let Some(existing) =
+        existing_scope_filter_checked(exo, &scope_name, GRANT_ONTO_UNRESTRICTED_SCOPE).await?
+        && !scope_filter_agrees(&existing, &scope_filter)
+    {
+        return Err(scope_group_mismatch(&scope_name));
     }
     exo.ensure_management_scope(&scope_name, &scope_filter)
         .await?;
@@ -475,6 +438,7 @@ pub async fn grant_exchange_mailbox_access(
         graph: &graph,
         exo: &exo,
         tenant_id: &tenant_id,
+        tenant_defaults: &load_tenant_defaults(&tenant_id),
         app_id: &app.app_id,
         sp_object_id: &entra_sp.id,
         display_name: &app.display_name,
@@ -498,6 +462,10 @@ pub async fn grant_exchange_mailbox_access(
 /// Exchange RBAC. Unlike [`grant_exchange_mailbox_access`], the targets come
 /// from the `mail_permissions` being granted (a managed identity has no app
 /// registration manifest), and the SP object id is the managed identity itself.
+/// A thin wrapper: the clients and this tenant's naming patterns, then
+/// [`grant_managed_identity_scope`]. `app_display_name` is part of the IPC
+/// contract but unread: the Exchange pointer takes the name Graph returns with
+/// the service principal.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn grant_managed_identity_scoped_exchange_access(
@@ -510,13 +478,69 @@ pub async fn grant_managed_identity_scoped_exchange_access(
     groups: Vec<String>,
     remove_unscoped_entra_grants: bool,
 ) -> Result<ExchangeAccessResult, UiError> {
-    let graph = state.graph_for(&tenant_id);
+    let _ = app_display_name;
     let exo = exchange_client_checked(&state, &tenant_id).await?;
+    grant_managed_identity_scope(
+        &state,
+        &exo,
+        &tenant_id,
+        &load_tenant_defaults(&tenant_id),
+        ManagedIdentityScope {
+            managed_identity_id: &managed_identity_id,
+            app_id: &app_id,
+            mail_permissions: &mail_permissions,
+            groups: &groups,
+            remove_unscoped: remove_unscoped_entra_grants,
+        },
+    )
+    .await
+}
+
+/// A managed identity's scoped grant as the webview sent it. `app_id` and
+/// `managed_identity_id` are two separate arguments, and the Exchange core
+/// assigns roles to the first and strips org-wide grants from the second, so
+/// [`grant_managed_identity_scope`] proves they name one principal first.
+pub(super) struct ManagedIdentityScope<'a> {
+    pub(super) managed_identity_id: &'a str,
+    pub(super) app_id: &'a str,
+    pub(super) mail_permissions: &'a [String],
+    pub(super) groups: &'a [String],
+    pub(super) remove_unscoped: bool,
+}
+
+/// The body of [`grant_managed_identity_scoped_exchange_access`], over the
+/// clients the command builds.
+///
+/// Before anything else, the service principal is read by its object id and
+/// must carry `app_id` (`principal_mismatch` otherwise), as the SharePoint
+/// grant paths check (`sharepoint::require_same_app`). Trusting the pairing
+/// let a transposed or stale pair assign one app's scoped roles, strip another
+/// principal's org-wide mail grants, and report the scoping as done.
+pub(super) async fn grant_managed_identity_scope(
+    state: &AppState,
+    exo: &ExchangeClient,
+    tenant_id: &str,
+    tenant_defaults: &TenantDefaults,
+    request: ManagedIdentityScope<'_>,
+) -> Result<ExchangeAccessResult, UiError> {
+    let ManagedIdentityScope {
+        managed_identity_id,
+        app_id,
+        mail_permissions,
+        groups,
+        remove_unscoped,
+    } = request;
+    let graph = state.graph_for(tenant_id);
+    let sp = graph
+        .get_service_principal_by_object_id(managed_identity_id)
+        .await?
+        .ok_or_else(|| UiError::not_found("service_principal", "Service principal not found."))?;
+    require_same_app(&sp.app_id, app_id, "service principal")?;
     let resources = mailbox_resource_roles(&graph).await?;
 
     let mut warnings = Vec::new();
     let mut targets = Vec::new();
-    for perm in &mail_permissions {
+    for perm in mail_permissions {
         // The caller sends bare permission values, so resolve each to the
         // resource that exposes it (Graph for mail/calendar/contacts, Office 365
         // Exchange Online for the EWS scope) — `remove_unscoped_grants` then has
@@ -545,17 +569,20 @@ pub async fn grant_managed_identity_scoped_exchange_access(
         )
     })?;
 
+    // Graph's own ids and name from here on: the ids equal the webview's, as
+    // just proven.
     apply_exchange_mailbox_scope(ApplyExchangeMailboxScopeParams {
-        state: &state,
+        state,
         graph: &graph,
-        exo: &exo,
-        tenant_id: &tenant_id,
-        app_id: &app_id,
-        sp_object_id: &managed_identity_id,
-        display_name: &app_display_name,
+        exo,
+        tenant_id,
+        tenant_defaults,
+        app_id: &sp.app_id,
+        sp_object_id: &sp.id,
+        display_name: &sp.display_name,
         targets: &targets,
-        groups: &groups,
-        remove_unscoped: remove_unscoped_entra_grants,
+        groups,
+        remove_unscoped,
         warnings,
     })
     .await

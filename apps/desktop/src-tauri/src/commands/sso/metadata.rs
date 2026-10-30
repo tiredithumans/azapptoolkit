@@ -6,7 +6,7 @@ use std::time::Duration;
 use azapptoolkit_core::http_body::{BodyCap, BodyTooLarge};
 use tauri::State;
 
-use crate::commands::guid::is_guid;
+use crate::commands::guid::require_app_id;
 use crate::dto::UiError;
 use crate::dto::sso::MetadataProbeDto;
 use crate::state::AppState;
@@ -39,12 +39,7 @@ pub async fn probe_federation_metadata(
     })?;
     // The id lands in the metadata URL's query string; anything but a GUID is
     // not an application (client) id.
-    if !is_guid(&app_id) {
-        return Err(UiError::validation(
-            "invalid_app_id",
-            "The application (client) ID must be a GUID.",
-        ));
-    }
+    require_app_id(&app_id)?;
     let (_, _, _, metadata_url) = saml_summary_urls(state.auth.cloud(), &tenant_id, &app_id);
     let fetched_at = chrono::Utc::now().to_rfc3339();
 

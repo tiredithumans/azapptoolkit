@@ -20,6 +20,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Rotate into Key Vault now refuses when it can't check which app owns the vault secret, and names any leftover secret.
 - Grant access and the audit's SharePoint fix now list each warning, such as an app that still reaches every site or file.
 - A restore no longer takes over an app with reply URLs, public client flows or Expose an API settings the backup lacks.
+- Scoping a managed identity's mailbox access and removing SharePoint item access now check they act on the right app.
 
 ## [0.35.0] - 2026-10-26
 

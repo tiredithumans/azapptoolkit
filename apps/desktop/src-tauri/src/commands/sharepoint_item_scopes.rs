@@ -353,9 +353,13 @@ pub async fn list_app_item_scopes(
 ///
 /// Fail-closed: the entry is re-read and must be **this app's** application
 /// grant before it is deleted, so a stale or tampered id can never revoke a
-/// person's or another app's access. An entry or resource already gone counts
-/// as removed. Without a `permission_id` only the record goes: the row was
-/// already showing "not granted" or "not found".
+/// person's or another app's access. The grant is revoked by `app_id` and the
+/// record forgotten on `object_id`, so the registration is read first and must
+/// be `app_id`'s (`principal_mismatch`): a mismatched pair revoked one app's
+/// grant and dropped another app's record. An entry or resource already gone
+/// counts as removed. Without a `permission_id` only the record goes (the row
+/// was already showing "not granted" or "not found"), and only `object_id` is
+/// touched.
 pub(crate) async fn remove_app_item_scope_with(
     state: &AppState,
     client: &GraphClient,
@@ -372,6 +376,14 @@ pub(crate) async fn remove_app_item_scope_with(
         ));
     }
     if let Some(permission_id) = permission_id {
+        let app = client.get_application(object_id).await?;
+        if !app.app_id.eq_ignore_ascii_case(app_id) {
+            return Err(UiError::validation(
+                "principal_mismatch",
+                "That app registration is not the app whose grant is being removed, so nothing \
+                 was removed.",
+            ));
+        }
         let target = target_of(scope);
         let read = match target.item_id {
             Some(item) => {
@@ -546,12 +558,14 @@ mod tests {
         mock_graph(server).with_sharepoint_token(StaticTokenProvider::new("sp"))
     }
 
+    /// App registration [`OBJ`] (app [`APP`]) with `tags`: the record reads and
+    /// the revoke's pairing read are both this GET.
     async fn mount_tags(server: &MockServer, tags: Vec<String>) {
         Mock::given(method("GET"))
             .and(path(format!("/v1.0/applications/{OBJ}")))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "id": OBJ, "tags": tags })),
+                    .set_body_json(serde_json::json!({ "id": OBJ, "appId": APP, "tags": tags })),
             )
             .mount(server)
             .await;
@@ -776,6 +790,7 @@ mod tests {
     #[tokio::test]
     async fn remove_refuses_an_entry_that_is_not_this_apps_grant() {
         let server = MockServer::start().await;
+        mount_tags(&server, vec![tag(&file_scope("17"))]).await;
         mount_item_permissions(
             &server,
             serde_json::json!({ "user": { "id": "u-1", "displayName": "Jane" } }),
@@ -805,6 +820,113 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "not_this_apps_grant");
+    }
+
+    /// The grant is revoked by `app_id` and the record forgotten on
+    /// `object_id`, two ids the webview sends apart. A pair naming two apps is
+    /// refused before SharePoint is read or anything is written: it revoked
+    /// one app's grant and dropped another app's record.
+    #[tokio::test]
+    async fn remove_refuses_a_registration_that_is_not_the_apps() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJ}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": OBJ,
+                "appId": "22222222-2222-2222-2222-222222222222",
+                "tags": [tag(&file_scope("17"))]
+            })))
+            .mount(&server)
+            .await;
+        // The entry IS `APP`'s grant: only the pairing stops the revoke.
+        mount_item_permissions(&server, serde_json::json!({ "application": { "id": APP } })).await;
+        for write in ["DELETE", "PATCH"] {
+            Mock::given(method(write))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+        }
+        let state = AppState::for_test(TENANT, &server.uri());
+
+        let err = remove_app_item_scope_with(
+            &state,
+            &client(&server),
+            TENANT,
+            OBJ,
+            APP,
+            &file_scope("17"),
+            Some("p1"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "principal_mismatch");
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path().starts_with("/v1.0/applications/")),
+            "no SharePoint call"
+        );
+    }
+
+    /// The Permission Tester's revoke deletes an application grant only. The
+    /// list also holds a person's entry, which is re-read and left in place
+    /// (the tester never offers it, so only a stale or crafted id reaches it).
+    /// An entry already gone counts as removed: one missing from the re-read
+    /// sends no DELETE, and one removed between the re-read and the DELETE
+    /// (a 404) is not an error.
+    #[tokio::test]
+    async fn the_tester_revoke_deletes_only_an_app_grant() {
+        for (permission_id, status, deletes) in [
+            ("p-user", 204, 0),
+            ("p-gone", 204, 0),
+            ("p-app", 204, 1),
+            ("p-app", 404, 1),
+        ] {
+            let server = MockServer::start().await;
+            mount_finance_library(&server).await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v1.0/sites/{SITE}/lists/{LIST}/permissions")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [
+                        { "id": "p-app", "roles": ["read"],
+                          "grantedToV2": { "application": { "id": APP } } },
+                        { "id": "p-user", "roles": ["write"],
+                          "grantedToV2": { "user": { "id": "u-1", "displayName": "Jane" } } }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path(format!(
+                    "/v1.0/sites/{SITE}/lists/{LIST}/permissions/{permission_id}"
+                )))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(deletes)
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+
+            let result = crate::commands::sharepoint::remove_selected_item_permission_with(
+                &client(&server),
+                LIBRARY_URL,
+                permission_id,
+            )
+            .await;
+
+            if permission_id == "p-user" {
+                assert_eq!(result.unwrap_err().code, "not_an_app_grant");
+            } else {
+                result.unwrap_or_else(|e| panic!("{permission_id} ({status}): {e:?}"));
+            }
+        }
     }
 
     #[tokio::test]
@@ -866,16 +988,18 @@ mod tests {
         );
     }
 
-    /// A grant made elsewhere is tracked by URL: resolved, then recorded.
-    #[tokio::test]
-    async fn tracking_a_library_url_records_its_list() {
-        let server = MockServer::start().await;
+    /// The Finance site's Documents library.
+    const LIBRARY_URL: &str = "https://contoso.sharepoint.com/sites/Finance/Shared%20Documents";
+
+    /// What the URL resolver walks to reach [`LIBRARY_URL`]: the site, its
+    /// drives, and the drive's list ([`LIST`]).
+    async fn mount_finance_library(server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/v1.0/sites/contoso.sharepoint.com:/sites/Finance"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": SITE, "webUrl": "https://contoso.sharepoint.com/sites/Finance"
             })))
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("GET"))
             .and(path(format!("/v1.0/sites/{SITE}/drives")))
@@ -883,28 +1007,29 @@ mod tests {
                 "value": [{ "id": "drive-1", "name": "Documents",
                     "webUrl": "https://contoso.sharepoint.com/sites/Finance/Shared%20Documents" }]
             })))
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("GET"))
             .and(path("/v1.0/drives/drive-1/list"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": LIST, "displayName": "Documents"
             })))
-            .mount(&server)
+            .mount(server)
             .await;
+    }
+
+    /// A grant made elsewhere is tracked by URL: resolved, then recorded.
+    #[tokio::test]
+    async fn tracking_a_library_url_records_its_list() {
+        let server = MockServer::start().await;
+        mount_finance_library(&server).await;
         mount_tags(&server, vec![]).await;
         expect_tags_written(&server, vec![tag(&list_scope())]).await;
         let state = AppState::for_test(TENANT, &server.uri());
 
-        let scope = track_app_item_scope_with(
-            &state,
-            &client(&server),
-            TENANT,
-            OBJ,
-            "https://contoso.sharepoint.com/sites/Finance/Shared%20Documents",
-        )
-        .await
-        .unwrap();
+        let scope = track_app_item_scope_with(&state, &client(&server), TENANT, OBJ, LIBRARY_URL)
+            .await
+            .unwrap();
         assert_eq!(scope, list_scope());
     }
 

@@ -13,6 +13,7 @@ use azapptoolkit_core::models::{CaApplications, CaClientApplications, Conditiona
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::graph_err;
+use crate::commands::guid::require_app_id;
 use crate::dto::UiError;
 use crate::dto::conditional_access::ConditionalAccessPolicyDto;
 use crate::state::{AppState, ConsentFeature};
@@ -41,6 +42,7 @@ pub async fn list_conditional_access_for_app(
     tenant_id: String,
     app_id: String,
 ) -> Result<Vec<ConditionalAccessPolicyDto>, UiError> {
+    require_app_id(&app_id)?;
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
     state
         .ensure_feature_token(&tenant_id, ConsentFeature::Policy)

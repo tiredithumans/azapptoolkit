@@ -21,7 +21,11 @@
 //! write and the check to the same function, or to every in-module caller of
 //! the helper the write sits in.
 
-use super::sources::{balanced_block, command_modules, functions_in};
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::sources::{
+    Function, balanced_block, calls, code_mask, command_modules, command_names, functions_in,
+};
 
 /// The two ways a trust reaches Graph. `Patch` is the update path — it rewrites
 /// issuer/subject on an existing credential, which repoints the trust just as
@@ -1445,4 +1449,399 @@ impl Client {
         "azapptoolkit-arm/src/client.rs",
         "azapptoolkit-arm/src"
     ));
+}
+
+// ---------------- App ids from the webview, in service-principal cache keys ----------------
+
+/// The graph client's builders of the per-app service-principal cache keys:
+/// `{tenant}|{appId}` and the audit's lean `{tenant}|{appId}|lean`, which share
+/// one `CacheKind::ServicePrincipal` bucket.
+const SP_KEY_BUILDERS: [&str; 2] = ["sp_cache_key", "sp_lean_cache_key"];
+
+/// The client reads [`sp_keyed_reads`] must at least derive — a floor, not the
+/// set. `ensure_service_principal` reaches a key only through
+/// `get_service_principal_by_app_id`, so it proves the fixpoint runs.
+const SP_KEYED_READS_FLOOR: [&str; 3] = [
+    "get_service_principal_by_app_id",
+    "get_service_principal_by_app_id_lean",
+    "ensure_service_principal",
+];
+
+/// The command layer's check for an app id the webview sends
+/// (`guid::require_app_id`), as a call.
+const APP_ID_VALIDATOR: &str = "require_app_id(";
+
+/// The items of a parameter or argument list (the text between a signature's
+/// or a call's parens) at depth 0, a `self` receiver left out. Strings, chars
+/// and comments are skipped, and so are commas inside `()`, `[]`, `{}` and a
+/// generic `<…>` (one opened straight after an identifier, `:` or `&`, and
+/// closed by a `>` that is not part of `->` or `=>`). Blind spot: a closure's
+/// own `|a, b|` parameter list reads as two items.
+fn list_items(list: &str) -> Vec<String> {
+    let mask = code_mask(list);
+    let bytes = list.as_bytes();
+    let mut items = Vec::new();
+    let (mut depth, mut angle, mut start) = (0usize, 0usize, 0usize);
+    for (i, &b) in bytes.iter().enumerate() {
+        if !mask[i] {
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| bytes[j]);
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'<' if prev.is_some_and(|c| c.is_ascii_alphanumeric() || b"_:&".contains(&c)) => {
+                angle += 1;
+            }
+            b'>' if angle > 0 && !prev.is_some_and(|c| c == b'-' || c == b'=') => angle -= 1,
+            b',' if depth == 0 && angle == 0 => {
+                items.push(list[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(list[start..].trim().to_string());
+    items.retain(|item| {
+        !item.is_empty() && !matches!(item.as_str(), "self" | "&self" | "mut self" | "&mut self")
+    });
+    items
+}
+
+/// Whether a parameter list declares a parameter named exactly `app_id`.
+fn takes_app_id(params: &str) -> bool {
+    list_items(params).iter().any(|item| {
+        item.split_once(':')
+            .is_some_and(|(name, _)| name.trim().trim_start_matches("mut ").trim() == "app_id")
+    })
+}
+
+/// Whether an argument hands over the bare identifier `app_id`: `&app_id`,
+/// `app_id.as_str()`, a `{ app_id }` shorthand field — never a field read off
+/// another value (`app.app_id`, `sp.app_id`), which comes from Graph, nor a
+/// struct literal's `app_id:` label.
+fn hands_over_app_id(arg: &str) -> bool {
+    let mask = code_mask(arg);
+    let bytes = arg.as_bytes();
+    arg.match_indices("app_id").any(|(at, m)| {
+        let before = at.checked_sub(1).map(|j| bytes[j]);
+        let after = arg[at + m.len()..].trim_start();
+        mask[at]
+            && !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
+            && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+            && !(after.starts_with(':') && !after.starts_with("::"))
+    })
+}
+
+/// Every call of `name` in `body`, as (offset, argument text): `name(` with no
+/// identifier character or backtick before it, the rule [`calls`] applies.
+fn call_sites<'a>(body: &'a str, name: &str) -> Vec<(usize, &'a str)> {
+    let mask = code_mask(body);
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in body.match_indices(&format!("{name}(")) {
+        let before = at.checked_sub(1).map(|j| bytes[j]);
+        if !mask[at] || before.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'`')
+        {
+            continue;
+        }
+        let open = at + name.len();
+        let mut depth = 0usize;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            if !mask[i] {
+                continue;
+            }
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push((at, &body[open + 1..i]));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The graph client's reads that key `CacheKind::ServicePrincipal` by the app
+/// id they are handed, each with its argument count: every client `fn` whose
+/// body calls a [`SP_KEY_BUILDERS`] builder, and every client `fn` that calls
+/// one of those, to a fixpoint. The count tells Graph's
+/// `ensure_service_principal(app_id)` from Exchange's three-argument pointer
+/// registration of the same name.
+fn sp_keyed_reads(graph: &[Function]) -> BTreeMap<String, usize> {
+    let mut reads: BTreeMap<String, usize> = BTreeMap::new();
+    loop {
+        let before = reads.len();
+        for f in graph {
+            if reads.contains_key(&f.name) {
+                continue;
+            }
+            if SP_KEY_BUILDERS.iter().any(|b| calls(&f.body, b))
+                || reads.keys().any(|r| calls(&f.body, r))
+            {
+                reads.insert(f.name.clone(), list_items(&f.params).len());
+            }
+        }
+        if reads.len() == before {
+            return reads;
+        }
+    }
+}
+
+/// Where `body` first hands its bare `app_id` to one of `sinks`, with that
+/// sink's argument count, and to which.
+fn first_app_id_feed(body: &str, sinks: &BTreeMap<String, usize>) -> Option<(usize, String)> {
+    sinks
+        .iter()
+        .flat_map(|(sink, &arity)| {
+            call_sites(body, sink)
+                .into_iter()
+                .filter(move |(_, args)| {
+                    let items = list_items(args);
+                    items.len() == arity && items.iter().any(|a| hands_over_app_id(a))
+                })
+                .map(move |(at, _)| (at, sink.clone()))
+        })
+        .min_by_key(|(at, _)| *at)
+}
+
+/// `(commands whose app_id reaches a key, offenders)` over `modules`.
+///
+/// One rule for helpers and commands: a function that hands its `app_id` to a
+/// sink has checked it only when it calls [`APP_ID_VALIDATOR`] before its
+/// first such hand-off. The sinks are the keyed client reads plus, to a
+/// fixpoint, every non-command `fn` under `commands/` with an `app_id`
+/// parameter that hands it on unchecked; a helper that checks only after
+/// relaying is a sink. A command that hands its `app_id` on unchecked is an
+/// offender, as `module::fn (into `sink`)`.
+fn unchecked_app_id_commands(
+    modules: &[(String, String)],
+    commands: &BTreeSet<String>,
+    keyed: &BTreeMap<String, usize>,
+) -> (usize, Vec<String>) {
+    let fns: Vec<(&str, Function)> = modules
+        .iter()
+        .flat_map(|(module, src)| functions_in(src).into_iter().map(|f| (module.as_str(), f)))
+        .collect();
+    let checked_before = |f: &Function, feed: usize| {
+        first_call(&f.body, APP_ID_VALIDATOR).is_some_and(|at| at < feed)
+    };
+    let mut sinks = keyed.clone();
+    loop {
+        let before = sinks.len();
+        for (_, f) in &fns {
+            if commands.contains(&f.name) || sinks.contains_key(&f.name) || !takes_app_id(&f.params)
+            {
+                continue;
+            }
+            // Re-judged every round: a callee that turns into a sink can move
+            // the first hand-off ahead of the check.
+            if let Some((feed, _)) = first_app_id_feed(&f.body, &sinks)
+                && !checked_before(f, feed)
+            {
+                sinks.insert(f.name.clone(), list_items(&f.params).len());
+            }
+        }
+        if sinks.len() == before {
+            break;
+        }
+    }
+    let mut found = 0usize;
+    let mut offenders = Vec::new();
+    for (module, f) in &fns {
+        if !commands.contains(&f.name) || !takes_app_id(&f.params) {
+            continue;
+        }
+        let Some((feed, sink)) = first_app_id_feed(&f.body, &sinks) else {
+            continue;
+        };
+        found += 1;
+        if !checked_before(f, feed) {
+            offenders.push(format!("{module}::{} (into `{sink}`)", f.name));
+        }
+    }
+    (found, offenders)
+}
+
+/// Every command whose `app_id` reaches a service-principal cache key checks
+/// that it is a GUID first (`guid::require_app_id`).
+///
+/// The graph client keys the per-app SP cache `{tenant}|{appId}` and the
+/// audit's lean projection `{tenant}|{appId}|lean`, in one bucket, so a
+/// webview `app_id` of `X|lean` named app X's lean entry: a miss stored "no
+/// service principal" over it, and a hit handed a full-SP caller the
+/// three-field projection. The Permission Tester's two probes, the
+/// managed-identity mail-scope verdict and the Conditional Access tab passed
+/// the id through unchecked.
+///
+/// Derived from the source tree, not a list: the keyed reads are the graph
+/// client functions that build one of the two keys, closed over their in-crate
+/// callers, and the command layer's sinks are every non-command function with
+/// an `app_id` parameter that hands it to one, to a fixpoint. Blind spots: an
+/// app id under another name (`client_id`) or in a struct field, a call
+/// through a closure or a trait object, and a closure's `|a, b|` read as two
+/// arguments; and only `commands/` and `azapptoolkit-graph/src/client/` are
+/// scanned, so a keyed read built elsewhere (`client.rs` itself, another crate)
+/// or a relaying helper outside `commands/` is not seen. A helper and a command
+/// are held to the same check: `require_app_id` before the first hand-off.
+#[test]
+fn every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache() {
+    let graph: Vec<Function> = path_splice_sources()
+        .iter()
+        .filter(|(file, _)| file.starts_with("azapptoolkit-graph/"))
+        .flat_map(|(_, src)| functions_in(src))
+        .collect();
+    let keyed = sp_keyed_reads(&graph);
+    for read in SP_KEYED_READS_FLOOR {
+        assert!(
+            keyed.contains_key(read),
+            "the derived service-principal keyed reads lack `{read}`: {keyed:?} — the key \
+             builders were renamed (update SP_KEY_BUILDERS), the read moved out of \
+             azapptoolkit-graph/src/client, or `calls` cannot read its call"
+        );
+    }
+    assert_eq!(
+        keyed.get("ensure_service_principal"),
+        Some(&1),
+        "Graph's `ensure_service_principal` takes one argument; the count is what tells it \
+         from Exchange's three-argument pointer registration"
+    );
+
+    let (found, offenders) =
+        unchecked_app_id_commands(&command_modules(), &command_names(), &keyed);
+    // The two Permission Tester probes, the managed-identity mail-scope
+    // verdict and the Conditional Access tab.
+    assert!(
+        found >= 4,
+        "only {found} command(s) hand an `app_id` to a service-principal cache key — the source \
+         walk or the detector is broken, and a rule that scans nothing passes vacuously"
+    );
+    assert!(
+        offenders.is_empty(),
+        "command(s) handing the webview's `app_id` to a service-principal cache key without \
+         checking it first: {offenders:#?}\n\
+         The keys are `{{tenant}}|{{appId}}` and `{{tenant}}|{{appId}}|lean` in one bucket, so \
+         an id ending in `|lean` reads or overwrites another app's entry. Call \
+         `crate::commands::guid::require_app_id(&app_id)?` before the first use."
+    );
+}
+
+/// The app-id rule fires on a command that hands its `app_id` to a keyed read
+/// directly, through helpers, before its check, or through a helper that
+/// checks only after relaying it — and not on a field read off a Graph object,
+/// on Exchange's same-named three-argument registration, or through a helper
+/// that checks the id before it relays it.
+#[test]
+fn the_app_id_rule_fires_on_an_unchecked_command() {
+    let module = r#"
+#[tauri::command]
+pub async fn direct(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    let sp = client.get_service_principal_by_app_id_lean(&app_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn checked(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    require_app_id(&app_id)?;
+    let sp = client.get_service_principal_by_app_id(&app_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn checked_late(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    let sp = client.get_service_principal_by_app_id(&app_id).await;
+    require_app_id(&app_id)?;
+    Ok(())
+}
+
+async fn held(client: &GraphClient, app_id: &str) -> Result<(), UiError> {
+    let sp = client.get_service_principal_by_app_id(app_id).await?;
+    Ok(())
+}
+
+async fn relay(client: &GraphClient, app_id: &str) -> Result<(), UiError> {
+    held(client, app_id).await
+}
+
+#[tauri::command]
+pub async fn through_helpers(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    relay(&client, &app_id).await
+}
+
+async fn guarded(client: &GraphClient, app_id: &str) -> Result<(), UiError> {
+    crate::commands::guid::require_app_id(app_id)?;
+    held(client, app_id).await
+}
+
+#[tauri::command]
+pub async fn through_a_checking_helper(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    guarded(&client, &app_id).await
+}
+
+async fn late(client: &GraphClient, app_id: &str) -> Result<(), UiError> {
+    held(client, app_id).await?;
+    crate::commands::guid::require_app_id(app_id)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn through_a_late_checking_helper(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    late(&client, &app_id).await
+}
+
+#[tauri::command]
+pub async fn from_graph(tenant_id: String, app_id: String, object_id: String) -> Result<(), UiError> {
+    let app = client.get_application(&object_id).await?;
+    let sp = client.get_service_principal_by_app_id(&app.app_id).await;
+    exo.ensure_service_principal(&app_id, &object_id, "MI").await?;
+    let params = Params { app_id: &app.app_id };
+    Ok(())
+}
+"#;
+    let modules = vec![("commands/fixture.rs".to_string(), module.to_string())];
+    let commands: BTreeSet<String> = [
+        "direct",
+        "checked",
+        "checked_late",
+        "through_helpers",
+        "through_a_checking_helper",
+        "through_a_late_checking_helper",
+        "from_graph",
+    ]
+    .map(str::to_string)
+    .into();
+    let keyed: BTreeMap<String, usize> = [
+        ("get_service_principal_by_app_id", 1),
+        ("get_service_principal_by_app_id_lean", 1),
+        ("ensure_service_principal", 1),
+    ]
+    .map(|(name, n)| (name.to_string(), n))
+    .into();
+
+    let (found, offenders) = unchecked_app_id_commands(&modules, &commands, &keyed);
+
+    assert_eq!(
+        found, 5,
+        "direct, checked, checked_late, through_helpers and through_a_late_checking_helper \
+         hand their app_id to a key"
+    );
+    assert_eq!(
+        offenders,
+        [
+            "commands/fixture.rs::direct (into `get_service_principal_by_app_id_lean`)",
+            "commands/fixture.rs::checked_late (into `get_service_principal_by_app_id`)",
+            "commands/fixture.rs::through_helpers (into `relay`)",
+            "commands/fixture.rs::through_a_late_checking_helper (into `late`)",
+        ]
+    );
+    assert_eq!(
+        list_items("&self, a: HashMap<K, V>, f: impl Fn(&str) -> String").len(),
+        2
+    );
+    assert_eq!(list_items("&x, \"a, b\", g(c, d)").len(), 3);
 }

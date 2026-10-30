@@ -254,6 +254,13 @@ pub(super) struct MigrationContext<'a> {
     pub(super) cancel: &'a CancelToken,
 }
 
+/// What migrating onto an existing scope that confines nothing would do: the
+/// migration's half of the shared `scope_filter_unreadable` refusal
+/// (`existing_scope_filter_checked`).
+pub(super) const MIGRATION_ONTO_UNRESTRICTED_SCOPE: &str = "Migrating onto it would assign this \
+     app's roles against an unrestricted scope and then remove the org-wide grants and the legacy \
+     policy, leaving the app able to reach every mailbox in the tenant.";
+
 pub(super) async fn migrate_one(
     ctx: MigrationContext<'_>,
     app_id: &str,
@@ -346,7 +353,8 @@ pub(super) async fn migrate_one(
     // `scope_override` — reaching assign-then-strip against a scope that
     // confines nothing. A dry run checks too, so the plan shows the refusal
     // instead of promising a migration that would fail.
-    let existing_filter = existing_scope_filter_checked(exo, &scope_name).await?;
+    let existing_filter =
+        existing_scope_filter_checked(exo, &scope_name, MIGRATION_ONTO_UNRESTRICTED_SCOPE).await?;
 
     // Consolidate onto the toolkit-managed group: copy the legacy group(s)'
     // membership into `app_scope_group_<appId>` and scope to THAT, so the old
