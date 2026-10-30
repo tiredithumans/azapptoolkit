@@ -1173,21 +1173,24 @@ pub(crate) async fn remove_selected_item_permission_with(
 
 // ---------------- Site-permission sweep (reverse lookup) ----------------
 
-/// In-flight cap on concurrent *chunk tasks*, each a `$batch` fan-out over up
-/// to [`SWEEP_BATCH`] sites — so up to `SWEEP_CONCURRENCY × SWEEP_BATCH` site
-/// reads, in `$batch` POSTs of 20, are in flight, not six single reads.
-/// SharePoint throttles harder than the directory endpoints, so this stays
-/// below the audit's initial cap, and the `ConcurrencyThrottle` halves it on
-/// 429s. The per-request retry (`scoped_get_retried` / the batch transport)
-/// absorbs a transient 429 with `Retry-After` honored; only a *persistently*
-/// failing site lands in `sites_failed`.
-const SWEEP_CONCURRENCY: usize = 6;
-/// Sites resolved per progress step. The Graph `$batch` cap is 20 sub-requests,
-/// and `batch_list_site_permissions` chunks internally, so this is the
-/// **cancellation and progress** granularity: small enough that Cancel feels
-/// immediate and a whole-batch failure costs one step, large enough that the
-/// batching win isn't given back in round trips.
-const SWEEP_BATCH: usize = 100;
+/// In-flight cap on sweep tasks — and so on `$batch` POSTs, since a task is ONE
+/// POST of [`SWEEP_BATCH`] site reads. 24 × 20 = 480 site reads in flight at
+/// most: the peak the sweep already had when a task was 100 sites, read by the
+/// graph client four POSTs at a time (6 tasks × 4 POSTs × 20). What changed is
+/// what the adaptive `ConcurrencyThrottle` steers. It halves POSTs now, down to
+/// ONE (20 reads) at its floor; with 100-site tasks a halving dropped four POSTs
+/// at a time and the floor still kept four (80 reads) in flight, on the endpoint
+/// family that throttles hardest. The per-request retry (`scoped_get_retried` /
+/// the batch transport) absorbs a transient 429 with `Retry-After` honored;
+/// only a *persistently* failing site lands in `sites_failed`.
+const SWEEP_CONCURRENCY: usize = 24;
+/// Sites per sweep task: Graph's `$batch` limit of 20 sub-requests, so a task
+/// is exactly one POST. That makes the POST the unit of progress, of Cancel and
+/// of a failure. `batch_list_site_permissions` fails as a whole when any one of
+/// its POSTs fails for good, so a 100-site task threw away up to four answered
+/// POSTs and re-read all 100 sites one by one; now a failed POST re-reads its
+/// own 20 sites and nothing else ([`read_site_chunk`]).
+const SWEEP_BATCH: usize = 20;
 /// Safety cap on sites per sweep — prevents a pathological tenant from
 /// queueing an unbounded scan. Hitting it is *reported*
 /// (`SiteSweepResult::truncated`, logged at warn), never silent — raise it if
@@ -1249,19 +1252,64 @@ fn fold_site_result(
     }
 }
 
+/// One sweep task: `sites` (at most [`SWEEP_BATCH`], so ONE `$batch` POST)
+/// read in that POST, degrading to per-site reads when it fails for good — the
+/// batched fan-out contract, at the granularity of the POST that failed.
+///
+/// The per-site loop stops on Cancel AND on a dead session. It used to check
+/// Cancel only, and the latch was set only when a whole chunk came back to the
+/// collector, so a session that died mid-fallback ground through the rest of
+/// the chunk, every read failing the same way. Each failure is noted as it
+/// arrives — the POST's own first, since a dead session fails the POST before
+/// any per-site read could succeed — so this task and every other one stop at
+/// their next check. Fewer results than sites means the loop stopped; the
+/// collector folds only the pairs it has.
+async fn read_site_chunk(
+    client: &azapptoolkit_graph::GraphClient,
+    sites: &[Site],
+    cancel: &crate::state::CancelToken,
+    session: &SessionDead,
+) -> Vec<Result<Vec<SitePermission>, azapptoolkit_graph::GraphError>> {
+    let ids: Vec<String> = sites.iter().map(|s| s.id.clone()).collect();
+    match client.batch_list_site_permissions(&ids).await {
+        Ok(results) => results,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                sites = sites.len(),
+                "site sweep: batch failed; falling back to per-site"
+            );
+            session.note_code(err.ui_code());
+            let mut out = Vec::with_capacity(sites.len());
+            for site in sites {
+                if cancel.is_cancelled() || session.is_dead() {
+                    break;
+                }
+                let result = client.list_site_permissions(&site.id).await;
+                if let Err(err) = &result {
+                    session.note_code(err.ui_code());
+                }
+                out.push(result);
+            }
+            out
+        }
+    }
+}
+
 /// Sweeps every enumerable site's application permissions to build the
 /// reverse-lookup index Graph doesn't offer: site → apps ("who can touch this
 /// site?") and, filtered by appId, app → sites (the `Sites.Selected` blind
 /// spot). Enumerates sites via `/sites?search=*` (team/communication sites;
 /// OneDrive personal sites aren't returned by the delegated search endpoint),
-/// then reads `/sites/{id}/permissions` in `$batch` chunks under an adaptive
+/// then reads `/sites/{id}/permissions` in `$batch` POSTs under an adaptive
 /// in-flight cap.
 ///
 /// Long-running: emits `site-sweep-progress` after each chunk of
 /// [`SWEEP_BATCH`] sites and polls its own `AppState.site_sweep_cancel` token
 /// (stopped only by [`cancel_site_sweep`] and by sign-out
 /// (`AppState::forget_tenant`), so no other run's Cancel can abort
-/// it, and it aborts no other run) between dispatches. Per-site read failures increment `sites_failed`
+/// it, and it aborts no other run) between dispatches, and between the per-site
+/// re-reads of a POST that failed. Per-site read failures increment `sites_failed`
 /// rather than aborting or silently reading as "no grants", so coverage is
 /// never overstated. The result is cached (60-minute audit TTL) under a
 /// tenant-prefixed key; a cancelled or partially-failed run is never cached,
@@ -1326,9 +1374,10 @@ pub async fn sweep_site_permissions(
 
     // `/sites/{id}/permissions` is a plain GET, so the sweep reads them in
     // `$batch` POSTs of 20 instead of one request per site — at the 5000-site
-    // cap that is 250 round trips rather than 5000. Chunked so cancellation and
-    // progress stay responsive between batches, and so a whole-batch failure
-    // costs one chunk rather than the run.
+    // cap that is 250 round trips rather than 5000. One task per POST
+    // (`SWEEP_BATCH`), so cancellation and progress stay responsive between
+    // batches, the meter's cap counts POSTs, and a POST that fails for good
+    // costs its own sites' re-reads rather than the run.
     // Chunks are independent and results are folded per-chunk, so order does not
     // matter — dispatch them through the shared driver with the meter as the
     // cap. Previously this loop awaited one chunk at a time, which meant the
@@ -1348,25 +1397,10 @@ pub async fn sweep_site_permissions(
                 return None;
             }
             let client = client.clone();
-            let cancel = cancel.clone();
+            let (cancel, session) = (cancel.clone(), session.clone());
             Some(tokio::spawn(async move {
-                let ids: Vec<String> = chunk.iter().map(|s| s.id.clone()).collect();
-                match client.batch_list_site_permissions(&ids).await {
-                    Ok(results) => (chunk, results),
-                    Err(err) => {
-                        // Whole-batch failure degrades to per-site reads rather
-                        // than losing the chunk (the batched fan-out contract).
-                        tracing::warn!(?err, "site sweep: batch failed; falling back to per-site");
-                        let mut out = Vec::with_capacity(chunk.len());
-                        for site in &chunk {
-                            if cancel.is_cancelled() {
-                                break;
-                            }
-                            out.push(client.list_site_permissions(&site.id).await);
-                        }
-                        (chunk, out)
-                    }
-                }
+                let results = read_site_chunk(&client, &chunk, &cancel, &session).await;
+                (chunk, results)
             }))
         },
         |joined| {
@@ -1377,8 +1411,8 @@ pub async fn sweep_site_permissions(
             for err in results.iter().filter_map(|r| r.as_ref().err()) {
                 session.note_code(err.ui_code());
             }
-            // A degraded chunk cut short by cancellation yields fewer results
-            // than sites; `zip` folds only the pairs that exist.
+            // A degraded chunk cut short by Cancel or a dead session yields
+            // fewer results than sites; `zip` folds only the pairs that exist.
             for (site, result) in chunk.iter().zip(results) {
                 fold_site_result(
                     &mut rows,
@@ -1833,6 +1867,160 @@ mod tests {
         );
         assert_eq!((scanned, failed, rows.len()), (1, 0, 1));
         assert_eq!(rows[0].permission_id, "perm-a");
+    }
+
+    /// The sweep's `$batch` endpoint: a POST carrying any site in `.0` fails
+    /// outright (a 400 — not retried, so the test needs no back-off), and
+    /// every other POST answers each sub-request with an empty grant list.
+    struct SitesBatch(&'static [&'static str]);
+
+    impl wiremock::Respond for SitesBatch {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let body: serde_json::Value = request.body_json().unwrap();
+            let requests = body["requests"].as_array().unwrap();
+            let url = |r: &serde_json::Value| r["url"].as_str().unwrap_or_default().to_string();
+            if requests.iter().any(|r| {
+                self.0
+                    .iter()
+                    .any(|f| url(r).contains(&format!("/sites/{f}/")))
+            }) {
+                return wiremock::ResponseTemplate::new(400);
+            }
+            let responses: Vec<serde_json::Value> = requests
+                .iter()
+                .map(|r| serde_json::json!({ "id": r["id"], "status": 200, "body": { "value": [] } }))
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "responses": responses }))
+        }
+    }
+
+    /// A mock Graph whose `$batch` is [`SitesBatch`]`(fail)` and whose
+    /// per-site `GET /sites/{id}/permissions` answers an empty list, and a
+    /// client on it whose SharePoint bearer is `token`.
+    async fn sweep_graph(
+        fail: &'static [&'static str],
+        token: Arc<dyn azapptoolkit_core::token::BearerProvider>,
+    ) -> (wiremock::MockServer, azapptoolkit_graph::GraphClient) {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/$batch"))
+            .respond_with(SitesBatch(fail))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1\.0/sites/[^/]+/permissions$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            crate::commands::test_support::mock_graph(&server).with_sharepoint_token(token);
+        (server, client)
+    }
+
+    /// The per-site re-reads `server` has seen, by site id.
+    async fn per_site_reads(server: &wiremock::MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::GET)
+            .filter_map(|r| r.url.path().split('/').nth(3).map(str::to_string))
+            .collect()
+    }
+
+    /// One sweep task is one `$batch` POST, so a POST that fails for good
+    /// costs the per-site re-reads of ITS sites and nothing else. Tasks used to
+    /// be 100 sites read in five POSTs, and one failed POST threw away the
+    /// answers already in hand and re-read all 100 sites one by one.
+    #[tokio::test]
+    async fn a_failed_post_re_reads_only_its_own_sites() {
+        let (server, client) = sweep_graph(
+            &["s047"],
+            azapptoolkit_core::token::StaticTokenProvider::new("sp"),
+        )
+        .await;
+        let sites: Vec<Site> = (0..100).map(|i| site(&format!("s{i:03}"))).collect();
+        let cancel = crate::state::CancelFlag::new().claim();
+        let session = SessionDead::new();
+        let mut results = Vec::new();
+        // Chunked as the sweep chunks them.
+        for chunk in sites.chunks(SWEEP_BATCH) {
+            results.extend(read_site_chunk(&client, chunk, &cancel, &session).await);
+        }
+
+        let posts = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .count();
+        assert_eq!(posts, 5, "one POST per task");
+        let expected: Vec<String> = (40..60).map(|i| format!("s{i:03}")).collect();
+        assert_eq!(
+            per_site_reads(&server).await,
+            expected,
+            "only the failed POST's own sites are re-read"
+        );
+        assert_eq!(results.len(), 100);
+        assert!(results.iter().all(Result::is_ok));
+        assert!(!session.is_dead());
+    }
+
+    /// The per-site fallback stops on a dead session — its own failure as it
+    /// arrives, or one another task latched — instead of grinding through the
+    /// rest of the chunk with every read failing the same way.
+    #[tokio::test]
+    async fn a_dead_session_stops_the_per_site_fallback() {
+        let sites: Vec<Site> = (0..SWEEP_BATCH)
+            .map(|i| site(&format!("s{i:03}")))
+            .collect();
+        let cancel = crate::state::CancelFlag::new().claim();
+
+        // The bearer outlives the POST and one re-read, then dies: the second
+        // re-read fails without a request, latches the session and ends the loop.
+        let (server, client) =
+            sweep_graph(&["s000"], crate::commands::test_support::dies_after(2)).await;
+        let session = SessionDead::new();
+        let results = read_site_chunk(&client, &sites, &cancel, &session).await;
+        assert!(session.is_dead());
+        assert_eq!(results.len(), 2, "the loop stopped at the failure");
+        assert_eq!(
+            results[1].as_ref().err().map(|e| e.ui_code()),
+            Some("refresh_missing")
+        );
+        assert_eq!(per_site_reads(&server).await, ["s000"]);
+
+        // Another task already latched it: the failed POST re-reads nothing.
+        let (server, client) = sweep_graph(
+            &["s000"],
+            azapptoolkit_core::token::StaticTokenProvider::new("sp"),
+        )
+        .await;
+        let session = SessionDead::new();
+        session.note_code("refresh_missing");
+        let results = read_site_chunk(&client, &sites, &cancel, &session).await;
+        assert!(results.is_empty());
+        assert!(per_site_reads(&server).await.is_empty());
+
+        // Cancel stops it the same way.
+        let (server, client) = sweep_graph(
+            &["s000"],
+            azapptoolkit_core::token::StaticTokenProvider::new("sp"),
+        )
+        .await;
+        let flag = crate::state::CancelFlag::new();
+        let stopped = flag.claim();
+        flag.cancel();
+        let results = read_site_chunk(&client, &sites, &stopped, &SessionDead::new()).await;
+        assert!(results.is_empty());
+        assert!(per_site_reads(&server).await.is_empty());
     }
 
     #[test]
