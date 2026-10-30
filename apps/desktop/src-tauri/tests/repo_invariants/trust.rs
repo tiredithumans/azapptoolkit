@@ -1612,12 +1612,13 @@ fn first_app_id_feed(body: &str, sinks: &BTreeMap<String, usize>) -> Option<(usi
 
 /// `(commands whose app_id reaches a key, offenders)` over `modules`.
 ///
-/// The sinks are the keyed client reads plus, to a fixpoint, every
-/// non-command `fn` under `commands/` with an `app_id` parameter that hands it
-/// to a sink without calling [`APP_ID_VALIDATOR`] itself. A command with an
-/// `app_id` parameter that hands it to a sink is an offender unless it calls
-/// the validator before the first such call. Offenders are `module::fn (into
-/// `sink`)`.
+/// One rule for helpers and commands: a function that hands its `app_id` to a
+/// sink has checked it only when it calls [`APP_ID_VALIDATOR`] before its
+/// first such hand-off. The sinks are the keyed client reads plus, to a
+/// fixpoint, every non-command `fn` under `commands/` with an `app_id`
+/// parameter that hands it on unchecked; a helper that checks only after
+/// relaying is a sink. A command that hands its `app_id` on unchecked is an
+/// offender, as `module::fn (into `sink`)`.
 fn unchecked_app_id_commands(
     modules: &[(String, String)],
     commands: &BTreeSet<String>,
@@ -1627,19 +1628,22 @@ fn unchecked_app_id_commands(
         .iter()
         .flat_map(|(module, src)| functions_in(src).into_iter().map(|f| (module.as_str(), f)))
         .collect();
-    let validates = |f: &Function| first_call(&f.body, APP_ID_VALIDATOR).is_some();
+    let checked_before = |f: &Function, feed: usize| {
+        first_call(&f.body, APP_ID_VALIDATOR).is_some_and(|at| at < feed)
+    };
     let mut sinks = keyed.clone();
     loop {
         let before = sinks.len();
         for (_, f) in &fns {
-            if commands.contains(&f.name)
-                || sinks.contains_key(&f.name)
-                || !takes_app_id(&f.params)
-                || validates(f)
+            if commands.contains(&f.name) || sinks.contains_key(&f.name) || !takes_app_id(&f.params)
             {
                 continue;
             }
-            if first_app_id_feed(&f.body, &sinks).is_some() {
+            // Re-judged every round: a callee that turns into a sink can move
+            // the first hand-off ahead of the check.
+            if let Some((feed, _)) = first_app_id_feed(&f.body, &sinks)
+                && !checked_before(f, feed)
+            {
                 sinks.insert(f.name.clone(), list_items(&f.params).len());
             }
         }
@@ -1657,7 +1661,7 @@ fn unchecked_app_id_commands(
             continue;
         };
         found += 1;
-        if !first_call(&f.body, APP_ID_VALIDATOR).is_some_and(|at| at < feed) {
+        if !checked_before(f, feed) {
             offenders.push(format!("{module}::{} (into `{sink}`)", f.name));
         }
     }
@@ -1681,12 +1685,10 @@ fn unchecked_app_id_commands(
 /// an `app_id` parameter that hands it to one, to a fixpoint. Blind spots: an
 /// app id under another name (`client_id`) or in a struct field, a call
 /// through a closure or a trait object, and a closure's `|a, b|` read as two
-/// arguments. A relaying helper counts as checked when it calls
-/// `require_app_id` anywhere in its body, while a command must call it before
-/// its first hand-off, so a command should check the id before passing it on.
-/// And only `commands/` and `azapptoolkit-graph/src/client/` are scanned: a
-/// keyed read built elsewhere (`client.rs` itself, another crate) or a
-/// relaying helper outside `commands/` is not seen.
+/// arguments; and only `commands/` and `azapptoolkit-graph/src/client/` are
+/// scanned, so a keyed read built elsewhere (`client.rs` itself, another crate)
+/// or a relaying helper outside `commands/` is not seen. A helper and a command
+/// are held to the same check: `require_app_id` before the first hand-off.
 #[test]
 fn every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache() {
     let graph: Vec<Function> = path_splice_sources()
@@ -1730,9 +1732,10 @@ fn every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache() {
 }
 
 /// The app-id rule fires on a command that hands its `app_id` to a keyed read
-/// directly, through helpers, or before its check — and not on a field read
-/// off a Graph object, on Exchange's same-named three-argument registration,
-/// or through a helper that checks the id itself.
+/// directly, through helpers, before its check, or through a helper that
+/// checks only after relaying it — and not on a field read off a Graph object,
+/// on Exchange's same-named three-argument registration, or through a helper
+/// that checks the id before it relays it.
 #[test]
 fn the_app_id_rule_fires_on_an_unchecked_command() {
     let module = r#"
@@ -1780,6 +1783,17 @@ pub async fn through_a_checking_helper(tenant_id: String, app_id: String) -> Res
     guarded(&client, &app_id).await
 }
 
+async fn late(client: &GraphClient, app_id: &str) -> Result<(), UiError> {
+    held(client, app_id).await?;
+    crate::commands::guid::require_app_id(app_id)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn through_a_late_checking_helper(tenant_id: String, app_id: String) -> Result<(), UiError> {
+    late(&client, &app_id).await
+}
+
 #[tauri::command]
 pub async fn from_graph(tenant_id: String, app_id: String, object_id: String) -> Result<(), UiError> {
     let app = client.get_application(&object_id).await?;
@@ -1796,6 +1810,7 @@ pub async fn from_graph(tenant_id: String, app_id: String, object_id: String) ->
         "checked_late",
         "through_helpers",
         "through_a_checking_helper",
+        "through_a_late_checking_helper",
         "from_graph",
     ]
     .map(str::to_string)
@@ -1811,8 +1826,9 @@ pub async fn from_graph(tenant_id: String, app_id: String, object_id: String) ->
     let (found, offenders) = unchecked_app_id_commands(&modules, &commands, &keyed);
 
     assert_eq!(
-        found, 4,
-        "direct, checked, checked_late and through_helpers hand their app_id to a key"
+        found, 5,
+        "direct, checked, checked_late, through_helpers and through_a_late_checking_helper \
+         hand their app_id to a key"
     );
     assert_eq!(
         offenders,
@@ -1820,6 +1836,7 @@ pub async fn from_graph(tenant_id: String, app_id: String, object_id: String) ->
             "commands/fixture.rs::direct (into `get_service_principal_by_app_id_lean`)",
             "commands/fixture.rs::checked_late (into `get_service_principal_by_app_id`)",
             "commands/fixture.rs::through_helpers (into `relay`)",
+            "commands/fixture.rs::through_a_late_checking_helper (into `late`)",
         ]
     );
     assert_eq!(
