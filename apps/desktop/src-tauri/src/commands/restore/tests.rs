@@ -3828,6 +3828,13 @@ async fn a_tagged_api_pre_authorizing_a_client_the_backup_does_not_list_is_not_a
         "{}",
         refusal.reason
     );
+    // A stale entry (a client deleted since an earlier run) refuses the same
+    // way, so the item says how to clear one.
+    assert!(
+        refusal.reason.contains("stale entry") && refusal.reason.contains("Expose an API tab"),
+        "{}",
+        refusal.reason
+    );
     assert!(
         requests(&server, "POST", "/applications").await.is_empty(),
         "not created again"
@@ -4012,6 +4019,195 @@ async fn a_run_that_stops_in_pass_1_takes_no_pending_adoption() {
             .is_empty(),
         "no write to an adoption the run never settled"
     );
+}
+
+/// A read token that serves bearers until `dead` is set, then fails with the
+/// re-auth-fatal `refresh_missing`: a session that dies where a mock says.
+struct DiesWhen(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl azapptoolkit_core::token::BearerProvider for DiesWhen {
+    async fn bearer(&self) -> Result<String, azapptoolkit_core::token::TokenError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(azapptoolkit_core::token::TokenError::new(
+                "refresh_missing",
+                "gone",
+            ))
+        } else {
+            Ok("tok".into())
+        }
+    }
+}
+
+/// A session that dies while Pass 1 decides the LAST app in the file ends the
+/// loop as if it had finished. That app is refused for its failed read (its
+/// own item), and judging the pending API that pre-authorizes it against a
+/// remap without it would refuse a legitimate app as not provably an earlier
+/// run's. The run stopped, so it takes no pending adoption: the API gets no
+/// item and no write, and its re-run decides it.
+#[tokio::test]
+async fn a_session_that_dies_on_the_last_app_takes_no_pending_adoption() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let server = MockServer::start().await;
+    mount_tag_lookup(
+        &server,
+        SRC_A,
+        serde_json::json!({
+            "id": "obj-a",
+            "appId": "app-a",
+            "displayName": "App A",
+            "createdDateTime": "2026-01-02T00:00:00Z",
+            "api": {
+                "preAuthorizedApplications": [
+                    { "appId": "app-b", "delegatedPermissionIds": ["scope-1"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    // The client is last, and the session dies as its tag lookup answers, so
+    // its owner read fails re-auth-fatally.
+    let dead = Arc::new(AtomicBool::new(false));
+    let dies = dead.clone();
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param(
+            "$filter",
+            format!("tags/any(t:t eq '{}')", restore_marker(SRC_B)),
+        ))
+        .respond_with(move |_: &Request| {
+            dies.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "obj-b",
+                    "appId": "app-b",
+                    "displayName": "App B",
+                    "createdDateTime": "2026-01-02T00:00:00Z"
+                }]
+            }))
+        })
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = GraphClient::with_base_url(
+        "tenant-test",
+        Arc::new(DiesWhen(dead)),
+        azapptoolkit_core::token::StaticTokenProvider::new("tok"),
+        azapptoolkit_core::cache::Cache::new(),
+        server.uri(),
+    );
+    let backup = manifest(vec![
+        AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "App A".into(),
+            has_service_principal: true,
+            pre_authorized_applications: vec![pre_authorized(SRC_B, &["scope-1"])],
+            ..Default::default()
+        },
+        AppRegistrationBackup {
+            source_app_id: SRC_B.into(),
+            display_name: "App B".into(),
+            ..Default::default()
+        },
+    ]);
+
+    let (report, effects) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(report.session_expired && report.cancelled, "{report:?}");
+    assert!(report.apps.is_empty(), "{report:?}");
+    assert!(!effects.created_any);
+    // The client's item is its failed read; the API has none.
+    assert_eq!(
+        report
+            .manual_items
+            .iter()
+            .map(|m| m.display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["App B"],
+        "{:?}",
+        report.manual_items
+    );
+    assert!(
+        requests(&server, "POST", "/servicePrincipals")
+            .await
+            .is_empty(),
+        "no write to the pending API"
+    );
+}
+
+/// The pending adoptions are taken one service principal at a time after the
+/// loop, and Cancel stops that loop too: a cancel landing during the first
+/// one's service-principal create leaves the second with no write. Both are
+/// this run's by then, so both are reported, unwired.
+#[tokio::test]
+async fn a_cancel_while_pending_adoptions_are_taken_stops_at_the_next_one() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    for (src, tag) in [(SRC_A, "a"), (SRC_C, "c")] {
+        mount_tag_lookup(
+            &server,
+            src,
+            serde_json::json!({
+                "id": format!("obj-{tag}"),
+                "appId": format!("app-{tag}"),
+                "displayName": format!("App {}", tag.to_ascii_uppercase()),
+                "createdDateTime": "2026-01-02T00:00:00Z",
+                "api": {
+                    "preAuthorizedApplications": [
+                        { "appId": "foreign-client", "delegatedPermissionIds": ["scope-1"] }
+                    ]
+                }
+            }),
+        )
+        .await;
+    }
+    // The operator cancels while the first service principal is created.
+    Mock::given(method("POST"))
+        .and(path("/servicePrincipals"))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            flag.cancel();
+            ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "sp-new",
+                "appId": body["appId"],
+                "displayName": ""
+            }))
+        })
+        .mount(&server)
+        .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let pending_app = |src: &str, name: &str| AppRegistrationBackup {
+        source_app_id: src.into(),
+        display_name: name.into(),
+        has_service_principal: true,
+        pre_authorized_applications: vec![pre_authorized("foreign-client", &["scope-1"])],
+        ..Default::default()
+    };
+    let backup = manifest(vec![
+        pending_app(SRC_A, "App A"),
+        pending_app(SRC_C, "App C"),
+    ]);
+
+    let (report, _) = restore(&client, &backup, cancel, &[]).await;
+
+    assert!(report.cancelled);
+    let created_for: Vec<serde_json::Value> = requests(&server, "POST", "/servicePrincipals")
+        .await
+        .iter()
+        .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+        .map(|b| b["appId"].clone())
+        .collect();
+    assert_eq!(
+        created_for,
+        [serde_json::json!("app-a")],
+        "the second pending adoption gets no write after the cancel"
+    );
+    assert_reported_unwired(&report, &["a", "c"]);
+    assert!(report.apps.iter().all(|a| a.adopted), "{report:?}");
+    assert!(report.manual_items.is_empty(), "{:?}", report.manual_items);
 }
 
 /// A run that creates nothing but re-binds a managed identity's roles

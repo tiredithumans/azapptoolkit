@@ -379,22 +379,27 @@ POSTs) and Pass 2 finishes it (`RestoredApp.adopted`).
 write.** Pass 2 replaces an adopted app's authentication and Expose-an-API
 settings only when the manifest has some (`preAuthorizedApplications` only when
 it lists a client), and a failed PATCH is only a warning, so whatever a planter
-set first would outlive the restore: a reply URL or the public-client flag that
-receives the tokens Pass 3's consent covers, or a pre-authorized client that
-gets the restored API's scopes with no consent at all. So the tag lookup also
-selects the `web`/`spa`/`publicClient`/`isFallbackPublicClient` and
+set first would outlive the restore: a reply URL that receives the tokens Pass
+3's consent covers, the public-client flag that lets anyone obtain them through
+a public client flow (device code, say) with no secret, or a pre-authorized
+client that gets the restored API's scopes with no consent at all. So the tag
+lookup also selects the `web`/`spa`/`publicClient`/`isFallbackPublicClient` and
 `identifierUris`/`api` blocks, read the way a backup captures them
-(`TagHit::from_json`, through `extract_auth_fields` and `ApplicationExposeApi`:
-an absent block reads as empty, and one that does not parse fails the lookup),
-and `adoption_for` refuses a hit holding a setting Pass 2 would not write
-(`foreign_settings`, built on Pass 2's own helpers): a redirect URI on a
-platform the manifest does not list it for, or one `core::redirect` rejects; a
-logout URL other than the manifest's; an implicit-grant or public-client flag
-the manifest has off; an identifier URI outside the manifest's as
-`rewrite_identifier_uris` maps them; a scope that differs from the manifest's in
-any field (its id ignoring case, an empty text as absent). Each list compares as
-a set and only extras count: what the hit lacks is what an earlier run that
-stopped before Pass 2 left, and Pass 2 writes it now.
+(`TagHit::from_json`). The typed
+app and the Expose-an-API block (`ApplicationExposeApi`) fail the lookup when
+they do not parse. The authentication blocks go through `extract_auth_fields`,
+which never fails: a missing or malformed redirect list reads as empty and a
+missing or non-boolean flag as off, as in the backup. `adoption_for` then
+refuses a hit holding a setting Pass 2 would not write (`foreign_settings`,
+built on Pass 2's own helpers): a redirect URI on a platform the manifest does
+not list it for, or one `core::redirect` rejects; a logout URL other than the
+manifest's; an implicit-grant or public-client flag the manifest has off; an
+identifier URI outside the manifest's as `rewrite_identifier_uris` maps them; a
+scope that differs from the manifest's in any field (its id ignoring case, an
+empty text as absent). Each list compares as a set and only extras count: what
+the hit lacks is what an earlier run that stopped before Pass 2 left, and Pass
+2 writes it now. `signInAudience` is neither compared nor written on an adopted
+app (Pass 1 sets it only on a create), a known gap tracked as a follow-up.
 
 Pre-authorized clients wait for the end of Pass 1, since a client this backup
 recreates has its destination appId only once Pass 1 reaches it, and the client
@@ -404,10 +409,15 @@ live list names a client, or a scope for one, outside Pass 2's own
 `plan_pre_authorized` over the final remap (`refuse_foreign_pre_authorized`,
 ignoring case). A refusal takes that app's appId out of the remap, which can
 leave another pending app's client unaccounted for, so the check repeats until
-nothing changes. A run that stops before the end of Pass 1 takes no pending
-adoption and reports none; its re-run decides them. A setting the operator
-changed after an earlier run is refused like a credential they added, with the
-same two ways out.
+nothing changes. The check stays strict about a stale entry as well: one an
+earlier run wrote for a client since deleted, or deleted and recreated as the
+runbook advises, names a dead appId that cannot be told from a planted one, so
+it refuses the API too, and its item says to remove that entry from the app's
+Expose an API tab and run the restore again. A run that is cancelled, or whose
+session dies, during Pass 1 (on its last app too: the cancel token and the
+session latch decide, not the loop) takes no pending adoption and reports none;
+its re-run decides them. A setting the operator changed after an earlier run is
+refused like a credential they added, with the same two ways out.
 
 A failed lookup — of the tag, of the owners, of the federated credentials or of the service principal — **fails closed** into a
 `ManualItem` too: creating blind is how a re-run duplicates the estate, and

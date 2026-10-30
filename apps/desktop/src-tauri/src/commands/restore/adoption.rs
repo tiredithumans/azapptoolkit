@@ -847,7 +847,10 @@ pub(super) fn foreign_pre_authorized(
 /// manifest has one (and only if its PATCH succeeds). A client of this backup
 /// has its destination appId only if this run created or adopted it, so
 /// refusing one adoption can leave another's entry unaccounted for: this
-/// repeats until nothing changes, taking each refused app out of `remap`.
+/// repeats until nothing changes, taking each refused app out of `remap`. It
+/// stays strict about a stale entry too, one an earlier run wrote for a client
+/// since deleted or recreated: a dead appId cannot be told from a planted one,
+/// so the reason says how to clear it.
 pub(super) fn refuse_foreign_pre_authorized(
     pending: &[PendingAdoption],
     created: &[CreatedApp],
@@ -871,14 +874,17 @@ pub(super) fn refuse_foreign_pre_authorized(
                 p.at,
                 format!(
                     "'{}' (appId {}) carries this app's restore tag, but it pre-authorizes \
-                     client(s) the backup does not list for it ({}), so it is not provably the \
-                     app an earlier run created. It was not adopted (that would give it this \
-                     app's permissions and admin consent) and not created again. A client that \
-                     is itself in this backup counts only once this run restores it, so if one \
-                     is, settle that app's own item first. If you added them yourself after an \
-                     earlier run, finish this app by hand or remove them and run the restore \
-                     again; otherwise find out who added them, and delete the app to have the \
-                     restore recreate it.",
+                     client(s) this restore would not ({}), so it is not provably the app an \
+                     earlier run created. It was not adopted (that would give it this app's \
+                     permissions and admin consent) and not created again. A client that is \
+                     itself in this backup counts only under the appId this run restored it \
+                     as: if one listed is a client this run did not restore, settle that app's \
+                     own item first; if it is a stale entry an earlier run wrote for a client \
+                     since deleted (or deleted and recreated), remove that entry from this \
+                     app's Expose an API tab and run the restore again. If you added a client \
+                     yourself after an earlier run, finish this app by hand or remove it and \
+                     run the restore again; otherwise find out who added it, and delete the app \
+                     to have the restore recreate it.",
                     c.backup.display_name,
                     c.new_app_id,
                     foreign.join(", ")
@@ -916,9 +922,9 @@ async fn ensure_adopted_service_principal(
 /// An adoption whose candidate pre-authorizes clients is taken only after the
 /// loop, once every app has its destination appId
 /// ([`refuse_foreign_pre_authorized`]), and has no write before then — not
-/// even its service principal. A run that stops before the end of the loop
-/// takes none of them: they are left to its re-run, unreported, like the apps
-/// it never reached.
+/// even its service principal. A run cancelled, or whose session died, in
+/// this pass (on its last app too) takes none of them: they are left to its
+/// re-run, unreported, like the apps it never reached.
 ///
 /// Stops at the next app on `cancel` and on a dead session, flagging the report
 /// cancelled either way, and emits one progress tick per app it settles.
@@ -938,11 +944,9 @@ pub(super) async fn pass1_create_or_adopt(
     // passes 2–3 wire exactly those.
     let mut created: Vec<CreatedApp> = Vec::new();
     let mut pending: Vec<PendingAdoption> = Vec::new();
-    let mut stopped = false;
     for app in &backup.app_registrations {
         if cancel.is_cancelled() {
             report.cancelled = true;
-            stopped = true;
             break;
         }
         // A dead session makes every remaining create fail identically, so the
@@ -950,7 +954,6 @@ pub(super) async fn pass1_create_or_adopt(
         // remaining app and report them as if the tenant had rejected them.
         if session.is_dead() {
             report.cancelled = true;
-            stopped = true;
             break;
         }
         // Has an earlier run of this restore already created it? Every read
@@ -1051,7 +1054,16 @@ pub(super) async fn pass1_create_or_adopt(
     }
 
     // Settle the pending adoptions now that every app has its destination
-    // appId, or none of them when the loop stopped short of that.
+    // appId, or none of them if the run stopped. Asked of the token and the
+    // latch, not of the loop: a cancel or a dead session during the LAST app
+    // ends the loop as if it had finished, and that app may have been refused
+    // for it. Judged against a remap without it, a legitimate pending app
+    // that pre-authorizes it would be refused, with a reason that sends the
+    // operator after a problem that does not exist.
+    let stopped = cancel.is_cancelled() || session.is_dead();
+    if stopped {
+        report.cancelled = true;
+    }
     let held: HashSet<usize> = if stopped {
         for p in &pending {
             app_id_remap.remove(&created[p.at].backup.source_app_id);
