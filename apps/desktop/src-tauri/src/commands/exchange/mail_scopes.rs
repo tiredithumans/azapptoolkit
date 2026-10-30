@@ -492,6 +492,8 @@ pub async fn get_mail_scopes_for_principal(
     app_id: String,
     permissions: Vec<PrincipalPermission>,
 ) -> Result<Vec<MailScopeEntry>, UiError> {
+    // It keys the service-principal read below and this verdict's cache entry.
+    crate::commands::guid::require_app_id(&app_id)?;
     // Resolve each held permission against the resource that exposes it, and
     // keep only the confinable ones. The value-only gate this replaces would
     // accept an Office 365 Exchange Online `Mail.Read` — a permission no

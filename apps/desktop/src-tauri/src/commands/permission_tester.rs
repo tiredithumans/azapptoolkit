@@ -53,6 +53,7 @@ use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_roles::{
     ResourceRoles, mailbox_resource_roles, resolve_grant, sharepoint_resource_roles,
 };
+use crate::commands::guid::require_app_id;
 use crate::commands::progress::emit_progress;
 use crate::commands::sharepoint::{sharepoint_client_checked, sharepoint_item_err};
 use crate::dto::UiError;
@@ -403,7 +404,7 @@ fn synthesize(mailbox: &str, entra: &EntraReach, rbac: &RbacReach) -> Permission
 /// propagation cache; `InScope` honored). A principal the RBAC cmdlet can't
 /// resolve (a managed identity isn't in Exchange's SP store) has no RBAC
 /// layer at all; any other failure leaves that layer indeterminate. Never a
-/// thrown error.
+/// thrown error, except for an `app_id` that is not a GUID (`invalid_app_id`).
 #[tauri::command]
 pub async fn test_mailbox_access(
     state: State<'_, AppState>,
@@ -411,6 +412,7 @@ pub async fn test_mailbox_access(
     app_id: String,
     mailbox: String,
 ) -> Result<PermissionTestResult, UiError> {
+    require_app_id(&app_id)?;
     let mailbox = mailbox.trim().to_string();
     let graph = state.graph_for(&tenant_id);
     let exo = match exchange_client(&state, &tenant_id) {
@@ -1197,6 +1199,7 @@ pub async fn test_site_access(
     app_id: String,
     site_url: String,
 ) -> Result<PermissionTestResult, UiError> {
+    require_app_id(&app_id)?;
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
 
     // Read the principal's grants once — both paths below need them, and a

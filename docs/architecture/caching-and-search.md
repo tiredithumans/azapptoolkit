@@ -546,6 +546,14 @@ DELETE/PATCH of a service-principal object, every app DELETE and every restore t
 sweeps. **`invalidate_app_lists` does not touch this kind** — don't rely on it for SP-field
 freshness.
 
+The two per-app keys share the bucket: `{tenant}|{appId}` (the full object) and
+`{tenant}|{appId}|lean` (the audit's three-field projection), so an `appId` of `X|lean` is app X's
+lean key — a miss stored "no service principal" over it, and a hit handed a full-SP caller the
+projection. appIds are GUIDs, and every command whose webview `app_id` reaches either read checks
+that first (`guid::require_app_id`, `invalid_app_id`); `trust.rs::every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache`
+derives the reads from the key builders and the command-layer helpers to a fixpoint, so a new
+command that hands an unchecked `app_id` to one fails CI.
+
 The read-throughs are watched. `invalidate_prefix` bumps only the watches it finds, so a lookup
 that was in flight when a sweep landed used to store the pre-sweep object for the TTL — the two
 per-appId SP lookups, `resolve_resource_sp`, both grant matrices, the sign-in activity reads and
