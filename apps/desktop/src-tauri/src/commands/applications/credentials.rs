@@ -194,16 +194,28 @@ pub async fn generate_self_signed_certificate(
     let validity = input
         .validity_days
         .unwrap_or(crate::dto::credentials::DEFAULT_CERT_LIFETIME_DAYS);
-    let mut generated = crate::cert::generate_self_signed(&input.subject, i64::from(validity))
-        .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
+    // On the blocking pool: RSA-2048 key generation is a prime search with a
+    // long tail, and the PKCS#12 build adds two PBKDF2 derivations. Inline,
+    // that CPU-bound run would hold a tokio worker from start to finish.
+    let subject = input.subject.clone();
+    let mut generated = tauri::async_runtime::spawn_blocking(move || {
+        crate::cert::generate_self_signed(&subject, i64::from(validity))
+    })
+    .await
+    .map_err(|e| {
+        UiError::validation(
+            "cert_generation_failed",
+            format!("certificate generation did not finish: {e}"),
+        )
+    })?
+    .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
 
     let expires_dt =
         chrono::DateTime::<chrono::Utc>::from_timestamp(generated.not_after.unix_timestamp(), 0);
 
     let client = state.graph_for(&tenant_id);
-    // `GeneratedCert: Drop` (zeroizes `private_key_pem` on drop), which means
-    // none of its `String` fields can be moved out — we extract each via
-    // `mem::take`, leaving an empty husk for `Drop` to zeroize harmlessly.
+    // `GeneratedCert: Drop`, so its fields cannot be moved out; each one
+    // handed on is taken with `mem::take` instead.
     let new_cred = NewKeyCredential {
         display_name: Some(input.subject.clone()),
         kind: Some("AsymmetricX509Cert".into()),
@@ -212,17 +224,24 @@ pub async fn generate_self_signed_certificate(
         end_date_time: expires_dt,
         ..Default::default()
     };
+    // A refusal here returns with the key, the bundle and its password still
+    // in `generated`, and its `Drop` wipes all three.
     client
         .add_key_credential(&input.object_id, new_cred)
         .await?;
     invalidate_app_credentials(&state.cache, &tenant_id, &input.object_id);
 
+    // The one-time reveal. The plaintext has to reach the webview, so the
+    // secrets move out here, and the copies IPC makes after this returns
+    // (Tauri's serialized reply, the webview's strings) are beyond any wipe.
+    // The PKCS#12 DER is encoded from a borrow: it stays in `generated`, whose
+    // `Drop` wipes it on return.
     Ok(GeneratedCertificateResult {
         thumbprint: std::mem::take(&mut generated.thumbprint),
         thumbprint_sha256: std::mem::take(&mut generated.thumbprint_sha256),
         certificate_pem: std::mem::take(&mut generated.cert_pem),
         private_key_pem: std::mem::take(&mut generated.private_key_pem),
-        pfx_base64: STANDARD.encode(std::mem::take(&mut generated.pfx_der)),
+        pfx_base64: STANDARD.encode(&generated.pfx_der),
         pfx_password: std::mem::take(&mut generated.pfx_password),
         expires: expires_dt.map(|d| d.to_rfc3339()).unwrap_or_default(),
     })
@@ -1005,6 +1024,32 @@ mod handler_tests {
         );
         assert!(!detail_cached_here(&state), "the credential tier is busted");
         assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// RSA key generation and the PKCS#12 build are CPU-bound, so the command
+    /// runs them on the blocking pool, as the auth service does its keyring
+    /// calls (`keyring_calls_stay_on_the_blocking_pool`). The call must sit on
+    /// the `spawn_blocking` line or, where rustfmt wraps the closure, the line
+    /// right below it.
+    #[test]
+    fn certificate_generation_stays_on_the_blocking_pool() {
+        let source = include_str!("credentials.rs").replace("\r\n", "\n");
+        let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+        let lines: Vec<&str> = production.lines().collect();
+        let mut calls = 0;
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("generate_self_signed(") {
+                continue;
+            }
+            calls += 1;
+            let previous = idx.checked_sub(1).map_or("", |i| lines[i]);
+            assert!(
+                line.contains("spawn_blocking") || previous.contains("spawn_blocking"),
+                "certificate generation outside spawn_blocking: {}",
+                line.trim()
+            );
+        }
+        assert!(calls >= 1, "the scan found no generator call");
     }
 
     #[tokio::test]
