@@ -1334,6 +1334,16 @@ async fn a_conflicting_add_is_retried_once_before_verifying() {
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, ResponseTemplate};
     let (server, exo) = exo_for_consolidation(&["a@contoso.com", "b@contoso.com"]).await;
+    // The pre-copy read finds the managed group empty, so both mailboxes are
+    // added; the verify re-read then lists both.
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-DistributionGroupMember"))
+        .and(body_string_contains(MANAGED))
+        .respond_with(ok_empty())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(body_string_contains("Add-DistributionGroupMember"))
         .and(body_string_contains("b@contoso.com"))
@@ -1443,6 +1453,131 @@ async fn extras_are_not_refused_when_the_managed_group_is_already_the_live_scope
     )
     .await;
     assert!(!out.consolidated, "{warnings:?}");
+}
+
+/// A mailbox the managed group already holds gets no `Add-DistributionGroupMember`:
+/// the pre-copy read is the skip set (case-folded keys), and the post-copy
+/// re-read still decides the repoint. Re-runs are routine — after a Cancel, a
+/// KEPT policy or a refused repoint — and each used to spend one proxied
+/// cmdlet per mailbox to change nothing.
+#[tokio::test]
+async fn a_mailbox_already_in_the_managed_group_is_not_added_again() {
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, ResponseTemplate};
+    let cancel = crate::state::CancelFlag::new().claim();
+    let (defaults, source) = (TenantDefaults::default(), vec!["CN=Src,DC=x".to_string()]);
+
+    // Everything already there, in Exchange's own casing: no add at all, and
+    // the move still verifies and reports both mailboxes copied.
+    let (server, exo) = exo_for_consolidation(&["a@contoso.com", "B@Contoso.com"]).await;
+    let mut warnings = Vec::new();
+    let out = consolidate_scope_group(
+        params(&exo, &defaults, &source, false, None, &cancel),
+        &mut warnings,
+    )
+    .await;
+    assert!(out.consolidated, "{warnings:?}");
+    assert_eq!(out.copied, ["a@contoso.com", "b@contoso.com"]);
+    assert_eq!(
+        sent_cmdlets(&server, "Add-DistributionGroupMember").await,
+        0
+    );
+
+    // Half there: only the missing mailbox is added.
+    let (server, exo) = exo_for_consolidation(&["a@contoso.com", "b@contoso.com"]).await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-DistributionGroupMember"))
+        .and(body_string_contains(MANAGED))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "PrimarySmtpAddress": "a@contoso.com" }]
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut warnings = Vec::new();
+    let out = consolidate_scope_group(
+        params(&exo, &defaults, &source, false, None, &cancel),
+        &mut warnings,
+    )
+    .await;
+    assert!(out.consolidated, "{warnings:?}");
+    assert_eq!(
+        sent_cmdlets(&server, "\"Member\":\"a@contoso.com\"").await,
+        0
+    );
+    assert_eq!(
+        sent_cmdlets(&server, "\"Member\":\"b@contoso.com\"").await,
+        1
+    );
+
+    // The KEPT-policy re-run: the live scope already names the managed group,
+    // so its extra member is the app's current reach, not a refusal — and a
+    // real run still reads the group, to skip what it holds.
+    let (server, exo) =
+        exo_for_consolidation(&["a@contoso.com", "b@contoso.com", "x@contoso.com"]).await;
+    let live = member_of_group_filter(&["CN=Managed,DC=x".to_string()]);
+    let mut warnings = Vec::new();
+    let out = consolidate_scope_group(
+        params(&exo, &defaults, &source, false, Some(&live), &cancel),
+        &mut warnings,
+    )
+    .await;
+    assert!(out.consolidated, "{warnings:?}");
+    assert_eq!(
+        sent_cmdlets(&server, "Add-DistributionGroupMember").await,
+        0
+    );
+}
+
+/// When Cancel stops the copy, the mailboxes the group already held count as
+/// copied (they are there, and none was re-added), and "N of M not copied"
+/// counts only the ones that really are missing.
+#[tokio::test]
+async fn a_stopped_copy_counts_the_mailboxes_already_there_as_copied() {
+    let source_members = many(12);
+    let refs: Vec<&str> = source_members.iter().map(String::as_str).collect();
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    let (server, exo) = exo_for_consolidation_with(
+        &refs,
+        &refs[..4],
+        CancelOnAdd(flag.clone()),
+        azapptoolkit_core::token::StaticTokenProvider::new("t"),
+    )
+    .await;
+    let (defaults, source) = (TenantDefaults::default(), vec!["CN=Src,DC=x".to_string()]);
+    let mut warnings = Vec::new();
+    let out = consolidate_scope_group(
+        params(&exo, &defaults, &source, false, None, &cancel),
+        &mut warnings,
+    )
+    .await;
+    assert!(!out.consolidated && out.incomplete);
+    for present in &refs[..4] {
+        assert!(
+            out.copied.iter().any(|c| c == present),
+            "{present} was already in the group: {:?}",
+            out.copied
+        );
+        assert_eq!(
+            sent_cmdlets(&server, &format!("\"Member\":\"{present}\"")).await,
+            0
+        );
+    }
+    let adds = sent_cmdlets(&server, "Add-DistributionGroupMember").await;
+    assert!(
+        (1..=8).contains(&adds),
+        "the copy started and then stopped: {adds} add(s)"
+    );
+    assert_eq!(out.copied.len() + out.unverified.len(), 12);
+    let missing = out.unverified.len();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains(&format!("({missing} of 12 not copied)"))),
+        "{warnings:?}"
+    );
 }
 
 /// The removal loop counts an identity-less row as failed (never a silent
@@ -1694,6 +1829,7 @@ async fn the_migration_loop_tracks_attempts_and_stops() {
         Ok(MigratedApp {
             item: item(&id),
             stopped: true,
+            retired_dns: Vec::new(),
         })
     })
     .await;
@@ -1713,6 +1849,7 @@ async fn the_migration_loop_tracks_attempts_and_stops() {
             Ok(MigratedApp {
                 item: item(&id),
                 stopped: false,
+                retired_dns: Vec::new(),
             })
         },
     )
@@ -1740,4 +1877,261 @@ fn the_migration_command_invalidates_from_the_run_verdict() {
         "the command must invalidate on `run.should_invalidate(dry_run)`"
     );
     assert!(!body.contains("items.is_empty()"));
+}
+
+/// The command names the retired groups once, from the run's items, after the
+/// run. Pinned at the call site: the two tests below drive the loop and the
+/// pass themselves, so a command that dropped the pass (mapping its items
+/// straight into the report) would pass them and lose every retired group.
+#[test]
+fn the_migration_command_names_retired_groups_after_the_run() {
+    // Normalised: a Windows checkout has CRLF line endings.
+    let src = include_str!("aap_migration.rs").replace("\r\n", "\n");
+    let body = src
+        .split_once("pub async fn migrate_application_access_policies(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("command body");
+    let run = body.find("run_migration_batches(").expect("the run loop");
+    let named = body
+        .find("name_retired_groups(&exo, run.items)")
+        .expect("the command must name the retired groups from the run's items");
+    assert!(run < named, "the groups are named after the run");
+}
+
+/// Exchange answering the retired-group check for four groups: `CN=Shared` is
+/// still named by another app's management scope, `CN=Kept` by a kept legacy
+/// policy, `CN=Free` by nothing, and `CN=Gone` no longer resolves.
+async fn exo_for_retired_groups() -> (wiremock::MockServer, ExchangeClient) {
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let reply = |value: serde_json::Value| {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value }))
+    };
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-ManagementScope"))
+        .respond_with(reply(serde_json::json!([{
+            "Name": "app_scope_other",
+            "RecipientFilter": "MemberOfGroup -eq 'CN=Shared,DC=x'"
+        }])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-ApplicationAccessPolicy"))
+        .respond_with(reply(serde_json::json!([{
+            "Identity": "policy-kept",
+            "AppId": "other-app",
+            "AccessRight": "RestrictAccess",
+            "ScopeName": "Kept"
+        }])))
+        .mount(&server)
+        .await;
+    for name in ["Shared", "Kept", "Free"] {
+        Mock::given(method("POST"))
+            .and(body_string_contains("Get-Group\""))
+            .and(body_string_contains(format!("CN={name},")))
+            .respond_with(reply(serde_json::json!([{
+                "Name": name,
+                "DistinguishedName": format!("CN={name},DC=x")
+            }])))
+            .mount(&server)
+            .await;
+    }
+    // Anything else — `CN=Gone` included — answers empty: not found.
+    Mock::given(method("POST"))
+        .respond_with(reply(serde_json::json!([])))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    let exo = ExchangeClient::with_base_url(
+        azapptoolkit_core::token::StaticTokenProvider::new("t"),
+        "tenant-1",
+        "admin@contoso.com",
+        server.uri(),
+    );
+    (server, exo)
+}
+
+/// The post-run pass names every app's retired groups on ONE read of each
+/// reference authority and one `Get-Group` per distinct group — and each app
+/// gets exactly the list and note its own check reports against the same
+/// state (`retired_scope_groups`, the single-app path the scope move uses),
+/// with the note still its last warning.
+#[tokio::test]
+async fn retired_groups_are_named_in_one_pass_and_match_each_app_s_own_check() {
+    let (server, exo) = exo_for_retired_groups().await;
+    let dn = |name: &str| format!("CN={name},DC=x");
+    let retired: Vec<Vec<String>> = vec![
+        vec![dn("Shared"), dn("Free")],
+        vec![dn("Free"), dn("Kept")],
+        // Not consolidated: its scope still names its groups.
+        Vec::new(),
+        vec![dn("Gone")],
+    ];
+    let apps: Vec<MigratedApp> = retired
+        .iter()
+        .enumerate()
+        .map(|(i, dns)| {
+            let mut item = item(&format!("app-{i}"));
+            item.warnings.push("an earlier note".into());
+            MigratedApp {
+                item,
+                stopped: false,
+                retired_dns: dns.clone(),
+            }
+        })
+        .collect();
+
+    let items = name_retired_groups(&exo, apps).await;
+
+    assert_eq!(sent_cmdlets(&server, "Get-ManagementScope").await, 1);
+    assert_eq!(
+        sent_cmdlets(&server, "Get-ApplicationAccessPolicy").await,
+        1
+    );
+    assert_eq!(
+        sent_cmdlets(&server, "Get-Group\"").await,
+        4,
+        "`CN=Free` is resolved once for both apps that retired it"
+    );
+
+    let note = |groups: &[RetiredScopeGroupDto]| {
+        format!(
+            "{} The toolkit can only check Exchange management scopes and policies — not mail \
+             flow, transport rules, or anything outside Exchange.",
+            retired_groups_note(groups)
+        )
+    };
+    for (item, dns) in items.iter().zip(&retired) {
+        let named: Vec<&str> = item
+            .retired_groups
+            .iter()
+            .map(|g| g.distinguished_name.as_str())
+            .collect();
+        assert_eq!(named, *dns, "{}", item.app_id);
+        let alone = retired_scope_groups(&exo, dns).await;
+        assert_eq!(
+            serde_json::to_value(&item.retired_groups).unwrap(),
+            serde_json::to_value(&alone).unwrap(),
+            "{}: the shared pass reports what the app's own check does",
+            item.app_id
+        );
+        if dns.is_empty() {
+            assert_eq!(item.warnings, ["an earlier note"]);
+        } else {
+            assert_eq!(item.warnings.len(), 2, "{:?}", item.warnings);
+            assert_eq!(item.warnings.last(), Some(&note(&item.retired_groups)));
+        }
+    }
+    let group = |name: &str| {
+        items
+            .iter()
+            .flat_map(|i| &i.retired_groups)
+            .find(|g| g.distinguished_name == dn(name))
+            .expect("named")
+    };
+    assert!(
+        !group("Shared").still_referenced_by.is_empty(),
+        "another app's scope names it"
+    );
+    assert!(
+        !group("Kept").still_referenced_by.is_empty(),
+        "a kept policy names it"
+    );
+    assert!(group("Free").still_referenced_by.is_empty() && group("Free").reference_check_complete);
+    assert!(
+        !group("Gone").reference_check_complete,
+        "a group that no longer resolves is never a clean bill of health"
+    );
+}
+
+/// A whole-tenant run through the real per-app migration: three apps on the
+/// same legacy group each consolidate and repoint, and the two tenant-wide
+/// reference reads happen once, after the run — they used to happen inside
+/// every app's migration.
+#[tokio::test]
+async fn a_whole_tenant_run_reads_the_reference_authorities_once() {
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, ResponseTemplate};
+    let (_g, graph, exo_server, exo) = migration_mocks().await;
+    // Each app's managed group already holds the source's two mailboxes, so
+    // every consolidation verifies; the scope and the SP pointer are new.
+    Mock::given(method("POST"))
+        .and(body_string_contains("Get-DistributionGroupMember"))
+        .and(body_string_contains("app_scope_group_"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [
+                { "PrimarySmtpAddress": "a@contoso.com" },
+                { "PrimarySmtpAddress": "b@contoso.com" }
+            ]
+        })))
+        .mount(&exo_server)
+        .await;
+    for created in ["New-ManagementScope", "New-ServicePrincipal"] {
+        Mock::given(method("POST"))
+            .and(body_string_contains(created))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [{}] })),
+            )
+            .mount(&exo_server)
+            .await;
+    }
+    let defaults = TenantDefaults::default();
+    let cancel = crate::state::CancelFlag::new().claim();
+    let ctx = MigrationContext {
+        graph: &graph,
+        exo: &exo,
+        resources: &[],
+        scope_override: None,
+        tenant_defaults: &defaults,
+        dry_run: false,
+        cancel: &cancel,
+    };
+    let batches: Vec<(String, Vec<ExoApplicationAccessPolicy>)> = ["1", "2", "3"]
+        .iter()
+        .map(|n| {
+            (
+                format!("{}-0000-0000-0000-000000000000", n.repeat(8)),
+                vec![policy()],
+            )
+        })
+        .collect();
+    let run = run_migration_batches(
+        batches,
+        &cancel,
+        &SessionDead::new(),
+        |id, batch| async move { migrate_one(ctx, &id, &batch).await },
+    )
+    .await;
+    assert!(run.failures.is_empty(), "{:?}", run.failures);
+    assert_eq!(run.items.len(), 3);
+    assert!(
+        run.items.iter().all(|a| a.retired_dns == ["CN=Src,DC=x"]),
+        "every app repointed off the policy group"
+    );
+    assert_eq!(
+        sent_cmdlets(&exo_server, "Get-ApplicationAccessPolicy").await,
+        0,
+        "no app reads the tenant's policies itself"
+    );
+
+    let items = name_retired_groups(&exo, run.items).await;
+    assert_eq!(
+        sent_cmdlets(&exo_server, "Get-ApplicationAccessPolicy").await,
+        1
+    );
+    assert_eq!(
+        sent_cmdlets(&exo_server, "\"Get-ManagementScope\",\"Parameters\":{}").await,
+        1,
+        "one list of every management scope, for three apps"
+    );
+    for item in &items {
+        assert_eq!(item.retired_groups.len(), 1, "{}", item.app_id);
+        assert!(
+            item.warnings.last().is_some_and(|w| w.contains("'Src'")),
+            "{:?}",
+            item.warnings
+        );
+    }
 }

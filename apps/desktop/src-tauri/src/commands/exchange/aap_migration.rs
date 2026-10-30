@@ -119,27 +119,84 @@ pub async fn migrate_application_access_policies(
         invalidate_app_detail_state(&state.cache, &tenant_id);
     }
 
+    // Every consolidated app's last step, taken once for the whole run.
+    let items = name_retired_groups(&exo, run.items).await;
     failures.extend(run.failures);
     Ok(AapMigrationReport {
         dry_run,
-        items: run.items,
+        items,
         failures,
         incomplete: run.cancelled,
         unattempted: run.unattempted,
     })
 }
 
-/// One application's migration outcome: the report item, and whether Cancel or
-/// a dead session stopped it partway (its member copy) — which makes the whole
-/// run `incomplete` even when it was the only or last application.
+/// One application's migration outcome: the report item, whether Cancel or a
+/// dead session stopped it partway (its member copy) — which makes the whole
+/// run `incomplete` even when it was the only or last application — and the
+/// legacy groups its repoint retired, which [`name_retired_groups`] names once
+/// the run is over.
 pub(super) struct MigratedApp {
     pub(super) item: AapMigrationItem,
     pub(super) stopped: bool,
+    /// The policy groups' DNs, when the scope was repointed off them onto the
+    /// managed group; empty otherwise (a plan, a stopped copy, or a scope that
+    /// still names them, so they are in use by definition).
+    pub(super) retired_dns: Vec<String>,
+}
+
+/// Names the legacy group(s) each consolidated app's repoint retired, so "the
+/// policy group is left in place for you to clean up" says WHICH one — the
+/// migration's last step, taken ONCE after the run rather than at the end of
+/// every [`migrate_one`].
+///
+/// Per app, the check read every management scope and every Application Access
+/// Policy in the tenant. The apps run one after another, so a whole-tenant run
+/// paid both tenant-wide reads once per consolidated app, on a scope list that
+/// grows by one per migrated app. Now it is one read of each and one `Get-Group`
+/// per distinct group ([`retired_scope_groups_per_app`]); each app's list and
+/// note are what its own check would have reported against the same state, and
+/// the note stays the item's last warning.
+///
+/// Read after the run, on purpose. The run-start policy read cannot stand in —
+/// the run deletes policies and creates or repoints scopes. And checking app by
+/// app could only over-report: a policy that named the same legacy group read
+/// as a live reference to an earlier app even after a later app's migration
+/// removed it. Now the note reflects the tenant the operator reads it against,
+/// and the delete re-verifies live regardless (`delete_exchange_scope_group`).
+/// Taken after a Cancel too (read-only, and the apps that finished have groups
+/// to name). After the session died, the reads fail and every group comes back
+/// with an incomplete check: "review the notes", never "can be cleaned up".
+pub(super) async fn name_retired_groups(
+    exo: &ExchangeClient,
+    apps: Vec<MigratedApp>,
+) -> Vec<AapMigrationItem> {
+    let named = {
+        let per_app: Vec<&[String]> = apps.iter().map(|a| a.retired_dns.as_slice()).collect();
+        retired_scope_groups_per_app(exo, &per_app).await
+    };
+    apps.into_iter()
+        .zip(named)
+        .map(|(app, retired_groups)| {
+            let mut item = app.item;
+            if !retired_groups.is_empty() {
+                item.warnings.push(format!(
+                    "{} The toolkit can only check Exchange management scopes and policies — not \
+                     mail flow, transport rules, or anything outside Exchange.",
+                    retired_groups_note(&retired_groups),
+                ));
+            }
+            item.retired_groups = retired_groups;
+            item
+        })
+        .collect()
 }
 
 /// What [`run_migration_batches`] did across the run.
 pub(super) struct MigrationRun {
-    pub(super) items: Vec<AapMigrationItem>,
+    /// Every app that produced an item, in run order; their retired groups are
+    /// named after the run ([`name_retired_groups`]).
+    pub(super) items: Vec<MigratedApp>,
     pub(super) failures: Vec<String>,
     /// Stopped by Cancel or a dead session — between apps, or inside one.
     pub(super) cancelled: bool,
@@ -198,9 +255,9 @@ where
         }
         run.attempted = true;
         match migrate(policy_app_id.clone(), batch).await {
-            Ok(MigratedApp { item, stopped }) => {
-                run.cancelled |= stopped;
-                run.items.push(item);
+            Ok(app) => {
+                run.cancelled |= app.stopped;
+                run.items.push(app);
             }
             Err(err) => {
                 // `note_code` keeps `UiError::is_reauth_fatal` the single
@@ -408,6 +465,7 @@ pub(super) async fn migrate_one(
                 warnings,
             },
             stopped: true,
+            retired_dns: Vec::new(),
         });
     }
 
@@ -481,6 +539,8 @@ pub(super) async fn migrate_one(
         }
         return Ok(MigratedApp {
             stopped: false,
+            // A plan repoints nothing, so no group is retired yet.
+            retired_dns: Vec::new(),
             item: AapMigrationItem {
                 app_id: app_id.to_string(),
                 source_policy_identities: identities.clone(),
@@ -496,7 +556,6 @@ pub(super) async fn migrate_one(
                     .collect(),
                 removed_entra_grants: targets.iter().map(|t| t.graph_value.clone()).collect(),
                 removed_policies: if removable { identities } else { Vec::new() },
-                // A plan repoints nothing, so no group is retired yet.
                 retired_groups: Vec::new(),
                 status: AapItemStatus::Planned,
                 warnings,
@@ -579,27 +638,22 @@ pub(super) async fn migrate_one(
         status = AapItemStatus::Partial;
     }
 
-    // 6. Name the legacy group(s) the new scope no longer points at, so "the
-    //    policy group is left in place for you to clean up" says WHICH one. Only
-    //    when the consolidation actually repointed: otherwise the scope still
-    //    references them and they are in use by definition. A KEPT policy still
-    //    names its group, so it shows up as a live reference — which is exactly
-    //    right, and stops the operator deleting the group out from under it.
-    let retired_groups = if consolidation.consolidated {
-        retired_scope_groups(exo, &dns).await
+    // 6. The legacy group(s) the new scope no longer points at — named once the
+    //    whole run is over, for every app in one pass (`name_retired_groups`).
+    //    Only when the consolidation actually repointed: otherwise the scope
+    //    still references them and they are in use by definition. A KEPT policy
+    //    still names its group, so it shows up as a live reference — which is
+    //    exactly right, and stops the operator deleting the group out from
+    //    under it.
+    let retired_dns = if consolidation.consolidated {
+        dns
     } else {
         Vec::new()
     };
-    if !retired_groups.is_empty() {
-        warnings.push(format!(
-            "{} The toolkit can only check Exchange management scopes and policies — not mail \
-             flow, transport rules, or anything outside Exchange.",
-            retired_groups_note(&retired_groups),
-        ));
-    }
 
     Ok(MigratedApp {
         stopped: false,
+        retired_dns,
         item: AapMigrationItem {
             app_id: app_id.to_string(),
             source_policy_identities: identities,
@@ -617,7 +671,8 @@ pub(super) async fn migrate_one(
             roles_assigned,
             removed_entra_grants,
             removed_policies,
-            retired_groups,
+            // Filled after the run, with its note appended as the last warning.
+            retired_groups: Vec::new(),
             status,
             warnings,
         },

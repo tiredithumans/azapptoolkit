@@ -317,6 +317,14 @@ Invariants, each of which exists because its absence *narrows* access silently:
   keeps the source and reports `incomplete`; in the migration, `migrate_one` then stops that app
   **before** any scope, role, Entra-grant or policy write (status `partial`, policy kept) and the
   run is reported `incomplete` even when it was the only app.
+- **The copy sends only what is missing.** A mailbox the pre-copy read of the managed group
+  already lists (case-folded key) gets no `Add-DistributionGroupMember`; it counts as landed, so a
+  stopped copy reports it copied and its "N of M not copied" counts only the missing ones. Re-runs
+  are routine (a cancelled copy, a KEPT policy, a refused repoint), and each used to send one
+  proxied cmdlet per mailbox that changed nothing. So a real run reads the group even when the
+  live scope already names it (only the extras check is skipped then). The skip set is that run's
+  own read, taken just before its copy — never a membership remembered across apps — and the
+  post-copy re-read below still decides.
 - **Verification re-reads the group; it does not trust the adds.** EXO accepts some recipient types
   and then doesn't list them. Comparison is on `source_member`'s case-folded key (primary SMTP,
   else GUID); a member with neither is unidentifiable, so its source group counts as unreadable.
@@ -355,6 +363,17 @@ reported that group as unreferenced and offered to delete a group the app was st
 reporting a scope that hasn't caught up only *withholds* the delete, which is the safe direction.
 `retired_groups_note` follows the same rule — it claims "can be cleaned up" only when every group
 came back with no reference **and** a completed check.
+
+**The migration names retired groups once, after its last app** (`name_retired_groups` over
+`retired_scope_groups_per_app`): one read of each authority and one `Get-Group` per distinct group,
+and each app's list and note are exactly what its own check reports against that state (the note
+stays the item's last warning). Checking inside every app's migration read both tenant-wide lists
+once per consolidated app, on a scope list that grows by one per migrated app. The run-start policy
+read cannot stand in: the run deletes policies and creates or repoints scopes. The end of the run is
+also the accurate moment. Checked app by app, a later app's policy naming the same legacy group read
+as a live reference even after that app's migration removed it. The pass runs after a Cancel too
+(read-only). After a dead session its reads fail, so every group reads "review", never "can be
+cleaned up".
 
 `delete_exchange_scope_group` is the cleanup, and it is **offered, never automatic**:
 `Remove-DistributionGroup` has no undo (the address starts bouncing), and the checks above cannot see

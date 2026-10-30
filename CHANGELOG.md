@@ -9,6 +9,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Changed
 
 - Rotate into Key Vault now needs permission to list a vault's secrets instead of permission to read their values.
+- Re-running a legacy-policy migration or "Move to managed group" skips mailboxes already in the group, so it ends sooner.
 
 ### Fixed
 
