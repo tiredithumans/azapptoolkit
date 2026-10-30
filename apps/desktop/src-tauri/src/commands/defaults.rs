@@ -21,9 +21,14 @@ pub fn get_tenant_defaults(tenant_id: String) -> TenantDefaults {
 
 /// Persists the operator-editable defaults for `tenant_id`, preserving every
 /// other setting (and this tenant's vault bindings). Validates the SSO
-/// notification-email list (max 5, each must contain `@`).
+/// notification-email list (max 5, each must contain `@`). Async so the write
+/// runs on the blocking pool: as a sync command it ran on the main thread, and
+/// a wait on the settings lock froze the UI.
 #[tauri::command]
-pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Result<(), UiError> {
+pub async fn set_tenant_defaults(
+    tenant_id: String,
+    defaults: TenantDefaults,
+) -> Result<(), UiError> {
     let tenant_id = tenant_id.trim().to_string();
     if tenant_id.is_empty() {
         return Err(UiError::validation(
@@ -35,9 +40,10 @@ pub fn set_tenant_defaults(tenant_id: String, defaults: TenantDefaults) -> Resul
     let defaults = validated_defaults(defaults)?;
 
     let config_dir = crate::config_directory();
-    UserSettings::mutate(&config_dir, |settings| {
+    crate::state::mutate_settings_off_worker(config_dir, move |settings| {
         settings.apply_tenant_defaults(&tenant_id, defaults);
     })
+    .await
     .map_err(|e| super::config::settings_write_error(&e))?;
     Ok(())
 }

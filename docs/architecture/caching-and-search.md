@@ -160,6 +160,25 @@ still copies the items once, because `AuditRunResult` is a wire DTO that owns th
 binds them with `invoke_result` and folds an `Err` into `None`. Pinned by
 `repo_invariants::cache::cached_scan_reads_are_async_commands`.
 
+### Settings writes run on the blocking pool
+
+`UserSettings::mutate`, the only `settings.json` writer, holds a process-wide mutex while it waits
+on the cross-process lock on `settings.lock` (a second running copy of the app, or a hung network
+mount, can hold it as long as it likes), then writes and fsyncs. Inline in an `async fn` that wait
+parked a tokio worker and every task queued on it; in a sync command, which Tauri runs on the main
+thread, it froze the window. Every writer now awaits `state::mutate_settings_off_worker`, which runs
+`mutate` under `tauri::async_runtime::spawn_blocking` and returns its `io::Result` as is, so the
+`SettingsUnreadable` refusal and each caller's error mapping are unchanged. The writers are the Key
+Vault rotation's vault binding, `AppState::remember_account` / `forget_account` (now `async`;
+`sign_in`, `restore_session` and `sign_out` await them, so a forget and a later remember keep their
+order) and the `set_auth_config` / `set_tenant_defaults` commands (now `async`). Reads (`stored`,
+`load`) take no lock and stay inline. Pinned by
+`repo_invariants::blocking::settings_writes_run_on_the_blocking_pool`: the writers are
+`UserSettings::mutate`, `Self::mutate` and every plain sync `fn` that calls one inline, derived to
+a fixpoint, and no `async fn`, `#[tauri::command(async)]`, `async` block or sync command may call
+a writer outside a `spawn_blocking(…)` argument list. Wrappers are followed by name, not type, and
+the `.setup(…)` closure in `lib.rs`, which also runs on the main thread, is not scanned.
+
 ### TTL sweeps have slack
 
 `Bucket::evict_if_needed` sweeps expired entries only once the oldest is past `ttl + ttl/8`
