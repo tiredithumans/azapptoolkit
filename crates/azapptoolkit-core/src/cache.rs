@@ -1,11 +1,11 @@
 //! LRU + TTL cache that mirrors `Private/Cache-Functions.ps1`.
 //!
 //! Keyed by `(CacheKind, String)`; each kind has its own TTL (see
-//! [`crate::constants`]). Eviction is LRU once a kind's entry count exceeds its
-//! cap — [`MAX_CACHE_SIZE`] for aggregate kinds, [`MAX_PER_OBJECT_CACHE_SIZE`]
-//! by default for the per-object `ServicePrincipal` / `Lists` (see
-//! [`Cache::capacity_for`]). Hit/miss counters are exposed for the diagnostics
-//! command surface.
+//! [`crate::constants`]). Eviction is LRU once a kind's unpinned entry count
+//! exceeds its cap — [`MAX_CACHE_SIZE`] for aggregate kinds,
+//! [`MAX_PER_OBJECT_CACHE_SIZE`] by default for the per-object
+//! `ServicePrincipal` / `Lists` (see [`Cache::capacity_for`]). Hit/miss
+//! counters are exposed for the diagnostics command surface.
 
 use parking_lot::Mutex;
 use std::any::Any;
@@ -170,6 +170,10 @@ struct Entry {
 
 struct Bucket {
     entries: HashMap<String, Entry>,
+    /// How many of `entries` are pinned. LRU cannot evict a pinned entry, so it
+    /// does not count against the entry cap either (see [`Bucket::unpinned_len`]).
+    /// Kept in step by every path that adds or drops an entry.
+    pinned: usize,
     // LRU ordering index: `last_access` tick -> key, so eviction pops the oldest
     // in O(log n). Kept in step with `entries` on insert/touch/remove; after a
     // bulk removal (`retain`, `evict_expired`) `prune_lru` drops the rows of
@@ -203,6 +207,7 @@ impl Bucket {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            pinned: 0,
             lru: BTreeMap::new(),
             tick: 0,
             oldest_insert: None,
@@ -253,22 +258,41 @@ impl Bucket {
             pinned,
             stamp,
         };
+        if pinned {
+            self.pinned += 1;
+        }
         if let Some(previous) = self.entries.insert(key.clone(), entry) {
             self.lru.remove(&previous.last_access);
+            if previous.pinned {
+                self.pinned -= 1;
+            }
         }
         self.lru.insert(tick, key);
         stamp
     }
 
-    /// Removes one entry, keeping the LRU index in step.
+    /// Removes one entry, keeping the LRU index and the pinned count in step.
     fn remove(&mut self, key: &str) -> bool {
         match self.entries.remove(key) {
             Some(previous) => {
                 self.lru.remove(&previous.last_access);
+                if previous.pinned {
+                    self.pinned -= 1;
+                }
                 true
             }
             None => false,
         }
+    }
+
+    /// The entries the cap applies to. A pinned entry is one of a bounded
+    /// handful of tenant-wide indexes per tenant, and LRU never evicts it, so
+    /// counting it took a slot from the per-app entries for good. At a small
+    /// cap (the Cache dialog accepts 10, and one tenant pins up to eight) the
+    /// indexes filled it, and each per-app detail or mailbox-scope verdict was
+    /// evicted by the very put that stored it.
+    fn unpinned_len(&self) -> usize {
+        self.entries.len().saturating_sub(self.pinned)
     }
 
     /// Removes `key` **only if** the entry under it is still the one that
@@ -316,15 +340,34 @@ impl Bucket {
         }
     }
 
+    /// Whether the typed value under `key` is still the exact allocation
+    /// `expected`: the check [`Self::replace_typed_if_same`] makes, for a patch
+    /// that keeps the entry as it is ([`Patch::Keep`]).
+    fn holds_typed(&self, key: &str, expected: &TypedValue) -> bool {
+        self.entries
+            .get(key)
+            .and_then(|entry| entry.typed.as_ref())
+            .is_some_and(|t| Arc::ptr_eq(t, expected))
+    }
+
     /// Drops every entry whose key fails `keep`, then prunes the LRU index of
     /// the rows that no longer name a live entry.
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
-        self.entries.retain(|k, _| keep(k));
+        let mut pinned_dropped = 0;
+        self.entries.retain(|k, e| {
+            let kept = keep(k);
+            if !kept && e.pinned {
+                pinned_dropped += 1;
+            }
+            kept
+        });
+        self.pinned -= pinned_dropped;
         self.prune_lru();
     }
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.pinned = 0;
         self.lru.clear();
         self.tick = 0;
         self.oldest_insert = None;
@@ -345,21 +388,24 @@ impl Bucket {
     /// a *pinned* index is invisible to LRU, so forever. Called from
     /// [`Bucket::evict_if_needed`].
     ///
-    /// One pass over the entries computes the surviving `oldest_insert` too,
-    /// rather than a second `min()` scan after the `retain`.
+    /// One pass over the entries computes the surviving `oldest_insert` and
+    /// pinned count too, rather than a second scan after the `retain`.
     fn evict_expired(&mut self, ttl: Duration) {
         #[cfg(test)]
         {
             self.expired_sweeps += 1;
         }
         let mut oldest: Option<Instant> = None;
+        let mut pinned = 0;
         self.entries.retain(|_, e| {
             let keep = e.inserted.elapsed() <= ttl;
             if keep {
                 oldest = Some(oldest.map_or(e.inserted, |o| o.min(e.inserted)));
+                pinned += usize::from(e.pinned);
             }
             keep
         });
+        self.pinned = pinned;
         self.prune_lru();
         self.oldest_insert = oldest;
         self.last_sweep = Some(Instant::now());
@@ -411,8 +457,9 @@ impl Bucket {
         // a live one is pushed out for its slot — unless a sweep ran within
         // `at_cap_sweep_interval`, which keeps a full bucket on an expiry front
         // from sweeping per put. Below the cap nothing is displaced, so the
-        // slack only delays reclaiming dead memory.
-        let over_cap = self.entries.len() > max_size;
+        // slack only delays reclaiming dead memory. Pinned entries are not
+        // counted (see `unpinned_len`).
+        let over_cap = self.unpinned_len() > max_size;
         let exact_allowed = over_cap
             && self
                 .last_sweep
@@ -437,12 +484,12 @@ impl Bucket {
 
     fn evict_lru(&mut self, max_size: usize) {
         // Shrink to the cap, not by one: after `configure` lowers `max_size`,
-        // one eviction per `put` would never converge if writes stop. Pinned
-        // entries are skipped, so an entirely-pinned bucket stops evicting
-        // rather than dropping an index — the pinned set is a fixed handful of
-        // tenant-wide keys, not caller-growable.
+        // one eviction per `put` would never converge if writes stop. Only
+        // unpinned entries count against the cap, and pinned ones are skipped:
+        // the pinned set is a fixed handful of tenant-wide keys, not
+        // caller-growable, so it never displaces a per-object entry.
         let mut skipped: Vec<(u64, String)> = Vec::new();
-        while self.entries.len() > max_size {
+        while self.unpinned_len() > max_size {
             let Some((tick, key)) = self.lru.pop_first() else {
                 break;
             };
@@ -572,6 +619,20 @@ impl Drop for IndexWatch<'_> {
     }
 }
 
+/// What a [`Cache::patch_typed_index_with`] patch decided about the entry it
+/// was handed.
+#[derive(Debug)]
+pub enum Patch<T> {
+    /// Swap this value in. The entry keeps its insert time, its pin and its
+    /// stamp.
+    Replace(T),
+    /// The entry already reflects the write (the id the write touched is not
+    /// in it, say): leave it, and copy nothing.
+    Keep,
+    /// The patch cannot apply: drop the entry, as a plain invalidation would.
+    Invalidate,
+}
+
 impl Cache {
     /// Ceiling on concurrently watched keys. Tenant-wide index fetches
     /// (`single_flight` collapses same-key fetchers), one long scan per run
@@ -664,13 +725,14 @@ impl Cache {
         *self.stats.lock()
     }
 
-    /// Effective entry cap for `kind`. Bulk pre-seed callers use it to bound
-    /// the pass so seeding can't evict its own earlier entries.
+    /// Effective entry cap for `kind`, counting unpinned entries only (the
+    /// pinned tenant-wide indexes sit on top of it). Bulk pre-seed callers use
+    /// it to bound the pass so seeding can't evict its own earlier entries.
     ///
     /// `max_size` targets kinds holding a handful of tenant-wide aggregates;
     /// the two per-object kinds instead cap at [`MAX_PER_OBJECT_CACHE_SIZE`]:
-    /// [`CacheKind::ServicePrincipal`] (the audit's `|lean` seeding) and
-    /// [`CacheKind::Lists`] (carries per-app `app_detail|`/`mail_scopes|`
+    /// [`CacheKind::ServicePrincipal`] (one entry per `appId` read through)
+    /// and [`CacheKind::Lists`] (carries per-app `app_detail|`/`mail_scopes|`
     /// entries, which the aggregate-sized cap let thrash the bucket). Raising
     /// `max_size` past the ceiling gives the larger value for every kind.
     pub fn capacity_for(&self, kind: CacheKind) -> usize {
@@ -1029,8 +1091,8 @@ impl Cache {
         }
     }
 
-    /// How many times [`Self::patch_typed_index`] re-reads and re-applies its
-    /// patch after another writer replaced the entry under it.
+    /// How many times [`Self::patch_typed_index_with`] re-reads and re-applies
+    /// its patch after another writer replaced the entry under it.
     const PATCH_ATTEMPTS: usize = 3;
 
     /// Rewrites a typed index entry in place. Use it for a write that has the
@@ -1053,11 +1115,38 @@ impl Cache {
     ///
     /// The patched entry keeps its insert time, so its TTL still counts from
     /// the scan that produced it, not from the patch.
+    ///
+    /// A patch that can find nothing to change still copies the whole entry
+    /// to say so; [`Self::patch_typed_index_with`] can answer [`Patch::Keep`]
+    /// instead.
     pub fn patch_typed_index<T: Send + Sync + 'static>(
         &self,
         kind: CacheKind,
         key: &str,
         patch: impl Fn(&T) -> Option<T>,
+    ) -> bool {
+        self.patch_typed_index_with(kind, key, |current: &T| {
+            patch(current).map_or(Patch::Invalidate, Patch::Replace)
+        })
+    }
+
+    /// [`Self::patch_typed_index`] for a patch that can also leave the entry
+    /// as it is: `patch` answers [`Patch::Keep`] when the entry it was handed
+    /// already reflects the write, typically because the id the write touched
+    /// is not in it. The patch tier's rows are tenant-wide `Vec`s, so a rename
+    /// that reached a list without the app used to copy every row to change
+    /// none of them, and swap the identical copy in.
+    ///
+    /// `Keep` changes nothing about the guard: the watches were bumped before
+    /// `patch` ran, so a scan that started before the write still refuses its
+    /// store. Like a replacement, it holds only if the entry is still the one
+    /// `patch` read; on a lost race the patch is re-applied to the entry that
+    /// replaced it. Returns `true` for a kept or replaced entry.
+    pub fn patch_typed_index_with<T: Send + Sync + 'static>(
+        &self,
+        kind: CacheKind,
+        key: &str,
+        patch: impl Fn(&T) -> Patch<T>,
     ) -> bool {
         self.bump_watches(Some(kind), |watched| watched == key);
         if let Some((_, ttl)) = self.limits_if_enabled(kind) {
@@ -1069,17 +1158,18 @@ impl Cache {
                     .filter(|e| e.inserted.elapsed() <= ttl)
                     .and_then(|e| e.typed.clone());
                 let Some(read) = read else { break };
-                let Some(next) = Arc::clone(&read)
-                    .downcast::<T>()
-                    .ok()
-                    .and_then(|current| patch(&current))
-                else {
+                let Ok(current) = Arc::clone(&read).downcast::<T>() else {
                     break;
                 };
-                if self.buckets[kind.idx()]
-                    .lock()
-                    .replace_typed_if_same(key, &read, Arc::new(next))
-                {
+                let landed =
+                    match patch(&current) {
+                        Patch::Replace(next) => self.buckets[kind.idx()]
+                            .lock()
+                            .replace_typed_if_same(key, &read, Arc::new(next)),
+                        Patch::Keep => self.buckets[kind.idx()].lock().holds_typed(key, &read),
+                        Patch::Invalidate => break,
+                    };
+                if landed {
                     return true;
                 }
             }

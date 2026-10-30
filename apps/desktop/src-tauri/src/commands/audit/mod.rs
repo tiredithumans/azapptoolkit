@@ -32,7 +32,7 @@ use azapptoolkit_core::audit::{
     CredentialActivity, MailPermissionScope, ResourcePermission, enforced_secret_max_days,
 };
 use azapptoolkit_core::cache::Cache;
-use azapptoolkit_core::models::{AppManagementPolicy, TenantAppManagementPolicy};
+use azapptoolkit_core::models::{AppManagementPolicy, ServicePrincipal, TenantAppManagementPolicy};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
 use chrono::{DateTime, Utc};
@@ -77,6 +77,9 @@ pub(crate) struct ScoreCtx {
     pub(crate) cache: Arc<Cache>,
     pub(crate) tenant_id: String,
     pub(crate) resolver: Arc<ResourceResolver>,
+    /// The SP index this run read at its start, by `appId`. `score_one`
+    /// answers from it before the lean read-through.
+    pub(crate) run_sps: RunSps,
     /// Best-effort Exchange client for mailbox-scope resolution; `None` degrades
     /// every mail permission to full org-wide weight.
     pub(crate) exo: Option<Arc<ExchangeClient>>,
@@ -138,6 +141,44 @@ pub(crate) struct ScoreCtx {
     /// The tenant default policy plus every per-target override, from the run's
     /// one tenant-wide policy pair read. Empty when unavailable.
     pub(crate) app_policy: Arc<AppPolicyData>,
+}
+
+/// The service principals the run's tenant-wide SP index read
+/// (`prefetch_sp_index`) returned, by `appId`.
+///
+/// The index projection carries the `id` and `accountEnabled` `score_one`
+/// reads, so it answers every app with an SP in the index at no Graph cost.
+/// It stays in the run: nothing from it is written to the shared
+/// `ServicePrincipal` cache. The run used to seed the `|lean` read-through
+/// keys from it with a plain `put`, after the slowest of the run's tenant-wide
+/// reads had landed, which undid any SP sweep in between (an `accountEnabled`
+/// change, an SP or app delete, a restore) for the 60-minute TTL: the next run
+/// and the Conditional Access tab then read the old principal. An app with no
+/// row here (no SP, an SP past the index cap, or an unreadable index) takes the
+/// lean read-through instead.
+#[derive(Default)]
+pub(crate) struct RunSps {
+    index: Arc<Vec<ServicePrincipal>>,
+    by_app_id: HashMap<String, usize>,
+}
+
+impl RunSps {
+    pub(crate) fn new(index: Arc<Vec<ServicePrincipal>>) -> Self {
+        // A principal without an `appId` (Graph omits it for some kinds) is
+        // no app registration's: every registration has one.
+        let by_app_id = index
+            .iter()
+            .enumerate()
+            .filter(|(_, sp)| !sp.app_id.is_empty())
+            .map(|(at, sp)| (sp.app_id.clone(), at))
+            .collect();
+        Self { index, by_app_id }
+    }
+
+    /// The run's service principal for `app_id`, if the index has one.
+    pub(crate) fn get(&self, app_id: &str) -> Option<&ServicePrincipal> {
+        self.by_app_id.get(app_id).map(|&at| &self.index[at])
+    }
 }
 
 /// The run's app-management policy state. Overrides are indexed by the

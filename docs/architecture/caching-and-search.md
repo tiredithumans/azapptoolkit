@@ -24,7 +24,7 @@ without a sign-out in between — while `reauthenticate` (same account, oid-chec
 
 ### Proving the session, and what may be pinned
 
-Two rules ride alongside the key prefix:
+These rules ride alongside the key prefix:
 
 - **A command that can answer from cache must prove the session** with
   `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)?`,
@@ -53,6 +53,10 @@ Two rules ride alongside the key prefix:
   the rule reads the key off that watch's `generation_for` capture — or, for a store helper that
   takes the watch as a parameter (`sp_index_store_if_current`), off every caller's capture, which
   must all be on one pinnable key.
+- **The entry cap counts only unpinned entries** (`Bucket::unpinned_len`). The pinned set is that
+  bounded handful per tenant, and while it counted, a small cap (the Cache dialog accepts 10) was
+  filled by the indexes alone, so each per-app detail or mailbox-scope verdict was evicted by the
+  put that stored it. Pinned by the core test `pinned_entries_do_not_count_against_the_cap`.
 - **Bound bulk seeding by `capacity_for`.** Seeding a whole scan into a bucket must respect its
   capacity, or the seed evicts everything else the bucket holds — including entries the same run is
   about to read back.
@@ -77,6 +81,11 @@ Both go through their accessor pairs in `commands/applications/cache.rs` — `sp
 thousands of per-app `app_detail|…` / `mail_scopes|…` writes sharing their bucket can't evict an
 entry that costs a full directory scan to rebuild). **Footgun:** a typed entry read untyped reads as
 a *miss*, silently costing a tenant-wide rescan — pinned by a test per index.
+
+The SP index scan itself runs only inside `sp_index_cached`, behind its single-flight gate. The
+audit's prefetch used to check the cache and then scan on its own, so an audit started beside a
+cold list, search or backup read paged all of `/servicePrincipals` a second time (pinned by
+`repo_invariants::the_sp_index_scan_has_one_home`).
 
 `indexes_cached(state, client, tenant)` returns both, fetching only the cold ones and, when both are
 cold, fetching them **concurrently**. Use it wherever a surface joins the two (the Enterprise Apps
@@ -358,9 +367,9 @@ already knows what changed. The create POST (and `instantiate`) returns the new 
 `ServicePrincipal`, a delete knows its object ids, and a rename knows its fields. So
 `record_created_apps`, `record_deleted_apps` and `record_renamed_app` (`applications/cache.rs`)
 rewrite the four scanned entries (`apps_pairing`, `app_name_index`, `credential_expirations`,
-`sp_index`) in place through `Cache::patch_typed_index`. Everything else the list tier drops goes
-through `invalidate_app_list_projections`; those entries rebuild from the patched indexes without a
-Graph scan. `patch_tier_tests::the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries`
+`sp_index`) in place through `Cache::patch_typed_index` (or `patch_typed_index_with`, below).
+Everything else the list tier drops goes through `invalidate_app_list_projections`; those entries
+rebuild from the patched indexes without a Graph scan. `patch_tier_tests::the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries`
 pins the two sets together. The callers are the single and bulk create, the SAML/OIDC wizards, the
 gallery create, the single and bulk delete, and `update_application` when the name or audience
 changed (description or notes alone take `invalidate_app_details`). The rules:
@@ -389,6 +398,13 @@ changed (description or notes alone take `invalidate_app_details`). The rules:
   `secret_text` is cleared before it reaches any row.
 - Patches are idempotent (upsert, remove or set by id). The cache re-applies a patch that lost a
   race, and a scan that started after the write already contains it.
+- A patch that finds nothing to change in an entry answers `Patch::Keep` through
+  `Cache::patch_typed_index_with`, and the entry is left as it is. Each scanned entry is a
+  tenant-wide `Vec`, so a rename used to copy all three of them, swapping in an identical copy even
+  where the app had no row (the roll-up holds none for an app without a credential); a delete of an
+  absent id and a create without a credential (in the roll-up) did the same. A row that changes
+  still costs one copy of its entry: the entry is an `Arc<Vec<Row>>` the list commands hand to
+  IPC, so it is copy-on-write.
 
 **Detail-affecting mutations that cannot change the set take `invalidate_app_detail_state`**
 (= `invalidate_app_details` + `invalidate_audit_cache`): grant/revoke/scope a permission
@@ -451,7 +467,9 @@ mutation here can invalidate.
 before it reads, as `invalidate` does, so a scan that captured its watch before the write refuses
 its pre-write snapshot. It computes the patch outside the bucket lock and swaps only if the entry is
 still the allocation it read (pointer identity), re-applying the patch up to three times when
-another writer got there first. The swap keeps the entry's `inserted`, so a patch never extends the
+another writer got there first. A `Patch::Keep` is held to the same check without a swap: the
+watches were already bumped, and a keep decided on an entry that has since been replaced is
+re-applied to the replacement. The swap keeps the entry's `inserted`, so a patch never extends the
 TTL of the scan it patched. It also keeps the `stamp`, so a rollback aimed at the store the patch
 built on still removes it.
 
@@ -559,10 +577,18 @@ that was in flight when a sweep landed used to store the pre-sweep object for th
 per-appId SP lookups, `resolve_resource_sp`, both grant matrices, the sign-in activity reads and
 the app-management policies. Each now captures `generation_for(kind, &key)` before its fetch and
 stores through `put_if_current`; `graph_client_read_throughs_store_through_a_watch` pins that no
-Graph client function `cache.put`s after an await, with the batch prewarm (`prewarm_sps`, which
-`prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
-`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects. (The audit's bulk
-lean-SP path is `seed_lean_sps_from_index`, a synchronous put from the already-fetched index.)
+Graph client function stores with a plain `cache.put` at all, with the batch prewarm (`prewarm_sps`,
+which `prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
+`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects.
+
+The rule used to flag only a `put` beside an `.await`, and the audit's lean-SP seeding slipped past
+it: a synchronous put whose await was in the caller. After its ten tenant-wide reads landed (the
+slowest can take minutes), the run wrote every app's `|lean` key from its run-start SP index, so a
+sweep in between (an `accountEnabled` change, an SP or app delete, a restore) was undone for the
+TTL, and the next audit and the Conditional Access tab read the old principal. The run now keeps
+that index to itself: `ScoreCtx::run_sps` maps `appId` to the run's index row, `score_one` answers
+from it first, and only an app with no row takes the lean read-through. Data a caller fetched
+earlier cannot be watched in the client, so it stays in the caller.
 
 Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk

@@ -336,8 +336,9 @@ pub(crate) async fn score_one(
     app: &Application,
     last_sign_in: Option<Option<DateTime<Utc>>>,
 ) -> Result<AuditItem, UiError> {
-    // Lean lookup: the audit reads only `sp.id` and `sp.account_enabled`. The
-    // prewarm above seeds the matching `|lean` cache key, so this is a hit.
+    // The audit reads only `sp.id` and `sp.account_enabled`. The run's own SP
+    // index answers first (`ScoreCtx::run_sps`, no Graph cost); an app it has
+    // no row for takes the lean read-through.
     //
     // A FAILED lookup is an error, never `None`. `Ok(None)` means the app truly
     // has no service principal; mapping a failed read to that same `None` took
@@ -348,18 +349,21 @@ pub(crate) async fn score_one(
     // reaches the run's collector: a transient failure counts the app as
     // unscored (→ `PerPrincipalScoring`, never cached), a dead session stops
     // the run for re-auth.
-    let sp = ctx
-        .client
-        .get_service_principal_by_app_id_lean(&app.app_id)
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                app = %app.display_name,
-                ?err,
-                "audit: SP lookup failed; app left unscored"
-            );
-            UiError::from(err)
-        })?;
+    let sp = match ctx.run_sps.get(&app.app_id) {
+        Some(sp) => Some(sp.clone()),
+        None => ctx
+            .client
+            .get_service_principal_by_app_id_lean(&app.app_id)
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    app = %app.display_name,
+                    ?err,
+                    "audit: SP lookup failed; app left unscored"
+                );
+                UiError::from(err)
+            })?,
+    };
 
     let (mut perms, unresolved_resources) =
         resolve_permissions(&ctx.resolver, &app.required_resource_access).await;

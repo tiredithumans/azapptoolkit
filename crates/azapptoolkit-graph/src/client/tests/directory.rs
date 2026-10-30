@@ -790,3 +790,75 @@ async fn risky_service_principals_without_token_is_forbidden() {
     let err = client.list_risky_service_principals().await.unwrap_err();
     assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
 }
+
+/// The report's pages ride the retrying transport, page one and the
+/// continuations alike: a 429 on either is ridden out and the report
+/// completes, where the one-shot read made it a risky-SP coverage gap for the
+/// whole audit. A 403 stays terminal — it is the license answer the audit
+/// reads as "not available here" — and is requested once.
+#[tokio::test]
+async fn a_throttled_risky_service_principal_page_is_retried_and_the_report_completes() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    let throttled = || ResponseTemplate::new(429).insert_header("Retry-After", "0");
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param_is_missing("page"))
+        .respond_with(throttled())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param_is_missing("page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "risk-1", "servicePrincipalId": "sp-obj-1", "riskState": "atRisk" }],
+            "@odata.nextLink": format!("{uri}/identityProtection/riskyServicePrincipals?page=2")
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param("page", "2"))
+        .respond_with(throttled())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .and(query_param("page", "2"))
+        // The retried continuation still rides the scoped bearer.
+        .and(header("authorization", "Bearer r"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "risk-2", "servicePrincipalId": "sp-obj-2", "riskState": "confirmedCompromised" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&uri).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let rows = client.list_risky_service_principals().await.unwrap();
+    let ids: Vec<_> = rows
+        .iter()
+        .filter_map(|r| r.service_principal_id.as_deref())
+        .collect();
+    assert_eq!(ids, ["sp-obj-1", "sp-obj-2"]);
+
+    // A 403 is not retried: one request, and the report fails as Forbidden.
+    let denied = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(
+            r#"{"error":{"code":"Authentication_RequestFromNonPremiumTenantOrB2CTenant"}}"#,
+        ))
+        .expect(1)
+        .mount(&denied)
+        .await;
+    let client = make_client(&denied.uri()).with_risky_sp_token(StaticTokenProvider::new("r"));
+    let err = client.list_risky_service_principals().await.unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden(_)), "got {err:?}");
+}

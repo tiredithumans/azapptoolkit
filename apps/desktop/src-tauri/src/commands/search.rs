@@ -48,7 +48,7 @@ const _: () = assert!(
 );
 
 /// Which result bucket a corpus row belongs to.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SearchKind {
     AppReg,
     Enterprise,
@@ -330,39 +330,21 @@ pub async fn global_search(
     let corpus = search_corpus(&state, &client, &tenant_id).await;
 
     // Rank each match (lower = better) and keep the best SEARCH_TOP per kind.
-    let mut app_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
-    let mut ent_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
-    let mut mi_hits: Vec<(u8, &str, SearchHit)> = Vec::new();
-    for row in corpus.rows.iter() {
-        let Some(r) = relevance(&needle, &row.name_lc, &row.app_id_lc, &row.id_lc) else {
-            continue;
-        };
-        let hit = SearchHit {
-            id: row.id.clone(),
-            app_id: Some(row.app_id.clone()),
-            display_name: row.display_name.clone(),
-        };
-        let bucket = match row.kind {
-            SearchKind::AppReg => &mut app_hits,
-            SearchKind::Enterprise => &mut ent_hits,
-            SearchKind::ManagedIdentity => &mut mi_hits,
-        };
-        bucket.push((r, row.name_lc.as_str(), hit));
-    }
+    let mut matched = Matches::of(&corpus.rows, &needle);
 
     // Counted BEFORE `finalize` truncates — that ordering is the whole point.
     // Ten rows and a full stop is read as "there are ten"; ten rows under
     // "10 of 47" is read as "narrow the query", which is the truth.
-    let app_total = app_hits.len();
-    let ent_total = ent_hits.len();
-    let mi_total = mi_hits.len();
+    let app_total = matched.app_registrations.len();
+    let ent_total = matched.enterprise_apps.len();
+    let mi_total = matched.managed_identities.len();
 
     Ok(GlobalSearchResults {
         query: trimmed,
         looked_up_as_guid: false,
-        app_registrations: finalize(&mut app_hits),
-        enterprise_apps: finalize(&mut ent_hits),
-        managed_identities: finalize(&mut mi_hits),
+        app_registrations: finalize(&mut matched.app_registrations),
+        enterprise_apps: finalize(&mut matched.enterprise_apps),
+        managed_identities: finalize(&mut matched.managed_identities),
         app_registrations_total: app_total,
         enterprise_apps_total: ent_total,
         managed_identities_total: mi_total,
@@ -459,14 +441,71 @@ fn relevance(needle: &str, name_lc: &str, app_id_lc: &str, id_lc: &str) -> Optio
     }
 }
 
-/// Sorts ranked hits (rank, then lowercased display name) and keeps the best
-/// [`SEARCH_TOP`]. The caller counts the bucket *before* calling this — the
-/// count is what the dropdown needs, and it is unrecoverable afterwards.
-fn finalize(hits: &mut [(u8, &str, SearchHit)]) -> Vec<SearchHit> {
-    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+/// One corpus row the needle matched, borrowed from the corpus for the length
+/// of the query. Ranking and the cap work on these, and a [`SearchHit`] (three
+/// `String` copies) is built only for a row that survives the cap: a one- or
+/// two-letter needle matches most of a large tenant (a hex letter is in nearly
+/// every appId and object id), and a hit per match came to tens of thousands
+/// of allocations, and a full sort, per query.
+struct Ranked<'a> {
+    rank: u8,
+    /// Position in the corpus. The last sort key: rows tied on rank and name
+    /// keep corpus order, as the stable sort this replaced kept them, and the
+    /// order is total, so the unstable partial select is deterministic.
+    pos: usize,
+    row: &'a SearchRow,
+}
+
+impl Ranked<'_> {
+    fn key(&self) -> (u8, &str, usize) {
+        (self.rank, self.row.name_lc.as_str(), self.pos)
+    }
+}
+
+/// Every corpus row a needle matches, bucketed by kind in corpus order.
+#[derive(Default)]
+struct Matches<'a> {
+    app_registrations: Vec<Ranked<'a>>,
+    enterprise_apps: Vec<Ranked<'a>>,
+    managed_identities: Vec<Ranked<'a>>,
+}
+
+impl<'a> Matches<'a> {
+    fn of(rows: &'a [SearchRow], needle: &str) -> Self {
+        let mut matched = Self::default();
+        for (pos, row) in rows.iter().enumerate() {
+            let Some(rank) = relevance(needle, &row.name_lc, &row.app_id_lc, &row.id_lc) else {
+                continue;
+            };
+            let bucket = match row.kind {
+                SearchKind::AppReg => &mut matched.app_registrations,
+                SearchKind::Enterprise => &mut matched.enterprise_apps,
+                SearchKind::ManagedIdentity => &mut matched.managed_identities,
+            };
+            bucket.push(Ranked { rank, pos, row });
+        }
+        matched
+    }
+}
+
+/// The best [`SEARCH_TOP`] of a bucket, best first: by rank, then lowercased
+/// display name, then corpus position. A partial select finds them and only
+/// they are sorted and copied out. The caller counts the bucket *before*
+/// calling this — the count is what the dropdown needs, and it is
+/// unrecoverable afterwards.
+fn finalize(hits: &mut Vec<Ranked<'_>>) -> Vec<SearchHit> {
+    let top = SEARCH_TOP as usize;
+    if hits.len() > top {
+        hits.select_nth_unstable_by(top - 1, |a, b| a.key().cmp(&b.key()));
+        hits.truncate(top);
+    }
+    hits.sort_unstable_by(|a, b| a.key().cmp(&b.key()));
     hits.iter()
-        .take(SEARCH_TOP as usize)
-        .map(|(_, _, h)| h.clone())
+        .map(|h| SearchHit {
+            id: h.row.id.clone(),
+            app_id: Some(h.row.app_id.clone()),
+            display_name: h.row.display_name.clone(),
+        })
         .collect()
 }
 
@@ -605,30 +644,38 @@ mod tests {
         assert!(!corpus.index_truncated, "a small tenant is not truncated");
     }
 
+    /// A corpus row as the build makes it: the display fields plus their
+    /// lowercased forms.
+    fn row(id: &str, app_id: &str, name: &str, kind: SearchKind) -> SearchRow {
+        SearchRow {
+            id: id.into(),
+            app_id: app_id.into(),
+            display_name: name.into(),
+            name_lc: name.to_lowercase(),
+            app_id_lc: app_id.to_lowercase(),
+            id_lc: id.to_lowercase(),
+            kind,
+        }
+    }
+
     #[test]
     fn finalize_caps_the_bucket_and_the_pre_cap_count_survives_it() {
         // The honesty of the dropdown rests on this ordering: the total is taken
         // from the bucket BEFORE `finalize` truncates it, because afterwards
         // twenty-five matches and exactly ten are byte-identical. Ten rows and a
         // full stop is how an operator concludes the eleventh app doesn't exist.
-        let names: Vec<String> = (0..25).map(|i| format!("svc-{i:02}")).collect();
-        let mut hits: Vec<(u8, &str, SearchHit)> = names
-            .iter()
-            .map(|n| {
-                (
-                    3u8,
-                    n.as_str(),
-                    SearchHit {
-                        id: n.clone(),
-                        app_id: None,
-                        display_name: n.clone(),
-                    },
-                )
+        // Stored out of order, so the cap has to find the best ten.
+        let rows: Vec<SearchRow> = (0..25)
+            .rev()
+            .map(|i| {
+                let name = format!("svc-{i:02}");
+                row(&name, &format!("app-{i:02}"), &name, SearchKind::AppReg)
             })
             .collect();
+        let mut matched = Matches::of(&rows, "svc");
 
-        let total = hits.len();
-        let shown = finalize(&mut hits);
+        let total = matched.app_registrations.len();
+        let shown = finalize(&mut matched.app_registrations);
 
         assert_eq!(total, 25);
         assert_eq!(shown.len(), SEARCH_TOP as usize);
@@ -636,6 +683,101 @@ mod tests {
         // Same rank throughout, so the tie-break is the lowercased name.
         assert_eq!(shown[0].display_name, "svc-00");
         assert_eq!(shown[9].display_name, "svc-09");
+    }
+
+    /// The ranking before the partial select, kept as the oracle: a
+    /// `SearchHit` for every match of `kind`, a full STABLE sort on (rank,
+    /// lowercased name), then the first [`SEARCH_TOP`]. Returns the shown rows
+    /// and the pre-cap count.
+    fn ranked_by_full_sort(
+        rows: &[SearchRow],
+        needle: &str,
+        kind: SearchKind,
+    ) -> (Vec<(String, Option<String>, String)>, usize) {
+        let mut hits: Vec<(u8, &str, SearchHit)> = Vec::new();
+        for row in rows.iter().filter(|r| r.kind == kind) {
+            let Some(r) = relevance(needle, &row.name_lc, &row.app_id_lc, &row.id_lc) else {
+                continue;
+            };
+            let hit = SearchHit {
+                id: row.id.clone(),
+                app_id: Some(row.app_id.clone()),
+                display_name: row.display_name.clone(),
+            };
+            hits.push((r, row.name_lc.as_str(), hit));
+        }
+        let total = hits.len();
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+        let shown = hits
+            .into_iter()
+            .take(SEARCH_TOP as usize)
+            .map(|(_, _, h)| (h.id, h.app_id, h.display_name))
+            .collect();
+        (shown, total)
+    }
+
+    /// The partial select returns exactly what the full sort did, row for row
+    /// and count for count, on a corpus built to tie: names repeated in
+    /// different cases across all three kinds, more matches per bucket than
+    /// the cap, and needles that hit every rank tier. Rows tied on rank and
+    /// name must keep corpus order, which only the position key preserves.
+    #[test]
+    fn the_partial_select_returns_exactly_what_the_full_sort_did() {
+        const NAMES: [&str; 8] = [
+            "App",
+            "app",
+            "Apple",
+            "Contoso App",
+            "APP",
+            "Zeta",
+            "Pineapple",
+            "app",
+        ];
+        const KINDS: [SearchKind; 3] = [
+            SearchKind::AppReg,
+            SearchKind::Enterprise,
+            SearchKind::ManagedIdentity,
+        ];
+        let rows: Vec<SearchRow> = (0..96usize)
+            .map(|i| {
+                row(
+                    &format!("obj-{i:03}"),
+                    &format!("{:08x}-0000-4000-8000-{i:012}", i * 2_654_435_761 % 65_536),
+                    NAMES[i % NAMES.len()],
+                    KINDS[(i / 2) % KINDS.len()],
+                )
+            })
+            .collect();
+
+        for needle in [
+            "app",
+            "a",
+            "e",
+            "contoso app",
+            "obj-0",
+            "000",
+            "8000-0",
+            "zzz",
+        ] {
+            let mut matched = Matches::of(&rows, needle);
+            let buckets = [
+                (SearchKind::AppReg, &mut matched.app_registrations),
+                (SearchKind::Enterprise, &mut matched.enterprise_apps),
+                (SearchKind::ManagedIdentity, &mut matched.managed_identities),
+            ];
+            for (kind, bucket) in buckets {
+                let total = bucket.len();
+                let shown: Vec<(String, Option<String>, String)> = finalize(bucket)
+                    .into_iter()
+                    .map(|h| (h.id, h.app_id, h.display_name))
+                    .collect();
+                assert_eq!(
+                    (shown, total),
+                    ranked_by_full_sort(&rows, needle, kind),
+                    "needle {needle:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -65,14 +65,15 @@ pub const MAX_CACHE_SIZE: usize = 5000;
 /// than a handful of tenant-wide aggregates, applied by
 /// [`crate::cache::Cache::capacity_for`] to two kinds:
 ///
-/// - [`crate::cache::CacheKind::ServicePrincipal`] — the audit's `|lean` keys,
-///   seeded one per app registration;
+/// - [`crate::cache::CacheKind::ServicePrincipal`] — one entry per `appId` the
+///   per-app SP read-throughs (the lean `|lean` form included) have answered;
 /// - [`crate::cache::CacheKind::Lists`] — it carries the per-app `app_detail|`
 ///   and `mail_scopes|` entries alongside the tenant aggregates.
 ///
 /// It is a default, not a floor: it applies only while the configured
 /// `max_size` is at least [`MAX_CACHE_SIZE`], so lowering the cache size still
-/// shrinks these kinds.
+/// shrinks these kinds. Either way it counts only unpinned entries: the
+/// pinned tenant-wide indexes sit on top of it.
 ///
 /// [`MAX_CACHE_SIZE`] (5000) is sized for aggregate entries and is *below* the
 /// 10 000-app ceiling the list/audit/credential scans enumerate to, so a

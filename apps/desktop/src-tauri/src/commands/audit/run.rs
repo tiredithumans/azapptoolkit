@@ -30,7 +30,7 @@ use super::score::{
     combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders, score_one,
     score_sp_only, sp_audit_candidates,
 };
-use super::{AuditFailure, ResourceResolver, ScoreCtx, classify_audit_failure};
+use super::{AuditFailure, ResourceResolver, RunSps, ScoreCtx, classify_audit_failure};
 
 /// Upper bound on in-flight per-app lookups when the tenant is healthy.
 const INITIAL_CONCURRENCY: usize = 8;
@@ -97,8 +97,8 @@ pub async fn run_audit(
     );
 
     // These ten tenant-wide reads are INDEPENDENT — every join between them
-    // (`seed_lean_sps_from_index`, `derive_orgwide_mail_scopes`,
-    // `sp_audit_candidates`) is synchronous and runs below, after all ten land.
+    // (`RunSps::new`, `derive_orgwide_mail_scopes`, `sp_audit_candidates`) is
+    // synchronous and runs below, after all ten land.
     // Awaiting them serially made a large tenant wait out eight full page-walks
     // before the progress bar left 0/N; overlapped, that is one wait instead of
     // the sum. Nine of the ten are best-effort (they swallow errors and
@@ -139,13 +139,13 @@ pub async fn run_audit(
         // ONE tenant-wide service-principal enumeration feeds BOTH the SP-only
         // audit phase (below) and every per-app SP lookup score_one makes: its
         // projection (id/appId/accountEnabled/…) is a superset of the lean
-        // fields score_one reads, so seeding the audit's lean SP cache FROM it
-        // makes each score_one lookup a cache hit at zero extra Graph cost. This
-        // replaces the former batched lean prewarm (~1 $batch POST per 20 apps)
-        // that re-fetched the very directory objects this index scan already
-        // returns. A cold/failed index (empty vec) simply leaves the per-app
-        // lean lookups to resolve as before.
-        prefetch_sp_index(&state.cache, &client, &tenant_id),
+        // fields score_one reads, so the run answers each lookup from it
+        // (`ScoreCtx::run_sps`) at zero extra Graph cost, without writing it to
+        // the shared cache. This replaces the former batched lean prewarm (~1
+        // $batch POST per 20 apps) that re-fetched the very directory objects
+        // this index scan already returns. A cold/failed index (empty vec)
+        // simply leaves the per-app lean lookups to resolve as before.
+        prefetch_sp_index(&state, &client, &tenant_id),
         // Admin-consent flags + delegated scopes from ONE tenant-wide
         // oauth2PermissionGrants read, replacing a per-app GET inside the
         // scoring loop (an N+1 that dominated large runs' request budget and 429
@@ -226,9 +226,6 @@ pub async fn run_audit(
     .chain(office365_gaps)
     .collect();
 
-    let app_ids: Vec<String> = apps.iter().map(|a| a.app_id.clone()).collect();
-    client.seed_lean_sps_from_index(&app_ids, &sp_index);
-
     let admin_consent_clients = Arc::new(admin_consent_clients);
     let delegated_scopes_by_client = Arc::new(delegated_scopes_by_client);
     let legacy_policies = Arc::new(legacy_policies);
@@ -279,6 +276,7 @@ pub async fn run_audit(
         cache: state.cache.clone(),
         tenant_id: tenant_id.clone(),
         resolver: Arc::new(ResourceResolver::new(client.clone())),
+        run_sps: RunSps::new(Arc::clone(&sp_index)),
         exo,
         admin_consent_clients,
         admin_consented_scopes_by_client: consent_grants_read

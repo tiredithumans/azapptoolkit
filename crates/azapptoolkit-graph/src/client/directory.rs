@@ -426,8 +426,13 @@ impl GraphClient {
     /// license — without either the endpoint answers 403, so callers degrade
     /// (no risky data ⇒ no risky-SP audit flags).
     ///
-    /// Deliberately one-shot `scoped_get` (no retry) like the other optional
-    /// premium reports: a failure is handled by the audit runner, not retried.
+    /// Every page rides the retrying transport (`scoped_get_retried`), like the
+    /// two sign-in reports. It was a one-shot `scoped_get` "like the other
+    /// optional premium reports", but those moved to the retrying read, and the
+    /// one-shot read turned one 429 or 5xx into a risky-SP coverage gap for the
+    /// whole audit run. A 403 (license / consent) or 404 is still terminal —
+    /// only a 429/5xx/network failure is replayed, with `Retry-After` honored.
+    ///
     /// Deliberately **not cached**: this is a live security signal — a
     /// compromised-SP flag must be re-read by every audit run, and the payload
     /// is tiny (one row per flagged principal, not the sign-in report's 200
@@ -442,10 +447,12 @@ impl GraphClient {
             "{}/identityProtection/riskyServicePrincipals?$top={MAX_PAGE_SIZE}",
             self.base_url
         );
-        match self.scoped_get(token, &url).await {
+        match self.scoped_get_retried(token, &url).await {
             Ok(page) => {
-                self.collect_pages_from(page, |u| async move { self.scoped_get(token, &u).await })
-                    .await
+                self.collect_pages_from(page, |u| async move {
+                    self.scoped_get_retried(token, &u).await
+                })
+                .await
             }
             Err(GraphError::NotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),
