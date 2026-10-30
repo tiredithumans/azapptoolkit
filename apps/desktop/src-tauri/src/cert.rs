@@ -27,9 +27,8 @@ pub struct GeneratedCert {
     pub cert_der_base64: String,
     pub cert_pem: String,
     /// PKCS#8 PEM of the RSA private key. Sensitive: surfaced once, never
-    /// stored. Zeroized on drop so the PEM bytes do not linger on the heap
-    /// after the value is returned to the caller (which clones into the IPC
-    /// reply path and drops the original almost immediately).
+    /// stored. Zeroized on drop while it is still held here; what that does
+    /// and does not cover is on the `Drop` impl below.
     pub private_key_pem: String,
     /// PKCS#12 (.pfx) bundle: this same certificate and this same private key,
     /// encrypted under `pfx_password`. Not an alternative identity — one key in
@@ -54,6 +53,14 @@ pub struct GeneratedCert {
     pub not_after: OffsetDateTime,
 }
 
+/// Wipes the secret material still held here. On every path where nothing is
+/// revealed (Entra refusing the upload after generation, say) that is all of
+/// it. On success the command moves the PEM and the password out with
+/// `mem::take` for the one-time reveal and only borrows the PKCS#12 DER to
+/// encode it, so this wipes the DER and two empty strings. What moved out is
+/// not wiped here: the reveal DTO has no zeroizing `Drop`, because the copies
+/// IPC makes anyway (Tauri's serialized reply, the webview's strings) cannot
+/// be wiped.
 impl Drop for GeneratedCert {
     fn drop(&mut self) {
         self.private_key_pem.zeroize();
@@ -181,7 +188,7 @@ pub fn generate_self_signed(
 
     // PKCS#8 PEM of the private key — surfaced once to the user, never persisted.
     // Serialized last so no error path above holds an unwiped copy; on success
-    // it moves into `GeneratedCert`, whose `Drop` wipes it.
+    // it moves into `GeneratedCert` (its `Drop` says what that wipe covers).
     let pkcs8_pem = key_pair.serialize_pem();
 
     Ok(GeneratedCert {

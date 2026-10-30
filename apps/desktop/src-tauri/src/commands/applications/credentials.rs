@@ -141,7 +141,9 @@ pub async fn remove_password(
 /// and returns what went up (thumbprint + notAfter, read from the certificate).
 /// The paste is parsed first ([`parse_cert_upload`]): a private key, a bundle,
 /// an expired certificate or anything that isn't an X.509 certificate is
-/// refused before anything reaches Graph.
+/// refused before anything reaches Graph. No `endDateTime` is sent: Graph
+/// derives it from the certificate, so the credential's expiry is the notAfter
+/// this reports.
 #[tauri::command]
 pub async fn add_certificate_credential(
     state: State<'_, AppState>,
@@ -169,7 +171,6 @@ pub(crate) async fn add_certificate_credential_core(
         kind: Some("AsymmetricX509Cert".into()),
         usage: Some("Verify".into()),
         key: parsed.key_b64,
-        end_date_time: input.end_date_time,
         ..Default::default()
     };
     client.add_key_credential(object_id, new_cred).await?;
@@ -193,16 +194,28 @@ pub async fn generate_self_signed_certificate(
     let validity = input
         .validity_days
         .unwrap_or(crate::dto::credentials::DEFAULT_CERT_LIFETIME_DAYS);
-    let mut generated = crate::cert::generate_self_signed(&input.subject, i64::from(validity))
-        .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
+    // On the blocking pool: RSA-2048 key generation is a prime search with a
+    // long tail, and the PKCS#12 build adds two PBKDF2 derivations. Inline,
+    // that CPU-bound run would hold a tokio worker from start to finish.
+    let subject = input.subject.clone();
+    let mut generated = tauri::async_runtime::spawn_blocking(move || {
+        crate::cert::generate_self_signed(&subject, i64::from(validity))
+    })
+    .await
+    .map_err(|e| {
+        UiError::validation(
+            "cert_generation_failed",
+            format!("certificate generation did not finish: {e}"),
+        )
+    })?
+    .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
 
     let expires_dt =
         chrono::DateTime::<chrono::Utc>::from_timestamp(generated.not_after.unix_timestamp(), 0);
 
     let client = state.graph_for(&tenant_id);
-    // `GeneratedCert: Drop` (zeroizes `private_key_pem` on drop), which means
-    // none of its `String` fields can be moved out — we extract each via
-    // `mem::take`, leaving an empty husk for `Drop` to zeroize harmlessly.
+    // `GeneratedCert: Drop`, so its fields cannot be moved out; each one
+    // handed on is taken with `mem::take` instead.
     let new_cred = NewKeyCredential {
         display_name: Some(input.subject.clone()),
         kind: Some("AsymmetricX509Cert".into()),
@@ -211,17 +224,24 @@ pub async fn generate_self_signed_certificate(
         end_date_time: expires_dt,
         ..Default::default()
     };
+    // A refusal here returns with the key, the bundle and its password still
+    // in `generated`, and its `Drop` wipes all three.
     client
         .add_key_credential(&input.object_id, new_cred)
         .await?;
     invalidate_app_credentials(&state.cache, &tenant_id, &input.object_id);
 
+    // The one-time reveal. The plaintext has to reach the webview, so the
+    // secrets move out here, and the copies IPC makes after this returns
+    // (Tauri's serialized reply, the webview's strings) are beyond any wipe.
+    // The PKCS#12 DER is encoded from a borrow: it stays in `generated`, whose
+    // `Drop` wipes it on return.
     Ok(GeneratedCertificateResult {
         thumbprint: std::mem::take(&mut generated.thumbprint),
         thumbprint_sha256: std::mem::take(&mut generated.thumbprint_sha256),
         certificate_pem: std::mem::take(&mut generated.cert_pem),
         private_key_pem: std::mem::take(&mut generated.private_key_pem),
-        pfx_base64: STANDARD.encode(std::mem::take(&mut generated.pfx_der)),
+        pfx_base64: STANDARD.encode(&generated.pfx_der),
         pfx_password: std::mem::take(&mut generated.pfx_password),
         expires: expires_dt.map(|d| d.to_rfc3339()).unwrap_or_default(),
     })
@@ -914,7 +934,6 @@ mod handler_tests {
             AddCertificateInput {
                 display_name: "bundle".to_string(),
                 pem_or_base64: format!("{}{}", generated.cert_pem, generated.private_key_pem),
-                end_date_time: None,
             },
         )
         .await
@@ -931,6 +950,106 @@ mod handler_tests {
                 .unwrap_or_default()
                 .is_empty()
         );
+    }
+
+    /// The two calls `add_key_credential` makes: the live `keyCredentials`
+    /// read (empty here) and the full-array PATCH.
+    async fn mount_key_credential_write(server: &wiremock::MockServer) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "keyCredentials": [] })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJECT}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    /// The one entry the one `keyCredentials` PATCH appended.
+    async fn appended_key_credential(server: &wiremock::MockServer) -> serde_json::Value {
+        let patches: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PATCH")
+            .map(|r| serde_json::from_slice(&r.body).expect("a JSON body"))
+            .collect();
+        assert_eq!(patches.len(), 1, "one keyCredentials PATCH");
+        let entries = patches[0]["keyCredentials"]
+            .as_array()
+            .expect("the full array");
+        assert_eq!(entries.len(), 1, "one entry appended to an empty array");
+        entries[0].clone()
+    }
+
+    /// Graph derives an uploaded certificate's `endDateTime` from the
+    /// certificate, so none is sent: a date from the webview could disagree
+    /// with the notAfter the reply reports. A payload that still carries the
+    /// `endDateTime` key the input used to have deserializes, and the date
+    /// goes nowhere.
+    #[tokio::test]
+    async fn an_uploaded_certificate_takes_its_expiry_from_the_certificate() {
+        let (server, state) = mock_state(TENANT).await;
+        mount_key_credential_write(&server).await;
+        seed(&state);
+        let generated = crate::cert::generate_self_signed("Upload Test", 30).unwrap();
+        let input: AddCertificateInput = serde_json::from_value(serde_json::json!({
+            "displayName": "uploaded",
+            "pemOrBase64": generated.cert_pem,
+            "endDateTime": "2099-01-01T00:00:00Z",
+        }))
+        .expect("a stale endDateTime key still deserializes");
+
+        let uploaded = add_certificate_credential_core(&state, TENANT, OBJECT, input)
+            .await
+            .expect("the mocked upload succeeds");
+
+        assert_eq!(uploaded.thumbprint, generated.thumbprint);
+        assert_eq!(
+            uploaded.not_after.timestamp(),
+            generated.not_after.unix_timestamp(),
+            "the reply reports the certificate's own notAfter",
+        );
+        let entry = appended_key_credential(&server).await;
+        assert_eq!(entry["key"], generated.cert_der_base64.as_str());
+        assert!(
+            entry.get("endDateTime").is_none(),
+            "Graph must derive the expiry from the certificate: {entry}",
+        );
+        assert!(!detail_cached_here(&state), "the credential tier is busted");
+        assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// RSA key generation and the PKCS#12 build are CPU-bound, so the command
+    /// runs them on the blocking pool, as the auth service does its keyring
+    /// calls (`keyring_calls_stay_on_the_blocking_pool`). The call must sit on
+    /// the `spawn_blocking` line or, where rustfmt wraps the closure, the line
+    /// right below it.
+    #[test]
+    fn certificate_generation_stays_on_the_blocking_pool() {
+        let source = include_str!("credentials.rs").replace("\r\n", "\n");
+        let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+        let lines: Vec<&str> = production.lines().collect();
+        let mut calls = 0;
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains("generate_self_signed(") {
+                continue;
+            }
+            calls += 1;
+            let previous = idx.checked_sub(1).map_or("", |i| lines[i]);
+            assert!(
+                line.contains("spawn_blocking") || previous.contains("spawn_blocking"),
+                "certificate generation outside spawn_blocking: {}",
+                line.trim()
+            );
+        }
+        assert!(calls >= 1, "the scan found no generator call");
     }
 
     #[tokio::test]

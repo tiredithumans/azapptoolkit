@@ -252,12 +252,33 @@ pub struct AddPasswordInput {
     pub end_date_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Input for uploading an operator-supplied certificate as a key credential.
+///
+/// It carries no expiry: Graph derives `endDateTime` from the certificate
+/// itself, so a date sent beside it could only disagree with the notAfter the
+/// upload reports back. A payload that still sends `endDateTime` (this type
+/// used to carry one) deserializes, and the date is ignored.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddCertificateInput {
     pub display_name: String,
+    /// The operator's paste or file. Meant to be a certificate, but it can
+    /// hold a private key (the upload exists to refuse one), so it is redacted
+    /// from `Debug`.
     pub pem_or_base64: String,
-    pub end_date_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// Hand-written rather than derived: a derived `Debug` on a secret is a defect
+// in this workspace — any `?input` in a `tracing` macro would put a pasted
+// private key straight into the daily rolling log file. Mirrors
+// `GeneratedCertificateResult` below.
+impl std::fmt::Debug for AddCertificateInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddCertificateInput")
+            .field("display_name", &self.display_name)
+            .field("pem_or_base64", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A federated identity credential (workload identity federation) on an app.
@@ -495,6 +516,29 @@ mod tests {
         assert!(dbg.contains("<redacted>"), "{dbg}");
         assert!(dbg.contains("AABB"), "{dbg}");
         assert!(dbg.contains("CCDD"), "{dbg}");
+    }
+
+    /// The upload paste is meant to be a certificate, but the upload exists
+    /// to refuse a private key, so a private key is exactly what it may hold —
+    /// and a `?input` would write it to the daily rolling log.
+    #[test]
+    fn a_certificate_upload_paste_is_redacted_in_debug() {
+        // Armour built at runtime, so the whole-history secrets scan never
+        // sees a literal private-key block.
+        let paste = format!(
+            "-----BEGIN {l}-----\nMIIEpastedkeybody\n-----END {l}-----",
+            l = "PRIVATE KEY"
+        );
+        let input = AddCertificateInput {
+            display_name: "ci-deploy".into(),
+            pem_or_base64: paste,
+        };
+        for dbg in [format!("{input:?}"), format!("{input:#?}")] {
+            assert!(!dbg.contains("MIIEpastedkeybody"), "{dbg}");
+            assert!(!dbg.contains("PRIVATE KEY"), "{dbg}");
+            assert!(dbg.contains("<redacted>"), "{dbg}");
+            assert!(dbg.contains("ci-deploy"), "{dbg}");
+        }
     }
     use azapptoolkit_core::models::KeyCredential;
 
