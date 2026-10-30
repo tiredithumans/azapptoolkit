@@ -472,7 +472,9 @@ aggregated `latest.json` and `SHA256SUMS`. Publishing is the deliberate human st
 
 One `cargo` entry in `.github/dependabot.yml` covers both Cargo trees (`directories`), so a bump of
 a crate both lockfiles resolve arrives as one PR that updates both. Two entries split it into two
-PRs, and each failed CI's `--locked` build on the other lockfile.
+PRs, and each failed CI's `--locked` build on the other lockfile. By hand, the same rule holds: after
+editing any `Cargo.toml`, run `just lock-sync`; to pin a crate for an advisory, run
+`just lock-pin <crate> <version>`. Either updates every lockfile the change reaches.
 
 `main` requires a PR to be up to date before it merges, and GitHub's auto-merge never updates a
 branch, so two workflows keep auto-merge moving:

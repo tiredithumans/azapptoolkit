@@ -39,8 +39,8 @@ the happy path; a malformed or missing header then fails there instead of on the
 ## 2. Bump the 3 guarded manifests + sync BOTH lockfiles — `just bump X.Y.Z`
 
 One recipe (`scripts/bump.sh` / `bump.ps1`) rewrites the three version literals, runs
-`cargo update --workspace` in both trees, then the identity tests. Hand-typing the
-`cargo update` pair is what AGENTS.md forbids — the recipe exists so you never have to.
+`just lock-sync` (`cargo update --workspace` in both trees), then the identity tests.
+Hand-typing `cargo update` is what AGENTS.md forbids — the recipes exist so you never have to.
 A partial bump is caught by the recipe itself on unix/windows dev boxes and by
 `every_manifest_states_the_same_version` in `just test` on the release PR (the guard job
 plus this test are why partial bumps fail PR CI, not only after a tag push).
@@ -54,10 +54,10 @@ equal the tag:
 
 These three are the complete set — there is no other version manifest in the repo.
 
-Lockfile context if the recipe's `cargo update` leg ever needs doing by hand: every
-verify/CI gate runs `--locked`, so a stale lockfile fails CI after a version bump. The
-workspace-only update touches only the `azapptoolkit-*` member version lines — no dep
-churn. Don't `cargo build`/`check` just to refresh a lock (needs the frontend-dist stub).
+Lockfile context if the lockfile leg ever needs re-running on its own: `just lock-sync`.
+Every verify/CI gate runs `--locked`, so a stale lockfile fails CI after a version bump. For a
+version bump the workspace-only update touches only the `azapptoolkit-*` member version
+lines — no dep churn. Don't `cargo build`/`check` just to refresh a lock (needs the frontend-dist stub).
 
 ## 3. Verify, commit, PR
 

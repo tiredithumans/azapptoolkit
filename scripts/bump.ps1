@@ -2,9 +2,10 @@
 # which dispatches here on Windows; the changelog roll comes FIRST because
 # the tail test compares against it). Mirrors scripts/bump.sh: rewrite the
 # three guarded version literals (tauri.conf.json, root [workspace.package],
-# web-rs [package]), resync BOTH lockfiles with `cargo update --workspace`
-# (workspace members only, never --locked — the point is to rewrite the
-# locks), then run the release-identity tests. Usage: just bump X.Y.Z
+# web-rs [package]), resync BOTH lockfiles with `just lock-sync` (`cargo
+# update --workspace` in both trees: workspace members only, never --locked —
+# the point is to rewrite the locks), then run the release-identity tests.
+# Usage: just bump X.Y.Z
 param([Parameter(Mandatory = $true)][string]$Version)
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { Write-Error "bump: '$Version' is not X.Y.Z"; exit 1 }
@@ -45,13 +46,8 @@ foreach ($c in $checks) {
 }
 
 # Lockfile resync (SKILL.md §2): both trees, workspace-only update.
-cargo update --workspace
+just lock-sync
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Push-Location apps/desktop/web-rs
-cargo update --workspace
-$webCode = $LASTEXITCODE
-Pop-Location
-if ($webCode -ne 0) { exit $webCode }
 
 # Release-identity smoke: the release.rs invariant suite (three-manifest
 # version parity, CHANGELOG header format, the verify-full gate list).

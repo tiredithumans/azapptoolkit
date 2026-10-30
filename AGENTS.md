@@ -16,7 +16,7 @@ are pinned by `apps/desktop/src-tauri/tests/repo_invariants/<area>.rs`; a failin
 | Task runner | `just` — every build/dev/verify command is a recipe in `/justfile` (never hand-type `cargo`); `just --list` describes each. |
 | Setup / Dev | `just setup` (idempotent OS-aware bootstrap; bodies in `scripts/`) · `just dev` (`cargo tauri dev`) |
 | Inner loop | `just check` (type-check both trees, no codegen) · `just test-crate <crate> [-- <filter>]` |
-| Gates | `just verify` (before declaring a change done) · `just verify-full` (CI parity) · `just clean` (both build trees) |
+| Gates | `just verify` (before declaring a change done) · `just verify-full` (CI parity) · `just clean` (both build trees) · `just lock-sync` / `lock-pin` (both lockfiles) |
 | Browser / demo | `just web-itest` · `just web-itest-size` (browser-gated) · `just web-build-pages [BASE]` (Pages demo) |
 | Release builds | per-host; `just build-{windows,macos,linux}-updater` need `TAURI_SIGNING_PRIVATE_KEY`, `build-windows` is keyless |
 | Run locally | needs `AZAPPTOOLKIT_CLIENT_ID` + `AZAPPTOOLKIT_TENANT_ID` (team builds bake them via `.env`) |
@@ -72,7 +72,7 @@ docs/CHANGELOG-archive.md — releases <= 0.26.3
   1. `#[tauri::command] async fn` under `src-tauri/src/commands/` (a domain file or subdir).
   2. Add it to `tauri::generate_handler![]` in `src-tauri/src/lib.rs`.
   3. A typed stub in `web-rs/src/bindings/` that calls `invoke_result`.
-- **Workspace dependency** — add to `[workspace.dependencies]`, use `"name".workspace = true`, check `Cargo.lock` for a duplicate major first. Dependencies are a cost: prefer std + existing crates.
+- **Workspace dependency** — add to `[workspace.dependencies]`, use `"name".workspace = true`, check `Cargo.lock` for a duplicate major first, then `just lock-sync`. Dependencies are a cost: prefer std + existing crates.
 - **Audit scoring rule** — in `azapptoolkit-core::audit` with a table-driven test citing the legacy PowerShell `file:line`; a rule that shifts ranking needs a CHANGELOG note.
 - **Audit remediation (one-click "Fix")** — only for a safe, existing mutation; re-resolves live state.
 
