@@ -122,7 +122,8 @@ tenant-wide indexes (`indexes_cached`: the cached `app_name_index` and
 
 The per-object reads are **batched** via Graph JSON batching to keep round-trips
 (and the throttling they trigger) low. Each pass chunks its objects into groups
-of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
+of `BATCH_CHUNK` (20, Graph's `$batch` cap); Passes 1 and 2 `dispatch_capped`
+the chunks, and Pass 3 reads them four at a time:
 
 - **Pass 1 — app registrations:** per chunk, `batch_get_applications_backup_json`
   (one consolidated `$expand=owners` doc per app — app + auth + Expose-an-API +
@@ -137,13 +138,19 @@ of `BATCH_CHUNK` (20, Graph's `$batch` cap) and `dispatch_capped`s the chunks:
   captures the SP, without that part, and is recorded in `TenantBackup.skipped`
   as a partial entry (`enterpriseAppAssignments` / `enterpriseAppGroups`); a
   vanished SP is left out.
-- **Pass 3 — managed identities:** `batch_list_app_role_assignments` for all MIs,
+- **Pass 3 — managed identities:** `batch_list_app_role_assignments` per chunk,
   then one batched prewarm of each **distinct** resource SP (seeding
   `ResourceLookup`), then assembly with no further round trips. Azure RBAC isn't
   scanned (runbook-only on restore). A per-MI assignment read failure captures
   the MI without its app-roles and is recorded as a `managedIdentity` skip; like
   Passes 1 and 2, every failure is classified through `SessionDead`, so a dead
-  session aborts the backup.
+  session aborts the backup. The chunks go out in groups of
+  `MI_CHUNKS_IN_FLIGHT` (four, one `join_all` per group, the batch helper's own
+  concurrency) rather than under the adaptive cap, with the backup's token and
+  the session checked before each group and progress ticked as each group
+  lands. The pass used to read every MI in one batched call: one failed `$batch`
+  POST then sent every MI down the one-at-a-time fallback, which nothing could
+  cancel.
 
 Each batched read returns `Vec<Result<T>>` in input order; a **whole-batch
 failure degrades to per-object reads** for that chunk (never failing the backup),

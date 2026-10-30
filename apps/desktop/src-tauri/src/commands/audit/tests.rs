@@ -3,8 +3,8 @@
 use super::*;
 
 use super::prefetch::{
-    prefetch_admin_consent_grants, prefetch_office365_role_grants, sign_in_activity_outcome,
-    sign_in_pre_acquire_outcome,
+    prefetch_admin_consent_grants, prefetch_office365_role_grants,
+    risky_service_principals_outcome, sign_in_activity_outcome, sign_in_pre_acquire_outcome,
 };
 use super::score::{
     combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
@@ -1080,6 +1080,101 @@ async fn a_readable_sign_in_report_maps_each_app_to_its_last_sign_in() {
     assert_eq!(gap, None);
     assert!(map.get("app-1").is_some_and(Option::is_some));
     assert_eq!(map.get("app-2"), Some(&None));
+}
+
+// ── The risky-service-principal report: retried, then unavailable ≠ gap ──
+
+/// A client whose `IdentityRiskyServicePrincipal.Read.All` token is in hand —
+/// the state after `prefetch_risky_service_principals`' pre-acquire succeeded.
+fn risky_client(server: &wiremock::MockServer) -> GraphClient {
+    let token: Arc<dyn BearerProvider> = StaticTokenProvider::new("tok");
+    GraphClient::with_base_url(
+        "tenant-test",
+        token.clone(),
+        token.clone(),
+        Cache::new(),
+        server.uri(),
+    )
+    .with_risky_sp_token(token)
+}
+
+async fn mock_risky_report(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+    use wiremock::matchers::{method, path};
+    wiremock::Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// One 429 from the risky-SP report used to be the whole run's
+/// `RiskyServicePrincipals` gap, and every compromised-SP flag was lost with
+/// it: the read was one-shot. It now rides the retrying transport, so a
+/// throttle that clears leaves no gap and the flags land.
+#[tokio::test]
+async fn a_throttled_risky_report_is_retried_and_leaves_no_gap() {
+    use wiremock::matchers::{method, path};
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(method("GET"))
+        .and(path("/identityProtection/riskyServicePrincipals"))
+        .respond_with(wiremock::ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mock_risky_report(
+        &server,
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [
+                { "id": "r-1", "servicePrincipalId": "sp-1", "riskState": "atRisk", "riskLevel": "medium" },
+                { "id": "r-2", "servicePrincipalId": "sp-2", "riskState": "dismissed" }
+            ]
+        })),
+    )
+    .await;
+
+    let (available, risky, gap) = risky_service_principals_outcome(
+        risky_client(&server).list_risky_service_principals().await,
+    );
+
+    assert!(available);
+    assert_eq!(gap, None, "a throttle the retries rode out is not a gap");
+    assert_eq!(
+        risky.get("sp-1"),
+        Some(&("atRisk".to_string(), "medium".to_string()))
+    );
+    assert!(!risky.contains_key("sp-2"), "only flagged states are kept");
+}
+
+/// What the retries cannot clear is still the gap, and an unlicensed tenant's
+/// 403 is still "not available here", never a gap.
+#[tokio::test]
+async fn a_risky_report_failure_is_a_gap_and_an_unlicensed_one_is_not() {
+    let server = wiremock::MockServer::start().await;
+    mock_risky_report(
+        &server,
+        wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"),
+    )
+    .await;
+    let (available, _, gap) = risky_service_principals_outcome(
+        risky_client(&server).list_risky_service_principals().await,
+    );
+    assert!(!available);
+    assert_eq!(gap, Some(AuditCoverageGap::RiskyServicePrincipals));
+
+    let server = wiremock::MockServer::start().await;
+    mock_risky_report(
+        &server,
+        wiremock::ResponseTemplate::new(403).set_body_string(
+            r#"{"error":{"code":"Authentication_RequestFromNonPremiumTenantOrB2CTenant"}}"#,
+        ),
+    )
+    .await;
+    let (available, _, gap) = risky_service_principals_outcome(
+        risky_client(&server).list_risky_service_principals().await,
+    );
+    assert!(!available);
+    assert_eq!(gap, None, "an unlicensed tenant must not read as degraded");
 }
 
 async fn mock_grants(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {

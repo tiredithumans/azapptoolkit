@@ -14,6 +14,9 @@ After 0.34.1, each change is one line written for the person using the app.
 
 - Saving Settings no longer freezes the window while another running copy of the app holds the settings file.
 - Restricting SharePoint access now grants a site listed twice once, and a refused grant names the admin role it needs.
+- The audit's risky service principal check now retries a throttled or failing page instead of giving up.
+- Cancel now stops a backup while it reads managed identities, and the progress bar moves during that step.
+- Deleting or disabling a service principal during an audit no longer leaves its old state showing for an hour.
 
 ### Security
 

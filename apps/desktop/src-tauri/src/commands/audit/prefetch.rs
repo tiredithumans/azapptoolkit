@@ -463,6 +463,14 @@ pub(crate) fn sign_in_activity_outcome(
     }
 }
 
+/// What the run learned from the risky-service-principal report: `(available,
+/// sp_objectId -> (riskState, riskLevel), gap)`.
+pub(crate) type RiskyPrefetch = (
+    bool,
+    Arc<HashMap<String, (String, String)>>,
+    Option<AuditCoverageGap>,
+);
+
 /// The tenant-wide Identity Protection risky-service-principal report →
 /// `(available, sp_objectId -> (riskState, riskLevel), gap)`.
 ///
@@ -485,12 +493,7 @@ pub(crate) async fn prefetch_risky_service_principals(
     state: &AppState,
     client: &GraphClient,
     tenant_id: &str,
-) -> (
-    bool,
-    Arc<HashMap<String, (String, String)>>,
-    Option<AuditCoverageGap>,
-) {
-    let empty = || (false, Arc::new(HashMap::new()), None);
+) -> RiskyPrefetch {
     // Pre-acquire the scoped token so a missing consent/license surfaces
     // before the read. Failure means the tenant cannot use the feature today
     // — unavailable, not a gap (see the doc comment).
@@ -498,9 +501,20 @@ pub(crate) async fn prefetch_risky_service_principals(
         tracing::info!(
             "audit: risky-service-principal report unavailable; skipping risky-SP check"
         );
-        return empty();
+        return (false, Arc::new(HashMap::new()), None);
     };
-    match client.list_risky_service_principals().await {
+    risky_service_principals_outcome(client.list_risky_service_principals().await)
+}
+
+/// The report read's half of [`prefetch_risky_service_principals`], once the
+/// token is in hand: rows → the risky map; a 403 that says the tenant is not
+/// licensed → unavailable; any other failure → the coverage gap. The read
+/// rides the retrying transport, so a throttled or failing page reaches this
+/// only once its retries ran out.
+pub(crate) fn risky_service_principals_outcome(
+    read: azapptoolkit_graph::Result<Vec<azapptoolkit_core::models::RiskyServicePrincipal>>,
+) -> RiskyPrefetch {
+    match read {
         Ok(rows) => {
             let map: HashMap<String, (String, String)> = rows
                 .into_iter()

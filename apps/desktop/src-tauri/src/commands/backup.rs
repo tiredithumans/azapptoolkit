@@ -46,6 +46,12 @@ use crate::state::{AppState, CancelToken};
 /// each dispatched chunk is one POST per batched read.
 const BATCH_CHUNK: usize = 20;
 
+/// `$batch` POSTs the managed-identity pass keeps in flight, one per chunk. It is
+/// the batch helper's own `CHUNK_CONCURRENCY`, which the pass rode when it read
+/// every MI in one call: going one chunk at a time cost a large estate four
+/// times the round trips.
+const MI_CHUNKS_IN_FLIGHT: usize = 4;
+
 /// Initial concurrent chunks. The unit of work is now a 20-object `$batch`, and
 /// each chunk task fires up to three batched reads at once (Pass 2 sends the SP
 /// read, the assignees, and the group memberships together), so the peak
@@ -762,12 +768,20 @@ fn assemble_enterprise_backup(
 
 /// Backs up the managed identities: their identity + held Graph app-roles (the
 /// re-bindable permission). Three batched phases: (1) every MI's held
-/// assignments in one batched read, (2) resolve each distinct resource SP once
-/// via a batched prewarm, (3) assemble (all resolves are now cache hits). Azure
-/// RBAC isn't scanned here — it's runbook-only on restore. Polls the backup's token
-/// between phases and per MI. (Uses the batch helpers' own internal concurrency
-/// rather than the adaptive chunk cap: the MI set is small and Pass 1/2 are the
-/// throttle pressure that matters.)
+/// assignments, one [`BATCH_CHUNK`] `$batch` per chunk with
+/// [`MI_CHUNKS_IN_FLIGHT`] chunks at a time, (2) resolve each distinct resource
+/// SP once via a batched prewarm, (3) assemble (all resolves are now cache
+/// hits). Azure RBAC isn't scanned here — it's runbook-only on restore. Phase 1
+/// keeps the batch helper's fixed concurrency rather than the adaptive cap
+/// Passes 1 and 2 dispatch under.
+///
+/// Phase 1 used to read every MI in ONE batched call. A single chunk whose
+/// `$batch` POST failed then failed the whole call, and every MI went down the
+/// per-MI fallback one GET at a time, deaf to Cancel and to a dead session.
+/// Now a failed chunk degrades only its own MIs, the backup's token and the
+/// session are checked before each group of chunks, and progress ticks for
+/// each MI as its group lands (phase 3 no longer ticks, so each MI counts
+/// once).
 ///
 /// Like Passes 1 and 2, every read failure is classified through `session`: a
 /// dead session aborts the backup rather than saving a manifest whose managed
@@ -781,25 +795,36 @@ async fn backup_managed_identities<S: ProgressSink>(
     tick: &BackupTicker<'_, S>,
     session: &SessionDead,
 ) -> Result<(Vec<ManagedIdentityBackup>, Vec<SkippedObject>), UiError> {
-    if cancel.is_cancelled() {
-        return Err(cancelled_err());
+    // Phase 1: every MI's held app-role assignments, a group of chunks at a
+    // time. A whole-batch failure takes the per-MI path for that chunk only;
+    // each per-MI result is kept, in `managed` order, so a failure is recorded
+    // below.
+    let chunks: Vec<&[ServicePrincipal]> = managed.chunks(BATCH_CHUNK).collect();
+    let mut assignments: Vec<Result<Vec<AppRoleAssignment>, GraphError>> =
+        Vec::with_capacity(managed.len());
+    for group in chunks.chunks(MI_CHUNKS_IN_FLIGHT) {
+        if session.is_dead() {
+            return Err(session.err("the tenant backup"));
+        }
+        if cancel.is_cancelled() {
+            return Err(cancelled_err());
+        }
+        // Grouped `join_all`, as the batch helper does, rather than
+        // `stream::buffered`, whose higher-ranked lifetimes break the Send
+        // inference a Tauri command needs. Results come back in input order.
+        let reads =
+            futures::future::join_all(group.iter().map(|chunk| read_mi_chunk(client, chunk))).await;
+        for (chunk, read) in group.iter().zip(reads) {
+            note_graph_failures(session, read.iter().map(Result::as_ref));
+            for sp in *chunk {
+                tick.advance(Some(sp.display_name.clone()));
+            }
+            assignments.extend(read);
+        }
     }
-    let mi_ids: Vec<String> = managed.iter().map(|sp| sp.id.clone()).collect();
-
-    // Phase 1: every MI's held app-role assignments. A whole-batch failure takes
-    // the per-MI path; each per-MI result is kept so a failure is recorded below.
-    let assignments: Vec<Result<Vec<AppRoleAssignment>, GraphError>> = batch_or_serial(
-        "backup MI assignment",
-        &mi_ids,
-        client.batch_list_app_role_assignments(&mi_ids).await,
-        |id: String| async move { client.list_app_role_assignments(&id).await },
-    )
-    .await;
-    note_graph_failures(session, assignments.iter().map(Result::as_ref));
     if session.is_dead() {
         return Err(session.err("the tenant backup"));
     }
-
     if cancel.is_cancelled() {
         return Err(cancelled_err());
     }
@@ -817,7 +842,7 @@ async fn backup_managed_identities<S: ProgressSink>(
         .collect();
     resolver.prewarm(&unique).await;
 
-    // Phase 3: assemble (cache hits).
+    // Phase 3: assemble (cache hits). Progress was ticked in phase 1.
     let mut out = Vec::with_capacity(managed.len());
     let mut skipped: Vec<SkippedObject> = Vec::new();
     for (i, sp) in managed.iter().enumerate() {
@@ -845,13 +870,29 @@ async fn backup_managed_identities<S: ProgressSink>(
             arm_resource_id: user_assigned_arm_id(&sp.alternative_names),
             held_app_roles,
         });
-        tick.advance(Some(sp.display_name.clone()));
     }
     // A resource-SP resolve can latch the session too.
     if session.is_dead() {
         return Err(session.err("the tenant backup"));
     }
     Ok((out, skipped))
+}
+
+/// One chunk of the managed-identity pass: its MIs' held app-role
+/// assignments in one `$batch`, or one by one when the whole batch failed. One
+/// result per MI, in `chunk` order.
+async fn read_mi_chunk(
+    client: &GraphClient,
+    chunk: &[ServicePrincipal],
+) -> Vec<Result<Vec<AppRoleAssignment>, GraphError>> {
+    let ids: Vec<String> = chunk.iter().map(|sp| sp.id.clone()).collect();
+    batch_or_serial(
+        "backup MI assignment",
+        &ids,
+        client.batch_list_app_role_assignments(&ids).await,
+        |id: String| async move { client.list_app_role_assignments(&id).await },
+    )
+    .await
 }
 
 fn is_managed_identity(sp: &ServicePrincipal) -> bool {
@@ -1460,6 +1501,245 @@ mod tests {
             .expect_err("a dead session must stop the backup, not save empty MIs");
         assert_eq!(err.code, "refresh_missing");
         assert!(session.is_dead());
+    }
+
+    /// `count` managed identities, `mi-00`, `mi-01`, …
+    fn mis(count: usize) -> Vec<ServicePrincipal> {
+        (0..count)
+            .map(|i| mi(&format!("mi-{i:02}"), &format!("mi {i:02}")))
+            .collect()
+    }
+
+    /// Answers the MI pass's `$batch` POSTs, noting when each arrived: the
+    /// chunk carrying `failing` fails outright (a 500 retried at once, then
+    /// given up), and any other chunk is answered sub-request by sub-request
+    /// with an empty assignment list, after `hold`.
+    struct MiBatch {
+        failing: Option<&'static str>,
+        hold: std::time::Duration,
+        arrivals: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    }
+
+    impl MiBatch {
+        fn failing(mi: &'static str) -> Self {
+            Self {
+                failing: Some(mi),
+                hold: std::time::Duration::ZERO,
+                arrivals: Arc::default(),
+            }
+        }
+    }
+
+    impl wiremock::Respond for MiBatch {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.arrivals
+                .lock()
+                .unwrap()
+                .push(std::time::Instant::now());
+            let body: serde_json::Value = request.body_json().unwrap();
+            let requests = body["requests"].as_array().unwrap();
+            let fails = self.failing.is_some_and(|mi| {
+                let failing = format!("/{mi}/");
+                requests
+                    .iter()
+                    .any(|r| r["url"].as_str().unwrap().contains(&failing))
+            });
+            if fails {
+                return wiremock::ResponseTemplate::new(500).insert_header("Retry-After", "0");
+            }
+            let responses: Vec<serde_json::Value> = requests
+                .iter()
+                .map(|r| serde_json::json!({ "id": r["id"], "status": 200, "body": { "value": [] } }))
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "responses": responses }))
+                .set_delay(self.hold)
+        }
+    }
+
+    /// Answers a per-MI read with an empty list after pressing Cancel: the
+    /// operator stops the backup while the pass reads one MI at a time.
+    struct CancelOnRead(crate::state::CancelFlag);
+
+    impl wiremock::Respond for CancelOnRead {
+        fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.0.cancel();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] }))
+        }
+    }
+
+    /// An MI with no held app roles, read on its own.
+    fn no_roles() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] }))
+    }
+
+    /// The MI pass's mock Graph: `$batch` through `batch`, and every per-MI
+    /// read through `per_mi`.
+    async fn mi_server(
+        batch: MiBatch,
+        per_mi: impl wiremock::Respond + 'static,
+    ) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path, path_regex};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/v1.0/$batch"))
+            .respond_with(batch)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/v1\.0/servicePrincipals/mi-\d+/appRoleAssignments$",
+            ))
+            .respond_with(per_mi)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// The MI ids `server` was asked about: one by one (a per-MI GET), and
+    /// inside a `$batch` POST.
+    async fn mi_reads(server: &wiremock::MockServer) -> (Vec<String>, Vec<String>) {
+        let mi_in = |url: &str| -> Option<String> {
+            let rest = url.split("/servicePrincipals/").nth(1)?;
+            Some(rest.split('/').next()?.to_string())
+        };
+        let (mut single, mut batched) = (Vec::new(), Vec::new());
+        for request in server.received_requests().await.unwrap() {
+            if request.method.as_str() == "GET" {
+                single.extend(mi_in(request.url.path()));
+            } else {
+                let body: serde_json::Value = request.body_json().unwrap();
+                for r in body["requests"].as_array().unwrap() {
+                    batched.extend(mi_in(r["url"].as_str().unwrap()));
+                }
+            }
+        }
+        single.sort();
+        single.dedup();
+        batched.sort();
+        batched.dedup();
+        (single, batched)
+    }
+
+    /// `mi-00` up to (not including) `mi-{end}`.
+    fn mi_ids(end: usize) -> Vec<String> {
+        (0..end).map(|i| format!("mi-{i:02}")).collect()
+    }
+
+    /// One chunk whose `$batch` fails degrades only its own MIs to per-MI
+    /// reads. The pass used to read every MI in one batched call, so the one
+    /// failed chunk sent all of them down the one-at-a-time fallback.
+    #[tokio::test]
+    async fn a_failed_mi_chunk_reads_only_its_own_mis_one_by_one() {
+        let server = mi_server(MiBatch::failing("mi-00"), no_roles()).await;
+        let client = mock_graph(&server);
+        let managed = mis(25);
+        let cancel = crate::state::CancelFlag::new().claim();
+        let rec = Recorder::default();
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, 25);
+        let session = SessionDead::new();
+
+        let (out, skipped) = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
+            .await
+            .expect("a failed chunk degrades, it does not fail the backup");
+
+        assert_eq!(out.len(), 25);
+        assert!(skipped.is_empty(), "every MI was read: {skipped:?}");
+        let (single, _) = mi_reads(&server).await;
+        assert_eq!(single, mi_ids(20), "only the failed chunk reads one by one");
+        // Progress ticks once per MI, as its chunks land, in input order.
+        let events = rec.payloads::<BulkProgress>(crate::dto::events::BACKUP_PROGRESS);
+        assert_eq!(
+            events.iter().map(|e| e.done).collect::<Vec<_>>(),
+            (1..=25).collect::<Vec<_>>()
+        );
+        assert_eq!(events[20].current_app.as_deref(), Some("mi 20"));
+        assert_eq!(fan.done(), 25);
+    }
+
+    /// Cancel pressed while a failed chunk reads its MIs one by one stops the
+    /// pass before the next group of chunks: those are never requested, and
+    /// the backup fails as cancelled rather than saving a short manifest.
+    #[tokio::test]
+    async fn a_cancel_during_the_mi_pass_stops_before_the_next_group() {
+        let flag = crate::state::CancelFlag::new();
+        let cancel = flag.claim();
+        let server = mi_server(MiBatch::failing("mi-00"), CancelOnRead(flag.clone())).await;
+        let client = mock_graph(&server);
+        // One full group of chunks, and one MI chunk more.
+        let in_group = MI_CHUNKS_IN_FLIGHT * BATCH_CHUNK;
+        let managed = mis(in_group + 5);
+        let rec = Recorder::default();
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, managed.len());
+        let session = SessionDead::new();
+
+        let err = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
+            .await
+            .expect_err("a cancelled backup is an error, not a short manifest");
+
+        assert_eq!(err.code, "cancelled");
+        let (single, batched) = mi_reads(&server).await;
+        assert_eq!(
+            single,
+            mi_ids(BATCH_CHUNK),
+            "only the failed chunk reads one by one"
+        );
+        assert_eq!(
+            batched,
+            mi_ids(in_group),
+            "the group after the cancel is never requested"
+        );
+    }
+
+    /// How long the concurrency test holds each `$batch` answer. A POST sent
+    /// after another POST's answer arrives at least this long after it.
+    const BATCH_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// The pass keeps four chunks' `$batch` POSTs in flight, as the batch
+    /// helper did when the pass read every MI in one call, and no more: a
+    /// fifth chunk waits for its group. One chunk at a time cost a large estate
+    /// four times the round trips. Five chunks are read, and the answers are
+    /// held, so the arrival times show both bounds.
+    #[tokio::test]
+    async fn the_mi_pass_keeps_four_chunks_in_flight() {
+        let arrivals = Arc::default();
+        let server = mi_server(
+            MiBatch {
+                failing: None,
+                hold: BATCH_HOLD,
+                arrivals: Arc::clone(&arrivals),
+            },
+            no_roles(),
+        )
+        .await;
+        let client = mock_graph(&server);
+        let managed = mis(5 * BATCH_CHUNK);
+        let cancel = crate::state::CancelFlag::new().claim();
+        let rec = Recorder::default();
+        let fan = FanOutTicker::detached(4);
+        let tick = ticker(&rec, &fan, managed.len());
+        let session = SessionDead::new();
+
+        let (out, skipped) = backup_managed_identities(&client, &managed, &cancel, &tick, &session)
+            .await
+            .expect("every chunk reads");
+
+        assert_eq!(out.len(), managed.len());
+        assert!(skipped.is_empty());
+        let mut at = arrivals.lock().unwrap().clone();
+        at.sort();
+        assert_eq!(at.len(), 5, "one POST per chunk");
+        let spread = at[3].duration_since(at[0]);
+        assert!(
+            spread < BATCH_HOLD,
+            "the first four chunks were not in flight together ({spread:?} apart)"
+        );
+        assert!(
+            at[4].duration_since(at[0]) >= BATCH_HOLD,
+            "a fifth chunk went out before the first four were answered"
+        );
     }
 
     fn api_err() -> GraphError {
