@@ -742,42 +742,42 @@ pub async fn delete_exchange_scope_group(
     Ok(())
 }
 
-/// Reads this app's management scope and refuses the migration unless what is
-/// there is something the migration can reason about.
+/// Reads this app's management scope before anything access-affecting
+/// happens, and refuses unless what is there is something the caller can
+/// reason about. The one existing-scope guard for both paths that assign roles
+/// against a scope and then strip org-wide grants: the scoped grant
+/// (`apply_exchange_mailbox_scope`) and the legacy-policy migration
+/// (`migrate_one`). Each then decides agreement with [`scope_filter_agrees`].
 ///
 /// Returns the existing recipient filter, or `None` when no scope exists yet —
 /// the clean path, where the caller's `ensure_management_scope` creates it with
-/// exactly the filter this migration computed.
+/// exactly the filter the caller computed.
 ///
-/// FAIL CLOSED on a scope that exists with **no** `RecipientRestrictionFilter`.
-/// Such a scope confines nothing, and `ensure_management_scope` is create-only,
-/// so it is kept rather than replaced. Proceeding assigns this app's roles
-/// against an unrestricted scope, then strips its org-wide Entra grants and
-/// deletes the legacy policy — leaving the app reaching every mailbox in the
-/// tenant while the report says it was confined. That is strictly worse than
-/// the legacy policy it replaced, and it is the one outcome this whole flow
-/// exists to prevent.
+/// FAIL CLOSED on a scope that exists with **no** `RecipientRestrictionFilter`
+/// (`scope_filter_unreadable`). Such a scope confines nothing, and
+/// `ensure_management_scope` is create-only, so it is kept rather than
+/// replaced. Proceeding assigns this app's roles against an unrestricted scope
+/// and then strips its org-wide Entra grants (and, migrating, deletes the
+/// legacy policy) — leaving the app reaching every mailbox in the tenant while
+/// the report says it was confined, the one outcome this whole flow exists to
+/// prevent. `consequence` is the caller's sentence for what proceeding would
+/// have done, so each path's refusal names its own stakes.
 ///
-/// This is the same guard `apply_exchange_mailbox_scope` applies to the same
-/// state (`scope_filter_unreadable`, see its comment block); the migration path
-/// reached the identical assign-then-strip sequence through
-/// `repoint_scope_if_stale`, which returned silently on `None`, and through the
-/// branches that never called it at all. Refusing is safe precisely because the
-/// caller runs this BEFORE the first mutation, so the app is left exactly as it
-/// was — on its legacy policy, which is the status quo, not a half-applied
-/// state. AGENTS.md: "Repointing a management scope is an explicit action, and
+/// A failed read refuses too, never "no scope yet": `ensure_management_scope`
+/// re-reads and aborts on a *persistent* failure anyway, so this closes the
+/// transient case where the first read errs, the second succeeds, and the
+/// pre-existing scope is never compared at all. Refusing is safe because the
+/// caller runs this BEFORE any role, scope, grant or policy write, so the app
+/// is left exactly as it was — the status quo, not a half-applied state.
+/// AGENTS.md: "Repointing a management scope is an explicit action, and
 /// fail-closed."
 pub(super) async fn existing_scope_filter_checked(
     exo: &ExchangeClient,
     scope_name: &str,
+    consequence: &str,
 ) -> Result<Option<String>, UiError> {
-    // Refuse rather than proceed blind on a read error — the same reasoning as
-    // the grant path: `ensure_management_scope` re-reads and aborts on a
-    // *persistent* failure anyway, so this closes the transient case where the
-    // first read errs, the second succeeds, and the pre-existing scope is never
-    // compared at all.
     let read = exo.get_management_scope(scope_name).await?;
-    scope_filter_decision(read, scope_name)
+    scope_filter_decision(read, scope_name, consequence)
 }
 
 /// The decision half of [`existing_scope_filter_checked`], split out so the
@@ -785,6 +785,7 @@ pub(super) async fn existing_scope_filter_checked(
 pub(super) fn scope_filter_decision(
     read: Option<ExoManagementScope>,
     scope_name: &str,
+    consequence: &str,
 ) -> Result<Option<String>, UiError> {
     match read {
         None => Ok(None),
@@ -795,11 +796,9 @@ pub(super) fn scope_filter_decision(
                 format!(
                     "a management scope “{scope_name}” already exists for this app but has no \
                      recipient restriction filter, so it confines nothing — and Exchange keeps the \
-                     existing scope rather than replacing it. Migrating onto it would assign this \
-                     app's roles against an unrestricted scope and then remove the org-wide grants \
-                     and the legacy policy, leaving the app able to reach every mailbox in the \
-                     tenant. Nothing was changed. Review the scope in Exchange, or use “Move to \
-                     managed group” to consolidate onto the toolkit-managed group."
+                     existing scope rather than replacing it. {consequence} Nothing was changed. \
+                     Review the scope in Exchange, or use “Move to managed group” to consolidate \
+                     onto the toolkit-managed group."
                 ),
             )),
         },

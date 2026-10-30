@@ -437,51 +437,369 @@ fn a_divergent_or_unreadable_scope_filter_is_never_agreement() {
     ));
 }
 
-/// The migration refuses a pre-existing scope that confines nothing.
+/// The migration and the scoped grant both refuse a pre-existing scope that
+/// confines nothing, through the one guard.
 ///
 /// `ensure_management_scope` is create-only, so such a scope is KEPT.
 /// Proceeding assigned this app's roles against it, then stripped the
 /// org-wide Entra grants and deleted the legacy policy — leaving the app
 /// reaching every mailbox in the tenant while the report said it had been
-/// confined, which is strictly worse than the policy it replaced. The grant
-/// path has always refused this exact state (`scope_filter_unreadable`);
-/// the migration reached it through `repoint_scope_if_stale`, which
-/// returned silently on `None`, and through the two branches that never
-/// called it at all.
+/// confined, which is strictly worse than the policy it replaced. The
+/// migration reached it through `repoint_scope_if_stale`, which returned
+/// silently on `None`, and through the two branches that never called it at
+/// all; the grant kept its own inline copy of the guard, now this one.
 #[test]
-fn a_scope_with_no_recipient_filter_fails_the_migration_closed() {
+fn a_scope_with_no_recipient_filter_fails_closed_on_either_path() {
     let scope = |filter: Option<&str>| ExoManagementScope {
         name: Some("app_scope_1".into()),
         identity: Some("app_scope_1".into()),
         recipient_filter: filter.map(str::to_string),
     };
+    let migration = MIGRATION_ONTO_UNRESTRICTED_SCOPE;
 
     // No scope yet: the clean path — `ensure_management_scope` creates it
     // below with exactly the filter the migration computed.
-    assert_eq!(scope_filter_decision(None, "app_scope_1").unwrap(), None);
+    assert_eq!(
+        scope_filter_decision(None, "app_scope_1", migration).unwrap(),
+        None
+    );
 
     // A scope with a filter is readable, and its filter is handed back so
     // the repoint can compare group sets without a second round trip.
     assert_eq!(
         scope_filter_decision(
             Some(scope(Some("MemberOfGroup -eq 'CN=a,DC=x'"))),
-            "app_scope_1"
+            "app_scope_1",
+            migration
         )
         .unwrap()
         .as_deref(),
         Some("MemberOfGroup -eq 'CN=a,DC=x'")
     );
 
-    // The fail-closed case, carrying the same code the grant path uses so
-    // one UI mapping covers both.
-    let err = scope_filter_decision(Some(scope(None)), "app_scope_1")
-        .expect_err("an unrestricted scope must not be migrated onto");
-    assert_eq!(err.code, "scope_filter_unreadable");
-    assert!(
-        err.message.contains("confines nothing"),
-        "the refusal must say WHY, not just that it refused: {}",
-        err.message
+    // The fail-closed case, one code on both paths so one UI mapping covers
+    // both, each naming its own stakes.
+    for (consequence, other) in [
+        (migration, GRANT_ONTO_UNRESTRICTED_SCOPE),
+        (GRANT_ONTO_UNRESTRICTED_SCOPE, migration),
+    ] {
+        let err = scope_filter_decision(Some(scope(None)), "app_scope_1", consequence)
+            .expect_err("an unrestricted scope must not be assigned against");
+        assert_eq!(err.code, "scope_filter_unreadable");
+        assert!(
+            err.message.contains("confines nothing"),
+            "the refusal must say WHY, not just that it refused: {}",
+            err.message
+        );
+        assert!(
+            err.message
+                .contains(&format!("{consequence} Nothing was changed.")),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains(other), "{}", err.message);
+    }
+}
+
+/// The managed identity the grant-core tests scope, and its app.
+const MI: &str = "mi-1";
+const MI_APP: &str = "app-1";
+const FINANCE_DN: &str = "CN=Finance,DC=x";
+
+/// One tenant for a managed identity's scoped grant, Graph and Exchange on ONE
+/// mock server, so `received_requests` is the whole run in order. `mi-1` is
+/// app `app-1` and holds Microsoft Graph's `Mail.Read` org-wide (`a-mail`,
+/// whose DELETE succeeds); Exchange already has its pointer and resolves the
+/// group `Finance`; this app's management scope is `existing_scope` (`None`:
+/// not there yet); `New-ManagementRoleAssignment` answers `assign`.
+async fn mi_scope_tenant(
+    existing_scope: Option<serde_json::Value>,
+    assign: wiremock::ResponseTemplate,
+) -> (wiremock::MockServer, AppState, ExchangeClient) {
+    use azapptoolkit_core::token::StaticTokenProvider;
+    use wiremock::matchers::{body_string_contains, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+    let resource = |app_id: &str| {
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{app_id}'")))
+    };
+    Mock::given(method("GET"))
+        .and(path(format!("/v1.0/servicePrincipals/{MI}")))
+        .respond_with(ok(serde_json::json!({
+            "id": MI, "appId": MI_APP, "displayName": "MI"
+        })))
+        .mount(&server)
+        .await;
+    resource(MICROSOFT_GRAPH_APP_ID)
+        .respond_with(ok(serde_json::json!({ "value": [{
+            "id": "graph-sp", "appId": MICROSOFT_GRAPH_APP_ID,
+            "appRoles": [{ "id": "r-mail", "value": "Mail.Read" }]
+        }] })))
+        .mount(&server)
+        .await;
+    resource(OFFICE365_EXCHANGE_ONLINE_APP_ID)
+        .respond_with(ok(serde_json::json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1.0/servicePrincipals/{MI}/appRoleAssignments"
+        )))
+        .respond_with(ok(serde_json::json!({ "value": [{
+            "id": "a-mail", "principalId": MI, "resourceId": "graph-sp", "appRoleId": "r-mail"
+        }] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/v1.0/servicePrincipals/{MI}/appRoleAssignments/a-mail"
+        )))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    // Every cmdlet is a POST to the one InvokeCommand URL, told apart by name.
+    let cmdlet =
+        |name: &str| Mock::given(method("POST")).and(body_string_contains(format!("\"{name}\"")));
+    cmdlet("Get-ServicePrincipal")
+        .respond_with(ok(
+            serde_json::json!({ "value": [{ "AppId": MI_APP, "ObjectId": MI }] }),
+        ))
+        .mount(&server)
+        .await;
+    cmdlet("Get-Group")
+        .respond_with(ok(serde_json::json!({ "value": [{
+            "Name": "Finance", "DistinguishedName": FINANCE_DN
+        }] })))
+        .mount(&server)
+        .await;
+    let scopes: Vec<serde_json::Value> = existing_scope.into_iter().collect();
+    cmdlet("Get-ManagementScope")
+        .respond_with(ok(serde_json::json!({ "value": scopes })))
+        .mount(&server)
+        .await;
+    cmdlet("New-ManagementScope")
+        .respond_with(ok(serde_json::json!({ "value": [{
+            "Name": "app_scope_app-1",
+            "RecipientFilter": format!("MemberOfGroup -eq '{FINANCE_DN}'")
+        }] })))
+        .mount(&server)
+        .await;
+    cmdlet("Get-ManagementRoleAssignment")
+        .respond_with(ok(serde_json::json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    cmdlet("New-ManagementRoleAssignment")
+        .respond_with(assign)
+        .mount(&server)
+        .await;
+
+    let state = AppState::for_test("t1", &server.uri());
+    let exo = ExchangeClient::with_base_url(
+        StaticTokenProvider::new("t"),
+        "t1",
+        "admin@contoso.com",
+        server.uri(),
     );
+    (server, state, exo)
+}
+
+/// `New-ManagementRoleAssignment` landing the scoped `Mail.Read` role.
+fn role_assigned() -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [{
+        "Role": "Application Mail.Read", "CustomResourceScope": "app_scope_app-1", "Identity": "ra-1"
+    }] }))
+}
+
+/// Runs the managed-identity grant core for `mi-1` with the webview's
+/// `app_id`: `Mail.Read`, scoped to `Finance`, its org-wide grant stripped.
+async fn scope_mi(
+    state: &AppState,
+    exo: &ExchangeClient,
+    app_id: &str,
+) -> Result<ExchangeAccessResult, UiError> {
+    grant_managed_identity_scope(
+        state,
+        exo,
+        "t1",
+        &TenantDefaults::default(),
+        ManagedIdentityScope {
+            managed_identity_id: MI,
+            app_id,
+            app_display_name: "MI",
+            mail_permissions: &["Mail.Read".to_string()],
+            groups: &["Finance".to_string()],
+            remove_unscoped: true,
+        },
+    )
+    .await
+}
+
+/// Whether `r` sent the Exchange cmdlet `name`.
+fn is_cmdlet(r: &wiremock::Request, name: &str) -> bool {
+    r.method == wiremock::http::Method::POST
+        && String::from_utf8_lossy(&r.body).contains(&format!("\"{name}\""))
+}
+
+/// The webview sends the managed identity and its app as two ids, and the core
+/// assigns roles to one and strips org-wide grants from the other. A pair that
+/// names two principals is refused after one read, before Exchange or a Graph
+/// write is touched: trusting it confined one app while stripping another
+/// principal's mail access, and reported the scoping as done.
+#[tokio::test]
+async fn a_managed_identity_paired_with_another_app_is_refused_before_any_write() {
+    let (server, state, exo) = mi_scope_tenant(None, role_assigned()).await;
+
+    let err = scope_mi(&state, &exo, "app-2")
+        .await
+        .expect_err("a drifted pair is refused");
+
+    assert_eq!(err.code, "principal_mismatch");
+    let requests = server.received_requests().await.unwrap();
+    let sent: Vec<String> = requests
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert_eq!(
+        sent,
+        [format!("GET /v1.0/servicePrincipals/{MI}")],
+        "only the service principal is read"
+    );
+}
+
+/// End to end, in order: the pairing read, the existing-scope guard, the
+/// scope, the scoped role, and only then the strip of the org-wide grant —
+/// scoped access lands before broad access goes, so a failure never strands
+/// the principal.
+#[tokio::test]
+async fn a_scoped_grant_lands_before_the_org_wide_grant_is_stripped() {
+    let (server, state, exo) = mi_scope_tenant(None, role_assigned()).await;
+
+    let out = scope_mi(&state, &exo, MI_APP)
+        .await
+        .expect("the grant runs");
+
+    assert_eq!(out.scope_name, "app_scope_app-1");
+    assert_eq!(out.roles_assigned, ["Application Mail.Read"]);
+    assert_eq!(out.removed_entra_grants, ["Mail.Read"]);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    let requests = server.received_requests().await.unwrap();
+    let first = |what: &str, hit: &dyn Fn(&wiremock::Request) -> bool| {
+        requests
+            .iter()
+            .position(hit)
+            .unwrap_or_else(|| panic!("no {what}"))
+    };
+    let pairing = first("pairing read", &|r| {
+        r.url.path() == format!("/v1.0/servicePrincipals/{MI}")
+    });
+    let exchange = first("Exchange call", &|r| {
+        r.url.path().ends_with("/InvokeCommand")
+    });
+    let guard = first("guard", &|r| is_cmdlet(r, "Get-ManagementScope"));
+    let scope = first("scope", &|r| is_cmdlet(r, "New-ManagementScope"));
+    let assign = first("scoped role", &|r| {
+        is_cmdlet(r, "New-ManagementRoleAssignment")
+    });
+    let strip = first("strip", &|r| r.method == wiremock::http::Method::DELETE);
+    assert!(
+        pairing < exchange && guard < scope && scope < assign && assign < strip,
+        "pairing {pairing} < exchange {exchange}; guard {guard} < scope {scope} < \
+         role {assign} < strip {strip}"
+    );
+}
+
+/// A scoped role Exchange refuses keeps its org-wide grant: nothing is
+/// stripped, and the result says the app still reaches every mailbox instead
+/// of reading as scoped.
+#[tokio::test]
+async fn a_refused_scoped_role_strips_nothing() {
+    let refused = wiremock::ResponseTemplate::new(400)
+        .set_body_json(serde_json::json!({ "error": { "message": "assignment refused" } }));
+    let (server, state, exo) = mi_scope_tenant(None, refused).await;
+
+    let out = scope_mi(&state, &exo, MI_APP)
+        .await
+        .expect("a failed role is reported, not thrown");
+
+    assert!(out.roles_assigned.is_empty());
+    assert!(out.removed_entra_grants.is_empty());
+    let all = out.warnings.join("\n");
+    assert!(
+        all.contains("failed to assign Application Mail.Read"),
+        "{all}"
+    );
+    assert!(
+        all.contains("Scoping is NOT effective for Mail.Read"),
+        "{all}"
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.method != wiremock::http::Method::DELETE),
+        "the org-wide grant stays when its scoped replacement failed"
+    );
+}
+
+/// The grant's existing-scope guard is the migration's
+/// (`existing_scope_filter_checked`, `scope_filter_agrees`), and it still
+/// refuses before any scope, role or grant write: a scope with no recipient
+/// filter, and one whose filter names the group but also reaches other
+/// mailboxes. A scope that already confines exactly that group, in Exchange's
+/// own casing, is reused rather than refused.
+#[tokio::test]
+async fn the_grant_refuses_an_existing_scope_it_cannot_prove_and_reuses_one_it_can() {
+    let scope = |filter: Option<&str>| {
+        serde_json::json!({
+            "Name": "app_scope_app-1", "Identity": "app_scope_app-1", "RecipientFilter": filter
+        })
+    };
+    let compound =
+        format!("MemberOfGroup -eq '{FINANCE_DN}' -or RecipientTypeDetails -eq 'UserMailbox'");
+    for (existing, refusal) in [
+        (scope(None), Some("scope_filter_unreadable")),
+        (scope(Some(compound.as_str())), Some("scope_group_mismatch")),
+        (scope(Some("MemberOfGroup -eq 'cn=finance,dc=X'")), None),
+    ] {
+        let (server, state, exo) = mi_scope_tenant(Some(existing), role_assigned()).await;
+
+        let out = scope_mi(&state, &exo, MI_APP).await;
+
+        let requests = server.received_requests().await.unwrap();
+        let sent = |name: &str| requests.iter().filter(|r| is_cmdlet(r, name)).count();
+        assert_eq!(sent("New-ManagementScope"), 0, "an existing scope is kept");
+        match refusal {
+            Some(code) => {
+                let err = out.expect_err(code);
+                assert_eq!(err.code, code);
+                if code == "scope_filter_unreadable" {
+                    assert!(
+                        err.message.contains(GRANT_ONTO_UNRESTRICTED_SCOPE),
+                        "the grant's own stakes: {}",
+                        err.message
+                    );
+                }
+                assert_eq!(sent("New-ManagementRoleAssignment"), 0, "{code}");
+                assert!(
+                    requests
+                        .iter()
+                        .all(|r| r.method != wiremock::http::Method::DELETE),
+                    "{code}: nothing stripped"
+                );
+            }
+            None => {
+                let out = out.expect("the same group, cased by Exchange, is agreement");
+                assert_eq!(out.roles_assigned, ["Application Mail.Read"]);
+                assert_eq!(out.removed_entra_grants, ["Mail.Read"]);
+            }
+        }
+    }
 }
 
 /// An Exchange role assignment row for the command-layer tests.

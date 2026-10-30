@@ -216,7 +216,11 @@ created the Entra SP busts the list tier itself) lives in
   takes an optional `permissions` filter so it can scope **one** declared mail permission (the
   per-permission "Scope…" action) or all of them (`None`, the coarse "scope all" action in the Permissions tab's Exchange scoping section).
 - `grant_managed_identity_scoped_exchange_access` builds them from the permission values being
-  granted (managed identities have no manifest).
+  granted (managed identities have no manifest). Its `managed_identity_id` and `app_id` arrive as
+  two webview arguments, and the core assigns roles to one and strips grants from the other, so its
+  body (`grant_managed_identity_scope`) first reads the service principal by object id and refuses
+  unless it carries `app_id` (`principal_mismatch`, the SharePoint grants' `require_same_app`),
+  before any Exchange call or Graph write; from there on it passes Graph's own ids.
 
 The MI grant form opens an inline scope panel for a scopable permission; non-scopable ones grant
 org-wide as before.
@@ -240,6 +244,12 @@ off and something is still assigned — the UI shows a partial removal as an err
 leftovers, never as "Removed N".
 `grant_exchange_mailbox_access` validates its targets before `ensure_service_principal`, and a
 newly created SP busts the list tier even when the scope step then fails.
+
+Both callers read the tenant's naming patterns (`load_tenant_defaults`) and pass them in, so the
+core reads no settings file and `grant_managed_identity_scope` runs against wiremock with Graph and
+Exchange on one server. Those tests pin the order (pairing read, existing-scope guard, scope,
+scoped role, then the strip), that a refused scoped role strips nothing, and that the guard refuses
+through the real grant path.
 
 ### Toolkit-managed scope group (default `app_scope_group_<app_id>`)
 
@@ -318,7 +328,9 @@ Invariants, each of which exists because its absence *narrows* access silently:
   using that scope. `apply_exchange_mailbox_scope` therefore *refuses* (`scope_group_mismatch`) when the existing
   scope does not prove exactly the requested groups — a grant must not rewrite a scope other
   permissions depend on; the operator chooses the move explicitly, from a dry-run plan listing the
-  mailboxes.
+  mailboxes. The grant runs the migration's own guard (`existing_scope_filter_checked`, then
+  `scope_filter_agrees`), and each path passes its own consequence clause into the shared
+  `scope_filter_unreadable` message.
 - **Invalidation:** the repoint changes the resolved verdict's filter and group count but not the
   app/SP set ⇒ `invalidate_app_detail_state`, not `invalidate_app_lists`.
 
@@ -383,8 +395,8 @@ because an integration that silently stops seeing a mailbox reports "not found",
 not "denied" — the hardest kind of outage to trace to a permission change.
 
 The same proof decides *agreement*: every "does this existing scope already
-confine exactly these groups?" check (the grant's existing-scope guard, the
-migration's `scope_filter_agrees` and its dry-run warning,
+confine exactly these groups?" check (`scope_filter_agrees`, the existing-scope
+guard the grant and the migration share, the migration's dry-run warning,
 `filter_names_only_group`, the redundant-write check in `repoint_scope_if_stale`,
 and `set_management_scope_filter`'s pre- and post-write proofs) goes through
 `targets::exact_scope_dns`, which is `None` for anything but a pure OR-chain.

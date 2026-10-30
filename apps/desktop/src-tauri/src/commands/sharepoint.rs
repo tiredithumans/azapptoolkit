@@ -135,8 +135,9 @@ struct GraphRolePrincipal<'a> {
     app_id: &'a str,
 }
 
-/// Refuses an object whose `appId` is not the one the grant names.
-fn require_same_app(found: &str, app_id: &str, what: &str) -> Result<(), UiError> {
+/// Refuses an object whose `appId` is not the one the grant names. The
+/// Exchange managed-identity grant makes the same check.
+pub(crate) fn require_same_app(found: &str, app_id: &str, what: &str) -> Result<(), UiError> {
     if found.eq_ignore_ascii_case(app_id) {
         Ok(())
     } else {
