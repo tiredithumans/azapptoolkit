@@ -268,9 +268,12 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
             "tags/any(t:t eq 'azapptoolkit:restoredFrom:o''brien')",
         ))
         .and(query_param("$top", "10"))
+        // The restore's provenance check reads the creation time and both credential lists,
+        // and compares the Authentication and Expose-an-API blocks with the backup's.
         .and(query_param(
             "$select",
-            "id,appId,displayName,createdDateTime,passwordCredentials,keyCredentials",
+            "id,appId,displayName,createdDateTime,passwordCredentials,keyCredentials,\
+             isFallbackPublicClient,web,spa,publicClient,identifierUris,api",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{
@@ -278,7 +281,8 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
                 "appId": "app-1",
                 "displayName": "Restored",
                 "createdDateTime": "2026-01-02T03:04:05Z",
-                "passwordCredentials": [{ "keyId": "k1", "displayName": "ci" }]
+                "passwordCredentials": [{ "keyId": "k1", "displayName": "ci" }],
+                "spa": { "redirectUris": ["https://contoso.com/"] }
             }]
         })))
         .mount(&server)
@@ -289,14 +293,19 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].app_id, "app-1");
-    // The restore's provenance check compares this against the backup time.
+    // Raw, so the blocks the typed model lacks reach the caller.
+    assert_eq!(hits[0]["appId"], "app-1");
     assert_eq!(
-        hits[0].created_date_time.map(|t| t.to_rfc3339()).as_deref(),
+        hits[0]["spa"]["redirectUris"],
+        serde_json::json!(["https://contoso.com/"])
+    );
+    let app: Application = serde_json::from_value(hits[0].clone()).unwrap();
+    assert_eq!(
+        app.created_date_time.map(|t| t.to_rfc3339()).as_deref(),
         Some("2026-01-02T03:04:05+00:00")
     );
     assert_eq!(
-        hits[0].password_credentials[0].display_name.as_deref(),
+        app.password_credentials[0].display_name.as_deref(),
         Some("ci")
     );
 }

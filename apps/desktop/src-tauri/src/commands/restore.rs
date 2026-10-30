@@ -32,9 +32,13 @@
 //! hit is adopted only once it is also provably this restore's: created after
 //! the backup, owned by nobody but the operator and the manifest's owners,
 //! holding no credential (secret, certificate, federated credential) the
-//! manifest does not account for, and with a service principal (if it has one)
-//! holding no credential at all and no other owner. Anything else — an ambiguous or unprovable
-//! match, or a read that failed — is a runbook item and never a blind create.
+//! manifest does not account for, with a service principal (if it has one)
+//! holding no credential at all and no other owner, and with no reply URL,
+//! implicit-grant or public-client flag, identifier URI, scope or
+//! pre-authorized client beyond what Pass 2 writes from the manifest — the
+//! last checked once Pass 1 knows every app's destination appId. Anything
+//! else — an ambiguous or unprovable match, or a read that failed — is a
+//! runbook item and never a blind create.
 //!
 //! Secret/cert values can't be restored: secrets are regenerated (the show-once
 //! values land in the [`RestoreReport`] for redistribution) — except those that
