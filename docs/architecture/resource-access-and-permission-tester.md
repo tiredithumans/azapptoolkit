@@ -42,7 +42,10 @@ app → its granted sites; filter by site → the apps that can touch it. Invari
 - **Coverage is never overstated.** The per-site read rides the client's retrying transport, so a
   transient 429 is absorbed with `Retry-After` honored; a *persistently* failing site increments
   `sites_failed` (surfaced as "scanned X of Y (Z failed — coverage is partial)") instead of
-  silently reading as "no grants". A cancelled **or partially-failed** run is returned but
+  silently reading as "no grants". So does every site of a task that never came back: a panic or
+  an abort reaches the collector without its chunk, so once a run that was not cancelled is over,
+  `sites_lost` counts what the returned tasks fall short of the total as failed. Uncounted, such a
+  run was cached and read complete. A cancelled **or partially-failed** run is returned but
   **never cached** — the promise extends to the cache. Site enumeration is capped at
   `MAX_SITES_PER_SWEEP` (5000); hitting it sets `SiteSweepResult::truncated` (the graph client's
   `list_all_sites` returns `(sites, truncated)` like every other capped walk), which

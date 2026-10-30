@@ -1404,9 +1404,14 @@ pub async fn sweep_site_permissions(
             }))
         },
         |joined| {
-            let Ok((chunk, results)) = joined else {
-                tracing::warn!("site sweep: chunk task failed to join");
-                return;
+            let (chunk, results) = match joined {
+                Ok(task) => task,
+                Err(err) => {
+                    // No chunk comes back with it, so its sites are counted
+                    // once the run is over (`sites_lost`).
+                    tracing::warn!(error = %err, "site sweep: chunk task failed to join");
+                    return;
+                }
             };
             for err in results.iter().filter_map(|r| r.as_ref().err()) {
                 session.note_code(err.ui_code());
@@ -1445,6 +1450,7 @@ pub async fn sweep_site_permissions(
         return Err(session.err("the SharePoint site sweep"));
     }
     let cancelled = stopped_early || cancel.is_cancelled();
+    sites_failed += sites_lost(total, done, cancelled);
     tracing::info!(
         total,
         sites_scanned,
@@ -1500,6 +1506,27 @@ pub async fn sweep_site_permissions(
 /// like the audit's `run_is_cacheable`; that function takes a Tauri `State`.
 fn sweep_is_cacheable(cancelled: bool, sites_failed: usize) -> bool {
     !cancelled && sites_failed == 0
+}
+
+/// The sites a finished sweep lost to tasks that never came back: a panic or
+/// an abort reaches the collector as a bare `JoinError`, without its chunk, so
+/// those sites were neither scanned nor failed. Uncounted, a run with no other
+/// failure was cached and read `is_complete()`, and every app granted on a
+/// lost site read "no grants".
+///
+/// `done` is the sites of every task that did come back. A run that was not
+/// cancelled dispatched every chunk and folded each returned one whole (the
+/// per-site fallback stops early only on Cancel or a dead session, and a dead
+/// session returns its error before this), so whatever `done` is short of
+/// `total` is exactly what the lost tasks took. A cancelled run adds nothing:
+/// its shortfall is mostly chunks Cancel never dispatched, and it is never
+/// cached nor complete anyway.
+fn sites_lost(total: usize, done: usize, cancelled: bool) -> usize {
+    if cancelled {
+        0
+    } else {
+        total.saturating_sub(done)
+    }
 }
 
 /// Signals an in-progress [`sweep_site_permissions`] run to stop at the next
@@ -2021,6 +2048,71 @@ mod tests {
         let results = read_site_chunk(&client, &sites, &stopped, &SessionDead::new()).await;
         assert!(results.is_empty());
         assert!(per_site_reads(&server).await.is_empty());
+    }
+
+    /// A sweep task that panicked (or was aborted) reaches the collector as a
+    /// bare `JoinError`, so its sites land in no count. They are counted as
+    /// failed once the run is over: uncounted, a run with no other failure was
+    /// cached and read complete, "no grants" for every app on the lost sites.
+    #[tokio::test]
+    async fn a_task_that_never_came_back_counts_its_sites_failed() {
+        let sites: Vec<Site> = (0..100).map(|i| site(&format!("s{i:03}"))).collect();
+        let chunks: Vec<Vec<Site>> = sites.chunks(SWEEP_BATCH).map(<[Site]>::to_vec).collect();
+        let mut done = 0usize;
+        dispatch_capped(
+            chunks.into_iter().enumerate(),
+            || 2,
+            |(i, chunk)| {
+                Some(tokio::spawn(async move {
+                    assert_ne!(i, 2, "this task panics");
+                    chunk
+                }))
+            },
+            // What the sweep's collector counts: the sites of a task that came back.
+            |joined| {
+                if let Ok(chunk) = joined {
+                    done += chunk.len();
+                }
+            },
+        )
+        .await;
+        assert_eq!(done, 80, "the lost task's sites reached no count");
+        let lost = sites_lost(sites.len(), done, false);
+        assert_eq!(lost, 20);
+        assert!(!sweep_is_cacheable(false, lost));
+        let sweep = SiteSweepResult {
+            tenant_id: "t".into(),
+            total_sites: 100,
+            sites_scanned: 80,
+            sites_failed: lost,
+            rows: Vec::new(),
+            cancelled: false,
+            truncated: false,
+        };
+        assert!(
+            !AppSiteAccessDto::from_sweep(&sweep, "app-1").is_complete(),
+            "an empty per-app list over lost sites is not 'no grants'"
+        );
+        assert_eq!(
+            sites_lost(sites.len(), done, true),
+            0,
+            "a cancelled run is never cached nor complete anyway"
+        );
+
+        // Pinned at the call site: the command adds them once the run is over.
+        // Normalised: a Windows checkout has CRLF line endings.
+        let src = include_str!("sharepoint.rs").replace("\r\n", "\n");
+        let body = src
+            .split_once("pub async fn sweep_site_permissions(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("command body");
+        assert!(
+            body.contains(
+                "let cancelled = stopped_early || cancel.is_cancelled();\n    sites_failed += sites_lost(total, done, cancelled);"
+            ),
+            "the sweep must count the lost tasks' sites as failed"
+        );
     }
 
     #[test]
