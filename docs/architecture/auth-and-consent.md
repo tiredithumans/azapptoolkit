@@ -220,6 +220,10 @@ caller picks the CAE slot by hand. Examples:
   the attempted change and offers "Grant consent & retry", replaying it after the grant
 - the `commands::exchange` commands — they build their client via `exchange_client_checked` →
   `ensure_exchange_token`, so the Exchange/Permissions tabs can offer "Grant consent & retry"
+- `rotate_app_credential`, with no `ensure_*` call: its Key Vault ownership read (tags only) is the
+  vault token's first use and runs before `addPassword`, and every failure but `NotFound` refuses
+  with the vault's own code, so a missing consent reaches the rotation dialog's Key Vault grant
+  with nothing minted (see *Client-secret rotation into Key Vault* below)
 - `get_enterprise_app_provisioning` (`ensure_sync_token`) — the Provisioning tab
   (`FeatureLoadError` with a `forbidden_lead`) turns `consent_required` into "Grant consent &
   retry" for the `sync` feature and reloads; a 403 keeps a role/license message instead
@@ -521,6 +525,57 @@ surfaces (the grants view's `AuditDashboard` `header_note` Callout and the Home 
 independent Suspense island) render *nothing* on unknown, the same never-flag-on-unknown contract
 as signed-request visibility above. The reads are mount-time and uncached: one tiny pair per
 view mount, not fan-out scale, and freshness is the feature (portal edits show up on reopen).
+
+## Client-secret rotation into Key Vault — fail closed
+
+`rotate_app_credential` (`commands/keyvault.rs`, body `rotate_app_credential_core`) mints a client
+secret with `addPassword` and stores it as a new version of a vault secret the operator names. The
+result DTO carries no value, so the backend is the value's only holder: `store_minted` moves it into
+the Drop-zeroizing `SecretSetRequest` and drops that as soon as the write returns.
+
+- **Ownership gate, before the mint, tags only.** Every version this app writes carries the
+  `azapptoolkit-object-id` / `-app-id` / `-key-id` tags. The gate reads them with
+  `KeyVaultClient::list_secret_versions` (`GET /secrets/{name}/versions`: metadata, never a value,
+  so it needs the secrets *list* permission, `readMetadata`, not *get*) and judges the newest
+  `created` version that claims an owner (carries the object-id or app-id tag). A version written
+  outside the app (a portal "New version", a script) carries no tags and claims nothing, so it
+  can't hide the claim an older version still makes. Claimed versions it can't order (the same
+  second, no `created`) are all weighed. A claim naming another app refuses with
+  `secret_owned_by_other_app`; a secret no version of which claims an owner stays rotatable
+  (absence proves nothing).
+- **Only `NotFound` goes on without a check.** Any other failure refuses before minting and keeps
+  the vault error's code and retryability (`ownership_unknown`): a 403 carries the
+  `keyvault_secrets` catalog hint, which names `readMetadata`; `consent_required` reaches the
+  dialog's Key Vault grant; a dead session raises re-auth; a throttle or 5xx stays retryable. The
+  gate used to log and carry on, so a Set-only operator, or any vault hiccup, could overwrite
+  another app's secret. Being the vault token's first use, it is also the pre-acquisition above.
+- **A failed store is read back before it is rolled back.** Only
+  `KeyVaultError::sent_nothing` (a token that couldn't be minted, a refused name; the transport
+  mints its bearer once, before its first attempt) proves a write absent. Any other failure may
+  follow a committed write: a replayed `PUT` that failed after an earlier attempt landed, or a 2xx
+  whose body didn't arrive or parse. So `store_minted` searches the versions for the new key id:
+  found, the rotation completes with a warning; absent, `removePassword` takes the secret back;
+  the read-back fails, the secret is kept and the error names its key id, because revoking a
+  secret the vault may already serve is an outage. **Known residual:** a final timeout or reset
+  can leave the last `PUT` still in flight at the vault. A read-back that runs before it commits
+  finds no such version, so the secret is rolled back, and the vault goes on to serve the revoked
+  value once the write lands. Nothing the client sees tells these apart; the next rotation, or a
+  manual write of a live secret, repairs it.
+- **The rollback's own result is checked** (`roll_back`). A failed `removePassword` leaves a live
+  secret nobody holds; the error keeps the first failure's code, names the leftover's display name
+  and key id, and is not retryable (a blind re-run mints another). Whenever a minted secret stays on
+  the app, the credential tier is busted on that landed write before the error returns
+  (`Unstored::left_on_app`).
+- **No plaintext the transport doesn't force.** The gate reads no value, and `set_secret` returns
+  the new version's metadata (`SecretItem`), so the parser skips the vault's echo of the value
+  instead of copying it into a `String`. The request body and reply buffers stay the accepted
+  limit `SecretSetRequest` documents.
+
+The wiremock tests in `commands/keyvault.rs` (`handler_tests`) pin each branch: a 403, a 401, a
+5xx, a dead session and a bad name on the gate mint nothing; a refused store rolls back; a landed one
+completes; an unknown one keeps the secret; a failed rollback names it and busts the tier. The
+claimed-version rule has unit tests of its own (`an_untagged_newer_version_cannot_hide_an_older_claim`,
+`the_newest_claimed_version_decides_and_unordered_ones_fail_closed`).
 
 ## SAML signing-certificate rollover — staged, resumable, revertible
 

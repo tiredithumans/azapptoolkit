@@ -346,6 +346,10 @@ apps-pairing, the *one* app's detail, the credential-expiry list and the audit r
 `app_name_index`, the enterprise list, and the mailbox-scope verdicts. Keeping the two tenant-wide
 indexes is the point — dropping them would force the next list visit to re-enumerate every app and
 every service principal (tens of seconds on a large tenant) for a change that touched neither.
+`rotate_app_credential` takes the same tier on success, and on a failure only when it leaves its
+minted secret on the app (a rollback that failed, or a secret kept because the vault may hold it):
+that secret is a landed write, so `rotate_app_credential_core` busts on the `Unstored::left_on_app`
+flag and then returns the error. A clean rollback changed nothing a cache holds.
 
 **Set changes with the object in hand take the patch tier.** A create, delete or rename used to
 call `invalidate_app_lists`, so the list reload that followed re-paged every `/applications` and

@@ -6,9 +6,17 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Changed
+
+- Rotate into Key Vault now needs permission to list a vault's secrets instead of permission to read their values.
+
 ### Fixed
 
 - Saving Settings no longer freezes the window while another running copy of the app holds the settings file.
+
+### Security
+
+- Rotate into Key Vault now refuses when it can't check which app owns the vault secret, and names any leftover secret.
 
 ## [0.35.0] - 2026-10-26
 

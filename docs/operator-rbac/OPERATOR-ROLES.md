@@ -48,9 +48,9 @@ az role definition create --role-definition azure-custom-role.json
 | Read MI role assignments; Resource Access → Vault access reverse lookup | `Microsoft.Authorization/roleAssignments/read` (Action) |
 | Resolve role-definition GUIDs → names | `Microsoft.Authorization/roleDefinitions/read` (Action) |
 | List Key Vaults (management plane) | `Microsoft.KeyVault/vaults/read` (Action) |
-| List secrets | `Microsoft.KeyVault/vaults/secrets/readMetadata/action` (DataAction) |
-| Read secret value | `Microsoft.KeyVault/vaults/secrets/getSecret/action` (DataAction) |
-| Create/update secret | `Microsoft.KeyVault/vaults/secrets/setSecret/action` (DataAction) |
+| List secrets; rotation's ownership check and read-back (a secret's tags, never its value) | `Microsoft.KeyVault/vaults/secrets/readMetadata/action` (DataAction) |
+| Read secret value (the Key Vault browser) | `Microsoft.KeyVault/vaults/secrets/getSecret/action` (DataAction) |
+| Create/update secret (rotation's new version) | `Microsoft.KeyVault/vaults/secrets/setSecret/action` (DataAction) |
 
 Notes:
 - **Key Vault must be in RBAC permission mode** (not legacy access policies) for `DataActions` to

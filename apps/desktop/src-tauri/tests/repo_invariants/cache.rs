@@ -678,10 +678,11 @@ fn an_in_place_write_never_busts_the_list_tier() {
     offenders.sort();
 
     assert!(
-        checked >= 17,
-        "only {checked} in-place writer(s) found (17 at 2026-10-14, once the expired-credential \
-         sweep's per-key writes moved into `sweep_one`) — the source walk or the fragment list \
-         is broken, and a rule that scans nothing passes vacuously"
+        checked >= 16,
+        "only {checked} in-place writer(s) found (16 at 2026-10-30, once the expired-credential \
+         sweep's per-key writes moved into `sweep_one` and the Key Vault rotation's into \
+         `rotate_app_credential_core`, whose handler tests check its tier) — the source walk or \
+         the fragment list is broken, and a rule that scans nothing passes vacuously"
     );
     assert!(
         offenders.is_empty(),
