@@ -7,7 +7,8 @@
 //! so the desktop layer wires one token adapter across audiences.
 //!
 //! Only the operations the desktop app needs: `list_secrets` and `get_secret`
-//! (the Key Vault view) and `set_secret` (credential rotation).
+//! (the Key Vault view), and `list_secret_versions` (tags only) and
+//! `set_secret` (credential rotation).
 
 pub mod client;
 pub mod error;

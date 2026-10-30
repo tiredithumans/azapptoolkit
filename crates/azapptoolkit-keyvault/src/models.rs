@@ -1,11 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Single entry from `GET /secrets`. Metadata only — the actual value only
-/// ships from `GET /secrets/{name}/{version?}`.
+/// A secret's metadata, never its value: an entry of `GET /secrets` or of
+/// `GET /secrets/{name}/versions`, and what
+/// [`crate::KeyVaultClient::set_secret`] keeps of its `PUT` reply. The value
+/// only ships from `GET /secrets/{name}/{version?}` ([`SecretValue`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretItem {
-    /// Full resource id: `https://{vault}.vault.azure.net/secrets/{name}`.
+    /// Full resource id: `https://{vault}.vault.azure.net/secrets/{name}` for
+    /// a `GET /secrets` entry, with `/{version}` appended for a version.
     pub id: String,
     #[serde(default)]
     pub attributes: Option<SecretAttributes>,
@@ -24,7 +27,8 @@ pub struct SecretItem {
 
 impl SecretItem {
     /// Strips the vault host + `/secrets/` prefix off `id` to yield the
-    /// user-visible name.
+    /// user-visible name. Only for a `GET /secrets` entry: a version's id ends
+    /// in the version.
     pub fn name(&self) -> Option<&str> {
         self.id.rsplit('/').next()
     }
@@ -65,9 +69,11 @@ pub struct SecretValue {
 }
 
 /// Manual impl so a stray `{:?}` can't log the secret value — the read-side
-/// twin of [`SecretSetRequest`]'s redacted Debug. No zeroize-on-drop: the
-/// value is moved into the IPC DTO the user asked to view, so a Drop impl
-/// would only forbid that field move without closing any real exposure.
+/// twin of [`SecretSetRequest`]'s redacted Debug. No zeroize-on-drop: a value
+/// is fetched only for the Key Vault browser's reveal, which moves it into the
+/// IPC DTO the user asked to view, so a Drop impl would only forbid that field
+/// move without closing any real exposure. Code that needs a secret's tags or
+/// attributes reads [`SecretItem`]s, which carry no value.
 impl std::fmt::Debug for SecretValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretValue")

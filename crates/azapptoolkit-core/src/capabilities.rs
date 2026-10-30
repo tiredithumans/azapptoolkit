@@ -454,8 +454,10 @@ pub static CAPABILITIES: &[Capability] = &[
         scopes: &["{keyvault}/.default"],
         scope_feature: Some("keyvault"),
         remediation: "Key Vault secret access needs an Azure RBAC role on the vault — Key Vault \
-                      Secrets Officer (or the equivalent custom role's secret DataActions) — and \
-                      the vault must use RBAC permission mode, not legacy access policies.",
+                      Secrets Officer, or a custom role with the secret DataActions readMetadata \
+                      (list secrets and read their tags), getSecret (read a value) and setSecret \
+                      (write a new version) — and the vault must use RBAC permission mode, not \
+                      legacy access policies.",
     },
     Capability {
         key: "azure_role_reads",

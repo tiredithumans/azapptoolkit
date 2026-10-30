@@ -100,8 +100,24 @@ impl KeyVaultClient {
     }
 
     pub async fn list_secrets(&self) -> Result<Vec<SecretItem>> {
-        let path = "/secrets".to_string();
-        let mut paged: Paged<SecretItem> = self.get_json(&path).await?;
+        self.list_paged("/secrets").await
+    }
+
+    /// `GET /secrets/{name}/versions`: every version of one secret, metadata
+    /// only. Each entry's `id` names a version and carries that version's
+    /// attributes and tags; Key Vault never sends a value on this endpoint.
+    /// It needs the secrets *list* permission (`readMetadata`), not *get*, and
+    /// the vault's audit log records a listing, not a read of the secret. The
+    /// order is undocumented: the current version is the newest `created`.
+    pub async fn list_secret_versions(&self, name: &str) -> Result<Vec<SecretItem>> {
+        crate::validate::validate_secret_name(name)?;
+        self.list_paged(&format!("/secrets/{name}/versions")).await
+    }
+
+    /// Reads `path`'s first page and follows `nextLink` to the last, at most
+    /// [`MAX_PAGES`] pages.
+    async fn list_paged(&self, path: &str) -> Result<Vec<SecretItem>> {
+        let mut paged: Paged<SecretItem> = self.get_json(path).await?;
         let mut out = paged.value;
         let mut pages = 1usize;
         while let Some(link) = paged.next_link.take() {
@@ -130,7 +146,12 @@ impl KeyVaultClient {
         self.get_json(&path).await
     }
 
-    pub async fn set_secret(&self, name: &str, req: &SecretSetRequest) -> Result<SecretValue> {
+    /// `PUT /secrets/{name}`: writes `req` as the secret's new current version
+    /// and returns that version's metadata. Key Vault's reply echoes the value
+    /// too; parsing it as a [`SecretItem`] skips that field without copying it
+    /// into a `String` nobody would wipe (the reply buffer itself is the
+    /// transport limit [`SecretSetRequest`] documents).
+    pub async fn set_secret(&self, name: &str, req: &SecretSetRequest) -> Result<SecretItem> {
         crate::validate::validate_secret_name(name)?;
         let path = format!("/secrets/{name}");
         self.send_json(Method::PUT, &path, req).await
@@ -192,6 +213,10 @@ impl KeyVaultClient {
         }
         let api_version = attach_api_version.then_some(self.api_version.as_str());
         let mut headers = HeaderMap::new();
+        // Minted once, before the first attempt: a `Token` error therefore
+        // means no request was sent (`KeyVaultError::sent_nothing`, which the
+        // rotation's rollback relies on). Pinned by
+        // `the_bearer_is_minted_once_before_the_first_attempt`.
         let bearer = self.token.bearer().await.map_err(KeyVaultError::Token)?;
         headers.insert(
             AUTHORIZATION,
@@ -301,11 +326,13 @@ async fn read_error_body(mut resp: reqwest::Response) -> String {
 /// appends a new version per call, so a replay after a post-commit 5xx or
 /// connection reset leaves a second version — but the replay carries the
 /// identical value, so the current version is still the right secret; the
-/// cost is one duplicate same-value version. Refusing would be worse:
-/// `rotate_app_credential` rolls back the freshly minted app secret when this
-/// write fails, so a post-commit transient would leave the vault holding a
-/// credential Entra no longer accepts. `POST`/`PATCH` replay only an explicit
-/// throttle (the `addPassword` hazard documented on
+/// cost is one duplicate same-value version. Refusing would be worse: a
+/// post-commit transient would end a write that landed in an error, and
+/// `rotate_app_credential` must then read the vault back to tell it from a
+/// failed one before it may roll the freshly minted app secret back. Because a
+/// replayed write can fail after an earlier attempt committed, only
+/// [`KeyVaultError::sent_nothing`] proves a failed write absent. `POST`/`PATCH`
+/// replay only an explicit throttle (the `addPassword` hazard documented on
 /// `azapptoolkit_core::http_retry::RetryClass`).
 fn retry_class_for(method: &Method) -> RetryClass {
     match *method {
@@ -366,7 +393,8 @@ mod tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": "p@ssw0rd",
-                "id": "https://v.vault.azure.net/secrets/my-secret/abc"
+                "id": "https://v.vault.azure.net/secrets/my-secret/abc",
+                "tags": {"owner": "me"}
             })))
             .mount(&server)
             .await;
@@ -383,7 +411,173 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.value, "p@ssw0rd");
+        // The reply's metadata, and nothing else: the echoed value has no
+        // field to land in (`SecretItem` carries none).
+        assert_eq!(resp.id, "https://v.vault.azure.net/secrets/my-secret/abc");
+        assert_eq!(
+            resp.tags
+                .as_ref()
+                .and_then(|t| t.get("owner"))
+                .map(String::as_str),
+            Some("me")
+        );
+    }
+
+    /// The versions listing is the tags-only read: every page of
+    /// `/secrets/{name}/versions`, with each version's tags, and never the
+    /// secret itself (`/secrets/{name}`, the one endpoint that sends a value).
+    #[tokio::test]
+    async fn list_secret_versions_reads_every_page_of_tags_and_no_value() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let next = format!(
+            "{uri}/secrets/my-secret/versions?$skiptoken=p2&api-version={DEFAULT_API_VERSION}"
+        );
+        Mock::given(method("GET"))
+            .and(path("/secrets/my-secret/versions"))
+            .and(query_param("api-version", DEFAULT_API_VERSION))
+            .and(query_param_is_missing("$skiptoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "https://v.vault.azure.net/secrets/my-secret/v1",
+                    "attributes": {"enabled": true, "created": 1_700_000_000},
+                    "tags": {"azapptoolkit-key-id": "key-1"}
+                }],
+                "nextLink": next
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/secrets/my-secret/versions"))
+            .and(query_param("$skiptoken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "https://v.vault.azure.net/secrets/my-secret/v2",
+                    "attributes": {"enabled": true, "created": 1_700_000_100},
+                    "tags": {"azapptoolkit-key-id": "key-2"}
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let versions = make_client(&uri)
+            .list_secret_versions("my-secret")
+            .await
+            .unwrap();
+        let key_ids: Vec<&str> = versions
+            .iter()
+            .filter_map(|v| v.tags.as_ref()?.get("azapptoolkit-key-id"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(key_ids, ["key-1", "key-2"]);
+        assert!(versions[1].attributes.as_ref().unwrap().created.is_some());
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(
+            reqs.iter()
+                .all(|r| r.url.path() == "/secrets/my-secret/versions"),
+            "only the versions listing was read"
+        );
+    }
+
+    /// The name is spliced into the path, so a bad one is refused before any
+    /// request (and bearer) leaves the process.
+    #[tokio::test]
+    async fn list_secret_versions_refuses_a_bad_name_before_any_request() {
+        let server = MockServer::start().await;
+        let err = make_client(&server.uri())
+            .list_secret_versions("../keys")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, KeyVaultError::InvalidName(_)), "got {err:?}");
+        assert!(err.sent_nothing());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// Serves `n` bearers, then fails like a session that died mid-call.
+    struct BearersThenDead(std::sync::atomic::AtomicUsize);
+
+    // The `#[async_trait]` expansion, written out: this crate has no
+    // async-trait dependency and two tests do not justify adding it (the
+    // exchange crate's tests do the same).
+    impl BearerProvider for BearersThenDead {
+        fn bearer<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = std::result::Result<String, TokenError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                match self
+                    .0
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                {
+                    Ok(_) => Ok("tok".to_string()),
+                    Err(_) => Err(TokenError::new("refresh_missing", "gone")),
+                }
+            })
+        }
+    }
+
+    fn plain_request() -> SecretSetRequest {
+        SecretSetRequest {
+            value: "v".into(),
+            content_type: None,
+            tags: None,
+            attributes: None,
+        }
+    }
+
+    /// A write whose bearer can't be minted fails before anything is sent, so
+    /// `sent_nothing` may vouch that it did not land.
+    #[tokio::test]
+    async fn a_write_whose_bearer_fails_sends_nothing() {
+        let server = MockServer::start().await;
+        let client =
+            KeyVaultClient::with_base_url(Arc::new(BearersThenDead(0.into())), server.uri());
+        let err = client.set_secret("s", &plain_request()).await.unwrap_err();
+        assert_eq!(err.ui_code(), "refresh_missing");
+        assert!(err.sent_nothing());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// What makes a `Token` error mean "nothing was sent": the bearer is minted
+    /// once, before the first attempt, so the replays reuse it. Minted per
+    /// attempt, a write could fail with `Token` after an earlier attempt had
+    /// committed, and a rotation trusting `sent_nothing` would revoke a secret
+    /// the vault already serves.
+    #[tokio::test]
+    async fn the_bearer_is_minted_once_before_the_first_attempt() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/secrets/s"))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+            .mount(&server)
+            .await;
+        let client =
+            KeyVaultClient::with_base_url(Arc::new(BearersThenDead(1.into())), server.uri());
+        let err = client.set_secret("s", &plain_request()).await.unwrap_err();
+        assert!(
+            matches!(err, KeyVaultError::Server { status: 503, .. }),
+            "the replays must reuse the one bearer, got {err:?}"
+        );
+        assert!(
+            !err.sent_nothing(),
+            "a write that reached the vault may have landed"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            4,
+            "the first attempt and its three replays"
+        );
     }
 
     #[tokio::test]
@@ -539,7 +733,7 @@ mod tests {
             .set_secret("rotated", &req)
             .await
             .unwrap();
-        assert_eq!(resp.value, "v");
+        assert_eq!(resp.id, "https://v.vault.azure.net/secrets/rotated/1");
     }
 
     /// A self-referencing `nextLink` stops at `MAX_PAGES` instead of paging forever.
