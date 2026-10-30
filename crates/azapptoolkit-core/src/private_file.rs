@@ -49,7 +49,9 @@ pub fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     //
     // `rename` is atomic within a filesystem and preserves the temp's mode, so
     // a reader sees either the old file or the new one, never a partial write,
-    // and the 0600 permission tests still hold.
+    // and the 0600 permission tests still hold. The data is synced before the
+    // rename and, on unix, the directory after it, so the new file is also the
+    // one an OS crash leaves behind.
     write_via(path, contents, || temp_candidate(path))
 }
 
@@ -174,7 +176,32 @@ fn fill_and_rename(
     file.write_all(contents)?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(temp, path)
+    std::fs::rename(temp, path)?;
+    // The bytes were synced above, but the rename is a change to the
+    // directory, and until that is synced too an OS crash or power cut can
+    // bring back the previous `settings.json`, or no file at all for a new
+    // export (a `.pfx`, a restore report with show-once secrets). Best effort:
+    // the file is already replaced, so an error here must not tell the caller
+    // the write failed. Unix only: the Windows equivalent is `MoveFileExW`
+    // with `MOVEFILE_WRITE_THROUGH`, which needs FFI, and `unsafe_code` is
+    // denied.
+    #[cfg(unix)]
+    if let Err(e) = sync_parent_dir(path) {
+        tracing::debug!(error = %e, "could not sync the directory after replacing a file");
+    }
+    Ok(())
+}
+
+/// Syncs the directory `path` sits in, so a rename inside it is durable. A
+/// bare file name's parent is the empty path, which names no directory to
+/// open: that is the working directory.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]
@@ -319,6 +346,37 @@ mod tests {
 
         assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    /// The directory sync after the rename is best effort, so a broken one
+    /// would fail silently. Pin that it works on this platform, for a file in
+    /// a directory and for a bare file name, whose `parent()` is the empty
+    /// path (opening that fails with `NotFound`).
+    #[cfg(unix)]
+    #[test]
+    fn syncing_the_parent_works_for_nested_and_bare_names() {
+        let dir = tempdir();
+        sync_parent_dir(&dir.0.join("settings.json")).expect("a directory can be synced");
+        sync_parent_dir(Path::new("settings.json")).expect("a bare name syncs the working dir");
+    }
+
+    /// Durability is not observable from a test, so the call is pinned by
+    /// source: `fill_and_rename` syncs the directory, and only after the
+    /// rename (a sync before it would make nothing durable).
+    #[test]
+    fn the_rename_is_followed_by_a_directory_sync() {
+        let src = include_str!("private_file.rs").replace("\r\n", "\n");
+        let body = src
+            .split("\nfn fill_and_rename(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("fill_and_rename is in this file");
+        let rename = body.find("std::fs::rename(temp, path)?;");
+        let sync = body.find("sync_parent_dir(path)");
+        assert!(
+            matches!((rename, sync), (Some(r), Some(s)) if r < s),
+            "fill_and_rename must sync the parent directory after the rename"
+        );
     }
 
     #[test]
