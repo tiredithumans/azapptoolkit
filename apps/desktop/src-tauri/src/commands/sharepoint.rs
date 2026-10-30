@@ -17,16 +17,22 @@ use azapptoolkit_core::models::{
     AppRoleAssignment, ResolvedSharePointResource, SelectedPermission, Site, SitePermission,
 };
 use azapptoolkit_core::scoping::{
-    MICROSOFT_GRAPH_APP_ID, SP_SITES_SELECTED, SelectedScopeLevel, is_grantable_selected_role,
-    is_sharepoint_orgwide, selected_scope_accepts, selected_scope_level_for,
+    MICROSOFT_GRAPH_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID, SP_SITES_SELECTED,
+    SelectedScopeLevel, is_files_orgwide_permission, is_grantable_selected_role,
+    is_scopable_sharepoint_resource_permission, is_sharepoint_orgwide,
+    is_sharepoint_orgwide_permission, resource_label, selected_scope_accepts,
+    selected_scope_level_for,
 };
 
 use crate::commands::applications::invalidate_app_detail_state;
 use crate::commands::dispatch::{SessionDead, dispatch_capped};
 use crate::commands::export::{coverage_comment_block, coverage_json, csv_field};
 use crate::commands::graph_err::forbidden_remediation;
-use crate::commands::graph_roles::{graph_role_id, graph_role_index, strip_app_role_grants};
-use crate::commands::permissions::declare_resource_access;
+use crate::commands::graph_roles::{
+    ResourceRoles, graph_resource_roles, graph_role_id, graph_role_index, resolve_grant,
+    resource_roles, strip_app_role_grants,
+};
+use crate::commands::permissions::{declare_resource_access, grant_failure_message};
 use crate::commands::progress::emit_progress;
 use crate::commands::throttle::FanOutMeter;
 use crate::dto::UiError;
@@ -197,15 +203,32 @@ async fn declare_and_grant_graph_role(
         client
             .grant_app_role(principal.sp_object_id, graph_sp_id, &role_id)
             .await
-            .map_err(|err| {
-                UiError::validation("grant_failed", format!("failed to grant {value}: {err}"))
-            })?;
+            .map_err(|err| grant_role_err(err, value))?;
         granted_role_added = true;
     }
     Ok(GraphRoleGrant {
         declared_permission,
         granted_role_added,
     })
+}
+
+/// A failed Microsoft Graph appRole assignment, with its code kept.
+///
+/// Every failure used to come back as `grant_failed`, which hid the three that
+/// each have their own way out: `forbidden` (the operator lacks the role),
+/// `consent_required` (the write scope was never consented — for a
+/// service-principal-only principal, or a role already declared, this is the
+/// first write of the run) and `refresh_missing` (a dead session, which also
+/// stops a bulk run). The message names the permission, and a 403 carries the
+/// `admin_consent` catalog guidance through the grant paths' shared
+/// [`grant_failure_message`]: assigning a Microsoft Graph application role
+/// needs Privileged Role Administrator, which is what a forbidden here means.
+fn grant_role_err(err: azapptoolkit_graph::GraphError, value: &str) -> UiError {
+    let message = format!("failed to grant {value}: {}", grant_failure_message(&err));
+    UiError {
+        message,
+        ..UiError::from(err)
+    }
 }
 
 /// The value assignment `a` grants when it is an org-wide `Sites.*` grant on
@@ -226,13 +249,118 @@ fn orgwide_sites_value(
         .cloned()
 }
 
-/// The distinct resources in a pasted target list, in the order given.
+/// The org-wide SharePoint reach `existing` still carries once the conversion
+/// has removed `removed_from_graph`, as `(resource app id, value)` pairs in
+/// assignment order — the SharePoint counterpart of the Exchange core's
+/// `still_held_orgwide`.
+///
+/// Classified by the audit's own Rule 12 gates, keyed by `(resource, value)`
+/// and never the value alone: an org-wide `Sites.*` on either SharePoint-bearing
+/// resource (`is_sharepoint_orgwide_permission`, behind `ORG_WIDE_SHAREPOINT`
+/// and `UNCONFINABLE_SHAREPOINT`) reaches every site, and Graph's
+/// `Files.Read.All` / `Files.ReadWrite.All` (`is_files_orgwide_permission`,
+/// behind `ORG_WIDE_FILES`) every file — whatever the `Sites.Selected` grants
+/// allow. The strip ([`orgwide_sites_value`]) removes Microsoft Graph's
+/// `Sites.*` only, so `removed_from_graph` excuses a Graph grant and nothing
+/// else: Office 365 SharePoint Online's `Sites.Read.All` is a different grant
+/// from Graph's, and nothing here removes it.
+fn residual_orgwide_reach<'a>(
+    resources: &'a [ResourceRoles],
+    existing: &[AppRoleAssignment],
+    removed_from_graph: &[String],
+) -> Vec<(&'a str, &'a str)> {
+    let mut held: Vec<(&'a str, &'a str)> = Vec::new();
+    for a in existing {
+        let Some((resource, _, value)) = resolve_grant(resources, &a.resource_id, &a.app_role_id)
+        else {
+            continue;
+        };
+        let orgwide = is_sharepoint_orgwide_permission(Some(resource), value)
+            || is_files_orgwide_permission(Some(resource), value);
+        let removed = resource == MICROSOFT_GRAPH_APP_ID
+            && removed_from_graph.iter().any(|r| r.as_str() == value);
+        if orgwide && !removed && !held.contains(&(resource, value)) {
+            held.push((resource, value));
+        }
+    }
+    held
+}
+
+/// One "Scoping is NOT effective" line naming each grant in `held` with its
+/// resource, or `None` when nothing org-wide is left. The step lines above it
+/// say what failed; this says what that means, once, in the Exchange core's
+/// voice.
+///
+/// A Microsoft Graph `Sites.*` is still held only because its removal was
+/// stopped (no site grant landed, or the DELETE failed) or not asked for, so
+/// it points back at those lines. Anything else is beyond what the conversion
+/// removes at all, so the line says so rather than implying a re-run helps.
+fn orgwide_reach_warning(held: &[(&str, &str)], remove_orgwide: bool) -> Option<String> {
+    if held.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = held
+        .iter()
+        .map(|&(resource, value)| format!("{value} ({})", resource_label(resource)))
+        .collect();
+    let sites = held
+        .iter()
+        .any(|&(r, v)| is_sharepoint_orgwide_permission(Some(r), v));
+    let files = held
+        .iter()
+        .any(|&(r, v)| is_files_orgwide_permission(Some(r), v));
+    let reach = match (sites, files) {
+        (true, true) => "every site and every file",
+        (false, true) => "every file",
+        _ => "every site",
+    };
+    let one = held.len() == 1;
+    let mut line = format!(
+        "Scoping is NOT effective for SharePoint: {} {} still granted organization-wide in \
+         Microsoft Entra ID, so the app still reaches {reach} through {}, not only the sites \
+         granted here.",
+        names.join(", "),
+        if one { "is" } else { "are" },
+        if one { "it" } else { "them" },
+    );
+    if held
+        .iter()
+        .any(|&(r, v)| !is_scopable_sharepoint_resource_permission(Some(r), v))
+    {
+        line.push_str(
+            " This conversion removes only Microsoft Graph's Sites.* grants: remove the others \
+             yourself if the app should be confined.",
+        );
+    }
+    if remove_orgwide
+        && held
+            .iter()
+            .any(|&(r, v)| is_scopable_sharepoint_resource_permission(Some(r), v))
+    {
+        line.push_str(" Re-run once the problems above are fixed.");
+    }
+    Some(line)
+}
+
+/// Whether `existing` holds a grant on a resource none of `resources` is, so
+/// the residual check cannot classify it. Asked only when Office 365 SharePoint
+/// Online's role index could not be read: such a grant may then be an org-wide
+/// `Sites.*` there, and "could not check" must not read as "holds nothing".
+fn holds_unidentified_grant(resources: &[ResourceRoles], existing: &[AppRoleAssignment]) -> bool {
+    existing
+        .iter()
+        .any(|a| !resources.iter().any(|r| r.sp_object_id == a.resource_id))
+}
+
+/// The distinct resources in a pasted target list, in the order given. Both
+/// Selected apply paths iterate this, never the raw list.
 ///
 /// Two spellings of one resource would create two permission entries on it, each
 /// consuming another of the library's unique permission scopes for no extra
-/// access — and a repeated line in a pasted block is easy not to notice.
-/// Compared case- and trailing-slash-insensitively, which is how SharePoint
-/// treats its own URLs.
+/// access — and a repeated line in a pasted block is easy not to notice. On the
+/// site path a repeat is a second grant call for the same site, counted twice in
+/// the result. Compared case- and trailing-slash-insensitively, which is how
+/// SharePoint treats its own URLs.
 fn dedupe_targets(urls: &[String]) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -407,9 +535,16 @@ pub async fn remove_site_permission(
 /// principal with no access.
 ///
 /// Steps: (1) grant `Sites.Selected` (idempotent); (2) grant `role` on each
-/// `site_url`; (3) only if ≥1 site grant succeeded and `remove_orgwide`, strip
-/// the org-wide `Sites.*` Entra grants so the scoping is effective. Graph has no
-/// reverse `appId → sites` lookup, so the sites must be supplied by the caller.
+/// distinct `site_url`; (3) only if ≥1 site grant succeeded and
+/// `remove_orgwide`, strip Microsoft Graph's org-wide `Sites.*` Entra grants;
+/// (4) report, as a "Scoping is NOT effective" warning, any org-wide
+/// SharePoint reach the principal still holds — an Office 365 SharePoint Online
+/// `Sites.*` or a Graph `Files.*.All`, which the strip does not touch, or a
+/// Graph `Sites.*` it could not remove. Graph has no reverse `appId → sites`
+/// lookup, so the sites must be supplied by the caller.
+///
+/// A thin wrapper: the role gate and the SharePoint pre-acquire, then
+/// `convert_site_access_core`, which holds everything else.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn convert_site_access_to_selected(
@@ -426,20 +561,7 @@ pub async fn convert_site_access_to_selected(
     require_grantable_roles(std::slice::from_ref(&role))?;
     // The per-site grants ride the SharePoint scope, pre-acquired here.
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
-    let (graph_sp_id, role_value_by_id) = graph_role_index(&client).await?;
-
-    let mut warnings = Vec::new();
-
-    // Snapshot the current assignments once: drives both the idempotency check
-    // for the Sites.Selected grant and the org-wide-removal scan below.
-    let existing = client.list_app_role_assignments(&sp_object_id).await?;
-
-    // 0-1. Declare Sites.Selected on the app registration (so the grant is
-    //      visible in the Permissions tab), then grant it (idempotent).
-    let GraphRoleGrant {
-        declared_permission,
-        granted_role_added,
-    } = declare_and_grant_graph_role(
+    convert_site_access_core(
         &client,
         &state.cache,
         &GraphRolePrincipal {
@@ -448,17 +570,84 @@ pub async fn convert_site_access_to_selected(
             sp_object_id: &sp_object_id,
             app_id: &app_id,
         },
-        &graph_sp_id,
-        &role_value_by_id,
+        SiteConversion {
+            app_display_name: &app_display_name,
+            site_urls: &site_urls,
+            role: &role,
+            remove_orgwide,
+        },
+    )
+    .await
+}
+
+/// What a `Sites.Selected` conversion grants, and whether it may strip. Named
+/// fields for the reason [`GraphRolePrincipal`] has them.
+struct SiteConversion<'a> {
+    /// Recorded on each per-site grant, as Graph shows it on the site.
+    app_display_name: &'a str,
+    site_urls: &'a [String],
+    /// `read` or `write`: the command gates it ([`require_grantable_roles`])
+    /// before the SharePoint token is even acquired.
+    role: &'a str,
+    remove_orgwide: bool,
+}
+
+/// The body of [`convert_site_access_to_selected`], over a client and a cache
+/// rather than `State`, so the orchestration is testable against a mock Graph
+/// (`tauri::test` is deliberately not enabled; see `progress.rs`).
+///
+/// Every read the conversion decides on comes first, so a failed read aborts
+/// with nothing changed: the Graph role index, Office 365 SharePoint Online's
+/// (held as a `Result` — only the final report reads it, and "unreadable" must
+/// never read as "holds nothing there"), and the principal's assignments.
+async fn convert_site_access_core(
+    client: &azapptoolkit_graph::GraphClient,
+    cache: &Cache,
+    principal: &GraphRolePrincipal<'_>,
+    conversion: SiteConversion<'_>,
+) -> Result<SiteScopeResult, UiError> {
+    let SiteConversion {
+        app_display_name,
+        site_urls,
+        role,
+        remove_orgwide,
+    } = conversion;
+    let graph = graph_resource_roles(client).await?;
+    let online = resource_roles(client, OFFICE365_SHAREPOINT_ONLINE_APP_ID).await;
+
+    let mut warnings = Vec::new();
+
+    // Snapshot the current assignments once: drives the idempotency check for
+    // the Sites.Selected grant, the org-wide-removal scan, and the report of
+    // what is still org-wide afterwards.
+    let existing = client
+        .list_app_role_assignments(principal.sp_object_id)
+        .await?;
+
+    // 0-1. Declare Sites.Selected on the app registration (so the grant is
+    //      visible in the Permissions tab), then grant it (idempotent).
+    let GraphRoleGrant {
+        declared_permission,
+        granted_role_added,
+    } = declare_and_grant_graph_role(
+        client,
+        cache,
+        principal,
+        &graph.sp_object_id,
+        &graph.role_value_by_id,
         &existing,
         SP_SITES_SELECTED,
     )
     .await?;
 
-    // 2. Grant the scoped per-site access (before removing the broad grant).
-    let roles = vec![role];
-    let mut sites_granted = Vec::new();
-    for url in &site_urls {
+    // 2. Grant the scoped per-site access (before removing the broad grant),
+    //    once per site: `dedupe_targets` folds the spellings it can see as one,
+    //    and a site already granted in this run is skipped for the ones it
+    //    cannot (no scheme, a page inside the site) — one site, one grant, one
+    //    row in the count.
+    let roles = vec![role.to_string()];
+    let mut sites_granted: Vec<SiteGrantDto> = Vec::new();
+    for url in &dedupe_targets(site_urls) {
         let site = match client.get_site_by_url(url).await {
             Ok(site) => site,
             Err(err) => {
@@ -470,8 +659,11 @@ pub async fn convert_site_access_to_selected(
                 continue;
             }
         };
+        if sites_granted.iter().any(|g| g.site_id == site.id) {
+            continue;
+        }
         match client
-            .grant_site_permission(&site.id, &app_id, &app_display_name, &roles)
+            .grant_site_permission(&site.id, principal.app_id, app_display_name, &roles)
             .await
         {
             Ok(perm) => sites_granted.push(SiteGrantDto {
@@ -486,15 +678,15 @@ pub async fn convert_site_access_to_selected(
         }
     }
 
-    // 3. Strip the org-wide Sites.* grants so the scoped model is effective —
-    //    but only if some site access actually landed.
+    // 3. Strip Microsoft Graph's org-wide Sites.* grants — but only if some
+    //    site access actually landed.
     let mut removed_orgwide_grants = Vec::new();
     if should_remove_orgwide(remove_orgwide, !sites_granted.is_empty()) {
         removed_orgwide_grants = strip_app_role_grants(
-            &client,
-            &sp_object_id,
+            client,
+            principal.sp_object_id,
             &existing,
-            |a| orgwide_sites_value(&graph_sp_id, &role_value_by_id, a),
+            |a| orgwide_sites_value(&graph.sp_object_id, &graph.role_value_by_id, a),
             &mut warnings,
         )
         .await;
@@ -504,16 +696,38 @@ pub async fn convert_site_access_to_selected(
         );
     }
 
+    // 4. Say what the principal can STILL reach org-wide. The strip removes
+    //    Graph's Sites.* and nothing else, so an Office 365 SharePoint Online
+    //    Sites.* or a Graph Files.*.All keeps every site (or file) in reach —
+    //    and a result that reported only the removals told the operator the
+    //    app was confined when it was not.
+    let (online, online_unreadable) = match online {
+        Ok(roles) => (roles, None),
+        Err(err) => (None, Some(err)),
+    };
+    let resources: Vec<ResourceRoles> = std::iter::once(graph).chain(online).collect();
+    let held = residual_orgwide_reach(&resources, &existing, &removed_orgwide_grants);
+    warnings.extend(orgwide_reach_warning(&held, remove_orgwide));
+    if let Some(err) = online_unreadable
+        && holds_unidentified_grant(&resources, &existing)
+    {
+        warnings.push(format!(
+            "could not read the Office 365 SharePoint Online permissions, so this cannot say \
+             whether the app still reaches every site through one of them: {}",
+            err.message
+        ));
+    }
+
     // The Sites.Selected grant / org-wide removal change the SP's app-role
     // assignments: detail-pane and audit state, never a list row (no list
     // shows assignments), so the detail tier, not a tenant-wide list rescan.
     // Invalidate only on this success path.
-    invalidate_app_detail_state(&state.cache, &tenant_id);
+    invalidate_app_detail_state(cache, principal.tenant_id);
     // The per-site grants are what the cached sweep indexes (the org-wide
     // strip is not — the sweep holds per-site rows only), so bust it whenever
     // at least one site grant landed.
     if !sites_granted.is_empty() {
-        invalidate_site_sweep(&state.cache, &tenant_id);
+        invalidate_site_sweep(cache, principal.tenant_id);
     }
 
     Ok(SiteScopeResult {
@@ -1851,6 +2065,566 @@ mod tests {
         ] {
             let err = require_grantable_roles(&bad).expect_err("refused");
             assert_eq!(err.code, "unsupported_role", "{bad:?}");
+        }
+    }
+
+    // ── The Sites.Selected conversion: what it grants, strips and reports ──
+
+    use azapptoolkit_core::scoping::OFFICE365_SHAREPOINT_ONLINE_APP_ID as SPO;
+
+    /// Microsoft Graph and Office 365 SharePoint Online as the residual check
+    /// sees them. `Sites.Read.All` sits on both, under different role ids.
+    fn sharepoint_resources() -> Vec<ResourceRoles> {
+        let index = |roles: &[(&str, &str)]| -> HashMap<String, String> {
+            roles
+                .iter()
+                .map(|(id, value)| (id.to_string(), value.to_string()))
+                .collect()
+        };
+        vec![
+            ResourceRoles {
+                app_id: MICROSOFT_GRAPH_APP_ID,
+                sp_object_id: "graph-sp".into(),
+                role_value_by_id: index(&[
+                    ("r-read", "Sites.Read.All"),
+                    ("r-sel", "Sites.Selected"),
+                    ("r-files", "Files.ReadWrite.All"),
+                    ("r-files-sel", "Files.SelectedOperations.Selected"),
+                    ("r-mail", "Mail.Read"),
+                ]),
+            },
+            ResourceRoles {
+                app_id: SPO,
+                sp_object_id: "spo-sp".into(),
+                role_value_by_id: index(&[
+                    ("s-full", "Sites.FullControl.All"),
+                    ("s-read", "Sites.Read.All"),
+                    ("s-sel", "Sites.Selected"),
+                ]),
+            },
+        ]
+    }
+
+    fn held_on(resource: &str, role: &str) -> AppRoleAssignment {
+        AppRoleAssignment {
+            id: format!("{resource}/{role}"),
+            resource_id: resource.into(),
+            app_role_id: role.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The strip takes Graph's `Sites.*` and nothing else, so what is
+    /// left org-wide is named — keyed by resource, never by value: the same
+    /// `Sites.Read.All` on SharePoint Online stays named after Graph's is gone.
+    #[test]
+    fn the_residual_check_names_what_the_strip_leaves_on_either_resource() {
+        let resources = sharepoint_resources();
+        let removed = vec!["Sites.Read.All".to_string()];
+        let existing = vec![
+            held_on("graph-sp", "r-read"),
+            held_on("spo-sp", "s-full"),
+            held_on("graph-sp", "r-files"),
+            held_on("spo-sp", "s-read"),
+            // Confinement, not reach — never named.
+            held_on("graph-sp", "r-sel"),
+            held_on("spo-sp", "s-sel"),
+            held_on("graph-sp", "r-files-sel"),
+            // Not SharePoint at all.
+            held_on("graph-sp", "r-mail"),
+            held_on("other-sp", "r-read"),
+        ];
+        assert_eq!(
+            residual_orgwide_reach(&resources, &existing, &removed),
+            vec![
+                (SPO, "Sites.FullControl.All"),
+                (MICROSOFT_GRAPH_APP_ID, "Files.ReadWrite.All"),
+                (SPO, "Sites.Read.All"),
+            ]
+        );
+        // A Graph Sites.* the strip did not remove (no site landed, or its
+        // DELETE failed) is still reach.
+        assert_eq!(
+            residual_orgwide_reach(&resources, &[held_on("graph-sp", "r-read")], &[]),
+            vec![(MICROSOFT_GRAPH_APP_ID, "Sites.Read.All")]
+        );
+        assert!(
+            residual_orgwide_reach(&resources, &[held_on("graph-sp", "r-sel")], &[]).is_empty()
+        );
+    }
+
+    #[test]
+    fn the_residual_warning_names_each_grant_with_its_resource() {
+        let beyond = orgwide_reach_warning(
+            &[
+                (SPO, "Sites.FullControl.All"),
+                (MICROSOFT_GRAPH_APP_ID, "Files.ReadWrite.All"),
+            ],
+            true,
+        )
+        .expect("org-wide reach is left");
+        assert!(beyond.starts_with("Scoping is NOT effective for SharePoint"));
+        assert!(beyond.contains("Sites.FullControl.All (Office 365 SharePoint Online)"));
+        assert!(beyond.contains("Files.ReadWrite.All (Microsoft Graph)"));
+        assert!(beyond.contains("every site and every file"), "{beyond}");
+        // Neither is something a re-run of this conversion removes.
+        assert!(beyond.contains("removes only Microsoft Graph's Sites.*"));
+        assert!(!beyond.contains("Re-run"), "{beyond}");
+
+        let stopped = orgwide_reach_warning(&[(MICROSOFT_GRAPH_APP_ID, "Sites.Read.All")], true)
+            .expect("org-wide reach is left");
+        assert!(stopped.contains("Sites.Read.All (Microsoft Graph) is still granted"));
+        assert!(stopped.contains("Re-run once the problems above are fixed"));
+        assert!(!stopped.contains("removes only"), "{stopped}");
+
+        assert_eq!(orgwide_reach_warning(&[], true), None);
+    }
+
+    /// An unreadable SharePoint Online index cannot classify a grant on a
+    /// resource nothing resolved — which is exactly where an org-wide
+    /// `Sites.*` there would sit — so that case is "could not check".
+    #[test]
+    fn a_grant_on_an_unresolved_resource_is_unidentified() {
+        let graph_only = &sharepoint_resources()[..1];
+        assert!(holds_unidentified_grant(
+            graph_only,
+            &[held_on("graph-sp", "r-read"), held_on("spo-sp", "s-full")]
+        ));
+        assert!(!holds_unidentified_grant(
+            graph_only,
+            &[held_on("graph-sp", "r-read"), held_on("graph-sp", "r-sel")]
+        ));
+    }
+
+    const FINANCE: &str = "https://contoso.sharepoint.com/sites/Finance";
+    const FINANCE_PATH: &str = "/v1.0/sites/contoso.sharepoint.com:/sites/Finance";
+    const FINANCE_ID: &str = "contoso.sharepoint.com,fin-site,fin-web";
+
+    fn assignment(id: &str, resource: &str, role: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "principalId": "sp1", "resourceId": resource, "appRoleId": role
+        })
+    }
+
+    /// Mounts what every conversion reads — Graph's role index, `spo` as
+    /// Office 365 SharePoint Online's lookup, the principal `sp1` (app `app-1`)
+    /// and `assignments` — plus an accepting `Sites.Selected` grant and the
+    /// Finance site, whose per-site grant answers `site_grant`.
+    async fn conversion_tenant(
+        server: &wiremock::MockServer,
+        spo: wiremock::ResponseTemplate,
+        assignments: serde_json::Value,
+        site_grant: wiremock::ResponseTemplate,
+    ) {
+        use wiremock::matchers::{method, path, path_regex, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let lookup = |app_id: &str| {
+            Mock::given(method("GET"))
+                .and(path("/v1.0/servicePrincipals"))
+                .and(query_param("$filter", format!("appId eq '{app_id}'")))
+        };
+        lookup(MICROSOFT_GRAPH_APP_ID)
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{"id": "graph-sp", "appId": MICROSOFT_GRAPH_APP_ID, "appRoles": [
+                    {"id": "r-sel", "value": "Sites.Selected"},
+                    {"id": "r-read", "value": "Sites.Read.All"},
+                    {"id": "r-files", "value": "Files.ReadWrite.All"}
+                ]}]
+            })))
+            .mount(server)
+            .await;
+        lookup(SPO).respond_with(spo).mount(server).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp1", "appId": "app-1", "displayName": "App"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "value": assignments })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(assignment("a-sel", "graph-sp", "r-sel")),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(FINANCE_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": FINANCE_ID, "displayName": "Finance"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v1\.0/sites/[^/]+/permissions$"))
+            .respond_with(site_grant)
+            .mount(server)
+            .await;
+    }
+
+    /// Office 365 SharePoint Online as the tenant resolves it.
+    fn spo_resource() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"id": "spo-sp", "appId": SPO, "appRoles": [
+                {"id": "s-full", "value": "Sites.FullControl.All"}
+            ]}]
+        }))
+    }
+
+    fn site_granted() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "perm-1", "roles": ["read"],
+            "grantedToIdentities": [{"application": {"id": "app-1", "displayName": "App"}}]
+        }))
+    }
+
+    /// Runs the conversion core for the SP-only principal `sp1` (no app
+    /// registration, so nothing is declared) against `server`.
+    async fn convert(
+        server: &wiremock::MockServer,
+        cache: &Cache,
+        urls: &[&str],
+    ) -> SiteScopeResult {
+        let client = crate::commands::test_support::mock_graph(server)
+            .with_sharepoint_token(azapptoolkit_core::token::StaticTokenProvider::new("sp"));
+        let site_urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+        convert_site_access_core(
+            &client,
+            cache,
+            &GraphRolePrincipal {
+                tenant_id: "t1",
+                object_id: None,
+                sp_object_id: "sp1",
+                app_id: "app-1",
+            },
+            SiteConversion {
+                app_display_name: "App",
+                site_urls: &site_urls,
+                role: "read",
+                remove_orgwide: true,
+            },
+        )
+        .await
+        .expect("the conversion runs")
+    }
+
+    /// End to end: Sites.Selected, then the site grant, and only
+    /// then the strip of Graph's `Sites.Read.All`. The SharePoint Online
+    /// `Sites.*` and Graph's `Files.ReadWrite.All` survive the strip, so the
+    /// result says the app is NOT confined instead of reporting only removals.
+    #[tokio::test]
+    async fn a_conversion_grants_before_it_strips_and_names_the_reach_it_leaves() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        conversion_tenant(
+            &server,
+            spo_resource(),
+            serde_json::json!([
+                assignment("a-read", "graph-sp", "r-read"),
+                assignment("a-spo", "spo-sp", "s-full"),
+                assignment("a-files", "graph-sp", "r-files"),
+            ]),
+            site_granted(),
+        )
+        .await;
+        Mock::given(method("DELETE"))
+            .and(path(
+                "/v1.0/servicePrincipals/sp1/appRoleAssignments/a-read",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Neither grant the conversion cannot confine is touched.
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/appRoleAssignments/"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let cache = Cache::new();
+        let sweep = std::sync::Arc::new(SiteSweepResult {
+            tenant_id: "t1".into(),
+            total_sites: 1,
+            sites_scanned: 1,
+            sites_failed: 0,
+            rows: Vec::new(),
+            cancelled: false,
+            truncated: false,
+        });
+        cache.put_typed(CacheKind::Audit, sweep_cache_key("t1"), sweep);
+
+        let out = convert(&server, &cache, &[FINANCE]).await;
+
+        assert!(out.granted_role_added);
+        assert_eq!(out.sites_granted.len(), 1);
+        assert_eq!(
+            out.removed_orgwide_grants,
+            vec!["Sites.Read.All".to_string()]
+        );
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        let warning = &out.warnings[0];
+        assert!(warning.starts_with("Scoping is NOT effective for SharePoint"));
+        assert!(warning.contains("Sites.FullControl.All (Office 365 SharePoint Online)"));
+        assert!(warning.contains("Files.ReadWrite.All (Microsoft Graph)"));
+        assert!(
+            !warning.contains("Sites.Read.All"),
+            "the removed grant is not reach: {warning}"
+        );
+
+        // The order is the point: scoped access first, the strip last.
+        let requests = server.received_requests().await.expect("recorded");
+        let position = |verb: &str, ends_with: &str| {
+            requests
+                .iter()
+                .position(|r| r.method.as_str() == verb && r.url.path().ends_with(ends_with))
+                .unwrap_or_else(|| panic!("no {verb} …{ends_with}"))
+        };
+        let selected = position("POST", "/servicePrincipals/sp1/appRoleAssignments");
+        let site = position("POST", "/permissions");
+        let strip = position("DELETE", "/appRoleAssignments/a-read");
+        assert!(
+            selected < site && site < strip,
+            "{selected} < {site} < {strip}"
+        );
+
+        assert!(
+            cache
+                .get_typed::<SiteSweepResult>(CacheKind::Audit, &sweep_cache_key("t1"))
+                .is_none(),
+            "a landed site grant busts the site sweep"
+        );
+    }
+
+    /// Every site grant refused → the org-wide grant stays, and the result
+    /// says the app still reaches every site rather than reading as scoped.
+    #[tokio::test]
+    async fn no_landed_site_grant_strips_nothing_and_says_the_app_is_still_org_wide() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        conversion_tenant(
+            &server,
+            spo_resource(),
+            serde_json::json!([assignment("a-read", "graph-sp", "r-read")]),
+            ResponseTemplate::new(403),
+        )
+        .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let out = convert(&server, &Cache::new(), &[FINANCE]).await;
+
+        assert!(out.sites_granted.is_empty());
+        assert!(out.removed_orgwide_grants.is_empty());
+        let all = out.warnings.join("\n");
+        assert!(all.contains("failed to grant access to"), "{all}");
+        assert!(all.contains("no site access was granted"), "{all}");
+        assert!(
+            all.contains("Sites.Read.All (Microsoft Graph) is still granted"),
+            "{all}"
+        );
+        assert!(
+            all.contains("Re-run once the problems above are fixed"),
+            "{all}"
+        );
+    }
+
+    /// A repeated site — another case, a trailing slash, no scheme — is
+    /// one site: one grant call and one row, never "Scoped to 3 sites".
+    #[tokio::test]
+    async fn a_site_listed_three_ways_is_granted_once() {
+        use wiremock::MockServer;
+        use wiremock::matchers::{method, path, path_regex};
+
+        let server = MockServer::start().await;
+        // Mounted ahead of `conversion_tenant`'s copies, so these count.
+        wiremock::Mock::given(method("GET"))
+            .and(path(FINANCE_PATH))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": FINANCE_ID, "displayName": "Finance"
+                })),
+            )
+            // The case/slash variant is folded before any read; the
+            // scheme-less one resolves, then matches the site already granted.
+            .expect(2)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("POST"))
+            .and(path_regex(r"^/v1\.0/sites/[^/]+/permissions$"))
+            .respond_with(site_granted())
+            .expect(1)
+            .mount(&server)
+            .await;
+        conversion_tenant(
+            &server,
+            spo_resource(),
+            serde_json::json!([]),
+            site_granted(),
+        )
+        .await;
+
+        let out = convert(
+            &server,
+            &Cache::new(),
+            &[
+                FINANCE,
+                "https://contoso.sharepoint.com/sites/finance/",
+                "contoso.sharepoint.com/sites/Finance",
+            ],
+        )
+        .await;
+
+        assert_eq!(out.sites_granted.len(), 1);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// An Office 365 SharePoint Online lookup that fails does not stop the
+    /// conversion, and is never read as "holds nothing there": a grant on a
+    /// resource nothing resolved is reported as unchecked.
+    #[tokio::test]
+    async fn an_unreadable_sharepoint_online_index_is_reported_not_read_as_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        conversion_tenant(
+            &server,
+            // A 4xx, not a 5xx: the retry policy would back off on a 5xx.
+            ResponseTemplate::new(400),
+            serde_json::json!([
+                assignment("a-read", "graph-sp", "r-read"),
+                assignment("a-spo", "spo-sp", "s-full"),
+            ]),
+            site_granted(),
+        )
+        .await;
+        Mock::given(method("DELETE"))
+            .and(path(
+                "/v1.0/servicePrincipals/sp1/appRoleAssignments/a-read",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let out = convert(&server, &Cache::new(), &[FINANCE]).await;
+
+        assert_eq!(
+            out.removed_orgwide_grants,
+            vec!["Sites.Read.All".to_string()]
+        );
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(
+            out.warnings[0]
+                .starts_with("could not read the Office 365 SharePoint Online permissions"),
+            "{}",
+            out.warnings[0]
+        );
+    }
+
+    /// A write token that answers this way for every request.
+    struct FailingToken(&'static str);
+
+    #[async_trait::async_trait]
+    impl azapptoolkit_core::token::BearerProvider for FailingToken {
+        async fn bearer(&self) -> Result<String, azapptoolkit_core::token::TokenError> {
+            Err(azapptoolkit_core::token::TokenError::new(
+                self.0,
+                "token refused",
+            ))
+        }
+    }
+
+    /// A refused appRole assignment keeps its code. `grant_failed` used to
+    /// stand in for all three, so a 403 named no role, a missing consent
+    /// offered no "Grant consent", and a dead session neither read as one nor
+    /// stopped a bulk run.
+    #[tokio::test]
+    async fn a_refused_selected_grant_keeps_its_code() {
+        use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider};
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let admin_consent = azapptoolkit_core::capabilities::capability("admin_consent")
+            .expect("catalog entry")
+            .remediation;
+        let cases: [(Arc<dyn BearerProvider>, &str); 3] = [
+            (StaticTokenProvider::new("tok"), "forbidden"),
+            (
+                Arc::new(FailingToken("consent_required")),
+                "consent_required",
+            ),
+            (Arc::new(FailingToken("refresh_missing")), "refresh_missing"),
+        ];
+        for (write, code) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/servicePrincipals/sp1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sp1", "appId": "app-1", "displayName": "App"
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1.0/servicePrincipals/sp1/appRoleAssignments"))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(&server)
+                .await;
+            let client = crate::commands::test_support::mock_graph_rw(
+                &server,
+                StaticTokenProvider::new("tok"),
+                write,
+                Cache::new(),
+            );
+            let index: HashMap<String, String> =
+                [("role-selected".to_string(), "Sites.Selected".to_string())].into();
+            let Err(err) = declare_and_grant_graph_role(
+                &client,
+                &Cache::new(),
+                &GraphRolePrincipal {
+                    tenant_id: "t1",
+                    object_id: None,
+                    sp_object_id: "sp1",
+                    app_id: "app-1",
+                },
+                "graph-sp",
+                &index,
+                &[],
+                SP_SITES_SELECTED,
+            )
+            .await
+            else {
+                panic!("{code}: the grant was refused");
+            };
+            assert_eq!(err.code, code, "{err:?}");
+            assert!(
+                err.message.starts_with("failed to grant Sites.Selected"),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.message.contains(admin_consent),
+                code == "forbidden",
+                "the admin-consent guidance rides a 403 only: {err:?}"
+            );
+            assert_eq!(err.is_reauth_fatal(), code == "refresh_missing", "{err:?}");
         }
     }
 }

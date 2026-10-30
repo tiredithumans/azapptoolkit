@@ -98,7 +98,10 @@ pub(crate) fn graph_role_id(
 /// assignment grants when it should go, `None` to keep it: the caller decides
 /// WHICH grants are org-wide (Exchange: its `(resource, appRole)` targets whose
 /// scoped role landed; SharePoint: any org-wide `Sites.*` on Graph), and this
-/// owns the loop and the failure wording.
+/// owns the loop and the failure wording. What a caller strips is not all a
+/// principal may hold, so each caller also reports what is still org-wide
+/// afterwards (Exchange's `still_held_orgwide`, the SharePoint conversion's
+/// residual-reach check).
 ///
 /// The one home of the org-wide strip for both scoping planes, so a fix to how
 /// a strip reports (or what it does on failure) lands on both at once. Callers
@@ -169,24 +172,44 @@ async fn graph_and_resource_roles(
     client: &GraphClient,
     extra_app_id: &'static str,
 ) -> Result<Vec<ResourceRoles>, UiError> {
-    let (graph_sp_id, graph_roles) = graph_role_index(client).await?;
-    let mut out = vec![ResourceRoles {
+    let mut out = vec![graph_resource_roles(client).await?];
+    if let Ok(Some(extra)) = resource_roles(client, extra_app_id).await {
+        out.push(extra);
+    }
+    Ok(out)
+}
+
+/// [`graph_role_index`] as the [`ResourceRoles`] that [`resolve_grant`] reads.
+pub(crate) async fn graph_resource_roles(client: &GraphClient) -> Result<ResourceRoles, UiError> {
+    let (sp_object_id, role_value_by_id) = graph_role_index(client).await?;
+    Ok(ResourceRoles {
         app_id: MICROSOFT_GRAPH_APP_ID,
-        sp_object_id: graph_sp_id,
-        role_value_by_id: graph_roles,
-    }];
-    if let Ok(Some(sp)) = client.resolve_resource_sp(extra_app_id).await {
-        out.push(ResourceRoles {
-            app_id: extra_app_id,
+        sp_object_id,
+        role_value_by_id,
+    })
+}
+
+/// One resource's appRole index: `Ok(None)` when the tenant has no service
+/// principal for it (no grant on it can exist), `Err` when it could not be
+/// looked up. The two readers above fold both into "nothing held there"; a
+/// caller that has to say what a principal still reaches keeps them apart,
+/// because an unreadable index is never the same as an absent one.
+pub(crate) async fn resource_roles(
+    client: &GraphClient,
+    app_id: &'static str,
+) -> Result<Option<ResourceRoles>, UiError> {
+    Ok(client
+        .resolve_resource_sp(app_id)
+        .await?
+        .map(|sp| ResourceRoles {
+            app_id,
             sp_object_id: sp.id,
             role_value_by_id: sp
                 .app_roles
                 .iter()
                 .map(|r| (r.id.clone(), r.value.clone()))
                 .collect(),
-        });
-    }
-    Ok(out)
+        }))
 }
 
 /// Resolves a service principal's **held** app-role assignments
