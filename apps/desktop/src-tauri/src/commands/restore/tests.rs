@@ -2,7 +2,10 @@
 
 use super::*;
 
-use azapptoolkit_core::models::{Application, DirectoryObject, FederatedIdentityCredential};
+use azapptoolkit_core::models::{
+    Application, DirectoryObject, FederatedIdentityCredential, OAuth2PermissionScope,
+    PreAuthorizedApplication,
+};
 use azapptoolkit_core::redirect::validate_redirect_uri;
 use azapptoolkit_core::restore_plan::BackupApps;
 
@@ -441,22 +444,27 @@ fn adoption_for_creates_adopts_or_refuses() {
     };
     let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
     // Created after the backup was taken, as anything a restore of it made.
-    let hit = |id: &str, name: &str| Application {
-        id: format!("obj-{id}"),
-        app_id: format!("app-{id}"),
-        display_name: name.into(),
-        created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+    let hit = |id: &str, name: &str| TagHit {
+        app: Application {
+            id: format!("obj-{id}"),
+            app_id: format!("app-{id}"),
+            display_name: name.into(),
+            created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+            ..Default::default()
+        },
         ..Default::default()
     };
+    let decide_on =
+        |hits: &[TagHit]| adoption_for(&app, hits, taken_at, "src-tenant", "dst-tenant");
 
     // Nothing carries the tag: create.
-    assert_eq!(adoption_for(&app, &[], taken_at), Adoption::Create);
+    assert_eq!(decide_on(&[]), Adoption::Create);
 
     // One tagged app with the same name holding exactly the manifest's
     // secret: an earlier run made it — adopt it, carrying the names of the
-    // secrets it already holds.
+    // secrets it already holds and the clients it pre-authorizes.
     let mut same = hit("1", "App A");
-    same.password_credentials = vec![PasswordCredential {
+    same.app.password_credentials = vec![PasswordCredential {
         key_id: "key-1".into(),
         display_name: Some("ci".into()),
         hint: Some("Ab1".into()),
@@ -464,7 +472,7 @@ fn adoption_for_creates_adopts_or_refuses() {
         ..Default::default()
     }];
     assert_eq!(
-        adoption_for(&app, &[same], taken_at),
+        decide_on(&[same]),
         Adoption::Adopt {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
@@ -474,19 +482,18 @@ fn adoption_for_creates_adopts_or_refuses() {
                 valid_from: chrono::DateTime::from_timestamp(1_000_700, 0),
                 hint: Some("Ab1".into()),
             }],
+            pre_authorized: Vec::new(),
         }
     );
 
     // Tagged but renamed: never adopted on the tag alone, never duplicated.
-    let Adoption::Refuse(reason) = adoption_for(&app, &[hit("2", "Renamed")], taken_at) else {
+    let Adoption::Refuse(reason) = decide_on(&[hit("2", "Renamed")]) else {
         panic!("a renamed tagged app must be refused");
     };
     assert!(reason.contains("Renamed") && reason.contains("app-2"));
 
     // Two tagged apps: ambiguous, so neither is taken and nothing is created.
-    let Adoption::Refuse(reason) =
-        adoption_for(&app, &[hit("1", "App A"), hit("2", "App A")], taken_at)
-    else {
+    let Adoption::Refuse(reason) = decide_on(&[hit("1", "App A"), hit("2", "App A")]) else {
         panic!("two tagged apps must be refused");
     };
     assert!(reason.starts_with("2 apps carry the restore tag"));
@@ -495,8 +502,8 @@ fn adoption_for_creates_adopts_or_refuses() {
     // time is unknown: no restore of this backup can be proven to have made
     // it, so it is refused rather than handed this app's consent.
     let mut older = hit("3", "App A");
-    older.created_date_time = chrono::DateTime::from_timestamp(999_000, 0);
-    let Adoption::Refuse(reason) = adoption_for(&app, &[older], taken_at) else {
+    older.app.created_date_time = chrono::DateTime::from_timestamp(999_000, 0);
+    let Adoption::Refuse(reason) = decide_on(&[older]) else {
         panic!("an app older than the backup must be refused");
     };
     assert!(
@@ -504,11 +511,31 @@ fn adoption_for_creates_adopts_or_refuses() {
         "{reason}"
     );
     let mut undated = hit("4", "App A");
-    undated.created_date_time = None;
-    let Adoption::Refuse(reason) = adoption_for(&app, &[undated], taken_at) else {
+    undated.app.created_date_time = None;
+    let Adoption::Refuse(reason) = decide_on(&[undated]) else {
         panic!("an app of unknown age must be refused");
     };
     assert!(reason.contains("an unknown time"), "{reason}");
+
+    // A reply URL the backup does not list: refused, the URL named. The
+    // clients it pre-authorizes are carried for Pass 1 to check once every
+    // app has its destination appId.
+    let mut planted = hit("5", "App A");
+    planted.auth.spa_redirect_uris = vec!["https://evil.example/cb".into()];
+    let Adoption::Refuse(reason) = decide_on(&[planted]) else {
+        panic!("a reply URL the backup does not list must refuse the adoption");
+    };
+    assert!(
+        reason.contains("SPA redirect URI 'https://evil.example/cb'"),
+        "{reason}"
+    );
+    let client = pre_authorized("client-1", &["scope-1"]);
+    let mut api = hit("6", "App A");
+    api.expose.api.pre_authorized_applications = vec![client.clone()];
+    let Adoption::Adopt { pre_authorized, .. } = decide_on(&[api]) else {
+        panic!("pre-authorized clients are checked after the loop, not here");
+    };
+    assert_eq!(pre_authorized, [client]);
 }
 
 #[test]
@@ -711,18 +738,33 @@ fn tagged_app_a() -> AppRegistrationBackup {
 /// Mounts the tag lookup answering one hit named "App A", created after
 /// `taken_at` in [`decide`], and its owners.
 async fn mount_tagged_hit(server: &wiremock::MockServer, owners: serde_json::Value) {
+    mount_tagged_hit_with(server, owners, serde_json::json!({})).await;
+}
+
+/// [`mount_tagged_hit`], the hit also carrying `settings`: any of the
+/// authentication and Expose-an-API fields the tag lookup selects (`web`,
+/// `spa`, `publicClient`, `isFallbackPublicClient`, `identifierUris`, `api`).
+async fn mount_tagged_hit_with(
+    server: &wiremock::MockServer,
+    owners: serde_json::Value,
+    settings: serde_json::Value,
+) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
+    let mut hit = serde_json::json!({
+        "id": "obj-1",
+        "appId": "app-1",
+        "displayName": "App A",
+        "createdDateTime": "2026-01-02T00:00:00Z"
+    });
+    if let (Some(hit), Some(settings)) = (hit.as_object_mut(), settings.as_object()) {
+        hit.extend(settings.clone());
+    }
     Mock::given(method("GET"))
         .and(path("/applications"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "value": [{
-                "id": "obj-1",
-                "appId": "app-1",
-                "displayName": "App A",
-                "createdDateTime": "2026-01-02T00:00:00Z"
-            }]
-        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [hit] })),
+        )
         .mount(server)
         .await;
     Mock::given(method("GET"))
@@ -821,17 +863,27 @@ fn pass_ctx<'a>(
 }
 
 async fn decide(client: &GraphClient, session: &SessionDead) -> Adoption {
-    let taken_at = "2026-01-01T00:00:00Z".parse().unwrap();
-    decide_adoption(
-        client,
-        &tagged_app_a(),
-        taken_at,
-        CloudEnvironment::Commercial,
-        Some("operator-oid"),
-        &mut HashMap::new(),
-        session,
-    )
-    .await
+    decide_app(client, &tagged_app_a(), session).await
+}
+
+/// [`decide_adoption`] for `app` under the run the pass-loop tests use: the
+/// [`manifest`] backup (taken 2026-01-01 in `src-tenant`), restored into
+/// `dst-tenant` by `operator-oid`.
+async fn decide_app(
+    client: &GraphClient,
+    app: &AppRegistrationBackup,
+    session: &SessionDead,
+) -> Adoption {
+    let backup = manifest(Vec::new());
+    let approved = HashSet::new();
+    let run = RestoreRun {
+        backup: &backup,
+        tenant_id: "dst-tenant",
+        cloud: CloudEnvironment::Commercial,
+        operator_oid: Some("operator-oid"),
+        approved: &approved,
+    };
+    decide_adoption(client, app, &run, &mut HashMap::new(), session).await
 }
 
 // The fail-closed branch is the package's key safety property: a failed tag
@@ -909,6 +961,7 @@ async fn a_tagged_app_owned_only_by_the_operator_is_adopted() {
             object_id: "obj-1".into(),
             app_id: "app-1".into(),
             live_secrets: Vec::new(),
+            pre_authorized: Vec::new(),
         }
     );
 }
@@ -3201,23 +3254,29 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
         ..Default::default()
     };
     let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
-    let hit = || Application {
-        id: "obj-1".into(),
-        app_id: "app-1".into(),
-        display_name: "App A".into(),
-        created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+    let hit = || TagHit {
+        app: Application {
+            id: "obj-1".into(),
+            app_id: "app-1".into(),
+            display_name: "App A".into(),
+            created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+            ..Default::default()
+        },
         ..Default::default()
+    };
+    let decide_on = |app: &AppRegistrationBackup, hit: TagHit| {
+        adoption_for(app, &[hit], taken_at, "src-tenant", "dst-tenant")
     };
 
     let mut certed = hit();
-    certed.key_credentials = vec![KeyCredential::default()];
-    let Adoption::Refuse(reason) = adoption_for(&app, &[certed], taken_at) else {
+    certed.app.key_credentials = vec![KeyCredential::default()];
+    let Adoption::Refuse(reason) = decide_on(&app, certed) else {
         panic!("a certificate credential must refuse the adoption");
     };
     assert!(reason.contains("certificate"), "{reason}");
 
     let mut planted = hit();
-    planted.password_credentials = vec![
+    planted.app.password_credentials = vec![
         PasswordCredential {
             display_name: Some("ci".into()),
             ..Default::default()
@@ -3227,14 +3286,14 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
             ..Default::default()
         },
     ];
-    let Adoption::Refuse(reason) = adoption_for(&app, &[planted], taken_at) else {
+    let Adoption::Refuse(reason) = decide_on(&app, planted) else {
         panic!("a secret the manifest does not name must refuse the adoption");
     };
     assert!(reason.contains("(backdoor)"), "{reason}");
 
     // Two live "ci" against one manifest entry: the second is foreign.
     let mut doubled = hit();
-    doubled.password_credentials = vec![
+    doubled.app.password_credentials = vec![
         PasswordCredential {
             display_name: Some("ci".into()),
             ..Default::default()
@@ -3244,7 +3303,7 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
             ..Default::default()
         },
     ];
-    let Adoption::Refuse(reason) = adoption_for(&app, &[doubled], taken_at) else {
+    let Adoption::Refuse(reason) = decide_on(&app, doubled) else {
         panic!("more same-named secrets than the manifest lists must refuse");
     };
     assert!(reason.contains("(ci)"), "{reason}");
@@ -3257,35 +3316,32 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
         ..Default::default()
     }];
     let mut reuploaded = hit();
-    reuploaded.key_credentials = vec![KeyCredential {
+    reuploaded.app.key_credentials = vec![KeyCredential {
         custom_key_identifier: Some("2iD8ppbE+D6Kmu1ZvjM2jtQh88E=".into()),
         ..Default::default()
     }];
     assert!(matches!(
-        adoption_for(&with_cert, &[reuploaded], taken_at),
+        decide_on(&with_cert, reuploaded),
         Adoption::Adopt { .. }
     ));
     let mut other_cert = hit();
-    other_cert.key_credentials = vec![KeyCredential {
+    other_cert.app.key_credentials = vec![KeyCredential {
         key_id: "k-other".into(),
         custom_key_identifier: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()),
         ..Default::default()
     }];
-    let Adoption::Refuse(reason) = adoption_for(&with_cert, &[other_cert], taken_at) else {
+    let Adoption::Refuse(reason) = decide_on(&with_cert, other_cert) else {
         panic!("a certificate the manifest does not list must refuse");
     };
     assert!(reason.contains("k-other"), "{reason}");
 
     // Exactly the manifest's secret, issued by the earlier run: adopted.
     let mut legit = hit();
-    legit.password_credentials = vec![PasswordCredential {
+    legit.app.password_credentials = vec![PasswordCredential {
         display_name: Some("ci".into()),
         ..Default::default()
     }];
-    assert!(matches!(
-        adoption_for(&app, &[legit], taken_at),
-        Adoption::Adopt { .. }
-    ));
+    assert!(matches!(decide_on(&app, legit), Adoption::Adopt { .. }));
 }
 
 /// A planted federated credential is a secretless, permanent sign-in as
@@ -3345,24 +3401,6 @@ async fn a_tagged_app_whose_federated_credential_the_manifest_names_is_adopted()
         subject: Some("repo:contoso/app:ref:refs/heads/main".into()),
         ..Default::default()
     }];
-    let taken_at: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
-    async fn decide_app(
-        client: &GraphClient,
-        app: &AppRegistrationBackup,
-        taken_at: DateTime<Utc>,
-    ) -> Adoption {
-        decide_adoption(
-            client,
-            app,
-            taken_at,
-            CloudEnvironment::Commercial,
-            Some("operator-oid"),
-            &mut HashMap::new(),
-            &SessionDead::new(),
-        )
-        .await
-    }
-
     mount_tagged_fics(
         &server,
         live(Some("repo:contoso/app:ref:refs/heads/main")),
@@ -3370,12 +3408,12 @@ async fn a_tagged_app_whose_federated_credential_the_manifest_names_is_adopted()
     )
     .await;
     assert!(matches!(
-        decide_app(&client, &app, taken_at).await,
+        decide_app(&client, &app, &SessionDead::new()).await,
         Adoption::Adopt { .. }
     ));
 
     mount_tagged_fics(&server, live(None), 1).await;
-    let Adoption::Refuse(reason) = decide_app(&client, &app, taken_at).await else {
+    let Adoption::Refuse(reason) = decide_app(&client, &app, &SessionDead::new()).await else {
         panic!("a flexible credential can never be matched to the manifest");
     };
     assert!(reason.contains("gh-main"), "{reason}");
@@ -3405,6 +3443,575 @@ async fn a_failed_federated_credential_read_refuses_the_adoption() {
         panic!("a failed credential read must refuse");
     };
     assert!(reason.contains("federated credentials"), "{reason}");
+}
+
+/// What Pass 2 writes, in any order, ids in any case and an empty text as
+/// absent, is no finding, and neither is less of it (an earlier run that
+/// stopped before Pass 2). Anything else on the hit is named.
+#[test]
+fn foreign_settings_names_only_what_pass_2_would_not_write() {
+    let scope = |id: &str, value: &str| OAuth2PermissionScope {
+        id: id.into(),
+        value: value.into(),
+        admin_consent_display_name: Some("Read orders".into()),
+        r#type: Some("Admin".into()),
+        is_enabled: Some(true),
+        ..Default::default()
+    };
+    let app = AppRegistrationBackup {
+        source_app_id: SRC_A.into(),
+        web_redirect_uris: vec![
+            "https://contoso.com/cb".into(),
+            "https://*.contoso.com/cb".into(),
+        ],
+        spa_redirect_uris: vec!["https://contoso.com/spa".into()],
+        logout_url: Some(" https://contoso.com/logout ".into()),
+        enable_id_token_issuance: true,
+        identifier_uris: vec![format!("api://{SRC_A}"), "api://src-tenant/orders".into()],
+        api_scopes: vec![scope("SCOPE-1", "Orders.Read")],
+        ..Default::default()
+    };
+    let findings = |hit: &TagHit| foreign_settings(&app, hit, "src-tenant", "dst-tenant");
+    let mut bare = TagHit::default();
+    bare.app.app_id = "app-a".into();
+    assert!(findings(&bare).is_empty(), "{:?}", findings(&bare));
+
+    let mut written = bare.clone();
+    written.auth.web_redirect_uris = vec!["https://contoso.com/cb".into()];
+    written.auth.spa_redirect_uris = vec!["https://contoso.com/spa".into()];
+    written.auth.logout_url = Some("https://contoso.com/logout".into());
+    written.auth.enable_id_token_issuance = true;
+    written.expose.identifier_uris = vec!["api://dst-tenant/orders".into(), "api://app-a".into()];
+    let mut live_scope = scope("scope-1", "Orders.Read");
+    live_scope.user_consent_description = Some(String::new());
+    written.expose.api.oauth2_permission_scopes = vec![live_scope];
+    assert!(findings(&written).is_empty(), "{:?}", findings(&written));
+
+    let mut planted = written.clone();
+    // Listed, but `core::redirect` rejects it, so Pass 2 never writes it.
+    planted
+        .auth
+        .web_redirect_uris
+        .push("https://*.contoso.com/cb".into());
+    // The manifest's web URL, on another platform.
+    planted
+        .auth
+        .spa_redirect_uris
+        .push("https://contoso.com/cb".into());
+    planted.auth.public_client_redirect_uris = vec!["ms-app://planted".into()];
+    planted.auth.logout_url = Some("https://evil.example/logout".into());
+    planted.auth.enable_access_token_issuance = true;
+    planted.auth.is_fallback_public_client = true;
+    // The source appId, which Pass 2 rewrites.
+    planted
+        .expose
+        .identifier_uris
+        .push(format!("api://{SRC_A}"));
+    // The manifest's scope made user-consentable, and one it lacks.
+    let mut user_consentable = scope("scope-1", "Orders.Read");
+    user_consentable.r#type = Some("User".into());
+    planted.expose.api.oauth2_permission_scopes =
+        vec![user_consentable, scope("scope-2", "Orders.ReadWrite")];
+    assert_eq!(
+        findings(&planted),
+        [
+            "web redirect URI 'https://*.contoso.com/cb'".to_string(),
+            "SPA redirect URI 'https://contoso.com/cb'".into(),
+            "public-client redirect URI 'ms-app://planted'".into(),
+            "logout URL 'https://evil.example/logout'".into(),
+            "implicit-grant access tokens turned on".into(),
+            "public client flows allowed (the public-client flag)".into(),
+            format!("identifier URI 'api://{SRC_A}'"),
+            "scope 'Orders.Read' (scope-1)".into(),
+            "scope 'Orders.ReadWrite' (scope-2)".into(),
+        ]
+    );
+}
+
+fn pre_authorized(app_id: &str, scope_ids: &[&str]) -> PreAuthorizedApplication {
+    PreAuthorizedApplication {
+        app_id: app_id.into(),
+        delegated_permission_ids: scope_ids.iter().map(|id| id.to_string()).collect(),
+    }
+}
+
+/// A live pre-authorized client is held to Pass 2's own list over the final
+/// remap: a client of this backup under the appId this run gave it, one from
+/// outside it as listed, either for no scope it was not listed with, all
+/// ignoring case.
+#[test]
+fn foreign_pre_authorized_holds_live_clients_to_what_pass_2_writes() {
+    let api = AppRegistrationBackup {
+        source_app_id: SRC_A.into(),
+        pre_authorized_applications: vec![
+            pre_authorized(SRC_B, &["scope-1"]),
+            pre_authorized("foreign-client", &["scope-1", "scope-2"]),
+        ],
+        ..Default::default()
+    };
+    let backup_apps = BackupApps::new([(SRC_A, "App A"), (SRC_B, "App B")]);
+    let remap = HashMap::from([
+        (SRC_A.to_string(), "app-a".to_string()),
+        (SRC_B.to_string(), "app-b".to_string()),
+    ]);
+    let findings = |live: &[PreAuthorizedApplication], remap: &HashMap<String, String>| {
+        foreign_pre_authorized(&api, live, remap, &backup_apps)
+    };
+    let written = [
+        pre_authorized("APP-B", &["SCOPE-1"]),
+        pre_authorized("Foreign-Client", &["scope-2"]),
+    ];
+    assert!(findings(&written, &remap).is_empty());
+
+    assert_eq!(
+        findings(
+            &[
+                // The backup's own client under its source tenant's appId.
+                pre_authorized(SRC_B, &["scope-1"]),
+                pre_authorized("mallory-client", &["scope-1"]),
+                pre_authorized("foreign-client", &["scope-1", "scope-3"]),
+            ],
+            &remap
+        ),
+        [
+            format!("pre-authorized client {SRC_B}"),
+            "pre-authorized client mallory-client".into(),
+            "pre-authorized client foreign-client for scope id(s) scope-3".into(),
+        ]
+    );
+    // A client of this backup the run did not restore has no appId here, so
+    // the one the hit names is not this run's.
+    let without_b = HashMap::from([(SRC_A.to_string(), "app-a".to_string())]);
+    assert_eq!(
+        findings(&[pre_authorized("app-b", &["scope-1"])], &without_b),
+        ["pre-authorized client app-b"]
+    );
+}
+
+/// Refusing one pending adoption takes its appId out of the remap, which
+/// leaves an app pre-authorizing it unaccounted for in turn: A pre-authorizes
+/// B, B pre-authorizes C, and C a client nobody listed. All three are
+/// refused, in manifest order, however many rounds that takes.
+#[test]
+fn refusing_a_pending_adoption_refuses_those_that_pre_authorize_it() {
+    let app = |src: &str, name: &str, client: Option<&str>| AppRegistrationBackup {
+        source_app_id: src.into(),
+        display_name: name.into(),
+        pre_authorized_applications: client
+            .map(|c| pre_authorized(c, &["scope-1"]))
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let adopted = |backup: AppRegistrationBackup, tag: &str| CreatedApp {
+        backup,
+        new_object_id: format!("obj-{tag}"),
+        new_app_id: format!("app-{tag}"),
+        adopted: true,
+        live_secrets: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let created = [
+        adopted(app(SRC_A, "App A", Some(SRC_B)), "a"),
+        adopted(app(SRC_B, "App B", Some(SRC_C)), "b"),
+        adopted(app(SRC_C, "App C", None), "c"),
+    ];
+    let pending =
+        [("app-b", 0), ("app-c", 1), ("mallory-client", 2)].map(|(client, at)| PendingAdoption {
+            at,
+            pre_authorized: vec![pre_authorized(client, &["scope-1"])],
+        });
+    let backup_apps = BackupApps::new([(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+    let mut remap: HashMap<String, String> = [(SRC_A, "app-a"), (SRC_B, "app-b"), (SRC_C, "app-c")]
+        .into_iter()
+        .map(|(src, new)| (src.to_string(), new.to_string()))
+        .collect();
+
+    let refused = refuse_foreign_pre_authorized(&pending, &created, &backup_apps, &mut remap);
+
+    assert_eq!(
+        refused.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert!(
+        refused[0].1.contains("pre-authorized client app-b"),
+        "{}",
+        refused[0].1
+    );
+    assert!(
+        refused[1].1.contains("pre-authorized client app-c"),
+        "{}",
+        refused[1].1
+    );
+    assert!(
+        refused[2]
+            .1
+            .contains("pre-authorized client mallory-client")
+            && refused[2].1.contains("not adopted"),
+        "{}",
+        refused[2].1
+    );
+    assert!(remap.is_empty(), "{remap:?}");
+}
+
+/// Answers the tag lookup for `src`'s restore tag with the one app `hit`; its
+/// owners, credentials and service principal read as none (the fallback).
+async fn mount_tag_lookup(server: &MockServer, src: &str, hit: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/applications"))
+        .and(query_param(
+            "$filter",
+            format!("tags/any(t:t eq '{}')", restore_marker(src)),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [hit] })),
+        )
+        .mount(server)
+        .await;
+}
+
+/// W20's bypass. A copy planted with the restore tag and the name, owned by
+/// nobody the restore did not set, holds a reply URL, an implicit-grant flag
+/// or the public-client flag the backup does not list. The manifest app
+/// consents to a low-risk delegated permission and lists none of those, so
+/// the plan asks for no approval and Pass 2 writes no authentication. Adopted,
+/// the planted setting would stay and Pass 3 would consent, delivering
+/// consented tokens wherever the planter chose. Refused instead: never
+/// adopted, never consented, not created again, the setting named.
+#[tokio::test]
+async fn a_tagged_app_with_planted_sign_in_settings_is_never_adopted_or_consented() {
+    for (planted, named) in [
+        (
+            serde_json::json!({ "spa": { "redirectUris": ["https://evil.example/cb"] } }),
+            "SPA redirect URI 'https://evil.example/cb'",
+        ),
+        (
+            serde_json::json!({ "web": { "redirectUris": ["https://evil.example/web"] } }),
+            "web redirect URI 'https://evil.example/web'",
+        ),
+        (
+            serde_json::json!({ "publicClient": { "redirectUris": ["ms-app://planted"] } }),
+            "public-client redirect URI 'ms-app://planted'",
+        ),
+        (
+            serde_json::json!({ "isFallbackPublicClient": true }),
+            "public client flows allowed",
+        ),
+        (
+            serde_json::json!({
+                "web": { "implicitGrantSettings": { "enableAccessTokenIssuance": true } }
+            }),
+            "implicit-grant access tokens turned on",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_tagged_hit_with(
+            &server,
+            serde_json::json!([{ "id": "operator-oid" }]),
+            planted,
+        )
+        .await;
+        // Pass 3's re-read: the app declares exactly the backup's permission,
+        // so nothing but the refusal stands between it and the consent.
+        Mock::given(method("GET"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "obj-1",
+                "appId": "app-1",
+                "displayName": "App A",
+                "requiredResourceAccess": [{
+                    "resourceAppId": GRAPH,
+                    "resourceAccess": [{ "id": USER_READ_SCOPE, "type": "Scope" }]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        mount_graph_sp(&server).await;
+        mount_fallback(&server).await;
+        let client = graph_over(&server, false);
+        let backup = manifest(vec![AppRegistrationBackup {
+            source_app_id: SRC_A.into(),
+            display_name: "App A".into(),
+            admin_consent_granted: true,
+            required_resource_access: vec![azapptoolkit_core::models::RequiredResourceAccess {
+                resource_app_id: GRAPH.into(),
+                resource_access: vec![azapptoolkit_core::models::ResourceAccess {
+                    id: USER_READ_SCOPE.into(),
+                    r#type: "Scope".into(),
+                }],
+            }],
+            ..Default::default()
+        }]);
+        let items = privileged_restore_items(&client, &backup, &SessionDead::new()).await;
+        assert!(
+            items.iter().all(|i| !i.requires_approval),
+            "the plan asks for no approval: {items:?}"
+        );
+
+        let (report, effects) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+        assert!(report.apps.is_empty(), "{named}: {report:?}");
+        assert!(!effects.created_any, "{named}");
+        assert!(
+            !consent_attempted(&server, "app-1").await,
+            "{named}: never consented"
+        );
+        assert!(
+            requests(&server, "POST", "/applications").await.is_empty(),
+            "{named}: not created again"
+        );
+        let refusal = report
+            .manual_items
+            .iter()
+            .find(|m| m.reason.contains("carries this app's restore tag"))
+            .unwrap_or_else(|| panic!("{named}: {:?}", report.manual_items));
+        assert!(
+            refusal.reason.contains(named) && refusal.reason.contains("not adopted"),
+            "{}",
+            refusal.reason
+        );
+    }
+}
+
+/// W55's bypass. A planted copy of an API the backup restores pre-authorizes
+/// a client the backup does not list (the planter's own, which would then get
+/// the API's scopes without anyone consenting), and Pass 2 writes that list
+/// only when the manifest has one. Refused once Pass 1 knows every app's
+/// appId, it gets no write at all, not even its service principal.
+#[tokio::test]
+async fn a_tagged_api_pre_authorizing_a_client_the_backup_does_not_list_is_not_adopted() {
+    let server = MockServer::start().await;
+    let scope = serde_json::json!({
+        "id": "scope-1", "value": "Orders.Read", "type": "User", "isEnabled": true
+    });
+    mount_tag_lookup(
+        &server,
+        SRC_A,
+        serde_json::json!({
+            "id": "obj-a",
+            "appId": "app-a",
+            "displayName": "App A",
+            "createdDateTime": "2026-01-02T00:00:00Z",
+            "identifierUris": ["api://app-a"],
+            "api": {
+                "oauth2PermissionScopes": [scope],
+                "preAuthorizedApplications": [
+                    { "appId": "mallory-client", "delegatedPermissionIds": ["scope-1"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let backup = manifest(vec![AppRegistrationBackup {
+        source_app_id: SRC_A.into(),
+        display_name: "App A".into(),
+        has_service_principal: true,
+        identifier_uris: vec![format!("api://{SRC_A}")],
+        api_scopes: vec![serde_json::from_value(scope).unwrap()],
+        ..Default::default()
+    }]);
+
+    let (report, effects) = restore(&client, &backup, never_cancelled(), &[]).await;
+
+    assert!(report.apps.is_empty(), "{report:?}");
+    assert!(!effects.created_any);
+    let [refusal] = report.manual_items.as_slice() else {
+        panic!("{:?}", report.manual_items);
+    };
+    assert!(
+        refusal
+            .reason
+            .contains("pre-authorized client mallory-client")
+            && refusal.reason.contains("not adopted"),
+        "{}",
+        refusal.reason
+    );
+    assert!(
+        requests(&server, "POST", "/applications").await.is_empty(),
+        "not created again"
+    );
+    assert!(
+        requests(&server, "POST", "/servicePrincipals")
+            .await
+            .is_empty(),
+        "no service principal for an app it refused"
+    );
+    assert!(
+        requests(&server, "PATCH", "/applications/obj-a")
+            .await
+            .is_empty(),
+        "nothing wired"
+    );
+}
+
+/// The other side of every check above: an earlier run's own app, whose
+/// settings are exactly what Pass 2 writes (in another order, ids in another
+/// case, absent fields as null), is adopted. That includes an API
+/// pre-authorizing a client of this backup listed after it in the file, whose
+/// appId Pass 1 knows only once it reaches that client.
+#[tokio::test]
+async fn a_tagged_app_whose_settings_are_what_pass_2_writes_is_adopted() {
+    let server = MockServer::start().await;
+    let scope = serde_json::json!({
+        "id": "scope-1", "value": "Orders.Read", "type": "User", "isEnabled": true,
+        "adminConsentDisplayName": "Read orders"
+    });
+    mount_tag_lookup(
+        &server,
+        SRC_A,
+        serde_json::json!({
+            "id": "obj-a",
+            "appId": "app-a",
+            "displayName": "App A",
+            "createdDateTime": "2026-01-02T00:00:00Z",
+            "isFallbackPublicClient": null,
+            "web": {
+                "redirectUris": ["https://a.contoso.com/alt", "https://a.contoso.com/cb"],
+                "logoutUrl": null,
+                "implicitGrantSettings": {
+                    "enableAccessTokenIssuance": false,
+                    "enableIdTokenIssuance": false
+                }
+            },
+            "spa": { "redirectUris": [] },
+            "publicClient": { "redirectUris": [] },
+            "identifierUris": ["api://app-a"],
+            "api": {
+                "oauth2PermissionScopes": [scope],
+                "preAuthorizedApplications": [
+                    { "appId": "foreign-client", "delegatedPermissionIds": ["SCOPE-1"] },
+                    { "appId": "app-b", "delegatedPermissionIds": ["scope-1"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    mount_tag_lookup(
+        &server,
+        SRC_B,
+        serde_json::json!({
+            "id": "obj-b",
+            "appId": "app-b",
+            "displayName": "App B",
+            "createdDateTime": "2026-01-02T00:00:00Z"
+        }),
+    )
+    .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let api = AppRegistrationBackup {
+        source_app_id: SRC_A.into(),
+        display_name: "App A".into(),
+        has_service_principal: true,
+        web_redirect_uris: vec![
+            "https://a.contoso.com/cb".into(),
+            "https://a.contoso.com/alt".into(),
+        ],
+        identifier_uris: vec![format!("api://{SRC_A}")],
+        api_scopes: vec![serde_json::from_value(scope).unwrap()],
+        pre_authorized_applications: vec![
+            pre_authorized(SRC_B, &["scope-1"]),
+            pre_authorized("foreign-client", &["scope-1"]),
+        ],
+        ..Default::default()
+    };
+    let api_client = AppRegistrationBackup {
+        source_app_id: SRC_B.into(),
+        display_name: "App B".into(),
+        ..Default::default()
+    };
+
+    let (report, _) = restore(
+        &client,
+        &manifest(vec![api, api_client]),
+        never_cancelled(),
+        &[],
+    )
+    .await;
+
+    assert!(
+        !report
+            .manual_items
+            .iter()
+            .any(|m| m.reason.contains("restore tag")),
+        "{:?}",
+        report.manual_items
+    );
+    assert_eq!(
+        report
+            .apps
+            .iter()
+            .map(|a| (a.display_name.as_str(), a.adopted))
+            .collect::<Vec<_>>(),
+        [("App A", true), ("App B", true)]
+    );
+    assert!(
+        requests(&server, "POST", "/applications").await.is_empty(),
+        "nothing created twice"
+    );
+    // Taken once settled: the service principal it had no write for until
+    // then is ensured.
+    assert!(
+        requests(&server, "POST", "/servicePrincipals")
+            .await
+            .iter()
+            .any(|r| String::from_utf8_lossy(&r.body).contains("app-a")),
+        "the settled adoption's service principal is ensured"
+    );
+}
+
+/// A run that stops in Pass 1 takes none of its pending adoptions: their
+/// pre-authorized clients were never checked, so each gets no write and no
+/// report entry (its re-run decides it), while the apps the run created are
+/// reported as usual.
+#[tokio::test]
+async fn a_run_that_stops_in_pass_1_takes_no_pending_adoption() {
+    let server = MockServer::start().await;
+    let flag = crate::state::CancelFlag::new();
+    let cancel = flag.claim();
+    mount_tag_lookup(
+        &server,
+        SRC_A,
+        serde_json::json!({
+            "id": "obj-a",
+            "appId": "app-a",
+            "displayName": "App A",
+            "createdDateTime": "2026-01-02T00:00:00Z",
+            "api": {
+                "preAuthorizedApplications": [
+                    { "appId": "foreign-client", "delegatedPermissionIds": ["scope-1"] }
+                ]
+            }
+        }),
+    )
+    .await;
+    // The operator cancels while App B is being created.
+    mount_create_then(&server, move |name| {
+        if name == "App B" {
+            flag.cancel();
+        }
+    })
+    .await;
+    mount_fallback(&server).await;
+    let client = graph_over(&server, false);
+    let mut backup = plain_apps(&[(SRC_A, "App A"), (SRC_B, "App B"), (SRC_C, "App C")]);
+    backup.app_registrations[0].has_service_principal = true;
+    backup.app_registrations[0].pre_authorized_applications =
+        vec![pre_authorized("foreign-client", &["scope-1"])];
+
+    let (report, _) = restore(&client, &backup, cancel, &[]).await;
+
+    assert!(report.cancelled);
+    assert_reported_unwired(&report, &["b"]);
+    assert!(report.manual_items.is_empty(), "{:?}", report.manual_items);
+    assert!(
+        requests(&server, "POST", "/servicePrincipals")
+            .await
+            .is_empty(),
+        "no write to an adoption the run never settled"
+    );
 }
 
 /// A run that creates nothing but re-binds a managed identity's roles

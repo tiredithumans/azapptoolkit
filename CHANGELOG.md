@@ -19,6 +19,7 @@ After 0.34.1, each change is one line written for the person using the app.
 
 - Rotate into Key Vault now refuses when it can't check which app owns the vault secret, and names any leftover secret.
 - Grant access and the audit's SharePoint fix now list each warning, such as an app that still reaches every site or file.
+- Restore no longer completes an app whose reply URLs, public client flows or Expose an API differ from the backup file.
 
 ## [0.35.0] - 2026-10-26
 

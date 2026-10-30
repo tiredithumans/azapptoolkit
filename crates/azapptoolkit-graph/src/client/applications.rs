@@ -211,6 +211,14 @@ pub(super) const APP_BACKUP_SELECT: &str = "id,appId,displayName,description,sig
      createdDateTime,passwordCredentials,keyCredentials,requiredResourceAccess,\
      isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
 
+/// `$select` for the DR restore's tag lookup ([`GraphClient::find_applications_by_tag`]): what
+/// proves a hit is the app an earlier run created (its creation time and both credential lists),
+/// plus the Authentication (`web`/`spa`/`publicClient`/`isFallbackPublicClient`) and
+/// Expose-an-API (`identifierUris`/`api`) blocks the restore writes, which someone could have set
+/// on a planted copy first. Those blocks are what [`APP_BACKUP_SELECT`] captures too.
+const APP_TAGGED_SELECT: &str = "id,appId,displayName,createdDateTime,passwordCredentials,\
+     keyCredentials,isFallbackPublicClient,web,spa,publicClient,identifierUris,api";
+
 /// Page size for `/applications` enumerations. Graph documents the default and **maximum**
 /// sizes as 100 and **999**; paging is strictly serial (each request needs the prior
 /// response's `@odata.nextLink`), so the page size is a direct divisor of wall-clock time on a
@@ -560,21 +568,20 @@ impl GraphClient {
     }
 
     /// Applications carrying the exact `tag` (`tags/any(t:t eq '…')`, a basic query — no
-    /// `ConsistencyLevel` needed). One page capped at 10: callers use this to find an app they
-    /// tagged themselves, so more than one hit is an anomaly to refuse, not something to page
-    /// through. Selects `createdDateTime` and both credential lists so a caller can prove a
-    /// hit is its own and holds nothing it did not put there.
-    pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<Application>> {
+    /// `ConsistencyLevel` needed), as raw JSON. One page capped at 10: callers use this to find an
+    /// app they tagged themselves, so more than one hit is an anomaly to refuse, not something to
+    /// page through. Selects `APP_TAGGED_SELECT` (`createdDateTime`, both credential lists and
+    /// the Authentication and Expose-an-API blocks) so a caller can prove a hit is its own and
+    /// holds nothing it did not put there. Raw, like [`Self::get_application_backup_json`],
+    /// because the typed [`Application`] carries neither block.
+    pub async fn find_applications_by_tag(&self, tag: &str) -> Result<Vec<serde_json::Value>> {
         let filter = format!("tags/any(t:t eq '{}')", escape_odata(tag));
         let params: [(&str, &str); 3] = [
             ("$filter", filter.as_str()),
-            (
-                "$select",
-                "id,appId,displayName,createdDateTime,passwordCredentials,keyCredentials",
-            ),
+            ("$select", APP_TAGGED_SELECT),
             ("$top", "10"),
         ];
-        let page: Paged<Application> = self.get_json("/applications", &params, false).await?;
+        let page: Paged<serde_json::Value> = self.get_json("/applications", &params, false).await?;
         Ok(page.items)
     }
 
