@@ -1187,10 +1187,10 @@ fn pinned_entries_are_still_swept_by_tenant_invalidation() {
 }
 
 /// `ServicePrincipal` holds one small entry per app registration (the
-/// audit's `|lean` seeding), so it is capped at the tenant-enumeration
+/// per-`appId` lean read-throughs), so it is capped at the tenant-enumeration
 /// ceiling rather than the aggregate-sized `MAX_CACHE_SIZE`. Without this a
-/// seeding pass over a large tenant evicts its own earlier entries and every
-/// one of them falls back to an individual Graph GET.
+/// pass over a large tenant evicts its own earlier entries and every one of
+/// them falls back to an individual Graph GET.
 #[test]
 fn service_principal_bucket_holds_a_whole_large_tenant() {
     let cache = Cache::new();

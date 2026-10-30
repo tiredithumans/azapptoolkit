@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, ResourcePermission};
-use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::{ServicePrincipal, ServicePrincipalSignInActivity};
 use azapptoolkit_core::scoping::{
     OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
@@ -312,25 +311,20 @@ pub(crate) async fn prefetch_legacy_access_policies(
 /// `CacheKind::Lists` — the same shared index as `list_enterprise_applications`),
 /// the candidate pool for the SP-only scoring phase. Best-effort: on failure the
 /// run covers app registrations only.
+///
+/// Read through `sp_index_cached`, the accessor every other reader uses, so a
+/// cold audit queues behind a list, search or backup reader's in-flight scan
+/// (its single-flight gate) instead of paging all of `/servicePrincipals` a
+/// second time beside it. The audit's own `/applications` scan runs outside
+/// `app_scan_gate`, so taking only the SP gate here cannot invert the
+/// scan → SP lock order.
 pub(crate) async fn prefetch_sp_index(
-    cache: &Cache,
+    state: &AppState,
     client: &GraphClient,
     tenant_id: &str,
 ) -> (Arc<Vec<ServicePrincipal>>, Option<AuditCoverageGap>) {
-    if let Some(cached) = crate::commands::applications::sp_index_hit(cache, tenant_id) {
-        return (cached, None);
-    }
-    // Captured BEFORE the scan: it takes seconds under no lock, and re-pinning
-    // a pre-mutation snapshot would outlive the invalidation it raced.
-    let watch = cache.generation_for(
-        azapptoolkit_core::cache::CacheKind::Lists,
-        &crate::commands::applications::sp_index_key(tenant_id),
-    );
-    match client.list_service_principals_index().await {
-        Ok(sps) => (
-            crate::commands::applications::sp_index_store_if_current(cache, sps, watch),
-            None,
-        ),
+    match crate::commands::applications::sp_index_cached(state, client, tenant_id).await {
+        Ok(sps) => (sps, None),
         Err(err) => {
             // NOT just a log. Returning an empty index silently drops the whole
             // SP-only scoring phase — enterprise apps, managed identities and

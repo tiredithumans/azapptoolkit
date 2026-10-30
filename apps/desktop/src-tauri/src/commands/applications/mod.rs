@@ -358,22 +358,75 @@ pub async fn get_application_detail(
     // pre-mutation detail over it.
     let watch = state.cache.generation_for(CacheKind::Lists, &detail_key);
 
-    let client = state.graph_for(&tenant_id);
+    let detail = fetch_application_detail(&state, &tenant_id, &object_id).await?;
+    // A degraded run is never cached nor shown as all-clear (AGENTS.md): a
+    // resource SP that couldn't be read leaves its granted permissions reading
+    // "Not granted", and caching that would pin the wrong answer for the whole
+    // Lists TTL. The flag rides the payload so the tab can say so instead.
+    if !detail.resolution_degraded {
+        state.cache.put_if_current(watch, &detail);
+    }
+    Ok(detail)
+}
+
+/// The Graph fan-out behind [`get_application_detail`]'s cache: the manifest,
+/// owners, paired service principal, its role assignments and delegated
+/// grants, and the resolved permissions.
+///
+/// The SP lookup keys off `appId`, which only the manifest carried, so a cold
+/// open waited three serial waves (manifest and owners, then the SP, then its
+/// grants). An object id names its `appId` for life, and the app-name index a
+/// list visit pinned already maps one to the other, so when the index holds
+/// this app the SP lookup joins the first wave. The manifest still has the
+/// last word: an SP read for any other `appId` is discarded (its error with
+/// it) and read again for the manifest's.
+pub(crate) async fn fetch_application_detail(
+    state: &AppState,
+    tenant_id: &str,
+    object_id: &str,
+) -> Result<ApplicationDetail, UiError> {
+    let client = state.graph_for(tenant_id);
+
+    // HIT-ONLY: `app_name_index_cached` would, on a cold deep link, page every
+    // application in the tenant to save one round trip. A miss keeps the
+    // serial order.
+    let indexed_app_id = cache::app_name_index_hit(&state.cache, tenant_id).and_then(|index| {
+        index
+            .iter()
+            .find(|a| a.id == object_id)
+            .map(|a| a.app_id.clone())
+    });
 
     // Wave 1: the owners list keys off the application OBJECT id — the same id
-    // the caller passed — so it never needed the fetched application and was
-    // waiting a full round trip for nothing. Only the SP lookup genuinely
-    // depends on the manifest (it keys off `appId`).
-    let (application, owners) = futures::future::try_join(
-        client.get_application(&object_id),
-        client.list_owners(&object_id),
-    )
-    .await?;
+    // the caller passed — so it never needed the fetched application. The SP
+    // lookup joins it when the index already named the `appId`.
+    let manifest_and_owners = futures::future::try_join(
+        client.get_application(object_id),
+        client.list_owners(object_id),
+    );
+    let (wave_one, early_sp) = match indexed_app_id.as_deref() {
+        Some(app_id) => {
+            let (wave_one, sp) = futures::future::join(
+                manifest_and_owners,
+                client.get_service_principal_by_app_id(app_id),
+            )
+            .await;
+            (wave_one, Some((app_id, sp)))
+        }
+        None => (manifest_and_owners.await, None),
+    };
+    let (application, owners) = wave_one?;
 
-    // Wave 2: the SP lookup needs `appId` from the manifest above.
-    let service_principal = client
-        .get_service_principal_by_app_id(&application.app_id)
-        .await?;
+    // Wave 2, only when wave 1 could not answer it: no index entry, or one
+    // naming another `appId` than the manifest does.
+    let service_principal = match early_sp {
+        Some((app_id, sp)) if app_id == application.app_id => sp?,
+        _ => {
+            client
+                .get_service_principal_by_app_id(&application.app_id)
+                .await?
+        }
+    };
 
     // Wave 3: role assignments and delegated grants both key off the SP id and
     // are independent of each other.
@@ -397,7 +450,7 @@ pub async fn get_application_detail(
         )
         .await;
 
-    let detail = ApplicationDetail {
+    Ok(ApplicationDetail {
         application,
         service_principal,
         owners,
@@ -405,15 +458,7 @@ pub async fn get_application_detail(
         oauth2_permission_grants,
         resolved_permissions,
         resolution_degraded,
-    };
-    // A degraded run is never cached nor shown as all-clear (AGENTS.md): a
-    // resource SP that couldn't be read leaves its granted permissions reading
-    // "Not granted", and caching that would pin the wrong answer for the whole
-    // Lists TTL. The flag rides the payload so the tab can say so instead.
-    if !detail.resolution_degraded {
-        state.cache.put_if_current(watch, &detail);
-    }
-    Ok(detail)
+    })
 }
 
 /// Drops the cached detail payload for a *single* application so the next
@@ -798,7 +843,7 @@ mod handler_tests {
 
     use crate::commands::test_support::{
         dies_after, indexes_intact, mock_graph, mock_graph_rw, mock_state,
-        mock_state_with_write_token, seed_indexes_and_detail,
+        mock_state_with_write_token, sample_app_json, seed_indexes_and_detail,
     };
 
     const TENANT: &str = "t1";
@@ -1025,6 +1070,196 @@ mod handler_tests {
         }
 
         assert!(credential_expirations_hit(&state.cache, TENANT).is_some());
+    }
+
+    /// When each recorded request arrived, by label.
+    #[derive(Clone, Default)]
+    struct Arrivals(Arc<std::sync::Mutex<Vec<(&'static str, std::time::Instant)>>>);
+
+    impl Arrivals {
+        fn at(&self, label: &str) -> std::time::Instant {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, at)| *at)
+                .unwrap_or_else(|| panic!("no {label} request arrived"))
+        }
+
+        fn answer(&self, label: &'static str, response: ResponseTemplate) -> Recorded {
+            Recorded {
+                arrivals: self.clone(),
+                label,
+                response,
+            }
+        }
+    }
+
+    /// Records its request's arrival, then answers with `response`.
+    struct Recorded {
+        arrivals: Arrivals,
+        label: &'static str,
+        response: ResponseTemplate,
+    }
+
+    impl wiremock::Respond for Recorded {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            self.arrivals
+                .0
+                .lock()
+                .unwrap()
+                .push((self.label, std::time::Instant::now()));
+            self.response.clone()
+        }
+    }
+
+    /// How long the manifest GET is held. An SP lookup that waited for the
+    /// manifest arrives at least this long after it.
+    const MANIFEST_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// One app's detail reads: `obj-1` / `app-1` (held [`MANIFEST_DELAY`]), no
+    /// owners, and its service principal `sp-1`, read once, with no grants.
+    async fn mount_detail(server: &MockServer, arrivals: &Arrivals) {
+        let empty = || ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] }));
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications/obj-1"))
+            .respond_with(
+                arrivals.answer(
+                    "manifest",
+                    ResponseTemplate::new(200)
+                        .set_body_json(sample_app_json())
+                        .set_delay(MANIFEST_DELAY),
+                ),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/applications/obj-1/owners"))
+            .respond_with(empty())
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-1'"))
+            .respond_with(arrivals.answer(
+                "sp",
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "sp-1", "appId": "app-1" }]
+                })),
+            ))
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals/sp-1/appRoleAssignments"))
+            .respond_with(empty())
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/oauth2PermissionGrants"))
+            .respond_with(empty())
+            .mount(server)
+            .await;
+    }
+
+    /// The app-name index entry a list visit pinned, mapping `obj-1` to
+    /// `app_id`.
+    fn index_names(state: &AppState, app_id: &str) {
+        app_name_index_store(
+            &state.cache,
+            TENANT,
+            vec![Application {
+                id: "obj-1".into(),
+                app_id: app_id.into(),
+                ..Default::default()
+            }],
+        );
+    }
+
+    /// A cold detail open with the app-name index warm starts the SP lookup in
+    /// the first wave: it no longer waits a round trip for the manifest to
+    /// name the `appId` the index already held.
+    #[tokio::test]
+    async fn a_warm_name_index_starts_the_sp_lookup_beside_the_manifest() {
+        let (server, state) = mock_state(TENANT).await;
+        let arrivals = Arrivals::default();
+        mount_detail(&server, &arrivals).await;
+        index_names(&state, "app-1");
+
+        let detail = fetch_application_detail(&state, TENANT, "obj-1")
+            .await
+            .expect("detail");
+
+        assert_eq!(
+            detail.service_principal.map(|sp| sp.id).as_deref(),
+            Some("sp-1")
+        );
+        let waited = arrivals
+            .at("sp")
+            .saturating_duration_since(arrivals.at("manifest"));
+        assert!(
+            waited < MANIFEST_DELAY,
+            "the SP lookup waited {waited:?} for the manifest"
+        );
+        server.verify().await;
+    }
+
+    /// With no index entry the order stays serial, and the index is read
+    /// hit-only: a cold one is not filled by paging every application.
+    #[tokio::test]
+    async fn a_cold_name_index_keeps_the_serial_order_and_scans_nothing() {
+        let (server, state) = mock_state(TENANT).await;
+        let arrivals = Arrivals::default();
+        mount_detail(&server, &arrivals).await;
+
+        let detail = fetch_application_detail(&state, TENANT, "obj-1")
+            .await
+            .expect("detail");
+
+        assert_eq!(
+            detail.service_principal.map(|sp| sp.id).as_deref(),
+            Some("sp-1")
+        );
+        assert!(arrivals.at("sp") >= arrivals.at("manifest") + MANIFEST_DELAY);
+        assert_eq!(count(&server, "GET", "/v1.0/applications").await, 0);
+        server.verify().await;
+    }
+
+    /// The manifest has the last word. An index entry naming another `appId`
+    /// (not something a live object id does, so this is the guard) has its
+    /// speculative SP read discarded, failure included, and the SP is read for
+    /// the manifest's `appId`.
+    #[tokio::test]
+    async fn an_index_naming_another_app_id_yields_to_the_manifest() {
+        let (server, state) = mock_state(TENANT).await;
+        let arrivals = Arrivals::default();
+        mount_detail(&server, &arrivals).await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", "appId eq 'app-stale'"))
+            .respond_with(ResponseTemplate::new(500).insert_header("Retry-After", "0"))
+            .mount(&server)
+            .await;
+        index_names(&state, "app-stale");
+
+        let detail = fetch_application_detail(&state, TENANT, "obj-1")
+            .await
+            .expect("a discarded speculative read cannot fail the detail");
+
+        assert_eq!(
+            detail.service_principal.map(|sp| sp.id).as_deref(),
+            Some("sp-1")
+        );
+        let stale_reads = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.query().is_some_and(|q| q.contains("app-stale")))
+            .count();
+        assert!(stale_reads > 0, "the index's appId was read speculatively");
+        server.verify().await;
     }
 
     /// The app POST lands (`obj-new` / `app-new`), no SP exists yet, and the

@@ -748,6 +748,7 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         client,
         cache,
         tenant_id: "tenant-test".to_string(),
+        run_sps: RunSps::default(),
         exo: None,
         admin_consent_clients: Arc::default(),
         admin_consented_scopes_by_client: None,
@@ -820,6 +821,43 @@ async fn a_failed_sp_lookup_leaves_the_app_unscored_instead_of_clean() {
         false,
         &[AuditCoverageGap::PerPrincipalScoring]
     ));
+}
+
+/// The run's SP index answers `score_one` with no Graph request, and nothing
+/// from it reaches the shared cache. The run used to seed the `|lean`
+/// read-through keys from it with a plain put, after its slowest tenant-wide
+/// read had landed, which undid any SP sweep in between for the TTL.
+#[tokio::test]
+async fn score_one_answers_from_the_runs_sp_index_and_writes_nothing_shared() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/servicePrincipals"))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let indexed = ServicePrincipal {
+        id: "sp-1".into(),
+        app_id: "app-1".into(),
+        account_enabled: Some(false),
+        ..Default::default()
+    };
+    let ctx = ScoreCtx {
+        run_sps: RunSps::new(Arc::new(vec![indexed])),
+        ..graph_over(&server, StaticTokenProvider::new("tok"))
+    };
+
+    let item = score_one(&ctx, &bare_app(), None)
+        .await
+        .expect("scored from the run's own index");
+
+    assert_eq!(item.service_principal_enabled, Some(false));
+    assert!(
+        ctx.cache
+            .get::<Option<ServicePrincipal>>(CacheKind::ServicePrincipal, "tenant-test|app-1|lean")
+            .is_none(),
+        "the run's snapshot must not be written to the shared SP cache"
+    );
+    server.verify().await;
 }
 
 #[tokio::test]

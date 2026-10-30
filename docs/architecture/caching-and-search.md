@@ -82,6 +82,11 @@ thousands of per-app `app_detail|…` / `mail_scopes|…` writes sharing their b
 entry that costs a full directory scan to rebuild). **Footgun:** a typed entry read untyped reads as
 a *miss*, silently costing a tenant-wide rescan — pinned by a test per index.
 
+The SP index scan itself runs only inside `sp_index_cached`, behind its single-flight gate. The
+audit's prefetch used to check the cache and then scan on its own, so an audit started beside a
+cold list, search or backup read paged all of `/servicePrincipals` a second time (pinned by
+`repo_invariants::the_sp_index_scan_has_one_home`).
+
 `indexes_cached(state, client, tenant)` returns both, fetching only the cold ones and, when both are
 cold, fetching them **concurrently**. Use it wherever a surface joins the two (the Enterprise Apps
 pairing join, the DR backup estate). `global_search` deliberately does *not*: it runs the two
@@ -572,10 +577,18 @@ that was in flight when a sweep landed used to store the pre-sweep object for th
 per-appId SP lookups, `resolve_resource_sp`, both grant matrices, the sign-in activity reads and
 the app-management policies. Each now captures `generation_for(kind, &key)` before its fetch and
 stores through `put_if_current`; `graph_client_read_throughs_store_through_a_watch` pins that no
-Graph client function `cache.put`s after an await, with the batch prewarm (`prewarm_sps`, which
-`prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
-`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects. (The audit's bulk
-lean-SP path is `seed_lean_sps_from_index`, a synchronous put from the already-fetched index.)
+Graph client function stores with a plain `cache.put` at all, with the batch prewarm (`prewarm_sps`,
+which `prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
+`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects.
+
+The rule used to flag only a `put` beside an `.await`, and the audit's lean-SP seeding slipped past
+it: a synchronous put whose await was in the caller. After its ten tenant-wide reads landed (the
+slowest can take minutes), the run wrote every app's `|lean` key from its run-start SP index, so a
+sweep in between (an `accountEnabled` change, an SP or app delete, a restore) was undone for the
+TTL, and the next audit and the Conditional Access tab read the old principal. The run now keeps
+that index to itself: `ScoreCtx::run_sps` maps `appId` to the run's index row, `score_one` answers
+from it first, and only an app with no row takes the lean read-through. Data a caller fetched
+earlier cannot be watched in the client, so it stays in the caller.
 
 Related: `ensure_service_principal` returns `(ServicePrincipal, bool)` where the bool is
 **created**. First-grant paths (`grant_single_permission`, `grant_admin_consent[_core]`, the bulk

@@ -491,14 +491,19 @@ fn graph_client_modules() -> Vec<(String, String)> {
 }
 
 /// A read-through in the Graph client stores through a watch captured before
-/// its first await, never a plain `put` after one.
+/// its first await, never a plain `put` after one — and no other Graph client
+/// function stores with a plain `put` either.
 ///
 /// `invalidate_prefix` bumps only the watches it finds, so an unwatched store
 /// that lost the race with a mutator's sweep kept the pre-mutation object for
 /// the TTL — the per-appId SP lookups, the resource-SP resolver and both grant
-/// matrices did exactly that. The batch prewarm (`prewarm_sps`, which
-/// `prewarm_resource_sps` delegates to) is exempt by name: a watch per id
-/// would overflow the watch table, and it is best-effort by design.
+/// matrices did exactly that. A synchronous `put` is the same race with the
+/// await in the caller: the audit's lean-SP seeding stored a run-start SP
+/// index, minutes old, over whatever sweep had landed since, and this rule
+/// (which then flagged only a `put` beside an `.await`) did not see it. The
+/// batch prewarm (`prewarm_sps`, which `prewarm_resource_sps` delegates to) is
+/// exempt by name: a watch per id would overflow the watch table, and it is
+/// best-effort by design.
 #[test]
 fn graph_client_read_throughs_store_through_a_watch() {
     const EXEMPT: &[&str] = &["prewarm_sps"];
@@ -507,7 +512,7 @@ fn graph_client_read_throughs_store_through_a_watch() {
     for (file, src) in graph_client_modules() {
         for f in super::sources::functions_in(&src) {
             let body: String = f.body.split_whitespace().collect();
-            if !body.contains(".cache.put(") || !body.contains(".await") {
+            if !body.contains(".cache.put(") {
                 continue;
             }
             if EXEMPT.contains(&f.name.as_str()) {
@@ -520,14 +525,16 @@ fn graph_client_read_throughs_store_through_a_watch() {
     for name in EXEMPT {
         assert!(
             exempted.iter().any(|e| e == name),
-            "`{name}` is exempt but no longer stores after an await — drop the exemption"
+            "`{name}` is exempt but no longer stores with a plain put — drop the exemption"
         );
     }
     assert!(
         offenders.is_empty(),
-        "Graph read-throughs that `cache.put` after an await: {offenders:?}\n\
+        "Graph client functions that store with a plain `cache.put`: {offenders:?}\n\
          Capture `self.cache.generation_for(kind, &key)` before the fetch and store through \
-         `put_if_current(watch, &value)`, so a sweep that lands mid-fetch wins."
+         `put_if_current(watch, &value)`, so a sweep that lands mid-fetch wins. Data a caller \
+         fetched earlier cannot be watched here at all: keep it in the caller (the audit holds \
+         its SP index in `ScoreCtx`) instead of writing it to the shared cache."
     );
 }
 
@@ -2393,6 +2400,46 @@ fn the_full_application_list_scan_has_one_home() {
     assert_eq!(
         total,
         EXPECTED.iter().map(|(_, n)| n).sum::<usize>(),
+        "the scan counter found {total} call site(s) — the source walk or the matcher is broken"
+    );
+}
+
+/// The service-principal index scan has exactly one home:
+/// `applications::sp_index_cached`, behind the index's single-flight gate.
+///
+/// Six surfaces read the index, and on a cold tenant they fire together. The
+/// audit's prefetch checked the cache and then ran the scan itself, outside
+/// the gate, so an audit started while a list, search or backup reader was
+/// mid-scan paged all of `/servicePrincipals` a second time beside it and
+/// raced it to the same pinned key. Counted per module on non-comment lines;
+/// the total is asserted exactly so the rule cannot pass vacuously.
+#[test]
+fn the_sp_index_scan_has_one_home() {
+    const HOME: &str = "commands/applications/cache.rs";
+    let mut offenders: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for (name, src) in super::sources::command_modules() {
+        let found = src
+            .lines()
+            .filter(|l| {
+                !l.trim_start().starts_with("//") && l.contains("list_service_principals_index(")
+            })
+            .count();
+        total += found;
+        let expected = usize::from(name == HOME);
+        if found != expected {
+            offenders.push(format!("{name}: {found} scan(s), expected {expected}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "service-principal index scan(s) outside their home: {offenders:#?}\n\
+         Read the index through `sp_index_hit` / `sp_index_cached` / `indexes_cached`: a bare \
+         `list_service_principals_index` skips the single-flight gate, so a cold reader pages \
+         the whole collection again beside the one already in flight."
+    );
+    assert_eq!(
+        total, 1,
         "the scan counter found {total} call site(s) — the source walk or the matcher is broken"
     );
 }

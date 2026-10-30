@@ -65,8 +65,8 @@ pub const MAX_CACHE_SIZE: usize = 5000;
 /// than a handful of tenant-wide aggregates, applied by
 /// [`crate::cache::Cache::capacity_for`] to two kinds:
 ///
-/// - [`crate::cache::CacheKind::ServicePrincipal`] — the audit's `|lean` keys,
-///   seeded one per app registration;
+/// - [`crate::cache::CacheKind::ServicePrincipal`] — one entry per `appId` the
+///   per-app SP read-throughs (the lean `|lean` form included) have answered;
 /// - [`crate::cache::CacheKind::Lists`] — it carries the per-app `app_detail|`
 ///   and `mail_scopes|` entries alongside the tenant aggregates.
 ///

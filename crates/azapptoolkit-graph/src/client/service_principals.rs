@@ -1,7 +1,5 @@
 use super::*;
 
-use std::collections::HashMap;
-
 /// `PATCH /servicePrincipals/{id}` setting the single-sign-on mode (e.g. `saml`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,62 +333,10 @@ impl GraphClient {
         Ok((all, truncated))
     }
 
-    /// Seeds the audit's lean SP cache (`|lean` keys) from an **already-fetched**
-    /// service-principal index at **zero Graph cost**.
-    /// [`Self::list_service_principals_index`]'s projection
-    /// (`id,appId,accountEnabled,…`) is a superset of the lean fields the audit's
-    /// [`Self::get_service_principal_by_app_id_lean`] reads, so an in-memory join
-    /// by `appId` seeds every matched app registration's lean entry — the audit
-    /// already runs that index scan for its SP-only phase, so this reuses it
-    /// instead of issuing a *second* batched prewarm (~1 `$batch` POST per 20
-    /// apps) that re-fetched the same directory objects.
-    ///
-    /// App ids with **no** index match are left cold on purpose: a per-item
-    /// [`Self::get_service_principal_by_app_id_lean`] then resolves them
-    /// correctly whether the app genuinely has no SP (it caches `None`) or the
-    /// index was truncated on a very large tenant (a real GET) — the same
-    /// graceful path the old failed-batch prewarm relied on. No-op when caching
-    /// is disabled. The index SP carries no heavy `appRoles`/`oauth2` arrays, so
-    /// caching it whole under the lean key stays small (`score_one` reads only
-    /// `id` + `accountEnabled`).
-    pub fn seed_lean_sps_from_index(&self, app_ids: &[String], sp_index: &[ServicePrincipal]) {
-        if !self.cache.enabled() {
-            return;
-        }
-        // Cap the pass at the bucket size, exactly as `prewarm_sps` does, so
-        // seeding can't LRU-evict its own earlier entries before the caller's
-        // scoring loop reads them. Beyond the cap every insert would evict one
-        // of this same pass's entries, so the work is not just wasted — it also
-        // churns the bucket and drops unrelated cached principals. The uncapped
-        // remainder resolves per-item through
-        // `get_service_principal_by_app_id_lean`, the same graceful path app ids
-        // with no index match already take.
-        let cap = self.cache.capacity_for(CacheKind::ServicePrincipal);
-        let seedable = app_ids.len().min(cap);
-        if app_ids.len() > cap {
-            tracing::info!(
-                requested = app_ids.len(),
-                cap,
-                "lean SP seeding capped at the cache size; the remainder resolves per-item"
-            );
-        }
-        let by_app_id: HashMap<&str, &ServicePrincipal> =
-            sp_index.iter().map(|sp| (sp.app_id.as_str(), sp)).collect();
-        for app_id in &app_ids[..seedable] {
-            if let Some(sp) = by_app_id.get(app_id.as_str()) {
-                self.cache.put(
-                    CacheKind::ServicePrincipal,
-                    self.sp_lean_cache_key(app_id),
-                    &Some((*sp).clone()),
-                );
-            }
-        }
-    }
-
-    /// Shared core of [`Self::prewarm_resource_sps`] (and, until it was
-    /// superseded by [`Self::seed_lean_sps_from_index`], the audit's lean SP
-    /// prewarm) — callers differ only in cache `kind`, key derivation, and
-    /// `$select`. Batch-resolves the
+    /// Core of [`Self::prewarm_resource_sps`] (it once served the audit's lean
+    /// SP prewarm too, before the audit answered from its own SP index) —
+    /// parameterised by cache `kind`, key derivation, and `$select`.
+    /// Batch-resolves the
     /// not-yet-cached `app_ids` (one `$batch` POST per 20) and seeds `kind`
     /// under `key(id)`, so the single lookup each prewarm mirrors is a later
     /// cache hit. Best-effort by contract: any error is swallowed (the
@@ -419,7 +365,7 @@ impl GraphClient {
         // Bound by the cap of the bucket being SEEDED, not the global
         // `max_size`: `CacheKind::ServicePrincipal` gets a larger, per-object
         // allowance (`Cache::capacity_for`), so measuring against `max_size`
-        // would under-seed it. Same rule `seed_lean_sps_from_index` follows.
+        // would under-seed it.
         let cap = self.cache.capacity_for(kind);
         if missing.len() > cap {
             tracing::info!(
