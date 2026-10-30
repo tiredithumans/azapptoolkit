@@ -86,7 +86,10 @@ operator sees the same list.
   and none is this app's), `Missing` (404) or `Unreadable`. A failed read is never `NotGranted`.
 - **Removing.** `remove_app_item_scope` re-reads the resource and deletes the entry only if it is
   **this app's** application grant (`not_this_apps_grant` otherwise), then forgets the record.
-  Without a permission id it only forgets the record, touching no SharePoint endpoint.
+  The grant is revoked by `app_id` and the record forgotten on `object_id`, two webview arguments,
+  so it first reads the registration and refuses unless it is `app_id`'s (`principal_mismatch`):
+  a mismatched pair revoked one app's grant and dropped another app's record. Without a
+  permission id it only forgets the record, touching no SharePoint endpoint.
 - **Grants made elsewhere** (before this version, in the Permission Tester, by script) are not in
   the record until tracked by URL (`track_app_item_scope`). The section's copy and empty state say
   so; the list is "what azapptoolkit recorded", never "everything this app can reach".

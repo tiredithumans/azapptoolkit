@@ -1105,7 +1105,7 @@ async fn read_permissions(
     }
 }
 
-/// Revokes one permission from the resource `url` names.
+/// Revokes one application grant from the resource `url` names.
 #[tauri::command]
 pub async fn remove_selected_item_permission(
     state: State<'_, AppState>,
@@ -1114,23 +1114,60 @@ pub async fn remove_selected_item_permission(
     permission_id: String,
 ) -> Result<(), UiError> {
     let client = sharepoint_client_checked(&state, &tenant_id).await?;
+    remove_selected_item_permission_with(&client, &url, &permission_id).await
+}
+
+/// The body of [`remove_selected_item_permission`], over the client.
+///
+/// Fail-closed, like `remove_app_item_scope`: the resource's entries are
+/// re-read, and `permission_id` is deleted only if it is an **application**
+/// grant (`not_an_app_grant` otherwise). A list or item also carries people,
+/// groups and sharing links, and the Permission Tester offers Revoke on app
+/// grants alone, so a stale or crafted id must never cut a person's access
+/// through it. An entry already gone counts as removed.
+pub(crate) async fn remove_selected_item_permission_with(
+    client: &azapptoolkit_graph::GraphClient,
+    url: &str,
+    permission_id: &str,
+) -> Result<(), UiError> {
     let resolved = client
-        .resolve_sharepoint_resource(&url)
+        .resolve_sharepoint_resource(url)
         .await
         .map_err(sharepoint_item_err)?;
-    match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
-        (Some(list_id), Some(item_id)) => client
-            .remove_list_item_permission(&resolved.site_id, list_id, item_id, &permission_id)
-            .await
-            .map_err(sharepoint_item_err),
-        (Some(list_id), None) => client
-            .remove_list_permission(&resolved.site_id, list_id, &permission_id)
-            .await
-            .map_err(sharepoint_item_err),
-        (None, _) => Err(UiError::validation(
-            "level_mismatch",
-            "use the site permissions view for a site collection".to_string(),
-        )),
+    // Refuses a site URL (`level_mismatch`) before anything is read or deleted.
+    let perms = read_permissions(client, &resolved).await?;
+    match perms.iter().find(|p| p.id == permission_id) {
+        None => return Ok(()),
+        Some(entry) if entry.app_id().is_none() => {
+            return Err(UiError::validation(
+                "not_an_app_grant",
+                "That permission entry gives a person, a group or a sharing link access, not an \
+                 app, so it was left in place.",
+            ));
+        }
+        Some(_) => {}
+    }
+    let removed = match (resolved.list_id.as_deref(), resolved.item_id.as_deref()) {
+        (Some(list_id), Some(item_id)) => {
+            client
+                .remove_list_item_permission(&resolved.site_id, list_id, item_id, permission_id)
+                .await
+        }
+        (Some(list_id), None) => {
+            client
+                .remove_list_permission(&resolved.site_id, list_id, permission_id)
+                .await
+        }
+        (None, _) => {
+            return Err(UiError::validation(
+                "level_mismatch",
+                "use the site permissions view for a site collection".to_string(),
+            ));
+        }
+    };
+    match removed {
+        Ok(()) | Err(azapptoolkit_graph::GraphError::NotFound(_)) => Ok(()),
+        Err(err) => Err(sharepoint_item_err(err)),
     }
 }
 

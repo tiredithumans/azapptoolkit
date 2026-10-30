@@ -193,7 +193,10 @@ verified: a per-URL grant made in the Grant-access wizard can be undone here (sa
 `remove_selected_item_permission` core as the wizard's, no cache involvement). Only
 application entries get a Revoke — a `grantedToV2` entry without an application is user or group
 sharing, and this surface never cuts a person's access (including when the app lookup simply
-failed: no button). Every entry is named: `SiteIdentitySet` reads `user`, `group`, `siteUser`,
+failed: no button). The backend holds the same line: `remove_selected_item_permission` re-reads the
+resource's entries and deletes only an application grant (`not_an_app_grant` for a person, group
+or sharing link, so a stale or crafted id cannot reach one), and an entry already gone counts as
+removed. Every entry is named: `SiteIdentitySet` reads `user`, `group`, `siteUser`,
 `siteGroup` and `device` as well as `application`, sharing links are read from `link` plus
 `grantedToIdentitiesV2`, and `dto::sharepoint::principals_of` projects them (a person seen as both
 `user` and `siteUser` is one principal). An Entra user or group Graph listed by id alone is named
