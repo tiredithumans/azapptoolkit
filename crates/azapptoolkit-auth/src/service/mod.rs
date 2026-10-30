@@ -2595,6 +2595,115 @@ mod tests {
         server.verify().await;
     }
 
+    /// The token was replaced while the refresh was in flight AND the session
+    /// moved on (a sign-in or a sign-out landed during the POST): the newer
+    /// token is a newer session's, whose store would refuse anything this
+    /// refresh minted. So no retry — `NotSignedIn` after one POST — and the
+    /// newer token and the registration are left to that session.
+    #[tokio::test]
+    async fn a_superseded_refresh_does_not_retry_into_a_newer_session() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("superseded-moved-tenant", "superseded-moved-oid");
+        let svc = signed_in_service(server.uri(), tenant, oid);
+        // The newer token is never sent.
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .and(wiremock::matchers::body_string_contains("rt-newer-session"))
+            .respond_with(token_ok("minted-for-the-newer-session"))
+            .with_priority(1)
+            .expect(0)
+            .mount(&server)
+            .await;
+        // The first POST: the epoch moves and a newer token is stored, as a
+        // sign-in landing meanwhile would, then the old token is rejected.
+        let (t, o) = (tenant.to_string(), oid.to_string());
+        let epoch = Arc::clone(&svc.session_epoch);
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(move |_: &wiremock::Request| {
+                epoch.fetch_add(1, Ordering::SeqCst);
+                save_refresh_token(&t, &o, "rt-newer-session").unwrap();
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "AADSTS70000: refresh token expired"
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(matches!(result, Err(AuthError::NotSignedIn)), "{result:?}");
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("rt-newer-session")
+        );
+        assert!(svc.tenant_context(tenant).is_some());
+        server.verify().await;
+    }
+
+    /// The retry is bounded: the newer token rejected too ends it. Still the
+    /// stored one, the session is dead and purged as usual; replaced again
+    /// meanwhile, the third token is kept for the next refresh. Either way two
+    /// POSTs, never a third.
+    #[tokio::test]
+    async fn a_retried_refresh_that_is_rejected_again_is_not_retried_again() {
+        let rejected = || {
+            ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS70000: refresh token expired"
+            }))
+        };
+        for (case, third) in [("purged", None), ("replaced again", Some("rt-third"))] {
+            let server = MockServer::start().await;
+            let tenant = format!("superseded-twice-{}", case.replace(' ', "-"));
+            let (tenant, oid) = (tenant.as_str(), "superseded-twice-oid");
+            // The retry, with the newer token: rejected as well.
+            let (t, o) = (tenant.to_string(), oid.to_string());
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .and(wiremock::matchers::body_string_contains("rt-reauthed"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if let Some(third) = third {
+                        save_refresh_token(&t, &o, third).unwrap();
+                    }
+                    rejected()
+                })
+                .with_priority(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            // The first POST: a re-authentication stores the newer token
+            // during it, then the old one is rejected.
+            let (t, o) = (tenant.to_string(), oid.to_string());
+            Mock::given(method("POST"))
+                .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+                .respond_with(move |_: &wiremock::Request| {
+                    save_refresh_token(&t, &o, "rt-reauthed").unwrap();
+                    rejected()
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let svc = signed_in_service(server.uri(), tenant, oid);
+
+            let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+            assert!(
+                matches!(result, Err(AuthError::RefreshTokenMissing(_))),
+                "{case}: {result:?}"
+            );
+            assert_eq!(stored_token(tenant, oid).as_deref(), third, "{case}");
+            assert_eq!(
+                svc.tenant_context(tenant).is_some(),
+                third.is_some(),
+                "{case}"
+            );
+            server.verify().await;
+        }
+    }
+
     /// A silent refresh in flight when the operator signs out: its late
     /// result must store nothing — neither the rotated refresh token (which
     /// `sign_out` cleared `last_account` for, stranding it forever) nor the
