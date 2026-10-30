@@ -3,8 +3,9 @@
 # changelog roll comes FIRST because the tail test compares against it).
 # Rewrites the three guarded version literals (tauri.conf.json, root [workspace.package],
 # web-rs [package]), resyncs BOTH lockfiles, then runs the release-identity
-# tests. Lockfile sync uses `cargo update --workspace` (workspace members only,
-# no dep churn, and never --locked — the whole point is to rewrite the locks).
+# tests. Lockfile sync is `just lock-sync`: `cargo update --workspace` in both
+# trees (workspace members only, no dep churn, and never --locked — the whole
+# point is to rewrite the locks).
 # Usage: just bump X.Y.Z
 set -euo pipefail
 V="${1:?usage: just bump X.Y.Z}"
@@ -43,8 +44,7 @@ for f in Cargo.toml apps/desktop/web-rs/Cargo.toml; do
 done
 
 # Lockfile resync (SKILL.md §2): both trees, workspace-only update.
-cargo update --workspace
-(cd apps/desktop/web-rs && cargo update --workspace)
+just lock-sync
 
 # Release-identity smoke: the release.rs invariant suite (three-manifest
 # version parity, CHANGELOG header format, the verify-full gate list).

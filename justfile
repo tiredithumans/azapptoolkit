@@ -560,6 +560,47 @@ bump VERSION:
 bump VERSION:
     powershell.exe -NoLogo -ExecutionPolicy Bypass -File scripts/bump.ps1 {{VERSION}}
 
+# Every gate runs --locked, and web-rs reaches the root [workspace.dependencies]
+# through its azapptoolkit-core/-dto path deps, so one manifest line can leave
+# either lock stale. `cargo update --workspace` re-resolves only the
+# workspaces' own entries: it adds or drops what the edit needs, and every
+# other entry keeps its version. `bump` calls this.
+# Resync both lockfiles after editing any Cargo.toml (a bump, a new or re-majored dep).
+lock-sync: _lock-sync-root _lock-sync-web
+
+_lock-sync-root:
+    cargo update --workspace
+
+[working-directory('apps/desktop/web-rs')]
+_lock-sync-web:
+    cargo update --workspace
+
+# The RustSec path. Use `name@old-version` (the full old version, e.g.
+# `parking_lot@0.12.5`) when a lock holds two majors of the crate. A tree whose
+# Cargo.lock lacks the crate (or that version of it) is left alone, and a crate
+# neither lock carries is an error.
+# Pin one crate to an exact version in every lockfile that has it: `just lock-pin ctutils 0.4.4`.
+[unix]
+lock-pin CRATE VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    spec='{{CRATE}}'; name="${spec%%@*}"; ver=''; hit=0
+    [ "$spec" = "$name" ] || ver="${spec#*@}"
+    for dir in . apps/desktop/web-rs; do
+      if [ -n "$ver" ]; then
+        grep -A1 "^name = \"$name\"\$" "$dir/Cargo.lock" | grep -q "^version = \"$ver\"\$" || continue
+      else
+        grep -q "^name = \"$name\"\$" "$dir/Cargo.lock" || continue
+      fi
+      (cd "$dir" && cargo update -p "$spec" --precise '{{VERSION}}')
+      hit=1
+    done
+    [ "$hit" = 1 ] || { echo "lock-pin: $spec is in neither Cargo.lock" >&2; exit 1; }
+
+[windows]
+lock-pin CRATE VERSION:
+    $spec = '{{CRATE}}'; $name, $ver = $spec -split '@', 2; $hit = $false; foreach ($dir in '.', 'apps/desktop/web-rs') { $pat = '(?m)^name = "' + [regex]::Escape($name) + '"\r?$'; if ($ver) { $pat += '\nversion = "' + [regex]::Escape($ver) + '"\r?$' }; if ((Get-Content -Raw (Join-Path $dir 'Cargo.lock')) -cmatch $pat) { Push-Location $dir; cargo update -p $spec --precise '{{VERSION}}'; $code = $LASTEXITCODE; Pop-Location; if ($code -ne 0) { exit $code }; $hit = $true } }; if (-not $hit) { Write-Error "lock-pin: $spec is in neither Cargo.lock"; exit 1 }
+
 # Windows MSI + NSIS installers, release, --locked (no updater signing key needed).
 [working-directory('apps/desktop/src-tauri')]
 build-windows:
