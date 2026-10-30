@@ -508,10 +508,11 @@ const FINANCE_DN: &str = "CN=Finance,DC=x";
 
 /// One tenant for a managed identity's scoped grant, Graph and Exchange on ONE
 /// mock server, so `received_requests` is the whole run in order. `mi-1` is
-/// app `app-1` and holds Microsoft Graph's `Mail.Read` org-wide (`a-mail`,
-/// whose DELETE succeeds); Exchange already has its pointer and resolves the
-/// group `Finance`; this app's management scope is `existing_scope` (`None`:
-/// not there yet); `New-ManagementRoleAssignment` answers `assign`.
+/// app `app-1`, named `Payroll MI` in Graph, and holds Microsoft Graph's
+/// `Mail.Read` org-wide (`a-mail`, whose DELETE succeeds); Exchange has no
+/// pointer for it yet and resolves the group `Finance`; this app's management
+/// scope is `existing_scope` (`None`: not there yet);
+/// `New-ManagementRoleAssignment` answers `assign`.
 async fn mi_scope_tenant(
     existing_scope: Option<serde_json::Value>,
     assign: wiremock::ResponseTemplate,
@@ -530,7 +531,7 @@ async fn mi_scope_tenant(
     Mock::given(method("GET"))
         .and(path(format!("/v1.0/servicePrincipals/{MI}")))
         .respond_with(ok(serde_json::json!({
-            "id": MI, "appId": MI_APP, "displayName": "MI"
+            "id": MI, "appId": MI_APP, "displayName": "Payroll MI"
         })))
         .mount(&server)
         .await;
@@ -566,9 +567,13 @@ async fn mi_scope_tenant(
     let cmdlet =
         |name: &str| Mock::given(method("POST")).and(body_string_contains(format!("\"{name}\"")));
     cmdlet("Get-ServicePrincipal")
-        .respond_with(ok(
-            serde_json::json!({ "value": [{ "AppId": MI_APP, "ObjectId": MI }] }),
-        ))
+        .respond_with(ok(serde_json::json!({ "value": [] })))
+        .mount(&server)
+        .await;
+    cmdlet("New-ServicePrincipal")
+        .respond_with(ok(serde_json::json!({ "value": [{
+            "AppId": MI_APP, "ObjectId": MI, "DisplayName": "Payroll MI"
+        }] })))
         .mount(&server)
         .await;
     cmdlet("Get-Group")
@@ -630,7 +635,6 @@ async fn scope_mi(
         ManagedIdentityScope {
             managed_identity_id: MI,
             app_id,
-            app_display_name: "MI",
             mail_permissions: &["Mail.Read".to_string()],
             groups: &["Finance".to_string()],
             remove_unscoped: true,
@@ -702,6 +706,11 @@ async fn a_scoped_grant_lands_before_the_org_wide_grant_is_stripped() {
     let exchange = first("Exchange call", &|r| {
         r.url.path().ends_with("/InvokeCommand")
     });
+    let pointer = first("pointer", &|r| is_cmdlet(r, "New-ServicePrincipal"));
+    assert!(
+        String::from_utf8_lossy(&requests[pointer].body).contains(r#""DisplayName":"Payroll MI""#),
+        "the Exchange pointer takes the name Graph returned with the service principal"
+    );
     let guard = first("guard", &|r| is_cmdlet(r, "Get-ManagementScope"));
     let scope = first("scope", &|r| is_cmdlet(r, "New-ManagementScope"));
     let scope_reads = requests[..scope]

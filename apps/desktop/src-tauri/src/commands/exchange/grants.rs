@@ -463,7 +463,9 @@ pub async fn grant_exchange_mailbox_access(
 /// from the `mail_permissions` being granted (a managed identity has no app
 /// registration manifest), and the SP object id is the managed identity itself.
 /// A thin wrapper: the clients and this tenant's naming patterns, then
-/// [`grant_managed_identity_scope`].
+/// [`grant_managed_identity_scope`]. `app_display_name` is part of the IPC
+/// contract but unread: the Exchange pointer takes the name Graph returns with
+/// the service principal.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn grant_managed_identity_scoped_exchange_access(
@@ -476,6 +478,7 @@ pub async fn grant_managed_identity_scoped_exchange_access(
     groups: Vec<String>,
     remove_unscoped_entra_grants: bool,
 ) -> Result<ExchangeAccessResult, UiError> {
+    let _ = app_display_name;
     let exo = exchange_client_checked(&state, &tenant_id).await?;
     grant_managed_identity_scope(
         &state,
@@ -485,7 +488,6 @@ pub async fn grant_managed_identity_scoped_exchange_access(
         ManagedIdentityScope {
             managed_identity_id: &managed_identity_id,
             app_id: &app_id,
-            app_display_name: &app_display_name,
             mail_permissions: &mail_permissions,
             groups: &groups,
             remove_unscoped: remove_unscoped_entra_grants,
@@ -501,7 +503,6 @@ pub async fn grant_managed_identity_scoped_exchange_access(
 pub(super) struct ManagedIdentityScope<'a> {
     pub(super) managed_identity_id: &'a str,
     pub(super) app_id: &'a str,
-    pub(super) app_display_name: &'a str,
     pub(super) mail_permissions: &'a [String],
     pub(super) groups: &'a [String],
     pub(super) remove_unscoped: bool,
@@ -525,7 +526,6 @@ pub(super) async fn grant_managed_identity_scope(
     let ManagedIdentityScope {
         managed_identity_id,
         app_id,
-        app_display_name,
         mail_permissions,
         groups,
         remove_unscoped,
@@ -569,7 +569,8 @@ pub(super) async fn grant_managed_identity_scope(
         )
     })?;
 
-    // Graph's own ids from here on: equal to the webview's, as just proven.
+    // Graph's own ids and name from here on: the ids equal the webview's, as
+    // just proven.
     apply_exchange_mailbox_scope(ApplyExchangeMailboxScopeParams {
         state,
         graph: &graph,
@@ -578,7 +579,7 @@ pub(super) async fn grant_managed_identity_scope(
         tenant_defaults,
         app_id: &sp.app_id,
         sp_object_id: &sp.id,
-        display_name: app_display_name,
+        display_name: &sp.display_name,
         targets: &targets,
         groups,
         remove_unscoped,
