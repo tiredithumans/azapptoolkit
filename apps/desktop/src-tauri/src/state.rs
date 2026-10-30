@@ -165,6 +165,28 @@ fn settings_error_message(
     )
 }
 
+/// [`UserSettings::mutate`] on the blocking pool, for async code.
+///
+/// `mutate` holds a process-wide mutex while it waits on the cross-process lock
+/// on `settings.lock`, which a second app instance or a hung network mount can
+/// hold for as long as it likes, and then writes and fsyncs the file. Inline in
+/// async code that wait parks a tokio worker and every task queued on it, and in
+/// a sync command, which Tauri runs on the main thread, it freezes the UI. So
+/// every settings writer awaits this instead, the Settings commands included
+/// (pinned by `repo_invariants/blocking.rs`).
+///
+/// The outcome is `mutate`'s own: a refused write still carries its
+/// `SettingsUnreadable` and leaves the file untouched. A task that did not
+/// finish (`f` panicked) is an `io::Error` too, not a panic in the caller.
+pub(crate) async fn mutate_settings_off_worker<T: Send + 'static>(
+    config_dir: std::path::PathBuf,
+    f: impl FnOnce(&mut UserSettings) -> T + Send + 'static,
+) -> std::io::Result<(T, UserSettings)> {
+    tauri::async_runtime::spawn_blocking(move || UserSettings::mutate(&config_dir, f))
+        .await
+        .map_err(|e| std::io::Error::other(format!("settings write task failed: {e}")))?
+}
+
 /// Resolves a client/tenant id from the process environment; see
 /// [`resolve_from`] for the precedence.
 fn resolve(
@@ -564,15 +586,20 @@ impl AppState {
     /// Best-effort by design: an unwritable settings file costs the operator one
     /// extra sign-in next launch and must never fail the sign-in that just
     /// succeeded. Every settings.json writer goes through `UserSettings::mutate`;
-    /// several read-modify-write this file from different threads.
+    /// several read-modify-write this file from different threads. This one runs
+    /// it on the blocking pool ([`mutate_settings_off_worker`]), and the callers
+    /// await it rather than detach it, so a forget and a later remember land in
+    /// that order.
     // Kept on AppState for discoverability beside the other auth helpers; it
     // resolves paths through `config_directory()`, not state.
     #[allow(clippy::unused_self)]
-    pub fn remember_account(&self, tenant: &TenantContext) {
+    pub async fn remember_account(&self, tenant: &TenantContext) {
         let tenant = tenant.clone();
-        if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
+        if let Err(e) = mutate_settings_off_worker(crate::config_directory(), move |settings| {
             settings.last_account = Some(tenant);
-        }) {
+        })
+        .await
+        {
             tracing::warn!(
                 target: "auth",
                 error = %e,
@@ -587,10 +614,12 @@ impl AppState {
     /// disagreeing about whether anyone is signed in.
     // Same shape as `remember_account` above.
     #[allow(clippy::unused_self)]
-    pub fn forget_account(&self) {
-        if let Err(e) = UserSettings::mutate(&crate::config_directory(), |settings| {
+    pub async fn forget_account(&self) {
+        if let Err(e) = mutate_settings_off_worker(crate::config_directory(), |settings| {
             settings.last_account = None;
-        }) {
+        })
+        .await
+        {
             tracing::warn!(target: "auth", error = %e, "could not clear the remembered account");
         }
     }
@@ -1057,10 +1086,11 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CancelFlag, ConfigSource, UserSettings, resolve, resolve_from,
-        settings_error_message,
+        AppState, CancelFlag, ConfigSource, UserSettings, mutate_settings_off_worker, resolve,
+        resolve_from, settings_error_message,
     };
     use azapptoolkit_core::cache::CacheKind;
+    use azapptoolkit_core::settings::SettingsUnreadable;
 
     /// Never set by anything, so the env-var branch of the [`resolve`] wiring
     /// falls through. Every tier, the env arm included, is covered through the
@@ -1104,6 +1134,46 @@ mod tests {
         assert!(text.contains("couldn't be read"), "{text}");
         assert!(text.contains("Check its permissions"), "{text}");
         assert!(!text.contains("Fix the JSON"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The off-worker write is `UserSettings::mutate` moved, not changed: it
+    /// runs on another thread than the awaiting task, returns the closure's
+    /// value and saves the change, and a refused write keeps the typed
+    /// `SettingsUnreadable` that `settings_write_error` maps and leaves the
+    /// damaged file as it was.
+    #[tokio::test]
+    async fn the_off_worker_settings_write_is_mutate_on_another_thread() {
+        let dir = std::env::temp_dir().join(format!(
+            "azapptoolkit-state-off-worker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let caller = std::thread::current().id();
+
+        let (ran_on, saved) = mutate_settings_off_worker(dir.clone(), |settings| {
+            settings.client_id = Some("c".into());
+            std::thread::current().id()
+        })
+        .await
+        .unwrap();
+        assert_ne!(ran_on, caller, "the write ran on the awaiting thread");
+        assert_eq!(saved.client_id.as_deref(), Some("c"));
+        assert_eq!(UserSettings::stored(&dir).client_id.as_deref(), Some("c"));
+
+        let file = dir.join(azapptoolkit_core::settings::SETTINGS_FILE);
+        std::fs::write(&file, b"{ not json").unwrap();
+        let refused = mutate_settings_off_worker(dir.clone(), |settings| {
+            settings.client_id = None;
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            SettingsUnreadable::find(&refused).is_some_and(SettingsUnreadable::is_parse_error),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

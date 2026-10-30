@@ -16,6 +16,8 @@
 //!
 //! - [`sources`] — the command layer as data: the source walk and the
 //!   per-command / per-function extractors every rule reads
+//! - [`blocking`] — blocking work stays off the tokio workers and the main
+//!   thread: the `settings.json` writer runs on the blocking pool
 //! - [`fanout`] — dead-session gating in the long-running fan-outs
 //! - [`cache`] — invalidate-on-`Ok`, pinned indexes, watch-before-fetch, the
 //!   sign-out sweep
@@ -34,6 +36,8 @@
 //! - [`webview`] — the webview's grants: CSP `connect-src` holds no remote
 //!   origin, and the capability file grants only `core:default`
 
+#[path = "repo_invariants/blocking.rs"]
+mod blocking;
 #[path = "repo_invariants/cache.rs"]
 mod cache;
 #[path = "repo_invariants/cancel.rs"]

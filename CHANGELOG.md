@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- Saving Settings no longer freezes the window while another running copy of the app holds the settings file.
+
 ## [0.35.0] - 2026-10-26
 
 ### Added

@@ -252,11 +252,18 @@ pub async fn rotate_app_credential(
         // Serialized with every other settings.json writer (all go through
         // `UserSettings::mutate`): this binding is what the next rotation uses
         // to find the secret again, and it was the write most likely to be
-        // lost — it lands while the operator may well be saving defaults on
-        // the main thread.
-        if let Err(e) = UserSettings::mutate(&config_dir, |settings| {
-            settings.set_app_vault_binding(&tenant_id, app_id, binding);
-        }) {
+        // lost — it lands while the operator may well be saving defaults. On
+        // the blocking pool: the write waits on the cross-process settings
+        // lock.
+        let (tenant, app) = (tenant_id.clone(), app_id.to_owned());
+        if let Err(e) = crate::state::mutate_settings_off_worker(
+            config_dir,
+            move |settings: &mut UserSettings| {
+                settings.set_app_vault_binding(&tenant, &app, binding);
+            },
+        )
+        .await
+        {
             warnings.push(format!(
                 "rotation succeeded, but couldn't remember the vault for next time: {e}"
             ));

@@ -224,19 +224,23 @@ impl UserSettings {
     /// The file has several read-modify-write callers — the auth config
     /// (`commands::config`), the tenant defaults (`commands::defaults`), the Key
     /// Vault rotation's vault binding (`commands::keyvault`) and the remembered
-    /// account (`AppState::remember_account` / `forget_account`). The tenant
-    /// defaults save is a synchronous Tauri command on the main thread while the
-    /// rotation is async on the runtime pool, so they genuinely run on different
-    /// OS threads. Interleaved either way, one side's read predates the other's
-    /// write and that write is silently dropped: the operator's just-saved
-    /// defaults, or the freshly recorded vault binding the rotation flow needs
-    /// to find the secret again.
+    /// account (`AppState::remember_account` / `forget_account`). Each runs it
+    /// on a blocking-pool thread of its own, so a tenant-defaults save and a
+    /// rotation's binding genuinely run at the same time. Interleaved, one
+    /// side's read predates the other's write and that write is silently
+    /// dropped: the operator's just-saved defaults, or the freshly recorded
+    /// vault binding the rotation flow needs to find the secret again.
     ///
     /// Every writer must go through here. Paired with the atomic
     /// temp-and-rename in `private_file`, a concurrent *reader* also never sees
     /// a partial file. A second app instance is kept out by an OS advisory lock
     /// on [`SETTINGS_LOCK_FILE`], taken inside the process lock (best-effort:
     /// see `Self::lock_across_instances`).
+    ///
+    /// Blocking: it can wait on that lock for as long as the other instance
+    /// holds it, then fsyncs. Neither a tokio worker nor the main thread (where
+    /// Tauri runs a sync command) ever calls it inline; the desktop backend runs
+    /// it on the blocking pool (`state::mutate_settings_off_worker`).
     ///
     /// Refuses, rather than overwrites, a `settings.json` that exists but
     /// cannot be read or parsed (a hand-edit typo, a transient read failure):

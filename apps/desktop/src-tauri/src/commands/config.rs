@@ -5,7 +5,7 @@
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::identity::canonical_tenant_id;
-use azapptoolkit_core::settings::{SettingsUnreadable, UserSettings};
+use azapptoolkit_core::settings::SettingsUnreadable;
 
 use crate::dto::UiError;
 
@@ -36,17 +36,20 @@ pub fn get_auth_config(state: State<'_, AppState>) -> AuthConfigStatus {
 /// calls `restart_app` after a successful save), since `AppState` resolves them
 /// once at startup.
 #[tauri::command]
-pub fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiError> {
+pub async fn set_auth_config(client_id: String, tenant_id: String) -> Result<(), UiError> {
     let (client_id, tenant_id) = validated_ids(&client_id, &tenant_id)?;
 
     let config_dir = crate::config_directory();
     // Every settings.json writer goes through `UserSettings::mutate`: several
     // read-modify-write this file from different threads, and an interleaved
-    // pair silently drops one side's write.
-    UserSettings::mutate(&config_dir, |settings| {
+    // pair silently drops one side's write. On the blocking pool, so the wait
+    // on the settings lock never runs on the main thread (a sync command's),
+    // where it froze the UI.
+    crate::state::mutate_settings_off_worker(config_dir, move |settings| {
         settings.client_id = Some(client_id);
         settings.tenant_id = Some(tenant_id);
     })
+    .await
     .map_err(|e| settings_write_error(&e))?;
     Ok(())
 }
@@ -113,6 +116,7 @@ pub fn restart_app(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azapptoolkit_core::settings::UserSettings;
 
     /// A domain is refused: the id token's `tid` is the GUID, so a
     /// domain-configured install could never complete a sign-in.

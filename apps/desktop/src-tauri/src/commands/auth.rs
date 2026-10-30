@@ -64,7 +64,7 @@ pub async fn sign_in(state: State<'_, AppState>) -> Result<SignInOutcome, UiErro
     // the next launch can restore this session silently instead of putting the
     // operator back through the account picker. Best-effort: see
     // `AppState::remember_account`.
-    state.remember_account(tenant);
+    state.remember_account(tenant).await;
     // A previous account's lists, audit run and lookups must never be read by
     // this one (see `AppState::forget_tenant`).
     state.forget_tenant(&tenant.tenant_id);
@@ -104,7 +104,7 @@ pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<Tenant
         // The stored sign-in belonged to someone else (the service already
         // deleted its token); drop the pointer too, so the next launch shows
         // the sign-in card instead of repeating the refused restore.
-        state.forget_account();
+        state.forget_account().await;
     }
     let restored = restore_outcome(result)?;
     // The refresh's id token carries the account's current UPN and display
@@ -113,7 +113,7 @@ pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<Tenant
     if let Some(fresh) = &restored
         && *fresh != tenant
     {
-        state.remember_account(fresh);
+        state.remember_account(fresh).await;
     }
     Ok(restored)
 }
@@ -166,7 +166,7 @@ pub async fn sign_out(state: State<'_, AppState>, tenant: TenantContext) -> Resu
     // Signing out is the one place that must also drop the restore pointer:
     // leaving it behind would have the next launch try to revive a session whose
     // keyring token `sign_out` just deleted.
-    state.forget_account();
+    state.forget_account().await;
     // Every per-tenant client map, idle gate and cache kind — one sweep, so a
     // new map can't be missed here (see `AppState::forget_tenant`).
     state.forget_tenant(&tenant.tenant_id);
