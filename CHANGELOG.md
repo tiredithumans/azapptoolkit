@@ -13,10 +13,12 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Fixed
 
 - Saving Settings no longer freezes the window while another running copy of the app holds the settings file.
+- Restricting SharePoint access now grants a site listed twice once, and a refused grant names the admin role it needs.
 
 ### Security
 
 - Rotate into Key Vault now refuses when it can't check which app owns the vault secret, and names any leftover secret.
+- Grant access and the audit's SharePoint fix now list each warning, such as an app that still reaches every site or file.
 
 ## [0.35.0] - 2026-10-26
 

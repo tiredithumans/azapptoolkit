@@ -9,7 +9,7 @@ use thaw::{Button, ButtonAppearance, Textarea};
 
 use azapptoolkit_core::audit::RemediationAction;
 
-use crate::bindings::remediation::ExchangeAccessResult;
+use crate::bindings::remediation::{ExchangeAccessResult, SiteScopeResult};
 use crate::bindings::{auth, exchange, remediation, sharepoint};
 use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::modal_shell::ModalShell;
@@ -300,6 +300,8 @@ pub fn ScopeSharePointButton(
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let needs_consent = RwSignal::new(false);
+    // A conversion that came back with warnings — shown in the modal until read.
+    let warned: RwSignal<Option<SiteScopeResult>> = RwSignal::new(None);
     let sites_text = RwSignal::new(String::new());
 
     // Performs the scope conversion for `role` ("read"/"write"). Reusable from
@@ -320,12 +322,13 @@ pub fn ScopeSharePointButton(
             };
             busy.set(true);
             error.set(None);
+            warned.set(None);
             let target = target.clone();
             let role = if write { "write" } else { "read" };
             leptos::task::spawn_local(async move {
-                // Same convert-to-selected core either way; the app-reg wrapper
-                // resolves the SP from the application first, the SP-only path
-                // supplies it directly. Unified to (sites, removed) counts.
+                // Same convert-to-selected core either way, and the same
+                // `SiteScopeResult`; the app-reg wrapper resolves the SP from
+                // the application first, the SP-only path supplies it directly.
                 let outcome = match &target {
                     ScopeFixTarget::AppReg { object_id } => {
                         remediation::remediate_scope_sharepoint_access(
@@ -335,49 +338,67 @@ pub fn ScopeSharePointButton(
                             role,
                         )
                         .await
-                        .map(|res| (res.sites_granted.len(), res.removed_orgwide_grants.len()))
                     }
                     ScopeFixTarget::ServicePrincipal {
                         sp_object_id,
                         app_id,
                         display_name,
-                    } => sharepoint::convert_site_access_to_selected(
-                        &t.tenant_id,
-                        sp_object_id,
-                        // SP-only target: no app registration exists to declare
-                        // Sites.Selected on, so the assignment is the whole fix.
-                        None,
-                        app_id,
-                        display_name,
-                        &site_urls,
-                        role,
-                        true,
-                    )
-                    .await
-                    .map(|res| (res.sites_granted.len(), res.removed_orgwide_grants.len())),
+                    } => {
+                        sharepoint::convert_site_access_to_selected(
+                            &t.tenant_id,
+                            sp_object_id,
+                            // SP-only target: no app registration exists to declare
+                            // Sites.Selected on, so the assignment is the whole fix.
+                            None,
+                            app_id,
+                            display_name,
+                            &site_urls,
+                            role,
+                            true,
+                        )
+                        .await
+                    }
                 };
                 if !session.is_active_tenant(&t.tenant_id) {
                     busy.set(false);
                     return;
                 }
                 match outcome {
-                    Ok((sites, removed)) => {
+                    Ok(res) if res.warnings.is_empty() => {
                         open.set(false);
                         needs_consent.set(false);
                         session.toast_success(format!(
                             "Restricted SharePoint access to {} — removed {}. Re-run the audit to refresh scores.",
-                            count_noun(sites, "site", "sites"),
-                            count_noun(removed, "org-wide grant", "org-wide grants"),
+                            count_noun(res.sites_granted.len(), "site", "sites"),
+                            count_noun(
+                                res.removed_orgwide_grants.len(),
+                                "org-wide grant",
+                                "org-wide grants"
+                            ),
                         ));
                         on_done.try_run(target.row_id());
                     }
-                    Err(e) if e.is_consent_required() => {
-                        needs_consent.set(true);
-                        error.set(Some(
-                            "Granting per-site access needs the SharePoint admin scope (Sites.FullControl.All). Grant consent, then try again.".into(),
-                        ));
+                    // A warned conversion stays in the modal and keeps the
+                    // row's Fix, as a warned mailbox grant does: the warnings
+                    // include "Scoping is NOT effective" (the app still reaches
+                    // every site or file through a grant the conversion does not
+                    // remove) and "no site access was granted, so the org-wide
+                    // grant was left in place". A success toast here retired the
+                    // Fix on an app that was still org-wide.
+                    Ok(res) => {
+                        needs_consent.set(false);
+                        warned.set(Some(res));
                     }
-                    Err(e) => error.set(Some(e.message)),
+                    // The error's own message, never a SharePoint-scope prompt:
+                    // `consent_required` comes from the SharePoint pre-acquire
+                    // AND from the Graph write scope the Sites.Selected grant
+                    // rides, and the code does not say which. "Grant consent"
+                    // still grants the SharePoint scope — right for the first,
+                    // no help for the second, which this message names.
+                    Err(e) => {
+                        needs_consent.set(e.is_consent_required());
+                        error.set(Some(e.message));
+                    }
                 }
                 busy.set(false);
             });
@@ -416,7 +437,10 @@ pub fn ScopeSharePointButton(
         <div class="audit-actions">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(move |_| open.set(true))
+                on_click=Box::new(move |_| {
+                    warned.set(None);
+                    open.set(true);
+                })
             >
                 {label}
             </Button>
@@ -435,6 +459,29 @@ pub fn ScopeSharePointButton(
                     value=sites_text
                     placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
                 />
+                {move || {
+                    warned
+                        .get()
+                        .map(|r| {
+                            let summary = format!(
+                                "Granted {} and removed {}. Read the notes below: they say what did not happen, or what the app can still reach.",
+                                count_noun(r.sites_granted.len(), "site", "sites"),
+                                count_noun(r.removed_orgwide_grants.len(), "org-wide grant", "org-wide grants"),
+                            );
+                            view! {
+                                <Callout tone="warn" role="status">
+                                    <span class="ui-text">{summary}</span>
+                                    <ul class="warnings">
+                                        {r
+                                            .warnings
+                                            .into_iter()
+                                            .map(|w| view! { <li>{w}</li> })
+                                            .collect_view()}
+                                    </ul>
+                                </Callout>
+                            }
+                        })
+                }}
                 {move || {
                     error.get().map(|e| view! { <FormError>{e}</FormError> })
                 }}

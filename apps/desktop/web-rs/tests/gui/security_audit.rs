@@ -4,7 +4,9 @@
 //! useful: they never enter the bulk selection (the bulk commands loop
 //! app-registration cores), the "No local app registration" group collects
 //! them, and their scope Fix routes to the SP-only command instead of the
-//! app-registration remediation wrapper.
+//! app-registration remediation wrapper. A scope Fix whose result carries
+//! warnings (mailbox or SharePoint) stays open with them and keeps the row's
+//! Fix, rather than toasting success on something that did not fully apply.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -17,6 +19,7 @@ use azapptoolkit_core::audit::{
 use azapptoolkit_dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use azapptoolkit_dto::events as names;
 use azapptoolkit_dto::exchange::ExchangeAccessResult;
+use azapptoolkit_dto::sharepoint::{SiteGrantDto, SitePermissionDto, SiteScopeResult};
 use azapptoolkit_web_rs::state::SecurityTab;
 use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::security_view::SecurityView;
@@ -249,6 +252,170 @@ async fn sp_mailbox_fix_keeps_a_warned_grant_open() {
     assert!(
         ts::body_contains("Scope 1 mailbox permission to specific mailboxes"),
         "the row keeps its Fix"
+    );
+}
+
+const SHAREPOINT_FIX: &str = "Restrict 1 SharePoint permission to selected sites";
+
+/// One SP-only row holding Microsoft Graph's org-wide `Sites.Read.All`, with
+/// the Restrict-SharePoint Fix attached.
+fn sharepoint_run() -> AuditRunResult {
+    let mut sp = fixtures::audit_item(
+        "Foreign Sites App",
+        RiskLevel::High,
+        &[format!("{} Sites.Read.All", issue::ORG_WIDE_SHAREPOINT)],
+    );
+    sp.principal_kind = AuditPrincipalKind::ServicePrincipal;
+    sp.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeSharePointAccess,
+        label: SHAREPOINT_FIX.to_string(),
+        detail: "Converts to Sites.Selected: Sites.Read.All".to_string(),
+        targets: vec!["Sites.Read.All".to_string()],
+    }];
+    AuditRunResult {
+        total_apps: 1,
+        items: vec![sp],
+        ..cached_run()
+    }
+}
+
+/// A conversion that granted Finance and removed Graph's `Sites.Read.All`.
+fn site_scope(warnings: Vec<String>) -> SiteScopeResult {
+    SiteScopeResult {
+        granted_role_added: true,
+        declared_permission: false,
+        sites_granted: vec![SiteGrantDto {
+            site_id: "contoso.sharepoint.com,fin-site,fin-web".to_string(),
+            site_display_name: Some("Finance".to_string()),
+            permission: SitePermissionDto {
+                id: "perm-1".to_string(),
+                roles: vec!["read".to_string()],
+                app_id: Some("Foreign Sites App-appid".to_string()),
+                app_display_name: Some("Foreign Sites App".to_string()),
+            },
+        }],
+        removed_orgwide_grants: vec!["Sites.Read.All".to_string()],
+        warnings,
+    }
+}
+
+/// Mounts the Security view over [`sharepoint_run`], and runs the row's Fix on
+/// Finance with "Grant read access", after `answer` has mocked the conversion.
+async fn run_sharepoint_fix(answer: impl FnOnce()) -> ts::Mounted {
+    ts::reset();
+    ts::mock_ok("get_cached_audit", &sharepoint_run());
+    answer();
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Org-wide SharePoint access")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_sharepoint".to_string()));
+    ts::wait_for(|| ts::has_button_labelled(SHAREPOINT_FIX)).await;
+
+    ts::click_button_labelled(SHAREPOINT_FIX);
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Finance",
+    );
+    ts::click_button_labelled("Grant read access");
+    ts::wait_for(|| ts::call_count("convert_site_access_to_selected") == 1).await;
+    m
+}
+
+/// The conversion strips Microsoft Graph's `Sites.*` only, so an app that also
+/// holds Graph's `Files.ReadWrite.All` (or a SharePoint Online `Sites.*`) still
+/// reaches every file. The Fix used to toast "Restricted SharePoint access to
+/// 1 site" and retire itself; the warning now stays in the modal, and the row
+/// keeps its Fix, as a warned mailbox grant does.
+#[wasm_bindgen_test]
+async fn sp_sharepoint_fix_keeps_a_conversion_that_left_org_wide_reach_open() {
+    let m = run_sharepoint_fix(|| {
+        ts::mock_ok(
+            "convert_site_access_to_selected",
+            &site_scope(vec![
+                "Scoping is NOT effective for SharePoint: Files.ReadWrite.All (Microsoft Graph) \
+                 is still granted organization-wide in Microsoft Entra ID, so the app still \
+                 reaches every file through it, not only the sites granted here."
+                    .to_string(),
+            ]),
+        )
+    })
+    .await;
+    ts::wait_for(|| ts::body_contains("Scoping is NOT effective for SharePoint")).await;
+
+    assert!(
+        ts::query(".modal").is_some(),
+        "a warned conversion keeps the modal open"
+    );
+    assert!(
+        ts::body_contains("what did not happen, or what the app can still reach"),
+        "the warning is explained, not counted"
+    );
+    assert!(
+        ts::has_button_labelled(SHAREPOINT_FIX),
+        "the row keeps its Fix"
+    );
+    assert!(
+        m.session.toasts.with_untracked(|t| t.is_empty()),
+        "no success toast for a conversion that left the app org-wide"
+    );
+    // The SP-only row still routes to the SP-only core, stripping org-wide.
+    let call = ts::last_call("convert_site_access_to_selected").unwrap();
+    assert_eq!(
+        call.arg_str("spObjectId").as_deref(),
+        Some("obj-Foreign Sites App")
+    );
+    assert_eq!(
+        call.args.get("removeOrgwide").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+}
+
+/// A clean conversion still closes with its success toast and retires the Fix.
+#[wasm_bindgen_test]
+async fn sp_sharepoint_fix_retires_after_a_clean_conversion() {
+    let m = run_sharepoint_fix(|| {
+        ts::mock_ok("convert_site_access_to_selected", &site_scope(Vec::new()))
+    })
+    .await;
+    ts::wait_for(|| ts::query(".modal").is_none()).await;
+
+    assert!(m.session.toasts.with_untracked(|t| {
+        t.iter().any(|toast| {
+            toast
+                .message
+                .contains("Restricted SharePoint access to 1 site")
+        })
+    }));
+    ts::wait_for(|| !ts::has_button_labelled(SHAREPOINT_FIX)).await;
+}
+
+/// `consent_required` reaches this Fix from the SharePoint pre-acquire AND from
+/// the Graph write scope the Sites.Selected grant rides, and the code does not
+/// say which. Answering both with "needs the SharePoint admin scope" sent an
+/// operator who lacked the WRITE consent to grant SharePoint, retry, and fail
+/// again; the modal now shows the error's own message.
+#[wasm_bindgen_test]
+async fn sp_sharepoint_fix_shows_a_consent_errors_own_message() {
+    let _m = run_sharepoint_fix(|| {
+        ts::mock_err(
+            "convert_site_access_to_selected",
+            &fixtures::ui_error(
+                "consent_required",
+                "failed to grant Sites.Selected: token: consent required for the requested \
+                 permissions (AADSTS65001)",
+            ),
+        )
+    })
+    .await;
+    ts::wait_for(|| ts::body_contains("failed to grant Sites.Selected")).await;
+
+    assert!(ts::query(".modal").is_some(), "the modal stays open");
+    assert!(
+        !ts::body_contains("needs the SharePoint admin scope"),
+        "a missing consent is not claimed to be the SharePoint scope"
     );
 }
 

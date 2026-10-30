@@ -25,6 +25,10 @@
 //!   the same step.
 //! - **Review:** step 3 names the principal, the resolved targets and the
 //!   org-wide grants the apply will strip — before it runs.
+//! - **Warned result:** an apply that comes back with warnings stays on step 3
+//!   and lists them, with Done in place of Grant access, instead of closing on
+//!   a toast that only counted them; the host's reload (which rebuilds the
+//!   wizard's subtree) waits until the wizard closes.
 #![cfg(target_arch = "wasm32")]
 
 use leptos::prelude::*;
@@ -285,7 +289,7 @@ async fn orgwide_option_grants_without_scoping() {
 
 #[wasm_bindgen_test]
 async fn sharepoint_path_converts_to_sites_selected() {
-    let _m = mount_wizard(None);
+    let m = mount_wizard(None);
     ts::mock_ok("convert_site_access_to_selected", &site_scope_result());
 
     // Step 1 — pick Sites.Read.All from the catalog.
@@ -327,6 +331,223 @@ async fn sharepoint_path_converts_to_sites_selected() {
         call.args.get("removeOrgwide").and_then(|v| v.as_bool()),
         Some(true)
     );
+    // A clean conversion closes on its success toast.
+    ts::wait_for(|| {
+        m.session.toasts.with_untracked(|t| {
+            t.iter()
+                .any(|toast| toast.message.starts_with("Scoped to 0 sites"))
+        })
+    })
+    .await;
+}
+
+/// A conversion that left the app reaching every file — through a Graph
+/// `Files.ReadWrite.All` the strip never touches — used to close the wizard on
+/// a toast ending "1 warning." The warning IS the result, so the wizard stays
+/// on the review step and lists it, with Done in place of Grant access.
+#[wasm_bindgen_test]
+async fn a_warned_site_conversion_stays_open_and_lists_its_warnings() {
+    let m = mount_wizard(None);
+    ts::mock_ok(
+        "convert_site_access_to_selected",
+        &SiteScopeResult {
+            warnings: vec![
+                "Scoping is NOT effective for SharePoint: Files.ReadWrite.All (Microsoft Graph) \
+                 is still granted organization-wide in Microsoft Entra ID, so the app still \
+                 reaches every file through it, not only the sites granted here."
+                    .to_string(),
+            ],
+            ..site_scope_result()
+        },
+    );
+
+    ts::wait_for(|| ts::body_contains("Sites.Read.All")).await;
+    ts::select_picker_permission("Sites.Read.All");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+    ts::set_textarea_value(
+        ".modal textarea",
+        "https://contoso.sharepoint.com/sites/Marketing",
+    );
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+    ts::click_button_labelled("Grant access");
+
+    ts::wait_for(|| ts::body_contains("Scoping is NOT effective for SharePoint")).await;
+    assert!(
+        ts::body_contains("what did not happen, or what the app can still reach"),
+        "the warning is explained, not counted"
+    );
+    assert!(ts::has_button_labelled("Done"));
+    assert!(
+        !ts::has_button_labelled("Grant access"),
+        "a landed apply is not offered again"
+    );
+    assert!(
+        m.session.toasts.with_untracked(|t| t.is_empty()),
+        "no success toast for a conversion that left the app org-wide"
+    );
+
+    // Done closes the wizard (this host's `on_close` is a no-op, so what is
+    // visible is the reset back to step 1).
+    ts::click_button_labelled("Done");
+    ts::wait_for(|| ts::body_contains("Step 1 of 3")).await;
+    assert!(!ts::body_contains("Scoping is NOT effective"));
+}
+
+/// Hosts keep the wizard mounted, and Escape closes it through the host's
+/// `on_close`, not the wizard's own reset. A warned result must not survive
+/// that into the next run: reopened from another "Scope…", the review step
+/// offers Grant access again, without the previous run's notes.
+#[wasm_bindgen_test]
+async fn a_warned_result_does_not_carry_into_the_next_run() {
+    ts::reset();
+    ts::mock_ok(
+        "list_resource_permissions",
+        &fixtures::graph_resource_permissions(CATALOG),
+    );
+    ts::mock_ok(
+        "convert_site_access_to_selected",
+        &SiteScopeResult {
+            warnings: vec!["Scoping is NOT effective for SharePoint: an old note".to_string()],
+            ..site_scope_result()
+        },
+    );
+    let open = RwSignal::new(true);
+    let preseed = RwSignal::new(Some(graph_app_selection("Sites.Read.All")));
+    let _m = ts::mount_view(move || {
+        let target = Signal::derive(|| ScopeTarget {
+            object_id: Some("obj-app".to_string()),
+            sp_object_id: "sp-app".to_string(),
+            app_id: "app-0".to_string(),
+            display_name: "App".to_string(),
+            is_managed_identity: false,
+        });
+        view! {
+            <ScopeWizard
+                open=open
+                target=target
+                preseed=preseed
+                on_close=Callback::new(move |()| open.set(false))
+                on_changed=Callback::new(|()| {})
+            />
+        }
+    });
+    let to_review = || async {
+        ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+        ts::set_textarea_value(
+            ".modal textarea",
+            "https://contoso.sharepoint.com/sites/Marketing",
+        );
+        ts::click_button_labelled("Next");
+        ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+    };
+
+    to_review().await;
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::has_button_labelled("Done")).await;
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| ts::query(".modal").is_none()).await;
+
+    open.set(true);
+    to_review().await;
+    assert!(
+        ts::has_button_labelled("Grant access"),
+        "the new run can grant"
+    );
+    assert!(!ts::has_button_labelled("Done"));
+    assert!(
+        !ts::body_contains("an old note"),
+        "the previous run's notes are gone"
+    );
+}
+
+/// The real hosts rebuild the subtree holding the wizard when `on_changed`
+/// runs (the app registration's Permissions tab, the managed identity window),
+/// so a reload fired on a warned apply took the warnings off the screen with
+/// it. This host does the same. The reload must wait until the wizard closes —
+/// by Done, or by Escape through the host — and run exactly once per close,
+/// a clean apply included.
+#[wasm_bindgen_test]
+async fn a_landed_apply_holds_the_hosts_reload_until_the_wizard_closes() {
+    ts::reset();
+    ts::mock_ok(
+        "list_resource_permissions",
+        &fixtures::graph_resource_permissions(CATALOG),
+    );
+    let warned = SiteScopeResult {
+        warnings: vec!["Scoping is NOT effective for SharePoint: a held note".to_string()],
+        ..site_scope_result()
+    };
+    ts::mock_ok("convert_site_access_to_selected", &warned);
+    let reload = RwSignal::new(0_u32);
+    let open = RwSignal::new(true);
+    let preseed = RwSignal::new(Some(graph_app_selection("Sites.Read.All")));
+    let _m = ts::mount_view(move || {
+        view! {
+            // Rebuilt on every reload, as the real hosts' subtrees are.
+            {move || {
+                let _ = reload.get();
+                let target = Signal::derive(|| ScopeTarget {
+                    object_id: Some("obj-app".to_string()),
+                    sp_object_id: "sp-app".to_string(),
+                    app_id: "app-0".to_string(),
+                    display_name: "App".to_string(),
+                    is_managed_identity: false,
+                });
+                view! {
+                    <ScopeWizard
+                        open=open
+                        target=target
+                        preseed=preseed
+                        on_close=Callback::new(move |()| open.set(false))
+                        on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+                    />
+                }
+            }}
+        }
+    });
+    let apply = || async {
+        ts::wait_for(|| ts::query(".modal textarea").is_some()).await;
+        ts::set_textarea_value(
+            ".modal textarea",
+            "https://contoso.sharepoint.com/sites/Marketing",
+        );
+        ts::click_button_labelled("Next");
+        ts::wait_for(|| ts::body_contains("not have org-wide site access")).await;
+        ts::click_button_labelled("Grant access");
+    };
+
+    // A warned apply: the notes stay up, and nothing reloads under them.
+    apply().await;
+    ts::wait_for(|| ts::body_contains("a held note")).await;
+    ts::tick().await;
+    ts::tick().await;
+    assert_eq!(reload.get_untracked(), 0, "no reload while the notes show");
+    assert!(ts::body_contains("a held note"), "the notes survive");
+    // Done closes, then reloads once.
+    ts::click_button_labelled("Done");
+    ts::wait_for(|| reload.get_untracked() == 1).await;
+    ts::wait_for(|| ts::query(".modal").is_none()).await;
+
+    // Escape closes through the host's `on_close`; the held reload still runs.
+    open.set(true);
+    apply().await;
+    ts::wait_for(|| ts::has_button_labelled("Done")).await;
+    assert_eq!(reload.get_untracked(), 1);
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| reload.get_untracked() == 2).await;
+
+    // A clean apply closes and reloads exactly once.
+    ts::mock_ok("convert_site_access_to_selected", &site_scope_result());
+    open.set(true);
+    apply().await;
+    ts::wait_for(|| reload.get_untracked() == 3).await;
+    ts::wait_for(|| ts::query(".modal").is_none()).await;
+    ts::tick().await;
+    ts::tick().await;
+    assert_eq!(reload.get_untracked(), 3, "one reload per close");
 }
 
 #[wasm_bindgen_test]

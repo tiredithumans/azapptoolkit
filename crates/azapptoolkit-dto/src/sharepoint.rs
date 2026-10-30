@@ -159,10 +159,15 @@ pub struct SiteScopeResult {
     pub declared_permission: bool,
     /// The sites the principal was granted access to.
     pub sites_granted: Vec<SiteGrantDto>,
-    /// The org-wide `Sites.*` permission values that were removed so the scoped
-    /// model is actually effective. Empty when none applied or removal was
-    /// skipped.
+    /// The Microsoft Graph org-wide `Sites.*` permission values the conversion
+    /// removed. Empty when none applied or removal was skipped. Removing them
+    /// does not by itself confine the app: an Office 365 SharePoint Online
+    /// `Sites.*` or a Graph `Files.*.All` keeps every site (or file) in reach,
+    /// and `warnings` then says "Scoping is NOT effective".
     pub removed_orgwide_grants: Vec<String>,
+    /// What did not go as asked: sites that failed, removals that failed, and
+    /// any org-wide SharePoint reach the app still holds. Shown in full, never
+    /// only counted.
     pub warnings: Vec<String>,
 }
 

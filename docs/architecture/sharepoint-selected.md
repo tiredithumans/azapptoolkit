@@ -128,6 +128,45 @@ assigned or granted). A separate gate covers the role on all three grant command
 `write` at every level, so a webview call cannot grant `owner` or `fullcontrol` the wizard never
 offers.
 
+A refused appRole assignment keeps its code (`grant_role_err`) instead of the old catch-all
+`grant_failed`: `forbidden` carries the `admin_consent` catalog guidance (assigning a Graph
+application role needs Privileged Role Administrator), and `refresh_missing` stops a bulk run
+rather than burning through the selection. `consent_required` here means the **Graph write** scope
+the grant rides was never consented — yet the SharePoint pre-acquire raises the same code for the
+SharePoint scope, and nothing in the error says which. So the audit Fix and the wizard's
+Sites/items modes show the error's own message rather than a SharePoint-scope prompt; their
+"Grant consent" still grants the SharePoint scope, which cannot fix a missing write consent (routing
+that lever by scope is a separate change).
+
+## What the `Sites.Selected` conversion reports
+
+`convert_site_access_to_selected` strips **Microsoft Graph's** org-wide `Sites.*` only — the handler
+limit `is_scopable_sharepoint_resource_permission` documents — so a removal does not by itself
+confine the app. After the strip, the conversion classifies the principal's assignments with the
+audit's own Rule 12 gates, keyed by `(resource, value)` and never the value alone: an org-wide
+`Sites.*` on either SharePoint-bearing resource (`is_sharepoint_orgwide_permission`) and Graph's
+`Files.Read.All` / `Files.ReadWrite.All` (`is_files_orgwide_permission`). Anything still held — an
+Office 365 SharePoint Online `Sites.*`, a Graph `Files.*.All`, or a Graph `Sites.*` whose removal
+did not happen — becomes one **"Scoping is NOT effective for SharePoint"** warning that names each
+grant with its resource: the counterpart of the Exchange core's `still_held_orgwide`. The strip
+excuses only what it removed from Graph, so a `Sites.Read.All` on SharePoint Online is still named
+after Graph's is gone. An Office 365 SharePoint Online role index that could not be read is never
+"holds nothing there": when the principal holds a grant on a resource the check cannot identify,
+the result says it could not check.
+
+The warnings are the result, so every surface except the bulk bar shows them in full. The audit Fix
+keeps a warned conversion open and keeps the row's Fix (as a warned mailbox Fix does), and the Grant
+access wizard stays on its review step, listing them, with Done in place of Grant access; its
+host's reload waits until the wizard closes, because the hosts rebuild the subtree holding it. The
+bulk bar reports per-app errors only, so it still drops these warnings — a known gap, tracked
+separately.
+
+The site list goes through `dedupe_targets`, as the item path's does, and a site already granted
+in this run (another spelling of its URL) is skipped: one site, one grant, one row in the count.
+The body is `convert_site_access_core`, State-free over a `GraphClient` and a `Cache`, so wiremock
+tests pin the grant-before-strip order, the no-site-landed path and the residual report; the
+command is a thin wrapper (role gate, SharePoint pre-acquire).
+
 ## Input boundary: URLs and ids in Graph paths
 
 The site lookup, the item resolver's URL parser and every SharePoint call splice operator-,
