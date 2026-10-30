@@ -1681,7 +1681,12 @@ fn unchecked_app_id_commands(
 /// an `app_id` parameter that hands it to one, to a fixpoint. Blind spots: an
 /// app id under another name (`client_id`) or in a struct field, a call
 /// through a closure or a trait object, and a closure's `|a, b|` read as two
-/// arguments.
+/// arguments. A relaying helper counts as checked when it calls
+/// `require_app_id` anywhere in its body, while a command must call it before
+/// its first hand-off, so a command should check the id before passing it on.
+/// And only `commands/` and `azapptoolkit-graph/src/client/` are scanned: a
+/// keyed read built elsewhere (`client.rs` itself, another crate) or a
+/// relaying helper outside `commands/` is not seen.
 #[test]
 fn every_ipc_app_id_is_a_guid_before_it_keys_the_sp_cache() {
     let graph: Vec<Function> = path_splice_sources()

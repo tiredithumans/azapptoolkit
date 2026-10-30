@@ -674,7 +674,8 @@ async fn a_managed_identity_paired_with_another_app_is_refused_before_any_write(
 /// End to end, in order: the pairing read, the existing-scope guard, the
 /// scope, the scoped role, and only then the strip of the org-wide grant —
 /// scoped access lands before broad access goes, so a failure never strands
-/// the principal.
+/// the principal. `ensure_management_scope` reads the scope too, so the guard
+/// is proven by TWO reads before the create, not by the first one alone.
 #[tokio::test]
 async fn a_scoped_grant_lands_before_the_org_wide_grant_is_stripped() {
     let (server, state, exo) = mi_scope_tenant(None, role_assigned()).await;
@@ -703,6 +704,14 @@ async fn a_scoped_grant_lands_before_the_org_wide_grant_is_stripped() {
     });
     let guard = first("guard", &|r| is_cmdlet(r, "Get-ManagementScope"));
     let scope = first("scope", &|r| is_cmdlet(r, "New-ManagementScope"));
+    let scope_reads = requests[..scope]
+        .iter()
+        .filter(|r| is_cmdlet(r, "Get-ManagementScope"))
+        .count();
+    assert_eq!(
+        scope_reads, 2,
+        "the guard's read and `ensure_management_scope`'s both precede the create"
+    );
     let assign = first("scoped role", &|r| {
         is_cmdlet(r, "New-ManagementRoleAssignment")
     });

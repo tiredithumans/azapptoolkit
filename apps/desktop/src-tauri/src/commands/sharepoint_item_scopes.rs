@@ -874,11 +874,18 @@ mod tests {
 
     /// The Permission Tester's revoke deletes an application grant only. The
     /// list also holds a person's entry, which is re-read and left in place
-    /// (the tester never offers it, so only a stale or crafted id reaches it);
-    /// an entry already gone deletes nothing and counts as removed.
+    /// (the tester never offers it, so only a stale or crafted id reaches it).
+    /// An entry already gone counts as removed: one missing from the re-read
+    /// sends no DELETE, and one removed between the re-read and the DELETE
+    /// (a 404) is not an error.
     #[tokio::test]
     async fn the_tester_revoke_deletes_only_an_app_grant() {
-        for (permission_id, deletes) in [("p-user", 0), ("p-gone", 0), ("p-app", 1)] {
+        for (permission_id, status, deletes) in [
+            ("p-user", 204, 0),
+            ("p-gone", 204, 0),
+            ("p-app", 204, 1),
+            ("p-app", 404, 1),
+        ] {
             let server = MockServer::start().await;
             mount_finance_library(&server).await;
             Mock::given(method("GET"))
@@ -897,7 +904,7 @@ mod tests {
                 .and(path(format!(
                     "/v1.0/sites/{SITE}/lists/{LIST}/permissions/{permission_id}"
                 )))
-                .respond_with(ResponseTemplate::new(204))
+                .respond_with(ResponseTemplate::new(status))
                 .expect(deletes)
                 .mount(&server)
                 .await;
@@ -917,7 +924,7 @@ mod tests {
             if permission_id == "p-user" {
                 assert_eq!(result.unwrap_err().code, "not_an_app_grant");
             } else {
-                result.unwrap_or_else(|e| panic!("{permission_id}: {e:?}"));
+                result.unwrap_or_else(|e| panic!("{permission_id} ({status}): {e:?}"));
             }
         }
     }
