@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch};
+use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch, Patch};
 use azapptoolkit_core::models::{Application, PasswordCredential, ServicePrincipal};
 use azapptoolkit_graph::{GraphClient, GraphError};
 
@@ -198,9 +198,11 @@ pub(crate) fn invalidate_app_credentials(cache: &Cache, tenant_id: &str, object_
 // `Cache::patch_typed_index` instead. Everything else `invalidate_app_lists`
 // drops is a projection the next read rebuilds without a tenant scan, so it is
 // dropped the same way. Each patch falls back to dropping its key when it
-// can't apply, so the worst case is the old cost. Call only on a clean `Ok`.
-// A partial failure may have landed a write nobody can describe, so it takes
-// `invalidate_app_lists`.
+// can't apply, so the worst case is the old cost. A patch that finds nothing
+// to change in an entry (the id is not in it) answers `Patch::Keep` through
+// `Cache::patch_typed_index_with`, rather than copying a tenant-wide `Vec` to
+// change none of its rows. Call only on a clean `Ok`. A partial failure may
+// have landed a write nobody can describe, so it takes `invalidate_app_lists`.
 
 /// One app registration a write just created, as Graph returned it.
 pub(crate) struct CreatedApp<'a> {
@@ -233,6 +235,16 @@ fn upsert<T>(rows: &mut Vec<T>, row: T, same: impl Fn(&T) -> bool) {
         Some(slot) => *slot = row,
         None => rows.push(row),
     }
+}
+
+/// `rows` without the rows `gone` picks, or [`Patch::Keep`] when it picks
+/// none: a delete that reached an entry without the deleted objects copies
+/// nothing.
+fn removed_by<T: Clone>(rows: &[T], gone: impl Fn(&T) -> bool) -> Patch<Vec<T>> {
+    if !rows.iter().any(&gone) {
+        return Patch::Keep;
+    }
+    Patch::Replace(rows.iter().filter(|r| !gone(r)).cloned().collect())
 }
 
 /// What `invalidate_app_lists` drops besides the four scanned entries the
@@ -304,10 +316,18 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
     if pairing_patched {
         let created_apps: Vec<Application> = apps.iter().map(|(app, _)| app.clone()).collect();
         let created_rows = crate::commands::credentials::credential_rows(&created_apps, now);
-        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+        cache.patch_typed_index_with::<Vec<CredentialRowDto>>(
             CacheKind::Lists,
             &credential_expirations_key(tenant_id),
             |rows| {
+                // An app created without a credential adds no row.
+                if created_rows.is_empty()
+                    && !rows
+                        .iter()
+                        .any(|r| created_ids.contains(r.app_object_id.as_str()))
+                {
+                    return Patch::Keep;
+                }
                 let mut next: Vec<CredentialRowDto> = rows
                     .iter()
                     .filter(|r| !created_ids.contains(r.app_object_id.as_str()))
@@ -315,7 +335,7 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
                     .collect();
                 next.extend(created_rows.iter().cloned());
                 crate::commands::credentials::sort_credential_rows(&mut next);
-                Some(next)
+                Patch::Replace(next)
             },
         );
     } else {
@@ -376,59 +396,45 @@ pub(crate) fn record_deleted_apps(cache: &Cache, tenant_id: &str, object_ids: &[
 
     // A truncated index loses a row here that a rescan would backfill from
     // past the cap, so a full index is dropped, not patched.
-    let pairing_patched = cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+    let pairing_patched = cache.patch_typed_index_with::<Vec<ApplicationListRowDto>>(
         CacheKind::Lists,
         &apps_pairing_key(tenant_id),
         |rows| {
-            (rows.len() < super::APPS_MAX).then(|| {
-                rows.iter()
-                    .filter(|r| !deleted.contains(r.id.as_str()))
-                    .cloned()
-                    .collect()
-            })
+            if rows.len() >= super::APPS_MAX {
+                return Patch::Invalidate;
+            }
+            removed_by(rows, |r| deleted.contains(r.id.as_str()))
         },
     );
-    cache.patch_typed_index::<Vec<Application>>(
+    cache.patch_typed_index_with::<Vec<Application>>(
         CacheKind::Lists,
         &app_name_index_key(tenant_id),
         |rows| {
-            (rows.len() < super::APPS_MAX).then(|| {
-                rows.iter()
-                    .filter(|a| !deleted.contains(a.id.as_str()))
-                    .cloned()
-                    .collect()
-            })
+            if rows.len() >= super::APPS_MAX {
+                return Patch::Invalidate;
+            }
+            removed_by(rows, |a| deleted.contains(a.id.as_str()))
         },
     );
     if pairing_patched {
-        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+        cache.patch_typed_index_with::<Vec<CredentialRowDto>>(
             CacheKind::Lists,
             &credential_expirations_key(tenant_id),
-            |rows| {
-                Some(
-                    rows.iter()
-                        .filter(|r| !deleted.contains(r.app_object_id.as_str()))
-                        .cloned()
-                        .collect(),
-                )
-            },
+            |rows| removed_by(rows, |r| deleted.contains(r.app_object_id.as_str())),
         );
     } else {
         cache.invalidate(CacheKind::Lists, &credential_expirations_key(tenant_id));
     }
     match app_ids {
         Some(app_ids) => {
-            cache.patch_typed_index::<Vec<ServicePrincipal>>(
+            cache.patch_typed_index_with::<Vec<ServicePrincipal>>(
                 CacheKind::Lists,
                 &sp_index_key(tenant_id),
                 |index| {
-                    (index.len() < azapptoolkit_graph::client::SP_INDEX_MAX).then(|| {
-                        index
-                            .iter()
-                            .filter(|sp| !app_ids.contains(&sp.app_id))
-                            .cloned()
-                            .collect()
-                    })
+                    if index.len() >= azapptoolkit_graph::client::SP_INDEX_MAX {
+                        return Patch::Invalidate;
+                    }
+                    removed_by(index, |sp| app_ids.contains(&sp.app_id))
                 },
             );
         }
@@ -451,43 +457,60 @@ pub(crate) fn record_renamed_app(
     display_name: Option<&str>,
     sign_in_audience: Option<&str>,
 ) {
-    cache.patch_typed_index::<Vec<ApplicationListRowDto>>(
+    // Each entry is searched before it is copied: an entry without the app
+    // (the roll-up holds no row for an app with no credential), or with the
+    // new values already in it, is kept as it is.
+    cache.patch_typed_index_with::<Vec<ApplicationListRowDto>>(
         CacheKind::Lists,
         &apps_pairing_key(tenant_id),
         |rows| {
-            let mut next = rows.clone();
-            if let Some(row) = next.iter_mut().find(|r| r.id == object_id) {
-                if let Some(name) = display_name {
-                    row.display_name = name.to_string();
-                }
-                if let Some(audience) = sign_in_audience {
-                    row.sign_in_audience = Some(audience.to_string());
-                }
+            let Some(at) = rows.iter().position(|r| r.id == object_id) else {
+                return Patch::Keep;
+            };
+            let renamed = display_name.is_some_and(|name| rows[at].display_name != name);
+            let moved = sign_in_audience
+                .is_some_and(|audience| rows[at].sign_in_audience.as_deref() != Some(audience));
+            if !renamed && !moved {
+                return Patch::Keep;
             }
-            Some(next)
+            let mut next = rows.clone();
+            if let Some(name) = display_name {
+                next[at].display_name = name.to_string();
+            }
+            if let Some(audience) = sign_in_audience {
+                next[at].sign_in_audience = Some(audience.to_string());
+            }
+            Patch::Replace(next)
         },
     );
     if let Some(name) = display_name {
-        cache.patch_typed_index::<Vec<Application>>(
+        cache.patch_typed_index_with::<Vec<Application>>(
             CacheKind::Lists,
             &app_name_index_key(tenant_id),
-            |rows| {
-                let mut next = rows.clone();
-                if let Some(app) = next.iter_mut().find(|a| a.id == object_id) {
-                    app.display_name = name.to_string();
+            |rows| match rows.iter().position(|a| a.id == object_id) {
+                Some(at) if rows[at].display_name != name => {
+                    let mut next = rows.clone();
+                    next[at].display_name = name.to_string();
+                    Patch::Replace(next)
                 }
-                Some(next)
+                _ => Patch::Keep,
             },
         );
-        cache.patch_typed_index::<Vec<CredentialRowDto>>(
+        cache.patch_typed_index_with::<Vec<CredentialRowDto>>(
             CacheKind::Lists,
             &credential_expirations_key(tenant_id),
             |rows| {
+                if !rows
+                    .iter()
+                    .any(|r| r.app_object_id == object_id && r.app_display_name != name)
+                {
+                    return Patch::Keep;
+                }
                 let mut next = rows.clone();
                 for row in next.iter_mut().filter(|r| r.app_object_id == object_id) {
                     row.app_display_name = name.to_string();
                 }
-                Some(next)
+                Patch::Replace(next)
             },
         );
     }
@@ -1588,6 +1611,61 @@ mod patch_tier_tests {
             "the SP index is untouched"
         );
         assert_projections_dropped(&cache, "rename");
+    }
+
+    /// A patch that finds nothing to change in an entry keeps it, rather than
+    /// copying a tenant-wide `Vec` to change none of its rows. An app with no
+    /// credential has no row in the roll-up, so renaming it is the common case.
+    #[test]
+    fn a_patch_that_changes_nothing_in_an_entry_keeps_its_allocation() {
+        let bare = |id: &str| Application {
+            id: id.to_string(),
+            app_id: format!("app-{id}"),
+            display_name: id.to_string(),
+            ..Default::default()
+        };
+        let cache = seeded(vec![app("obj-1"), bare("obj-2")]);
+        let rollup = credential_expirations_hit(&cache, T).unwrap();
+        record_renamed_app(&cache, T, "obj-2", Some("Renamed"), None);
+        assert!(
+            Arc::ptr_eq(&rollup, &credential_expirations_hit(&cache, T).unwrap()),
+            "the roll-up holds no row for an app without a credential"
+        );
+        assert_eq!(
+            app_name_index_hit(&cache, T).unwrap()[1].display_name,
+            "Renamed",
+            "the entries that hold the app are still patched"
+        );
+
+        // Renamed again to the same name, or an id no entry holds: nothing
+        // is copied anywhere.
+        let rows = apps_pairing_hit(&cache, T).unwrap();
+        let names = app_name_index_hit(&cache, T).unwrap();
+        record_renamed_app(&cache, T, "obj-2", Some("Renamed"), None);
+        record_renamed_app(&cache, T, "obj-gone", Some("X"), Some("AzureADMyOrg"));
+        record_deleted_apps(&cache, T, &["obj-gone".to_string()]);
+        assert!(Arc::ptr_eq(&rows, &apps_pairing_hit(&cache, T).unwrap()));
+        assert!(Arc::ptr_eq(&names, &app_name_index_hit(&cache, T).unwrap()));
+        assert!(Arc::ptr_eq(
+            &rollup,
+            &credential_expirations_hit(&cache, T).unwrap()
+        ));
+
+        // A create without a credential adds no roll-up row.
+        record_created_apps(
+            &cache,
+            T,
+            &[CreatedApp {
+                application: &bare("obj-3"),
+                service_principal: None,
+                added_password: None,
+            }],
+        );
+        assert_eq!(list_ids(&cache), ["obj-1", "obj-2", "obj-3"]);
+        assert!(Arc::ptr_eq(
+            &rollup,
+            &credential_expirations_hit(&cache, T).unwrap()
+        ));
     }
 
     /// A list at `APPS_MAX` came from a truncated scan. Only a rescan knows

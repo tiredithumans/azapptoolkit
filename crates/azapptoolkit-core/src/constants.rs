@@ -72,7 +72,8 @@ pub const MAX_CACHE_SIZE: usize = 5000;
 ///
 /// It is a default, not a floor: it applies only while the configured
 /// `max_size` is at least [`MAX_CACHE_SIZE`], so lowering the cache size still
-/// shrinks these kinds.
+/// shrinks these kinds. Either way it counts only unpinned entries: the
+/// pinned tenant-wide indexes sit on top of it.
 ///
 /// [`MAX_CACHE_SIZE`] (5000) is sized for aggregate entries and is *below* the
 /// 10 000-app ceiling the list/audit/credential scans enumerate to, so a

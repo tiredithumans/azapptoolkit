@@ -24,7 +24,7 @@ without a sign-out in between — while `reauthenticate` (same account, oid-chec
 
 ### Proving the session, and what may be pinned
 
-Two rules ride alongside the key prefix:
+These rules ride alongside the key prefix:
 
 - **A command that can answer from cache must prove the session** with
   `session::prove_tenant_session(&state, &tenant_id)?` (or `state.auth.tenant_context(tenant_id)?`,
@@ -53,6 +53,10 @@ Two rules ride alongside the key prefix:
   the rule reads the key off that watch's `generation_for` capture — or, for a store helper that
   takes the watch as a parameter (`sp_index_store_if_current`), off every caller's capture, which
   must all be on one pinnable key.
+- **The entry cap counts only unpinned entries** (`Bucket::unpinned_len`). The pinned set is that
+  bounded handful per tenant, and while it counted, a small cap (the Cache dialog accepts 10) was
+  filled by the indexes alone, so each per-app detail or mailbox-scope verdict was evicted by the
+  put that stored it. Pinned by the core test `pinned_entries_do_not_count_against_the_cap`.
 - **Bound bulk seeding by `capacity_for`.** Seeding a whole scan into a bucket must respect its
   capacity, or the seed evicts everything else the bucket holds — including entries the same run is
   about to read back.
@@ -358,9 +362,9 @@ already knows what changed. The create POST (and `instantiate`) returns the new 
 `ServicePrincipal`, a delete knows its object ids, and a rename knows its fields. So
 `record_created_apps`, `record_deleted_apps` and `record_renamed_app` (`applications/cache.rs`)
 rewrite the four scanned entries (`apps_pairing`, `app_name_index`, `credential_expirations`,
-`sp_index`) in place through `Cache::patch_typed_index`. Everything else the list tier drops goes
-through `invalidate_app_list_projections`; those entries rebuild from the patched indexes without a
-Graph scan. `patch_tier_tests::the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries`
+`sp_index`) in place through `Cache::patch_typed_index` (or `patch_typed_index_with`, below).
+Everything else the list tier drops goes through `invalidate_app_list_projections`; those entries
+rebuild from the patched indexes without a Graph scan. `patch_tier_tests::the_projections_are_what_the_list_tier_drops_besides_the_scanned_entries`
 pins the two sets together. The callers are the single and bulk create, the SAML/OIDC wizards, the
 gallery create, the single and bulk delete, and `update_application` when the name or audience
 changed (description or notes alone take `invalidate_app_details`). The rules:
@@ -389,6 +393,13 @@ changed (description or notes alone take `invalidate_app_details`). The rules:
   `secret_text` is cleared before it reaches any row.
 - Patches are idempotent (upsert, remove or set by id). The cache re-applies a patch that lost a
   race, and a scan that started after the write already contains it.
+- A patch that finds nothing to change in an entry answers `Patch::Keep` through
+  `Cache::patch_typed_index_with`, and the entry is left as it is. Each scanned entry is a
+  tenant-wide `Vec`, so a rename used to copy all three of them, swapping in an identical copy even
+  where the app had no row (the roll-up holds none for an app without a credential); a delete of an
+  absent id and a create without a credential (in the roll-up) did the same. A row that changes
+  still costs one copy of its entry: the entry is an `Arc<Vec<Row>>` the list commands hand to
+  IPC, so it is copy-on-write.
 
 **Detail-affecting mutations that cannot change the set take `invalidate_app_detail_state`**
 (= `invalidate_app_details` + `invalidate_audit_cache`): grant/revoke/scope a permission
@@ -451,7 +462,9 @@ mutation here can invalidate.
 before it reads, as `invalidate` does, so a scan that captured its watch before the write refuses
 its pre-write snapshot. It computes the patch outside the bucket lock and swaps only if the entry is
 still the allocation it read (pointer identity), re-applying the patch up to three times when
-another writer got there first. The swap keeps the entry's `inserted`, so a patch never extends the
+another writer got there first. A `Patch::Keep` is held to the same check without a swap: the
+watches were already bumped, and a keep decided on an entry that has since been replaced is
+re-applied to the replacement. The swap keeps the entry's `inserted`, so a patch never extends the
 TTL of the scan it patched. It also keeps the `stamp`, so a rollback aimed at the store the patch
 built on still removes it.
 

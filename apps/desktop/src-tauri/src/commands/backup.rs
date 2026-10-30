@@ -868,10 +868,12 @@ struct ResourceLookup<'a> {
     // A resolve miss degrades to raw ids, but its failure is still classified:
     // a dead session must stop the backup, not thin every grant to raw ids.
     session: &'a SessionDead,
-    cache: HashMap<String, Option<ResourceInfo>>,
+    // Shared, not copied: `resolve` runs once per held grant, and Microsoft
+    // Graph's role map alone is hundreds of pairs. `ResourceInfo` is not
+    // `Clone` so a per-grant deep copy cannot come back.
+    cache: HashMap<String, Option<Arc<ResourceInfo>>>,
 }
 
-#[derive(Clone)]
 struct ResourceInfo {
     app_id: String,
     display_name: String,
@@ -920,7 +922,7 @@ impl<'a> ResourceLookup<'a> {
                     match res {
                         Ok(Some(sp)) => {
                             self.cache
-                                .insert(id.clone(), Some(ResourceInfo::from_sp(&sp)));
+                                .insert(id.clone(), Some(Arc::new(ResourceInfo::from_sp(&sp))));
                         }
                         Ok(None) => {
                             self.cache.insert(id.clone(), None);
@@ -938,7 +940,7 @@ impl<'a> ResourceLookup<'a> {
         }
     }
 
-    async fn resolve(&mut self, resource_sp_id: &str) -> Option<ResourceInfo> {
+    async fn resolve(&mut self, resource_sp_id: &str) -> Option<Arc<ResourceInfo>> {
         if let Some(hit) = self.cache.get(resource_sp_id) {
             return hit.clone();
         }
@@ -947,7 +949,7 @@ impl<'a> ResourceLookup<'a> {
             .get_service_principal_by_object_id(resource_sp_id)
             .await
         {
-            Ok(Some(sp)) => Some(ResourceInfo::from_sp(&sp)),
+            Ok(Some(sp)) => Some(Arc::new(ResourceInfo::from_sp(&sp))),
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(%resource_sp_id, error = %err, "backup: resource SP resolve failed; recording raw ids");

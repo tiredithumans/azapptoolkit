@@ -1648,3 +1648,176 @@ fn a_rollback_of_the_patched_store_still_removes_the_patch() {
     );
     assert!(bucket.remove_if_stamp("k", stamp));
 }
+
+/// `Keep` copies nothing: the entry is the same allocation afterwards, with
+/// its insert time and pin. It is still a write the guard must see, so a scan
+/// that started before it refuses its store, as after any other patch.
+#[test]
+fn a_kept_patch_copies_nothing_and_still_refuses_an_older_scan() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    let original = Arc::new(vec![1u8, 2]);
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::clone(&original));
+    let (_, inserted, _) = typed_entry(&cache, key).unwrap();
+    let watch = cache.generation_for(CacheKind::Lists, key);
+
+    assert!(cache.patch_typed_index_with::<Vec<u8>>(CacheKind::Lists, key, |_| Patch::Keep));
+
+    let kept = cache
+        .get_typed::<Vec<u8>>(CacheKind::Lists, key)
+        .expect("a kept entry stays");
+    assert!(
+        Arc::ptr_eq(&kept, &original),
+        "a kept entry must be the allocation it was, not a copy"
+    );
+    let (_, after, pinned) = typed_entry(&cache, key).unwrap();
+    assert_eq!(after, inserted, "keeping must not restart the TTL");
+    assert!(pinned, "keeping must not unpin the index");
+    assert!(
+        !cache.put_typed_index_if_current(watch, Arc::new(vec![9u8])),
+        "a scan that started before the write must still refuse its store"
+    );
+    let still = cache.get_typed::<Vec<u8>>(CacheKind::Lists, key).unwrap();
+    assert!(Arc::ptr_eq(&still, &original));
+}
+
+/// A `Keep` decided on an entry another writer has since replaced says
+/// nothing about the replacement, so the patch is re-applied to it, as a lost
+/// `Replace` is.
+#[test]
+fn a_kept_patch_that_lost_a_race_reapplies_to_the_replacement() {
+    let cache = Cache::new();
+    let key = "t1|apps_pairing";
+    cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![1u8]));
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+
+    assert!(
+        cache.patch_typed_index_with::<Vec<u8>>(CacheKind::Lists, key, |v| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // A racing writer lands a row this write removes.
+                cache.put_typed_index(CacheKind::Lists, key.into(), Arc::new(vec![7u8, 2]));
+            }
+            if v.contains(&2) {
+                Patch::Replace(v.iter().copied().filter(|&b| b != 2).collect())
+            } else {
+                Patch::Keep
+            }
+        })
+    );
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(typed_entry(&cache, key).unwrap().0, vec![7]);
+}
+
+/// Pinned entries do not count against the cap. They are a bounded handful of
+/// tenant-wide indexes per tenant that LRU never evicts, so counting them left
+/// the per-app entries whatever they did not fill: at the smallest cap the
+/// Cache dialog accepts, two tenants' indexes filled it, and a per-app detail
+/// was evicted by the very put that stored it.
+#[test]
+fn pinned_entries_do_not_count_against_the_cap() {
+    let cache = Cache::new();
+    cache.configure(None, None, None, None, None, Some(10));
+    for tenant in ["t1", "t2"] {
+        for i in 0..8 {
+            cache.put_typed_index(
+                CacheKind::Lists,
+                format!("{tenant}|index{i}"),
+                Arc::new(vec![1u8]),
+            );
+        }
+    }
+
+    cache.put(
+        CacheKind::Lists,
+        "t1|app_detail|a".into(),
+        &Sample("a".into()),
+    );
+    assert_eq!(
+        cache.get::<Sample>(CacheKind::Lists, "t1|app_detail|a"),
+        Some(Sample("a".into())),
+        "a per-app entry must survive its own put"
+    );
+
+    // The cap still binds what LRU can evict: ten more per-app entries push
+    // out the least recent one, and no index.
+    for i in 0..10 {
+        cache.put(
+            CacheKind::Lists,
+            format!("t1|app_detail|{i}"),
+            &Sample(i.to_string()),
+        );
+    }
+    assert!(
+        cache
+            .get::<Sample>(CacheKind::Lists, "t1|app_detail|a")
+            .is_none()
+    );
+    assert_eq!(entry_count(&cache, CacheKind::Lists), 16 + 10);
+    for tenant in ["t1", "t2"] {
+        for i in 0..8 {
+            assert!(
+                cache
+                    .get_typed::<Vec<u8>>(CacheKind::Lists, &format!("{tenant}|index{i}"))
+                    .is_some(),
+                "{tenant}|index{i} was evicted"
+            );
+        }
+    }
+    // Lowering the cap shrinks only the per-app entries.
+    cache.configure(None, None, None, None, None, Some(2));
+    assert_eq!(entry_count(&cache, CacheKind::Lists), 16 + 2);
+}
+
+/// The pinned count behind the cap must stay in step with the entries across
+/// every path that adds or drops one, or the cap drifts from what the bucket
+/// holds.
+#[test]
+fn the_pinned_count_stays_in_step_with_the_entries() {
+    fn assert_in_step(cache: &Cache, step: &str) {
+        let bucket = cache.buckets[CacheKind::Lists.idx()].lock();
+        let pinned = bucket.entries.values().filter(|e| e.pinned).count();
+        assert_eq!(bucket.pinned, pinned, "pinned count drifted after {step}");
+    }
+    let cache = Cache::new();
+    cache.configure(
+        None,
+        None,
+        None,
+        None,
+        Some(Duration::from_millis(30)),
+        Some(4),
+    );
+    for i in 0..6 {
+        cache.put_typed_index(CacheKind::Lists, format!("t1|idx{i}"), Arc::new(i));
+        cache.put(CacheKind::Lists, format!("t1|k{i}"), &Sample(i.to_string()));
+    }
+    assert_in_step(&cache, "puts and LRU eviction");
+    // A pinned key re-stored unpinned, and an unpinned one re-stored pinned.
+    cache.put(
+        CacheKind::Lists,
+        "t1|idx0".into(),
+        &Sample("now unpinned".into()),
+    );
+    cache.put_typed_index(CacheKind::Lists, "t1|k5".into(), Arc::new(5));
+    assert_in_step(&cache, "replacing an entry with the other kind");
+    cache.invalidate(CacheKind::Lists, "t1|idx1");
+    assert_in_step(&cache, "invalidate");
+    assert!(!cache.patch_typed_index::<i32>(CacheKind::Lists, "t1|idx2", |_| None));
+    assert_in_step(&cache, "a patch that drops its entry");
+    cache.invalidate_prefix(CacheKind::Lists, "t1|idx3");
+    assert_in_step(&cache, "invalidate_prefix");
+    cache.put_typed_index(CacheKind::Lists, "t2|idx".into(), Arc::new(0));
+    cache.invalidate_tenant("t2");
+    assert_in_step(&cache, "invalidate_tenant");
+    sleep(Duration::from_millis(40));
+    cache.put_typed_index(CacheKind::Lists, "t1|fresh".into(), Arc::new(9));
+    assert_in_step(&cache, "the expiry sweep");
+    assert!(
+        cache
+            .get_typed::<i32>(CacheKind::Lists, "t1|idx4")
+            .is_none()
+    );
+    cache.clear_kind(CacheKind::Lists);
+    assert_in_step(&cache, "clear_kind");
+}

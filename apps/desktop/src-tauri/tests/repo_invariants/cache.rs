@@ -395,7 +395,10 @@ const CACHE_MUTATORS: &[&str] = &[
     ".invalidate_prefix(",
     ".invalidate_tenant(",
     ".clear_kind(",
-    ".patch_typed_index(",
+    // No `(`: the patch tier calls it with a turbofish
+    // (`.patch_typed_index::<Vec<…>>(`) and as `.patch_typed_index_with`,
+    // neither of which contains `.patch_typed_index(`.
+    ".patch_typed_index",
 ];
 
 /// Every synchronous, non-command function under `commands/` that drops or
