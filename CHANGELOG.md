@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-11-02
+
 ### Changed
 
 - Rotate into Key Vault now needs permission to list a vault's secrets instead of permission to read their values.
