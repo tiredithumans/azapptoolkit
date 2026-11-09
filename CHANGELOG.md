@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-11-09
+
 ### Fixed
 
 - A new client secret whose reply from Graph was lost now says it may exist and refreshes the Credentials tab.
