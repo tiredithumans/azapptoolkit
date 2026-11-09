@@ -1821,3 +1821,25 @@ fn the_pinned_count_stays_in_step_with_the_entries() {
     cache.clear_kind(CacheKind::Lists);
     assert_in_step(&cache, "clear_kind");
 }
+
+/// One prefix watch guards many keys: a store under it lands while the prefix
+/// is current, is refused after a prefix sweep or a tenant sweep, and a key
+/// outside the prefix is refused outright.
+#[test]
+fn a_prefix_watch_guards_every_key_under_it() {
+    let cache = Cache::new();
+    let kind = CacheKind::Permissions;
+
+    let watch = cache.generation_for(kind, "t1|resource:");
+    assert!(cache.put_under_watch_if_current(&watch, "t1|resource:a".into(), &1_u32));
+    assert!(!cache.put_under_watch_if_current(&watch, "t1|other:a".into(), &1_u32));
+    cache.invalidate_prefix(kind, "t1|resource:");
+    assert!(!cache.put_under_watch_if_current(&watch, "t1|resource:b".into(), &2_u32));
+    assert!(cache.get::<u32>(kind, "t1|resource:b").is_none());
+    drop(watch);
+
+    let watch = cache.generation_for(kind, "t1|resource:");
+    cache.invalidate_tenant("t1");
+    assert!(!cache.put_under_watch_if_current(&watch, "t1|resource:c".into(), &3_u32));
+    assert!(cache.get::<u32>(kind, "t1|resource:c").is_none());
+}

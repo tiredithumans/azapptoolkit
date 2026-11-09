@@ -343,10 +343,16 @@ impl GraphClient {
     /// per-item fallback still resolves), and the fetch is capped at the
     /// cache size so seeding can't LRU-evict its own entries before the
     /// caller's loop reads them.
+    ///
+    /// Every `key(id)` starts with `prefix`, the prefix the kind's writers
+    /// sweep, and one watch on it guards every store: a sweep that lands
+    /// while the batch is in flight leaves the cache cold instead of being
+    /// undone by the pre-sweep reply for the whole TTL.
     async fn prewarm_sps(
         &self,
         app_ids: &[String],
         kind: CacheKind,
+        prefix: &str,
         select: &'static str,
         label: &'static str,
         key: impl Fn(&str) -> String,
@@ -392,6 +398,7 @@ impl GraphClient {
             })
             .collect();
 
+        let watch = self.cache.generation_for(kind, prefix);
         let pages: Vec<Result<Paged<ServicePrincipal>>> = match self.batch_get_json(&urls).await {
             Ok(p) => p,
             Err(err) => {
@@ -405,13 +412,11 @@ impl GraphClient {
         for (id, page) in missing.iter().zip(pages) {
             // A failed sub-request leaves the cache cold; the per-item lookup
             // retries. An empty page caches `None`, exactly like the single
-            // lookup it mirrors. Unwatched on purpose: a watch per id would
-            // overflow `Cache::MAX_WATCHES` for a tenant-sized prewarm, and a
-            // sweep that lands mid-batch is corrected by the next mutator's
-            // sweep or the TTL — this is a best-effort warm-up, not a read.
+            // lookup it mirrors. One prefix watch guards them all (a watch
+            // per id would overflow `Cache::MAX_WATCHES`).
             if let Ok(page) = page {
                 let sp = page.items.into_iter().next();
-                self.cache.put(kind, key(id), &sp);
+                self.cache.put_under_watch_if_current(&watch, key(id), &sp);
             }
         }
     }
@@ -718,6 +723,7 @@ impl GraphClient {
         self.prewarm_sps(
             resource_app_ids,
             CacheKind::Permissions,
+            &format!("{}|resource:", self.tenant_id),
             RESOURCE_SP_SELECT,
             "resource-SP",
             |id| self.resource_sp_cache_key(id),

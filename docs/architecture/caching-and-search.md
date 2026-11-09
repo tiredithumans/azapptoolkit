@@ -577,9 +577,12 @@ that was in flight when a sweep landed used to store the pre-sweep object for th
 per-appId SP lookups, `resolve_resource_sp`, both grant matrices, the sign-in activity reads and
 the app-management policies. Each now captures `generation_for(kind, &key)` before its fetch and
 stores through `put_if_current`; `graph_client_read_throughs_store_through_a_watch` pins that no
-Graph client function stores with a plain `cache.put` at all, with the batch prewarm (`prewarm_sps`,
-which `prewarm_resource_sps` delegates to) as the named exception: a watch per id would overflow
-`MAX_WATCHES`, and it is a best-effort warm-up a later sweep or the TTL corrects.
+Graph client function stores with any plain `cache.put*` at all (it reads the method name, so a
+`put_typed` counts too). The batch prewarm (`prewarm_sps`, which `prewarm_resource_sps` delegates
+to) can't take a watch per id without overflowing `MAX_WATCHES`, so it takes ONE watch on the
+prefix its writers sweep (`{tenant}|resource:`) and stores each key through
+`Cache::put_under_watch_if_current`; only a prefix or tenant sweep bumps that watch, which is how
+every resource-SP writer sweeps.
 
 The rule used to flag only a `put` beside an `.await`, and the audit's lean-SP seeding slipped past
 it: a synchronous put whose await was in the caller. After its ten tenant-wide reads landed (the

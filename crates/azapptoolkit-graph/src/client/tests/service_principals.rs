@@ -572,6 +572,54 @@ async fn patch_service_principal_sends_sso_mode() {
 
 /// A lookup in flight when a mutator sweeps the SP cache must not store the
 /// pre-mutation object afterwards: the second read goes back to Graph.
+/// N13: a resource-SP sweep that lands while the prewarm batch is in flight
+/// wins. The batch used to store with a plain `put` after its await, undoing
+/// the sweep for the whole TTL; now one prefix watch guards every key, so the
+/// next resolve goes back to Graph.
+#[tokio::test]
+async fn a_prewarm_that_raced_a_resource_sp_sweep_caches_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "responses": [
+                        { "id": "0", "status": 200, "body": { "value": [{
+                            "id": "sp-graph", "appId": "graph-id", "displayName": "Before"
+                        }] } }
+                    ]
+                }))
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-graph", "appId": "graph-id", "displayName": "After" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+
+    let ids = ["graph-id".to_string()];
+    let ((), ()) = tokio::join!(client.prewarm_resource_sps(&ids), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client.invalidate_resource_sp_cache();
+    });
+
+    let sp = client
+        .resolve_resource_sp("graph-id")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sp.display_name, "After");
+    server.verify().await;
+}
+
 #[tokio::test]
 async fn an_sp_lookup_that_raced_a_sweep_is_not_cached() {
     let server = MockServer::start().await;
