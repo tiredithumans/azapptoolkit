@@ -501,36 +501,37 @@ fn graph_client_modules() -> Vec<(String, String)> {
 /// await in the caller: the audit's lean-SP seeding stored a run-start SP
 /// index, minutes old, over whatever sweep had landed since, and this rule
 /// (which then flagged only a `put` beside an `.await`) did not see it. The
-/// batch prewarm (`prewarm_sps`, which `prewarm_resource_sps` delegates to) is
-/// exempt by name: a watch per id would overflow the watch table, and it is
-/// best-effort by design.
+/// batch prewarm (`prewarm_sps`) guards all its keys with one prefix watch
+/// (`put_under_watch_if_current`). Every `cache.put*` method counts — the
+/// rule once matched only `.cache.put(`, so a `put_typed` slipped past it.
 #[test]
 fn graph_client_read_throughs_store_through_a_watch() {
-    const EXEMPT: &[&str] = &["prewarm_sps"];
     let mut offenders = Vec::new();
-    let mut exempted = Vec::new();
+    let mut stores = 0;
     for (file, src) in graph_client_modules() {
         for f in super::sources::functions_in(&src) {
             let body: String = f.body.split_whitespace().collect();
-            if !body.contains(".cache.put(") {
-                continue;
+            for (at, _) in body.match_indices(".cache.put") {
+                let method: String = body[at + ".cache.".len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                stores += 1;
+                if !method.ends_with("_if_current") {
+                    offenders.push(format!("{file}::{} ({method})", f.name));
+                }
             }
-            if EXEMPT.contains(&f.name.as_str()) {
-                exempted.push(f.name.clone());
-                continue;
-            }
-            offenders.push(format!("{file}::{}", f.name));
         }
     }
-    for name in EXEMPT {
-        assert!(
-            exempted.iter().any(|e| e == name),
-            "`{name}` is exempt but no longer stores with a plain put — drop the exemption"
-        );
-    }
+    // Floor from the count at the time (2026-11): a walk that sees no stores
+    // is broken, not clean.
+    assert!(
+        stores >= 10,
+        "saw only {stores} cache stores in the graph client"
+    );
     assert!(
         offenders.is_empty(),
-        "Graph client functions that store with a plain `cache.put`: {offenders:?}\n\
+        "Graph client functions that store with a plain `cache.put*`: {offenders:?}\n\
          Capture `self.cache.generation_for(kind, &key)` before the fetch and store through \
          `put_if_current(watch, &value)`, so a sweep that lands mid-fetch wins. Data a caller \
          fetched earlier cannot be watched here at all: keep it in the caller (the audit holds \

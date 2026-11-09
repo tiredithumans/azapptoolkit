@@ -358,8 +358,11 @@ pub async fn list_app_item_scopes(
 /// be `app_id`'s (`principal_mismatch`): a mismatched pair revoked one app's
 /// grant and dropped another app's record. An entry or resource already gone
 /// counts as removed. Without a `permission_id` only the record goes (the row
-/// was already showing "not granted" or "not found"), and only `object_id` is
-/// touched.
+/// was showing "not granted" or "not found"), but that row may be stale, so
+/// the resource is re-read first: a grant this app holds there again keeps
+/// its record (`grant_exists`), since the tag is the only per-app list of
+/// item grants, and an unreadable resource keeps it too. Only `object_id` is
+/// written.
 pub(crate) async fn remove_app_item_scope_with(
     state: &AppState,
     client: &GraphClient,
@@ -375,65 +378,76 @@ pub(crate) async fn remove_app_item_scope_with(
             "That library, folder or file reference is not valid.",
         ));
     }
-    if let Some(permission_id) = permission_id {
-        let app = client.get_application(object_id).await?;
-        if !app.app_id.eq_ignore_ascii_case(app_id) {
+    let app = client.get_application(object_id).await?;
+    if !app.app_id.eq_ignore_ascii_case(app_id) {
+        return Err(UiError::validation(
+            "principal_mismatch",
+            "That app registration is not the app whose grant is being removed, so nothing was \
+             removed.",
+        ));
+    }
+    let target = target_of(scope);
+    let read = match target.item_id {
+        Some(item) => {
+            client
+                .list_list_item_permissions(target.site_id, target.list_id, item)
+                .await
+        }
+        None => {
+            client
+                .list_list_permissions(target.site_id, target.list_id)
+                .await
+        }
+    };
+    let perms = match read {
+        Ok(perms) => perms,
+        // The resource is gone, and its entries with it.
+        Err(GraphError::NotFound(_)) => Vec::new(),
+        Err(err) => return Err(sharepoint_item_err(err)),
+    };
+    let Some(permission_id) = permission_id else {
+        let holds_grant = perms
+            .iter()
+            .any(|p| p.app_id().is_some_and(|id| id.eq_ignore_ascii_case(app_id)));
+        if holds_grant {
             return Err(UiError::validation(
-                "principal_mismatch",
-                "That app registration is not the app whose grant is being removed, so nothing \
-                 was removed.",
+                "grant_exists",
+                "SharePoint shows this app has access there again, so its record was kept. \
+                 Refresh the list to see it.",
             ));
         }
-        let target = target_of(scope);
-        let read = match target.item_id {
+        return forget(state, client, tenant_id, object_id, scope).await;
+    };
+    if let Some(entry) = perms.iter().find(|p| p.id == permission_id) {
+        if !entry
+            .app_id()
+            .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
+        {
+            return Err(UiError::validation(
+                "not_this_apps_grant",
+                "That permission entry is not this app's grant, so it was left in place.",
+            ));
+        }
+        let removed = match target.item_id {
             Some(item) => {
                 client
-                    .list_list_item_permissions(target.site_id, target.list_id, item)
+                    .remove_list_item_permission(
+                        target.site_id,
+                        target.list_id,
+                        item,
+                        permission_id,
+                    )
                     .await
             }
             None => {
                 client
-                    .list_list_permissions(target.site_id, target.list_id)
+                    .remove_list_permission(target.site_id, target.list_id, permission_id)
                     .await
             }
         };
-        let perms = match read {
-            Ok(perms) => perms,
-            // The resource is gone, and its entries with it.
-            Err(GraphError::NotFound(_)) => Vec::new(),
+        match removed {
+            Ok(()) | Err(GraphError::NotFound(_)) => {}
             Err(err) => return Err(sharepoint_item_err(err)),
-        };
-        if let Some(entry) = perms.iter().find(|p| p.id == permission_id) {
-            if !entry
-                .app_id()
-                .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
-            {
-                return Err(UiError::validation(
-                    "not_this_apps_grant",
-                    "That permission entry is not this app's grant, so it was left in place.",
-                ));
-            }
-            let removed = match target.item_id {
-                Some(item) => {
-                    client
-                        .remove_list_item_permission(
-                            target.site_id,
-                            target.list_id,
-                            item,
-                            permission_id,
-                        )
-                        .await
-                }
-                None => {
-                    client
-                        .remove_list_permission(target.site_id, target.list_id, permission_id)
-                        .await
-                }
-            };
-            match removed {
-                Ok(()) | Err(GraphError::NotFound(_)) => {}
-                Err(err) => return Err(sharepoint_item_err(err)),
-            }
         }
     }
     forget(state, client, tenant_id, object_id, scope).await
@@ -450,13 +464,9 @@ pub async fn remove_app_item_scope(
     scope: ItemScopeRef,
     permission_id: Option<String>,
 ) -> Result<(), UiError> {
-    // Forgetting a record touches only the app object; revoking a grant needs
-    // the SharePoint scope, so only that path asks for its consent.
-    let client = if permission_id.is_some() {
-        sharepoint_client_checked(&state, &tenant_id).await?
-    } else {
-        state.graph_for(&tenant_id)
-    };
+    // Both paths read the resource's live entries first (forgetting re-checks
+    // that the grant is really gone), so both need the SharePoint scope.
+    let client = sharepoint_client_checked(&state, &tenant_id).await?;
     remove_app_item_scope_with(
         &state,
         &client,
@@ -958,34 +968,95 @@ mod tests {
         .unwrap();
     }
 
-    /// Forgetting a stale row touches only the app object, never SharePoint.
+    /// Forgetting a record with no permission id re-reads the resource: a
+    /// grant that is really gone (no entry for this app, or the file deleted)
+    /// drops the record, writing only the app object.
     #[tokio::test]
-    async fn forgetting_a_stale_record_touches_only_the_app() {
-        let server = MockServer::start().await;
-        mount_tags(&server, vec![tag(&file_scope("19")), OTHER.into()]).await;
-        expect_tags_written(&server, vec![OTHER.into()]).await;
-        let state = AppState::for_test(TENANT, &server.uri());
+    async fn forgetting_a_record_whose_grant_is_gone_drops_it() {
+        for status in [200, 404] {
+            let server = MockServer::start().await;
+            mount_tags(&server, vec![tag(&file_scope("19")), OTHER.into()]).await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1.0/sites/{SITE}/lists/{LIST}/items/19/permissions"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "value": [{ "id": "p-user", "roles": ["read"],
+                            "grantedToV2": { "user": { "id": "u-1", "displayName": "Jane" } } }]
+                    })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            expect_tags_written(&server, vec![OTHER.into()]).await;
+            let state = AppState::for_test(TENANT, &server.uri());
 
-        remove_app_item_scope_with(
-            &state,
-            &client(&server),
-            TENANT,
-            OBJ,
-            APP,
-            &file_scope("19"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(
-            server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|r| r.url.path().starts_with("/v1.0/applications/")),
-            "no SharePoint call"
-        );
+            remove_app_item_scope_with(
+                &state,
+                &client(&server),
+                TENANT,
+                OBJ,
+                APP,
+                &file_scope("19"),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{status}: {e:?}"));
+            let requests = server.received_requests().await.unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .filter(|r| r.method.as_str() != "GET")
+                    .all(|r| r.url.path().starts_with("/v1.0/applications/")),
+                "only the app object is written"
+            );
+        }
+    }
+
+    /// N9: a row that showed "not granted" may be stale. If SharePoint shows
+    /// the app holds a grant there again, or the entries can't be read, the
+    /// record (the only per-app list of item grants) is kept.
+    #[tokio::test]
+    async fn forgetting_keeps_the_record_of_a_grant_made_again_or_unreadable() {
+        for (status, code) in [(200, "grant_exists"), (403, "forbidden")] {
+            let server = MockServer::start().await;
+            mount_tags(&server, vec![tag(&file_scope("17"))]).await;
+            if status == 200 {
+                mount_item_permissions(
+                    &server,
+                    serde_json::json!({ "application": { "id": APP } }),
+                )
+                .await;
+            } else {
+                Mock::given(method("GET"))
+                    .and(path(format!(
+                        "/v1.0/sites/{SITE}/lists/{LIST}/items/17/permissions"
+                    )))
+                    .respond_with(ResponseTemplate::new(status))
+                    .mount(&server)
+                    .await;
+            }
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let state = AppState::for_test(TENANT, &server.uri());
+
+            let err = remove_app_item_scope_with(
+                &state,
+                &client(&server),
+                TENANT,
+                OBJ,
+                APP,
+                &file_scope("17"),
+                None,
+            )
+            .await
+            .expect_err("the record is kept");
+            assert_eq!(err.code, code);
+        }
     }
 
     /// The Finance site's Documents library.

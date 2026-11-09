@@ -89,7 +89,10 @@ operator sees the same list.
   The grant is revoked by `app_id` and the record forgotten on `object_id`, two webview arguments,
   so it first reads the registration and refuses unless it is `app_id`'s (`principal_mismatch`):
   a mismatched pair revoked one app's grant and dropped another app's record. Without a
-  permission id it only forgets the record, touching no SharePoint endpoint.
+  permission id it only forgets the record, but the row that showed "not granted" may be stale,
+  so it re-reads the resource first: an entry for this app keeps the record (`grant_exists`), and
+  so does an unreadable resource; only no entry or a 404 forgets it. Both paths therefore need
+  the SharePoint consent.
 - **Grants made elsewhere** (before this version, in the Permission Tester, by script) are not in
   the record until tracked by URL (`track_app_item_scope`). The section's copy and empty state say
   so; the list is "what azapptoolkit recorded", never "everything this app can reach".

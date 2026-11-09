@@ -867,6 +867,45 @@ impl Cache {
         })
     }
 
+    /// Stores `value` under `key`, one of several keys a single **prefix**
+    /// watch covers, only if that prefix was never invalidated, including
+    /// during the store itself. For a batch read-through that seeds many
+    /// per-object keys at once (`prewarm_sps`), where one watch per key would
+    /// overflow the watch table: `watch` comes from
+    /// [`Self::generation_for`] on the shared prefix, captured before the
+    /// batch's first await, and is borrowed so it can guard every key.
+    ///
+    /// Only an invalidation that reaches the prefix itself bumps the watch:
+    /// [`Self::invalidate_prefix`] with that prefix (or a shorter one) and
+    /// [`Self::invalidate_tenant`]. An exact-key [`Self::invalidate`] of one
+    /// covered key does not, so use this only for keys whose writers sweep by
+    /// prefix. A `key` outside the prefix is refused (`false`).
+    pub fn put_under_watch_if_current<T>(
+        &self,
+        watch: &IndexWatch<'_>,
+        key: String,
+        value: &T,
+    ) -> bool
+    where
+        T: serde::Serialize,
+    {
+        if !key.starts_with(watch.key()) || watch.current() != Some(watch.since) {
+            return false;
+        }
+        let Some(stamp) = self.put_inner(watch.kind, key.clone(), value, false) else {
+            return false;
+        };
+        // Same second look as `store_if_current`: the borrowed watch still
+        // holds its reference, so an invalidation during the store bumped it.
+        if watch.current() == Some(watch.since) {
+            return true;
+        }
+        self.buckets[watch.kind.idx()]
+            .lock()
+            .remove_if_stamp(&key, stamp);
+        false
+    }
+
     /// Stores through `store` only if `watch`'s key was never invalidated —
     /// including during the store itself.
     ///
