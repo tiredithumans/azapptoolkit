@@ -45,6 +45,13 @@ fn active_secret(key_id: &str) -> PasswordCredential {
 /// this subtree down, so anything the tab kept locally is gone by the time the
 /// operator looks. Only state held outside it — the toast stack — survives.
 fn mount_with_toasts(secrets: Vec<PasswordCredential>) -> ts::Mounted {
+    mount_with_toasts_and(secrets, Callback::new(|()| {}))
+}
+
+fn mount_with_toasts_and(
+    secrets: Vec<PasswordCredential>,
+    on_changed: Callback<()>,
+) -> ts::Mounted {
     let mut d = fixtures::application_detail("obj-1", "app-1", "Contoso CRM");
     d.application.password_credentials = secrets;
     // The tab fetches the tenant-wide Last-used map on mount; mock it (empty,
@@ -65,7 +72,7 @@ fn mount_with_toasts(secrets: Vec<PasswordCredential>) -> ts::Mounted {
         let detail = Signal::derive(move || detail.clone());
         view! {
             <ToastHost />
-            <CredentialsTab detail=detail on_changed=Callback::new(|()| {}) />
+            <CredentialsTab detail=detail on_changed=on_changed />
         }
     })
 }
@@ -288,4 +295,64 @@ async fn escape_on_the_rotate_confirm_closes_only_the_confirm() {
         "and leave the rotate dialog underneath open"
     );
     assert_eq!(ts::call_count("rotate_app_credential"), 0);
+}
+
+/// Opens the rotate dialog, waits for the vault prefill, and rotates keeping
+/// the existing secrets.
+async fn rotate_keeping_old() {
+    ts::wait_for(|| ts::body_contains("Rotate into Key Vault…")).await;
+    ts::click_button_labelled("Rotate into Key Vault…");
+    ts::wait_for(|| {
+        ts::query_all(".modal input").iter().any(|el| {
+            el.clone()
+                .unchecked_into::<web_sys::HtmlInputElement>()
+                .value()
+                == "kv-contoso"
+        })
+    })
+    .await;
+    ts::click_button_labelled("Rotate (keep old)");
+    ts::wait_for(|| ts::call_count("rotate_app_credential") == 1).await;
+}
+
+/// N4: a rotation that failed but may have left a client secret on the app
+/// reloads the detail so the leftover shows, and its error outlives that
+/// reload on a toast. A plain failure keeps the dialog open with its inline
+/// error and reloads nothing.
+#[wasm_bindgen_test]
+async fn a_failed_rotation_that_left_a_secret_reloads_the_credentials() {
+    for leftover in [true, false] {
+        ts::reset();
+        mock_rotation();
+        let mut err = azapptoolkit_dto::UiError::new("server_error", "graph error (502)", true);
+        if leftover {
+            err = err.with_leftover_secret("Graph may have created the client secret anyway.");
+        }
+        ts::mock_err("rotate_app_credential", &err);
+        let reloads = RwSignal::new(0_u32);
+        let _m = mount_with_toasts_and(
+            vec![active_secret("key-1")],
+            Callback::new(move |()| reloads.update(|n| *n += 1)),
+        );
+
+        rotate_keeping_old().await;
+        if leftover {
+            ts::wait_for(|| ts::query(".toast").is_some()).await;
+            assert!(
+                ts::text(".toast").contains("delete it from the Credentials tab"),
+                "{:?}",
+                ts::text(".toast")
+            );
+            assert_eq!(reloads.get_untracked(), 1, "the detail reloads once");
+            assert!(!ts::body_contains("Rotate secret into Key Vault"));
+        } else {
+            ts::wait_for(|| ts::body_contains("graph error (502)")).await;
+            assert_eq!(
+                reloads.get_untracked(),
+                0,
+                "nothing changed, nothing reloads"
+            );
+            assert!(ts::body_contains("Rotate secret into Key Vault"));
+        }
+    }
 }

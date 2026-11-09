@@ -6,6 +6,11 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- A new client secret whose reply from Graph was lost now says it may exist and refreshes the Credentials tab.
+- A Key Vault rotation blocked by Conditional Access now offers "Verify identity" for Key Vault, not only Graph.
+
 ## [0.35.1] - 2026-11-02
 
 ### Changed

@@ -547,7 +547,20 @@ pub fn CredentialsTab(
                     }
                 }
             },
-            cmd_create.fail_into(error),
+            {
+                // A secret Graph may have minted despite the error: reload to
+                // show it (see the rotate handler), the error on a toast.
+                let fail = cmd_create.fail_into(error);
+                move |e: azapptoolkit_dto::UiError| {
+                    if e.names_leftover_secret() {
+                        add_open.set(false);
+                        session.toast_error(e.message, None);
+                        on_changed_cb.try_run(());
+                        return;
+                    }
+                    fail(e);
+                }
+            },
             move |tenant_id| {
                 let input = AddPasswordInput {
                     display_name: dn.trim().to_string(),
@@ -724,13 +737,27 @@ pub fn CredentialsTab(
             },
             {
                 // A rotation writes on two planes — the Graph secret and the
-                // Key Vault version — and a `consent_required` names neither,
-                // so offer the Key Vault grant beside the Graph one the handle
-                // raises; the one that applies is the one that helps.
+                // Key Vault version — and neither a `consent_required` nor an
+                // `interaction_required` says which, so offer the Key Vault
+                // grant or step-up beside the Graph one the handle raises; the
+                // one that applies is the one that helps.
                 let fail = cmd_rotate.fail_into(error);
                 move |e: azapptoolkit_dto::UiError| {
                     if e.is_consent_required() {
                         session.report_consent_required(&e, "keyvault");
+                    } else if e.is_interaction_required() {
+                        session.report_interaction_required(&e, "keyvault");
+                    }
+                    if e.names_leftover_secret() {
+                        // The app's credentials may have changed although the
+                        // rotation failed (the backend busted their cache), so
+                        // reload to show the leftover. As on success,
+                        // `on_changed` unmounts this subtree, so the error
+                        // rides a session toast instead of the dialog.
+                        rotate_open.set(false);
+                        session.toast_error(e.message, None);
+                        on_changed_cb.try_run(());
+                        return;
                     }
                     fail(e);
                 }
