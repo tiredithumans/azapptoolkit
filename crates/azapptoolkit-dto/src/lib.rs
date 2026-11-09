@@ -75,6 +75,11 @@ pub struct UiError {
     pub retryable: bool,
 }
 
+/// The closing sentence of every error that may have left a client secret on
+/// the app (see [`UiError::with_leftover_secret`]).
+pub const LEFTOVER_SECRET_NOTE: &str =
+    "Nobody holds its value: refresh this app, then delete it from the Credentials tab.";
+
 impl UiError {
     /// Full-control constructor. The fields stay `pub`, so literal construction
     /// still works; these factories just drop the repetitive `retryable: false`
@@ -143,6 +148,26 @@ impl UiError {
     /// identity" toast, or — for the Graph read scopes — `reauthenticate`.
     pub fn is_interaction_required(&self) -> bool {
         self.code == azapptoolkit_core::reauth::INTERACTION_REQUIRED
+    }
+
+    /// Marks an error whose failed write may have left a client secret on the
+    /// app that nobody holds (a mint whose outcome is open, a rollback that
+    /// failed, a vault store that couldn't be confirmed): appends `detail` and
+    /// [`LEFTOVER_SECRET_NOTE`], and makes the error not retryable, since
+    /// re-running the write would mint another secret beside it. The backend's
+    /// one way to say so, read back by [`Self::names_leftover_secret`].
+    #[must_use]
+    pub fn with_leftover_secret(mut self, detail: &str) -> Self {
+        self.message = format!("{}\n\n{detail} {LEFTOVER_SECRET_NOTE}", self.message);
+        self.retryable = false;
+        self
+    }
+
+    /// True for an error built by [`Self::with_leftover_secret`]: the app's
+    /// credentials may have changed although the command failed, so the
+    /// Credentials tab reloads to show them.
+    pub fn names_leftover_secret(&self) -> bool {
+        self.message.ends_with(LEFTOVER_SECRET_NOTE)
     }
 
     /// True for a rejected access token (`unauthorized`, a client 401), read

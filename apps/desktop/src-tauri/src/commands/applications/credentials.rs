@@ -3,6 +3,7 @@ use base64::engine::general_purpose::STANDARD;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::models::{NewKeyCredential, PasswordCredential};
+use azapptoolkit_graph::GraphError;
 
 use crate::dto::UiError;
 use crate::dto::applications::{
@@ -42,11 +43,42 @@ pub(crate) async fn add_password_core(
     let (start, end) = resolve_password_window(&input, chrono::Utc::now())
         .map_err(|e| UiError::validation("invalid_secret_window", e.to_string()))?;
     let client = state.graph_for(tenant_id);
-    let cred = client
+    let cred = match client
         .add_password_window(object_id, &input.display_name, start, end)
-        .await?;
+        .await
+    {
+        Ok(cred) => cred,
+        Err(err) => {
+            // A mint whose outcome is open may have put a secret on the app,
+            // so the credential tier hears about it before the error surfaces
+            // (bust on the possibly-landed write, as the rotation does).
+            let (err, maybe_minted) = add_password_failed(err);
+            if maybe_minted {
+                invalidate_app_credentials(&state.cache, tenant_id, object_id);
+            }
+            return Err(err);
+        }
+    };
     invalidate_app_credentials(&state.cache, tenant_id, object_id);
     Ok(cred)
+}
+
+/// Maps a failed `addPassword` to the error to show, plus whether Graph may
+/// have minted the secret anyway ([`GraphError::may_have_committed`]): a 2xx
+/// whose body was lost, a 5xx or a dropped connection. Such a secret is live
+/// on the app with nobody holding its value, so the message names it for the
+/// operator to delete, and the error is not retryable (a retry would mint
+/// another one beside it). Shared by every `addPassword` caller.
+pub(crate) fn add_password_failed(err: GraphError) -> (UiError, bool) {
+    let maybe_minted = err.may_have_committed();
+    let ui = UiError::from(err);
+    if !maybe_minted {
+        return (ui, false);
+    }
+    let ui = ui.with_leftover_secret(
+        "Graph may have created the client secret anyway, though its reply was lost.",
+    );
+    (ui, true)
 }
 
 /// Maximum client-secret lifetime — the portal's 24-month hard cap, as the
@@ -917,6 +949,35 @@ mod handler_tests {
             "a failed mutation must leave the cached detail row alone"
         );
         assert!(indexes_intact(&state, TENANT));
+    }
+
+    /// N7: a mint whose outcome is open (a 5xx, or a 2xx whose body can't be
+    /// parsed) may have put a secret on the app that nobody holds. The error
+    /// says so, is not retryable, and the credential tier is busted for the
+    /// possibly-landed write (keeping the indexes); `addPassword` is sent once.
+    #[tokio::test]
+    async fn a_secret_add_with_an_open_outcome_names_it_and_busts_the_credential_tier() {
+        for reply in [
+            ResponseTemplate::new(502).insert_header("Retry-After", "0"),
+            ResponseTemplate::new(200).set_body_string("{not json"),
+        ] {
+            let (server, state) = mock_state(TENANT).await;
+            Mock::given(method("POST"))
+                .and(path(format!("/v1.0/applications/{OBJECT}/addPassword")))
+                .respond_with(reply)
+                .expect(1)
+                .mount(&server)
+                .await;
+            seed(&state);
+
+            let err = add_password_core(&state, TENANT, OBJECT, input())
+                .await
+                .expect_err("an open outcome surfaces as an error");
+            assert!(err.names_leftover_secret(), "{}", err.message);
+            assert!(!err.retryable, "a retry would mint another secret");
+            assert!(!detail_cached_here(&state), "the credential tier is busted");
+            assert!(indexes_intact(&state, TENANT));
+        }
     }
 
     /// A paste holding a private key is refused before the client is used —

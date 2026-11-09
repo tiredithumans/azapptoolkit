@@ -13,3 +13,63 @@ azapptoolkit_core::http_error_enum! {
         api_code = "graph_error",
     }
 }
+
+impl GraphError {
+    /// True when a failed non-idempotent write (a `POST` such as `addPassword`)
+    /// may still have committed on Graph's side, so its caller must treat the
+    /// outcome as open rather than as "nothing happened". A 2xx whose body
+    /// couldn't be read or parsed is a committed write reported as an error; a
+    /// 5xx or a dropped connection leaves the outcome unknown. A token that
+    /// couldn't be minted, a 401/403/404/429 or any other 4xx is a request
+    /// Graph refused, which wrote nothing (a `POST` is replayed only on a 429,
+    /// see `core::http_retry::RetryClass::NonIdempotent`).
+    pub fn may_have_committed(&self) -> bool {
+        matches!(
+            self,
+            GraphError::Server { .. }
+                | GraphError::Network(_)
+                | GraphError::Deserialize(_)
+                | GraphError::Protocol(_)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unknown_outcome_may_have_committed() {
+        let open = [
+            GraphError::Server {
+                status: 502,
+                body: String::new(),
+            },
+            GraphError::Network("reset".into()),
+            GraphError::Deserialize("eof".into()),
+            GraphError::Protocol("too big".into()),
+        ];
+        for e in &open {
+            assert!(e.may_have_committed(), "{e:?}");
+        }
+        let refused = [
+            GraphError::Unauthorized,
+            GraphError::Forbidden(String::new()),
+            GraphError::NotFound(String::new()),
+            GraphError::Throttled {
+                retry_after_secs: None,
+            },
+            GraphError::Api {
+                status: 400,
+                body: String::new(),
+            },
+            GraphError::Token(azapptoolkit_core::token::TokenError::new(
+                "consent_required",
+                "x",
+            )),
+        ];
+        for e in &refused {
+            assert!(!e.may_have_committed(), "{e:?}");
+        }
+    }
+}
