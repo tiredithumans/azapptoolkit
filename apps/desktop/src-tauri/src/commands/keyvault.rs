@@ -12,7 +12,7 @@ use azapptoolkit_core::settings::UserSettings;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_keyvault::{KeyVaultClient, KeyVaultError, SecretItem, SecretSetRequest};
 
-use crate::commands::applications::invalidate_app_credentials;
+use crate::commands::applications::{add_password_failed, invalidate_app_credentials};
 use crate::commands::dispatch::ARM_CONCURRENCY;
 use crate::dto::UiError;
 use crate::dto::keyvault::{
@@ -189,7 +189,7 @@ async fn roll_back(
     object_id: &str,
     minted: &PasswordCredential,
     display_name: &str,
-    mut err: UiError,
+    err: UiError,
 ) -> Unstored {
     let Err(rollback) = graph.remove_password(object_id, &minted.key_id).await else {
         return Unstored {
@@ -202,14 +202,12 @@ async fn roll_back(
         key_id = %minted.key_id,
         "rotation rollback failed; the minted client secret is still on the app",
     );
-    err.message = format!(
-        "{}\n\nThe new client secret '{display_name}' (key id {}) couldn't be removed again \
-         ({rollback}). Nobody holds its value: refresh this app, then delete it from the \
-         Credentials tab.",
-        err.message, minted.key_id
-    );
-    // Re-running the rotation as it stands would mint another one beside it.
-    err.retryable = false;
+    // Not retryable: re-running the rotation would mint another one beside it.
+    let err = err.with_leftover_secret(&format!(
+        "The new client secret '{display_name}' (key id {}) couldn't be removed again \
+         ({rollback}).",
+        minted.key_id
+    ));
     Unstored {
         err,
         left_on_app: true,
@@ -323,17 +321,14 @@ async fn store_minted(
                 key_id = %new_cred.key_id,
                 "rotation: couldn't tell whether the vault stored the new version; keeping it",
             );
-            let mut e = UiError::from(err);
-            e.message = format!(
-                "{}\n\nCouldn't check whether the vault stored the new secret anyway \
-                 ({read_back}), so client secret '{display_name}' (key id {}) was kept on the \
-                 app rather than revoked while the vault may hold it. If no version of '{}' is \
-                 tagged {TAG_KEY_ID} = {}, delete that client secret from this app's \
-                 Credentials tab.",
-                e.message, new_cred.key_id, input.secret_name, new_cred.key_id
-            );
-            // Re-running the rotation as it stands would mint another one.
-            e.retryable = false;
+            // Not retryable: re-running the rotation would mint another one.
+            let e = UiError::from(err).with_leftover_secret(&format!(
+                "Couldn't check whether the vault stored the new secret anyway ({read_back}), \
+                 so client secret '{display_name}' (key id {}) was kept on the app rather than \
+                 revoked while the vault may hold it. If no version of '{}' is tagged \
+                 {TAG_KEY_ID} = {}, the vault doesn't hold it.",
+                new_cred.key_id, input.secret_name, new_cred.key_id
+            ));
             Err(Unstored {
                 err: e,
                 left_on_app: true,
@@ -409,10 +404,22 @@ pub(crate) async fn rotate_app_credential_core(
     let lifetime = std::time::Duration::from_secs(u64::from(days) * 86_400);
     let display_name = format!("rotated-{}", chrono::Utc::now().format("%Y%m%d"));
 
-    // 1. Mint the new app secret.
-    let mut new_cred = graph
+    // 1. Mint the new app secret. A mint whose outcome is open may have left
+    //    a secret on the app that nobody holds, so the credential tier hears
+    //    about it before the error surfaces, as in step 2.
+    let mut new_cred = match graph
         .add_password(&input.object_id, &display_name, lifetime)
-        .await?;
+        .await
+    {
+        Ok(cred) => cred,
+        Err(err) => {
+            let (err, maybe_minted) = add_password_failed(err);
+            if maybe_minted {
+                invalidate_app_credentials(&state.cache, &tenant_id, &input.object_id);
+            }
+            return Err(err);
+        }
+    };
 
     // 2. Store it as a new Key Vault version (see `store_minted`).
     let mut warnings = match store_minted(&graph, &kv, &input, &mut new_cred, &display_name).await {
@@ -923,6 +930,70 @@ mod handler_tests {
         );
     }
 
+    /// A vault token that answers with this code.
+    struct CodedToken(&'static str);
+
+    #[async_trait::async_trait]
+    impl BearerProvider for CodedToken {
+        async fn bearer(&self) -> Result<String, azapptoolkit_core::token::TokenError> {
+            Err(azapptoolkit_core::token::TokenError::new(
+                self.0,
+                "token refused",
+            ))
+        }
+    }
+
+    /// N3: a vault consent or step-up refusal keeps its code through the
+    /// ownership read, so the Credentials tab can offer the Key Vault lever,
+    /// and nothing is minted.
+    #[tokio::test]
+    async fn a_vault_consent_or_step_up_keeps_its_code_before_anything_is_minted() {
+        for code in ["consent_required", "interaction_required"] {
+            let (server, state) = rotation_state(Arc::new(CodedToken(code))).await;
+            mount_mint(&server, Some("s3cret-value")).await;
+
+            let err = rotate(&state)
+                .await
+                .expect_err("the vault token was refused");
+            assert_eq!(err.code, code);
+            assert!(!err.is_reauth_fatal());
+            assert_eq!(hits(&server, "POST", &mint_path()).await, 0, "{code}");
+        }
+    }
+
+    /// N7: a mint that fails with its outcome open may have left a secret on
+    /// the app. The rotation stops before the vault, says so, is not
+    /// retryable, and busts the credential tier; a refused mint (403) busts
+    /// nothing.
+    #[tokio::test]
+    async fn a_mint_with_an_open_outcome_names_it_and_busts_the_credential_tier() {
+        for (reply, open) in [
+            (unavailable(), true),
+            (
+                ResponseTemplate::new(200).set_body_string("{not json"),
+                true,
+            ),
+            (ResponseTemplate::new(403), false),
+        ] {
+            let (server, state) = rotation_state(static_token()).await;
+            mount_versions(&server, ResponseTemplate::new(404)).await;
+            Mock::given(method("POST"))
+                .and(path(mint_path()))
+                .respond_with(reply)
+                .mount(&server)
+                .await;
+
+            let err = rotate(&state).await.expect_err("the mint failed");
+            assert_eq!(err.names_leftover_secret(), open, "{}", err.message);
+            if open {
+                assert!(!err.retryable, "a retry would mint another secret");
+            }
+            assert_eq!(detail_cached(&state, TENANT, OBJECT), !open);
+            assert_eq!(hits(&server, "POST", &mint_path()).await, 1);
+            assert_eq!(hits(&server, "PUT", &format!("/secrets/{SECRET}")).await, 0);
+        }
+    }
+
     /// A name Key Vault would refuse fails the ownership read, before any
     /// request; it used to mint, fail the same check on the write, and roll
     /// back.
@@ -1048,6 +1119,7 @@ mod handler_tests {
             err.message
         );
         assert!(!err.retryable, "a blind re-run mints a second secret");
+        assert!(err.names_leftover_secret(), "{}", err.message);
         assert!(
             !detail_cached(&state, TENANT, OBJECT),
             "the leftover secret is a landed write"
@@ -1125,8 +1197,9 @@ mod handler_tests {
 
         let err = rotate(&state).await.expect_err("the outcome is unknown");
         assert_eq!(err.code, "server_error", "the write's own code");
-        assert!(!err.retryable);
+        assert!(err.names_leftover_secret(), "{}", err.message);
         assert!(err.message.contains(NEW_KEY), "{}", err.message);
+        assert!(!err.retryable);
         assert!(err.message.contains("was kept"), "{}", err.message);
         assert_eq!(
             hits(&server, "POST", &rollback_path()).await,

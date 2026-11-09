@@ -14,7 +14,8 @@ use azapptoolkit_graph::client::{
 };
 
 use crate::commands::applications::{
-    CreatedApp, augment_with_object_id, invalidate_app_lists, record_created_apps,
+    CreatedApp, add_password_failed, augment_with_object_id, invalidate_app_lists,
+    record_created_apps,
 };
 use crate::dto::UiError;
 use crate::dto::sso::{OidcSsoConfigInput, OidcSsoSummary, SamlSsoConfigInput, SamlSsoSummary};
@@ -358,8 +359,11 @@ pub(crate) async fn configure_oidc(
     {
         let days = resolve_secret_lifetime_days(input.secret_lifetime_days)?;
         let lifetime = Duration::from_secs(u64::from(days) * 86_400);
-        let mut secret =
-            with_replication_retry(|| client.add_password(object_id, name, lifetime)).await?;
+        // The app is created by now, so the caller names it; this names a
+        // secret that may have been minted despite the error.
+        let mut secret = with_replication_retry(|| client.add_password(object_id, name, lifetime))
+            .await
+            .map_err(|e| add_password_failed(e).0)?;
         (
             secret.secret_text.take(),
             secret.end_date_time.map(|d| d.to_rfc3339()),
