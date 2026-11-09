@@ -2586,6 +2586,58 @@ fn the_run_is_cacheable_guard_detector_rejects_every_escape() {
     }
 }
 
+/// The `sign_out` command's own steps are fenced on the epoch its keyring
+/// delete moved to, like the service's sweep (N12).
+///
+/// A sign-in that landed while a sign-out ran used to keep its session but
+/// lose `last_account` (the next launch showed the sign-in card) and its
+/// freshly swept tenant caches, because the command cleared both
+/// unconditionally after the service call. The remembered account is now
+/// cleared only inside the settings write, while the epoch is still the
+/// sign-out's (`forget_account_after_sign_out`), and the tenant sweep runs only
+/// while it still is.
+#[test]
+fn the_sign_out_command_fences_its_steps_on_its_own_bump() {
+    let auth = include_str!("../../src/commands/auth.rs").replace("\r\n", "\n");
+    let (_, after) = auth
+        .split_once("pub async fn sign_out(")
+        .expect("the sign_out command");
+    let (body, _) = after.split_once("\n}\n").expect("the end of sign_out");
+    let code: String = code_lines(body).collect::<Vec<_>>().join("\n");
+    assert!(
+        code.contains("let bumped = state.auth.sign_out("),
+        "sign_out binds the epoch the service moved to as `bumped`"
+    );
+    assert!(
+        code.contains("forget_account_after_sign_out(bumped)")
+            && !code.contains("forget_account()"),
+        "sign_out clears the remembered account only through the fenced helper"
+    );
+    let (before_sweep, _) = code
+        .split_once("forget_tenant(")
+        .expect("sign_out still sweeps the tenant");
+    assert!(
+        before_sweep.contains("if state.auth.session_epoch() == bumped"),
+        "sign_out sweeps the tenant only while its own bump is the latest"
+    );
+
+    let state = include_str!("../../src/state.rs").replace("\r\n", "\n");
+    let (_, after) = state
+        .split_once("pub async fn forget_account_after_sign_out(")
+        .expect("AppState::forget_account_after_sign_out");
+    let (helper, _) = after.split_once("\n    }\n").expect("its end");
+    let (_, inside) = helper
+        .split_once("mutate_settings_off_worker(")
+        .expect("the helper writes through mutate_settings_off_worker");
+    let (check, clear) = inside
+        .split_once("settings.last_account = None")
+        .expect("the helper clears last_account");
+    assert!(
+        check.contains("session_epoch() == bumped") && !clear.is_empty(),
+        "the epoch check runs inside the settings write, before the clear"
+    );
+}
+
 /// Sign-out forgets **every** per-tenant map on `AppState`, through one sweep.
 ///
 /// `sign_out` used to drop two of the five client maps by hand and leave the Key

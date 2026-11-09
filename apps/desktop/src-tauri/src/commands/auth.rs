@@ -162,14 +162,18 @@ fn restore_outcome(
 
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>, tenant: TenantContext) -> Result<(), UiError> {
-    state.auth.sign_out(&tenant).await.map_err(UiError::from)?;
+    let bumped = state.auth.sign_out(&tenant).await.map_err(UiError::from)?;
     // Signing out is the one place that must also drop the restore pointer:
     // leaving it behind would have the next launch try to revive a session whose
-    // keyring token `sign_out` just deleted.
-    state.forget_account().await;
-    // Every per-tenant client map, idle gate and cache kind — one sweep, so a
-    // new map can't be missed here (see `AppState::forget_tenant`).
-    state.forget_tenant(&tenant.tenant_id);
+    // keyring token `sign_out` just deleted. Both steps are fenced on the epoch
+    // the sign-out moved to: a sign-in that landed meanwhile remembered its own
+    // account and swept the tenant itself, and keeps both.
+    state.forget_account_after_sign_out(bumped).await;
+    if state.auth.session_epoch() == bumped {
+        // Every per-tenant client map, idle gate and cache kind — one sweep, so
+        // a new map can't be missed here (see `AppState::forget_tenant`).
+        state.forget_tenant(&tenant.tenant_id);
+    }
     Ok(())
 }
 

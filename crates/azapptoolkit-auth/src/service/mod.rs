@@ -999,9 +999,11 @@ impl EntraAuthService {
     /// nothing is stored and the call fails `NotSignedIn`, which every
     /// long-running loop already stops on. It fails the same way while another
     /// account holds the tenant (unless `registration` is `sign_in`'s
-    /// `Replace`), caching and registering nothing — but that check follows
-    /// the keyring write, so the flow's rotated refresh token is saved by then,
-    /// under its own account's `{tenant}:{oid}` entry.
+    /// `Replace`), caching and registering nothing. Both checks follow the
+    /// keyring write, so a refused flow's rotated refresh token is saved by
+    /// then, under its own account's `{tenant}:{oid}` entry; the refusal takes
+    /// it back out ([`Self::discard_refused_refresh`]) while the keyring still
+    /// holds exactly that token, so nothing newer is ever touched.
     ///
     /// `registration` is the one place a flow registers its context, in the
     /// critical section that caches the token and checked the fence: an
@@ -1029,7 +1031,11 @@ impl EntraAuthService {
             .unwrap_or(now);
         let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
         // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
+        // `written` keeps a copy (also `Zeroizing`) of a token that reached
+        // the keyring, for a refusal below to take back out.
+        let mut written: Option<Zeroizing<String>> = None;
         if let Some(refresh) = token.refresh_token.take() {
+            let kept = refresh.clone();
             let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
             let epoch = Arc::clone(&self.session_epoch);
             // The fence is evaluated under the keyring's chunk-set lock, which
@@ -1053,7 +1059,7 @@ impl EntraAuthService {
                     );
                     return Err(AuthError::NotSignedIn);
                 }
-                (Ok(true), _) => {}
+                (Ok(true), _) => written = Some(kept),
                 (Err(AuthError::Keyring(_)), RefreshTokenSave::BestEffort) => {
                     // No error text. The access token below is still good; the
                     // previous refresh token survives a write refused at chunk
@@ -1082,37 +1088,67 @@ impl EntraAuthService {
         // check lands before the sweep, which removes it, and one checked after
         // the move stores nothing: a late put cannot outlive it. The
         // registration rides the same critical section, so it cannot either.
-        let mut registry = self.known_tenants.lock();
-        if self.session_epoch() != fence {
-            drop(registry);
-            tracing::info!(
-                target: "auth",
-                tenant_id = %tenant.tenant_id,
-                "a token refresh finished after the session ended; discarding it"
-            );
+        // The refusal is decided inside the lock's scope and acted on after
+        // it: the guard is not `Send`, so no await may sit in its scope.
+        let refused = {
+            let mut registry = self.known_tenants.lock();
+            if self.session_epoch() != fence {
+                Some("a token refresh finished after the session ended; discarding it")
+            // Only a sign-in or a sign-out moves the epoch, so while the tenant
+            // is registered its account must not change without a move: this
+            // token never seeds another account's live session (only
+            // `sign_in`, which moved it, replaces one). With nothing registered
+            // (after a purge) there is no account to compare.
+            } else if registration != Registration::Replace
+                && held_by_another_account(&registry, tenant)
+            {
+                Some("another account is signed in to the tenant; discarding this token")
+            } else {
+                self.cache
+                    .put(tenant.tenant_id.clone(), cache_scopes, cae, access.clone());
+                if registration != Registration::Keep {
+                    registry.insert(tenant.tenant_id.clone(), tenant.clone());
+                }
+                None
+            }
+        };
+        if let Some(why) = refused {
+            tracing::info!(target: "auth", tenant_id = %tenant.tenant_id, "{why}");
+            Self::discard_refused_refresh(tenant, written).await;
             return Err(AuthError::NotSignedIn);
         }
-        // Only a sign-in or a sign-out moves the epoch, so while the tenant is
-        // registered its account must not change without a move: this token
-        // never seeds another account's live session (only `sign_in`, which
-        // moved it, replaces one). With nothing registered (after a purge)
-        // there is no account to compare.
-        if registration != Registration::Replace && held_by_another_account(&registry, tenant) {
-            drop(registry);
-            tracing::info!(
-                target: "auth",
-                tenant_id = %tenant.tenant_id,
-                "another account is signed in to the tenant; discarding this token"
-            );
-            return Err(AuthError::NotSignedIn);
-        }
-        self.cache
-            .put(tenant.tenant_id.clone(), cache_scopes, cae, access.clone());
-        if registration != Registration::Keep {
-            registry.insert(tenant.tenant_id.clone(), tenant.clone());
-        }
-        drop(registry);
         Ok(access)
+    }
+
+    /// Takes a refused flow's refresh token back out of the keyring, so it
+    /// isn't left under its account's `{tenant}:{oid}` entry with no session
+    /// to use it. The compare and delete share the chunk-set lock with every
+    /// save, so it removes only `written` itself: a newer token (a sign-in of
+    /// the same account that landed meanwhile) is `Superseded` and kept.
+    /// Best-effort: a failure leaves the entry, which is never served across
+    /// identities.
+    async fn discard_refused_refresh(tenant: &TenantContext, written: Option<Zeroizing<String>>) {
+        let Some(refresh) = written else {
+            return;
+        };
+        let (t, oid) = (tenant.tenant_id.clone(), tenant.account_oid.clone());
+        let purge = tokio::task::spawn_blocking(move || {
+            delete_refresh_token_if_current(&t, &oid, &refresh)
+        })
+        .await;
+        match purge {
+            Ok(Ok(outcome)) => tracing::debug!(
+                target: "auth",
+                tenant_id = %tenant.tenant_id,
+                ?outcome,
+                "took a refused flow's refresh token back out of the keyring"
+            ),
+            _ => tracing::warn!(
+                target: "auth",
+                tenant_id = %tenant.tenant_id,
+                "could not remove a refused flow's refresh token from the keyring"
+            ),
+        }
     }
 
     async fn access_token_inner(
@@ -1351,7 +1387,11 @@ impl EntraAuthService {
     /// client adapter — exactly as it was, so "still signed in" stays true.
     /// The sweep after it runs only while that move is the latest one (see
     /// `Self::sweep_after_sign_out`).
-    pub async fn sign_out(&self, tenant: &TenantContext) -> Result<()> {
+    ///
+    /// Returns that epoch, so the command's own steps (the remembered
+    /// account, the data caches) can be fenced on it too: a sign-in that
+    /// moves the epoch again meanwhile keeps everything it set up.
+    pub async fn sign_out(&self, tenant: &TenantContext) -> Result<u64> {
         let account_oid = self
             .known_tenants
             .lock()
@@ -1368,7 +1408,7 @@ impl EntraAuthService {
         .await
         .map_err(|e| AuthError::Keyring(format!("keyring delete task failed: {e}")))??;
         self.sweep_after_sign_out(&tenant.tenant_id, bumped);
-        Ok(())
+        Ok(bumped)
     }
 
     /// `sign_out`'s in-memory half, once its keyring delete moved the epoch
@@ -2313,6 +2353,49 @@ mod tests {
             svc.cache.get(tenant, &read, true).unwrap().token,
             "claimant-read"
         );
+        // N11: its refresh token reached the keyring before the refusal; the
+        // refusal takes it back out instead of leaving it under its own entry.
+        assert_eq!(stored_token(tenant, oid), None);
+    }
+
+    /// N11: a refused flow takes back only the refresh token it wrote. A newer
+    /// one under the same entry (a sign-in of the same account that landed
+    /// meanwhile) is kept, and nothing written means nothing removed.
+    #[tokio::test]
+    async fn a_refused_store_takes_back_only_its_own_refresh_token() {
+        init_mock_keyring();
+        let (tenant, oid) = ("refused-store-tenant", "refused-store-oid");
+        let context = TenantContext {
+            tenant_id: tenant.into(),
+            account_oid: oid.into(),
+            username: None,
+            display_name: None,
+        };
+
+        save_refresh_token(tenant, oid, "rt-newer-sign-in").unwrap();
+        EntraAuthService::discard_refused_refresh(
+            &context,
+            Some(Zeroizing::new("rt-refused".into())),
+        )
+        .await;
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("rt-newer-sign-in")
+        );
+
+        EntraAuthService::discard_refused_refresh(&context, None).await;
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("rt-newer-sign-in")
+        );
+
+        save_refresh_token(tenant, oid, "rt-refused").unwrap();
+        EntraAuthService::discard_refused_refresh(
+            &context,
+            Some(Zeroizing::new("rt-refused".into())),
+        )
+        .await;
+        assert_eq!(stored_token(tenant, oid), None);
     }
 
     /// A silent refresh (`Registration::Keep`) took its account from the
