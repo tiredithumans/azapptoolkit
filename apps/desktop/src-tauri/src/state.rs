@@ -624,6 +624,24 @@ impl AppState {
         }
     }
 
+    /// [`Self::forget_account`] for the `sign_out` command, fenced on the epoch
+    /// its keyring delete moved to (`bumped`). The check runs inside the
+    /// settings write, under the settings lock a sign-in's
+    /// [`Self::remember_account`] also takes: a sign-in that moved the epoch
+    /// meanwhile keeps its remembered account, whichever write lands first.
+    pub async fn forget_account_after_sign_out(&self, bumped: u64) {
+        let auth = Arc::clone(&self.auth);
+        if let Err(e) = mutate_settings_off_worker(crate::config_directory(), move |settings| {
+            if auth.session_epoch() == bumped {
+                settings.last_account = None;
+            }
+        })
+        .await
+        {
+            tracing::warn!(target: "auth", error = %e, "could not clear the remembered account");
+        }
+    }
+
     /// Everything this process holds for `tenant_id`, dropped on sign-out: every
     /// per-tenant client map, the tenant's idle single-flight gates, and every
     /// cache kind. Distinct from [`Self::forget_account`] (the settings.json

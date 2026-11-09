@@ -11,6 +11,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - A new client secret whose reply from Graph was lost now says it may exist and refreshes the Credentials tab.
 - A Key Vault rotation blocked by Conditional Access now offers "Verify identity" for Key Vault, not only Graph.
 - Removing a SharePoint item record now checks SharePoint first and keeps it if the app has access there again.
+- Signing in while a sign-out was still finishing no longer makes the next launch forget the new account.
 
 ## [0.35.1] - 2026-11-02
 

@@ -322,10 +322,11 @@ which a sign-out/sign-in cycle would.
   use that, since the UI hands back the backend's own outcome; closing it needs a tombstone of the
   purged account, because refusing when `remembered_account()` is `None` would lock out an operator
   whose pointer write failed); a refresh token can be orphaned in the keyring, where nothing
-  addresses it again (a lost `last_account`, a failed best-effort delete, a store refused after its
-  keyring write, a sign-out that read the registered account before its delete while a sign-in
-  switched it); and the command-level `remember_account` / `forget_account` / `forget_tenant` steps
-  are not fenced by the epoch, so overlapping flows can interleave them.
+  addresses it again (a lost `last_account`, a failed best-effort delete, a sign-out that read the
+  registered account before its delete while a sign-in switched it); and the `sign_in` command's
+  `remember_account` / `forget_tenant` steps are not fenced by the epoch. A store refused after its
+  keyring write takes its token back out (`discard_refused_refresh`, a compare-and-delete that keeps
+  a newer token), and the `sign_out` command's steps are fenced (below).
 - The `InvalidGrant` purge is conditional (`token_cache::delete_refresh_token_if_current`): it
   deletes only if the keyring still holds the token that just failed, compared and deleted under
   the chunk-set lock. Refresh locks are per scope set, so a slow refresh can fail with the old token
@@ -363,6 +364,11 @@ which a sign-out/sign-in cycle would.
   session's refresh token on disk with nothing to address it again. Its sweep runs only while its
   own epoch move is still the latest (`sweep_after_sign_out`): a sign-in that lands in between
   has already swept the tenant and registered its own session, which the sweep used to drop.
+  `sign_out` returns that epoch, and the command fences its own steps on it the same way: it
+  clears `last_account` only inside the settings write while the epoch is still its own
+  (`AppState::forget_account_after_sign_out`, under the settings lock `remember_account` takes),
+  and runs `forget_tenant` only while it is (pinned by
+  `the_sign_out_command_fences_its_steps_on_its_own_bump`).
 - `reauthenticate`, consent and step-up round trips do not move the epoch, so the purge's
   epoch check does not cover them: one landing between the purge's keyring delete and its
   in-memory cleanup still loses its cached tokens and registration (its keyring token survives for
