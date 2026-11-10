@@ -71,10 +71,14 @@ pub fn owner_summary_text(heading: &str, fields: &[OwnerField], note: Option<&st
 /// per-field icon.
 #[component]
 fn CopyAllButton(#[prop(into)] text: String) -> impl IntoView {
-    let copied = RwSignal::new(false);
+    // `None` until clicked; then what the clipboard write actually did.
+    let copied: RwSignal<Option<bool>> = RwSignal::new(None);
     let copy = move |_| {
-        crate::util::copy_text(text.clone());
-        copied.set(true);
+        let text = text.clone();
+        leptos::task::spawn_local(async move {
+            let ok = crate::util::write_clipboard(&text).await;
+            let _ = copied.try_set(Some(ok));
+        });
     };
     view! {
         <div class="sso-summary__actions">
@@ -82,7 +86,11 @@ fn CopyAllButton(#[prop(into)] text: String) -> impl IntoView {
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
                 on_click=Box::new(copy)
             >
-                {move || if copied.get() { "Copied all details" } else { "Copy all details" }}
+                {move || match copied.get() {
+                    Some(true) => "Copied all details",
+                    Some(false) => "Copy failed — try again",
+                    None => "Copy all details",
+                }}
             </Button>
         </div>
     }

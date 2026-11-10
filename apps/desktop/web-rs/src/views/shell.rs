@@ -375,6 +375,14 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         }
                                     })}
                                 </span>
+                                // A pending update outlives its launch toast
+                                // as a dot on the pill (the menu item names
+                                // the version).
+                                <Show when=move || update_info.with(Option::is_some)>
+                                    <span class="shell__tenant-chip-update" title="Update available">
+                                        <span class="visually-hidden">"Update available"</span>
+                                    </span>
+                                </Show>
                                 <span class="shell__tenant-chip-caret">
                                     <Icon name=IconName::ChevronDown size=14 />
                                 </span>
@@ -443,11 +451,18 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         <span>
                                             {move || {
                                                 if checking.get() {
-                                                    "Checking…"
+                                                    "Checking…".to_string()
                                                 } else if let Some(reason) = updates_disabled.get() {
-                                                    reason.menu_label()
+                                                    reason.menu_label().to_string()
+                                                } else if let Some(v) = update_info
+                                                    .with(|i| i.as_ref().map(|i| i.version.clone()))
+                                                {
+                                                    // The launch toast is gone in
+                                                    // seconds; this is where the
+                                                    // pending update stays visible.
+                                                    format!("Update available — v{v}")
                                                 } else {
-                                                    "Check for updates"
+                                                    "Check for updates".to_string()
                                                 }
                                             }}
                                         </span>

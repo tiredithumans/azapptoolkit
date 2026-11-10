@@ -11,6 +11,7 @@ use leptos::prelude::*;
 
 use azapptoolkit_dto::UiError;
 
+use crate::components::toast::ToastKind;
 use crate::state::{Session, use_session};
 
 /// One list fetch's rows, each wrapped ONCE in an `Arc`, tagged with the tenant
@@ -156,6 +157,14 @@ where
             return;
         }
         let Some(rows) = export_rows.for_active_tenant(session) else {
+            // The menu used to do nothing at all here, which read as a broken
+            // button. Say why there is no file.
+            session.push_toast(
+                ToastKind::Info,
+                format!("Nothing to export — there are no {noun} in this list."),
+                None,
+                None,
+            );
             return;
         };
         exporting.set(true);

@@ -25,11 +25,18 @@ struct ClipboardStub {
 
 impl ClipboardStub {
     fn install() -> Self {
+        Self::install_with("window.__copiedText = text; return Promise.resolve();")
+    }
+
+    /// A clipboard that refuses the write, as the webview does when it has
+    /// lost focus or the permission is denied.
+    fn install_rejecting() -> Self {
+        Self::install_with("return Promise.reject(new Error('denied'));")
+    }
+
+    fn install_with(body: &str) -> Self {
         let clipboard: JsValue = web_sys::window().unwrap().navigator().clipboard().into();
-        let write_text = js_sys::Function::new_with_args(
-            "text",
-            "window.__copiedText = text; return Promise.resolve();",
-        );
+        let write_text = js_sys::Function::new_with_args("text", body);
         js_sys::Reflect::set(&clipboard, &"writeText".into(), &write_text).unwrap();
         Self { clipboard }
     }
@@ -80,4 +87,24 @@ async fn copy_click_shows_transient_copied_badge() {
 
     // The badge is transient: it clears itself after the reset timeout.
     ts::wait_for(|| ts::query(".copyable-id__copied").is_none()).await;
+}
+
+/// A rejected clipboard write must not read as done: the badge says the copy
+/// failed, and says it as an alert. It used to show "Copied" regardless, so the
+/// operator pasted whatever the clipboard held before.
+#[wasm_bindgen_test]
+async fn a_failed_copy_says_so() {
+    ts::reset();
+    let _clipboard = ClipboardStub::install_rejecting();
+    let _m = ts::mount_view(
+        || view! { <CopyableId value="00000000-1111-2222-3333-444444444444" label="Test id" /> },
+    );
+
+    ts::click(".copyable-id .ui-icon-btn");
+    ts::wait_for(|| ts::query(".copyable-id__copied--failed[role=alert]").is_some()).await;
+    assert!(ts::body_contains("Copy failed"));
+    assert!(
+        ts::query(".copyable-id__copied[role=status]").is_none(),
+        "a failed copy never shows the success badge"
+    );
 }

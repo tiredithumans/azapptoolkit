@@ -17,6 +17,11 @@ After 0.34.1, each change is one line written for the person using the app.
 - Closing an open item with unsaved edits now asks first, and a full dock no longer evicts an item you were editing.
 - Pressing Escape in a text field or with a menu open no longer hides the item you are working in.
 - The update dialog now warns when restarting would lose unsaved edits or one-time secret values.
+- A copy button now says "Copy failed" when the clipboard refuses, instead of "Copied".
+- Error notifications stay until you dismiss them, and a new one no longer resets the others or steals focus.
+- Creating an app now confirms and opens it; saving the Overview tab confirms; an empty export says so.
+- A managed identity's Azure RBAC panel now shows the real error with Retry instead of always blaming consent.
+- A pending update stays marked on the account menu after its notification disappears.
 
 ## [0.35.3] - 2026-11-10
 
