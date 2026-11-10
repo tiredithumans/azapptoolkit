@@ -223,7 +223,7 @@ impl GraphClient {
     /// consent, so it grows with the number of users; the audit keeps only the
     /// `AllPrincipals` rows and used to page through all of it (serially, 999
     /// at a time) to throw the rest away. Cached under its own `grants:` key,
-    /// which [`Self::invalidate_grant_cache`] sweeps with the others. Should a
+    /// which `invalidate_grant_cache` sweeps with the others. Should a
     /// tenant's Graph refuse the filter (a 400), the full read answers instead,
     /// filtered here — never an empty result.
     pub async fn list_admin_consent_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
