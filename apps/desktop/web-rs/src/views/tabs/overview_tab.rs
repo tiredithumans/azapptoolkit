@@ -160,6 +160,9 @@ pub fn OverviewTab(
         ) != UpdateApplicationInput::default()
     };
 
+    // Closing the open item mid-edit asks before discarding the form.
+    crate::hooks::use_unsaved_marker(move || editing.get() && changed());
+
     let cancel = move |_| {
         editing.set(false);
         cmd.error.set(None);

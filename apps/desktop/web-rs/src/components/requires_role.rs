@@ -14,7 +14,10 @@ pub fn RequiresRole(#[prop(into)] capability_key: String) -> impl IntoView {
     // Unknown key → render nothing (the catalog is the allow-list).
     capability(&capability_key).map(|cap| {
         // Name the primary role (the label users recognise); the full list of
-        // satisfying roles + what-to-do lives in the tooltip.
+        // satisfying roles + what-to-do lives in the tooltip. A `title` never
+        // shows for a keyboard user, so the label is focusable, carries the
+        // whole text as its accessible name, and shows the same tip on focus
+        // (`data-tip`, drawn by the stylesheet).
         let primary = cap.role_names().next().unwrap_or(cap.label);
         let tip = if cap.directory_roles_any.len() > 1 {
             format!(
@@ -26,7 +29,14 @@ pub fn RequiresRole(#[prop(into)] capability_key: String) -> impl IntoView {
             cap.remediation.to_string()
         };
         view! {
-            <span class="requires-role" title=tip>
+            <span
+                class="requires-role"
+                role="note"
+                tabindex="0"
+                aria-label=format!("Requires: {primary}. {tip}")
+                data-tip=tip.clone()
+                title=tip
+            >
                 {format!("Requires: {primary}")}
             </span>
         }

@@ -1126,6 +1126,10 @@ fn RestoreReportView(
                             <div class="dr-view__report-head">
                                 <strong>{display_name}</strong>
                                 <span class="dr-view__report-id">{format!("new appId {new_app_id}")}</span>
+                                <crate::components::ui::CopyIconButton
+                                    value=Signal::stored(new_app_id.clone())
+                                    aria_label="Copy new appId"
+                                />
                                 {consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
                                 // "completed" only when this run did finish it.
                                 {adopted.then(|| view! {

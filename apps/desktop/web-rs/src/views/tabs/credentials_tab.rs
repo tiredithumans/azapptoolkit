@@ -21,7 +21,7 @@ use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyableId, DataTable, DateInput, FormError, Spinner,
+    Badge, BadgeTone, Callout, CopyIconButton, CopyableId, DataTable, DateInput, FormError, Spinner,
 };
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
@@ -1350,9 +1350,21 @@ pub fn CredentialsTab(
                             <span class="ui-text">
                                 "The .pfx holds this certificate and its private key, encrypted with the password above — import it with Import-PfxCertificate on Windows, then delete the file. Save both together: neither half is any use alone. Windows Server 2016 and older cannot read AES-256 .pfx files; use the PEM below there."
                             </span>
-                            <strong>"Private key (PKCS#8 PEM)"</strong>
+                            <span class="copyable-id">
+                                <strong>"Private key (PKCS#8 PEM)"</strong>
+                                <CopyIconButton
+                                    value=Signal::stored(r.private_key_pem.clone())
+                                    aria_label="Copy private key PEM"
+                                />
+                            </span>
                             <pre class="secret-reveal">{r.private_key_pem.clone()}</pre>
-                            <strong>"Certificate (PEM)"</strong>
+                            <span class="copyable-id">
+                                <strong>"Certificate (PEM)"</strong>
+                                <CopyIconButton
+                                    value=Signal::stored(r.certificate_pem.clone())
+                                    aria_label="Copy certificate PEM"
+                                />
+                            </span>
                             <pre class="secret-reveal">{r.certificate_pem.clone()}</pre>
                             {move || {
                                 pfx_saved
