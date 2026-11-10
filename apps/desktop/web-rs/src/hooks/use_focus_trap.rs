@@ -54,6 +54,15 @@ fn is_active(el: &HtmlElement) -> bool {
 /// container ref is read reactively, so the focus-in still fires if the dialog
 /// mounts a tick after `active` flips (the `<Show>` case).
 pub fn use_focus_trap(container: NodeRef<html::Div>, active: Signal<bool>) {
+    use_focus_placement(container, active);
+    use_tab_cycle(container, active);
+}
+
+/// The focus half of [`use_focus_trap`]: move focus into `container` when
+/// `active` turns true and hand it back to the trigger when it turns false.
+/// Registers no window listener, so an always-mounted, closed dialog costs
+/// nothing per keystroke.
+pub fn use_focus_placement(container: NodeRef<html::Div>, active: Signal<bool>) {
     // Record-and-restore is the shared half (see the module doc). Reading the
     // container ref inside the closure is what drives the retry when the dialog
     // mounts a tick after `active` flips; a dialog with no focusable control at
@@ -67,7 +76,15 @@ pub fn use_focus_trap(container: NodeRef<html::Div>, active: Signal<bool>) {
         }
         true
     });
+}
 
+/// The keyboard half of [`use_focus_trap`]: one window `keydown` listener that
+/// cycles Tab inside `container` while `active`. Call it from a component that
+/// is mounted only while the dialog is open (as `ModalShell` does) so a closed
+/// dialog holds no listener at all — an audit page mounts several closed
+/// dialogs per row, and each used to add two window listeners that ran on every
+/// keystroke anywhere in the app.
+pub fn use_tab_cycle(container: NodeRef<html::Div>, active: Signal<bool>) {
     let handle = window_event_listener(ev::keydown, move |ev| {
         if ev.key() != "Tab" || !active.get_untracked() {
             return;

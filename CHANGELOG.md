@@ -9,6 +9,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Changed
 
 - A security audit of a large tenant reads far fewer delegated grants and updates its progress bar more smoothly.
+- The Credentials tab opens faster on a large tenant, and typing is lighter on pages with many audit rows.
 
 ### Fixed
 
