@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.35.4] - 2026-11-10
+
 ### Changed
 
 - Granting admin consent, deleting an app and "Delete forever" now ask you to type a keyword, as the bulk actions do.
