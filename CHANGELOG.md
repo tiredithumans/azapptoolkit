@@ -22,9 +22,10 @@ After 0.34.1, each change is one line written for the person using the app.
 - The Usage panel retries a failed log query and no longer reports "no workspace" for an hour after one failure.
 - A backup now records whether each app was actually consented, so a restore no longer proposes consent it never had.
 - Restore no longer adopts an existing app because a certificate on it is labelled with a thumbprint from the backup.
-- Granting consent with an expired session now prompts you to sign in again, and a bulk grant stops instead of failing every app.
+- Granting consent with an expired session now asks you to sign in again, and a bulk grant stops there.
 - Granting consent that changes nothing no longer discards the saved security audit.
 - Cached lists and the saved audit now expire after the computer has been asleep (macOS and Linux).
+- The sign-in card now has "Cancel sign-in", so a closed browser tab no longer locks the button for five minutes.
 - An owner change that partly failed now also shows its error as a notification, which stays after the tab reloads.
 
 ## [0.35.2] - 2026-11-09

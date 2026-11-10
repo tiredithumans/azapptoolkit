@@ -49,6 +49,13 @@ pub async fn refresh_session(tenant_id: &str) -> Result<(), UiError> {
     invoke_result("refresh_session", TenantArg { tenant_id }).await
 }
 
+/// Abandons an interactive flow that is waiting on the browser (sign-in,
+/// re-authenticate, consent, step-up). The waiting call then returns
+/// `cancelled`. A no-op when nothing is waiting.
+pub async fn cancel_interactive_auth() -> Result<(), UiError> {
+    invoke_result("cancel_interactive_auth", ()).await
+}
+
 /// Interactively re-authenticates the signed-in account in place — one browser
 /// round trip (`prompt=login`, pinned to the current account) that mints a fresh
 /// refresh + access token without ending the session or wiping the data caches.

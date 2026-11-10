@@ -59,6 +59,7 @@ pub fn run() {
             commands::auth::sign_out,
             commands::auth::refresh_session,
             commands::auth::reauthenticate,
+            commands::auth::cancel_interactive_auth,
             commands::auth::request_scope_consent,
             commands::auth::request_scope_step_up,
             commands::backup::backup_tenant,

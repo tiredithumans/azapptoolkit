@@ -193,6 +193,15 @@ pub async fn refresh_session(state: State<'_, AppState>, tenant_id: String) -> R
         .map_err(UiError::from)
 }
 
+/// Abandons a sign-in, re-authentication, consent or step-up that is waiting
+/// on the browser. The waiting command returns `cancelled`; nothing is stored.
+/// A no-op when no flow is waiting.
+#[tauri::command]
+pub async fn cancel_interactive_auth(state: State<'_, AppState>) -> Result<(), UiError> {
+    state.auth.cancel_interactive();
+    Ok(())
+}
+
 /// Interactively re-authenticates the signed-in account *without* ending the
 /// session: runs one browser round trip (`prompt=login`, pinned to the current
 /// account) to mint a fresh refresh + access token, leaving the per-tenant data

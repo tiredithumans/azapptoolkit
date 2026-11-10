@@ -192,6 +192,10 @@ pub struct EntraAuthService {
     /// default), a launch failure is only logged. Installed by the app via
     /// [`Self::set_browser_fallback`].
     browser_fallback: Mutex<Option<BrowserFallback>>,
+    /// Wakes every interactive flow waiting on its browser redirect
+    /// ([`Self::cancel_interactive`]). A flow that is not waiting misses the
+    /// wake by design — there is nothing to cancel.
+    interactive_cancel: tokio::sync::Notify,
     /// Registers the OS credential store before `sign_in` opens the browser.
     /// Always `token_cache::ensure_keyring_store` in the app; a field (not a
     /// direct call) for the same reason as [`Self::open_browser`] — the test
@@ -230,6 +234,7 @@ impl EntraAuthService {
             http: token_http_client(),
             open_browser: Box::new(open_system_browser),
             browser_fallback: Mutex::new(None),
+            interactive_cancel: tokio::sync::Notify::new(),
             ensure_store: ensure_keyring_store,
         })
     }
@@ -239,6 +244,16 @@ impl EntraAuthService {
     /// then `None` once that flow's browser leg is over. The URL is single-use
     /// (PKCE + `state`) and redeemable only through this process's loopback
     /// listener; the hook must never log it. Replaces any earlier hook.
+    /// Abandons every interactive flow currently waiting on its browser
+    /// redirect: each returns [`AuthError::Cancelled`] and releases its
+    /// loopback socket. Without it the only exit was `REDIRECT_WAIT`, so a
+    /// closed tab (or the wrong browser profile) left the sign-in button
+    /// disabled for five minutes. Nothing is stored and no epoch moves — the
+    /// flow simply never redeems a code.
+    pub fn cancel_interactive(&self) {
+        self.interactive_cancel.notify_waiters();
+    }
+
     pub fn set_browser_fallback(&self, f: impl Fn(Option<&str>) + Send + Sync + 'static) {
         *self.browser_fallback.lock() = Some(Arc::new(f));
     }
@@ -675,11 +690,15 @@ impl EntraAuthService {
         // forever (the future holds the loopback socket and blocks the caller).
         // A redirect that never arrives is an abandoned sign-in — the operator
         // closed the tab — not a network fault, so it surfaces as `Cancelled`.
-        let code = tokio::time::timeout(
-            REDIRECT_WAIT,
-            listen_for_code(listener, csrf_state.secret()),
-        )
-        .await;
+        // …or the operator's Cancel (`cancel_interactive`), which ends the wait
+        // the same way.
+        let code = tokio::select! {
+            code = tokio::time::timeout(
+                REDIRECT_WAIT,
+                listen_for_code(listener, csrf_state.secret()),
+            ) => code.map_err(|_| ()),
+            () = self.interactive_cancel.notified() => Err(()),
+        };
         // The browser leg is over, whatever it returned: withdraw the link.
         drop(manual_link);
         let code = code.map_err(|_| AuthError::Cancelled)??;
@@ -1759,6 +1778,7 @@ mod tests {
             http: token_http_client(),
             open_browser,
             browser_fallback: Mutex::new(None),
+            interactive_cancel: tokio::sync::Notify::new(),
             ensure_store: ensure_keyring_store,
         }
     }
@@ -3482,6 +3502,32 @@ mod tests {
         );
 
         let result = svc.sign_in().await;
+
+        assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
+        assert!(svc.known_tenants.lock().is_empty());
+    }
+
+    /// The operator's Cancel ends the wait at once, with the same `Cancelled`
+    /// the five-minute bound gives, and registers nothing.
+    #[tokio::test]
+    async fn cancelling_a_waiting_sign_in_ends_it_at_once() {
+        let svc = Arc::new(fresh_service(
+            "http://localhost".into(),
+            "cancelled-tenant",
+            Box::new(|_| Ok(())),
+        ));
+        let flow = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move { svc.sign_in().await }
+        });
+        // Cancel until the flow has reached its wait and taken the wake.
+        let result = loop {
+            svc.cancel_interactive();
+            if flow.is_finished() {
+                break flow.await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
 
         assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
         assert!(svc.known_tenants.lock().is_empty());
