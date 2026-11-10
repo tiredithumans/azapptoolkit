@@ -111,6 +111,7 @@ pub fn UploadCertificateDialog(
                 <input
                     type="file"
                     accept=".cer,.pem,.crt"
+                    aria-label="Certificate file"
                     class="file-input"
                     on:change=on_file_change
                 />

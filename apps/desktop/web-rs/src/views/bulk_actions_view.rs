@@ -29,7 +29,7 @@ use crate::components::icon::IconName;
 use crate::components::ui::{
     Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem, tab_id,
 };
-use crate::state::use_session;
+use crate::state::{ActiveView, use_session};
 use crate::util::count_noun;
 
 #[component]
@@ -233,7 +233,10 @@ pub fn BulkActionsView() -> impl IntoView {
                                 <span class="ui-text">
                                     "Create apps from a JSON array, e.g. [{\"displayName\":\"App A\",\"signInAudience\":\"AzureADMyOrg\"}], or load a CSV inventory (DisplayName, SignInAudience, Description, Owners, Permissions). Owners are UPNs; permissions are declared, not consented. Validate first to check every name against the tenant without creating anything."
                                 </span>
-                                <Textarea value=create_json />
+                                <label>
+                                    <span class="visually-hidden">"Apps to create, as JSON"</span>
+                                    <Textarea value=create_json />
+                                </label>
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
@@ -341,7 +344,16 @@ pub fn BulkActionsView() -> impl IntoView {
                                     title="No apps selected".to_string()
                                     body="Check one or more apps in App Registrations, then return here (or use the inline bar on the list) to grant consent, remove expired credentials, or delete them."
                                         .to_string()
-                                />
+                                >
+                                    // The empty state named the page to go to
+                                    // and offered no way to get there.
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(move |_| session.set_view(ActiveView::Apps))
+                                    >
+                                        "Go to App Registrations"
+                                    </Button>
+                                </EmptyState>
                             </Show>
                         }
                             .into_any()

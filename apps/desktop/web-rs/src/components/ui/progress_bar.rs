@@ -5,7 +5,13 @@ use leptos::prelude::*;
 /// a run knows its total) reads as empty: `clamp` would pass it through as an
 /// invalid width.
 #[component]
-pub fn ProgressBar(#[prop(into)] value: Signal<f64>) -> impl IntoView {
+pub fn ProgressBar(
+    #[prop(into)] value: Signal<f64>,
+    /// Names the bar for assistive tech ("Audit progress"). Defaults to
+    /// "Progress" so no bar is ever announced as a bare percentage.
+    #[prop(optional, into)]
+    label: Option<String>,
+) -> impl IntoView {
     let percent = move || {
         let v = value.get();
         if v.is_nan() {
@@ -18,6 +24,7 @@ pub fn ProgressBar(#[prop(into)] value: Signal<f64>) -> impl IntoView {
         <div
             class="ui-progress"
             role="progressbar"
+            aria-label=label.unwrap_or_else(|| "Progress".to_string())
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow=move || format!("{:.0}", percent())

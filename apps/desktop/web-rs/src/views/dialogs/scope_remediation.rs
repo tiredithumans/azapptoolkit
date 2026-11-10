@@ -455,10 +455,13 @@ pub fn ScopeSharePointButton(
                     "Convert this app's org-wide SharePoint access to the Sites.Selected model — access only to the sites you list below. The org-wide grant is removed once at least one site grant lands. You must be a SharePoint administrator or site owner."
                 </span>
                 <p class="muted">{action.detail.clone()}</p>
-                <Textarea
-                    value=sites_text
-                    placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
-                />
+                <label>
+                    <span class="visually-hidden">"Site URLs, one per line"</span>
+                    <Textarea
+                        value=sites_text
+                        placeholder="Site URLs — one per line (e.g. https://contoso.sharepoint.com/sites/Marketing)"
+                    />
+                </label>
                 {move || {
                     warned
                         .get()

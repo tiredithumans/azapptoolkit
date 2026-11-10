@@ -7,6 +7,8 @@ use leptos::prelude::*;
 ///
 /// The `role="progressbar"` element is named by `label` through `aria-label`;
 /// the visible copy is `aria-hidden` so a screen reader does not say it twice.
+/// Without a `label` it is named "Working…": a busy button swaps its text for
+/// a bare spinner, and an unnamed one left the button with no name at all.
 /// The reduced-motion block in `styles.css` keeps it turning (a stalled arc
 /// reads as a hung app), matching every `ui-spinner` class by substring.
 #[component]
@@ -23,7 +25,11 @@ pub fn Spinner(
         }
     });
     view! {
-        <div class="ui-spinner" role="progressbar" aria-label=label>
+        <div
+            class="ui-spinner"
+            role="progressbar"
+            aria-label=label.unwrap_or_else(|| "Working…".to_string())
+        >
             <span class="ui-spinner__arc">
                 <span class="ui-spinner__tail"></span>
             </span>

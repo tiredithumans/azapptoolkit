@@ -8,6 +8,10 @@
   /* ---- Color: neutrals & accents ---- */
   --border: #e3e3e3;
   --border-strong: #cfcfcf;
+  /* The edge that tells a form control from the page: 3:1 against --surface,
+     --canvas and (dark) --surface-raised, which --border (1.3:1) is not.
+     Drawn on the bottom edge only, as thaw's Fluent inputs do. */
+  --control-border: #8a8a8a;
   --canvas: #f4f6f8;
   --bg-subtle: #f4f6f8;
   --surface: #ffffff;
@@ -31,11 +35,14 @@
   --accent-mi-user-soft: rgba(0, 122, 153, 0.12);
   --danger: #b10e1c;
   --danger-soft: rgba(177, 14, 28, 0.12);
-  /* 4.5:1 on --surface. This is used as a TEXT colour (badge labels, callout
-     copy), not just a fill, so it has to clear AA like any other body text. */
-  --warning: #a35c00;
+  /* This is used as a TEXT colour (badge labels, callout copy), not just a
+     fill, and those sit on the --warning-soft tint, not bare --surface: 5.5:1
+     there (5.1 over --canvas). #a35c00 was 4.48 / 4.16 on the tint. */
+  --warning: #8f5000;
   --warning-soft: rgba(201, 114, 0, 0.12);
-  --ok: #0f803c;
+  /* 5.4:1 on its own --ok-soft tint over --surface (5.0 over --canvas).
+     #0f803c was 4.28 / 3.97 there — under AA for 11-12px badge labels. */
+  --ok: #0b6e33;
   --ok-soft: rgba(15, 128, 60, 0.12);
 
   /* Foreground for text/glyphs painted ON a filled --danger or --accent
@@ -125,6 +132,7 @@
     color-scheme: dark;
     --border: #3b3b3b;
     --border-strong: #4a4a4a;
+    --control-border: #757575;
     --canvas: #1a1a1a;
     --bg-subtle: #242424;
     --surface: #1f1f1f;
@@ -145,7 +153,9 @@
     --accent-mi-user-soft: rgba(78, 201, 214, 0.18);
     /* Status colors must lighten too: the light-mode reds/greens land at
      * ~2-3:1 against the dark surfaces, below WCAG AA for text. */
-    --danger: #ff6b70;
+    /* 4.66:1 on its --danger-soft tint over --surface-raised (a badge in a
+       modal or card); #ff6b70 was 3.94 there. */
+    --danger: #ff8589;
     --danger-soft: rgba(255, 107, 112, 0.18);
     --warning: #f0ab46;
     --warning-soft: rgba(240, 171, 70, 0.18);
@@ -1660,6 +1670,7 @@ h3 {
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border);
+  border-bottom-color: var(--control-border);
   border-radius: var(--radius-md);
   padding: var(--space-1) var(--space-2);
 }
@@ -2954,6 +2965,7 @@ h3 {
      runs underneath the arrow. */
   padding: 0 calc(var(--space-5) + var(--space-1)) 0 var(--space-2);
   border: 1px solid var(--border);
+  border-bottom-color: var(--control-border);
   /* --radius-sm, not --radius-md: these sit inline with thaw `Input`s in the
      same form (Access tab: Role above the directory search), and thaw's
      `--borderRadiusMedium` resolves to 4px. 6px here left a visible seam. */
@@ -3083,7 +3095,9 @@ h3 {
   color: var(--danger);
 }
 .ui-load-error__code {
-  opacity: 0.6;
+  /* A token, not `opacity: 0.6` on the inherited colour, which landed at
+     3.4:1 (light) and 3.0:1 (dark). */
+  color: var(--text-muted);
   font-size: 0.85em;
 }
 

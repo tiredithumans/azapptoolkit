@@ -802,6 +802,7 @@ fn SsoEditor(
             <Field label="Set sign-on method">
                 <select
                     class="ui-select"
+                    aria-label="Set sign-on method"
                     on:change=move |ev| {
                         // Exact parse: an unknown value leaves the choice alone
                         // rather than falling through to Disabled.

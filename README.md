@@ -166,8 +166,8 @@ toolkit-owned service principal storing tokens you cannot audit.
 
 ### App experience & operator tools
 
-- **Command bar & home dashboard** — the top-bar search bar jumps to any app or
-  GUID and runs any tool (Cmd/Ctrl-K focuses it); a sign-in landing page
+- **Command bar & home dashboard** — the top-bar search bar jumps to any app,
+  GUID or page (Cmd/Ctrl-K focuses it); a sign-in landing page
   summarizing credential health and security posture. Saved filter views pin
   your favorite facet+search combinations.
 - **Readiness checklist** — a live page showing which directory / Azure /

@@ -426,7 +426,15 @@ fn view_row(
 
     // Descriptive per-row label so the row button announces which enterprise
     // application it opens.
-    let row_label = format!("{display_name} ({app_id_string})");
+    // The Disabled / Foreign badges are separate elements the row button's
+    // label replaces, so the label has to carry them itself.
+    let mut row_label = format!("{display_name} ({app_id_string})");
+    if is_disabled {
+        row_label.push_str(", sign-in disabled");
+    }
+    if is_foreign {
+        row_label.push_str(", from another tenant");
+    }
 
     view! {
         <div

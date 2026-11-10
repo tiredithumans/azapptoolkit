@@ -690,7 +690,13 @@ fn finding_row(
             title=format!("Show {title}")
             on:click=move |_| session.open_posture_with_facet(key)
         >
-            <span class=format!("finding-group__tone finding-group__tone--{tone}")></span>
+            // Named like the Findings pane's dot — colour alone said nothing
+            // to a screen reader.
+            <span
+                class=format!("finding-group__tone finding-group__tone--{tone}")
+                role="img"
+                aria-label=format!("{tone} severity")
+            ></span>
             <span class="posture-finding__title">{title}</span>
             <span class=format!(
                 "posture-finding__count posture-finding__count--{tone}",

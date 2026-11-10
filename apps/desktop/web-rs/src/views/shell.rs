@@ -427,6 +427,20 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                         <span class="nav__icon"><Icon name=IconName::Activity size=16 /></span>
                                         <span>"Cache diagnostics"</span>
                                     </button>
+                                    // The sheet opened only with `?`, which
+                                    // nothing on screen mentioned.
+                                    <button
+                                        class="shell__account-item"
+                                        type="button"
+                                        role="menuitem"
+                                        on:click=move |_| {
+                                            menu_open.set(false);
+                                            shortcuts_open.set(true);
+                                        }
+                                    >
+                                        <span class="nav__icon"><Icon name=IconName::Info size=16 /></span>
+                                        <span>"Keyboard shortcuts"</span>
+                                    </button>
                                     <button
                                         class="shell__account-item shell__account-item--update"
                                         type="button"

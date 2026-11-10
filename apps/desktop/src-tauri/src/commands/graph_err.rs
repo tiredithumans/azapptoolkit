@@ -118,7 +118,7 @@ pub(crate) fn premium_feature_err(
         GraphError::Unauthorized => msg(
             false,
             format!(
-                "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen {feature}."
+                "Your access token was rejected. Use \"Refresh token\" (the refresh icon in the top bar), then reopen {feature}."
             ),
         ),
         GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => msg(
