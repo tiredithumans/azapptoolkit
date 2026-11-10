@@ -14,6 +14,9 @@ After 0.34.1, each change is one line written for the person using the app.
 - Entra's "too many requests" loop error no longer signs you out; the session stays and the action can be retried.
 - Ctrl/Cmd+W, Ctrl/Cmd+1–5 and Ctrl/Cmd+K no longer act behind an open dialog, so a one-time secret is not lost.
 - A Key Vault secret whose reveal finishes after you leave the page is discarded instead of shown on your return.
+- The security audit now says so, and is not saved as complete, when the tenant has more service principals than it reads.
+- A backup of a tenant past the 10,000 app or service principal limit now lists what it left out.
+- Restore now keeps an enterprise app disabled when sign-in was disabled for it in the backup.
 
 ## [0.35.2] - 2026-11-09
 

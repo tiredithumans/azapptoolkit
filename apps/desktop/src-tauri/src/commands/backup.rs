@@ -148,6 +148,11 @@ pub async fn backup_tenant(
     // Carried onto the manifest so a short backup says so — see
     // `TenantBackup::skipped`.
     let mut skipped: Vec<SkippedObject> = Vec::new();
+    // Both indexes stop at a row cap and still answer `Ok`. A manifest built
+    // from a capped index is missing the tail of the estate, and a backup that
+    // silently drops apps is the most dangerous artifact this command can
+    // produce — so the cap is recorded where every other omission is.
+    skipped.extend(capped_index_gaps(app_index.len(), sp_index.len()));
     let mut lost_task = false;
     let cancelled = dispatch_capped(
         app_chunks,
@@ -269,6 +274,38 @@ pub async fn backup_tenant(
         managed_identities,
         skipped,
     })
+}
+
+/// One `skipped` entry per index that stopped at its row cap: the objects past
+/// it are in the tenant but not in the manifest, and they cannot be named.
+fn capped_index_gaps(apps: usize, service_principals: usize) -> Vec<SkippedObject> {
+    use crate::commands::applications::APPS_MAX;
+    use azapptoolkit_graph::client::SP_INDEX_MAX;
+    let mut out = Vec::new();
+    if apps >= APPS_MAX {
+        out.push(SkippedObject::new(
+            "application",
+            "",
+            Some(format!("App registrations past the first {APPS_MAX}")),
+            format!(
+                "the tenant has more app registrations than the {APPS_MAX} this backup reads; \
+                 the rest are not in this file"
+            ),
+        ));
+    }
+    if service_principals >= SP_INDEX_MAX {
+        out.push(SkippedObject::new(
+            "enterpriseApp",
+            "",
+            Some(format!("Service principals past the first {SP_INDEX_MAX}")),
+            format!(
+                "the tenant has more service principals than the {SP_INDEX_MAX} this backup \
+                 reads; the enterprise applications and managed identities among the rest are \
+                 not in this file"
+            ),
+        ));
+    }
+    out
 }
 
 /// A cancelled backup is an error, not a truncated success — a partial manifest
@@ -1119,6 +1156,19 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capped index answers `Ok` with the tail missing. The manifest must
+    /// say so in `skipped`, where every other omission is recorded.
+    #[test]
+    fn a_capped_index_is_recorded_as_skipped() {
+        use crate::commands::applications::APPS_MAX;
+        use azapptoolkit_graph::client::SP_INDEX_MAX;
+        assert!(capped_index_gaps(APPS_MAX - 1, SP_INDEX_MAX - 1).is_empty());
+        let gaps = capped_index_gaps(APPS_MAX, SP_INDEX_MAX);
+        let kinds: Vec<&str> = gaps.iter().map(|g| g.kind.as_str()).collect();
+        assert_eq!(kinds, ["application", "enterpriseApp"]);
+        assert!(gaps.iter().all(|g| g.reason.contains("not in this file")));
+    }
     use crate::commands::test_support::{
         Recorder, dead_token, mock_graph, mock_graph_with, sample_app_json, temp_file,
     };
