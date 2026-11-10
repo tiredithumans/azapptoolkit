@@ -863,6 +863,10 @@ pub fn ScopeWizard(
         }
     };
 
+    // A scoped mode needs at least one resolved target; org-wide has none.
+    let targets_ready =
+        move || active_mode.get() == ScopeMode::OrgWide || !review_targets().is_empty();
+
     // What the apply REMOVES, named before it runs rather than after. The
     // scoped Exchange apply passes `remove_unscoped = true` and the site
     // conversion `remove_orgwide = true`, so both delete the app's matching
@@ -1188,7 +1192,12 @@ pub fn ScopeWizard(
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)
                                         on_click=Box::new(move |_| run_apply())
-                                        disabled=Signal::derive(move || busy.get())
+                                        // Never offer a grant the review says
+                                        // has no target: `run_apply` refuses
+                                        // it anyway, but only after the click.
+                                        disabled=Signal::derive(move || {
+                                            busy.get() || !targets_ready()
+                                        })
                                     >
                                         {move || {
                                             if busy.get() {

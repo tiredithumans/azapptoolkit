@@ -351,6 +351,13 @@ fn finding_group_view(
                                     class="finding-fix-all"
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                     on_click=Box::new(fix_all)
+                                    // "Fix all 0" was a live button that did
+                                    // nothing; it also says what the click
+                                    // does — it selects, the bar below acts.
+                                    disabled=Signal::derive(move || {
+                                        eligible_ids.with(|v| v.is_empty())
+                                    })
+                                    attr:title="Selects every eligible principal in this group; choose the fix in the bar below"
                                 >
                                     {move || format!("Fix all {}", eligible_ids.with(|v| v.len()))}
                                 </Button>

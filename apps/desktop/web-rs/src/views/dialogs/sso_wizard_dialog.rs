@@ -435,6 +435,36 @@ pub fn SsoWizardDialog(
                     <dd>{move || protocol.get().to_uppercase()}</dd>
                     <dt>"Display name"</dt>
                     <dd>{move || display_name.get()}</dd>
+                    // The OIDC review used to stop at the two rows above, so
+                    // the operator confirmed redirect URIs and a secret they
+                    // could no longer see.
+                    {move || {
+                        (protocol.get() != "saml")
+                            .then(|| {
+                                let or_none = |v: Vec<String>| {
+                                    if v.is_empty() { "None".to_string() } else { v.join(", ") }
+                                };
+                                let secret = {
+                                    let n = secret_name.get().trim().to_string();
+                                    let days = secret_days.get();
+                                    if n.is_empty() {
+                                        format!("Created, expires in {days} days")
+                                    } else {
+                                        format!("\"{n}\", expires in {days} days")
+                                    }
+                                };
+                                view! {
+                                    <>
+                                        <dt>"Web redirect URIs"</dt>
+                                        <dd class="mono">{or_none(lines_to_vec(&redirect_uris.get()))}</dd>
+                                        <dt>"SPA redirect URIs"</dt>
+                                        <dd class="mono">{or_none(lines_to_vec(&spa_uris.get()))}</dd>
+                                        <dt>"Client secret"</dt>
+                                        <dd>{secret}</dd>
+                                    </>
+                                }
+                            })
+                    }}
                     {move || {
                         (protocol.get() == "saml")
                             .then(|| {
@@ -476,6 +506,26 @@ pub fn SsoWizardDialog(
             </Show>
 
             {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
+
+            // Why "Next" is disabled — the button alone gave no reason.
+            {move || {
+                let reason = match step.get() {
+                    0 if display_name.with(|d| d.trim().is_empty()) => {
+                        Some("Enter a display name to continue.")
+                    }
+                    1 if !step1_ready() => {
+                        Some(
+                            if protocol.get() == "saml" {
+                                "Enter an Entity ID, a Reply URL and a valid certificate lifetime to continue."
+                            } else {
+                                "Enter at least one redirect URI and a valid secret lifetime to continue."
+                            },
+                        )
+                    }
+                    _ => None,
+                };
+                reason.map(|r| view! { <span class="ui-text hint">{r}</span> })
+            }}
 
             // ---- Footer actions ----
             <div class="actions-row">
