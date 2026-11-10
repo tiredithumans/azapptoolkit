@@ -53,7 +53,7 @@ use crate::token_cache::{
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
     IdClaims, TokenErrorBody, TokenResponse, build_cae_claims, classify_token_error,
-    parse_id_token, parse_scopes, redacted_aad_error,
+    is_request_loop, parse_id_token, parse_scopes, redacted_aad_error,
 };
 
 const REFRESH_LEEWAY_SECS: i64 = 60;
@@ -430,7 +430,9 @@ impl EntraAuthService {
                 // Entra answered, but with a throttle or an outage rather than
                 // a verdict on the request: nothing to fix in the config, and
                 // the refresh token is untouched.
-                AuthError::TokenExchange(detail) if is_throttle_or_outage(status) => {
+                AuthError::TokenExchange(detail)
+                    if is_throttle_or_outage(status) || is_request_loop(&err_body) =>
+                {
                     AuthError::ServiceUnavailable {
                         status: status.as_u16(),
                         detail,
@@ -4350,6 +4352,40 @@ mod tests {
                 })
             ),
             "{result:?}"
+        );
+    }
+
+    /// Entra's loop detection arrives as `400 invalid_grant` + AADSTS50196
+    /// (Microsoft Learn, "Looping clients will be interrupted"). It says the
+    /// client asked too often, not that the refresh token died, so it is
+    /// `ServiceUnavailable` and the stored token survives — read as a plain
+    /// `invalid_grant` it purged a live session.
+    #[tokio::test]
+    async fn a_request_loop_interrupt_never_purges_the_refresh_token() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("loop-tenant", "loop-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS50196: The server terminated an operation because it encountered a loop while processing a request."
+            })))
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AuthError::ServiceUnavailable { status: 400, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
         );
     }
 
