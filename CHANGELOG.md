@@ -12,6 +12,8 @@ After 0.34.1, each change is one line written for the person using the app.
 - A mail permission with an unscoped Exchange role assignment no longer reads "Scoped (legacy)" beside a policy.
 - A redirect or logout URL that hides another host before `?@localhost` is now refused as plain http.
 - Entra's "too many requests" loop error no longer signs you out; the session stays and the action can be retried.
+- Ctrl/Cmd+W, Ctrl/Cmd+1–5 and Ctrl/Cmd+K no longer act behind an open dialog, so a one-time secret is not lost.
+- A Key Vault secret whose reveal finishes after you leave the page is discarded instead of shown on your return.
 
 ## [0.35.2] - 2026-11-09
 

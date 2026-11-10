@@ -107,13 +107,23 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
         // ---- Modified bindings: safe even while typing. ----
         if modified && !ev.alt_key() {
             let key = ev.key();
+            // Safe while typing, but not over a dialog: each of these takes the
+            // dialog's host away. Cmd/Ctrl-W disposes the pane a one-time
+            // secret reveal lives in, and Cmd/Ctrl-<n> unmounts a shell dialog
+            // (the SSO wizard on its client-secret step) — both refuse Escape
+            // precisely because closing them loses the secret for good. The
+            // default is still prevented below, so the keystroke never falls
+            // through to the browser or the OS window.
+            let over_dialog = crate::hooks::modal_is_open();
             // Cmd/Ctrl-<n> — jump to a top-level view.
             if let Some(ch) = key.chars().next()
                 && key.chars().count() == 1
                 && let Some((_, view)) = QUICK_NAV.iter().find(|(c, _)| *c == ch)
             {
                 ev.prevent_default();
-                session.set_view(*view);
+                if !over_dialog {
+                    session.set_view(*view);
+                }
                 return;
             }
             // Cmd/Ctrl-W — close the focused open item (the workspace's tab-like
@@ -130,7 +140,9 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
                 // The LAST shown pane is the most recently focused one
                 // (`focus_item` pushes), so a 2-up compare closes the pane the
                 // operator is reading rather than whichever is on the left.
-                if let Some(item) = session.shown_items.with_untracked(|s| s.last().copied()) {
+                if !over_dialog
+                    && let Some(item) = session.shown_items.with_untracked(|s| s.last().copied())
+                {
                     session.close_item(item);
                 }
                 return;
@@ -141,7 +153,9 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
             // is what closes that one-way door.
             if key == "]" || key == "[" {
                 ev.prevent_default();
-                step_open_item(session, key == "]");
+                if !over_dialog {
+                    step_open_item(session, key == "]");
+                }
                 return;
             }
             return;
