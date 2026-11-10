@@ -52,6 +52,8 @@ pub fn group_policies_for_migration(
 ) -> (Vec<(String, Vec<ExoApplicationAccessPolicy>)>, Vec<String>) {
     let mut batches: Vec<(String, Vec<ExoApplicationAccessPolicy>)> = Vec::new();
     let mut excluded = Vec::new();
+    // AppIds holding a policy that is skipped below (not RestrictAccess).
+    let mut unmigratable: Vec<String> = Vec::new();
     for policy in policies {
         let Some(policy_app_id) = policy.app_id.clone() else {
             excluded.push("policy without an AppId skipped".to_string());
@@ -67,6 +69,7 @@ pub fn group_policies_for_migration(
                      migrating it would invert the policy. Re-express the exclusion as a \
                      management-scope recipient filter instead."
                 ));
+                unmigratable.push(policy_app_id);
                 continue;
             }
             None => {
@@ -75,6 +78,7 @@ pub fn group_policies_for_migration(
                      RestrictAccess and DenyAccess migrate to opposite scopes, so it can't be \
                      guessed."
                 ));
+                unmigratable.push(policy_app_id);
                 continue;
             }
         }
@@ -86,6 +90,28 @@ pub fn group_policies_for_migration(
             None => batches.push((policy_app_id, vec![policy])),
         }
     }
+    // The exclusions above are per POLICY; this one is per APP. A policy
+    // constrains only the app's Entra grants, and a migration strips those — so
+    // migrating an app's RestrictAccess policies while one of its other
+    // policies stays behind leaves that policy constraining nothing. With
+    // `RestrictAccess → Sales` + `DenyAccess → Execs` the app would come out
+    // scoped to all of Sales, Execs members included: exactly the mailboxes it
+    // was denied. An app with any policy that cannot be migrated is not
+    // migrated at all.
+    batches.retain(|(batch_app_id, _)| {
+        let blocked = unmigratable
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(batch_app_id));
+        if blocked {
+            excluded.push(format!(
+                "{batch_app_id}: not migrated — it also has a policy that can't be migrated \
+                 (see above). That policy only constrains the app's Entra grants, which a \
+                 migration removes, so migrating the rest would drop its restriction. Remove or \
+                 re-express that policy first."
+            ));
+        }
+        !blocked
+    });
     (batches, excluded)
 }
 
@@ -272,6 +298,37 @@ mod tests {
         );
         assert_eq!(excluded.len(), 1);
         assert!(excluded[0].contains("invert"), "{}", excluded[0]);
+    }
+
+    #[test]
+    fn an_app_with_a_deny_policy_keeps_its_restrict_policies_too() {
+        // RestrictAccess → Sales plus DenyAccess → Execs reaches Sales minus
+        // Execs. Migrating the Restrict half strips the Entra grants the Deny
+        // policy constrained, so the app would reach Execs members in Sales.
+        let (batches, excluded) = group_policies_for_migration(vec![
+            aap("app-1", "RestrictAccess", Some("Sales")),
+            aap("APP-1", "DenyAccess", Some("Execs")),
+            aap("app-2", "RestrictAccess", Some("Ops")),
+        ]);
+        assert_eq!(
+            batches.len(),
+            1,
+            "only the app with no Deny policy migrates"
+        );
+        assert_eq!(batches[0].0, "app-2");
+        assert_eq!(excluded.len(), 2, "{excluded:?}");
+        assert!(excluded[1].contains("not migrated"), "{}", excluded[1]);
+    }
+
+    #[test]
+    fn an_unreadable_access_right_blocks_its_apps_other_policies() {
+        let mut unreadable = aap("app-1", "RestrictAccess", Some("Execs"));
+        unreadable.access_right = None;
+        let (batches, _) = group_policies_for_migration(vec![
+            aap("app-1", "RestrictAccess", Some("Sales")),
+            unreadable,
+        ]);
+        assert!(batches.is_empty());
     }
 
     #[test]

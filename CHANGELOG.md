@@ -6,6 +6,11 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- Migrate to RBAC for Applications now leaves an app alone when it also has a DenyAccess policy, keeping the block.
+- A mail permission with an unscoped Exchange role assignment no longer reads "Scoped (legacy)" beside a policy.
+
 ## [0.35.2] - 2026-11-09
 
 ### Fixed

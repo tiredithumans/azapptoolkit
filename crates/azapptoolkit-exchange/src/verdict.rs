@@ -305,7 +305,12 @@ pub fn apply_legacy_policy_verdict(
             continue;
         }
         match scopes.get(&grant.value) {
-            Some(MailPermissionScope::Scoped { .. }) => {}
+            // An RBAC verdict stands. `Scoped`: the app already migrated.
+            // `OrgWide`: the lean resolver names it only for an unscoped RBAC
+            // assignment, which a policy does not constrain — the legacy
+            // verdict there read "Scoped (legacy)" for an app that reaches
+            // every mailbox.
+            Some(MailPermissionScope::Scoped { .. } | MailPermissionScope::OrgWide) => {}
             _ => {
                 scopes.insert(grant.value.clone(), verdict.clone());
             }
@@ -956,7 +961,7 @@ mod tests {
     // ---- relocated from commands/exchange.rs with the logic they cover ----
 
     #[test]
-    fn legacy_policy_verdict_fills_org_wide_and_missing_but_never_an_rbac_scope() {
+    fn legacy_policy_verdict_fills_a_missing_verdict_but_never_an_rbac_one() {
         let legacy = aap_verdict_for(&[policy("app-1", "RestrictAccess", "Sales")], "app-1")
             .expect("legacy verdict");
         let rbac = MailPermissionScope::Scoped {
@@ -992,7 +997,12 @@ mod tests {
 
         apply_legacy_policy_verdict(&mut scopes, &grants, Some(&legacy));
 
-        assert_eq!(scopes.get("Mail.Read"), Some(&legacy), "org-wide → legacy");
+        assert_eq!(
+            scopes.get("Mail.Read"),
+            Some(&MailPermissionScope::OrgWide),
+            "an unscoped RBAC assignment reaches every mailbox; a policy constrains only the \
+             Entra grant, so it must not read as scoped"
+        );
         assert_eq!(
             scopes.get("Calendars.Read"),
             Some(&legacy),
