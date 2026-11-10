@@ -77,6 +77,8 @@ impl LogAnalyticsClient {
             &[],
             Some(&body),
             MAX_QUERY_BODY_BYTES,
+            // A query is a read sent as a POST: replaying it is safe.
+            Some(azapptoolkit_core::http_retry::RetryClass::Idempotent),
         )
         .await?;
         let parsed: LogsQueryResponse =
@@ -112,6 +114,32 @@ mod tests {
 
     /// A workspace `customerId` is a GUID; anything else is refused unsent.
     const WS: &str = "6f1c2a4e-0000-4000-8000-00000000abcd";
+
+    /// A query is a read sent as a POST. Classed by its verb it was
+    /// non-idempotent, so one 503 failed it outright; it is now replayed.
+    #[tokio::test]
+    async fn a_query_is_retried_on_a_transient_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/workspaces/{WS}/query")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tables": [{ "name": "PrimaryResult", "columns": [], "rows": [] }]
+            })))
+            .mount(&server)
+            .await;
+
+        let table = client(&server.uri())
+            .query(WS, "AppEvents | take 1", "P1D")
+            .await
+            .expect("the 503 is retried");
+        assert_eq!(table.name, "PrimaryResult");
+    }
 
     #[tokio::test]
     async fn query_returns_first_table() {

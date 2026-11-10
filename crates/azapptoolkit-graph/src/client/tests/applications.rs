@@ -510,6 +510,37 @@ async fn deleting_an_application_drops_the_sp_and_grant_caches() {
     server.verify().await;
 }
 
+/// A DELETE whose first reply was lost is replayed, and the replay of a delete
+/// that had committed answers 404. The call returns `NotFound`, but the app IS
+/// gone, so the caches are swept all the same; a 403 (refused, nothing
+/// written) sweeps nothing.
+#[tokio::test]
+async fn a_delete_answered_404_still_drops_the_caches_but_a_403_does_not() {
+    for (status, swept) in [(404u16, true), (403, false)] {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/applications/obj-1"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = make_client(&server.uri());
+        let key = "tenant-test|grants:oauth2_all";
+        client.cache.put(
+            CacheKind::Permissions,
+            key.to_string(),
+            &serde_json::json!([{ "clientId": "sp-1" }]),
+        );
+
+        let result = client.delete_application("obj-1").await;
+
+        assert!(result.is_err(), "{status}: {result:?}");
+        let cached = client
+            .cache
+            .get::<serde_json::Value>(CacheKind::Permissions, key);
+        assert_eq!(cached.is_none(), swept, "status {status}");
+    }
+}
+
 /// `restore_deleted_item` also restores service principals (the bulk restore
 /// brings the paired SP back with a second call): same sweep as a delete.
 #[tokio::test]

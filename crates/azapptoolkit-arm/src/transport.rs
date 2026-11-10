@@ -38,6 +38,11 @@ pub(crate) async fn send_with_retry(
     query: &[(&str, &str)],
     body: Option<&serde_json::Value>,
     max_body: usize,
+    // `None` derives the class from the verb. A POST that is semantically a
+    // read (a Logs query) passes `Some(RetryClass::Idempotent)`: derived from
+    // its verb it was `NonIdempotent`, so a 5xx or a dropped connection on a
+    // query was never retried.
+    retry_class: Option<RetryClass>,
 ) -> Result<bytes::Bytes> {
     let bearer = token.bearer().await.map_err(ArmError::Token)?;
     let mut headers = HeaderMap::new();
@@ -50,7 +55,8 @@ pub(crate) async fn send_with_retry(
     // Retry budget, backoff and `Retry-After` handling all live in
     // `http_retry::with_retries`; this closure only classifies one attempt.
     let label = format!("{label} {method} {}", endpoint_family(url));
-    with_retries(&label, retry_class_for(&method), |_| {
+    let retry_class = retry_class.unwrap_or_else(|| retry_class_for(&method));
+    with_retries(&label, retry_class, |_| {
         let http = http.clone();
         let headers = headers.clone();
         let method = method.clone();

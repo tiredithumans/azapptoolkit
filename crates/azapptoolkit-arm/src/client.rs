@@ -315,6 +315,7 @@ impl ArmClient {
             query,
             body,
             self.max_body_bytes,
+            None,
         )
         .await
     }

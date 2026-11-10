@@ -53,6 +53,25 @@ pub(crate) const MAX_PAGE_SIZE: &str = "999";
 /// domain modules.
 pub(crate) const MAX_PAGES: usize = 200;
 
+/// Whether a DELETE's outcome leaves the object possibly (or certainly) gone,
+/// so the caches describing it must be swept.
+///
+/// `Ok` is the plain case. The other two are why this exists: a DELETE is
+/// idempotent, so the transport replays one whose reply was lost (a reset, a
+/// 502/504) — and when the first attempt had committed, the replay answers 404.
+/// The call then returns `NotFound` for a delete that succeeded, and a sweep
+/// placed after `?` never ran: the deleted app or revoked grant stayed in the
+/// cached lists, the grant matrix and the audit for the TTL. An error after
+/// which the write may have committed ([`GraphError::may_have_committed`]) is
+/// the same unknown outcome with the retries exhausted. A sweep is always safe;
+/// only a request Graph refused outright (401/403, another 4xx) skips it.
+pub(crate) fn delete_may_have_landed(result: &Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(err) => matches!(err, GraphError::NotFound(_)) || err.may_have_committed(),
+    }
+}
+
 /// Row cap on the shared per-tenant SP index ([`GraphClient::list_service_principals_index`]).
 /// Public because its readers — the Enterprise Applications and Managed Identities lists — are
 /// filtered subsets that cannot infer truncation from their own row counts; they compare the

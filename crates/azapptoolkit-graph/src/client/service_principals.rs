@@ -542,11 +542,32 @@ impl GraphClient {
             return Ok((existing, false));
         }
         let body = serde_json::json!({ "appId": app_id });
-        let sp: ServicePrincipal = self
+        let created: Result<ServicePrincipal> = self
             .send_json(Method::POST, "/servicePrincipals", &body)
-            .await?;
-        self.invalidate_sp_cache();
-        Ok((sp, true))
+            .await;
+        match created {
+            Ok(sp) => {
+                self.invalidate_sp_cache();
+                Ok((sp, true))
+            }
+            // The lookup above is cached, `None` included. A principal created
+            // since (consent in the portal, another admin, or this very POST
+            // on an earlier call whose reply was lost) makes Graph answer 409
+            // — and with the cached `None` untouched, every later call POSTed
+            // into the same 409 until the TTL. Drop the cache and read live
+            // once: if the principal is there, that is the answer.
+            Err(err)
+                if matches!(err, GraphError::Api { status: 409, .. })
+                    || err.may_have_committed() =>
+            {
+                self.invalidate_sp_cache();
+                match self.get_service_principal_by_app_id(app_id).await {
+                    Ok(Some(existing)) => Ok((existing, false)),
+                    _ => Err(err),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// GET `/servicePrincipals/{id}`. Returns `Ok(None)` for 404.
@@ -623,10 +644,13 @@ impl GraphClient {
     pub async fn delete_service_principal(&self, object_id: &str) -> Result<()> {
         validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_principal_caches();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_principal_caches();
+        }
+        result
     }
 
     /// PATCH `/servicePrincipals/{id}` with a caller-built body. Used to set

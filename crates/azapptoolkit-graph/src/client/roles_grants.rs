@@ -191,10 +191,13 @@ impl GraphClient {
         validate::require_path_segment("resource service principal id", resource_sp_id)?;
         validate::require_path_segment("assignment id", assignment_id)?;
         let path = format!("/servicePrincipals/{resource_sp_id}/appRoleAssignedTo/{assignment_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     pub async fn list_oauth2_grants(
@@ -274,10 +277,13 @@ impl GraphClient {
         validate::require_path_segment("assignment id", assignment_id)?;
         let path =
             format!("/servicePrincipals/{service_principal_id}/appRoleAssignments/{assignment_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     pub async fn create_oauth2_grant(
@@ -317,10 +323,13 @@ impl GraphClient {
     pub async fn delete_oauth2_grant(&self, grant_id: &str) -> Result<()> {
         validate::require_path_segment("grant id", grant_id)?;
         let path = format!("/oauth2PermissionGrants/{grant_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     /// Ensures an admin-consent OAuth2 grant exists for `(client_sp_id, resource_sp_id)` and

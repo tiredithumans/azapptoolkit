@@ -114,6 +114,8 @@ async fn discover_workspace(
     let mut probed = 0usize;
     let mut found: WorkspaceLookup = None;
     let mut hit_cap = false;
+    // A probe that failed for a reason other than "not this workspace".
+    let mut inconclusive = false;
     for ws in workspaces {
         if probed >= MAX_WORKSPACES_PROBED {
             tracing::warn!(
@@ -141,6 +143,9 @@ async fn discover_workspace(
             }
             Err(err) => {
                 // Table absent (400) or no read access (403) — not this one.
+                // A throttle, 5xx or network failure says nothing about the
+                // workspace, so the lookup as a whole is then not conclusive.
+                inconclusive |= err.is_retryable();
                 tracing::debug!(
                     ws = ws.name.as_deref().unwrap_or("?"),
                     code = err.ui_code(),
@@ -153,7 +158,9 @@ async fn discover_workspace(
     // Cache the outcome — including "no workspace". Skip only the truncated
     // case, where the answer is "we ran out of probe budget", not "there is
     // none", and caching it would hide a workspace past the cap until the TTL.
-    if !hit_cap {
+    // Nor an inconclusive miss: one transient probe failure on the only
+    // workspace otherwise read "no workspace" for the whole TTL.
+    if !hit_cap && (found.is_some() || !inconclusive) {
         state.cache.put(CacheKind::Permissions, cache_key, &found);
     }
     Ok(found)

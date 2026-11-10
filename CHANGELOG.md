@@ -17,6 +17,9 @@ After 0.34.1, each change is one line written for the person using the app.
 - The security audit now says so, and is not saved as complete, when the tenant has more service principals than it reads.
 - A backup of a tenant past the 10,000 app or service principal limit now lists what it left out.
 - Restore now keeps an enterprise app disabled when sign-in was disabled for it in the backup.
+- A delete or revoke that worked but came back "not found" now drops out of the lists straight away.
+- Granting access no longer keeps failing with a conflict after the app's enterprise application was created elsewhere.
+- The Usage panel retries a failed log query and no longer reports "no workspace" for an hour after one failure.
 
 ## [0.35.2] - 2026-11-09
 

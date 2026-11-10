@@ -443,10 +443,13 @@ impl GraphClient {
     pub async fn delete_application(&self, object_id: &str) -> Result<()> {
         validate::require_path_segment("object id", object_id)?;
         let path = format!("/applications/{object_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_principal_caches();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_principal_caches();
+        }
+        result
     }
 
     /// Recycle bin: the tenant's deleted app registrations, paged to the cap.
