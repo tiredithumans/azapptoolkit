@@ -134,6 +134,7 @@ async fn consent_with_sp(
             Ok(Some(sp)) => sp,
             Ok(None) => {
                 failures.push(GrantFailure {
+                    code: None,
                     resource_app_id: resource.resource_app_id.clone(),
                     permission_id: None,
                     kind: "Resource".into(),
@@ -143,6 +144,7 @@ async fn consent_with_sp(
             }
             Err(err) => {
                 failures.push(GrantFailure {
+                    code: None,
                     resource_app_id: resource.resource_app_id.clone(),
                     permission_id: None,
                     kind: "Resource".into(),
@@ -175,6 +177,7 @@ async fn consent_with_sp(
             {
                 Ok(ara) => role_assignments_created.push(ara),
                 Err(err) => failures.push(GrantFailure {
+                    code: Some(err.ui_code().to_string()),
                     resource_app_id: resource.resource_app_id.clone(),
                     permission_id: Some(role.id.clone()),
                     kind: "Role".into(),
@@ -213,6 +216,7 @@ async fn consent_with_sp(
                 .any(|s| s.id == *id)
             {
                 failures.push(GrantFailure {
+                    code: None,
                     resource_app_id: resource.resource_app_id.clone(),
                     permission_id: Some((*id).to_string()),
                     kind: "Scope".into(),
@@ -243,6 +247,7 @@ async fn consent_with_sp(
                 });
             }
             Err(err) => failures.push(GrantFailure {
+                code: Some(err.ui_code().to_string()),
                 resource_app_id: resource.resource_app_id.clone(),
                 permission_id: None,
                 kind: "Scope".into(),

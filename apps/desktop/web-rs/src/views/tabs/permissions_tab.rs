@@ -154,7 +154,20 @@ fn run_grant(
                         session.toast_success(msg);
                     }
                     Err(msg) => {
-                        session.toast_error(msg, None);
+                        // A failure that needs an out-of-band fix (a dead
+                        // session, a rejected token, missing consent) gets its
+                        // recovery toast; the plain one cannot resolve it.
+                        let recovered = r.failures.iter().any(|f| {
+                            f.code.as_deref().is_some_and(|code| {
+                                session.report_recovery_action(
+                                    &azapptoolkit_dto::UiError::new(code, f.message.clone(), false),
+                                    "write",
+                                )
+                            })
+                        });
+                        if !recovered {
+                            session.toast_error(msg, None);
+                        }
                     }
                 }
                 on_changed.try_run(());
@@ -1263,6 +1276,7 @@ mod tests {
             permission_id: None,
             kind: "Role".into(),
             message: "Insufficient privileges".into(),
+            code: None,
         };
         let err = consent_report(&grant_result(vec![failure.clone()])).expect_err("partial");
         assert!(err.contains("1 failed"), "{err}");

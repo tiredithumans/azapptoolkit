@@ -153,6 +153,7 @@ async fn single_runtime_grant(
                 {
                     Ok(ara) => role_assignments_created.push(ara),
                     Err(err) => failures.push(GrantFailure {
+                        code: Some(err.ui_code().to_string()),
                         resource_app_id: resource_app_id.clone(),
                         permission_id: Some(permission_id.clone()),
                         kind: "Role".into(),
@@ -181,6 +182,7 @@ async fn single_runtime_grant(
                             scopes_added: vec![value.to_string()],
                         }),
                         Err(err) => failures.push(GrantFailure {
+                            code: Some(err.ui_code().to_string()),
                             resource_app_id: resource_app_id.clone(),
                             permission_id: Some(permission_id.clone()),
                             kind: "Scope".into(),
@@ -189,6 +191,7 @@ async fn single_runtime_grant(
                     }
                 }
                 None => failures.push(GrantFailure {
+                    code: None,
                     resource_app_id: resource_app_id.clone(),
                     permission_id: Some(permission_id.clone()),
                     kind: "Scope".into(),

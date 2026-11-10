@@ -61,6 +61,12 @@ pub struct GrantFailure {
     pub permission_id: Option<String>,
     pub kind: String,
     pub message: String,
+    /// The failure's wire code (`forbidden`, `refresh_missing`, …) when a
+    /// request caused it. Without it every failure read as text alone, so a
+    /// dead session mid-consent never raised the re-authenticate prompt and a
+    /// bulk run walked its whole selection failing the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

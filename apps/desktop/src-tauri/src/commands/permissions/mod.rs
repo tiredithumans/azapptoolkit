@@ -94,7 +94,15 @@ pub(crate) fn invalidate_after_grant(
 ) {
     if run.sp_created {
         super::applications::invalidate_app_lists(cache, tenant_id);
-    } else if run.error.is_none() || run.manifest_changed {
+    } else if run.manifest_changed
+        || !run.result.role_assignments_created.is_empty()
+        || !run.result.scope_grants_upserted.is_empty()
+    {
+        // Only when something landed. A completed run that granted nothing —
+        // every grant refused (a 403 for want of the admin role is the common
+        // one), or everything already in place — used to drop every app
+        // detail, mailbox verdict and the cached audit run all the same: a
+        // multi-minute re-scan on a large tenant for zero writes.
         super::applications::invalidate_app_detail_state(cache, tenant_id);
     }
 }
@@ -376,7 +384,8 @@ mod handler_tests {
         let rows: [(bool, bool, Option<UiError>, bool, bool); 5] = [
             (false, true, None, false, false),
             (false, true, forbidden(), false, false),
-            (false, false, None, false, true),
+            // A completed run that granted nothing keeps everything.
+            (false, false, None, true, true),
             (true, false, forbidden(), false, true),
             (false, false, forbidden(), true, true),
         ];
@@ -399,5 +408,20 @@ mod handler_tests {
             );
             assert_eq!(indexes_intact(&state, TENANT), indexes_kept, "row {i}");
         }
+
+        // A completed run that granted something drops the detail tier.
+        let state = AppState::for_test(TENANT, "http://127.0.0.1:9");
+        seed_indexes_and_detail(&state, TENANT, OBJECT);
+        let mut result = empty_grant(String::new());
+        result.role_assignments_created.push(Default::default());
+        let run = GrantRun {
+            result,
+            manifest_changed: false,
+            sp_created: false,
+            error: None,
+        };
+        invalidate_after_grant(&state.cache, TENANT, &run);
+        assert!(!detail_cached(&state, TENANT, OBJECT));
+        assert!(indexes_intact(&state, TENANT));
     }
 }
