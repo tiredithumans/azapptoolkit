@@ -202,7 +202,9 @@ pub fn SignInScreen(
                 // same shape as `DetailLoadError` — so a failure stays
                 // diagnosable without leading with the wire code.
                 // The operator's own Cancel is not a failure to report.
-                Err(err) if err.code == "cancelled" && cancel_requested.get_untracked() => {}
+                Err(err)
+                    if err.code == "cancelled"
+                        && cancel_requested.try_get_untracked().unwrap_or(false) => {}
                 Err(err) => {
                     let hint = recovery_hint(&err.code, &err.message);
                     error.set(Some((err.message, err.code, hint)));
