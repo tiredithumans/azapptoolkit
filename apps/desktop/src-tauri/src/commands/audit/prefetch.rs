@@ -67,7 +67,7 @@ pub(crate) async fn prefetch_admin_consent_grants(
     HashMap<String, Vec<String>>,
     Option<AuditCoverageGap>,
 ) {
-    match client.list_all_oauth2_grants().await {
+    match client.list_admin_consent_grants().await {
         Ok(grants) => {
             let mut clients: HashSet<String> = HashSet::new();
             let mut scopes: HashMap<String, Vec<String>> = HashMap::new();

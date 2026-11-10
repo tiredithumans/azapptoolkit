@@ -216,6 +216,51 @@ impl GraphClient {
         self.collect_all_pages(page, false).await
     }
 
+    /// The tenant's ADMIN-consent delegated grants only
+    /// (`consentType eq 'AllPrincipals'`), for the security audit.
+    ///
+    /// The unfiltered collection holds one `Principal` row per user × app
+    /// consent, so it grows with the number of users; the audit keeps only the
+    /// `AllPrincipals` rows and used to page through all of it (serially, 999
+    /// at a time) to throw the rest away. Cached under its own `grants:` key,
+    /// which [`Self::invalidate_grant_cache`] sweeps with the others. Should a
+    /// tenant's Graph refuse the filter (a 400), the full read answers instead,
+    /// filtered here — never an empty result.
+    pub async fn list_admin_consent_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
+        const ADMIN: &str = "AllPrincipals";
+        let cache_key = Self::grant_cache_key(&self.tenant_id, "oauth2_admin");
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<OAuth2PermissionGrant>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
+        let filter = format!("consentType eq '{ADMIN}'");
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$top", MAX_PAGE_SIZE),
+            ("$select", OAUTH2_GRANT_SELECT),
+        ];
+        let first: Result<Paged<OAuth2PermissionGrant>> = self
+            .get_json("/oauth2PermissionGrants", &params, false)
+            .await;
+        let all = match first {
+            Ok(page) => self.collect_all_pages(page, false).await?,
+            Err(GraphError::Api { status: 400, .. }) => self
+                .list_all_oauth2_grants()
+                .await?
+                .into_iter()
+                .filter(|g| g.consent_type == ADMIN)
+                .collect(),
+            Err(err) => return Err(err),
+        };
+        self.cache.put_if_current(watch, &all);
+        Ok(all)
+    }
+
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
     /// unfiltered). Used by the consent-grant audit. Follows `@odata.nextLink`.
     pub async fn list_all_oauth2_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {

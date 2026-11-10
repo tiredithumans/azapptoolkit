@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Changed
+
+- A security audit of a large tenant reads far fewer delegated grants and updates its progress bar more smoothly.
+
 ### Fixed
 
 - Migrate to RBAC for Applications now leaves an app alone when it also has a DenyAccess policy, keeping the block.

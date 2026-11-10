@@ -309,6 +309,9 @@ pub async fn run_audit(
     // looked at the principals whose scoring failed.
     let mut unscored: usize = 0;
     // Dynamic in-flight cap: the tracker shrinks it on 429s mid-run.
+    // Scoring is mostly CPU once the prefetches land, so its ticks are rate
+    // limited (see `EmitGate`); the last one always goes out.
+    let emit_gate = Arc::new(crate::commands::progress::EmitGate::new());
     let cancelled_before_all_dispatched = dispatch_capped(
         apps,
         || meter.limit(),
@@ -320,6 +323,7 @@ pub async fn run_audit(
             let app_handle = app_handle.clone();
             let ticker = meter.ticker();
             let cancel_for_task = cancel.clone();
+            let emit_gate = emit_gate.clone();
             Some(tokio::spawn(async move {
                 if cancel_for_task.is_cancelled() {
                     return Err(UiError::validation("cancelled", "audit cancelled"));
@@ -334,7 +338,9 @@ pub async fn run_audit(
                     in_flight_cap,
                     cancelled: cancel_for_task.is_cancelled(),
                 };
-                emit_progress(&app_handle, crate::dto::events::AUDIT_PROGRESS, progress);
+                if emit_gate.allow(done == total) {
+                    emit_progress(&app_handle, crate::dto::events::AUDIT_PROGRESS, progress);
+                }
                 result
             }))
         },
@@ -400,17 +406,19 @@ pub async fn run_audit(
                 break;
             }
             let item = score_sp_only(&sp, &ctx, &delegated_scopes_by_client, now);
-            emit_progress(
-                &app_handle,
-                crate::dto::events::AUDIT_PROGRESS,
-                AuditProgress {
-                    done: done_count,
-                    total,
-                    current_app: Some(item.application_name.clone()),
-                    in_flight_cap: meter.limit(),
-                    cancelled: false,
-                },
-            );
+            if emit_gate.allow(done_count == total) {
+                emit_progress(
+                    &app_handle,
+                    crate::dto::events::AUDIT_PROGRESS,
+                    AuditProgress {
+                        done: done_count,
+                        total,
+                        current_app: Some(item.application_name.clone()),
+                        in_flight_cap: meter.limit(),
+                        cancelled: false,
+                    },
+                );
+            }
             items.push(item);
         }
     }
