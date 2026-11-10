@@ -107,10 +107,11 @@ async fn restore_calls_the_restore_command_and_refetches() {
     ts::wait_for(|| ts::call_count("list_recently_deleted") == 2).await;
 }
 
-/// Permanent deletion skips the 30-day window and cannot be undone, so the
-/// button arms on the first click and only fires on the second.
+/// Permanent deletion skips the 30-day window and cannot be undone, so it sits
+/// in the irreversible confirmation tier: a dialog naming the app, armed only
+/// by typing the keyword.
 #[wasm_bindgen_test]
-async fn delete_forever_needs_two_clicks() {
+async fn delete_forever_needs_the_typed_keyword() {
     ts::reset();
     ts::mock_ok("purge_deleted_application", &());
     let _m = mount_dialog(&one_row_bin());
@@ -121,11 +122,22 @@ async fn delete_forever_needs_two_clicks() {
     assert_eq!(
         ts::call_count("purge_deleted_application"),
         0,
-        "the first click only arms the row"
+        "the row button only opens the confirmation"
     );
 
-    ts::wait_for(|| ts::has_button_labelled("Confirm permanent delete")).await;
-    ts::click_button_labelled("Confirm permanent delete");
+    let gate = ".confirm-dialog__keyword input";
+    ts::wait_for(|| ts::query(gate).is_some()).await;
+    let confirm = || {
+        ts::button_labelled_in(".actions-row", "Delete forever")
+            .expect("the dialog's confirm button")
+    };
+    assert!(
+        confirm().has_attribute("disabled"),
+        "confirm stays disabled until the keyword is typed"
+    );
+    ts::set_input_value(gate, "DELETE");
+    ts::wait_for(|| !confirm().has_attribute("disabled")).await;
+    ts::click_button_labelled_in(".actions-row", "Delete forever");
     ts::wait_for(|| ts::call_count("purge_deleted_application") == 1).await;
     let call = ts::last_call("purge_deleted_application").unwrap();
     assert_eq!(call.arg_str("objectId").as_deref(), Some("del-1"));

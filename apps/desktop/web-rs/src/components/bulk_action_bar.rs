@@ -593,7 +593,7 @@ impl BulkAction {
                 confirm_label: "Remove expired",
                 description: |n| {
                     format!(
-                        "Remove every expired password credential from the {}. This is irreversible.",
+                        "Remove every expired client secret from the {}. Certificates and active secrets are not touched. This is irreversible.",
                         count_noun(n, "selected app", "selected apps")
                     )
                 },

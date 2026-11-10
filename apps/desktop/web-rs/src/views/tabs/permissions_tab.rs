@@ -331,7 +331,14 @@ pub fn PermissionsTab(
             scopes_loading,
         );
     };
-    let grant = move |_| run_grant(session, detail, consenting, consent_error, on_changed);
+    // Tenant-wide and on behalf of every user, so it sits in the typed-keyword
+    // tier — the same guard the bulk "Grant consent" has always had
+    // (`frontend-workspace.md`, "Confirmation tiers").
+    let consent_open = RwSignal::new(false);
+    let grant = move || {
+        consent_open.set(false);
+        run_grant(session, detail, consenting, consent_error, on_changed);
+    };
 
     // A row's "Test access…" seeds the Permission tester with THIS principal and
     // jumps to it. Offered only beside a badge that can't state its own reach
@@ -554,7 +561,7 @@ pub fn PermissionsTab(
                     // permissions is the alternate path, not the default one.
                     <Button
                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                        on_click=Box::new(grant)
+                        on_click=Box::new(move |_| consent_open.set(true))
                         disabled=Signal::derive(move || consenting.get())
                     >
                         {move || {
@@ -848,6 +855,16 @@ pub fn PermissionsTab(
                     }
                 })
                 on_close=Callback::new(move |()| close_revoke())
+            />
+            <ConfirmDialog
+                open=consent_open
+                title="Grant admin consent?"
+                body="This consents every permission this app declares, tenant-wide, on behalf of all users. Consent stays in place until it is revoked."
+                subject=Signal::derive(move || detail.with(|d| d.application.display_name.clone()))
+                confirm_label="Grant consent"
+                require_keyword="GRANT"
+                on_confirm=Callback::new(move |()| grant())
+                on_close=Callback::new(move |()| consent_open.set(false))
             />
             {move || consent_error.get().map(|e| view! { <FormError>{e}</FormError> })}
             {move || {
