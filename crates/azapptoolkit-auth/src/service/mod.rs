@@ -28,8 +28,8 @@ mod loopback;
 mod scopes;
 mod wire;
 
+use crate::pkce::{CsrfToken, PkceCodeChallenge};
 use chrono::{Duration, Utc};
-use oauth2::{CsrfToken, PkceCodeChallenge};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -703,11 +703,9 @@ impl EntraAuthService {
         drop(manual_link);
         let code = code.map_err(|_| AuthError::Cancelled)??;
 
-        // Moved, not copied: this is the only verifier string, wiped on drop.
-        // (oauth2 has no zeroize, so the random pre-image inside its
-        // `new_random_len` is freed un-wiped — outside our control, and useful
-        // only alongside the single-use code redeemed moments later.)
-        let verifier_secret = Zeroizing::new(pkce_verifier.into_secret());
+        // Moved, not copied: this is the only verifier string, wiped on drop
+        // (as are the random bytes it was encoded from — see `pkce`).
+        let verifier_secret = pkce_verifier.into_secret();
         let mut params = vec![
             ("client_id", self.client_id.as_str()),
             ("grant_type", "authorization_code"),

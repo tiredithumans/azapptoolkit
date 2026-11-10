@@ -6,6 +6,7 @@
 //! refreshed lazily 60s before expiry.
 
 pub mod error;
+mod pkce;
 pub mod service;
 pub mod token_cache;
 

@@ -52,10 +52,10 @@ updates:
       default-days: 7
     ignore:
       # sha2 is TRANSITIVE-ONLY — nothing in this repo declares it (certificate
-      # thumbprints digest on aws-lc-rs). The 0.10 line is pinned by `oauth2` 5,
+      # thumbprints digest on aws-lc-rs). The 0.10 line is pinned by
       # `p12-keystore` and `tauri-codegen`; 0.11 is already present, Linux-only,
       # via `secret-service`. The ignore stops Dependabot churning a dependency
-      # we do not own; drop it once oauth2 and Tauri move to 0.11. NOTE: `rsa`
+      # we do not own; drop it once Tauri moves to 0.11. NOTE: `rsa`
       # (RUSTSEC-2023-0071) is not in this graph at all — cert generation uses
       # rcgen on the aws_lc_rs backend specifically to keep it out, and
       # `deny.toml`'s `[[bans.deny]] name = "rsa"` is what enforces that.
