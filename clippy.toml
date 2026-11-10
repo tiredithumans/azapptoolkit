@@ -1,0 +1,14 @@
+# Compiler-resolved versions of rules that `repo_invariants` otherwise enforces
+# by scanning source text. Clippy sees the actual method being called, whatever
+# the receiver is named and however the call is laid out.
+#
+# A response body is read through `azapptoolkit_core::http_body::BodyCap`
+# (a `resp.chunk()` loop), never whole: reqwest drops `Content-Length` when it
+# inflates gzip, so a few KiB on the wire can decode to gigabytes. Mirrors
+# `repo_invariants/trust.rs::no_client_reads_an_unbounded_body`, which stays as
+# the cross-check until this has been in place for a while.
+disallowed-methods = [
+    { path = "reqwest::Response::bytes", reason = "read the body through http_body::BodyCap (a resp.chunk() loop); a whole-body read is unbounded once gzip is inflated" },
+    { path = "reqwest::Response::text", reason = "read the body through http_body::BodyCap (a resp.chunk() loop); a whole-body read is unbounded once gzip is inflated" },
+    { path = "reqwest::Response::json", reason = "read the body through http_body::BodyCap (a resp.chunk() loop); a whole-body read is unbounded once gzip is inflated" },
+]
