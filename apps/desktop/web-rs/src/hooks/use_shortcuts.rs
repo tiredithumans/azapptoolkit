@@ -143,7 +143,7 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
                 if !over_dialog
                     && let Some(item) = session.shown_items.with_untracked(|s| s.last().copied())
                 {
-                    session.close_item(item);
+                    session.request_close_item(item);
                 }
                 return;
             }

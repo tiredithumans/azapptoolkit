@@ -30,6 +30,7 @@ mod tenant;
 mod toasts;
 
 pub use navigation::SecurityTab;
+pub use open_items::PendingClose;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveView {
@@ -366,6 +367,13 @@ pub struct Session {
     pub open_items: RwSignal<Vec<OpenItem>>,
     pub open_seq: RwSignal<u64>,
     pub shown_items: RwSignal<Vec<u64>>,
+    // Open items whose pane holds edits that were never saved (set by the pane's
+    // own tabs through `hooks::use_unsaved_marker`). Never persisted — a parked
+    // chip remounts from live data. Closing one asks first: `pending_close` is
+    // the close awaiting that answer, rendered once by `shell.rs`. Both reset
+    // with the working set in `set_active_tenant`.
+    pub dirty_items: RwSignal<HashSet<u64>>,
+    pub pending_close: RwSignal<Option<PendingClose>>,
     // Every tenant-scoped search/facet/selection/dialog signal, grouped so the
     // tenant-switch reset is structural — see the type's doc for the invariant.
     pub tenant_ui: TenantScopedUi,
@@ -435,6 +443,8 @@ pub fn provide_session() {
         open_items: RwSignal::new(Vec::new()),
         open_seq: RwSignal::new(0),
         shown_items: RwSignal::new(Vec::new()),
+        dirty_items: RwSignal::new(HashSet::new()),
+        pending_close: RwSignal::new(None),
         tenant_ui: TenantScopedUi::new(),
         apps_reload: RwSignal::new(0),
         view: RwSignal::new(ActiveView::Home),
@@ -830,6 +840,91 @@ mod tests {
             session
                 .shown_items
                 .with_untracked(|s| assert!(s.is_empty()));
+        });
+    }
+
+    /// An operator close of a pane with unsaved edits parks on `pending_close`
+    /// instead of closing; a clean one closes at once. `close_item` itself stays
+    /// unconditional (a deleted entity's pane has nothing worth keeping).
+    #[test]
+    fn closing_a_dirty_item_asks_first() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            let b = session.open_item(OpenItemKind::AppReg, "app-2", "B");
+            session.set_item_dirty(a, true);
+
+            session.request_close_item(b);
+            assert!(session.is_open(OpenItemKind::AppReg, "app-2").is_none());
+            assert_eq!(session.pending_close.get_untracked(), None);
+
+            session.request_close_item(a);
+            assert_eq!(
+                session.pending_close.get_untracked(),
+                Some(PendingClose::One(a))
+            );
+            assert!(session.is_open(OpenItemKind::AppReg, "app-1").is_some());
+
+            session.confirm_pending_close();
+            assert!(session.is_open(OpenItemKind::AppReg, "app-1").is_none());
+            assert_eq!(session.pending_close.get_untracked(), None);
+            assert!(!session.has_unsaved_items(), "a closed item is not dirty");
+        });
+    }
+
+    #[test]
+    fn close_all_asks_when_any_item_is_dirty() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            session.open_item(OpenItemKind::AppReg, "app-2", "B");
+            session.set_item_dirty(a, true);
+            session.request_close_all_items();
+            assert_eq!(
+                session.pending_close.get_untracked(),
+                Some(PendingClose::All)
+            );
+            session
+                .open_items
+                .with_untracked(|l| assert_eq!(l.len(), 2));
+            session.confirm_pending_close();
+            session.open_items.with_untracked(|l| assert!(l.is_empty()));
+            assert!(!session.has_unsaved_items());
+        });
+    }
+
+    /// The dock cap evicts the least recently focused item WITHOUT unsaved
+    /// edits — it must never silently discard a pane the operator was editing.
+    #[test]
+    fn the_cap_spares_an_item_with_unsaved_edits() {
+        with_session(|session| {
+            let first = session.open_item(OpenItemKind::AppReg, "app-0", "A0");
+            session.set_item_dirty(first, true);
+            for i in 1..=8 {
+                session.open_item(OpenItemKind::AppReg, format!("app-{i}"), format!("A{i}"));
+            }
+            assert!(
+                session.is_open(OpenItemKind::AppReg, "app-0").is_some(),
+                "the dirty item (the oldest) survives the cap"
+            );
+            assert!(
+                session.is_open(OpenItemKind::AppReg, "app-1").is_none(),
+                "the oldest clean item is evicted instead"
+            );
+            session
+                .open_items
+                .with_untracked(|l| assert_eq!(l.len(), 8));
+        });
+    }
+
+    /// Unsaved-edit state is per tenant's working set, so it resets with it.
+    #[test]
+    fn a_tenant_switch_clears_unsaved_state() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "A");
+            session.set_item_dirty(a, true);
+            session.request_close_item(a);
+            session.set_active_tenant(None);
+            assert!(!session.has_unsaved_items());
+            assert_eq!(session.pending_close.get_untracked(), None);
         });
     }
 

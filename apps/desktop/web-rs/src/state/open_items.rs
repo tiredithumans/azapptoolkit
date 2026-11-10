@@ -57,10 +57,31 @@ mod store {
 /// Position of the least recently focused item — what the cap evicts. The one
 /// definition of that rule, shared by `open_item` and the restore clamp.
 fn lru_position(list: &[OpenItem]) -> Option<usize> {
-    list.iter()
-        .enumerate()
-        .min_by_key(|(_, it)| it.focused_at)
-        .map(|(pos, _)| pos)
+    lru_position_sparing(list, &HashSet::new())
+}
+
+/// [`lru_position`], passing over the items in `spare` (panes with unsaved
+/// edits) while any other item is left to evict. With every item spared it
+/// falls back to the plain rule, so the cap still holds.
+fn lru_position_sparing(list: &[OpenItem], spare: &HashSet<u64>) -> Option<usize> {
+    let oldest = |skip_spared: bool| {
+        list.iter()
+            .enumerate()
+            .filter(|(_, it)| !(skip_spared && spare.contains(&it.id)))
+            .min_by_key(|(_, it)| it.focused_at)
+            .map(|(pos, _)| pos)
+    };
+    oldest(true).or_else(|| oldest(false))
+}
+
+/// A close the operator asked for that would discard unsaved edits — held on
+/// `Session.pending_close` until they answer the one dialog `shell.rs` mounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingClose {
+    /// One item (a dock chip's ×, or Cmd/Ctrl-W).
+    One(u64),
+    /// The dock's "Close all".
+    All,
 }
 
 /// Make a decoded snapshot satisfy the invariants `open_item` maintains for the
@@ -122,6 +143,9 @@ impl Session {
         // Cap the working set so it can't grow unbounded. Exactly one item is
         // pushed, so at most one can be over the cap.
         let mut evicted: Option<OpenItem> = None;
+        // The cap must not silently throw away a pane the operator was editing:
+        // evict the least recently focused item WITHOUT unsaved edits.
+        let unsaved = self.dirty_items.get_untracked();
         self.update_open_items(|list| {
             list.push(OpenItem {
                 id,
@@ -131,12 +155,13 @@ impl Session {
                 focused_at: id,
             });
             if list.len() > MAX_OPEN_ITEMS
-                && let Some(pos) = lru_position(list)
+                && let Some(pos) = lru_position_sparing(&list[..list.len() - 1], &unsaved)
             {
                 evicted = Some(list.remove(pos));
             }
         });
         if let Some(item) = evicted {
+            self.forget_dirty(&[item.id]);
             self.shown_items
                 .update(|shown| shown.retain(|s| *s != item.id));
             // Dropping the operator's parked reference app with no toast, no
@@ -204,9 +229,82 @@ impl Session {
     }
 
     /// Close one open item (and drop it from the shown set if present).
+    ///
+    /// Unconditional — for callers that already know the pane's edits are moot
+    /// (the entity was deleted) or that the operator confirmed. An operator
+    /// gesture goes through [`Session::request_close_item`].
     pub fn close_item(&self, id: u64) {
         self.update_open_items(|list| list.retain(|it| it.id != id));
         self.shown_items.update(|shown| shown.retain(|s| *s != id));
+        self.forget_dirty(&[id]);
+    }
+
+    /// Close `id` on the operator's say-so (a dock chip's ×, Cmd/Ctrl-W): at
+    /// once when its pane is clean, otherwise park the close on
+    /// `pending_close` so the shell's dialog can ask before the edits go.
+    pub fn request_close_item(&self, id: u64) {
+        if self.dirty_items.with_untracked(|d| d.contains(&id)) {
+            self.pending_close.set(Some(PendingClose::One(id)));
+        } else {
+            self.close_item(id);
+        }
+    }
+
+    /// "Close all" on the operator's say-so — asks first when any pane holds
+    /// unsaved edits.
+    pub fn request_close_all_items(&self) {
+        if self.dirty_items.with_untracked(|d| !d.is_empty()) {
+            self.pending_close.set(Some(PendingClose::All));
+        } else {
+            self.close_all_items();
+        }
+    }
+
+    /// The operator chose "Discard" on the pending close.
+    pub fn confirm_pending_close(&self) {
+        match self.pending_close.get_untracked() {
+            Some(PendingClose::One(id)) => self.close_item(id),
+            Some(PendingClose::All) => self.close_all_items(),
+            None => {}
+        }
+        self.pending_close.set(None);
+    }
+
+    /// Mark (or clear) `id` as holding unsaved edits. A no-op when nothing
+    /// changes, and for an id that is no longer open — a pane's cleanup can run
+    /// after its item was closed.
+    pub fn set_item_dirty(&self, id: u64, dirty: bool) {
+        let open = self
+            .open_items
+            .with_untracked(|l| l.iter().any(|it| it.id == id));
+        let want = dirty && open;
+        if self.dirty_items.with_untracked(|d| d.contains(&id)) != want {
+            self.dirty_items.update(|d| {
+                if want {
+                    d.insert(id);
+                } else {
+                    d.remove(&id);
+                }
+            });
+        }
+    }
+
+    /// Whether any open pane holds unsaved edits — what a restart would lose.
+    pub fn has_unsaved_items(&self) -> bool {
+        self.dirty_items.with(|d| !d.is_empty())
+    }
+
+    fn forget_dirty(&self, ids: &[u64]) {
+        if self
+            .dirty_items
+            .with_untracked(|d| ids.iter().any(|id| d.contains(id)))
+        {
+            self.dirty_items.update(|d| {
+                for id in ids {
+                    d.remove(id);
+                }
+            });
+        }
     }
 
     /// Close the entire working set — empties the dock and the workspace. (Tenant
@@ -215,6 +313,7 @@ impl Session {
     pub fn close_all_items(&self) {
         self.update_open_items(|list| list.clear());
         self.shown_items.set(Vec::new());
+        self.dirty_items.set(HashSet::new());
     }
 
     /// Close the open item identified by `(kind, entity_id)` — for detail-pane

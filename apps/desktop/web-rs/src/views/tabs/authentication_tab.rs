@@ -122,6 +122,8 @@ fn AuthenticationForm(
                 || id_token.get() != l.enable_id_token_issuance
         }
     };
+    // Closing this app's pane with edits pending asks first.
+    crate::hooks::use_unsaved_marker(dirty.clone());
     let reset = move |_| {
         let l = loaded.as_ref();
         web.reset(&l.web_redirect_uris);

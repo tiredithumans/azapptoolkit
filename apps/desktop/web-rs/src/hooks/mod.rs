@@ -18,6 +18,28 @@ pub mod use_shortcuts;
 
 pub use use_command::{CommandState, use_command};
 
+/// The open item a detail pane is mounted for — provided by the workspace
+/// around each pane, read by [`use_unsaved_marker`].
+#[derive(Debug, Clone, Copy)]
+pub struct OpenItemId(pub u64);
+
+/// Report this component's unsaved-edit state to the open item it lives in, so
+/// closing that item (a dock chip's ×, "Close all", Cmd/Ctrl-W, the dock cap)
+/// asks before discarding the edits.
+///
+/// `dirty` is tracked reactively. The flag is cleared when the component is
+/// disposed — by then the edits are gone or saved. A no-op outside the
+/// workspace (a tab mounted on its own, as the GUI tests do).
+pub fn use_unsaved_marker(dirty: impl Fn() -> bool + 'static) {
+    use leptos::prelude::*;
+    let Some(OpenItemId(id)) = use_context::<OpenItemId>() else {
+        return;
+    };
+    let session = crate::state::use_session();
+    Effect::new(move |_| session.set_item_dirty(id, dirty()));
+    on_cleanup(move || session.set_item_dirty(id, false));
+}
+
 /// True when the keystroke came from a text-entry control, where a bare key
 /// belongs to the caret and not to a binding.
 ///
