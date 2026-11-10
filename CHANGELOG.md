@@ -9,6 +9,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Changed
 
 - A security audit of a large tenant reads far fewer delegated grants and updates its progress bar more smoothly.
+- Saving a change in an app's detail no longer reloads the tabs you are not looking at.
 - The Credentials tab opens faster on a large tenant, and typing is lighter on pages with many audit rows.
 
 ### Fixed
@@ -31,6 +32,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Granting consent that changes nothing no longer discards the saved security audit.
 - Cached lists and the saved audit now expire after the computer has been asleep (macOS and Linux).
 - The sign-in card now has "Cancel sign-in", so a closed browser tab no longer locks the button for five minutes.
+- With two enterprise apps open, reloading one no longer jumps it to the tab the other was showing.
 - An owner change that partly failed now also shows its error as a notification, which stays after the tab reloads.
 
 ## [0.35.2] - 2026-11-09

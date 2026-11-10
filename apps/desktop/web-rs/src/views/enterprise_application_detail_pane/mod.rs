@@ -94,6 +94,14 @@ pub fn EnterpriseApplicationDetailPane(
 
     let on_refresh = Callback::new(move |()| reload.update(|n| *n += 1));
 
+    // The tab THIS pane is on, kept across the rebuild every reload causes.
+    // The panel below is recreated inside the Suspense on each reload and used
+    // to restore its tab from the session-wide "last tab" — so with two panes
+    // open, a reload of one (an owner added, Refresh) jumped it to whichever
+    // tab the OTHER pane had last shown, hiding the list just changed. A plain
+    // stored value: nothing reads it reactively.
+    let pane_tab: StoredValue<Option<String>> = StoredValue::new(None);
+
     view! {
         <div class="app-detail">
             <Suspense fallback=move || {
@@ -123,6 +131,7 @@ pub fn EnterpriseApplicationDetailPane(
                                 <EnterpriseAppPanel
                                     detail_signal=detail_signal
                                     on_refresh=on_refresh
+                                    pane_tab=pane_tab
                                 />
                             }
                                 .into_any()
@@ -150,6 +159,7 @@ pub fn EnterpriseApplicationDetailPane(
 fn EnterpriseAppPanel(
     detail_signal: Signal<Arc<EnterpriseApplicationDetail>>,
     #[prop(into)] on_refresh: Callback<()>,
+    pane_tab: StoredValue<Option<String>>,
 ) -> impl IntoView {
     let session = use_session();
     // Restore the last-viewed tab so it survives switching between enterprise
@@ -159,16 +169,24 @@ fn EnterpriseAppPanel(
     // A deep-link (e.g. a consent-grant "Open") sets `pending_enterprise_tab`
     // and overrides the restored last-tab; consume it once so it doesn't pin
     // every later visit.
-    let restored = session
-        .tenant_ui
-        .pending_enterprise_tab
-        .get_untracked()
-        .unwrap_or_else(|| session.last_enterprise_tab.get_untracked());
+    // This pane's own tab wins once it has one (a reload); a deep link is
+    // consumed on first mount only, when the pane has none yet.
+    let restored = pane_tab.get_value().unwrap_or_else(|| {
+        session
+            .tenant_ui
+            .pending_enterprise_tab
+            .get_untracked()
+            .unwrap_or_else(|| session.last_enterprise_tab.get_untracked())
+    });
     session.tenant_ui.pending_enterprise_tab.set(None);
     // Clamp a stale persisted/deep-linked value to a live tab (e.g. the former
     // merged "insights" → Conditional Access) via the typed enum.
     let active_tab = RwSignal::new(EnterpriseTab::from_str(&restored).value().to_string());
-    Effect::new(move |_| session.last_enterprise_tab.set(active_tab.get()));
+    Effect::new(move |_| {
+        let tab = active_tab.get();
+        pane_tab.try_set_value(Some(tab.clone()));
+        session.last_enterprise_tab.set(tab);
+    });
 
     // Insert-only latch of visited tabs — see `ApplicationDetailPane` for the
     // same treatment. Ten tabs here, several of which (SSO, Provisioning,
