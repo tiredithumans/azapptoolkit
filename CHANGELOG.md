@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.35.3] - 2026-11-10
+
 ### Changed
 
 - A security audit of a large tenant reads far fewer delegated grants and updates its progress bar more smoothly.
