@@ -375,3 +375,62 @@ async fn restored_chips_fetch_nothing_until_opened() {
         "kept alive, not refetched"
     );
 }
+
+/// Escape typed into a text field belongs to that field. It used to also hide
+/// the pane the operator was working in — leaving the global search or a
+/// picker with Escape threw the open item off screen.
+#[wasm_bindgen_test]
+async fn escape_in_a_text_field_does_not_hide_the_pane() {
+    mock_details();
+    let m = ts::mount_view(|| {
+        view! {
+            <input class="probe-input" type="text" />
+            <OpenItemsWorkspace />
+            <OpenItemsDock />
+        }
+    });
+    m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    ts::wait_for(|| visible_panes() == 1).await;
+
+    ts::press_key(".probe-input", "Escape");
+    ts::tick().await;
+    assert_eq!(
+        visible_panes(),
+        1,
+        "typing Escape in a field keeps the pane"
+    );
+
+    ts::press_key("body", "Escape");
+    ts::wait_for(|| visible_panes() == 0).await;
+}
+
+/// Closing an item whose pane holds unsaved edits asks first: the chip's ×
+/// parks the close on the session (the shell renders the one dialog) and the
+/// item stays open. The chip also says it is unsaved.
+#[wasm_bindgen_test]
+async fn closing_an_item_with_unsaved_edits_asks_first() {
+    let m = mount();
+    let id = m.session.open_item(
+        OpenItemKind::AppReg,
+        "app-1".to_string(),
+        "Contoso API".to_string(),
+    );
+    ts::wait_for(|| ts::query(".open-dock__close").is_some()).await;
+    m.session.set_item_dirty(id, true);
+    ts::wait_for(|| ts::query(".open-dock__chip-unsaved").is_some()).await;
+
+    ts::click(".open-dock__close");
+    ts::tick().await;
+    assert!(
+        m.session.pending_close.get_untracked().is_some(),
+        "the close waits for the operator's answer"
+    );
+    assert_eq!(ts::query_all(".open-dock__chip").len(), 1, "still open");
+
+    m.session.confirm_pending_close();
+    ts::wait_for(|| ts::query_all(".open-dock__chip").is_empty()).await;
+}

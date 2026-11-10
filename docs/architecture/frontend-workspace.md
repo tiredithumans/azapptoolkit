@@ -352,6 +352,21 @@ which adds it to ONE shared, cross-entity working set:
   through `open_item` / `close_item_by_entity` — do not reintroduce
   `selected_*_id`-style signals on `Session`.
 
+### Unsaved edits in a pane
+
+A tab that can hold unsaved edits calls `hooks::use_unsaved_marker(dirty)`; the workspace provides
+each pane its `OpenItemId`, so the marker lands on `Session.dirty_items` (never persisted, reset in
+`set_active_tenant`). Every operator close — a dock chip's ×, "Close all", Cmd/Ctrl-W — goes through
+`Session::request_close_item` / `request_close_all_items`, which park a dirty close on
+`Session.pending_close` for the one "Discard unsaved changes?" dialog in `shell.rs`. `close_item`
+stays unconditional for callers whose edits are moot (the entity was deleted). The dock cap evicts
+the least recently focused item *without* unsaved edits. The update dialog warns before
+"Update & restart" when anything is unsaved.
+
+Escape hides the workspace through `use_escape_outside_entry`: it stands down when the key was
+typed into a text field, when a `role="menu"` is open, or when a nearer handler prevented the
+event — so leaving the global search or a picker with Escape no longer hides the pane.
+
 ## Tenant-scoped UI state: `TenantScopedUi`
 
 Per-list filter state that an outside surface can seed — or that would silently narrow the next

@@ -12,6 +12,12 @@ After 0.34.1, each change is one line written for the person using the app.
 - Disabling single sign-on and granting scoped mailbox access now confirm first and say what will be removed.
 - "Migrate this app" in Exchange scoping stays disabled until you have previewed the migration.
 
+### Fixed
+
+- Closing an open item with unsaved edits now asks first, and a full dock no longer evicts an item you were editing.
+- Pressing Escape in a text field or with a menu open no longer hides the item you are working in.
+- The update dialog now warns when restarting would lose unsaved edits or one-time secret values.
+
 ## [0.35.3] - 2026-11-10
 
 ### Changed

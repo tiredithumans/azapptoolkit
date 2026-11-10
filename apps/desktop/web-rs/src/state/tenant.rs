@@ -26,6 +26,8 @@ impl Session {
         // working set the restore below is about to read back.
         self.open_items.set(Vec::new());
         self.shown_items.set(Vec::new());
+        self.dirty_items.set(HashSet::new());
+        self.pending_close.set(None);
         // Every lifted search/facet/selection/dialog signal resets structurally
         // — membership and sentinels live on `TenantScopedUi` itself.
         self.tenant_ui.reset();

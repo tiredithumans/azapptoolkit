@@ -1038,6 +1038,10 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.open-dock__chip-unsaved {
+  flex: 0 0 auto;
+  color: var(--warning);
+}
 .open-dock__close {
   flex: 0 0 auto;
   padding: var(--space-1) var(--space-2);

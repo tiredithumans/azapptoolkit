@@ -33,6 +33,7 @@ fn needs_manual_install(e: &UiError) -> bool {
 
 #[component]
 pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) -> impl IntoView {
+    let session = crate::state::use_session();
     let updating = RwSignal::new(false);
     let error: RwSignal<Option<UiError>> = RwSignal::new(None);
     let progress: RwSignal<Option<UpdateProgress>> = RwSignal::new(None);
@@ -176,6 +177,20 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                             }
                                         })
                                 }}
+                                // The restart takes unsaved work with it,
+                                    // as Sign Out would — say so before the
+                                    // button rather than after the relaunch.
+                                    {move || {
+                                        (session.has_unsaved_items()
+                                            || session.tenant_ui.dr_unsaved_secrets.get())
+                                            .then(|| {
+                                                view! {
+                                                    <Callout tone="warn">
+                                                        "Updating restarts the app. Unsaved edits in open items, a running restore, and any one-time secret values you have not saved will be lost."
+                                                    </Callout>
+                                                }
+                                            })
+                                    }}
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Primary)

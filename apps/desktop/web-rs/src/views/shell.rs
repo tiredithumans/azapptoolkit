@@ -21,7 +21,7 @@ use crate::components::update_splash::UpdateSplash;
 use crate::hooks::use_escape::use_escape;
 use crate::hooks::use_menu_keynav::use_menu_keynav;
 use crate::hooks::use_shortcuts::use_shortcuts;
-use crate::state::{ActiveView, use_session};
+use crate::state::{ActiveView, PendingClose, use_session};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::{
     cache_diagnostics_dialog::CacheDiagnosticsDialog, create_app_dialog::CreateAppDialog,
@@ -556,6 +556,26 @@ pub fn AppShell(children: Children) -> impl IntoView {
                     sign_out();
                 })
                 on_close=Callback::new(move |()| confirm_sign_out.set(false))
+            />
+            // The one "discard unsaved edits?" prompt for the open-items working
+            // set — every operator close (chip ×, Close all, Cmd/Ctrl-W) parks
+            // here when a pane is dirty (`Session::request_close_item`).
+            <ConfirmDialog
+                open=Signal::derive(move || session.pending_close.with(Option::is_some))
+                title="Discard unsaved changes?"
+                body="This item has edits that were not saved. Closing it discards them."
+                subject=Signal::derive(move || match session.pending_close.get() {
+                    Some(PendingClose::One(id)) => session
+                        .open_items
+                        .with(|l| l.iter().find(|it| it.id == id).map(|it| it.title.clone()))
+                        .unwrap_or_default(),
+                    Some(PendingClose::All) => "All open items".to_string(),
+                    None => String::new(),
+                })
+                confirm_label="Discard and close"
+                cancel_label="Keep editing"
+                on_confirm=Callback::new(move |()| session.confirm_pending_close())
+                on_close=Callback::new(move |()| session.pending_close.set(None))
             />
             <ToastHost />
             <ToolDialogs />

@@ -47,7 +47,7 @@ pub fn OpenItemsDock() -> impl IntoView {
                         type="button"
                         class="open-dock__clear"
                         title="Close all open items"
-                        on:click=move |_| session.close_all_items()
+                        on:click=move |_| session.request_close_all_items()
                     >
                         "Close all"
                     </button>
@@ -105,6 +105,12 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
             >
                 <TypeChip kind=app_kind compact=true />
                 <span class="open-dock__chip-label">{label}</span>
+                <Show when=move || session.dirty_items.with(|d| d.contains(&id))>
+                    <span class="open-dock__chip-unsaved" title="Unsaved changes">
+                        <span aria-hidden="true">"●"</span>
+                        <span class="visually-hidden">" (unsaved changes)"</span>
+                    </span>
+                </Show>
             </button>
             <button
                 type="button"
@@ -117,7 +123,7 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
                 title=move || format!("Close {}", label())
                 on:click=move |ev: leptos::ev::MouseEvent| {
                     ev.stop_propagation();
-                    session.close_item(id);
+                    session.request_close_item(id);
                 }
             >
                 <Icon name=IconName::Close size=14 />

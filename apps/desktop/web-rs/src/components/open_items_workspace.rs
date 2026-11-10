@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use crate::components::icon::{Icon, IconName};
 use crate::components::open_items_dock::chip_kind;
 use crate::components::type_chip::TypeChip;
-use crate::hooks::use_escape::use_escape;
+use crate::hooks::use_escape::use_escape_outside_entry;
 use crate::hooks::use_focus_return::use_focus_return;
 use crate::state::{OpenItem, OpenItemKind, Session, use_session};
 use crate::views::application_detail_pane::ApplicationDetailPane;
@@ -24,7 +24,9 @@ pub fn OpenItemsWorkspace() -> impl IntoView {
     // Escape collapses the workspace back to the full-width list (the dock and
     // every window stay mounted). Gated to no-op while a modal is open, so
     // Escape there closes the modal — via its own handler — instead of both.
-    use_escape(
+    // The `_outside_entry` variant: Escape typed into a text field, or with a
+    // menu open, belongs to that control and must not also hide the pane.
+    use_escape_outside_entry(
         move || {
             session.shown_items.with_untracked(|s| !s.is_empty()) && !crate::hooks::modal_is_open()
         },
@@ -158,6 +160,10 @@ fn open_item_window(
     pane_focus: RwSignal<Option<u64>>,
 ) -> impl IntoView {
     let id = item.id;
+    // Lets a tab inside this pane report unsaved edits against this item
+    // (`hooks::use_unsaved_marker`). Each `<For>` row has its own owner, so the
+    // context is per pane.
+    provide_context(crate::hooks::OpenItemId(id));
     let entity_id = item.entity_id;
     let app_kind = chip_kind(item.kind);
     // Live title from the session signal (same pattern as the dock chip) so the
@@ -281,7 +287,9 @@ fn open_item_window(
                             session.shown_items.update(|s| s.retain(|x| *x != id));
                         }
                     >
-                        <Icon name=IconName::Close size=14 />
+                        // A chevron, not the dock chip's ×: this hides the
+                        // pane, the × closes the item.
+                        <Icon name=IconName::ChevronDown size=14 />
                     </button>
                 </div>
             </div>
