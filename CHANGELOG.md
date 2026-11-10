@@ -20,6 +20,8 @@ After 0.34.1, each change is one line written for the person using the app.
 - A delete or revoke that worked but came back "not found" now drops out of the lists straight away.
 - Granting access no longer keeps failing with a conflict after the app's enterprise application was created elsewhere.
 - The Usage panel retries a failed log query and no longer reports "no workspace" for an hour after one failure.
+- A backup now records whether each app was actually consented, so a restore no longer proposes consent it never had.
+- Restore no longer adopts an existing app because a certificate on it is labelled with a thumbprint from the backup.
 - An owner change that partly failed now also shows its error as a notification, which stays after the tab reloads.
 
 ## [0.35.2] - 2026-11-09

@@ -191,6 +191,29 @@ pub async fn backup_tenant(
         return Err(lost_task_err());
     }
 
+    // The app pass set `admin_consent_granted` from the DECLARED permissions.
+    // Replace it with what the tenant actually granted, so a restore proposes
+    // consent only where the source had it.
+    let sp_id_by_app_id: HashMap<&str, &str> = sp_index
+        .iter()
+        .map(|sp| (sp.app_id.as_str(), sp.id.as_str()))
+        .collect();
+    record_granted_consent(
+        &client,
+        &sp_id_by_app_id,
+        &mut app_backups,
+        &mut skipped,
+        &cancel,
+        &session,
+    )
+    .await;
+    if session.is_dead() {
+        return Err(session.err("the tenant backup"));
+    }
+    if cancel.is_cancelled() {
+        return Err(cancelled_err());
+    }
+
     // appId → source object id, so an enterprise-app SP backed by an in-backup
     // app registration can point at it.
     let app_obj_by_app_id: HashMap<String, String> = app_backups
@@ -274,6 +297,84 @@ pub async fn backup_tenant(
         managed_identities,
         skipped,
     })
+}
+
+/// Sets each app's `admin_consent_granted` from what its service principal
+/// actually HOLDS: any application-permission assignment, or any delegated
+/// grant. The app pass can only see the manifest, and "declares permissions"
+/// is not "was consented": restored that way, an app that requested
+/// `Directory.ReadWrite.All` and was never granted it came back with a plan
+/// proposing tenant-wide consent the source never had.
+///
+/// One tenant-wide delegated-grant read, plus the held assignments of the
+/// apps that declare something and have a service principal, 20 per `$batch`
+/// (the read the managed-identity pass already uses). An app with no service
+/// principal cannot have been consented. A read that fails leaves the declared
+/// fallback in place and says so in `skipped` — the plan still asks before it
+/// grants anything.
+async fn record_granted_consent(
+    client: &GraphClient,
+    sp_id_by_app_id: &HashMap<&str, &str>,
+    apps: &mut [AppRegistrationBackup],
+    skipped: &mut Vec<SkippedObject>,
+    cancel: &CancelToken,
+    session: &SessionDead,
+) {
+    let delegated: Option<std::collections::HashSet<String>> = match client
+        .list_all_oauth2_grants()
+        .await
+    {
+        Ok(grants) => Some(grants.into_iter().map(|g| g.client_id).collect()),
+        Err(err) => {
+            session.note_code(err.ui_code());
+            tracing::warn!(error = %err, "backup: delegated grants unreadable; consent state falls back to declared permissions");
+            None
+        }
+    };
+    // (index into `apps`, service principal id) for every app worth asking about.
+    let mut asks: Vec<(usize, String)> = Vec::new();
+    for (i, app) in apps.iter_mut().enumerate() {
+        if app.required_resource_access.is_empty() {
+            continue;
+        }
+        match sp_id_by_app_id.get(app.source_app_id.as_str()) {
+            Some(sp_id) => asks.push((i, (*sp_id).to_string())),
+            None => app.admin_consent_granted = false,
+        }
+    }
+    for chunk in asks.chunks(BATCH_CHUNK) {
+        if cancel.is_cancelled() || session.is_dead() {
+            return;
+        }
+        let ids: Vec<String> = chunk.iter().map(|(_, id)| id.clone()).collect();
+        let held = batch_or_serial(
+            "backup app consent",
+            &ids,
+            client.batch_list_app_role_assignments(&ids).await,
+            |id: String| async move { client.list_app_role_assignments(&id).await },
+        )
+        .await;
+        note_graph_failures(session, held.iter().map(Result::as_ref));
+        for ((i, sp_id), held) in chunk.iter().zip(held) {
+            let app = &mut apps[*i];
+            let has_delegated = delegated.as_ref().map(|d| d.contains(sp_id));
+            match (held, has_delegated) {
+                (Ok(roles), Some(delegated)) => {
+                    app.admin_consent_granted = !roles.is_empty() || delegated;
+                }
+                // Proof of consent from the half that was read is enough.
+                (Ok(roles), None) if !roles.is_empty() => app.admin_consent_granted = true,
+                (Err(_), Some(true)) => app.admin_consent_granted = true,
+                _ => skipped.push(SkippedObject::new(
+                    "applicationConsent",
+                    &app.source_object_id,
+                    Some(app.display_name.clone()),
+                    "whether its permissions were consented could not be read; recorded as \
+                     consented because it declares permissions",
+                )),
+            }
+        }
+    }
 }
 
 /// One `skipped` entry per index that stopped at its row cap: the objects past
@@ -552,10 +653,9 @@ async fn backup_app_chunk<S: ProgressSink>(
 /// Authentication + Expose-an-API + owners all come from the one JSON document.
 ///
 /// `has_service_principal` is taken from the already-fetched SP index (no per-app
-/// SP lookup), and `admin_consent_granted` is derived from the declared
-/// permissions rather than probing the SP's live grants: restore re-grants admin
-/// consent idempotently whenever permissions are declared, which is the
-/// DR-correct default and removes three calls per app.
+/// SP lookup). `admin_consent_granted` is only SEEDED here from the declared
+/// permissions; [`record_granted_consent`] replaces it with what the service
+/// principal actually holds once every app is assembled.
 fn assemble_app_backup(
     value: &serde_json::Value,
     federated: Vec<FederatedIdentityCredential>,
@@ -1156,6 +1256,81 @@ fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Declares permissions" is not "was consented". The backup records what
+    /// each app's service principal holds: an assignment or a delegated grant
+    /// means consented; neither, or no service principal at all, means not.
+    #[tokio::test]
+    async fn consent_state_comes_from_what_the_service_principal_holds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The `$batch` fails, so each SP's assignments are read one by one.
+        Mock::given(method("POST"))
+            .and(path("/v1.0/$batch"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/oauth2PermissionGrants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "clientId": "sp-delegated", "resourceId": "r", "consentType": "AllPrincipals", "scope": "User.Read" }]
+            })))
+            .mount(&server)
+            .await;
+        for (sp, body) in [
+            (
+                "sp-roles",
+                serde_json::json!({ "value": [{ "id": "a1", "appRoleId": "role-1", "resourceId": "r", "principalId": "sp-roles" }] }),
+            ),
+            ("sp-delegated", serde_json::json!({ "value": [] })),
+            ("sp-none", serde_json::json!({ "value": [] })),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1.0/servicePrincipals/{sp}/appRoleAssignments"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        let client = mock_graph(&server);
+        let declares = |app_id: &str| AppRegistrationBackup {
+            source_app_id: app_id.into(),
+            source_object_id: format!("obj-{app_id}"),
+            display_name: app_id.into(),
+            required_resource_access: vec![Default::default()],
+            admin_consent_granted: true,
+            ..Default::default()
+        };
+        let mut apps = vec![
+            declares("app-roles"),
+            declares("app-delegated"),
+            declares("app-none"),
+            declares("app-no-sp"),
+        ];
+        let sp_ids = HashMap::from([
+            ("app-roles", "sp-roles"),
+            ("app-delegated", "sp-delegated"),
+            ("app-none", "sp-none"),
+        ]);
+        let mut skipped = Vec::new();
+
+        record_granted_consent(
+            &client,
+            &sp_ids,
+            &mut apps,
+            &mut skipped,
+            &crate::state::CancelFlag::new().claim(),
+            &SessionDead::new(),
+        )
+        .await;
+
+        let granted: Vec<bool> = apps.iter().map(|a| a.admin_consent_granted).collect();
+        assert_eq!(granted, [true, true, false, false]);
+        assert!(skipped.is_empty(), "{skipped:?}");
+    }
 
     /// A capped index answers `Ok` with the tail missing. The manifest must
     /// say so in `skipped`, where every other omission is recorded.

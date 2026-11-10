@@ -169,6 +169,30 @@ impl GraphClient {
             .unwrap_or_default())
     }
 
+    /// Each live certificate credential of an application as `(keyId, key)`,
+    /// `key` being the base64 certificate Graph returns only on this
+    /// single-object `$select=keyCredentials` read (`None` when it sent none).
+    ///
+    /// For a caller that must identify a certificate by its CONTENT:
+    /// `customKeyIdentifier` is a label the uploader may set to anything
+    /// (Microsoft Graph `keyCredential`: "Optional. When not provided in the
+    /// payload, defaults to the thumbprint"), so it proves nothing about the
+    /// certificate it sits on.
+    pub async fn application_certificate_keys(
+        &self,
+        object_id: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .live_key_credentials(object_id)
+            .await?
+            .iter()
+            .map(|k| {
+                let text = |field: &str| k.get(field).and_then(|v| v.as_str()).map(str::to_owned);
+                (text("keyId").unwrap_or_default(), text("key"))
+            })
+            .collect())
+    }
+
     /// Appends a certificate-credential entry to the application's `keyCredentials` array:
     /// fetch the live array, append, PATCH the full array back (Graph full-replaces it) — as
     /// raw JSON, so the surviving entries keep their `key` (see `Self::live_key_credentials`).
