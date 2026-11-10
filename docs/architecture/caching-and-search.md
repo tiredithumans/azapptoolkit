@@ -315,6 +315,15 @@ to avoid. (The demo's mock keeps its args-aware `gallery_search_for` match over 
 
 ## Invalidation — only on `Ok`
 
+**The one exception is a DELETE that may have landed.** A DELETE is idempotent, so the transport
+replays one whose reply was lost, and the replay of a delete that had committed answers 404. The
+call then returns `NotFound` for a delete that succeeded. The Graph client's delete helpers
+(`delete_application`, `delete_service_principal`, the grant deletes) therefore sweep their caches
+through `client::delete_may_have_landed`: on `Ok`, on `NotFound`, and on an error after which the
+write may have committed (`GraphError::may_have_committed`). The `delete_application` command drops
+the list tier in the same cases and still returns the error. A request Graph refused outright
+(401/403, another 4xx) sweeps nothing, as before.
+
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on
 the error path, so a failed write doesn't clear fresh data.
 
