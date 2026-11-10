@@ -211,6 +211,16 @@ surfaces reuse it rather than re-implementing the markup.
   chips do. An action column's header is `""` in `DataTable`, which renders a `.visually-hidden`
   "Actions"; a hand-built table writes the same span into its empty `<th>`.
 
+## Accessible names by default
+
+Three primitives carry a name so a call site cannot forget one: a `Spinner` with no `label` is named
+"Working…" (a busy button swaps its text for a bare spinner, which left the button nameless), a
+`ProgressBar` defaults to "Progress", and a `warn` / `danger` `Callout` with no `role` is a polite
+`status` region so a warning that appears after an action is announced. A form control is named by a
+thaw `Field` (thaw controls), a wrapping `<label>` with a `.visually-hidden` span, or `aria-label`
+(a raw `<select>` / `<input>` inside a `Field`, which thaw does not link) — never by its placeholder.
+`use_tab_cycle` pulls focus back into the dialog when it is outside every `.modal-backdrop`.
+
 ## Confirmation tiers
 
 An action's guard follows what it does, never which surface triggers it. Every tier is

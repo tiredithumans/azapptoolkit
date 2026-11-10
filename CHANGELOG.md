@@ -22,6 +22,13 @@ After 0.34.1, each change is one line written for the person using the app.
 - Creating an app now confirms and opens it; saving the Overview tab confirms; an empty export says so.
 - A managed identity's Azure RBAC panel now shows the real error with Retry instead of always blaming consent.
 - A pending update stays marked on the account menu after its notification disappears.
+- Busy buttons, progress bars and several unlabelled form fields are now named for screen readers.
+- Tab no longer leaves an open dialog for the page behind it after you click outside the dialog.
+- Warnings that appear after an action are now announced by screen readers.
+- Green, amber and red status badges, error codes and dropdown borders now meet contrast guidelines.
+- Grant access can no longer be pressed with no target chosen; the SSO setup review lists redirect URIs and the secret.
+- The account menu now lists Keyboard shortcuts, and the search box shows its Ctrl/Cmd+K shortcut.
+- "Refresh token" hints now point at the top-bar icon; Bulk Actions and Findings link to the pages they mention.
 
 ## [0.35.3] - 2026-11-10
 
