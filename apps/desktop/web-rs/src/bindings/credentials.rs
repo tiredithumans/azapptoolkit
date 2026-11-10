@@ -4,7 +4,7 @@ use super::ipc::invoke_result;
 use azapptoolkit_dto::UiError;
 use serde::Serialize;
 
-use crate::bindings::{ObjectIdArgs, TenantArg};
+use crate::bindings::{AppIdArgs, ObjectIdArgs, TenantArg};
 pub use azapptoolkit_dto::credentials::{
     AppCredentialPolicyDto, CredentialHealthCounts, CredentialRowDto, CredentialUsageDto,
     EXPIRY_CRITICAL_DAYS,
@@ -35,8 +35,11 @@ pub async fn get_credential_health_counts(
 /// an absent row is *unknown*, never "unused", and `available = false` means
 /// the report was unreadable (no `AuditLog.Read.All`, a sovereign cloud, or a
 /// failed read) — the command never fails on those, it degrades.
-pub async fn list_credential_usage(tenant_id: &str) -> Result<CredentialUsageDto, UiError> {
-    invoke_result("list_credential_usage", TenantArg { tenant_id }).await
+pub async fn list_credential_usage(
+    tenant_id: &str,
+    app_id: &str,
+) -> Result<CredentialUsageDto, UiError> {
+    invoke_result("list_credential_usage", AppIdArgs { tenant_id, app_id }).await
 }
 
 /// This app's secret-lifetime policy context: the effective cap decided from

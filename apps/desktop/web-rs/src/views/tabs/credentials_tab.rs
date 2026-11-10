@@ -300,9 +300,10 @@ pub fn CredentialsTab(
     // honest for unknown.
     let usage = LocalResource::new(move || {
         let tenant = session.active_tenant.get();
+        let app_id = app_id.get();
         async move {
             match tenant {
-                Some(t) => credentials::list_credential_usage(&t.tenant_id).await,
+                Some(t) => credentials::list_credential_usage(&t.tenant_id, &app_id).await,
                 None => Ok(CredentialUsageDto {
                     available: false,
                     rows: Vec::new(),
