@@ -51,7 +51,12 @@ pub fn validate_redirect_uri(uri: &str) -> Result<(), String> {
     }
     if let Some(rest) = lower.strip_prefix("http://") {
         // Loopback is the only permitted plaintext-http case (native dev clients).
-        let authority = rest.split('/').next().unwrap_or("");
+        // The authority ends at the first `/`, `?` or `#` — and at `\`, which
+        // browsers read as `/`. Cutting at `/` alone kept a query or fragment in
+        // it, so `http://evil.example?@localhost/cb` (host `evil.example`, as
+        // every URL parser reads it) passed the userinfo step below as
+        // `localhost`. `federation::validate_issuer` cuts the same way.
+        let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
         // Userinfo comes first and is separated from the real host by the LAST
         // `@`. Splitting the authority on `:` before considering it read
         // `http://127.0.0.1:1@evil.com/cb` as host `127.0.0.1` — so the one
@@ -143,6 +148,31 @@ mod tests {
     /// Userinfo lets a plaintext reply URL name a loopback host it does not
     /// actually resolve to. The authority was split on `:` before `@` was
     /// considered, so everything before the first colon read as the host.
+    #[test]
+    fn rejects_a_loopback_host_hidden_after_a_query_fragment_or_backslash() {
+        // The host is `evil.example` in each; the loopback name sits in the
+        // query, the fragment, or (as browsers read `\`) the path.
+        for uri in [
+            "http://evil.example?@localhost/cb",
+            "http://evil.example#@127.0.0.1",
+            "http://evil.example\\@localhost/cb",
+            "http://evil.example?x=1@localhost:8080/cb",
+        ] {
+            assert!(
+                validate_redirect_uri(uri).is_err(),
+                "{uri} names evil.example, not a loopback host"
+            );
+            assert!(validate_logout_url(uri).is_err(), "{uri}");
+        }
+        // A real loopback URL with a query or fragment still passes.
+        for uri in [
+            "http://localhost:3000/cb?x=1",
+            "http://127.0.0.1?code=1#frag",
+        ] {
+            assert!(validate_redirect_uri(uri).is_ok(), "{uri}");
+        }
+    }
+
     #[test]
     fn rejects_a_loopback_host_disguised_by_userinfo() {
         for uri in [
