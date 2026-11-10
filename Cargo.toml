@@ -157,6 +157,15 @@ cast_possible_wrap = "warn"
 #
 # Revisit if a genuinely CPU-bound path appears (large local crypto, in-process
 # indexing/search over the whole tenant). Re-run the bench first.
+# Line tables only, as `apps/desktop/web-rs/Cargo.toml` already does for the
+# wasm tree. Measured on a cold `cargo test --workspace --no-run` (4 cores,
+# 2026-11-10): target/ 7.9 GB -> 4.7 GB and 172 s -> 158 s. Backtraces and
+# panic locations keep their file and line; what is given up is variable
+# inspection in a debugger — set `CARGO_PROFILE_DEV_DEBUG=full` for a session
+# that needs it. `test` inherits from `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

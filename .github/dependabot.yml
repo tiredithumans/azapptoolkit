@@ -43,6 +43,13 @@ updates:
     commit-message:
       prefix: deps
     open-pull-requests-limit: 10
+    # Patch and minor bumps auto-merge once CI is green
+    # (dependabot-auto-merge.yml), and this app holds delegated admin tokens.
+    # Waiting a week before proposing a new version gives a yanked or
+    # compromised release time to be caught upstream. Security updates are not
+    # held back by a cooldown.
+    cooldown:
+      default-days: 7
     ignore:
       # sha2 is TRANSITIVE-ONLY — nothing in this repo declares it (certificate
       # thumbprints digest on aws-lc-rs). The 0.10 line is pinned by `oauth2` 5,
