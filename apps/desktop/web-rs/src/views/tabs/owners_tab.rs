@@ -130,7 +130,13 @@ pub fn OwnersTab(
                 DefaultOwnersOutcome::Done { added, failures } => (added, failures),
             };
             if let Some(msg) = DefaultOwnersOutcome::failure_message(&failures) {
-                DefaultOwnersOutcome::report_recovery(session, &failures);
+                // `on_changed` below reloads the detail, which rebuilds this
+                // tab and its `error` signal with it — so the message also
+                // goes to the session's toast, the one place it survives. A
+                // recovery toast (re-authenticate / consent) already names it.
+                if !DefaultOwnersOutcome::report_recovery(session, &failures) {
+                    session.toast_error(msg.clone(), None);
+                }
                 error.set(Some(msg));
             } else if added > 0 {
                 session.toast_success(format!(
@@ -267,10 +273,14 @@ pub fn OwnersTab(
                             })
                             .collect::<Vec<_>>()
                             .join("; ");
-                        error.set(Some(format!(
+                        let msg = format!(
                             "{} failed — {details}",
                             count_noun(res.failures.len(), "owner change", "owner changes")
-                        )));
+                        );
+                        // As above: the reload below rebuilds this tab, so the
+                        // toast is what the operator can still read.
+                        session.toast_error(msg.clone(), None);
+                        error.set(Some(msg));
                     } else {
                         session.toast_success("Owners updated.");
                     }
