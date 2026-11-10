@@ -151,6 +151,11 @@ struct Entry {
     // which a debounced keystroke would otherwise rebuild from JSON.
     typed: Option<TypedValue>,
     inserted: Instant,
+    // The same moment on the wall clock. `Instant` does not advance while the
+    // machine sleeps on macOS or Linux, so on its own an entry cached before
+    // the lid closed was still "five minutes old" days later and served for
+    // the rest of its TTL. See [`Entry::is_live`].
+    inserted_wall: std::time::SystemTime,
     // Monotonically-increasing counter used for LRU ordering.
     last_access: u64,
     // Exempt from LRU eviction. Set for the handful of tenant-wide *index*
@@ -166,6 +171,18 @@ struct Entry {
     // `last_access`, which `touch` bumps on every read: a rollback keyed on
     // that would be defeated by any read landing in the window.
     stamp: u64,
+}
+
+impl Entry {
+    /// Whether the entry is still inside `ttl`, by EITHER clock: expired as
+    /// soon as the monotonic or the wall clock says so. The monotonic clock is
+    /// immune to a clock change but stops during sleep (macOS, Linux); the wall
+    /// clock counts sleep but can jump. A wall clock set backwards
+    /// (`elapsed()` is `Err`) simply defers to the monotonic one.
+    fn is_live(&self, ttl: Duration) -> bool {
+        self.inserted.elapsed() <= ttl
+            && self.inserted_wall.elapsed().map_or(true, |age| age <= ttl)
+    }
 }
 
 struct Bucket {
@@ -254,6 +271,7 @@ impl Bucket {
             value,
             typed,
             inserted,
+            inserted_wall: std::time::SystemTime::now(),
             last_access: tick,
             pinned,
             stamp,
@@ -398,7 +416,7 @@ impl Bucket {
         let mut oldest: Option<Instant> = None;
         let mut pinned = 0;
         self.entries.retain(|_, e| {
-            let keep = e.inserted.elapsed() <= ttl;
+            let keep = e.is_live(ttl);
             if keep {
                 oldest = Some(oldest.map_or(e.inserted, |o| o.min(e.inserted)));
                 pinned += usize::from(e.pinned);
@@ -785,10 +803,7 @@ impl Cache {
             c.ttl_for(kind)
         };
         let mut bucket = self.buckets[kind.idx()].lock();
-        let live = bucket
-            .entries
-            .get(key)
-            .is_some_and(|e| e.inserted.elapsed() <= ttl);
+        let live = bucket.entries.get(key).is_some_and(|e| e.is_live(ttl));
         if !live {
             bucket.remove(key);
             drop(bucket);
@@ -1194,7 +1209,7 @@ impl Cache {
                     .lock()
                     .entries
                     .get(key)
-                    .filter(|e| e.inserted.elapsed() <= ttl)
+                    .filter(|e| e.is_live(ttl))
                     .and_then(|e| e.typed.clone());
                 let Some(read) = read else { break };
                 let Ok(current) = Arc::clone(&read).downcast::<T>() else {

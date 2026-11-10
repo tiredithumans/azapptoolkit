@@ -1462,6 +1462,44 @@ fn expired_entries_miss() {
     );
 }
 
+/// Time the machine spent asleep counts. The monotonic clock does not advance
+/// during sleep on macOS or Linux, so an entry is also held to the wall clock:
+/// one cached two days ago by the wall clock is expired, however young the
+/// monotonic clock says it is. A wall clock set BACKWARDS (insert time in the
+/// future) defers to the monotonic clock instead of expiring everything.
+#[test]
+fn an_entry_older_than_its_ttl_by_the_wall_clock_misses() {
+    let cache = Cache::new();
+    let backdate = |key: &str, to: std::time::SystemTime| {
+        let mut bucket = cache.buckets[CacheKind::ServicePrincipal.idx()].lock();
+        bucket.entries.get_mut(key).unwrap().inserted_wall = to;
+    };
+    let two_days = Duration::from_secs(2 * 24 * 60 * 60);
+    cache.put(
+        CacheKind::ServicePrincipal,
+        "slept".into(),
+        &Sample("v".into()),
+    );
+    cache.put(
+        CacheKind::ServicePrincipal,
+        "skewed".into(),
+        &Sample("v".into()),
+    );
+    backdate("slept", std::time::SystemTime::now() - two_days);
+    backdate("skewed", std::time::SystemTime::now() + two_days);
+
+    let slept: Option<Sample> = cache.get(CacheKind::ServicePrincipal, "slept");
+    assert!(
+        slept.is_none(),
+        "two days by the wall clock is past any TTL"
+    );
+    let skewed: Option<Sample> = cache.get(CacheKind::ServicePrincipal, "skewed");
+    assert!(
+        skewed.is_some(),
+        "a backwards clock change must not expire it"
+    );
+}
+
 /// The read side of every `patch_typed_index` test: the entry's typed value,
 /// its insert time and its pin, straight from the bucket.
 fn typed_entry(cache: &Cache, key: &str) -> Option<(Vec<u8>, Instant, bool)> {
