@@ -278,6 +278,7 @@ pub fn AccessContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl I
             <Field label="Role">
                 <select
                     class="ui-select"
+                    aria-label="Role"
                     on:change=move |ev| selected_role.set(event_target_value(&ev))
                 >
                     <option value=DEFAULT_ACCESS_ROLE>"Default access"</option>

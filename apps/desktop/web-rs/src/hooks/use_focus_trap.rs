@@ -96,6 +96,22 @@ pub fn use_tab_cycle(container: NodeRef<html::Div>, active: Signal<bool>) {
         let (Some(first), Some(last)) = (els.first(), els.last()) else {
             return;
         };
+        // Focus escaped every dialog — a click on the scrim leaves it on
+        // `<body>`. The next Tab would then walk into the page behind the
+        // dialog, which nothing here is `inert` for. Pull it back in. (Focus
+        // inside ANOTHER dialog is left alone: stacked dialogs each run this.)
+        let outside_all = document()
+            .active_element()
+            .is_none_or(|el| el.closest(".modal-backdrop").ok().flatten().is_none());
+        if outside_all {
+            ev.prevent_default();
+            let _ = if ev.shift_key() {
+                last.focus()
+            } else {
+                first.focus()
+            };
+            return;
+        }
         // Cycle at the edges; let the browser handle Tab in the interior.
         if ev.shift_key() {
             if is_active(first) {

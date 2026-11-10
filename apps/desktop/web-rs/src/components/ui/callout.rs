@@ -10,7 +10,10 @@ pub fn Callout(
     /// `"info"` (default) | `"ok"` | `"warn"` | `"danger"`.
     #[prop(optional, into, default = String::from("info"))]
     tone: String,
-    /// Optional ARIA role (e.g. `"status"` / `"alert"`).
+    /// ARIA role (`"status"` / `"alert"`). Left empty, a `warn` or `danger`
+    /// callout is a polite `status` region, so one that appears after an
+    /// action is announced — most call sites never passed a role, and their
+    /// warnings were silent to a screen reader. `info` / `ok` stay roleless.
     #[prop(optional, into, default = String::new())]
     role: String,
     /// Extra class(es) appended to the tone class, for the few callers that
@@ -32,6 +35,11 @@ pub fn Callout(
         tone_class.to_string()
     } else {
         format!("{tone_class} {class}")
+    };
+    let role = if role.is_empty() && matches!(tone.as_str(), "warn" | "danger") {
+        "status".to_string()
+    } else {
+        role
     };
     view! {
         <div class=class role=(!role.is_empty()).then_some(role)>

@@ -233,7 +233,10 @@ pub fn BulkActionsView() -> impl IntoView {
                                 <span class="ui-text">
                                     "Create apps from a JSON array, e.g. [{\"displayName\":\"App A\",\"signInAudience\":\"AzureADMyOrg\"}], or load a CSV inventory (DisplayName, SignInAudience, Description, Owners, Permissions). Owners are UPNs; permissions are declared, not consented. Validate first to check every name against the tenant without creating anything."
                                 </span>
-                                <Textarea value=create_json />
+                                <label>
+                                    <span class="visually-hidden">"Apps to create, as JSON"</span>
+                                    <Textarea value=create_json />
+                                </label>
                                 <div class="actions-row">
                                     <Button
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)

@@ -244,9 +244,10 @@ pub(super) fn MailboxesPanel() -> impl IntoView {
             "Lists every application holding a mail-scopable Graph permission and tests each against one mailbox via Exchange's authoritative authorization check — \"who can read this mailbox?\"."
         </span>
         <div class="actions-row">
-            <div class="page__search">
+            <label class="page__search">
+                <span class="visually-hidden">"Mailbox address"</span>
                 <Input value=mailbox placeholder="Mailbox address (e.g. shared@contoso.com)…" />
-            </div>
+            </label>
             {move || {
                 if probing.get() {
                     view! {

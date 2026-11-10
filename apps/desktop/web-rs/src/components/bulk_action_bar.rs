@@ -1237,12 +1237,13 @@ fn armed_panel<R: Fn(BulkAction) + Copy + Send + Sync + 'static>(
     // while rendering no input to satisfy it.
     let input: AnyView = match spec.confirm {
         Confirm::Keyword(keyword) => view! {
-            <div class="confirm-gate">
+            // A `<label>`, so the instruction names the field it sits above.
+            <label class="confirm-gate">
                 <span class="ui-text confirm-gate__label">
                     "Type "<strong>{keyword}</strong>" to confirm."
                 </span>
                 <Input value=confirm_text placeholder=keyword />
-            </div>
+            </label>
         }
         .into_any(),
         Confirm::Groups => view! {

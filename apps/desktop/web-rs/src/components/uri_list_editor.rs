@@ -581,6 +581,7 @@ fn UriRowView(
                 on:keydown=on_keydown
                 on:paste=on_paste
                 placeholder=placeholder.get_value()
+                aria-label=noun.get_value()
                 spellcheck="false"
                 autocapitalize="none"
                 autocomplete="off"

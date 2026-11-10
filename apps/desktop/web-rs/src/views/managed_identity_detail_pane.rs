@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Input, Select};
+use thaw::{Button, ButtonAppearance, Field, Input, Select};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::SP_SITES_SELECTED;
@@ -626,8 +626,7 @@ fn AssignAzureRolePanel(
                     view! {
                         <div class="form-grid">
                             <RequiresRole capability_key="azure_role_assign" />
-                            <div class="read-field">
-                                <strong>"Role"</strong>
+                            <Field label="Role">
                                 <Select value=role>
                                     {COMMON_AZURE_ROLES
                                         .iter()
@@ -639,17 +638,15 @@ fn AssignAzureRolePanel(
                                         "Custom role definition id…"
                                     </option>
                                 </Select>
-                            </div>
+                            </Field>
                             <Show when=move || role.get() == CUSTOM_ROLE_OPTION>
-                                <div class="read-field">
-                                    <strong>"Role definition id (GUID)"</strong>
+                                <Field label="Role definition id (GUID)">
                                     <Input value=custom_role />
-                                </div>
+                                </Field>
                             </Show>
-                            <div class="read-field">
-                                <strong>"Scope (/subscriptions/<id>[/resourceGroups/<rg>])"</strong>
+                            <Field label="Scope (/subscriptions/<id>[/resourceGroups/<rg>])">
                                 <Input value=scope />
-                            </div>
+                            </Field>
                             {move || {
                                 error.get().map(|m| view! { <FormError>{m}</FormError> })
                             }}
