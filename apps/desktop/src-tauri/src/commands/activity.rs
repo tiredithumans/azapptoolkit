@@ -211,7 +211,7 @@ fn map_sign_in_err(err: GraphError) -> Result<SignInActivityDto, UiError> {
             "Couldn't acquire AuditLog.Read.All for sign-in activity right now; the rest of the app is unaffected.",
         ),
         GraphError::Unauthorized => sign_in_unavailable(
-            "Your access token was rejected. Use \"Refresh token\" (next to Sign out), then reopen sign-in activity.",
+            "Your access token was rejected. Use \"Refresh token\" (the refresh icon in the top bar), then reopen sign-in activity.",
         ),
         GraphError::Throttled { .. } | GraphError::Server { .. } | GraphError::Network(_) => {
             sign_in_unavailable(

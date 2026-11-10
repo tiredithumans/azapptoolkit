@@ -29,7 +29,7 @@ use crate::components::icon::IconName;
 use crate::components::ui::{
     Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem, tab_id,
 };
-use crate::state::use_session;
+use crate::state::{ActiveView, use_session};
 use crate::util::count_noun;
 
 #[component]
@@ -344,7 +344,16 @@ pub fn BulkActionsView() -> impl IntoView {
                                     title="No apps selected".to_string()
                                     body="Check one or more apps in App Registrations, then return here (or use the inline bar on the list) to grant consent, remove expired credentials, or delete them."
                                         .to_string()
-                                />
+                                >
+                                    // The empty state named the page to go to
+                                    // and offered no way to get there.
+                                    <Button
+                                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                                        on_click=Box::new(move |_| session.set_view(ActiveView::Apps))
+                                    >
+                                        "Go to App Registrations"
+                                    </Button>
+                                </EmptyState>
                             </Show>
                         }
                             .into_any()

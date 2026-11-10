@@ -485,7 +485,7 @@ async fn concurrent_refresh_token_actions_start_one_refresh() {
     m.session.report_command_error(&fixtures::ui_error(
         "unauthorized",
         "unauthorized (401)\n\nYour Key Vault token was rejected. Use \
-         \"Refresh token\" (next to Sign out), then retry; if it persists, \
+         \"Refresh token\" (the refresh icon in the top bar), then retry; if it persists, \
          confirm the app has consented the vault.azure.net scope.",
     ));
     ts::wait_for(|| ts::query_all(".toast__action").len() == 2).await;

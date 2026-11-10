@@ -142,6 +142,18 @@ pub(crate) fn FindingsPane() -> impl IntoView {
                                             ctrl.sign_in_read_failed.get(),
                                             ctrl.consent_needed.get(),
                                         )}
+                                        // The note names Access Readiness,
+                                        // which has no nav entry — link it.
+                                        " "
+                                        <button
+                                            type="button"
+                                            class="link-btn"
+                                            on:click=move |_| {
+                                                session.set_view(crate::state::ActiveView::Readiness)
+                                            }
+                                        >
+                                            "Open Access Readiness"
+                                        </button>
                                     </p>
                                 }
                             })}

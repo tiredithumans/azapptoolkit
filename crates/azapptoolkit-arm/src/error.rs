@@ -30,8 +30,7 @@ impl ArmError {
                     .map(|c| c.remediation)
             }
             ArmError::Unauthorized => Some(
-                "Your Azure Resource Manager token was rejected. Use \"Refresh token\" (next to \
-                 Sign out), then retry; if it persists, confirm the app has consented the \
+                "Your Azure Resource Manager token was rejected. Use \"Refresh token\" (the refresh icon in the top bar), then retry; if it persists, confirm the app has consented the \
                  management.azure.com scope.",
             ),
             _ => None,

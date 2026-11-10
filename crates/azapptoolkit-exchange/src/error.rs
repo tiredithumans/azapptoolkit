@@ -127,14 +127,14 @@ impl ExchangeError {
                 "Exchange rejected this request without a diagnostic reason, which usually is NOT \
                  a missing Exchange role. Most common causes after activating a role: (1) your \
                  access token predates the activation, so its role claim is stale — use \"Refresh \
-                 token\" (next to Sign out), then retry; (2) an \"Exchange Administrator\" \
+                 token\" (the refresh icon in the top bar), then retry; (2) an \"Exchange Administrator\" \
                  activation that hasn't finished propagating to Exchange yet — wait a few minutes \
                  and retry; (3) only if neither helps, a genuine Exchange RBAC gap — confirm your \
                  account holds the \"Role Management\" role (e.g. Organization Management).",
             ),
             ExchangeError::Unauthorized => Some(
-                "Your Exchange admin-API token was rejected. Use \"Refresh token\" (next to Sign \
-                 out), then retry; if it persists, confirm the app registration has the delegated \
+                "Your Exchange admin-API token was rejected. Use \"Refresh token\" (the refresh icon in \
+                 the top bar), then retry; if it persists, confirm the app registration has the delegated \
                  \"Office 365 Exchange Online → Exchange.Manage\" permission with admin consent.",
             ),
             _ => None,

@@ -33,7 +33,7 @@ impl KeyVaultError {
                     .map(|c| c.remediation)
             }
             KeyVaultError::Unauthorized => Some(
-                "Your Key Vault token was rejected. Use \"Refresh token\" (next to Sign out), \
+                "Your Key Vault token was rejected. Use \"Refresh token\" (the refresh icon in the top bar), \
                  then retry; if it persists, confirm the app has consented the vault.azure.net \
                  scope.",
             ),

@@ -246,7 +246,7 @@ pub fn GlobalSearch() -> impl IntoView {
                         // resolved from the flattened list, never guessed.
                         hits.with(|h| active_option_id(h, selected.get()))
                     }
-                    placeholder="Search apps or jump to a page…"
+                    placeholder="Search apps or jump to a page… (Ctrl/Cmd+K)"
                     prop:value=move || raw_query.get()
                     on:input=on_input
                     on:focus=move |_| {

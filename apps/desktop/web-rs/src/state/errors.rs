@@ -622,7 +622,7 @@ mod tests {
         // advice for a 401 that survives a refresh. Replacing it with fixed text
         // turned a persistent 401 into a refresh loop with nothing to go on.
         let hinted = "unauthorized (401)\n\nYour Key Vault token was rejected. Use \
-                      \"Refresh token\" (next to Sign out), then retry; if it persists, \
+                      \"Refresh token\" (the refresh icon in the top bar), then retry; if it persists, \
                       confirm the app has consented the vault.azure.net scope.";
         Owner::new().with(|| {
             provide_session();
