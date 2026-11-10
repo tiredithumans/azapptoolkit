@@ -211,6 +211,22 @@ surfaces reuse it rather than re-implementing the markup.
   chips do. An action column's header is `""` in `DataTable`, which renders a `.visually-hidden`
   "Actions"; a hand-built table writes the same span into its empty `<th>`.
 
+## Confirmation tiers
+
+An action's guard follows what it does, never which surface triggers it. Every tier is
+`ConfirmDialog` (or the bulk bar's own gate); pinned by `web-rs/tests/confirmation_tiers.rs`.
+
+| Tier | Guard | Actions |
+|---|---|---|
+| Irreversible or tenant-wide | `require_keyword`, naming the object | permanent delete (`DELETE`), delete an app registration (`DELETE`), admin consent (`GRANT`), immediate signing-cert rotation (`ROTATE`) |
+| Destructive but narrow or recoverable | click confirm, naming the object and what is removed | remove a credential / expired credentials, revoke a grant, disable SSO, retire the previous signing cert, grant scoped access with the org-wide strip, remove Exchange scoping |
+| Planned | commit disabled until a dry-run plan is on screen | AAP migration (Exchange section and the Security tab's dialog) |
+
+Bulk escalates one tier: a click-confirmed single-app removal ("Remove expired") asks for a typed
+keyword in the bulk bar, because it runs across every selected app. The reverse never holds — a
+single-app action is never weaker than the tier above gives it. A red button (`button--danger`)
+marks the trigger of anything in the first two tiers.
+
 ## Moving off Thaw
 
 Thaw (a pre-1.0 Fluent UI port whose last release is a beta) is being retired a few components at

@@ -6,6 +6,12 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Changed
+
+- Granting admin consent, deleting an app and "Delete forever" now ask you to type a keyword, as the bulk actions do.
+- Disabling single sign-on and granting scoped mailbox access now confirm first and say what will be removed.
+- "Migrate this app" in Exchange scoping stays disabled until you have previewed the migration.
+
 ## [0.35.3] - 2026-11-10
 
 ### Changed

@@ -507,7 +507,10 @@ fn SigningCertRolloverPanel(
                                     >
                                         "Revert to previous certificate"
                                     </Button>
+                                    // Red: it removes the only rollback (the
+                                    // confirm below says so).
                                     <Button
+                                        class="button--danger"
                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                         on_click=Box::new(retire)
                                         disabled=Signal::derive(move || cmd.busy.get())
@@ -644,7 +647,11 @@ fn SsoEditor(
     let needs_consent = RwSignal::new(false);
 
     // Apply a new SSO method, then reload so the editor switches to it.
-    let apply_mode = move |_| {
+    // Turning a configured method off stops sign-ins for every user of the app,
+    // so that one direction goes through a confirm (`frontend-workspace.md`,
+    // "Confirmation tiers"); switching between methods stays one click.
+    let disable_open = RwSignal::new(false);
+    let apply_mode = move || {
         mode_cmd.run_toast_err(
             move |()| {
                 session.toast_success("Single sign-on method updated.");
@@ -816,11 +823,29 @@ fn SsoEditor(
             </Field>
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Primary)
-                on_click=Box::new(apply_mode)
+                on_click=Box::new(move |_| {
+                    if configured && selected_mode.get_untracked() == SsoMode::Disabled {
+                        disable_open.set(true);
+                    } else {
+                        apply_mode();
+                    }
+                })
                 disabled=Signal::derive(move || mode_cmd.busy.get())
             >
                 "Apply method"
             </Button>
+            <ConfirmDialog
+                open=disable_open
+                title="Disable single sign-on?"
+                body="Users can no longer sign in to this application through Entra until a method is set again. The saved SAML or OIDC configuration is kept."
+                subject=app_name
+                confirm_label="Disable SSO"
+                on_confirm=Callback::new(move |()| {
+                    disable_open.set(false);
+                    apply_mode();
+                })
+                on_close=Callback::new(move |()| disable_open.set(false))
+            />
             <span class="ui-text hint">
                 "Password-based and linked single sign-on are configured in the Microsoft Entra admin center, not here."
             </span>

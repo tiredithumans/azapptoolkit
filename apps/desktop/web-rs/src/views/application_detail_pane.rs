@@ -310,6 +310,7 @@ pub fn ApplicationDetailPane(
                                         subject=Signal::derive(move || detail_signal
                                             .with(|d| d.application.display_name.clone()))
                                         confirm_label="Delete"
+                                        require_keyword="DELETE"
                                         busy=Signal::derive(move || delete_cmd.busy.get())
                                         error=Signal::derive(move || delete_cmd.error.get())
                                         on_confirm=Callback::new(move |()| do_delete())

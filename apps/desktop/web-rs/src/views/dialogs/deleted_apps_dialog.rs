@@ -4,7 +4,7 @@
 //! delete was presented as irreversible and the bin was invisible. This dialog
 //! lists it and offers the two exits: **Restore** (which carries the paired
 //! enterprise app along — see `commands::bulk::bulk_restore_deleted`) and a
-//! two-step **Delete forever** that skips the window.
+//! typed-keyword **Delete forever** that skips the window.
 //!
 //! Mounted once by the shell under the App Registrations view, gated on
 //! `TenantScopedUi::deleted_open`, so it re-mounts per open and fetches fresh
@@ -19,6 +19,7 @@ use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{Callout, DataTable, DetailLoadError, EmptyState, SkeletonList};
 use crate::state::use_session;
 use crate::util::{expiry_label, floored_days_until, relative_time};
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 use azapptoolkit_dto::applications::{DeletedAppDto, DeletedAppsDto};
 use chrono::{Duration, Utc};
@@ -48,11 +49,21 @@ pub fn DeletedAppsDialog(
     // both change what the next row read would show); holds the object id of
     // the row being acted on so its buttons read busy.
     let busy_row: RwSignal<Option<String>> = RwSignal::new(None);
-    // First "Delete forever" click only arms the row; the same button then
-    // reads "Confirm permanent delete". Arming is per-row and sticky until a
-    // click, so an accidental first tap never chains into a second-target
-    // accidental confirm.
-    let purge_armed: RwSignal<Option<String>> = RwSignal::new(None);
+    // "Delete forever" opens a typed-keyword `ConfirmDialog` for that row — the
+    // irreversible tier of the confirmation policy (`frontend-workspace.md`,
+    // "Confirmation tiers"). Holds the object id awaiting confirmation.
+    let purge_target: RwSignal<Option<String>> = RwSignal::new(None);
+    let purge_subject = Signal::derive(move || {
+        let Some(id) = purge_target.get() else {
+            return String::new();
+        };
+        rows.with(|d| {
+            d.as_ref()
+                .and_then(|d| d.apps.iter().find(|a| a.object_id == id))
+                .and_then(|a| a.display_name.clone())
+        })
+        .unwrap_or(id)
+    });
 
     // Fetch on mount and on every reload bump. Tenant-race guarded like the
     // audit dashboard: a late response must not write into a switched tenant.
@@ -152,12 +163,10 @@ pub fn DeletedAppsDialog(
         });
     });
 
-    let on_purge = Callback::new(move |object_id: String| {
-        // Two-step: arm first, confirm second.
-        if purge_armed.get_untracked().as_deref() != Some(object_id.as_str()) {
-            purge_armed.set(Some(object_id));
+    let on_purge = Callback::new(move |(): ()| {
+        let Some(object_id) = purge_target.get_untracked() else {
             return;
-        }
+        };
         if busy_row.get_untracked().is_some() {
             return;
         }
@@ -170,7 +179,7 @@ pub fn DeletedAppsDialog(
                     .and_then(|a| a.display_name.clone())
             })
             .unwrap_or_else(|| object_id.clone());
-        purge_armed.set(None);
+        purge_target.set(None);
         busy_row.set(Some(object_id.clone()));
         let Some(t) = session.active_tenant.get_untracked() else {
             busy_row.set(None);
@@ -251,7 +260,6 @@ pub fn DeletedAppsDialog(
                         // rebuild per interaction is fine.
                         {
                             let busy = busy_row.get();
-                            let armed = purge_armed.get();
                             view! {
                                 <DataTable
                                     headers=vec!["App", "Deleted", ""]
@@ -259,8 +267,6 @@ pub fn DeletedAppsDialog(
                                     empty_message="".to_string()
                                     row=move |row: DeletedAppDto| {
                                         let pending = busy.as_deref() == Some(row.object_id.as_str());
-                                        let is_armed =
-                                            armed.as_deref() == Some(row.object_id.as_str());
                                         let name = row
                                             .display_name
                                             .clone()
@@ -299,17 +305,14 @@ pub fn DeletedAppsDialog(
                                                         "Restore"
                                                     </Button>
                                                     <Button
+                                                        class="button--danger"
                                                         appearance=Signal::derive(|| ButtonAppearance::Secondary)
                                                         disabled=Signal::derive(move || pending)
                                                         on_click=Box::new(move |_| {
-                                                            on_purge.run(id_for_purge.clone())
+                                                            purge_target.set(Some(id_for_purge.clone()))
                                                         })
                                                     >
-                                                        {if is_armed {
-                                                            "Confirm permanent delete"
-                                                        } else {
-                                                            "Delete forever"
-                                                        }}
+                                                        "Delete forever"
                                                     </Button>
                                                 </td>
                                             </tr>
@@ -338,6 +341,16 @@ pub fn DeletedAppsDialog(
                     "Close"
                 </Button>
             </div>
+            <ConfirmDialog
+                open=Signal::derive(move || purge_target.get().is_some())
+                title="Delete this app permanently?"
+                body="This skips the 30-day recycle bin. The app registration cannot be restored afterwards."
+                subject=purge_subject
+                confirm_label="Delete forever"
+                require_keyword="DELETE"
+                on_confirm=on_purge
+                on_close=Callback::new(move |_| purge_target.set(None))
+            />
         </ModalShell>
     }
 }

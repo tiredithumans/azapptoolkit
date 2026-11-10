@@ -109,7 +109,17 @@ async fn deleting_from_the_detail_pane_refreshes_both_lists() {
     let (apps, enterprise) = reloads(&m);
 
     ts::click_button_labelled("Delete");
-    ts::wait_for(|| ts::query(".modal").is_some()).await;
+    ts::wait_for(|| ts::query(".confirm-dialog__keyword input").is_some()).await;
+    // The irreversible tier: Delete stays disabled until the keyword is typed.
+    assert!(
+        ts::button_labelled_in(".modal", "Delete").is_some_and(|b| b.has_attribute("disabled")),
+        "delete must not be one click"
+    );
+    ts::set_input_value(".confirm-dialog__keyword input", "DELETE");
+    ts::wait_for(|| {
+        ts::button_labelled_in(".modal", "Delete").is_some_and(|b| !b.has_attribute("disabled"))
+    })
+    .await;
     ts::click_button_labelled_in(".modal", "Delete");
 
     ts::wait_for(|| reloads(&m) == (apps + 1, enterprise + 1)).await;

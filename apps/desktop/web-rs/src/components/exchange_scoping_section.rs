@@ -111,6 +111,11 @@ pub fn ExchangeScopingSection(
     let remove_cmd = use_command().with_consent_feature("exchange");
     let confirm_remove = RwSignal::new(false);
     let mig_result: RwSignal<Option<AapMigrationReport>> = RwSignal::new(None);
+    // True once a dry-run plan has landed for the current scope name; cleared
+    // when a run starts, so the commit always follows a plan the operator read.
+    let mig_planned = RwSignal::new(false);
+    // The recommended grant's "this strips org-wide grants" confirmation.
+    let confirm_strip = RwSignal::new(false);
     // A grant outcome that carries warnings, kept inline until it's been read.
     // A clean grant toasts and reloads the caller (which rebuilds this whole
     // section), but a warned one must survive that: the backend reports
@@ -321,6 +326,7 @@ pub fn ExchangeScopingSection(
             return;
         }
         mig_result.set(None);
+        mig_planned.set(false);
         let app_id = app_id.get();
         // Blank override => None, so the backend applies the `app_scope_<appId>` default.
         let scope = scope_name_override.get_untracked().trim().to_string();
@@ -337,6 +343,7 @@ pub fn ExchangeScopingSection(
                 // (reported as a warning, not a failure); a failed app; and a
                 // stopped run (Stop migration, or a dead session) with its
                 // unattempted tail. Refresh picks up whatever did land.
+                mig_planned.set(r.dry_run);
                 if !r.is_clean() {
                     mig_result.set(Some(r));
                 } else {
@@ -383,7 +390,7 @@ pub fn ExchangeScopingSection(
             <div class="actions-row">
                 <Button
                     appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| do_grant_managed(true))
+                    on_click=Box::new(move |_| confirm_strip.set(true))
                     disabled=Signal::derive(move || grant_cmd.busy.get())
                 >
                     {move || {
@@ -410,6 +417,22 @@ pub fn ExchangeScopingSection(
                     )
                 }}
             </span>
+
+            // The recommended path strips org-wide grants, so it states that in
+            // a confirm instead of leaving it to the hint above
+            // (`frontend-workspace.md`, "Confirmation tiers").
+            <ConfirmDialog
+                open=confirm_strip
+                title="Grant scoped access and remove org-wide grants?"
+                body="Scoped access is granted first. Then the org-wide Microsoft Entra grants for the scoped mail permissions are removed, so this principal can reach only the mailboxes in the managed group. Exchange can take 30 min–2 h to apply the change."
+                subject=Signal::derive(move || target.with(|t| t.display_name.clone()))
+                confirm_label="Grant scoped access"
+                on_confirm=Callback::new(move |_| {
+                    confirm_strip.set(false);
+                    do_grant_managed(true);
+                })
+                on_close=Callback::new(move |_| confirm_strip.set(false))
+            />
 
             // Warned grant outcome (either grant path — this sits above both).
             {move || {
@@ -783,7 +806,13 @@ pub fn ExchangeScopingSection(
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                     on_click=Box::new(move |_| do_migrate(false))
-                                    disabled=Signal::derive(move || mig_cmd.busy.get())
+                                    // Never offer the commit before a plan has
+                                    // been read — the plan is what surfaces the
+                                    // fail-closed outcomes (same gate as the
+                                    // Security tab's migrate dialog).
+                                    disabled=Signal::derive(move || {
+                                        mig_cmd.busy.get() || !mig_planned.get()
+                                    })
                                 >
                                     {move || {
                                         if mig_cmd.busy.get() {
@@ -798,6 +827,16 @@ pub fn ExchangeScopingSection(
                                 </Button>
                                 {move || mig_cmd.busy.get().then(|| view! { <AapMigrationStop /> })}
                             </div>
+                            {move || {
+                                (!mig_planned.get())
+                                    .then(|| {
+                                        view! {
+                                            <span class="ui-text hint">
+                                                "Preview the migration first — “Migrate this app” unlocks once a plan is shown."
+                                            </span>
+                                        }
+                                    })
+                            }}
                             {move || {
                                 mig_cmd
                                     .error
