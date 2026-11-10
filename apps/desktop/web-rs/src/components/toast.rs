@@ -1,10 +1,14 @@
 //! In-app toast notifications. A single `ToastHost` is mounted near the
 //! shell root and renders the live stack from `Session::toasts`; toasts are
 //! pushed from anywhere via the `Session` helpers (`toast_success`,
-//! `toast_error`, …) and auto-dismiss after a timeout — errors linger longer
-//! than successes/info so they aren't missed; error toasts that carry an
-//! action stay until acted on or dismissed ([`Toast::is_sticky`]). Errors announce assertively
-//! (`role="alert"`), the rest politely (`role="status"`).
+//! `toast_error`, …). Successes and info auto-dismiss after a timeout; errors
+//! stay until acted on or dismissed ([`Toast::is_sticky`]). Errors announce
+//! assertively (`role="alert"`), the rest politely (`role="status"`).
+//!
+//! The stack is a keyed `<For>`: a push or dismiss touches only that toast's
+//! node. Mapping the whole list rebuilt every toast on each change, which
+//! replayed the entry animation, re-announced every `role="alert"`, and took
+//! focus away from a Retry button the operator had tabbed to.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -16,11 +20,9 @@ use wasm_bindgen::prelude::*;
 use crate::components::icon::{Icon, IconName};
 use crate::state::use_session;
 
-/// How long success / info toasts linger before auto-dismiss (ms).
+/// How long success / info toasts linger before auto-dismiss (ms). Errors
+/// never auto-dismiss ([`Toast::is_sticky`]).
 const TOAST_TIMEOUT_MS: i32 = 5000;
-/// Errors linger longer — a failure the user must read shouldn't vanish as
-/// fast as a routine success confirmation.
-const ERROR_TIMEOUT_MS: i32 = 10000;
 
 /// Optional action attached to a toast (e.g. "Retry"). CSR-only, single-
 /// threaded, so `Rc<dyn Fn()>` is used rather than Leptos `Callback`: the
@@ -53,12 +55,16 @@ pub struct Toast {
 }
 
 impl Toast {
-    /// The one definition of "sticky": an error that carries an action (Retry,
-    /// Re-authenticate, Grant consent, …) stays until acted on or dismissed.
-    /// `ToastHost` never auto-dismisses one, and the stack cap evicts one only
-    /// once no transient toast is left to drop.
+    /// The one definition of "sticky": an error stays until acted on or
+    /// dismissed — with an action (Retry, Re-authenticate, Grant consent, …) or
+    /// without. `ToastHost` never auto-dismisses one, and the stack cap evicts
+    /// one only once no transient toast is left to drop.
+    ///
+    /// A plain error used to expire after ten seconds, so a failure that landed
+    /// while the operator was reading another window was simply gone, with no
+    /// history to find it in.
     pub fn is_sticky(&self) -> bool {
-        matches!(self.kind, ToastKind::Error) && self.action.is_some()
+        matches!(self.kind, ToastKind::Error)
     }
 }
 
@@ -87,14 +93,6 @@ impl ToastKind {
             _ => "status",
         }
     }
-
-    /// Auto-dismiss delay (ms). Errors linger longer so they aren't missed.
-    fn timeout_ms(self) -> i32 {
-        match self {
-            ToastKind::Error => ERROR_TIMEOUT_MS,
-            _ => TOAST_TIMEOUT_MS,
-        }
-    }
 }
 
 /// Renders the toast stack and owns auto-dismiss timers. Mount once.
@@ -115,13 +113,13 @@ pub fn ToastHost() -> impl IntoView {
             Some(w) => w,
             None => return,
         };
-        // Snapshot the (id, kind, sticky) of the currently-present toasts.
-        let present: Vec<(u64, ToastKind, bool)> =
-            toasts.with(|list| list.iter().map(|t| (t.id, t.kind, t.is_sticky())).collect());
+        // Snapshot the (id, sticky) of the currently-present toasts.
+        let present: Vec<(u64, bool)> =
+            toasts.with(|list| list.iter().map(|t| (t.id, t.is_sticky())).collect());
 
         handles.update_value(|map| {
             // Cancel + drop timers for toasts that are gone.
-            let present_ids: Vec<u64> = present.iter().map(|(id, _, _)| *id).collect();
+            let present_ids: Vec<u64> = present.iter().map(|(id, _)| *id).collect();
             let stale: Vec<u64> = map
                 .keys()
                 .copied()
@@ -133,7 +131,7 @@ pub fn ToastHost() -> impl IntoView {
                 }
             }
             // Schedule timers for new auto-dismissable toasts.
-            for (id, kind, sticky) in present {
+            for (id, sticky) in present {
                 // Sticky toasts (`Toast::is_sticky`) stay; everything else expires.
                 if sticky || map.contains_key(&id) {
                     continue;
@@ -143,7 +141,7 @@ pub fn ToastHost() -> impl IntoView {
                 let cb = Closure::once_into_js(move || session.dismiss_toast(id));
                 let cb_fn = cb.unchecked_ref::<js_sys::Function>();
                 if let Ok(h) = win
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(cb_fn, kind.timeout_ms())
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(cb_fn, TOAST_TIMEOUT_MS)
                 {
                     map.insert(id, h);
                 }
@@ -161,12 +159,13 @@ pub fn ToastHost() -> impl IntoView {
         }
     });
 
-    let stack = move || {
+    // Keyed by id, and the row looks its toast up: `Toast` holds an
+    // `Rc<dyn Fn()>` action and so is not `Send`, which `<For>`'s item type
+    // must be. A toast is immutable once pushed, so the untracked read is exact.
+    let render = move |id: u64| {
         toasts
-            .get()
-            .into_iter()
+            .with_untracked(|list| list.iter().find(|t| t.id == id).cloned())
             .map(|t| {
-                let id = t.id;
                 let action = t.action.clone();
                 let action_label = t.action_label.clone();
                 let dismiss = move |_| session.dismiss_toast(id);
@@ -208,13 +207,20 @@ pub fn ToastHost() -> impl IntoView {
                     </div>
                 }
             })
-            .collect_view()
     };
 
     // No `aria-live` on the host: each toast carries its own `role`
     // (alert ⇒ assertive, status ⇒ polite), so a wrapping live region would
     // just nest redundantly.
-    view! { <div class="toast-host">{stack}</div> }
+    view! {
+        <div class="toast-host">
+            <For
+                each=move || toasts.with(|list| list.iter().map(|t| t.id).collect::<Vec<_>>())
+                key=|id| *id
+                children=render
+            />
+        </div>
+    }
 }
 
 #[cfg(test)]

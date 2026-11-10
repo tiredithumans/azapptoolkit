@@ -854,6 +854,13 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.shell__tenant-chip-update {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .shell__tenant-chip-caret {
   display: inline-flex;
   color: var(--text-muted);
@@ -2876,6 +2883,9 @@ h3 {
 .copyable-id__copied {
   color: var(--ok);
   font-size: var(--text-xs);
+}
+.copyable-id__copied--failed {
+  color: var(--danger);
 }
 
 .open-dock__hint {

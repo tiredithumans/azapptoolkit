@@ -8,7 +8,9 @@ use crate::bindings::applications::{self, CreateApplicationInput};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{FormError, Spinner};
 use crate::hooks::use_command::use_command;
+use crate::state::{OpenItemKind, use_session};
 use crate::views::tabs::overview_tab::SIGN_IN_AUDIENCES;
+use azapptoolkit_dto::applications::CreateApplicationResult;
 
 #[component]
 pub fn CreateAppDialog(
@@ -17,6 +19,7 @@ pub fn CreateAppDialog(
     #[prop(into)] on_created: Callback<()>,
 ) -> impl IntoView {
     let cmd = use_command();
+    let session = use_session();
     let display_name = RwSignal::new(String::new());
     let audience = RwSignal::new(SIGN_IN_AUDIENCES[0].0.to_string());
     let description = RwSignal::new(String::new());
@@ -28,11 +31,17 @@ pub fn CreateAppDialog(
         let desc = description.get();
         let csp = create_sp.get();
         cmd.run(
-            move |_| {
+            move |created: CreateApplicationResult| {
                 display_name.set(String::new());
                 description.set(String::new());
                 on_created.try_run(());
                 on_close.try_run(());
+                // Say it worked and put the operator on the new app. The dialog
+                // used to just close, leaving them to find the new row in a
+                // list that had not refetched yet.
+                let app = created.application;
+                session.toast_success(format!("Created {}.", app.display_name));
+                session.open_item(OpenItemKind::AppReg, app.id, app.display_name);
             },
             move |tenant_id| {
                 let input = CreateApplicationInput {

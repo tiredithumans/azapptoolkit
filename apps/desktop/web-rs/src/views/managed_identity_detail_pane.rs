@@ -427,11 +427,26 @@ pub fn ManagedIdentityDetailPane(
                             }
                                 .into_any()
                         }
-                        Err(_) => {
+                        Err(e) if e.is_consent_required() => {
                             view! {
                                 <Callout tone="warn">
                                     "Azure RBAC is unavailable — it needs consent to Azure Service Management (management.azure.com) and an Azure subscription you can read."
                                 </Callout>
+                            }
+                                .into_any()
+                        }
+                        // Anything else is not a consent problem — a throttle,
+                        // a network blip, a 403 with its own remediation. It
+                        // used to be reported as "needs consent" with no way
+                        // to try again.
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |()| {
+                                        arm_reload.update(|n| *n += 1)
+                                    })
+                                />
                             }
                                 .into_any()
                         }

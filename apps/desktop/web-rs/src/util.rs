@@ -90,15 +90,6 @@ pub async fn write_clipboard(value: &str) -> bool {
     JsFuture::from(promise).await.is_ok()
 }
 
-/// Copies `value` to the system clipboard (fire-and-forget). Shared by the
-/// detail panes and the SSO summary, all of which surface copy-to-clipboard
-/// fields. One clipboard implementation: this rides [`write_clipboard`].
-pub fn copy_text(value: String) {
-    leptos::task::spawn_local(async move {
-        let _ = write_clipboard(&value).await;
-    });
-}
-
 /// The standard "no tenant selected" IPC error. Views guard on the active
 /// tenant before invoking a command; centralizing this keeps the code + message
 /// identical everywhere (it had been independently redefined in 7 files).

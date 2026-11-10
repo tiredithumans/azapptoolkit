@@ -129,6 +129,9 @@ pub fn OverviewTab(
         cmd.run(
             move |()| {
                 editing.set(false);
+                // Every other tab confirms its save; this one closed the form
+                // and said nothing.
+                session.toast_success("Application details saved.");
                 on_changed_cb.try_run(());
                 if list_changed {
                     session.bump_apps_reload();
