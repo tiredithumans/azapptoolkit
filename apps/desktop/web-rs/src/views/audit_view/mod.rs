@@ -232,7 +232,19 @@ pub fn AuditAppsPane() -> impl IntoView {
             <SearchInput value=search placeholder="Filter by name or appId…" />
             {move || {
                 if total_items.get().is_none() {
-                    return view! { <span class="ui-text">"Run an audit to populate this view."</span> }
+                    // The empty state carries the action it asks for; the
+                    // posture strip's own button is a scroll away.
+                    return view! {
+                        <span class="ui-text">"Run an audit to populate this view."</span>
+                        <button
+                            type="button"
+                            class="link-btn"
+                            disabled=move || ctrl.scanning.get()
+                            on:click=move |_| ctrl.run()
+                        >
+                            {move || if ctrl.scanning.get() { "Audit running…" } else { "Run audit now" }}
+                        </button>
+                    }
                         .into_any();
                 }
                 // The table shell renders once per scan; the count line and the

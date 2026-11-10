@@ -506,6 +506,16 @@ fn ExposeApiLoaded(
                         "+ Add a client application"
                     </Button>
                 </header>
+                {scopes
+                    .get_value()
+                    .is_empty()
+                    .then(|| {
+                        view! {
+                            <span class="ui-text hint">
+                                "Add a scope first — a client is authorized for specific scopes."
+                            </span>
+                        }
+                    })}
                 <span class="ui-text hint">
                     "Pre-authorized clients can request the selected scopes without the user being asked to consent. Only authorize clients you trust."
                 </span>

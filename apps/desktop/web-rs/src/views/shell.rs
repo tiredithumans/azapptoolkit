@@ -551,7 +551,9 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                     view! { <Spinner /> }
                                         .into_any()
                                 } else {
-                                    view! { <Icon name=IconName::Refresh size=16 /> }.into_any()
+                                    // A key, not the reload arrows: every list's Refresh
+                                    // re-reads data, this one renews the sign-in.
+                                    view! { <Icon name=IconName::Key size=16 /> }.into_any()
                                 }
                             }}
                         </button>

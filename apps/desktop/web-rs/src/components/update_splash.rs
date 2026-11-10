@@ -182,11 +182,12 @@ pub fn UpdateSplash(open: RwSignal<bool>, info: RwSignal<Option<UpdateInfo>>) ->
                                     // button rather than after the relaunch.
                                     {move || {
                                         (session.has_unsaved_items()
+                                            || session.tenant_ui.bulk_running.get()
                                             || session.tenant_ui.dr_unsaved_secrets.get())
                                             .then(|| {
                                                 view! {
                                                     <Callout tone="warn">
-                                                        "Updating restarts the app. Unsaved edits in open items, a running restore, and any one-time secret values you have not saved will be lost."
+                                                        "Updating restarts the app. Unsaved edits in open items, a running bulk action or restore, and any one-time secret values you have not saved will be lost."
                                                     </Callout>
                                                 }
                                             })

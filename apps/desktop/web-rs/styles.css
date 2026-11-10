@@ -2495,6 +2495,8 @@ h3 {
   font-size: var(--text-xs);
   line-height: 1;
   padding: 2px var(--space-2);
+  min-width: 24px;
+  min-height: 24px;
 }
 .pair-arrow:hover {
   background: var(--accent-soft);
@@ -3664,6 +3666,8 @@ h3 {
   font-size: var(--text-md);
   line-height: 1;
   padding: 0 2px;
+  min-width: 24px;
+  min-height: 24px;
 }
 .toast__close:hover {
   color: var(--text);
@@ -4262,6 +4266,27 @@ h3 {
   padding: 1px 10px;
   cursor: help;
   white-space: nowrap;
+  position: relative;
+}
+.requires-role:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+/* The hover `title` never shows for a keyboard user: draw the same text. */
+.requires-role:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: 320px;
+  padding: var(--space-2);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  white-space: pre-line;
 }
 
 /* Disaster Recovery (backup & restore) page */
