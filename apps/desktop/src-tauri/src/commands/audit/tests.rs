@@ -1882,3 +1882,18 @@ async fn office365_grant_failures_are_gaps_but_an_absent_resource_is_not() {
     assert_eq!(gaps, vec![AuditCoverageGap::EwsFullAccessGrants]);
     assert!(grants.is_empty());
 }
+
+/// The SP index answers `Ok` when it stops at its cap. A run over a capped
+/// index never scored the service principals past it, so it carries the
+/// `ServicePrincipalIndex` gap (and is therefore not cached or shown clean).
+#[test]
+fn a_capped_sp_index_is_a_coverage_gap() {
+    use azapptoolkit_graph::client::SP_INDEX_MAX;
+    assert!(!super::prefetch::sp_index_capped(SP_INDEX_MAX - 1));
+    assert!(super::prefetch::sp_index_capped(SP_INDEX_MAX));
+    assert!(!run_is_cacheable(
+        false,
+        false,
+        &[AuditCoverageGap::ServicePrincipalIndex]
+    ));
+}

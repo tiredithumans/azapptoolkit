@@ -6,6 +6,35 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Changed
+
+- A security audit of a large tenant reads far fewer delegated grants and updates its progress bar more smoothly.
+- Saving a change in an app's detail no longer reloads the tabs you are not looking at.
+- The Credentials tab opens faster on a large tenant, and typing is lighter on pages with many audit rows.
+
+### Fixed
+
+- Migrate to RBAC for Applications now leaves an app alone when it also has a DenyAccess policy, keeping the block.
+- A mail permission with an unscoped Exchange role assignment no longer reads "Scoped (legacy)" beside a policy.
+- A redirect or logout URL that hides another host before `?@localhost` is now refused as plain http.
+- Entra's "too many requests" loop error no longer signs you out; the session stays and the action can be retried.
+- Ctrl/Cmd+W, Ctrl/Cmd+1–5 and Ctrl/Cmd+K no longer act behind an open dialog, so a one-time secret is not lost.
+- A Key Vault secret whose reveal finishes after you leave the page is discarded instead of shown on your return.
+- The security audit now flags a run as incomplete when the tenant has more service principals than it reads.
+- A backup of a tenant past the 10,000 app or service principal limit now lists what it left out.
+- Restore now keeps an enterprise app disabled when sign-in was disabled for it in the backup.
+- A delete or revoke that worked but came back "not found" now drops out of the lists straight away.
+- Granting access no longer keeps failing with a conflict after the app's enterprise application was created elsewhere.
+- The Usage panel retries a failed log query and no longer reports "no workspace" for an hour after one failure.
+- A backup now records whether each app was actually consented, so a restore no longer proposes consent it never had.
+- Restore no longer adopts an existing app because a certificate on it is labelled with a thumbprint from the backup.
+- Granting consent with an expired session now asks you to sign in again, and a bulk grant stops there.
+- Granting consent that changes nothing no longer discards the saved security audit.
+- Cached lists and the saved audit now expire after the computer has been asleep (macOS and Linux).
+- The sign-in card now has "Cancel sign-in", so a closed browser tab no longer locks the button for five minutes.
+- With two enterprise apps open, reloading one no longer jumps it to the tab the other was showing.
+- An owner change that partly failed now also shows its error as a notification, which stays after the tab reloads.
+
 ## [0.35.2] - 2026-11-09
 
 ### Fixed

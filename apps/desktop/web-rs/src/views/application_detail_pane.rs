@@ -101,6 +101,19 @@ pub fn ApplicationDetailPane(
         });
     });
 
+    // A reload rebuilds the pane body, and with it every tab in `visited` —
+    // each re-running its own reads at once (up to nine besides the detail)
+    // for tabs nobody is looking at. Their state is lost to the rebuild either
+    // way, so on a reload only the tab on screen stays visited; the others
+    // mount again, fresh, when next opened.
+    Effect::new(move |previous: Option<u32>| {
+        let now = reload.get();
+        if previous.is_some_and(|before| before != now) {
+            visited.set(HashSet::from([active_tab.get_untracked()]));
+        }
+        now
+    });
+
     let delete_open = RwSignal::new(false);
     // `use_command` owns the busy/error signals and the double-submit guard,
     // tenant resolution, and spawn boilerplate this handler used to inline.

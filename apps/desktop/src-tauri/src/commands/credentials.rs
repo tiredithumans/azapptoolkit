@@ -77,7 +77,13 @@ pub async fn get_credential_health_counts(
 pub async fn list_credential_usage(
     state: State<'_, AppState>,
     tenant_id: String,
+    app_id: String,
 ) -> Result<CredentialUsageDto, UiError> {
+    // One app's rows only. The report is tenant-wide and stays cached that
+    // way, but the tab is per app: sending every tracked credential in the
+    // tenant across IPC on each mount (megabytes on a large tenant, held once
+    // per open pane) served a lookup of this app's handful of keys.
+    crate::commands::guid::require_app_id(&app_id)?;
     // The tab calls this on every mount; prove the session before the
     // (possibly cache-hit) report read, matching `list_credential_expirations`.
     crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
@@ -101,12 +107,13 @@ pub async fn list_credential_usage(
             rows: Vec::new(),
         });
     };
+    let requested_app_id = app_id;
     let mut merged: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
     for r in &rows {
         let (Some(app_id), Some(key_id)) = (r.app_id.as_deref(), r.key_id.as_deref()) else {
             continue;
         };
-        if app_id.is_empty() || key_id.is_empty() {
+        if key_id.is_empty() || !app_id.eq_ignore_ascii_case(&requested_app_id) {
             continue;
         }
         // Any dated row makes the credential "used as of" that date; absence

@@ -61,17 +61,11 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 bytes = "1"
 # Auth
 #
-# `default-features = false` on purpose. oauth2's defaults enable its own
-# `reqwest` + `rustls-tls` clients, and this workspace uses oauth2 for exactly
-# three types — `CsrfToken`, `PkceCodeChallenge`, `PkceCodeVerifier`. Every HTTP
-# call in `azapptoolkit-auth` goes through the workspace `reqwest` above, so the
-# defaults compiled and linked a SECOND http client (reqwest 0.12, one major
-# behind ours) plus a second webpki root store that nothing ever called. In an
-# app whose job is handling tenant credentials, an unused TLS path is liability,
-# not just build time. Turning them off removes exactly those two crates and
-# needs no code change; if a future version starts using oauth2's own client,
-# add the feature back deliberately rather than by default.
-oauth2 = { version = "5", default-features = false }
+# No `oauth2` crate: this workspace only ever used three of its types (the CSRF
+# token and the PKCE verifier/challenge), which `azapptoolkit-auth::pkce` now
+# provides on `aws-lc-rs` — already in the tree via rustls. Dropping it removed
+# `rand` 0.8, `rand_chacha`, `ppv-lite86` and `serde_path_to_error` from the
+# graph, and `thiserror` 1 from the Windows and macOS builds.
 keyring-core = "1.0"
 # Serde. `rc` is explicit, not borrowed from tauri's feature unification:
 # list and cached-sweep commands return the cache's `Arc<T>` (serialized as
@@ -157,6 +151,15 @@ cast_possible_wrap = "warn"
 #
 # Revisit if a genuinely CPU-bound path appears (large local crypto, in-process
 # indexing/search over the whole tenant). Re-run the bench first.
+# Line tables only, as `apps/desktop/web-rs/Cargo.toml` already does for the
+# wasm tree. Measured on a cold `cargo test --workspace --no-run` (4 cores,
+# 2026-11-10): target/ 7.9 GB -> 4.7 GB and 172 s -> 158 s. Backtraces and
+# panic locations keep their file and line; what is given up is variable
+# inspection in a debugger — set `CARGO_PROFILE_DEV_DEBUG=full` for a session
+# that needs it. `test` inherits from `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

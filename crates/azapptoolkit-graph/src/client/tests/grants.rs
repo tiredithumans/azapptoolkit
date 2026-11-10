@@ -472,3 +472,47 @@ async fn per_sp_app_role_assignments_are_read_live() {
     client.list_app_role_assignments("sp-1").await.unwrap();
     client.list_app_role_assignments("sp-1").await.unwrap();
 }
+
+/// The audit's grants read asks Graph for admin consents only, and when a
+/// tenant refuses the filter it falls back to the full read, filtered here.
+#[tokio::test]
+async fn admin_consent_grants_are_filtered_server_side_with_a_client_side_fallback() {
+    use wiremock::matchers::query_param;
+    let admin = serde_json::json!({ "id": "g1", "clientId": "sp-1", "resourceId": "r", "consentType": "AllPrincipals", "scope": "User.Read" });
+    let user = serde_json::json!({ "id": "g2", "clientId": "sp-2", "resourceId": "r", "consentType": "Principal", "principalId": "u", "scope": "User.Read" });
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2PermissionGrants"))
+        .and(query_param("$filter", "consentType eq 'AllPrincipals'"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [admin] })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    assert_eq!(client.list_admin_consent_grants().await.unwrap().len(), 1);
+    // Cached: no second request.
+    assert_eq!(client.list_admin_consent_grants().await.unwrap().len(), 1);
+    server.verify().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2PermissionGrants"))
+        .and(query_param("$filter", "consentType eq 'AllPrincipals'"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2PermissionGrants"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [admin, user] })),
+        )
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    let grants = client.list_admin_consent_grants().await.unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].client_id, "sp-1");
+}

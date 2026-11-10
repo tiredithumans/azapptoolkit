@@ -67,7 +67,7 @@ pub(crate) async fn prefetch_admin_consent_grants(
     HashMap<String, Vec<String>>,
     Option<AuditCoverageGap>,
 ) {
-    match client.list_all_oauth2_grants().await {
+    match client.list_admin_consent_grants().await {
         Ok(grants) => {
             let mut clients: HashSet<String> = HashSet::new();
             let mut scopes: HashMap<String, Vec<String>> = HashMap::new();
@@ -307,6 +307,12 @@ pub(crate) async fn prefetch_legacy_access_policies(
     (out, false)
 }
 
+/// Whether an SP index of `len` rows stopped at the cap, so the tenant may hold
+/// service principals it does not list.
+pub(crate) fn sp_index_capped(len: usize) -> bool {
+    len >= azapptoolkit_graph::client::SP_INDEX_MAX
+}
+
 /// The tenant's service-principal index (get-or-fetch, cached under
 /// `CacheKind::Lists` — the same shared index as `list_enterprise_applications`),
 /// the candidate pool for the SP-only scoring phase. Best-effort: on failure the
@@ -324,7 +330,20 @@ pub(crate) async fn prefetch_sp_index(
     tenant_id: &str,
 ) -> (Arc<Vec<ServicePrincipal>>, Option<AuditCoverageGap>) {
     match crate::commands::applications::sp_index_cached(state, client, tenant_id).await {
-        Ok(sps) => (sps, None),
+        Ok(sps) => {
+            // The index stops at `SP_INDEX_MAX` rows and still answers `Ok`. A
+            // principal past the cap is never an SP-only candidate — whatever
+            // it holds — so a capped index is a coverage gap like a failed one:
+            // the run must not be cached or shown as an all-clear.
+            let gap = sp_index_capped(sps.len()).then_some(AuditCoverageGap::ServicePrincipalIndex);
+            if gap.is_some() {
+                tracing::warn!(
+                    cap = azapptoolkit_graph::client::SP_INDEX_MAX,
+                    "audit: SP index hit its cap; service principals past it were not scored"
+                );
+            }
+            (sps, gap)
+        }
         Err(err) => {
             // NOT just a log. Returning an empty index silently drops the whole
             // SP-only scoring phase — enterprise apps, managed identities and

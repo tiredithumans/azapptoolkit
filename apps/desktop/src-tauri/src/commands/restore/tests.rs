@@ -727,6 +727,67 @@ async fn a_failed_sp_read_is_not_reported_as_having_no_sp() {
     assert!(report.enterprise_apps.is_empty());
 }
 
+/// A source app with sign-in disabled must not come back enabled: the
+/// restored service principal is PATCHed `accountEnabled: false`, and when
+/// that PATCH fails the operator gets a runbook item saying it is enabled.
+#[tokio::test]
+async fn an_app_disabled_in_the_source_is_disabled_on_restore() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for patch_status in [204u16, 403] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/servicePrincipals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "sp-new", "appId": "new-a", "displayName": "Ent A" }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/servicePrincipals/sp-new"))
+            .and(body_partial_json(
+                serde_json::json!({ "accountEnabled": false }),
+            ))
+            .respond_with(ResponseTemplate::new(patch_status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = graph_over(&server, false);
+        let session = SessionDead::new();
+        let mut report = RestoreReport::default();
+        let ent = EnterpriseAppBackup {
+            display_name: "Ent A".into(),
+            source_app_id: "src-a".into(),
+            account_enabled: Some(false),
+            ..Default::default()
+        };
+        let remap = HashMap::from([("src-a".to_string(), "new-a".to_string())]);
+
+        restore_enterprise_app(
+            &pass_ctx(&client, &session, &remap),
+            &ent,
+            false,
+            &mut report,
+            &mut HashMap::new(),
+            &never_cancelled(),
+        )
+        .await;
+
+        server.verify().await;
+        let enabled_notice = report
+            .manual_items
+            .iter()
+            .any(|m| m.reason.contains("ENABLED in this tenant"));
+        assert_eq!(
+            enabled_notice,
+            patch_status == 403,
+            "{:?}",
+            report.manual_items
+        );
+    }
+}
+
 fn tagged_app_a() -> AppRegistrationBackup {
     AppRegistrationBackup {
         display_name: "App A".into(),
@@ -3315,15 +3376,37 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
         thumbprint: Some("DA20FCA696C4F83E8A9AED59BE33368ED421F3C1".into()),
         ..Default::default()
     }];
-    let mut reuploaded = hit();
-    reuploaded.app.key_credentials = vec![KeyCredential {
+    // "Lists" is decided by the certificate's own bytes, read into
+    // `certificate_thumbprints`, never by its `customKeyIdentifier` label.
+    let listed = "DA20FCA696C4F83E8A9AED59BE33368ED421F3C1".to_string();
+    let labelled = || KeyCredential {
+        key_id: "k-1".into(),
         custom_key_identifier: Some("2iD8ppbE+D6Kmu1ZvjM2jtQh88E=".into()),
         ..Default::default()
-    }];
+    };
+    let mut reuploaded = hit();
+    reuploaded.app.key_credentials = vec![labelled()];
+    reuploaded.certificate_thumbprints = Some(HashMap::from([("k-1".to_string(), listed)]));
     assert!(matches!(
         decide_on(&with_cert, reuploaded),
         Adoption::Adopt { .. }
     ));
+    // A planted certificate LABELLED with a listed thumbprint: its bytes hash
+    // to something else, so the label earns it nothing.
+    let mut mislabelled = hit();
+    mislabelled.app.key_credentials = vec![labelled()];
+    mislabelled.certificate_thumbprints = Some(HashMap::from([(
+        "k-1".to_string(),
+        "0000000000000000000000000000000000000000".to_string(),
+    )]));
+    assert!(matches!(
+        decide_on(&with_cert, mislabelled),
+        Adoption::Refuse(_)
+    ));
+    // Bytes never read: unproven, so refused.
+    let mut unread = hit();
+    unread.app.key_credentials = vec![labelled()];
+    assert!(matches!(decide_on(&with_cert, unread), Adoption::Refuse(_)));
     let mut other_cert = hit();
     other_cert.app.key_credentials = vec![KeyCredential {
         key_id: "k-other".into(),

@@ -244,9 +244,8 @@ that re-derivation showed their premise had lapsed:
   `.pfx` writer `p12-keystore` 0.2.1 already pulled `rand 0.10`, so the tree carried 0.8 *and*
   0.10 with our own two call sites sitting on the older one. Declaring 0.10 unified our direct
   dep with the copy already compiled in and added **zero crates** to the lock file. `rand 0.8`
-  remains, reachable only through `oauth2` 5.0.0 — that edge is not ours to move, and it is the
-  same two majors either way. `getrandom` is likewise unchanged: 0.2 (oauth2), 0.3 (Tauri) and
-  0.4 (`uuid`, and `rand 0.10`) were all in the tree beforehand.
+  stayed at the time, reachable only through `oauth2` 5.0.0; it left the graph when that crate
+  did (its three types now come from `azapptoolkit-auth::pkce`, on `aws-lc-rs`).
   The migration is small but not mechanical — 0.9 renamed `thread_rng()` to `rng()`, 0.10 renamed
   `rngs::OsRng` to `rngs::SysRng` and split the fallible half of `RngCore` into `TryRng`, so
   `cert.rs`'s `.pfx` password now calls `try_fill_bytes` and `expect`s (an unavailable OS entropy
@@ -264,7 +263,7 @@ that re-derivation showed their premise had lapsed:
 
 What remains held:
 
-- **`sha2` (0.10.9 → 0.11.0):** `sha2 0.10.9` is shared by oauth2 5, Tauri 2.11
+- **`sha2` (0.10.9 → 0.11.0):** `sha2 0.10.9` is shared by Tauri 2.11
   (`tauri-codegen` / `wry`) and the `p12-keystore` chain (`pkcs5`, `scrypt`), all unified on
   `digest 0.10`. Note `sha2` is **not** a direct dependency: both certificate thumbprints digest
   on `aws-lc-rs`, the same backend rcgen signs with (`src-tauri/Cargo.toml` says so at the

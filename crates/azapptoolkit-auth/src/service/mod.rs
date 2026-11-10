@@ -28,8 +28,8 @@ mod loopback;
 mod scopes;
 mod wire;
 
+use crate::pkce::{CsrfToken, PkceCodeChallenge};
 use chrono::{Duration, Utc};
-use oauth2::{CsrfToken, PkceCodeChallenge};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ use crate::token_cache::{
 use loopback::{listen_for_code, open_system_browser};
 use wire::{
     IdClaims, TokenErrorBody, TokenResponse, build_cae_claims, classify_token_error,
-    parse_id_token, parse_scopes, redacted_aad_error,
+    is_request_loop, parse_id_token, parse_scopes, redacted_aad_error,
 };
 
 const REFRESH_LEEWAY_SECS: i64 = 60;
@@ -192,6 +192,10 @@ pub struct EntraAuthService {
     /// default), a launch failure is only logged. Installed by the app via
     /// [`Self::set_browser_fallback`].
     browser_fallback: Mutex<Option<BrowserFallback>>,
+    /// Wakes every interactive flow waiting on its browser redirect
+    /// ([`Self::cancel_interactive`]). A flow that is not waiting misses the
+    /// wake by design — there is nothing to cancel.
+    interactive_cancel: tokio::sync::Notify,
     /// Registers the OS credential store before `sign_in` opens the browser.
     /// Always `token_cache::ensure_keyring_store` in the app; a field (not a
     /// direct call) for the same reason as [`Self::open_browser`] — the test
@@ -230,6 +234,7 @@ impl EntraAuthService {
             http: token_http_client(),
             open_browser: Box::new(open_system_browser),
             browser_fallback: Mutex::new(None),
+            interactive_cancel: tokio::sync::Notify::new(),
             ensure_store: ensure_keyring_store,
         })
     }
@@ -239,6 +244,16 @@ impl EntraAuthService {
     /// then `None` once that flow's browser leg is over. The URL is single-use
     /// (PKCE + `state`) and redeemable only through this process's loopback
     /// listener; the hook must never log it. Replaces any earlier hook.
+    /// Abandons every interactive flow currently waiting on its browser
+    /// redirect: each returns [`AuthError::Cancelled`] and releases its
+    /// loopback socket. Without it the only exit was `REDIRECT_WAIT`, so a
+    /// closed tab (or the wrong browser profile) left the sign-in button
+    /// disabled for five minutes. Nothing is stored and no epoch moves — the
+    /// flow simply never redeems a code.
+    pub fn cancel_interactive(&self) {
+        self.interactive_cancel.notify_waiters();
+    }
+
     pub fn set_browser_fallback(&self, f: impl Fn(Option<&str>) + Send + Sync + 'static) {
         *self.browser_fallback.lock() = Some(Arc::new(f));
     }
@@ -430,7 +445,9 @@ impl EntraAuthService {
                 // Entra answered, but with a throttle or an outage rather than
                 // a verdict on the request: nothing to fix in the config, and
                 // the refresh token is untouched.
-                AuthError::TokenExchange(detail) if is_throttle_or_outage(status) => {
+                AuthError::TokenExchange(detail)
+                    if is_throttle_or_outage(status) || is_request_loop(&err_body) =>
+                {
                     AuthError::ServiceUnavailable {
                         status: status.as_u16(),
                         detail,
@@ -673,20 +690,22 @@ impl EntraAuthService {
         // forever (the future holds the loopback socket and blocks the caller).
         // A redirect that never arrives is an abandoned sign-in — the operator
         // closed the tab — not a network fault, so it surfaces as `Cancelled`.
-        let code = tokio::time::timeout(
-            REDIRECT_WAIT,
-            listen_for_code(listener, csrf_state.secret()),
-        )
-        .await;
+        // …or the operator's Cancel (`cancel_interactive`), which ends the wait
+        // the same way.
+        let code = tokio::select! {
+            code = tokio::time::timeout(
+                REDIRECT_WAIT,
+                listen_for_code(listener, csrf_state.secret()),
+            ) => code.map_err(|_| ()),
+            () = self.interactive_cancel.notified() => Err(()),
+        };
         // The browser leg is over, whatever it returned: withdraw the link.
         drop(manual_link);
         let code = code.map_err(|_| AuthError::Cancelled)??;
 
-        // Moved, not copied: this is the only verifier string, wiped on drop.
-        // (oauth2 has no zeroize, so the random pre-image inside its
-        // `new_random_len` is freed un-wiped — outside our control, and useful
-        // only alongside the single-use code redeemed moments later.)
-        let verifier_secret = Zeroizing::new(pkce_verifier.into_secret());
+        // Moved, not copied: this is the only verifier string, wiped on drop
+        // (as are the random bytes it was encoded from — see `pkce`).
+        let verifier_secret = pkce_verifier.into_secret();
         let mut params = vec![
             ("client_id", self.client_id.as_str()),
             ("grant_type", "authorization_code"),
@@ -1757,6 +1776,7 @@ mod tests {
             http: token_http_client(),
             open_browser,
             browser_fallback: Mutex::new(None),
+            interactive_cancel: tokio::sync::Notify::new(),
             ensure_store: ensure_keyring_store,
         }
     }
@@ -3485,6 +3505,32 @@ mod tests {
         assert!(svc.known_tenants.lock().is_empty());
     }
 
+    /// The operator's Cancel ends the wait at once, with the same `Cancelled`
+    /// the five-minute bound gives, and registers nothing.
+    #[tokio::test]
+    async fn cancelling_a_waiting_sign_in_ends_it_at_once() {
+        let svc = Arc::new(fresh_service(
+            "http://localhost".into(),
+            "cancelled-tenant",
+            Box::new(|_| Ok(())),
+        ));
+        let flow = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move { svc.sign_in().await }
+        });
+        // Cancel until the flow has reached its wait and taken the wake.
+        let result = loop {
+            svc.cancel_interactive();
+            if flow.is_finished() {
+                break flow.await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+
+        assert!(matches!(result, Err(AuthError::Cancelled)), "{result:?}");
+        assert!(svc.known_tenants.lock().is_empty());
+    }
+
     // ---- F114: a browser that won't launch hands the link to the app ----
 
     /// Records every call a browser fallback receives.
@@ -4350,6 +4396,40 @@ mod tests {
                 })
             ),
             "{result:?}"
+        );
+    }
+
+    /// Entra's loop detection arrives as `400 invalid_grant` + AADSTS50196
+    /// (Microsoft Learn, "Looping clients will be interrupted"). It says the
+    /// client asked too often, not that the refresh token died, so it is
+    /// `ServiceUnavailable` and the stored token survives — read as a plain
+    /// `invalid_grant` it purged a live session.
+    #[tokio::test]
+    async fn a_request_loop_interrupt_never_purges_the_refresh_token() {
+        let server = MockServer::start().await;
+        let (tenant, oid) = ("loop-tenant", "loop-oid");
+        Mock::given(method("POST"))
+            .and(path(format!("/{tenant}/oauth2/v2.0/token")))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS50196: The server terminated an operation because it encountered a loop while processing a request."
+            })))
+            .mount(&server)
+            .await;
+        let svc = signed_in_service(server.uri(), tenant, oid);
+
+        let result = svc.access_token_for_scopes(tenant, &arm_scopes()).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AuthError::ServiceUnavailable { status: 400, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            stored_token(tenant, oid).as_deref(),
+            Some("stored-refresh-token")
         );
     }
 

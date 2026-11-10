@@ -223,9 +223,17 @@ pub(crate) async fn resolve_mail_scopes(
             .filter(|r| row_grants_permission(r, role, perm))
             .collect();
         let mut verdict = verdict_from_rows(&matching);
-        // Apply the legacy-AAP fallback only when RBAC shows org-wide, and only
-        // to a permission a policy could govern.
+        // `OrgWide` from the rows means two different things: no assignment at
+        // all, or an assignment with no scope. A policy constrains only the
+        // app's Entra grants, never an Exchange RBAC assignment, so an unscoped
+        // assignment reaches every mailbox whatever the policy says.
+        let orgwide_assignment = matching
+            .iter()
+            .any(|r| azapptoolkit_exchange::verdict::is_org_wide_auth_row(r));
+        // Apply the legacy-AAP fallback only when RBAC holds NO assignment for
+        // the permission, and only to a permission a policy could govern.
         if matches!(verdict, MailPermissionScope::OrgWide)
+            && !orgwide_assignment
             && *aap_confinable
             && let Some(aap) = &aap_override
         {
@@ -274,6 +282,15 @@ pub(crate) async fn resolve_mail_scopes(
                     mechanism: ScopeMechanism::Rbac,
                 };
             }
+        }
+        // The lean (audit) path names an org-wide verdict only when an unscoped
+        // RBAC assignment is behind it. Any other org-wide result (no
+        // assignment, or a scope defeated by an un-stripped Entra grant) is
+        // left out: the scorer reads a missing entry as org-wide all the same,
+        // and `apply_legacy_policy_verdict` may then answer for the Entra grant,
+        // which it must not do over an unscoped assignment.
+        if !enrich && matches!(verdict, MailPermissionScope::OrgWide) && !orgwide_assignment {
+            continue;
         }
         out.insert(perm.clone(), verdict);
     }

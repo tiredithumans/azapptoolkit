@@ -53,29 +53,29 @@ pub fn is_retryable_code(ui_code: &str) -> bool {
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Maximum number of retries on transient failure (5xx, 429, network error).
-pub const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 3;
 
 /// Initial backoff in milliseconds. Doubles on each transient retry up to
-/// [`MAX_DELAY_MS`].
-pub const BASE_DELAY_MS: u64 = 1000;
+/// `MAX_DELAY_MS`.
+const BASE_DELAY_MS: u64 = 1000;
 
 /// Upper bound on the *jittered exponential backoff* (the no-`Retry-After`
 /// fallback). It does **not** cap an explicit `Retry-After`, which is honored
-/// verbatim up to [`RETRY_AFTER_MAX_SECS`] — see [`sleep_before_retry`].
-pub const MAX_DELAY_MS: u64 = 30_000;
+/// verbatim up to [`RETRY_AFTER_MAX_SECS`] — see `sleep_before_retry`.
+const MAX_DELAY_MS: u64 = 30_000;
 
 /// Sanity ceiling for an explicit `Retry-After`, in seconds. Far above any
 /// realistic Graph / ARM / Key Vault throttle (which is seconds to a few
 /// minutes), this exists only to bound a pathological or buggy header so a
 /// single retry can't hang the app for hours. It is deliberately **not** the
-/// old [`MAX_DELAY_MS`] (30s) clamp, which truncated legitimate multi-minute
+/// old `MAX_DELAY_MS` (30s) clamp, which truncated legitimate multi-minute
 /// write-quota waits and caused premature re-throttling — Microsoft requires
 /// waiting *exactly* the advertised `Retry-After`.
 pub const RETRY_AFTER_MAX_SECS: u64 = 300;
 
-/// Doubles `delay_ms` and clamps to [`MAX_DELAY_MS`]. Returns the value the
+/// Doubles `delay_ms` and clamps to `MAX_DELAY_MS`. Returns the value the
 /// caller should use for its *next* attempt.
-pub fn next_backoff_ms(delay_ms: u64) -> u64 {
+fn next_backoff_ms(delay_ms: u64) -> u64 {
     (delay_ms.saturating_mul(2)).min(MAX_DELAY_MS)
 }
 
@@ -91,9 +91,9 @@ pub fn parse_retry_after_seconds(header_value: Option<&str>) -> Option<u64> {
 /// Milliseconds to wait for an explicit `Retry-After` of `secs` seconds:
 /// honored verbatim (no jitter) and bounded only by the generous
 /// [`RETRY_AFTER_MAX_SECS`] sanity ceiling — **not** the 30s
-/// [`MAX_DELAY_MS`] backoff clamp. Pure so the honor-exactly behavior is
-/// unit-testable; [`sleep_before_retry`] wraps the async sleep.
-pub fn retry_after_millis(secs: u64) -> u64 {
+/// `MAX_DELAY_MS` backoff clamp. Pure so the honor-exactly behavior is
+/// unit-testable; `sleep_before_retry` wraps the async sleep.
+fn retry_after_millis(secs: u64) -> u64 {
     secs.min(RETRY_AFTER_MAX_SECS).saturating_mul(1000)
 }
 
@@ -103,8 +103,8 @@ pub fn retry_after_millis(secs: u64) -> u64 {
 /// require waiting the advertised value, and write quotas legitimately return
 /// multi-minute waits that retrying sooner would just re-throttle. Without a
 /// header, falls back to jittered exponential backoff bounded by
-/// [`MAX_DELAY_MS`] so concurrent callers don't synchronize on retry boundaries.
-pub async fn sleep_before_retry(retry_after_secs: Option<u64>, fallback_ms: u64) {
+/// `MAX_DELAY_MS` so concurrent callers don't synchronize on retry boundaries.
+async fn sleep_before_retry(retry_after_secs: Option<u64>, fallback_ms: u64) {
     match retry_after_secs {
         Some(secs) => {
             use std::time::Duration;
@@ -115,9 +115,9 @@ pub async fn sleep_before_retry(retry_after_secs: Option<u64>, fallback_ms: u64)
 }
 
 /// Sleeps for `base_ms` plus 0–10% random jitter, capped at
-/// [`MAX_DELAY_MS`]. Used between retry attempts so concurrent callers do
+/// `MAX_DELAY_MS`. Used between retry attempts so concurrent callers do
 /// not synchronize on retry boundaries.
-pub async fn sleep_with_jitter(base_ms: u64) {
+async fn sleep_with_jitter(base_ms: u64) {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     // Cheap deterministic-ish jitter: take a small fraction of the current
     // nanoseconds to add 0–10% of `base_ms`.
@@ -178,7 +178,7 @@ pub enum Attempt<T, E> {
     /// Transient. Retried while budget remains **and** `reason` is safe for the
     /// request's [`RetryClass`]; once exhausted or refused, `err` is returned.
     /// `retry_after_secs` comes from the response header, honored exactly (see
-    /// [`sleep_before_retry`]).
+    /// `sleep_before_retry`).
     Retry {
         reason: RetryReason,
         /// HTTP status; `None` = no response (a network failure). Logged

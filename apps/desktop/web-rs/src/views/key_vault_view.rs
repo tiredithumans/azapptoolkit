@@ -120,7 +120,15 @@ pub fn KeyVaultView() -> impl IntoView {
             let result = keyvault::kv_get_secret(&t.tenant_id, v.trim(), &secret_name).await;
             if session.is_active_tenant(&t.tenant_id) {
                 match result {
-                    Ok(value) => revealed.set(Some(value)),
+                    // Only while this page is still on screen. The wipe above
+                    // runs when the view CHANGES, so a value landing after the
+                    // operator navigated away would sit in the hidden page and
+                    // be shown, unasked, on the next visit.
+                    Ok(value) => {
+                        if session.view.try_get_untracked() == Some(ActiveView::KeyVault) {
+                            revealed.set(Some(value));
+                        }
+                    }
                     Err(e) => {
                         if !session.report_recovery_action(&e, "keyvault") {
                             error.set(Some(e.message));

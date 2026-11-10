@@ -191,10 +191,13 @@ impl GraphClient {
         validate::require_path_segment("resource service principal id", resource_sp_id)?;
         validate::require_path_segment("assignment id", assignment_id)?;
         let path = format!("/servicePrincipals/{resource_sp_id}/appRoleAssignedTo/{assignment_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     pub async fn list_oauth2_grants(
@@ -211,6 +214,51 @@ impl GraphClient {
             .get_json("/oauth2PermissionGrants", &params, false)
             .await?;
         self.collect_all_pages(page, false).await
+    }
+
+    /// The tenant's ADMIN-consent delegated grants only
+    /// (`consentType eq 'AllPrincipals'`), for the security audit.
+    ///
+    /// The unfiltered collection holds one `Principal` row per user × app
+    /// consent, so it grows with the number of users; the audit keeps only the
+    /// `AllPrincipals` rows and used to page through all of it (serially, 999
+    /// at a time) to throw the rest away. Cached under its own `grants:` key,
+    /// which `invalidate_grant_cache` sweeps with the others. Should a
+    /// tenant's Graph refuse the filter (a 400), the full read answers instead,
+    /// filtered here — never an empty result.
+    pub async fn list_admin_consent_grants(&self) -> Result<Vec<OAuth2PermissionGrant>> {
+        const ADMIN: &str = "AllPrincipals";
+        let cache_key = Self::grant_cache_key(&self.tenant_id, "oauth2_admin");
+        if let Some(cached) = self
+            .cache
+            .get::<Vec<OAuth2PermissionGrant>>(CacheKind::Permissions, &cache_key)
+        {
+            return Ok(cached);
+        }
+        let watch = self
+            .cache
+            .generation_for(CacheKind::Permissions, &cache_key);
+        let filter = format!("consentType eq '{ADMIN}'");
+        let params: [(&str, &str); 3] = [
+            ("$filter", filter.as_str()),
+            ("$top", MAX_PAGE_SIZE),
+            ("$select", OAUTH2_GRANT_SELECT),
+        ];
+        let first: Result<Paged<OAuth2PermissionGrant>> = self
+            .get_json("/oauth2PermissionGrants", &params, false)
+            .await;
+        let all = match first {
+            Ok(page) => self.collect_all_pages(page, false).await?,
+            Err(GraphError::Api { status: 400, .. }) => self
+                .list_all_oauth2_grants()
+                .await?
+                .into_iter()
+                .filter(|g| g.consent_type == ADMIN)
+                .collect(),
+            Err(err) => return Err(err),
+        };
+        self.cache.put_if_current(watch, &all);
+        Ok(all)
     }
 
     /// Every delegated permission grant in the tenant (`/oauth2PermissionGrants`,
@@ -274,10 +322,13 @@ impl GraphClient {
         validate::require_path_segment("assignment id", assignment_id)?;
         let path =
             format!("/servicePrincipals/{service_principal_id}/appRoleAssignments/{assignment_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     pub async fn create_oauth2_grant(
@@ -317,10 +368,13 @@ impl GraphClient {
     pub async fn delete_oauth2_grant(&self, grant_id: &str) -> Result<()> {
         validate::require_path_segment("grant id", grant_id)?;
         let path = format!("/oauth2PermissionGrants/{grant_id}");
-        self.send_no_content::<()>(Method::DELETE, &path, None)
-            .await?;
-        self.invalidate_grant_cache();
-        Ok(())
+        let result = self
+            .send_no_content::<()>(Method::DELETE, &path, None)
+            .await;
+        if delete_may_have_landed(&result) {
+            self.invalidate_grant_cache();
+        }
+        result
     }
 
     /// Ensures an admin-consent OAuth2 grant exists for `(client_sp_id, resource_sp_id)` and

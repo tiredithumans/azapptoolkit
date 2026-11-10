@@ -84,6 +84,10 @@ pub(super) struct TagHit {
     pub(super) app: Application,
     pub(super) auth: ApplicationAuthenticationDto,
     pub(super) expose: ApplicationExposeApi,
+    /// `keyId` → SHA-1 thumbprint computed from each live certificate's own
+    /// bytes ([`read_certificate_thumbprints`]). `None` until read; a
+    /// certificate missing from it has no proven identity.
+    pub(super) certificate_thumbprints: Option<HashMap<String, String>>,
 }
 
 impl TagHit {
@@ -95,6 +99,7 @@ impl TagHit {
             app: serde_json::from_value(hit.clone())?,
             auth: extract_auth_fields(hit),
             expose: serde_json::from_value(hit.clone())?,
+            certificate_thumbprints: None,
         })
     }
 }
@@ -154,7 +159,7 @@ pub(super) fn adoption_for(
         // one residue this cannot settle; Pass 2 reports it rather than keeping
         // it silently.
         [hit] => {
-            let certificates = foreign_certificates(&hit.app, app);
+            let certificates = foreign_certificates(hit, app);
             if !certificates.is_empty() {
                 return Adoption::Refuse(format!(
                     "'{}' (appId {}) carries this app's restore tag, but it holds certificate \
@@ -364,29 +369,65 @@ fn comparable_scope(scope: &OAuth2PermissionScope) -> OAuth2PermissionScope {
     }
 }
 
-/// The labels of `hit`'s certificate credentials whose thumbprint the manifest
-/// does not list. A restore uploads no certificate, so an earlier run cannot
-/// have put one there — but the runbook tells the operator to re-upload the
-/// backed-up ones, and a certificate the manifest knows by thumbprint is
-/// safe to keep: a planter has nothing without its private key. Labelled by
-/// display name, else key id; an unreadable thumbprint counts as foreign.
-fn foreign_certificates(hit: &Application, app: &AppRegistrationBackup) -> Vec<String> {
+/// The labels of `hit`'s certificate credentials the manifest does not list.
+/// A restore uploads no certificate, so an earlier run cannot have put one
+/// there — but the runbook tells the operator to re-upload the backed-up ones,
+/// and a certificate that IS one of them is safe to keep: a planter has nothing
+/// without its private key.
+///
+/// "Is one of them" is decided by the certificate's own bytes
+/// (`hit.certificate_thumbprints`, SHA-1 of the `key` Graph returns), never by
+/// `customKeyIdentifier`: that field is a label the uploader sets, so a planted
+/// certificate could carry a listed thumbprint and be adopted — and consented —
+/// under its own private key. A certificate whose bytes were not read, or do
+/// not hash to a listed thumbprint, counts as foreign. Labelled by display
+/// name, else key id.
+fn foreign_certificates(hit: &TagHit, app: &AppRegistrationBackup) -> Vec<String> {
     let known: HashSet<String> = app
         .certificates
         .iter()
         .filter_map(|c| c.thumbprint.as_deref())
         .filter_map(azapptoolkit_core::thumbprint::canonical)
         .collect();
-    hit.key_credentials
+    hit.app
+        .key_credentials
         .iter()
         .filter(|k| {
-            !k.custom_key_identifier
-                .as_deref()
-                .and_then(azapptoolkit_core::thumbprint::canonical)
-                .is_some_and(|t| known.contains(&t))
+            !hit.certificate_thumbprints
+                .as_ref()
+                .and_then(|proven| proven.get(&k.key_id))
+                .is_some_and(|t| known.contains(t))
         })
         .map(|k| k.display_name.clone().unwrap_or_else(|| k.key_id.clone()))
         .collect()
+}
+
+/// `keyId` → canonical SHA-1 thumbprint of each certificate on `object_id`,
+/// computed from the certificate bytes. A credential Graph returned no bytes
+/// for, or whose bytes are not base64, is left out (and so stays unproven).
+async fn read_certificate_thumbprints(
+    client: &GraphClient,
+    object_id: &str,
+) -> Result<HashMap<String, String>, GraphError> {
+    use base64::Engine as _;
+    Ok(client
+        .application_certificate_keys(object_id)
+        .await?
+        .into_iter()
+        .filter_map(|(key_id, key)| {
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(key?.trim())
+                .ok()?;
+            Some((key_id, certificate_thumbprint(&der)))
+        })
+        .collect())
+}
+
+/// The canonical SHA-1 thumbprint of a DER certificate, as Entra derives it.
+fn certificate_thumbprint(der: &[u8]) -> String {
+    let sha1 = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, der);
+    let hex = azapptoolkit_core::thumbprint::hex_upper(sha1.as_ref());
+    azapptoolkit_core::thumbprint::canonical(&hex).unwrap_or(hex)
 }
 
 /// The display names of `hit`'s secrets that the manifest does not account
@@ -497,6 +538,19 @@ pub(super) async fn decide_adoption(
             ));
         }
     };
+    let mut hits = hits;
+    // A lone hit holding certificates is the one case their identity decides.
+    // A failed read leaves it unproven, and `foreign_certificates` refuses.
+    if let [hit] = hits.as_mut_slice()
+        && !hit.app.key_credentials.is_empty()
+    {
+        match read_certificate_thumbprints(client, &hit.app.id).await {
+            Ok(thumbprints) => hit.certificate_thumbprints = Some(thumbprints),
+            Err(e) => {
+                session.note_code(e.ui_code());
+            }
+        }
+    }
     let adoption = adoption_for(
         app,
         &hits,

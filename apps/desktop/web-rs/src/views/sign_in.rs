@@ -174,6 +174,15 @@ pub fn SignInScreen(
     // sign-in shows them, since the log is where its detail is.
     let has_settings_error = settings_error.is_some();
 
+    // Set by Cancel so the `cancelled` it causes is not shown as an error.
+    let cancel_requested = RwSignal::new(false);
+    let on_cancel = move |_| {
+        cancel_requested.set(true);
+        leptos::task::spawn_local(async move {
+            let _ = auth::cancel_interactive_auth().await;
+        });
+    };
+
     let on_sign_in = move |_| {
         if busy.get() {
             return;
@@ -192,11 +201,16 @@ pub fn SignInScreen(
                 // Message first, with the machine code muted after it — the
                 // same shape as `DetailLoadError` — so a failure stays
                 // diagnosable without leading with the wire code.
+                // The operator's own Cancel is not a failure to report.
+                Err(err)
+                    if err.code == "cancelled"
+                        && cancel_requested.try_get_untracked().unwrap_or(false) => {}
                 Err(err) => {
                     let hint = recovery_hint(&err.code, &err.message);
                     error.set(Some((err.message, err.code, hint)));
                 }
             }
+            cancel_requested.set(false);
             busy.set(false);
         });
     };
@@ -278,6 +292,17 @@ pub fn SignInScreen(
                         }
                     }}
                 </Button>
+                // The flow waits on the browser for minutes; a closed tab or the
+                // wrong profile otherwise left the button above disabled until
+                // the wait ran out.
+                <Show when=move || busy.get()>
+                    <span class="ui-text signin-hint">
+                        "Finish signing in in your browser. "
+                        <button type="button" class="link-btn" on:click=on_cancel>
+                            "Cancel sign-in"
+                        </button>
+                    </span>
+                </Show>
                 {move || {
                     error
                         .get()

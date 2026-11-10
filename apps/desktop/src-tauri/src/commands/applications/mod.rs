@@ -710,9 +710,23 @@ pub async fn delete_application(
     object_id: String,
 ) -> Result<(), UiError> {
     let client = state.graph_for(&tenant_id);
-    client.delete_application(&object_id).await?;
-    record_deleted_apps(&state.cache, &tenant_id, &[object_id]);
-    Ok(())
+    match client.delete_application(&object_id).await {
+        Ok(()) => {
+            record_deleted_apps(&state.cache, &tenant_id, &[object_id]);
+            Ok(())
+        }
+        Err(err) => {
+            // A 404 means the app is gone (a replayed DELETE whose first
+            // attempt had committed answers one), and an outcome Graph never
+            // reported may have landed too. Either way the pinned lists may
+            // still hold the app, so they are dropped — the error is still
+            // returned, since this call cannot say the delete was its own.
+            if matches!(err, GraphError::NotFound(_)) || err.may_have_committed() {
+                invalidate_app_lists(&state.cache, &tenant_id);
+            }
+            Err(err.into())
+        }
+    }
 }
 
 // ---------------- Inventory export ----------------

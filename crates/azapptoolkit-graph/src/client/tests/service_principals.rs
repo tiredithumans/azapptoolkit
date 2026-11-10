@@ -823,3 +823,47 @@ fn sp_index_row_keeps_exactly_the_index_select() {
     selected.sort_unstable();
     assert_eq!(kept, selected);
 }
+
+/// A cached "no service principal" must not turn into a 409 loop. The lookup
+/// caches `None`; when the principal was created elsewhere since, the POST
+/// answers 409, and the client re-reads live and returns the existing one.
+#[tokio::test]
+async fn ensure_service_principal_recovers_from_a_stale_cached_miss() {
+    let server = MockServer::start().await;
+    // First lookup: none yet (cached). Second (after the 409): it exists.
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{ "id": "sp-1", "appId": "app-1", "displayName": "Demo App" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/servicePrincipals"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": { "code": "Request_MultipleObjectsWithSameKeyValue", "message": "exists" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(&server.uri());
+    assert!(
+        client
+            .get_service_principal_by_app_id("app-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let (sp, created) = client.ensure_service_principal("app-1").await.unwrap();
+
+    assert_eq!(sp.id, "sp-1");
+    assert!(!created);
+    server.verify().await;
+}

@@ -20,7 +20,7 @@ use leptos::html;
 use leptos::prelude::*;
 
 use crate::hooks::use_escape::use_escape;
-use crate::hooks::use_focus_trap::use_focus_trap;
+use crate::hooks::use_focus_trap::{use_focus_placement, use_tab_cycle};
 
 /// Source of per-instance title ids. Several `ModalShell`s can be mounted at
 /// once — the shell alone mounts `ShortcutsHelp`, `UpdateSplash`,
@@ -57,12 +57,11 @@ pub fn ModalShell(
     close_on_escape: Signal<bool>,
     children: ChildrenFn,
 ) -> impl IntoView {
-    use_escape(
-        move || close_on_escape.get_untracked() && open.get_untracked() && !busy.get_untracked(),
-        move || on_close.run(()),
-    );
     let modal_ref: NodeRef<html::Div> = NodeRef::new();
-    use_focus_trap(modal_ref, open);
+    // Focus moves in on open and back to the trigger on close. The two window
+    // key listeners (Escape, Tab) are registered by `ModalKeys` below, which is
+    // mounted only while the dialog is open.
+    use_focus_placement(modal_ref, open);
     let modal_class = if wide { "modal modal--wide" } else { "modal" };
     let title_id = StoredValue::new(format!(
         "modal-shell-title-{}",
@@ -77,6 +76,13 @@ pub fn ModalShell(
                 aria-modal="true"
                 aria-labelledby=move || title_id.get_value()
             >
+                <ModalKeys
+                    open=open
+                    busy=busy
+                    close_on_escape=close_on_escape
+                    on_close=on_close
+                    container=modal_ref
+                />
                 <div class=modal_class node_ref=modal_ref>
                     <h3 id=move || title_id.get_value()>{move || title.get()}</h3>
                     {children()}
@@ -84,4 +90,22 @@ pub fn ModalShell(
             </div>
         </Show>
     }
+}
+
+/// The dialog's window-level key handling: Escape to close (while not `busy`
+/// and `close_on_escape`) and the Tab cycle. A component of its own so the
+/// listeners exist only while the dialog is open — it renders nothing.
+#[component]
+fn ModalKeys(
+    open: Signal<bool>,
+    busy: Signal<bool>,
+    close_on_escape: Signal<bool>,
+    on_close: Callback<()>,
+    container: NodeRef<html::Div>,
+) -> impl IntoView {
+    use_escape(
+        move || close_on_escape.get_untracked() && open.get_untracked() && !busy.get_untracked(),
+        move || on_close.run(()),
+    );
+    use_tab_cycle(container, open);
 }

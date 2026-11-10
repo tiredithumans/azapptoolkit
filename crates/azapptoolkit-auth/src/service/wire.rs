@@ -101,10 +101,29 @@ pub(super) fn classify_token_error(body: &TokenErrorBody) -> AuthError {
     {
         return AuthError::InteractionRequired(safe);
     }
+    // Entra's loop detection answers `invalid_grant` too, but it is a verdict
+    // on the request RATE ("15+ identical requests in 5 minutes"), not on the
+    // refresh token — purging for it signed the operator out of a session that
+    // was still good. The caller turns it into `ServiceUnavailable`.
+    if is_request_loop(body) {
+        return AuthError::TokenExchange(safe);
+    }
     if body.error == "invalid_grant" {
         return AuthError::InvalidGrant(safe);
     }
     AuthError::TokenExchange(safe)
+}
+
+/// Whether `body` is Entra's request-loop interrupt (AADSTS50196). Microsoft
+/// documents it as an `invalid_grant` ("Looping clients will be interrupted",
+/// identity-platform breaking changes, March 2019), so it must be recognised
+/// before the dead-refresh-token reading of that error.
+pub(super) fn is_request_loop(body: &TokenErrorBody) -> bool {
+    body.error_description
+        .as_deref()
+        .and_then(extract_aadsts_code)
+        .as_deref()
+        == Some("AADSTS50196")
 }
 
 /// The AADSTS codes Entra wraps in `invalid_grant` when a Conditional Access

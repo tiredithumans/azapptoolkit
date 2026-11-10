@@ -91,6 +91,28 @@ pub(super) async fn restore_enterprise_app(
         ..Default::default()
     };
 
+    // Sign-in disabled in the source: disabled here too, before anything else
+    // is re-applied. A new service principal is created enabled, so without
+    // this an app the source had switched off (this tool's own "Disable
+    // sign-in" fix included) came back able to sign in, with fresh secrets and
+    // its consent. A failure is a runbook item, not only a warning: the
+    // operator has to switch it off by hand.
+    if ent.account_enabled == Some(false) {
+        let body = serde_json::json!({ "accountEnabled": false });
+        if let Err(e) = client.patch_service_principal(&sp.id, &body).await {
+            session.note_code(e.ui_code());
+            out.warnings.push(format!("disable sign-in: {e}"));
+            report.manual_items.push(ManualItem {
+                display_name: ent.display_name.clone(),
+                reason: format!(
+                    "Sign-in was disabled for this app in the source, but disabling it here \
+                     failed ({e}). It is ENABLED in this tenant — disable sign-in from its \
+                     Overview tab."
+                ),
+            });
+        }
+    }
+
     // Settings (best-effort).
     if !ent.tags.is_empty()
         && let Err(e) = client.set_service_principal_tags(&sp.id, &ent.tags).await

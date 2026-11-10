@@ -1050,6 +1050,63 @@ async fn the_legacy_override_skips_an_rbac_only_permission() {
     );
 }
 
+/// A policy constrains the app's Entra grants, never an Exchange RBAC
+/// assignment. An app with a `RestrictAccess` policy AND an unscoped
+/// `Application Mail.Read` assignment (a half-done manual migration) reaches
+/// every mailbox; the override read it "Scoped (legacy)". With no assignment
+/// at all the policy still answers, on the detail path and — by leaving the
+/// entry out for the fold — on the lean audit path.
+#[tokio::test]
+async fn the_legacy_override_never_masks_an_unscoped_rbac_assignment() {
+    let unscoped = wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "value": [{
+            "RoleName": "Application Mail.Read",
+            "GrantedPermissions": "Mail.Read",
+            "AllowedResourceScope": "Not Applicable",
+            "ScopeType": "None"
+        }]
+    }));
+    let (_server, exo) = exo_with_restrict_policy_and_probe(unscoped).await;
+    let perms = [graph_perm("Mail.Read")];
+    for enrich in [true, false] {
+        let out = resolve_mail_scopes(&exo, "app-1", &perms, &HashSet::new(), enrich)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.get("Mail.Read"),
+            Some(&MailPermissionScope::OrgWide),
+            "enrich={enrich}: {out:?}"
+        );
+    }
+    // The audit's fold must leave that verdict alone.
+    let mut lean = resolve_mail_scopes(&exo, "app-1", &perms, &HashSet::new(), false)
+        .await
+        .unwrap();
+    let legacy = MailPermissionScope::Scoped {
+        scope_name: Some("Sales".into()),
+        recipient_filter: None,
+        group_count: None,
+        mechanism: ScopeMechanism::LegacyApplicationAccessPolicy,
+    };
+    let grants = [azapptoolkit_core::audit::ResourcePermission::graph(
+        "Mail.Read",
+    )];
+    azapptoolkit_exchange::verdict::apply_legacy_policy_verdict(&mut lean, &grants, Some(&legacy));
+    assert_eq!(lean.get("Mail.Read"), Some(&MailPermissionScope::OrgWide));
+
+    // No assignment: the lean path names nothing, so the policy can answer.
+    let (_server, exo) = exo_with_restrict_policy_and_probe(
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+    )
+    .await;
+    let mut lean = resolve_mail_scopes(&exo, "app-1", &perms, &HashSet::new(), false)
+        .await
+        .unwrap();
+    assert!(lean.is_empty(), "{lean:?}");
+    azapptoolkit_exchange::verdict::apply_legacy_policy_verdict(&mut lean, &grants, Some(&legacy));
+    assert!(is_legacy(lean.get("Mail.Read")), "{lean:?}");
+}
+
 /// The probe-failure fallback honours the same gate. A principal Exchange
 /// can't resolve has no RBAC scope, so its RBAC-only grant is org-wide while
 /// the policy still answers for `Mail.Read`; a genuine 403 leaves the RBAC-only

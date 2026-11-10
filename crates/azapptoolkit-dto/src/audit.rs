@@ -360,9 +360,10 @@ impl AuditCoverageGap {
                  checked for an un-stripped org-wide grant."
             }
             AuditCoverageGap::ServicePrincipalIndex => {
-                "The tenant's service-principal list could not be read, so enterprise \
-                 applications, managed identities and orphaned service principals were not \
-                 scored. App registrations were still covered."
+                "The tenant's service-principal list could not be read in full (the read \
+                 failed, or the tenant has more service principals than the list holds), so \
+                 some or all enterprise applications, managed identities and orphaned service \
+                 principals were not scored. App registrations were still covered."
             }
             AuditCoverageGap::EwsFullAccessGrants => {
                 "Office 365 Exchange Online permission grants could not be read, so an \

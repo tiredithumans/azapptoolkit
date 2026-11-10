@@ -231,12 +231,12 @@ const CHUNK_HEADER_RESERVE_UTF16_BYTES: usize =
 /// [`MAX_CHUNK_UTF16_BYTES`].
 const MAX_PAYLOAD_UTF16_BYTES: usize = MAX_CHUNK_UTF16_BYTES - CHUNK_HEADER_RESERVE_UTF16_BYTES;
 
-/// A fresh per-write generation id. `oauth2`'s CSRF generator is the crate's
-/// existing CSPRNG-backed source (`rand::thread_rng`, base64url-encoded); the
+/// A fresh per-write generation id. The CSRF generator is the crate's
+/// existing CSPRNG-backed source (`pkce`, base64url-encoded); the
 /// value is only an identity tag, not a secret, so a CSRF type is a fine
 /// carrier.
 fn new_chunk_gen() -> String {
-    oauth2::CsrfToken::new_random_len(CHUNK_GEN_BYTES)
+    crate::pkce::CsrfToken::new_random_len(CHUNK_GEN_BYTES)
         .secret()
         .clone()
 }

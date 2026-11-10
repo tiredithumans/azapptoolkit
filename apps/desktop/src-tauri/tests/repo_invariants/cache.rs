@@ -1990,7 +1990,7 @@ fn flatten_out_whitespace(body: &str) -> (String, Vec<usize>) {
 /// the accessor definitions: a new `*_cached` / `*_hit` accessor, or a new Graph
 /// client read-through, that is missing here would make every command reading
 /// through it invisible to this rule.
-const CACHED_ACCESSORS: [&str; 26] = [
+const CACHED_ACCESSORS: [&str; 27] = [
     "sp_index_cached(",
     "app_name_index_cached(",
     "apps_pairing_cached(",
@@ -2024,6 +2024,7 @@ const CACHED_ACCESSORS: [&str; 26] = [
     // `remediate_disable_sign_in`).
     "list_app_role_assigned_to_cached(",
     "list_all_oauth2_grants(",
+    "list_admin_consent_grants(",
     "resolve_resource_sp(",
     "get_service_principal_by_app_id(",
     "get_service_principal_by_app_id_lean(",

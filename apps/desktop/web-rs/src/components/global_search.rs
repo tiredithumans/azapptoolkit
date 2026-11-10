@@ -101,7 +101,11 @@ pub fn GlobalSearch() -> impl IntoView {
     let handle = window_event_listener(ev::keydown, move |evt| {
         if (evt.meta_key() || evt.ctrl_key()) && evt.key().eq_ignore_ascii_case("k") {
             evt.prevent_default();
-            if let Some(el) = input_ref.get() {
+            // Not over a dialog: focusing the bar leaves the dialog's focus
+            // trap, and Enter on a hit then navigates away from it.
+            if !crate::hooks::modal_is_open()
+                && let Some(el) = input_ref.get()
+            {
                 let _ = el.focus();
             }
         }

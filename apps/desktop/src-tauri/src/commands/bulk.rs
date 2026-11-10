@@ -872,11 +872,30 @@ fn grant_item(object_id: String, res: Result<super::permissions::GrantRun, UiErr
                     granted: r.role_assignments_created.len() + r.scope_grants_upserted.len(),
                     skipped: r.role_assignments_skipped.len(),
                     failed: r.failures.len(),
-                    error: r.failures.first().map(|f| BulkError {
-                        code: "partial_failure".into(),
-                        message: f.message.clone(),
-                        retryable: false,
-                    }),
+                    // A re-auth-fatal failure wins over the first one and
+                    // keeps its own code: the run latches on it and the bar
+                    // prompts re-authentication, instead of walking the rest
+                    // of the selection into the same dead session.
+                    error: r
+                        .failures
+                        .iter()
+                        .find(|f| {
+                            f.code
+                                .as_deref()
+                                .is_some_and(azapptoolkit_core::reauth::is_reauth_fatal)
+                        })
+                        .map(|f| BulkError {
+                            code: f.code.clone().unwrap_or_default(),
+                            message: f.message.clone(),
+                            retryable: false,
+                        })
+                        .or_else(|| {
+                            r.failures.first().map(|f| BulkError {
+                                code: "partial_failure".into(),
+                                message: f.message.clone(),
+                                retryable: false,
+                            })
+                        }),
                 },
                 sp_created: run.sp_created,
             }
