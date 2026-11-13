@@ -74,7 +74,7 @@ jobs:
             exit 1
           }
 
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
       # No rust-cache: its keys are per job and main only ever saves `rust`,
       # `web` and `analyze` caches, so a tag run's guard/build jobs find none
       # (every leg of v0.33.3–v0.34.0 logged "No cache found"); what they saved
@@ -145,7 +145,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
 
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
         with:
           targets: ${{ matrix.rust_target }}, wasm32-unknown-unknown
 
@@ -161,7 +161,7 @@ jobs:
         # runtime (Cargo.lock) for reproducible release tooling — upstream does not
         # cut a CLI release for every runtime patch, so the two can differ in the
         # patch digit. Bump in lockstep with the crate. --locked pins its deps.
-        run: cargo install tauri-cli --locked --version "=2.12.3"
+        run: cargo install tauri-cli --locked --version "=2.12.4"
 
       # Compile and bundle are separate steps so TAURI_SIGNING_PRIVATE_KEY is
       # only in the environment of the bundling step (review F285). A single

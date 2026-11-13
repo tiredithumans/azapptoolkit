@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "Entra ID authentication (OAuth2 PKCE) for azapptoolkit"
 
@@ -23,7 +25,7 @@ reqwest = { workspace = true }
 # SHA-256 and the OS CSPRNG for PKCE / state / nonce (`src/pkce.rs`). The same
 # crate and feature set `src-tauri` declares, already compiled in via rustls,
 # so this adds an edge, not a crate.
-aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 url = { workspace = true }
 chrono = { workspace = true }
 keyring-core = { workspace = true }

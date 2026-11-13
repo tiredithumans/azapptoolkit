@@ -108,7 +108,7 @@ impl BearerProvider for DiesAfter {
     async fn bearer(&self) -> Result<String, TokenError> {
         let left = self
             .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         match left {
             Ok(_) => Ok("tok".to_string()),
             Err(_) => Err(TokenError::new("refresh_missing", "gone")),

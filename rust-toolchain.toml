@@ -4,7 +4,7 @@
 # with the workspace MSRV. Before bumping, run `just future-incompat` — a listed
 # crate becomes a hard error on some future toolchain (docs/DEVELOPMENT.md,
 # "Bumping the Rust toolchain").
-channel = "1.98.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 # The Leptos frontend (apps/desktop/web-rs) compiles to WASM; declaring the
 # target here means rustup provisions it automatically on first build, so

@@ -1,7 +1,7 @@
 # Agent Instructions — azapptoolkit
 
 azapptoolkit is a native Rust desktop app for managing Microsoft Entra ID app registrations — the
-replacement for ad-hoc PowerShell. Tauri 2 + Leptos 0.8 (WASM) workspace, edition 2024, MSRV 1.98
+replacement for ad-hoc PowerShell. Tauri 2 + Leptos 0.8 (WASM) workspace, edition 2024, MSRV 1.100
 (`rust-toolchain.toml`).
 
 This file is an invariant + pointer index, not a manual: one sentence per rule. Detail lives in
