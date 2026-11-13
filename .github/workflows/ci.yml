@@ -172,7 +172,7 @@ jobs:
           # trunk is version-pinned (like cargo-deny) so the release build and its
           # minifier (Trunk.toml `minify`) are reproducible across CI, Pages and
           # release; bump it in all three workflows together.
-          tool: just,trunk@0.21.14,wasm-pack
+          tool: just,trunk@0.22.1,wasm-pack
       # web-rs is excluded from the root workspace, so the `rust` job's
       # `cargo fmt --all` does not reach it — format-check it here.
       - name: fmt

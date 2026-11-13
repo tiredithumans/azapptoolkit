@@ -53,7 +53,7 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           # Pinned like ci.yml's trunk: the minified release bundle stays reproducible.
-          tool: just,trunk@0.21.14
+          tool: just,trunk@0.22.1
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       # The base href must match the Pages subpath so the hashed JS/WASM/CSS
       # resolve under https://<user>.github.io/<repo>/.
