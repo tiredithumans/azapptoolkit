@@ -2,7 +2,7 @@
 name = "azapptoolkit-web-rs"
 version = "0.35.4"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 description = "azapptoolkit desktop front-end (Leptos + Thaw, runs in Tauri webview as WASM)"
 publish = false
@@ -51,8 +51,10 @@ thaw = { version = "0.5.0-beta", features = ["csr"] }
 
 # Pinned to an exact rev (not the `v2` branch) so WASM builds are reproducible —
 # a branch pin silently absorbs whatever upstream pushes. Bump deliberately.
-# Reviewed 2026-09-27 against upstream v2 HEAD (0.2.5). This rev decodes every
-# reply and event through `JSON.stringify` + `serde_json` — upstream's
+# Reviewed 2026-11-13 against upstream v2 HEAD (0.2.5, `e1a4d04`: `Channel`
+# streams now yield messages in Tauri's `index` order, as @tauri-apps/api does —
+# web-rs uses `core` invoke + `event`, not `Channel`). Since 2026-09-27
+# (`571cef4`) this rev decodes every reply and event through `JSON.stringify` + `serde_json` — upstream's
 # workaround for wasm-bindgen#5324, a reported (still open) "Out of bounds table
 # access" function-table exhaustion under repeated `serde_wasm_bindgen::from_value`
 # inside listener closures, which is our per-app progress-stream path. An event
@@ -60,7 +62,7 @@ thaw = { version = "0.5.0-beta", features = ["csr"] }
 # prints it) where it used to panic, and the mock bridge must emit JSON-shaped
 # values (see `src/ipc_mock`). Re-check at release time with
 # `git ls-remote https://github.com/JonasKruckenberg/tauri-sys refs/heads/v2`.
-tauri-sys = { git = "https://github.com/JonasKruckenberg/tauri-sys", rev = "571cef48b216ce5dcd0e487a1184a32d77a88452", features = ["core", "event"] }
+tauri-sys = { git = "https://github.com/JonasKruckenberg/tauri-sys", rev = "e1a4d049def58d8c544f01a2be0c0849a55025ef", features = ["core", "event"] }
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

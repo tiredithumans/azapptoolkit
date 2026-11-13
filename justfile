@@ -154,21 +154,22 @@ web-itest-size:
     #!/usr/bin/env bash
     set -euo pipefail
     CEILING_MB=52
-    DEPS=target/wasm32-unknown-unknown/debug/deps
-    # Clear PRIOR shard artifacts first. cargo keeps every hash-suffixed build in
-    # deps/, so a stale binary from an older profile or feature set sits beside
-    # the current one — and those are enormous (a debug wasm with debuginfo is
-    # ~2 GB, vs ~7-21 MB once `[profile.test] strip = "debuginfo"` applies).
-    # Measuring the directory blind reports those as failures and buries the real
-    # numbers. Objects stay cached, so this costs a relink, not a rebuild.
-    shopt -s nullglob
-    rm -f "$DEPS"/gui_*.wasm
+    # Take each shard's path from cargo's own JSON (`executable`) instead of
+    # globbing a directory: Rust 1.100's cargo moved test binaries from
+    # `target/<triple>/debug/deps/` to per-package `build/<pkg>/<hash>/out/`,
+    # which silently emptied the old glob. The paths cargo reports are exactly
+    # this build's artifacts, so stale hash-suffixed binaries from an older
+    # profile or feature set (a debug wasm with debuginfo is ~2 GB, vs ~7-21 MB
+    # once `[profile.test] strip = "debuginfo"` applies) are never measured.
     # Build the shard binaries without running them. Same profile + features as
     # `web-itest`, so these are the artifacts the browser would load.
-    cargo test --locked --no-run --target wasm32-unknown-unknown --features test-support
-    files=("$DEPS"/gui_*.wasm)
+    files=()
+    while IFS= read -r f; do
+      files+=("$f")
+    done < <(cargo test --locked --no-run --target wasm32-unknown-unknown --features test-support --message-format=json \
+      | grep -o '"executable":"[^"]*/gui_[^"/]*\.wasm"' | sed 's/^"executable":"//; s/"$//' | sort -u)
     if [ ${#files[@]} -eq 0 ]; then
-      echo "no gui_*.wasm shards found — the build layout changed, so this gate is measuring nothing" >&2
+      echo "no gui_*.wasm shards found — cargo reported no gui_* test executables, so this gate is measuring nothing" >&2
       exit 1
     fi
     status=0

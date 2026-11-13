@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "azapptoolkit desktop app (Tauri 2)"
 
@@ -70,7 +72,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc
 # SHA-256) come from the SAME aws-lc-rs rcgen already signs with — the feature
 # spec mirrors rcgen's `aws_lc_rs` feature exactly so resolution unifies and no
 # new crate enters the graph. This is why there is no direct `sha2` here.
-aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 # PKCS#12 (.pfx) bundling of the generated certificate + its key, so an operator
 # can `Import-PfxCertificate` on Windows instead of hand-rolling `openssl
 # pkcs12 -export` around a one-time private key. Writes PBES2 / AES-256-CBC with
