@@ -7,14 +7,14 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::applications::{
     self, AddFederatedCredentialInput, ApplicationDetail, FederatedCredentialDto,
     UpdateFederatedCredentialInput,
 };
 use crate::bindings::managed_identity;
-use crate::components::ui::{DataTable, DetailLoadError, FormError, SkeletonList, Spinner};
+use crate::components::ui::{DataTable, DetailLoadError, FormError, Select, SkeletonList, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
@@ -78,6 +78,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
 
     // ---- Edit state (raw fields; name is immutable in Graph) ----
     let editing: RwSignal<Option<FederatedCredentialDto>> = RwSignal::new(None);
+    // An open add or edit form is unsaved work the pane should not drop
+    // silently (close, Refresh, another tab's reload).
+    crate::hooks::use_unsaved_marker(move || add_open.get() || editing.with(Option::is_some));
     let edit_issuer = RwSignal::new(String::new());
     let edit_subject = RwSignal::new(String::new());
     let edit_description = RwSignal::new(String::new());
@@ -298,7 +301,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
             <Show when=move || add_open.get() fallback=|| view! { <></> }>
                 <section class="federated-tab__add">
                     <Field label="Federated credential scenario">
-                        <Select value=scenario>
+                        <Select value=scenario label="Federated credential scenario">
                             {SCENARIOS
                                 .iter()
                                 .map(|(value, label)| {
@@ -316,7 +319,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                             <Input value=gh_repo placeholder="contoso-app" />
                         </Field>
                         <Field label="Entity type">
-                            <Select value=gh_entity>
+                            <Select value=gh_entity label="Entity type">
                                 {GITHUB_ENTITIES
                                     .iter()
                                     .map(|(value, label)| {
@@ -365,7 +368,7 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
                                     Ok(list) if !list.is_empty() => {
                                         view! {
                                             <Field label="Managed identity">
-                                                <Select value=mi_selected>
+                                                <Select value=mi_selected label="Managed identity">
                                                     <option value="">"Select a managed identity…"</option>
                                                     {list
                                                         .into_iter()

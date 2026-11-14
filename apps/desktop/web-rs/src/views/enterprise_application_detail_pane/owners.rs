@@ -237,7 +237,7 @@ pub(super) fn OwnersContent(
                             view! { <Spinner /> }
                                 .into_any()
                         } else {
-                            view! { "Add Default Owners" }.into_any()
+                            view! { "Add default owners" }.into_any()
                         }
                     }}
                 </Button>

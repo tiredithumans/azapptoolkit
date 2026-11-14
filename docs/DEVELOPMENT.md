@@ -145,7 +145,7 @@ and that check runs in **Validate** as well, so a dry run proves the names exist
 that names an unknown user, resource or permission is rejected whole, so nothing is
 created for it. Permissions are **declared** in the new app's `requiredResourceAccess`,
 not consented: grant consent afterwards by selecting the apps in App Registrations and
-using **Grant consent**. An owner that could not be added is listed on its row.
+using **Grant admin consent**. An owner that could not be added is listed on its row.
 
 ## Testing
 

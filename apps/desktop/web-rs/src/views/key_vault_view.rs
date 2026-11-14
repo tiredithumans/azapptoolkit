@@ -29,6 +29,11 @@ pub fn KeyVaultView() -> impl IntoView {
     let session = use_session();
     let vault_name = RwSignal::new(String::new());
     let listed: RwSignal<Vec<KvSecretItemDto>> = RwSignal::new(Vec::new());
+    // The vault the table on screen was listed from. Reveal reads this, never
+    // the text box: the box can be edited after a list, and a reveal that
+    // followed it would fetch a same-named secret from a different vault than
+    // the row the operator clicked.
+    let listed_vault = RwSignal::new(String::new());
     let revealed: RwSignal<Option<KvSecretValueDto>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
     // Whether a successful list has completed — so the empty table can say "no
@@ -62,6 +67,7 @@ pub fn KeyVaultView() -> impl IntoView {
     Effect::new(move |_| {
         let _ = tenant.get();
         listed.set(Vec::new());
+        listed_vault.set(String::new());
         loaded.set(false);
         vault_name.set(String::new());
         revealed.set(None);
@@ -86,6 +92,10 @@ pub fn KeyVaultView() -> impl IntoView {
                 match result {
                     Ok(items) => {
                         listed.set(items);
+                        listed_vault.set(v.trim().to_string());
+                        // A value revealed from the previous vault no longer
+                        // belongs under this table.
+                        revealed.set(None);
                         loaded.set(true);
                     }
                     // This view has no consent / step-up button of its own, so
@@ -109,7 +119,7 @@ pub fn KeyVaultView() -> impl IntoView {
             return;
         }
         let tenant = session.active_tenant.get();
-        let v = vault_name.get();
+        let v = listed_vault.get();
         revealing.set(Some(secret_name.clone()));
         error.set(None);
         leptos::task::spawn_local(async move {
@@ -144,7 +154,7 @@ pub fn KeyVaultView() -> impl IntoView {
         <main class="tool-page">
             <SectionHeader
                 title="Key Vault".to_string()
-                crumb="Browse and reveal secrets in a named vault".to_string()
+                description="Browse and reveal secrets in a named vault.".to_string()
             />
             <RequiresRole capability_key="keyvault_secrets" />
             <div class="row">
@@ -165,6 +175,19 @@ pub fn KeyVaultView() -> impl IntoView {
                     }}
                 </Button>
             </div>
+            // Names the vault the rows came from, since the box above can
+            // have been edited since.
+            {move || {
+                let vault = listed_vault.get();
+                (loaded.get() && !vault.is_empty())
+                    .then(|| {
+                        view! {
+                            <span class="ui-text hint">
+                                "Secrets in " <strong class="mono">{vault}</strong>
+                            </span>
+                        }
+                    })
+            }}
             {move || {
                 view! {
                     <DataTable

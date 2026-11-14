@@ -150,7 +150,7 @@ fn render_report(rep: ReadinessReport, session: Session) -> impl IntoView {
     let banner = indeterminate.then(|| {
         view! {
             <Callout tone="warn" class="readiness__roles-error">
-                "Couldn't read your active directory roles, so directory-role requirements show as \
+                "Couldn't read your active Microsoft Entra roles, so directory-role requirements show as \
                  \"?\"."
                 {roles_error
                     .map(|e| {
@@ -264,7 +264,7 @@ pub fn ReadinessView() -> impl IntoView {
 
     view! {
         <div class="readiness">
-            <SectionHeader title="Access Readiness".to_string() crumb="Account".to_string() />
+            <SectionHeader title="Access Readiness".to_string() />
             <span class="ui-text hint">
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \

@@ -213,7 +213,7 @@ pub fn DeletedAppsDialog(
             wide=true
         >
             <Callout tone="info">
-                "Deleted apps stay in the recycle bin for 30 days. Restoring an app also restores its paired enterprise application; permanent deletion skips the window and cannot be undone."
+                "Deleted apps stay recoverable for 30 days. Restoring an app also restores its paired enterprise application; permanent deletion skips the window and cannot be undone."
             </Callout>
             {move || {
                 error
@@ -239,7 +239,7 @@ pub fn DeletedAppsDialog(
                     return view! {
                         <EmptyState
                             icon=IconName::Trash
-                            title="Recycle bin is empty"
+                            title="No recently deleted apps"
                             body="App registrations deleted in the last 30 days appear here."
                         />
                     }
@@ -251,7 +251,7 @@ pub fn DeletedAppsDialog(
                         {truncated.then(|| {
                             view! {
                                 <Callout tone="warn">
-                                    "The recycle-bin read hit its row cap, so this list is partial — deleted apps beyond the cap are not shown."
+                                    "This list is partial: the tenant has more recently deleted apps than one read returns, and the rest are not shown."
                                 </Callout>
                             }
                         })}
@@ -344,7 +344,7 @@ pub fn DeletedAppsDialog(
             <ConfirmDialog
                 open=Signal::derive(move || purge_target.get().is_some())
                 title="Delete this app permanently?"
-                body="This skips the 30-day recycle bin. The app registration cannot be restored afterwards."
+                body="This skips the 30-day recovery window. The app registration cannot be restored afterwards."
                 subject=purge_subject
                 confirm_label="Delete forever"
                 require_keyword="DELETE"

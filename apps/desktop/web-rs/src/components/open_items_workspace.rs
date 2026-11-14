@@ -260,14 +260,37 @@ fn open_item_window(
             style:display=move || if shown() { "flex" } else { "none" }
         >
             <div class="workspace__pane-bar">
-                // Echoes the dock chip: kind glyph + the item's live title, so a
-                // side-by-side compare labels which pane is which.
-                <div class="workspace__pane-title">
-                    <TypeChip kind=app_kind />
-                    <span class="workspace__pane-name">{title}</span>
-                </div>
-                <div class="workspace__pane-actions">
-                    <Show when=comparing>
+                <Show
+                    when=comparing
+                    // One pane: the way back to the page underneath. The pane's
+                    // own header right below already names the item, so the bar
+                    // repeating the kind chip and the name a second time (and
+                    // the dock chip a third) told the operator nothing, while
+                    // the only visible way out was an unlabelled chevron in the
+                    // far corner — or knowing that Escape does it.
+                    fallback=move || {
+                        view! {
+                            <button
+                                type="button"
+                                class="workspace__pane-back"
+                                title="Back to the page (Esc). The item stays in the Open dock."
+                                on:click=move |_| {
+                                    session.shown_items.update(|s| s.retain(|x| *x != id));
+                                }
+                            >
+                                <Icon name=IconName::ChevronLeft size=14 />
+                                {move || format!("Back to {}", session.view.get().title())}
+                            </button>
+                        }
+                    }
+                >
+                    // Comparing: kind glyph + the item's live title, so each of
+                    // the two panes says which one it is.
+                    <div class="workspace__pane-title">
+                        <TypeChip kind=app_kind />
+                        <span class="workspace__pane-name">{title}</span>
+                    </div>
+                    <div class="workspace__pane-actions">
                         <button
                             type="button"
                             class="workspace__pane-full"
@@ -277,21 +300,21 @@ fn open_item_window(
                         >
                             <Icon name=IconName::Maximize size=14 />
                         </button>
-                    </Show>
-                    <button
-                        type="button"
-                        class="workspace__pane-close"
-                        aria-label="Hide this pane"
-                        title="Hide this pane (it stays in the Open dock)"
-                        on:click=move |_| {
-                            session.shown_items.update(|s| s.retain(|x| *x != id));
-                        }
-                    >
-                        // A chevron, not the dock chip's ×: this hides the
-                        // pane, the × closes the item.
-                        <Icon name=IconName::ChevronDown size=14 />
-                    </button>
-                </div>
+                        <button
+                            type="button"
+                            class="workspace__pane-close"
+                            aria-label="Hide this pane"
+                            title="Hide this pane (it stays in the Open dock)"
+                            on:click=move |_| {
+                                session.shown_items.update(|s| s.retain(|x| *x != id));
+                            }
+                        >
+                            // A chevron, not the dock chip's ×: this hides the
+                            // pane, the × closes the item.
+                            <Icon name=IconName::ChevronDown size=14 />
+                        </button>
+                    </div>
+                </Show>
             </div>
             <Show when=move || mounted.get()>{body()}</Show>
         </div>

@@ -159,7 +159,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "disabled_by_microsoft",
         title: "Disabled by Microsoft",
-        blurb: "Microsoft blocked these apps for suspicious, abusive or malicious activity (disabledByMicrosoftStatus). Sign-ins are already blocked; the credentials and grants remain. Investigate why each was blocked before re-enabling anything — delete the ones that aren't mistaken blocks.",
+        blurb: "Microsoft blocked these apps for suspicious, abusive or malicious activity. Sign-ins are already blocked; the credentials and grants remain. Investigate why each was blocked before re-enabling anything — delete the ones that aren't mistaken blocks.",
         tab: "overview",
         section: GroupSection::Actionable,
     },
@@ -174,7 +174,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "risky_service_principal",
         title: "Risky service principal (Identity Protection)",
-        blurb: "Microsoft Identity Protection flags these service principals as risky or compromised (`atRisk` / `confirmedCompromised`) — token issuance may be happening now. Open each in Identity Protection before trusting it again; if it is unknown to you, disable sign-in (reversible) to stop its tokens.",
+        blurb: "Microsoft Identity Protection flags these service principals as risky or compromised — token issuance may be happening now. Open each in Identity Protection before trusting it again; if it is unknown to you, disable sign-in (reversible) to stop its tokens.",
         tab: "overview",
         section: GroupSection::Actionable,
     },

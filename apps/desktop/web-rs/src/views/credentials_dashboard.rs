@@ -16,6 +16,7 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::credentials::{self, CredentialHealthCounts, CredentialRowDto};
+use crate::bindings::diagnostics::ListCacheKindDto;
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::ui::{Badge, Callout, CopyableId};
 use crate::state::use_session;
@@ -38,8 +39,9 @@ pub fn CredentialsDashboard() -> impl IntoView {
 
     view! {
         <AuditDashboard
+            cache_kind=ListCacheKindDto::Credentials
             title="Credential expiry"
-            crumb="Secrets & certificates across the tenant"
+            description="Every client secret and certificate across the tenant."
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh credential expiry"
             view_key="credentials"
@@ -66,8 +68,9 @@ pub fn CredentialsDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{} already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    "{} already expired; {soon} {} within {CRITICAL_DAYS} days.",
                                     count_noun(expired, "credential", "credentials"),
+                                    if soon == 1 { "expires" } else { "expire" },
                                 )}
                             </Callout>
                         }

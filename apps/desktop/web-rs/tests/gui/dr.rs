@@ -151,6 +151,8 @@ async fn run_restore(report: RestoreReport) -> ts::Mounted {
     ts::click_button_labelled("Restore into this tenant…");
     // The confirm dialog's own "Restore" is the one that fires the command.
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
     m
@@ -546,6 +548,8 @@ async fn done_clears_a_saved_report_without_asking() {
     ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::body_contains("s3cr3t-value")).await;
 
@@ -688,6 +692,8 @@ async fn privileged_grants_render_before_confirm_and_only_ticked_apps_are_approv
         "the confirm dialog names what will be skipped: {}",
         ts::body_text()
     );
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
 
@@ -715,6 +721,8 @@ async fn an_unticked_plan_restores_with_no_approvals() {
     .await;
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
     let call = ts::last_call("restore_tenant").expect("restore_tenant called");
@@ -774,6 +782,8 @@ async fn approve_all_listed_ticks_every_item_needing_approval() {
 
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
     let call = ts::last_call("restore_tenant").expect("restore_tenant called");
@@ -826,6 +836,8 @@ async fn restore_cancel_reads_as_cancelling() {
     let _m = load_plan(plan()).await;
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
 
@@ -848,6 +860,8 @@ async fn restore_in_shell(report: RestoreReport) -> ts::Mounted {
     ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::query(".dr-view__result").is_some()).await;
     m
@@ -922,6 +936,8 @@ async fn a_report_landing_after_its_card_is_gone_says_it_was_not_kept() {
     ts::wait_for(|| ts::has_button_labelled("Restore into this tenant…")).await;
     ts::click_button_labelled("Restore into this tenant…");
     ts::wait_for(|| ts::has_button_labelled("Restore")).await;
+    ts::set_input_value(".confirm-dialog__keyword input", "RESTORE");
+    ts::tick().await;
     ts::click_button_labelled("Restore");
     ts::wait_for(|| ts::call_count("restore_tenant") == 1).await;
     // While it runs, signing out would lose its report.

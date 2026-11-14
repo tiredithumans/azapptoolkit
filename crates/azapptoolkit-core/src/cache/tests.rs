@@ -1881,3 +1881,56 @@ fn a_prefix_watch_guards_every_key_under_it() {
     assert!(!cache.put_under_watch_if_current(&watch, "t1|resource:c".into(), &3_u32));
     assert!(cache.get::<u32>(kind, "t1|resource:c").is_none());
 }
+
+/// The "Updated … ago" stamp reads the oldest live entry under a prefix, and
+/// reading it is not a cache access: it must not refresh an entry's LRU slot
+/// or count as a hit.
+#[test]
+fn the_age_of_a_prefix_is_its_oldest_live_entry_and_reading_it_touches_nothing() {
+    let cache = Cache::new();
+    assert_eq!(
+        cache.oldest_age_for_prefix(CacheKind::Lists, "t1|"),
+        None,
+        "nothing cached, nothing to date"
+    );
+
+    cache.put(CacheKind::Lists, "t1|apps".to_string(), &1u32);
+    cache.put(CacheKind::Lists, "t2|apps".to_string(), &2u32);
+    // Back-date t1's entry, so "oldest" is distinguishable from "newest".
+    {
+        let mut bucket = cache.buckets[CacheKind::Lists.idx()].lock();
+        let entry = bucket.entries.get_mut("t1|apps").expect("just stored");
+        entry.inserted_wall -= Duration::from_secs(90);
+    }
+    cache.put(CacheKind::Lists, "t1|enterprise".to_string(), &3u32);
+
+    let stats_before = cache.stats();
+    let age = cache
+        .oldest_age_for_prefix(CacheKind::Lists, "t1|")
+        .expect("t1 has entries");
+    assert!(
+        age >= Duration::from_secs(90),
+        "the back-dated entry is the oldest: {age:?}"
+    );
+    let other = cache
+        .oldest_age_for_prefix(CacheKind::Lists, "t2|")
+        .expect("t2 has an entry");
+    assert!(
+        other < Duration::from_secs(90),
+        "another tenant's prefix never sees t1's entry: {other:?}"
+    );
+    let stats_after = cache.stats();
+    assert_eq!(
+        (stats_before.lists_hits, stats_before.lists_misses),
+        (stats_after.lists_hits, stats_after.lists_misses),
+        "asking for an age is not a hit or a miss"
+    );
+
+    // An entry past its TTL has no age to report.
+    cache.configure(None, None, None, None, Some(Duration::from_secs(60)), None);
+    assert_eq!(
+        cache.oldest_age_for_prefix(CacheKind::Lists, "t1|apps"),
+        None,
+        "the back-dated entry is past a 60s TTL"
+    );
+}

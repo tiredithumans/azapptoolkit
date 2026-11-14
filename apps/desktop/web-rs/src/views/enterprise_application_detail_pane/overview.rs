@@ -3,7 +3,9 @@ use super::*;
 #[component]
 pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
-    let sp = signal.with(|d| d.service_principal.clone());
+    // A snapshot for this mount (untracked): the pane rebuilds the tab when
+    // fresh data should replace it, and keeps it when it holds unsaved notes.
+    let sp = signal.with_untracked(|d| d.service_principal.clone());
 
     // My Apps portal visibility (the `HideApp` tag). Toggled optimistically so
     // the row reflects the change without re-fetching the whole detail.
@@ -103,11 +105,18 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
 
     // ---- Free-text management notes editor. ----
     let notes_text = RwSignal::new(sp.notes.clone().unwrap_or_default());
+    // What the directory holds, so Save is offered only for a real change and
+    // an unsaved note is known to the pane (closing or refreshing asks first).
+    let saved_notes = RwSignal::new(sp.notes.clone().unwrap_or_default());
+    let notes_dirty = move || notes_text.with(|n| saved_notes.with(|s| n != s));
+    crate::hooks::use_unsaved_marker(notes_dirty);
     let notes_cmd = use_command();
     let sp_id_notes = StoredValue::new(sp.id.clone());
     let save_notes = move |_| {
+        let saving = notes_text.get_untracked();
         notes_cmd.run_toast_err(
             move |()| {
+                saved_notes.set(saving.clone());
                 session.toast_success("Notes saved.");
             },
             move |tenant_id| {
@@ -125,21 +134,34 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
         .clone()
         .unwrap_or_else(|| "—".to_string());
     let created = fmt_date(sp.created_date_time);
+    // Monospace only for a real id: the placeholder dash in the mono face is a
+    // different, shorter glyph than the "—" in the cells beside it.
+    let has_owner_org = sp.app_owner_organization_id.is_some();
     let owner_org = sp
         .app_owner_organization_id
         .clone()
         .unwrap_or_else(|| "—".to_string());
 
     view! {
-        <dl class="read-field">
-            <dt>"Service principal id"</dt>
-            <dd class="mono">{sp.id.clone()}</dd>
-            <dt>"Application id"</dt>
-            <dd class="mono">{sp.app_id.clone()}</dd>
-            <dt>"Type"</dt>
-            <dd>{sp_type}</dd>
+        // The same `.read-grid` and the same id labels as the app-registration
+        // Overview ("Object ID" / "App ID") — the two panes are one object seen
+        // from two sides, and used to name and set these differently.
+        <dl class="read-grid">
+            <div class="read-grid__item">
+                <dt>"Object ID"</dt>
+                <dd class="mono">{sp.id.clone()}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"App ID"</dt>
+                <dd class="mono">{sp.app_id.clone()}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Type"</dt>
+                <dd>{sp_type}</dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"Enabled for sign-in"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let eff = enabled_override.get().or(initial_enabled);
                     let (label, tone) = match eff {
@@ -150,7 +172,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || enabled_cmd.busy.get())
                     on_click=Box::new(toggle_enabled)
                 >
@@ -163,8 +185,10 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"Assignment required"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let eff = assign_override.get().or(initial_assign);
                     let (label, tone) = match eff {
@@ -175,7 +199,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || assign_cmd.busy.get())
                     on_click=Box::new(toggle_assign)
                 >
@@ -188,12 +212,18 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
-            <dt>"Created"</dt>
-            <dd>{created}</dd>
-            <dt>"Owner tenant"</dt>
-            <dd class="mono">{owner_org}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Created"</dt>
+                <dd>{created}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Owner tenant"</dt>
+                <dd class=("mono", has_owner_org)>{owner_org}</dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"My Apps visibility"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let hidden = hidden_override.get().unwrap_or(initial_hidden);
                     let (label, tone) = if hidden {
@@ -204,7 +234,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || toggling.get())
                     on_click=Box::new(toggle_visibility)
                 >
@@ -217,17 +247,20 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
+            </div>
         </dl>
         <h4>"Notes"</h4>
         <Field label="Management notes (max 1024 characters)">
             <Textarea value=notes_text />
         </Field>
-        <Button
-            appearance=Signal::derive(|| ButtonAppearance::Primary)
-            disabled=Signal::derive(move || notes_cmd.busy.get())
-            on_click=Box::new(save_notes)
-        >
-            "Save notes"
-        </Button>
+        <div class="actions-row">
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                disabled=Signal::derive(move || notes_cmd.busy.get() || !notes_dirty())
+                on_click=Box::new(save_notes)
+            >
+                "Save notes"
+            </Button>
+        </div>
     }
 }

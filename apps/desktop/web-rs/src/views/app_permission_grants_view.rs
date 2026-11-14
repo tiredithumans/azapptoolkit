@@ -35,7 +35,7 @@ pub fn AppPermissionGrantsView() -> impl IntoView {
     view! {
         <AuditDashboard
             title="Application permissions"
-            crumb="App-only permissions held across the tenant"
+            description="App-only (application) permissions held across the tenant."
             search_placeholder="Filter by app, permission, or resource…"
             refresh_label="Refresh application permissions"
             view_key="app-permissions"

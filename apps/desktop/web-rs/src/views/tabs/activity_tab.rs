@@ -197,6 +197,24 @@ fn activity_table(list: Vec<ActivityLogItem>) -> impl IntoView {
     }
 }
 
+/// Display form of an audit-log `result`: the known values as plain words, any
+/// other value with its first letter capitalised, "—" untouched.
+fn result_label(raw: &str) -> String {
+    match raw {
+        "success" => "Success".to_string(),
+        "failure" => "Failure".to_string(),
+        "timeout" => "Timed out".to_string(),
+        "unknownFutureValue" => "Unknown".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn activity_row(item: ActivityLogItem) -> impl IntoView {
     let when = item
         .activity_date_time
@@ -208,6 +226,9 @@ fn activity_row(item: ActivityLogItem) -> impl IntoView {
         "failure" => BadgeTone::Danger,
         _ => BadgeTone::Neutral,
     };
+    // Graph's audit log spells the outcome as a lower-case enum value
+    // (`success`, `failure`, `timeout`); the badge shows it as a word.
+    let result = result_label(&result);
     let changed: Vec<String> = item
         .modified_properties
         .into_iter()

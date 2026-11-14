@@ -43,6 +43,15 @@ pub async fn invalidate_list_cache(tenant_id: String, kind: ListCacheKindDto) {
     .await
 }
 
+/// How old the cached data behind a list page is, in seconds (`None` when
+/// nothing is cached for `kind`). Drives the pages' "Updated … ago" stamp.
+pub async fn list_cache_age(
+    tenant_id: String,
+    kind: ListCacheKindDto,
+) -> Result<Option<u64>, UiError> {
+    invoke_result("list_cache_age", InvalidateListArgs { tenant_id, kind }).await
+}
+
 #[derive(Serialize)]
 struct EnabledArgs {
     enabled: bool,

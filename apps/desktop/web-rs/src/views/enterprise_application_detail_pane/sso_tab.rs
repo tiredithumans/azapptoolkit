@@ -582,10 +582,18 @@ fn SsoEditor(
     let is_saml = saved_mode == SsoMode::Saml;
     let is_oidc = saved_mode == SsoMode::Oidc;
     let configured = is_saml || is_oidc;
-    let saved_mode_label = cfg
-        .sso_mode
-        .clone()
-        .unwrap_or_else(|| "not configured".to_string());
+    // The method as a name, not Graph's `preferredSingleSignOnMode` value
+    // ("saml", "oidc", "notSupported") — the page showed "saml" above a
+    // dropdown that said "SAML".
+    let saved_mode_label = match cfg.sso_mode.as_deref() {
+        None | Some("") => "Not configured".to_string(),
+        Some("saml") => "SAML".to_string(),
+        Some("oidc") => "OpenID Connect (OIDC)".to_string(),
+        Some("password") => "Password-based".to_string(),
+        Some("linked") => "Linked".to_string(),
+        Some("notSupported") => "Not supported".to_string(),
+        Some(other) => other.to_string(),
+    };
     // Held in `StoredValue` (Copy) so the on_click handlers below capture only
     // Copy state and stay `Fn` — Leptos `<Show>` children must be re-callable.
     let object_id = StoredValue::new(cfg.object_id.clone());
@@ -614,6 +622,30 @@ fn SsoEditor(
     // OIDC editable fields — one row per URI (`UriListEditor`).
     let redirect_uris = UriListState::validated(&cfg.redirect_uris, redirect_uri_reason);
     let spa_uris = UriListState::validated(&cfg.spa_redirect_uris, redirect_uri_reason);
+    // Edits to any of the fields above that are not saved yet. The tab had no
+    // marker at all, so closing or refreshing the pane dropped them unasked.
+    // (The claims editor keeps its own state and is not covered.)
+    {
+        let saved = StoredValue::new((
+            cfg.identifier_uris.clone(),
+            cfg.reply_urls.clone(),
+            cfg.logout_url.clone().unwrap_or_default(),
+            cfg.notification_emails.clone(),
+            cfg.redirect_uris.clone(),
+            cfg.spa_redirect_uris.clone(),
+        ));
+        crate::hooks::use_unsaved_marker(move || {
+            selected_mode.get() != saved_mode
+                || saved.with_value(|(ids, replies, logout, emails, redirects, spa)| {
+                    !identifiers.same_as(ids)
+                        || !reply_urls.same_as(replies)
+                        || logout_url.with(|l| l.trim() != logout.trim())
+                        || !notification_emails.same_as(emails)
+                        || !redirect_uris.same_as(redirects)
+                        || !spa_uris.same_as(spa)
+                })
+        });
+    }
     // Cert rotation. The big-bang path breaks sign-in for static-certificate
     // apps, so the button only opens a typed confirmation.
     let cert_subject = RwSignal::new(String::new());
@@ -815,7 +847,7 @@ fn SsoEditor(
                         "SAML"
                     </option>
                     <option value=SsoMode::Oidc.as_str() selected=is_oidc>
-                        "OIDC / OpenID Connect"
+                        "OpenID Connect (OIDC)"
                     </option>
                     <option value=SsoMode::Disabled.as_str() selected=!configured>
                         "Disabled"
@@ -1021,7 +1053,7 @@ fn SsoEditor(
                                         on_click=Box::new(grant_consent)
                                         disabled=Signal::derive(move || cmd.busy.get())
                                     >
-                                        "Grant admin consent"
+                                        "Grant consent"
                                     </Button>
                                 </Callout>
                             }

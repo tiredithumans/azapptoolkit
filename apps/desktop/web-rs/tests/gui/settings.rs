@@ -38,9 +38,9 @@ async fn tabs_organize_defaults_into_groups() {
     let _m = ts::mount_view(|| view! { <SettingsView /> });
 
     // All four tab labels render regardless of which pane is active.
-    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
-    assert!(ts::body_contains("Enterprise Application Defaults"));
-    assert!(ts::body_contains("Naming Defaults"));
+    ts::wait_for(|| ts::body_contains("App registration defaults")).await;
+    assert!(ts::body_contains("Enterprise application defaults"));
+    assert!(ts::body_contains("Naming defaults"));
     assert!(ts::body_contains("Tenant connection"));
 
     // The App Registration pane is active on load: its seeded owner shows.
@@ -89,7 +89,7 @@ async fn tenant_connection_tab_prefills_then_confirms_the_restart() {
     let configured = fixtures::configured();
 
     let _m = ts::mount_view(|| view! { <SettingsView /> });
-    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
+    ts::wait_for(|| ts::body_contains("App registration defaults")).await;
 
     // The connection pane is read lazily — nothing fetches it until it opens.
     assert!(ts::last_call("get_auth_config").is_none());
@@ -144,7 +144,7 @@ async fn tenant_connection_tab_names_an_active_env_override() {
     );
 
     let _m = ts::mount_view(|| view! { <SettingsView /> });
-    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
+    ts::wait_for(|| ts::body_contains("App registration defaults")).await;
     ts::click(".ui-tabs button:nth-of-type(4)");
     ts::wait_for(|| ts::body_contains("overrides what you save here")).await;
     assert!(ts::body_contains(
@@ -164,7 +164,7 @@ async fn tenant_connection_tab_shows_where_the_logs_and_settings_live() {
     let paths = fixtures::support_paths();
 
     let _m = ts::mount_view(|| view! { <SettingsView /> });
-    ts::wait_for(|| ts::body_contains("App Registration Defaults")).await;
+    ts::wait_for(|| ts::body_contains("App registration defaults")).await;
     ts::click(".ui-tabs button:nth-of-type(4)");
     ts::wait_for(|| ts::body_contains(&paths.log_dir)).await;
     assert!(ts::body_contains(&paths.settings_file));

@@ -1347,6 +1347,40 @@ impl Cache {
             .retain(|k| !k.starts_with(prefix));
     }
 
+    /// How long ago the OLDEST live entry of `kind` whose key begins with
+    /// `prefix` was stored — the age of the data a list page is showing, for
+    /// its "Updated … ago" stamp. `None` when no such entry is cached, or
+    /// caching is off.
+    ///
+    /// The wall clock, because it keeps counting while the machine sleeps
+    /// (see `Entry::is_live`); one set backwards falls back to the monotonic
+    /// clock. An in-place patch keeps an entry's `inserted`, so this is the age
+    /// of the *scan* the page came from, not of the last patch to it.
+    ///
+    /// A pure read: no LRU touch and no hit/miss record, so asking how old an
+    /// entry is neither keeps it alive nor skews the diagnostics.
+    pub fn oldest_age_for_prefix(&self, kind: CacheKind, prefix: &str) -> Option<Duration> {
+        let ttl = {
+            let c = self.config.lock();
+            if !c.enabled {
+                return None;
+            }
+            c.ttl_for(kind)
+        };
+        self.buckets[kind.idx()]
+            .lock()
+            .entries
+            .iter()
+            .filter(|(key, entry)| key.starts_with(prefix) && entry.is_live(ttl))
+            .map(|(_, entry)| {
+                entry
+                    .inserted_wall
+                    .elapsed()
+                    .unwrap_or_else(|_| entry.inserted.elapsed())
+            })
+            .max()
+    }
+
     /// Drops every entry across **all** kinds whose key begins with
     /// `{tenant_id}|`. The cross-tenant-leakage guard on sign-out (the
     /// AGENTS.md "#1 footgun"): every kind uses the `{tenant_id}|` key

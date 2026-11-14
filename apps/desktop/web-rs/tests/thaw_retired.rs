@@ -38,7 +38,6 @@ const STILL_ON_THAW: &[&str] = &[
     "InputSuffix",
     "Field",
     "Textarea",
-    "Select",
     "ComponentRef",
     "ConfigProvider",
     "Theme",
@@ -50,6 +49,7 @@ const RETIRED: &[(&str, &str)] = &[
     ("Card", "a plain element carrying the view's own class"),
     ("DatePicker", "components::ui::DateInput"),
     ("ProgressBar", "components::ui::ProgressBar"),
+    ("Select", "components::ui::Select"),
     ("Spinner", "components::ui::Spinner"),
     ("SpinnerSize", "nothing: ui::Spinner has one size"),
 ];

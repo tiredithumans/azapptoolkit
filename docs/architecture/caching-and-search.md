@@ -202,6 +202,25 @@ one per `Bucket::at_cap_sweep_interval` (`ttl/64`, at least 5 ms), otherwise a f
 expiry front swept on every `put` again; inside the gap the put falls through to plain LRU. The LRU index is pruned in place
 (`prune_lru`) rather than rebuilt by cloning every key.
 
+### How old a cached list is
+
+The lists are served from the `Lists` bucket for up to an hour and are patched in place by a
+create, delete or rename, so the frontend cannot tell how old the rows on screen are: the moment
+its own request landed says nothing about when the scan ran. `list_cache_age(tenant_id, kind)`
+answers it. It reads `Cache::oldest_age_for_prefix(CacheKind::Lists, prefix)` — the age of the
+oldest entry under the key the page for that `ListCacheKindDto` **renders** (`apps_pairing_key`,
+`enterprise_key`, `mi_key`, the two roll-up keys; `All` takes the whole tenant prefix) — and
+returns `None` when nothing is cached. That is deliberately narrower than what
+`invalidate_list_cache` drops for the same kind: the shared SP index can be older or newer than a
+list derived from it, and it is not what the page shows. The command never fetches, so it is a
+cache-only command and proves the session first. A patch does not reset the age (the entry keeps
+its `inserted_wall`); only a rescan does.
+
+`ListCacheKindDto` now also names the two Security lenses that used to have no Refresh of their
+own: `Credentials` (the credential roll-up) and `SsoCertificates`. Their Refresh buttons call
+`invalidate_list_cache` first and then reload; before, the button re-ran the command and was
+handed the same cached roll-up back.
+
 ## Filtering happens in the frontend, on lean rows
 
 The per-list filter boxes never reach the backend at all: each list loads once, then
@@ -265,6 +284,18 @@ hang. `GlobalSearch` fires this on focus (click or Cmd/Ctrl-K), so the rebuild o
 Best-effort and idempotent, mirroring `prefetch_application_gallery`: warm returns immediately,
 cold builds exactly once behind the gate, and a failed index degrades to a partial corpus rather
 than an error.
+
+### "Go to" destinations are ranked, and a keyword-only match is capped
+
+The palette's first group is local: the static list of pages and settings in
+`components/global_search.rs`, matched in the frontend while the records round-trip. Each
+destination has a label, a context line and a list of keywords, and `match_rank` orders a match in
+four tiers: label prefix, label word, context, keyword. A keyword matches only at the **start of a
+word** (`starts_a_word`), and at most `GOTO_KEYWORD_LIMIT` (2) destinations that match by keyword
+alone are listed. Without the cap a short query matched a dozen pages through their keyword lists
+("con" hit *consent*, *connection*, *conditional access*, *contacts*…) and pushed the apps the
+operator was typing the name of below the fold. The group order is unchanged — records land a
+round trip after the pages do, so putting them first would make the list jump under the cursor.
 
 ## Gallery search — fetch the corpus once, match every keystroke locally
 

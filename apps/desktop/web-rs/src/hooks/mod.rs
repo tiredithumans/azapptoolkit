@@ -3,6 +3,7 @@
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, HtmlInputElement};
 
+pub mod pane_tabs;
 pub mod use_command;
 pub mod use_debounced;
 pub mod use_deferred_blur;
@@ -30,8 +31,38 @@ pub struct OpenItemId(pub u64);
 /// `dirty` is tracked reactively. The flag is cleared when the component is
 /// disposed — by then the edits are gone or saved. A no-op outside the
 /// workspace (a tab mounted on its own, as the GUI tests do).
+///
+/// Inside a detail-pane tab ([`pane_tabs::PaneTabs::slot`]) the report goes to
+/// the pane instead, keyed by tab and by this call: the pane then knows WHICH
+/// tab is dirty (a reload keeps that tab and rebuilds the others) and reports
+/// the item as a whole. Two markers used to share the item's one flag, so a
+/// clean tab mounting cleared a dirty sibling's report.
 pub fn use_unsaved_marker(dirty: impl Fn() -> bool + 'static) {
     use leptos::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_MARKER: AtomicU64 = AtomicU64::new(0);
+
+    if let (Some(pane_tabs::PaneDirtyTabs(set)), Some(pane_tabs::TabKey(tab))) = (
+        use_context::<pane_tabs::PaneDirtyTabs>(),
+        use_context::<pane_tabs::TabKey>(),
+    ) {
+        let key = (tab, NEXT_MARKER.fetch_add(1, Ordering::Relaxed));
+        let report = move |want: bool| {
+            // `try_`: the cleanup below can run after the pane's signal is gone.
+            if set.try_with_untracked(|s| s.contains(&key)) == Some(!want) {
+                set.try_update(|s| {
+                    if want {
+                        s.insert(key);
+                    } else {
+                        s.remove(&key);
+                    }
+                });
+            }
+        };
+        Effect::new(move |_| report(dirty()));
+        on_cleanup(move || report(false));
+        return;
+    }
     let Some(OpenItemId(id)) = use_context::<OpenItemId>() else {
         return;
     };

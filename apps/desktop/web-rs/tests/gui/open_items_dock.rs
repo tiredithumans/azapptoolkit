@@ -102,7 +102,7 @@ async fn open_focus_compare_close() {
         .get_attribute("title")
         .unwrap_or_default();
     assert!(
-        title.contains("Ctrl/Cmd-click to compare"),
+        title.contains("Ctrl-click to compare"),
         "chip title advertises the compare gesture: {title}"
     );
     // Single pane: the "Full" control would be a no-op, so it isn't shown.

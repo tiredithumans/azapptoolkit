@@ -390,11 +390,11 @@ mod tests {
         let other_account = UiError::new(
             "authorization",
             "authorization request failed: re-authentication completed with a different \
-             account — use Sign Out to switch",
+             account — use Sign out to switch",
             true,
         );
         let text = lever_failure_message("Couldn't re-authenticate", &other_account);
-        assert!(text.contains("use Sign Out to switch"), "{text}");
+        assert!(text.contains("use Sign out to switch"), "{text}");
         assert!(!text.contains("administrator"), "{text}");
         // A coded decline still gets its AADSTS step.
         let declined = UiError::new(

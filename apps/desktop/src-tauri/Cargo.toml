@@ -38,6 +38,11 @@ tauri = { version = "2", features = [] }
 # depend on the feature, so nothing reads an archive through it.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-dialog = "2"
+# Remembers the main window's size, position and maximized state between
+# launches (it opened at the tauri.conf.json 1280x800 default every time).
+# First-party Tauri plugin; it adds no crate the lock did not already hold
+# beyond itself.
+tauri-plugin-window-state = "2"
 
 # `macros`: `tokio::join!` in the command fan-outs. `rt-multi-thread`: no runtime
 # is constructed here (Tauri owns it), but `tokio::spawn`/`JoinHandle`/`JoinSet`

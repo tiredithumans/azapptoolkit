@@ -174,8 +174,15 @@ pub fn ManagedIdentityDetailWindow(
     let do_revoke = move |assignment_id: String, sp_id: String| {
         cmd.run(
             move |()| {
+                // Read before the clear below empties it.
+                let revoked = pending_revoke_label.get_untracked();
                 reload.update(|n| *n += 1);
                 pending_revoke.set(None);
+                session.toast_success(if revoked.is_empty() {
+                    "Permission revoked.".to_string()
+                } else {
+                    format!("Revoked {revoked}.")
+                });
             },
             move |tenant_id| async move {
                 permissions_bindings::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id)
@@ -210,8 +217,8 @@ pub fn ManagedIdentityDetailWindow(
     view! {
         <ConfirmDialog
             open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
-            title="Revoke permission?"
-            body="Remove this managed identity's held app-role assignment. The identity loses that permission until it's granted again; the live grant is re-checked before removal."
+            title="Revoke this permission?"
+            body="Revokes this managed identity's held app-role assignment. The identity loses that permission until it's granted again; the live grant is re-checked before removal."
             subject=pending_revoke_label
             confirm_label="Revoke"
             busy=cmd.busy

@@ -2,11 +2,11 @@
 //! create-SP toggle.
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::applications::{self, CreateApplicationInput};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{FormError, Spinner};
+use crate::components::ui::{FormError, Select, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::{OpenItemKind, use_session};
 use crate::views::tabs::overview_tab::SIGN_IN_AUDIENCES;
@@ -83,7 +83,7 @@ pub fn CreateAppDialog(
                 }}
             </Field>
             <Field label="Sign-in audience">
-                <Select value=audience>
+                <Select value=audience label="Sign-in audience">
                     {SIGN_IN_AUDIENCES
                         .iter()
                         .map(|(value, label)| {

@@ -302,3 +302,54 @@ fn token_scan_pairs_uses_with_declarations() {
         BTreeSet::from(["--a".to_string(), "--b-c".to_string()])
     );
 }
+
+/// The declarations of the rule whose selector line is exactly `selector {`,
+/// one per entry, trimmed.
+fn declarations_of(css: &str, selector: &str) -> Vec<String> {
+    let open = format!("{selector} {{");
+    let start = css
+        .find(&open)
+        .unwrap_or_else(|| panic!("styles.css has no `{open}` rule"))
+        + open.len();
+    let end = start + css[start..].find('}').expect("rule is closed");
+    css[start..end]
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The dark palette is written twice — once under the OS media query (unless
+/// the operator chose Light), once for an explicit Dark choice — because a
+/// selector cannot say "the media query matches OR this attribute is set". The
+/// two must stay the same palette: a token changed in one only would make
+/// "Dark" in Settings look different from the OS's dark mode.
+#[test]
+fn both_dark_palettes_are_the_same() {
+    let css = strip_css_comments(&stylesheet());
+    let by_os = declarations_of(&css, ":root:not([data-theme=\"light\"])");
+    let by_choice = declarations_of(&css, ":root[data-theme=\"dark\"]");
+    assert!(
+        by_os.iter().any(|d| d.starts_with("--accent:")),
+        "the OS dark block lost its tokens: {by_os:?}"
+    );
+    assert_eq!(
+        by_os, by_choice,
+        "the two dark palettes in styles.css differ — keep them identical"
+    );
+}
+
+/// With the palette in tokens, no other rule may test the colour scheme: a
+/// second `prefers-color-scheme` block would follow the OS and ignore the
+/// operator's choice in Settings → Appearance.
+#[test]
+fn the_colour_scheme_is_tested_in_one_place() {
+    let css = strip_css_comments(&stylesheet());
+    assert_eq!(
+        css.matches("prefers-color-scheme").count(),
+        1,
+        "styles.css tests prefers-color-scheme outside the dark palette block; make the value a \
+         token there instead, so an explicit Light/Dark choice reaches it"
+    );
+}

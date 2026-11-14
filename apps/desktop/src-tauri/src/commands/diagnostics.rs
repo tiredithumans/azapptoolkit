@@ -149,11 +149,72 @@ pub(crate) fn invalidate_list_cache_in(cache: &Cache, tenant_id: &str, kind: Lis
                 &crate::commands::applications::search_corpus_key(tenant_id),
             );
         }
+        // The roll-up alone: a miss on it runs the shared app scan, which
+        // re-reads every app registration from Graph and re-seeds the roll-up
+        // (and the App Registrations rows) from that fresh read.
+        ListCacheKindDto::Credentials => {
+            cache.invalidate(
+                CacheKind::Lists,
+                &crate::commands::applications::credential_expirations_key(tenant_id),
+            );
+        }
+        // The board is its own scan of the tenant's SAML service principals.
+        ListCacheKindDto::SsoCertificates => {
+            cache.invalidate(
+                CacheKind::Lists,
+                &crate::commands::sso::sso_certificate_expirations_key(tenant_id),
+            );
+        }
         // The whole-tenant prefix already covers the shared SP index.
         ListCacheKindDto::All => {
             cache.invalidate_prefix(CacheKind::Lists, &format!("{tenant_id}|"));
         }
     }
+}
+
+/// How old the cached data behind a list page is, in whole seconds — what its
+/// "Updated … ago" stamp shows. `None` when nothing is cached for it (the page
+/// then stamps the moment its own read returned).
+///
+/// The lists are served from a cache with a long TTL and patched in place, so
+/// "when did the frontend last ask" says nothing about how old the rows are;
+/// only the cache knows when the scan behind them ran.
+///
+/// Cache-only, so it proves the session itself.
+#[tauri::command]
+pub fn list_cache_age(
+    state: State<'_, AppState>,
+    tenant_id: String,
+    kind: ListCacheKindDto,
+) -> Result<Option<u64>, UiError> {
+    crate::commands::session::prove_tenant_session(&state, &tenant_id)?;
+    Ok(list_cache_age_in(&state.cache, &tenant_id, kind))
+}
+
+/// The body of [`list_cache_age`], on a bare [`Cache`] so the per-kind keys are
+/// unit-testable. Each kind dates the entry its page renders — not everything
+/// [`invalidate_list_cache_in`] drops for it (the shared SP index is older or
+/// newer than a list derived from it, and is not what the page shows).
+pub(crate) fn list_cache_age_in(
+    cache: &Cache,
+    tenant_id: &str,
+    kind: ListCacheKindDto,
+) -> Option<u64> {
+    let prefix = match kind {
+        ListCacheKindDto::Apps => crate::commands::applications::apps_pairing_key(tenant_id),
+        ListCacheKindDto::Enterprise => crate::commands::applications::enterprise_key(tenant_id),
+        ListCacheKindDto::ManagedIdentities => crate::commands::managed_identity::mi_key(tenant_id),
+        ListCacheKindDto::Credentials => {
+            crate::commands::applications::credential_expirations_key(tenant_id)
+        }
+        ListCacheKindDto::SsoCertificates => {
+            crate::commands::sso::sso_certificate_expirations_key(tenant_id)
+        }
+        ListCacheKindDto::All => format!("{tenant_id}|"),
+    };
+    cache
+        .oldest_age_for_prefix(CacheKind::Lists, &prefix)
+        .map(|age| age.as_secs())
 }
 
 #[tauri::command]
@@ -221,9 +282,13 @@ pub fn set_cache_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{invalidate_list_cache_in, support_paths_in};
-    use crate::commands::applications::{search_corpus_key, sp_index_hit, sp_index_store};
+    use super::{invalidate_list_cache_in, list_cache_age_in, support_paths_in};
+    use crate::commands::applications::{
+        apps_pairing_key, credential_expirations_key, enterprise_key, search_corpus_key,
+        sp_index_hit, sp_index_store,
+    };
     use crate::commands::managed_identity::mi_key;
+    use crate::commands::sso::sso_certificate_expirations_key;
     use crate::dto::diagnostics::ListCacheKindDto;
     use azapptoolkit_core::cache::{Cache, CacheKind};
 
@@ -279,6 +344,86 @@ mod tests {
             settings.file_name().and_then(|f| f.to_str()),
             Some(azapptoolkit_core::settings::SETTINGS_FILE)
         );
+    }
+
+    /// The two Security lenses' Refresh drops exactly the entry the lens reads
+    /// — it used to drop nothing, so "Refresh" re-served the cached board —
+    /// and leaves the tenant-wide indexes and the other tenant alone.
+    #[test]
+    fn a_lens_refresh_drops_its_own_board_and_nothing_else() {
+        for (kind, key) in [
+            (
+                ListCacheKindDto::Credentials,
+                credential_expirations_key("t1"),
+            ),
+            (
+                ListCacheKindDto::SsoCertificates,
+                sso_certificate_expirations_key("t1"),
+            ),
+        ] {
+            let label = format!("{kind:?}");
+            let cache = Cache::new();
+            cache.put(CacheKind::Lists, key.clone(), &1u32);
+            cache.put(CacheKind::Lists, key.replace("t1|", "t2|"), &2u32);
+            sp_index_store(&cache, "t1", Vec::new());
+
+            invalidate_list_cache_in(&cache, "t1", kind);
+
+            assert!(
+                cache
+                    .oldest_age_for_prefix(CacheKind::Lists, &key)
+                    .is_none(),
+                "{label}: the board survived its own Refresh"
+            );
+            assert!(
+                cache
+                    .oldest_age_for_prefix(CacheKind::Lists, &key.replace("t1|", "t2|"))
+                    .is_some(),
+                "{label}: another tenant's board was dropped"
+            );
+            assert!(
+                sp_index_hit(&cache, "t1").is_some(),
+                "{label}: the SP index is not this lens's to drop"
+            );
+        }
+    }
+
+    /// Each kind dates the entry its own page renders, per tenant; a page with
+    /// nothing cached has no age.
+    #[test]
+    fn a_list_age_is_read_from_the_entry_its_page_shows() {
+        let cache = Cache::new();
+        for (kind, key) in [
+            (ListCacheKindDto::Apps, apps_pairing_key("t1")),
+            (ListCacheKindDto::Enterprise, enterprise_key("t1")),
+            (ListCacheKindDto::ManagedIdentities, mi_key("t1")),
+            (
+                ListCacheKindDto::Credentials,
+                credential_expirations_key("t1"),
+            ),
+            (
+                ListCacheKindDto::SsoCertificates,
+                sso_certificate_expirations_key("t1"),
+            ),
+        ] {
+            let label = format!("{kind:?}");
+            assert_eq!(
+                list_cache_age_in(&cache, "t1", kind),
+                None,
+                "{label}: nothing cached yet"
+            );
+            cache.put(CacheKind::Lists, key, &1u32);
+            assert!(
+                list_cache_age_in(&cache, "t1", kind).is_some(),
+                "{label}: its own entry is not what it dates"
+            );
+            assert_eq!(
+                list_cache_age_in(&cache, "t2", kind),
+                None,
+                "{label}: another tenant read this tenant's age"
+            );
+        }
+        assert!(list_cache_age_in(&cache, "t1", ListCacheKindDto::All).is_some());
     }
 
     #[test]

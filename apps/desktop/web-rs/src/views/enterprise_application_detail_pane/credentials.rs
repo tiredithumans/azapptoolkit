@@ -18,8 +18,9 @@ fn expiry_badge(end: Option<DateTime<Utc>>, now: DateTime<Utc>) -> AnyView {
 pub(super) fn CredentialsContent(
     signal: Signal<Arc<EnterpriseApplicationDetail>>,
 ) -> impl IntoView {
-    let secrets = signal.with(|d| d.service_principal.password_credentials.clone());
-    let certs = signal.with(|d| d.service_principal.key_credentials.clone());
+    // Snapshots for this mount (untracked): the pane rebuilds the tab on a reload.
+    let secrets = signal.with_untracked(|d| d.service_principal.password_credentials.clone());
+    let certs = signal.with_untracked(|d| d.service_principal.key_credentials.clone());
     let now = Utc::now();
 
     let secrets_view = view! {

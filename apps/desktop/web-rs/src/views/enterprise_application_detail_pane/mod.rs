@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use azapptoolkit_core::models::DirectoryObject;
+use azapptoolkit_dto::UiError;
+use leptos::html;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
@@ -25,10 +27,11 @@ use crate::components::ui::{
     TabBarItem,
 };
 use crate::components::uri_list_editor::{UriListEditor, UriListState, redirect_uri_reason};
+use crate::hooks::pane_tabs::{PaneTabs, Reload};
 use crate::hooks::use_command::use_command;
 use crate::hooks::use_debounced::use_debounced;
 use crate::state::{OpenItemKind, use_session};
-use crate::util::{fmt_date, keep_alive, no_tenant};
+use crate::util::{fmt_date, no_tenant};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::pairing::jump_to_paired_app;
 use crate::views::tabs::EnterpriseTab;
@@ -73,132 +76,240 @@ pub fn EnterpriseApplicationDetailPane(
     let session = use_session();
     let tenant = session.active_tenant;
 
-    // Bumped by the detail-pane Refresh button to re-fetch. The enterprise
-    // detail is not server-cached, so re-running the resource is enough — no
-    // cache bust needed (unlike the App Registrations pane). The Suspense
-    // fallback covers the re-fetch, so no separate busy flag is needed.
+    // Bumped to re-fetch. The enterprise detail is not server-cached, so
+    // re-running the resource is enough — no cache bust needed (unlike the App
+    // Registrations pane).
     let reload = RwSignal::new(0_u32);
 
+    // Each fetch is numbered so the effect below can tell a fresh result from
+    // the previous one: the resource notifies when a refetch STARTS as well as
+    // when it lands, and still holds the old value in between.
+    let fetch_seq = StoredValue::new(0_u64);
     let detail = LocalResource::new(move || {
         let tenant = tenant.get();
         let id = service_principal_id.get();
         let _ = reload.get();
+        let seq = fetch_seq.get_value() + 1;
+        fetch_seq.set_value(seq);
         async move {
-            if let Some(t) = tenant {
-                enterprise_application::get_enterprise_application_detail(&t.tenant_id, &id).await
-            } else {
-                Err(no_tenant())
+            let result = match tenant {
+                Some(t) => {
+                    enterprise_application::get_enterprise_application_detail(&t.tenant_id, &id)
+                        .await
+                }
+                None => Err(no_tenant()),
+            };
+            (seq, id, result)
+        }
+    });
+
+    // The last detail that loaded; the panel renders from it and stays mounted
+    // across a reload, so a tab's unsaved edits survive another tab's mutation
+    // (`hooks::pane_tabs`, and `ApplicationDetailPane` for the same shape). It
+    // is written from the effect below, never from inside a render: a signal
+    // write inside the old `Suspend` body fed back into its scope and looped.
+    let loaded: RwSignal<Option<Arc<EnterpriseApplicationDetail>>> = RwSignal::new(None);
+    let load_error: RwSignal<Option<UiError>> = RwSignal::new(None);
+    let reloading = RwSignal::new(false);
+
+    // Restore the last-viewed tab so it survives switching between enterprise
+    // apps. A deep-link (e.g. a consent-grant "Open") sets
+    // `pending_enterprise_tab` and overrides it; consumed once so it doesn't
+    // pin every later visit. Clamped through the typed enum, so a stale
+    // persisted value (the former merged "insights") lands on a live tab.
+    let restored = session
+        .tenant_ui
+        .pending_enterprise_tab
+        .get_untracked()
+        .unwrap_or_else(|| session.last_enterprise_tab.get_untracked());
+    session.tenant_ui.pending_enterprise_tab.set(None);
+    let tabs = PaneTabs::new(
+        EnterpriseTab::from_str(&restored).value().to_string(),
+        EnterpriseTab::ALL.iter().map(|tab| tab.value()),
+    );
+    let active_tab = tabs.active;
+    Effect::new(move |_| session.last_enterprise_tab.set(active_tab.get()));
+
+    let pane_ref: NodeRef<html::Div> = NodeRef::new();
+    let landed_seq = StoredValue::new(0_u64);
+    let landed_id: StoredValue<Option<String>> = StoredValue::new(None);
+    Effect::new(move |_| {
+        let Some((seq, id, result)) = detail.get() else {
+            return;
+        };
+        if seq <= landed_seq.get_value() {
+            return;
+        }
+        landed_seq.set_value(seq);
+        reloading.set(false);
+        match result {
+            Ok(d) => {
+                if let Some(cb) = on_title {
+                    cb.run(d.service_principal.display_name.clone());
+                }
+                // A different object in the same pane: nothing on screen
+                // belongs to it, unsaved edits included.
+                if landed_id.get_value().is_some_and(|prev| prev != id) {
+                    tabs.request(Reload::DiscardAll);
+                }
+                landed_id.set_value(Some(id));
+                let first = loaded.with_untracked(Option::is_none);
+                load_error.set(None);
+                // The new detail first, so a tab rebuilt by `land` reads it.
+                loaded.set(Some(Arc::new(d)));
+                if !first {
+                    let scope = pane_ref.get_untracked();
+                    tabs.land(scope.as_deref().map(|el| el as &web_sys::Element));
+                }
+            }
+            Err(e) => {
+                if loaded.with_untracked(Option::is_some) {
+                    // The pane keeps showing what it had; say the refresh failed.
+                    session.report_command_error(&e);
+                } else {
+                    load_error.set(Some(e));
+                }
             }
         }
     });
 
-    let on_refresh = Callback::new(move |()| reload.update(|n| *n += 1));
+    // A tab's own mutation (an owner added, a role edited): refetch, rebuild
+    // that tab, keep unsaved edits on the others.
+    let reload_from = move |tab: EnterpriseTab| {
+        Callback::new(move |()| {
+            tabs.request(Reload::From(tab.value()));
+            reloading.set(true);
+            reload.update(|n| *n = n.wrapping_add(1));
+        })
+    };
+    // The header's Refresh rebuilds every tab, so with unsaved edits in the
+    // pane it asks first (`confirm_refresh`).
+    let refresh_now = move || {
+        tabs.request(Reload::DiscardAll);
+        reloading.set(true);
+        reload.update(|n| *n = n.wrapping_add(1));
+    };
+    let confirm_refresh = RwSignal::new(false);
+    let on_refresh = Callback::new(move |()| {
+        if tabs.any_dirty() {
+            confirm_refresh.set(true);
+        } else {
+            refresh_now();
+        }
+    });
 
-    // The tab THIS pane is on, kept across the rebuild every reload causes.
-    // The panel below is recreated inside the Suspense on each reload and used
-    // to restore its tab from the session-wide "last tab" — so with two panes
-    // open, a reload of one (an owner added, Refresh) jumped it to whichever
-    // tab the OTHER pane had last shown, hiding the list just changed. A plain
-    // stored value: nothing reads it reactively.
-    let pane_tab: StoredValue<Option<String>> = StoredValue::new(None);
+    // Memoized so the panel is built once when the first detail lands, not
+    // again on every reload.
+    let phase = Memo::new(move |_| {
+        if loaded.with(Option::is_some) {
+            Phase::Ready
+        } else if load_error.with(Option::is_some) {
+            Phase::Failed
+        } else {
+            Phase::Loading
+        }
+    });
+    // `expect`: only the `Phase::Ready` panel holds this signal, and `loaded`
+    // is never cleared once set.
+    let detail_signal: Signal<Arc<EnterpriseApplicationDetail>> = Signal::derive(move || {
+        loaded
+            .get()
+            .expect("the panel renders only once a detail has loaded")
+    });
 
     view! {
-        <div class="app-detail">
-            <Suspense fallback=move || {
-                view! {
-                    <div class="app-detail__body">
-                        <DetailSkeleton />
-                    </div>
-                }
-            }>
-                {move || Suspend::new(async move {
-                    match detail.await {
-                        Ok(d) => {
-                            if let Some(cb) = on_title {
-                                cb.run(d.service_principal.display_name.clone());
-                            }
-                            // Derive the child's signal from the resolved value — do
-                            // NOT write a container signal here. A signal write inside
-                            // this Suspend render fed back into the scope and looped
-                            // (the pane refetched forever, then froze); the App
-                            // Registrations pane derives the same way.
-                            //
-                            // Wrap in `Arc` first so the (non-memoized) derive clones a
-                            // refcount, not the whole detail struct, on every tab read.
-                            let d = std::sync::Arc::new(d);
-                            let detail_signal = Signal::derive(move || d.clone());
-                            view! {
-                                <EnterpriseAppPanel
-                                    detail_signal=detail_signal
-                                    on_refresh=on_refresh
-                                    pane_tab=pane_tab
-                                />
-                            }
-                                .into_any()
-                        }
-                        Err(err) => {
-                            view! {
-                                <DetailLoadError
-                                    error=err
-                                    on_retry=Callback::new(move |_| {
-                                        reload.update(|n| *n = n.wrapping_add(1))
-                                    })
-                                    class="app-detail__body".to_string()
-                                />
-                            }
-                                .into_any()
-                        }
+        <div class="app-detail" node_ref=pane_ref>
+            {move || match phase.get() {
+                Phase::Loading => {
+                    view! {
+                        <div class="app-detail__body">
+                            <DetailSkeleton />
+                        </div>
                     }
-                })}
-            </Suspense>
+                        .into_any()
+                }
+                Phase::Failed => {
+                    view! {
+                        {move || {
+                            load_error
+                                .get()
+                                .map(|err| {
+                                    view! {
+                                        <DetailLoadError
+                                            error=err
+                                            on_retry=Callback::new(move |_| {
+                                                // Back to the skeleton while the retry runs.
+                                                load_error.set(None);
+                                                reload.update(|n| *n = n.wrapping_add(1))
+                                            })
+                                            class="app-detail__body".to_string()
+                                        />
+                                    }
+                                })
+                        }}
+                    }
+                        .into_any()
+                }
+                Phase::Ready => {
+                    view! {
+                        <EnterpriseAppPanel
+                            detail_signal=detail_signal
+                            tabs=tabs
+                            on_refresh=on_refresh
+                            refreshing=Signal::derive(move || reloading.get())
+                            reload_owners=reload_from(EnterpriseTab::Owners)
+                            reload_app_roles=reload_from(EnterpriseTab::AppRoles)
+                        />
+                        // Refresh rebuilds every tab from Graph, so with unsaved
+                        // edits in the pane it asks first — the same question
+                        // closing the item asks.
+                        <ConfirmDialog
+                            open=confirm_refresh
+                            title="Discard unsaved changes and refresh?"
+                            body="This item has edits that were not saved. Refreshing reloads it from Microsoft Entra and discards them."
+                            subject=Signal::derive(move || detail_signal
+                                .with(|d| d.service_principal.display_name.clone()))
+                            confirm_label="Discard and refresh"
+                            cancel_label="Keep editing"
+                            on_confirm=Callback::new(move |()| {
+                                confirm_refresh.set(false);
+                                refresh_now();
+                            })
+                            on_close=Callback::new(move |()| confirm_refresh.set(false))
+                        />
+                    }
+                        .into_any()
+                }
+            }}
         </div>
     }
+}
+
+/// What the pane is showing: nothing yet, a failed first load, or a detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Loading,
+    Failed,
+    Ready,
 }
 
 #[component]
 fn EnterpriseAppPanel(
     detail_signal: Signal<Arc<EnterpriseApplicationDetail>>,
-    #[prop(into)] on_refresh: Callback<()>,
-    pane_tab: StoredValue<Option<String>>,
+    /// The pane's tab bookkeeping, owned by the pane so a reload can decide
+    /// which tabs to rebuild.
+    tabs: PaneTabs,
+    /// The header's Refresh (asks first when a tab holds unsaved edits).
+    #[prop(into)]
+    on_refresh: Callback<()>,
+    #[prop(into)] refreshing: Signal<bool>,
+    /// The Owners and App roles tabs' "reload after my own mutation".
+    #[prop(into)]
+    reload_owners: Callback<()>,
+    #[prop(into)] reload_app_roles: Callback<()>,
 ) -> impl IntoView {
     let session = use_session();
-    // Restore the last-viewed tab so it survives switching between enterprise
-    // apps, and persist changes. The former merged "Insights" tab was split back
-    // into separate Conditional Access + Activity tabs; clamp a stale persisted
-    // "insights" value so it doesn't fall through to the "Unknown tab" arm.
-    // A deep-link (e.g. a consent-grant "Open") sets `pending_enterprise_tab`
-    // and overrides the restored last-tab; consume it once so it doesn't pin
-    // every later visit.
-    // This pane's own tab wins once it has one (a reload); a deep link is
-    // consumed on first mount only, when the pane has none yet.
-    let restored = pane_tab.get_value().unwrap_or_else(|| {
-        session
-            .tenant_ui
-            .pending_enterprise_tab
-            .get_untracked()
-            .unwrap_or_else(|| session.last_enterprise_tab.get_untracked())
-    });
-    session.tenant_ui.pending_enterprise_tab.set(None);
-    // Clamp a stale persisted/deep-linked value to a live tab (e.g. the former
-    // merged "insights" → Conditional Access) via the typed enum.
-    let active_tab = RwSignal::new(EnterpriseTab::from_str(&restored).value().to_string());
-    Effect::new(move |_| {
-        let tab = active_tab.get();
-        pane_tab.try_set_value(Some(tab.clone()));
-        session.last_enterprise_tab.set(tab);
-    });
-
-    // Insert-only latch of visited tabs — see `ApplicationDetailPane` for the
-    // same treatment. Ten tabs here, several of which (SSO, Provisioning,
-    // Activity) fetch on mount, so re-mounting per switch was the costlier half.
-    let visited = RwSignal::new(HashSet::from([active_tab.get_untracked()]));
-    Effect::new(move |_| {
-        let v = active_tab.get();
-        visited.update(|set| {
-            set.insert(v);
-        });
-    });
-
+    let active_tab = tabs.active;
     // Derive a read-only signal from the RwSignal for easier access.
     let ro_signal = Signal::derive(move || detail_signal.get());
 
@@ -255,6 +366,7 @@ fn EnterpriseAppPanel(
                 title=Signal::derive(move || ro_signal.with(|d| d.service_principal.display_name.clone()))
                 app_id=Signal::derive(move || ro_signal.with(|d| d.service_principal.app_id.clone()))
                 on_refresh=on_refresh
+                refreshing=refreshing
                 on_delete=Callback::new(move |()| delete_open.set(true))
             >
                 {move || {
@@ -310,66 +422,36 @@ fn EnterpriseAppPanel(
                 selected=active_tab
             />
             <div class="app-detail__pane">
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Overview.value(),
-                    move || view! { <OverviewContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Sso.value(),
-                    move || view! { <SsoContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Credentials.value(),
-                    move || view! { <CredentialsContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Owners.value(),
-                    move || view! { <OwnersContent signal=ro_signal on_refresh=on_refresh /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Permissions.value(),
-                    move || view! { <PermissionsContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::AppRoles.value(),
-                    move || view! { <AppRolesContent signal=ro_signal on_refresh=on_refresh /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Access.value(),
-                    move || view! { <AccessContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Provisioning.value(),
-                    move || view! { <ProvisioningContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::ConditionalAccess.value(),
-                    move || view! { <CaContent signal=ro_signal /> },
-                )}
-                {keep_alive(
-                    active_tab,
-                    visited,
-                    EnterpriseTab::Activity.value(),
-                    move || view! { <ActivityContent signal=ro_signal /> },
-                )}
+                {tabs.slot(EnterpriseTab::Overview.value(), move || {
+                    view! { <OverviewContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::Sso.value(), move || {
+                    view! { <SsoContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::Credentials.value(), move || {
+                    view! { <CredentialsContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::Owners.value(), move || {
+                    view! { <OwnersContent signal=ro_signal on_refresh=reload_owners /> }
+                })}
+                {tabs.slot(EnterpriseTab::Permissions.value(), move || {
+                    view! { <PermissionsContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::AppRoles.value(), move || {
+                    view! { <AppRolesContent signal=ro_signal on_refresh=reload_app_roles /> }
+                })}
+                {tabs.slot(EnterpriseTab::Access.value(), move || {
+                    view! { <AccessContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::Provisioning.value(), move || {
+                    view! { <ProvisioningContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::ConditionalAccess.value(), move || {
+                    view! { <CaContent signal=ro_signal /> }
+                })}
+                {tabs.slot(EnterpriseTab::Activity.value(), move || {
+                    view! { <ActivityContent signal=ro_signal /> }
+                })}
             </div>
             {move || {
                 // A foreign-tenant / first-party SP (owned outside this tenant)

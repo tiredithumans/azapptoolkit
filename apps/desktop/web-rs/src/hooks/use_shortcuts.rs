@@ -194,26 +194,79 @@ pub fn use_shortcuts(session: Session, show_help: RwSignal<bool>) {
     on_cleanup(move || handle.remove());
 }
 
+/// One documented binding: its key (with whether the accelerator — ⌘ on a Mac,
+/// Ctrl elsewhere — is held) and what it does.
+pub struct Shortcut {
+    /// The key as printed: `"K"`, `"1…5"`, `"Esc"`.
+    pub key: &'static str,
+    /// Whether the platform's accelerator key is held with it.
+    pub accel: bool,
+    pub what: &'static str,
+}
+
+impl Shortcut {
+    /// The binding as this platform writes it (`⌘K` / `Ctrl+K`, or the bare
+    /// key).
+    pub fn keys(&self) -> String {
+        if self.accel {
+            crate::util::accel(self.key)
+        } else {
+            self.key.to_string()
+        }
+    }
+}
+
 /// The bindings, for the help sheet. Kept beside the handler so the two can't
 /// drift.
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    (
-        "Cmd/Ctrl + K",
-        "Focus global search (any app, tool, or GUID)",
-    ),
-    ("/", "Focus the current list's filter"),
-    (
-        "Cmd/Ctrl + 1…5",
-        "Home · App Registrations · Enterprise Apps · Managed Identities · Security",
-    ),
-    ("Cmd/Ctrl + W", "Close the focused open item"),
-    ("Cmd/Ctrl + ]", "Next open item"),
-    (
-        "Cmd/Ctrl + [",
-        "Previous open item (either key re-opens a collapsed workspace)",
-    ),
-    ("Esc", "Close a dialog, or collapse the open-item workspace"),
-    ("↑ ↓ / Home / End", "Move between rows in a table"),
-    ("←  →", "Move between tabs"),
-    ("?", "Show this list"),
+pub const SHORTCUTS: &[Shortcut] = &[
+    Shortcut {
+        key: "K",
+        accel: true,
+        what: "Focus global search (any app, tool, or GUID)",
+    },
+    Shortcut {
+        key: "/",
+        accel: false,
+        what: "Focus the current list's filter",
+    },
+    Shortcut {
+        key: "1…5",
+        accel: true,
+        what: "Home · App Registrations · Enterprise Applications · Managed Identities · Security",
+    },
+    Shortcut {
+        key: "W",
+        accel: true,
+        what: "Close the focused open item",
+    },
+    Shortcut {
+        key: "]",
+        accel: true,
+        what: "Next open item",
+    },
+    Shortcut {
+        key: "[",
+        accel: true,
+        what: "Previous open item (either key re-opens a collapsed workspace)",
+    },
+    Shortcut {
+        key: "Esc",
+        accel: false,
+        what: "Close a dialog, or go back from an open item to the page",
+    },
+    Shortcut {
+        key: "↑ ↓ / Home / End",
+        accel: false,
+        what: "Move between rows in a table",
+    },
+    Shortcut {
+        key: "←  →",
+        accel: false,
+        what: "Move between tabs",
+    },
+    Shortcut {
+        key: "?",
+        accel: false,
+        what: "Show this list",
+    },
 ];

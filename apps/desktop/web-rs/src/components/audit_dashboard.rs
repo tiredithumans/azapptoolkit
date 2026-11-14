@@ -13,12 +13,13 @@ use std::future::Future;
 use azapptoolkit_dto::UiError;
 use leptos::prelude::*;
 
+use crate::bindings::diagnostics::{self, ListCacheKindDto};
 use crate::components::export_menu::ExportMenu;
 use crate::components::icon::IconName;
 use crate::components::saved_views::SavedViews;
 use crate::components::ui::{
-    Callout, DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader, ShowMore,
-    SkeletonList, TabBar, TabBarItem,
+    Callout, DataAge, DetailLoadError, EmptyState, IconButton, SearchInput, SectionHeader,
+    ShowMore, SkeletonList, TabBar, TabBarItem, stamp_data_age,
 };
 use crate::constants::*;
 use crate::hooks::use_debounced::use_debounced;
@@ -30,7 +31,9 @@ use crate::state::use_session;
 #[component]
 pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Row>(
     #[prop(into)] title: String,
-    #[prop(into)] crumb: String,
+    /// What the lens lists, as one plain sentence under the tab strip.
+    #[prop(into)]
+    description: String,
     #[prop(into)] search_placeholder: String,
     /// Accessible name for the refresh control, e.g. `"Refresh credential
     /// expiry"` — an icon button needs a view-specific label, not "Refresh".
@@ -67,6 +70,13 @@ pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Ro
     /// lands; `None` renders nothing, permanently.
     #[prop(optional)]
     header_note: Option<Signal<Option<(String, String)>>>,
+    /// The backend list cache this lens reads through, if any. With it, Refresh
+    /// drops that entry before refetching (a bare refetch re-served the cached
+    /// board, so the button did nothing), and the "Updated … ago" stamp is the
+    /// cached entry's age. `None` for a lens whose read is live each time —
+    /// Refresh then just refetches and the stamp is the moment the read landed.
+    #[prop(optional)]
+    cache_kind: Option<ListCacheKindDto>,
     /// Column header labels (use `""` for an action column with no heading;
     /// a trailing `""` renders a visually-hidden "Actions" name).
     headers: Vec<&'static str>,
@@ -105,6 +115,8 @@ where
     let facet = facet.unwrap_or_else(|| RwSignal::new(String::from("all")));
     let search = RwSignal::new(String::new());
     let exporting = RwSignal::new(false);
+    // When the rows on screen were read, for the header's "Updated … ago".
+    let loaded_at = RwSignal::new(None);
 
     // Non-`Send` closures live in single-threaded (CSR) storage, mirroring
     // `VirtualList`'s `render_row` handling.
@@ -136,13 +148,31 @@ where
             let result = fetch.with_value(|f| f(tenant_id.clone())).await;
             if session.is_active_tenant(&tenant_id) {
                 match result {
-                    Ok(r) => rows.set(r),
+                    Ok(r) => {
+                        rows.set(r);
+                        stamp_data_age(session, tenant_id.clone(), cache_kind, loaded_at);
+                    }
                     Err(e) => error.set(Some(e)),
                 }
                 loading.set(false);
             }
         });
     });
+
+    // Refresh: drop the lens's cached board first, then refetch. Awaited in
+    // that order because the backend's cache-hit path is synchronous — a
+    // refetch started first would re-serve the entry being dropped.
+    let on_refresh = move |_| {
+        let (Some(kind), Some(t)) = (cache_kind, tenant.get_untracked()) else {
+            reload.update(|n| *n += 1);
+            return;
+        };
+        loading.set(true);
+        leptos::task::spawn_local(async move {
+            diagnostics::invalidate_list_cache(t.tenant_id.clone(), kind).await;
+            reload.update(|n| *n += 1);
+        });
+    };
 
     let on_export = move |format: &'static str| {
         if exporting.get() {
@@ -215,7 +245,8 @@ where
 
     view! {
         <main class="audit-view">
-            <SectionHeader title=title crumb=crumb>
+            <SectionHeader title=title description=description sub=true>
+                <DataAge loaded_at=loaded_at />
                 <ExportMenu
                     disabled=Signal::derive(move || {
                         exporting.get() || rows.with(Vec::is_empty)
@@ -227,7 +258,7 @@ where
                     icon=IconName::Refresh
                     aria_label=refresh_label.clone()
                     title="Refresh".to_string()
-                    on_click=Callback::new(move |_| reload.update(|n| *n += 1))
+                    on_click=Callback::new(on_refresh)
                     busy=Signal::derive(move || loading.get())
                 />
             </SectionHeader>
@@ -252,17 +283,24 @@ where
             }}
             {move || banner.with_value(|b| rows.with(|all| b(all.as_slice())))}
 
-            <TabBar
-                label="Filter"
-                items={
-                    facets
-                        .into_iter()
-                        .map(|(value, label)| TabBarItem { value, label })
-                        .collect::<Vec<_>>()
-                }
-                selected=facet
-            />
-            <SearchInput value=search placeholder=search_placeholder />
+            // The facet tabs and the filter box on one line (the box takes the
+            // slack and drops under the tabs at a narrow width); they were two
+            // full-width bands above a table that then had room for one row.
+            <div class="audit-view__filters">
+                <TabBar
+                    label="Filter"
+                    items={
+                        facets
+                            .into_iter()
+                            .map(|(value, label)| TabBarItem { value, label })
+                            .collect::<Vec<_>>()
+                    }
+                    selected=facet
+                />
+                <div class="audit-view__search">
+                    <SearchInput value=search placeholder=search_placeholder />
+                </div>
+            </div>
             <SavedViews view_key=view_key facet=facet search=search />
 
             // Which non-table state (if any) this surface is in. Three lenses

@@ -66,5 +66,10 @@ pub enum ListCacheKindDto {
     Apps,
     Enterprise,
     ManagedIdentities,
+    /// The credential-expiry roll-up behind Security → Credential expiry. Its
+    /// Refresh used to only re-read the cached roll-up.
+    Credentials,
+    /// The SAML signing-certificate board behind Security → SSO certificates.
+    SsoCertificates,
     All,
 }

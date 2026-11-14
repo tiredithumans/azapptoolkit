@@ -1482,6 +1482,8 @@ fn register_fixtures() {
     // ---- Infallible `invoke()` commands: must resolve or they panic on the
     // rejected-promise fallback (Result-returning reads can safely fall through).
     mock_ok("cache_stats", &f::cache_stats());
+    // The lists' "Updated … ago" stamp: the demo data reads as a few minutes old.
+    mock_ok("list_cache_age", &Some(240u64));
     // `()`-returning commands reachable without a prior mutation — chiefly the
     // per-list Refresh button (`invalidate_list_cache`) and the Cache dialog.
     for cmd in [

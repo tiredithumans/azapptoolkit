@@ -32,6 +32,37 @@ mod toasts;
 pub use navigation::SecurityTab;
 pub use open_items::PendingClose;
 
+/// A long-running job that keeps going when the operator leaves its page.
+///
+/// Each one has a progress row and a Cancel on its own view and nothing
+/// anywhere else, so a scan started and then navigated away from was invisible
+/// until someone went back to look. The shell marks the nav row of
+/// [`Self::view`] while any is in flight (`TenantScopedUi::background_work`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackgroundWork {
+    /// The security audit scan.
+    Audit,
+    /// A tenant backup.
+    Backup,
+    /// A restore into this tenant.
+    Restore,
+    /// The Resource Access site sweep.
+    SiteSweep,
+    /// The Resource Access Key Vault sweep.
+    VaultSweep,
+}
+
+impl BackgroundWork {
+    /// The nav destination that owns the job's progress and Cancel.
+    pub fn view(self) -> ActiveView {
+        match self {
+            Self::Audit => ActiveView::Security,
+            Self::Backup | Self::Restore => ActiveView::DisasterRecovery,
+            Self::SiteSweep | Self::VaultSweep => ActiveView::ResourceAccess,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveView {
     Home,
@@ -69,6 +100,39 @@ pub enum ActiveView {
     /// Per-tenant operator defaults (default owners, SSO notification emails,
     /// scope-name pattern). An account-scoped page, not org data.
     Settings,
+}
+
+impl ActiveView {
+    /// The nav group this view is filed under — the top bar's crumb.
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::Home | Self::Apps | Self::EnterpriseApps | Self::ManagedIdentities => "Inventory",
+            Self::Security | Self::PermissionTester | Self::ResourceAccess => "Security",
+            Self::Readiness | Self::Settings => "Account",
+            Self::BulkActions | Self::DisasterRecovery | Self::KeyVault => "Operations",
+        }
+    }
+
+    /// The view's one name: its nav label, the top bar's title, the page's
+    /// (visually hidden) heading and the "Back to …" link of an open item. The
+    /// Home page used to be "Home" in the nav, "Overview" as its title and
+    /// "Inventory" in the crumb.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Apps => "App Registrations",
+            Self::EnterpriseApps => "Enterprise Applications",
+            Self::ManagedIdentities => "Managed Identities",
+            Self::Security => "Security",
+            Self::PermissionTester => "Permission Tester",
+            Self::ResourceAccess => "Resource Access",
+            Self::Readiness => "Access Readiness",
+            Self::Settings => "Settings",
+            Self::BulkActions => "Bulk Actions",
+            Self::DisasterRecovery => "Disaster Recovery",
+            Self::KeyVault => "Key Vault",
+        }
+    }
 }
 
 /// Which entity surface an [`OpenItem`] points at — the three list views whose
@@ -267,6 +331,12 @@ pub struct TenantScopedUi {
     // this is set. Kept by `RestoreCard`, which clears it on unmount;
     // tenant-scoped so it never outlives the tenant whose report it guards.
     pub dr_unsaved_secrets: RwSignal<bool>,
+    // The long-running jobs in flight for this tenant, so the nav can mark the
+    // page that owns each while the operator is somewhere else. Written only
+    // through `Session::set_background_work`, by the job's own view (which
+    // stays mounted, keep-alive). Tenant-scoped: a job cut off by sign-out
+    // must not leave its mark on the next tenant's nav.
+    pub background_work: RwSignal<HashSet<BackgroundWork>>,
 }
 
 impl TenantScopedUi {
@@ -304,6 +374,7 @@ impl TenantScopedUi {
             apps_scroll_top: RwSignal::new(0.0),
             enterprise_scroll_top: RwSignal::new(0.0),
             dr_unsaved_secrets: RwSignal::new(false),
+            background_work: RwSignal::new(HashSet::new()),
         }
     }
 
@@ -346,6 +417,7 @@ impl TenantScopedUi {
         self.apps_scroll_top.set(0.0);
         self.enterprise_scroll_top.set(0.0);
         self.dr_unsaved_secrets.set(false);
+        self.background_work.update(HashSet::clear);
     }
 }
 
@@ -415,6 +487,13 @@ pub struct Session {
     // straight to the tab that holds it, rather than dropping them on Settings'
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
+    // The colour scheme the operator chose in Settings → Appearance: `"system"`
+    // (follow the OS, the default), `"light"` or `"dark"`. A device
+    // preference, not tenant state — it is read from `localStorage` at start
+    // and survives sign-out and a tenant switch. A `String` because `TabBar`
+    // binds one; `lib.rs` applies it (the `data-theme` attribute the
+    // stylesheet keys on, and Thaw's own theme) and writes it back.
+    pub theme_pref: RwSignal<String>,
     // Active sub-tab of the Security workbench (`SecurityTab::value`; typed
     // writers go through `open_security`).
     // Lifted to the session so the Home cards and command palette can
@@ -452,6 +531,7 @@ pub fn provide_session() {
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
         settings_tab: RwSignal::new(String::from("app-reg")),
+        theme_pref: RwSignal::new(stored_theme_pref()),
         security_tab: RwSignal::new(SecurityTab::Findings.value().to_string()),
         resource_access_tab: RwSignal::new(String::from("mailboxes")),
         enterprise_apps_reload: RwSignal::new(0),
@@ -463,6 +543,23 @@ pub fn provide_session() {
         toast_seq: RwSignal::new(0),
     };
     provide_context(session);
+}
+
+/// `localStorage` key of the colour-scheme choice. Unkeyed by tenant on
+/// purpose: it describes this screen, not a directory.
+pub const THEME_PREF_KEY: &str = "azapptoolkit:theme";
+
+/// The stored colour-scheme choice, or `"system"` when none (or an unknown
+/// value) is stored. Always `"system"` off-wasm: the native unit tests have no
+/// `localStorage`.
+fn stored_theme_pref() -> String {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(stored) = crate::util::ls_get(THEME_PREF_KEY)
+        && matches!(stored.as_str(), "light" | "dark")
+    {
+        return stored;
+    }
+    String::from("system")
 }
 
 /// Pull the session out of context. Panics if `provide_session()` was not
@@ -573,6 +670,9 @@ mod tests {
             ui.apps_scroll_top.set(5200.0);
             ui.enterprise_scroll_top.set(5200.0);
             ui.dr_unsaved_secrets.set(true);
+            ui.background_work.update(|w| {
+                w.insert(BackgroundWork::Audit);
+            });
 
             session.set_active_tenant(None);
 
@@ -611,6 +711,7 @@ mod tests {
             assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
             assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);
             assert!(!ui.dr_unsaved_secrets.get_untracked());
+            ui.background_work.with_untracked(|w| assert!(w.is_empty()));
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });

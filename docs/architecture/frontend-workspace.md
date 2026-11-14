@@ -38,19 +38,41 @@ usage panel, the app site panel, the managed scope group panel, the Access tab, 
 controller) or at the top of the replay itself (`ScopeWizard::run_apply`, `SsoWizard::run_create`),
 which every caller then inherits.
 
+**Give up focus before disposing a subtree.** A Thaw `Input` / `Textarea` validates on blur
+through a `Callback` its own component owns, and Chromium fires `blur` synchronously while it
+removes a focused element — after the reactive owner is cleaned up. Escape on a dialog with the
+caret in a field, or Cmd/Ctrl-W on a pane with one focused, ran a disposed callback and panicked.
+`util::blur_focus_within(scope)` blurs the focused element (inside `scope`) so that handler runs
+while everything it reads is alive. It must run **before** the disposing write, and an `on_cleanup`
+is too late (an owner cleans its children first). The three places that dispose a subtree holding
+fields do it: `ModalShell` inside `Show`'s `when` (its memo is re-evaluated before the children are
+disposed, so every close path is covered — Escape, Cancel, a submit that lands),
+`Session::update_open_items` / `set_active_tenant` before their writes, and `PaneTabs::land` for
+the tabs it is about to rebuild.
+
 ## One primitive per UI pattern
 
 The design-consistency invariant: every recurring UI pattern has exactly one primitive, and new
 surfaces reuse it rather than re-implementing the markup.
 
-- **Page header** — `components::ui::SectionHeader` (uppercase category crumb + title), app-wide.
-  There is no `.view-header` class. The two list views own their `SectionHeader` above a titleless
-  `ListScaffold` — `ListScaffold` takes no `title`/`actions` props; the card starts at its search
-  box.
+- **Page header** — `components::ui::SectionHeader`, app-wide: a visually hidden `<h1>` (an `<h2>`
+  with `sub`, for a Security lens), an optional one-line `description`, and the page's actions as
+  children. **The title is drawn once, by the shell's top bar** (`ActiveView::section` / `title`,
+  which the nav rail, the top bar and an open item's "Back to …" link share); the header used to
+  draw the same crumb and title again directly under it, and its crumb slot did three jobs (the
+  nav section, an alternate title, a sentence in capitals). There is no `crumb` prop and no
+  `.view-header` class. A header with neither a description nor actions takes no space. The three
+  list views put their actions in `ListScaffold`'s `actions` slot instead: the card's first row is
+  search + Filters + actions, its second the count (with select-all) and the sort.
 - **Loading** — skeletons for content regions (`SkeletonList` / `DetailSkeleton` /
   `SkeletonCard`), each a `role="status"` region with a hidden "Loading…"; spinners
   (`components::ui::Spinner`) are reserved for in-button / inline busy states only. Determinate
   progress is `ProgressBar`; date entry is `DateInput`.
+- **Data age** — `components::ui::DataAge` ("Updated 5 min ago", exact time on hover) beside a
+  list's or lens's Refresh. `stamp_data_age(session, tenant, kind, loaded_at)` sets it after a
+  load: with a `ListCacheKindDto` it asks the backend how old the cached entry is
+  (`list_cache_age`; the frontend cannot know — the lists are served from a long-lived cache and
+  patched in place), with `None` (a live read) it stamps the moment the read landed.
 - **Load failure** — `DetailLoadError`, the universal "message + Retry" block (detail panes and
   their tabs/sections, all three list views, dashboard cards). Pass `on_retry: Callback<()>` plus a
   context `class`. A `Suspend` `Err` arm never renders `form-error` / `FormError` directly — pinned
@@ -111,8 +133,13 @@ surfaces reuse it rather than re-implementing the markup.
   reports a failed clipboard write instead of claiming "Copied". Used by the SSO owner summaries
   and the SSO tab's staged / rotated certificate reveals; don't hand-roll a `pre` plus a clipboard
   call.
-- **Select / dropdown** — `.ui-select` (a class, not a component: these are bare `<select>`s
-  inside a thaw `Field`). Metrics match the thaw input/button they sit beside, chevron is an
+- **Read-only label/value pairs** — a `<dl class="read-grid">` of `<div class="read-grid__item">`
+  groups (`read-grid__item--wide` for free text, `read-grid__value-row` for a state badge with its
+  toggle). The Overview tab of all three detail panes uses it, with the same id labels ("Object
+  ID" / "App ID"); they used to be three different label styles in one narrow column.
+- **Select / dropdown** — `components::ui::Select` (two-way bound to a `RwSignal<String>`, named by
+  its required `label`) or a hand-written `<select class="ui-select">` where the change handler
+  parses. Both are bare `<select>`s inside a thaw `Field`. Metrics match the thaw input/button they sit beside, chevron is an
   inline-SVG data URI because the CSP forbids fetching one, and the stroke colour is baked into
   the URI so the dark-mode override swaps the whole image — keep the two in sync. `:root` also
   sets `color-scheme`, which is the only thing that reaches the OS-drawn popup list and the
@@ -228,8 +255,8 @@ An action's guard follows what it does, never which surface triggers it. Every t
 
 | Tier | Guard | Actions |
 |---|---|---|
-| Irreversible or tenant-wide | `require_keyword`, naming the object | permanent delete (`DELETE`), delete an app registration (`DELETE`), admin consent (`GRANT`), immediate signing-cert rotation (`ROTATE`) |
-| Destructive but narrow or recoverable | click confirm, naming the object and what is removed | remove a credential / expired credentials, revoke a grant, disable SSO, retire the previous signing cert, grant scoped access with the org-wide strip, remove Exchange scoping |
+| Irreversible or tenant-wide | `require_keyword`, naming the object | permanent delete (`DELETE`), delete an app registration (`DELETE`), admin consent (`GRANT`), immediate signing-cert rotation (`ROTATE`), restore a backup into the tenant (`RESTORE`) |
+| Destructive but narrow or recoverable | click confirm, naming the object and what is removed | remove a credential / expired credentials, revoke a grant, disable SSO, retire the previous signing cert, grant scoped access with the org-wide strip (the recommended path and the Advanced block's), replace an app's owner set, remove Exchange scoping |
 | Planned | commit disabled until a dry-run plan is on screen | AAP migration (Exchange section and the Security tab's dialog) |
 
 Bulk escalates one tier: a click-confirmed single-app removal ("Remove expired") asks for a typed
@@ -251,10 +278,12 @@ item nobody imports any more must move to `RETIRED`.
   panes render a plain `.app-detail` div; the relative positioning, clipping and 12px gap Thaw
   supplied are in that rule), `DatePicker`
   (`ui::DateInput`, the native date input the list filters already used), `ProgressBar`
-  (`ui::ProgressBar`: a fraction, with NaN read as empty) and `Spinner` (`ui::Spinner`: Fluent's
+  (`ui::ProgressBar`: a fraction, with NaN read as empty), `Select` (`ui::Select`: Thaw's is a
+  wrapper span, and `styles.css` swept `.thaw-select` into the `.ui-select` rule, so it drew a box
+  inside a box with two chevrons) and `Spinner` (`ui::Spinner`: Fluent's
   20px "tiny" arc, the only size the app used, named by its `label`). Earlier, `Dialog` became
   `ModalShell` and `TabList`/`Tab` became `TabBar`.
-- **Still on Thaw:** the form controls (`Field`, `Input`, `Textarea`, `Select`, `InputSuffix`),
+- **Still on Thaw:** the form controls (`Field`, `Input`, `Textarea`, `InputSuffix`),
   `Button`, and `ConfigProvider`/`Theme`, which go last. `ConfigProvider`'s wrapper div also sets
   the font every element inherits, to Thaw's stack (`'Segoe UI'` first), not `--font-sans`
   (`"Segoe UI Variable"` first); removing it moves Windows text to Segoe UI Variable unless the
@@ -269,14 +298,33 @@ item nobody imports any more must move to `RETIRED`.
 - **Colours come from our tokens.** The replacements use `--accent` and `--border`, not Thaw's
   brand ramp. Light mode matches Thaw exactly; dark mode takes the app's own, lighter accent.
 
+## Theme
+
+The colour scheme is the operator's choice in Settings → Appearance: System (the default), Light
+or Dark. `Session::theme_pref` holds it (a device preference in `localStorage`, key
+`azapptoolkit:theme` — not tenant state, so it survives sign-out and a tenant switch), and one
+effect in `lib.rs` applies it to both halves of the UI: Thaw's `Theme`, and a `data-theme`
+attribute on `<html>` (absent for System).
+
+`styles.css` has **one** dark palette, written twice with identical declarations — under
+`@media (prefers-color-scheme: dark)` on `:root:not([data-theme="light"])`, and on
+`:root[data-theme="dark"]` — because a selector cannot say "the media query matches *or* this
+attribute is set". Every themed value is a token in that block, including the two that are not
+plain colours (`--select-chevron`, an inline SVG whose stroke is baked into the data URI, and
+`--skel-sheen`), so no other rule tests the scheme: a second `prefers-color-scheme` block would
+follow the OS and ignore the choice. Both are pinned by `tests/stylesheet_coverage.rs`
+(`both_dark_palettes_are_the_same`, `the_colour_scheme_is_tested_in_one_place`). The boot screen in
+`index.html` is the one exception — it paints before the stylesheet and the stored choice exist,
+so it follows the OS.
+
 ## Responsive layout
 
 The desktop window runs from 900×600 (`minWidth`/`minHeight` in `tauri.conf.json`) to maximized,
 and the layout should neither clip at the narrow end nor leave empty gutters at the wide one. It
 gets there with intrinsic CSS rather than a ladder of breakpoints:
 
-- **Flow, don't overflow.** Toolbars, action rows (`.actions-row`, `.list-header-actions`, the
-  list select/sort bars, …) and tab strips (`.ui-tabs`) `flex-wrap` — beside a title
+- **Flow, don't overflow.** Toolbars, action rows (`.actions-row`, `.app-list__toolbar`, the
+  list's count/sort row, …) and tab strips (`.ui-tabs`) `flex-wrap` — beside a title
   (`.row-between > .actions-row`, `> .thaw-button`) the buttons keep their width so the title
   wraps first. A panel nested inside a flex-column tab needs the column itself (`.cert-rollover`
   in `.sso-tab`): as a plain block, its buttons sit inline and a `.ui-text` hint — an inline
@@ -295,6 +343,14 @@ gets there with intrinsic CSS rather than a ladder of breakpoints:
 - **One width breakpoint reaches the desktop:** `max-width: 1199px` collapses the nav to the icon
   rail, so the content area never drops below ~960 px with labels showing. The 740/560/480 px
   blocks are below the window minimum — they serve the GitHub Pages demo on phones only.
+- **Width-gated extras use the window, not the container.** A list row gains columns when there
+  is room (`.app-list__row-col`: credential counts and created date from 1100px, sign-in audience
+  from 1500px; type and created on the enterprise list) — fixed-width cells after the flexible
+  name, hidden by default, switched on by `min-width` media queries because container queries are
+  off the table (next bullet). Each value says what it is ("2 secrets", "Created 2024-03-14"), so
+  there is no header row. Home's `.dash-grid` has explicit column counts by window width (1 / 2
+  from 700px / 3 from 1200px) rather than `auto-fill`: its Security posture card spans two
+  columns, and a free column count left a ragged last row at most widths.
 - **No container queries.** `ModalShell` renders its dialog inline, inside the view that opened it,
   and a query container gets layout containment, which makes it the containing block of every
   `position: fixed` descendant: a pane that was a container would pin its dialog's scrim to the
@@ -345,10 +401,13 @@ which adds it to ONE shared, cross-entity working set:
   via a per-window latch seeded from `shown_items` (an interactive open is already shown, so it
   mounts eagerly), and is then kept alive. A restored dock therefore fetches nothing for a chip
   that has not been opened. Pinned by `restored_chips_fetch_nothing_until_opened` (`gui_1`).
-- **Pane chrome** — each pane's `workspace__pane-bar` shows the dock chip's `TypeChip` kind glyph
-  plus the item's **live** title (read from the `open_items` signal, self-correcting like the
-  chip), so a 2-up compare is legible; Full (`Icon::Maximize`) and close (`Icon::Close`) are icon
-  buttons on the right.
+- **Pane chrome** — with ONE pane shown, `workspace__pane-bar` is a "Back to {page}" link
+  (`ActiveView::title` of the view underneath; it hides the pane, as Escape does). The pane's own
+  header right below names the item, so the bar repeating the kind chip and name was the item's
+  name three times on screen, with an unlabelled chevron as the only visible way out. Comparing
+  two panes, the bar shows the dock chip's `TypeChip` kind glyph plus the item's **live** title
+  (read from the `open_items` signal, self-correcting like the chip) so each pane says which one
+  it is, with Full (`Icon::Maximize`) and hide (`Icon::ChevronDown`) on the right.
 - **Pane contents** — the app-reg and enterprise detail panes are self-contained and reused
   directly. The MI detail is split: `ManagedIdentityDetailWindow` owns the resources, signals, and
   `ConfirmDialog` (keyed off one `mi_id`) and feeds the pure-presenter
@@ -364,9 +423,26 @@ which adds it to ONE shared, cross-entity working set:
 
 ### Unsaved edits in a pane
 
-A tab that can hold unsaved edits calls `hooks::use_unsaved_marker(dirty)`; the workspace provides
-each pane its `OpenItemId`, so the marker lands on `Session.dirty_items` (never persisted, reset in
-`set_active_tenant`). Every operator close — a dock chip's ×, "Close all", Cmd/Ctrl-W — goes through
+A tab that can hold unsaved edits calls `hooks::use_unsaved_marker(dirty)`. Inside a detail pane
+the report goes to the pane's `hooks::pane_tabs::PaneTabs`, keyed by tab and by call (two markers
+used to share the item's one flag, so a clean tab mounting cleared a dirty sibling's report); the
+pane reports the item as a whole to `Session.dirty_items` (never persisted, reset in
+`set_active_tenant`) through the `OpenItemId` the workspace provides. Markers today: the app
+registration Overview and Authentication tabs, the owners "replace all" set, the federated
+add/edit forms, the scope-group mailbox box, the SSO editor's fields and the enterprise notes.
+
+**A pane reload keeps unsaved edits.** Both detail panes hold the last loaded detail in a signal
+and stay mounted across a reload (the resource's results are landed by an effect, numbered so a
+refetch that is still in flight is not mistaken for a result). They used to render inside the
+resource's `Suspense`, so a tab's `on_changed` after its own mutation — or the header's Refresh —
+swapped the pane for a skeleton and rebuilt every tab: editing Overview and then adding an owner
+threw the Overview form away without asking. `PaneTabs::land` now decides per tab what fresh data
+does: a tab with unsaved edits that did not ask for the reload is kept (its reactive reads follow
+the new detail); the tab on screen is otherwise rebuilt in place; every other mounted tab is
+dropped and mounts fresh when next opened, as before. Each tab's `on_changed` is
+`reload_from(tab)` (`Reload::From`); the header's Refresh is `Reload::DiscardAll`, so with a
+dirty tab it asks "Discard unsaved changes and refresh?" first, and its icon spins while the
+reload runs (the pane no longer blanks to show it). Every operator close — a dock chip's ×, "Close all", Cmd/Ctrl-W — goes through
 `Session::request_close_item` / `request_close_all_items`, which park a dirty close on
 `Session.pending_close` for the one "Discard unsaved changes?" dialog in `shell.rs`. `close_item`
 stays unconditional for callers whose edits are moot (the entity was deleted). The dock cap evicts
@@ -384,7 +460,12 @@ tenant's list if it survived a switch (the lists stay mounted via `util::keep_al
 `Session.tenant_ui` (the `TenantScopedUi` substruct) — the front-end mirror of the backend's cross-tenant cache-leakage
 footgun, with the reset enforced **by structure, not vigilance**:
 
-- **What lives there** — the searches (`apps_search` / `enterprise_search` / `mi_search`); the
+- **What lives there** — `background_work` (the long-running jobs in flight — audit, backup,
+  restore, the two Resource Access sweeps — mirrored from each job's own running flag through
+  `Session::set_background_work`; the shell marks the nav row of the page that owns one with
+  `Session::view_is_busy`, which also counts a bulk run for Bulk Actions, and
+  `Session::notify_background_done` toasts a "View" link when one finishes while another page is
+  on screen); the searches (`apps_search` / `enterprise_search` / `mi_search`); the
   facet of every drill target (`enterprise_facet`, `mi_facet`, `credentials_facet`, the audit's
   `audit_severity`, the Findings pane's `audit_expanded_group`); the two lists' creation-date
   ranges (`apps_created_*` / `enterprise_created_*`); both bulk selections
@@ -439,7 +520,10 @@ sub-tabs (the two audit panes plus four inventory lenses). (Finding
 - **One controller** — `SecurityView` constructs a single `audit_view::AuditController`
   (run/cancel/export/progress/consent + the cached-run hydration with its tenant-race guard) and
   provides it via context to every pane.
-- **Read-only posture strip** — it renders severity counts, never filter controls. Do not
+- **Read-only posture strip** — one row: the severity counts, "Scanned … ago", and the audit's
+  actions (Run audit / Cancel / Export). It is the *audit's* header, so it is shown only on the
+  two audit tabs (hidden, not unmounted, on the four lenses, which read their own data and have
+  their own Export). It renders severity counts, never filter controls. Do not
   reintroduce a severity TabBar, finding-chip drawer, or clickable scorecard as filters, and no
   `SavedViews` on the two audit panes (Findings / All apps) — filtering the scan has exactly two
   homes (below). The four inventory lenses (Credential expiry, SSO certificates, Delegated grants,

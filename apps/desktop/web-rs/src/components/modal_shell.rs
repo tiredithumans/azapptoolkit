@@ -69,7 +69,21 @@ pub fn ModalShell(
     ));
 
     view! {
-        <Show when=move || open.get() fallback=|| view! { <></> }>
+        // `when` runs inside `Show`'s own memo, which is re-evaluated before the
+        // old children are disposed — the one point where the dialog can still
+        // give up focus safely. See `util::blur_focus_within`: every close path
+        // (Escape, Cancel, a submit that lands, a view switch) comes through
+        // here, so no caller has to remember it.
+        <Show
+            when=move || {
+                let is_open = open.get();
+                if !is_open && let Some(modal) = modal_ref.get_untracked() {
+                    crate::util::blur_focus_within(Some(&modal));
+                }
+                is_open
+            }
+            fallback=|| view! { <></> }
+        >
             <div
                 class="modal-backdrop"
                 role="dialog"
