@@ -180,7 +180,8 @@ pub(super) fn PermissionsContent(
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
     // permissions + the delegated scopes the app publishes.
-    let scopes = signal.with(|d| d.service_principal.oauth2_permission_scopes.clone());
+    // (A snapshot for this mount, untracked: the pane rebuilds the tab on a reload.)
+    let scopes = signal.with_untracked(|d| d.service_principal.oauth2_permission_scopes.clone());
 
     let scopes_view = view! {
         <DataTable

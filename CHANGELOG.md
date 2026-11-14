@@ -32,7 +32,6 @@ After 0.34.1, each change is one line written for the person using the app.
 - "Grant admin consent" always means consenting an app's permissions; "Grant consent" is the toolkit's own access.
 - Labels use sentence case throughout ("Sign out", "Add default owners", the Settings tabs, the Home cards).
 - A SharePoint site grant's row button says "Revoke", as its dialog does; the Delegated grants page matches its tab.
-
 - Deleting an app registration now offers Undo on its confirmation, as the bulk delete does.
 - Refreshing an open item with unsaved edits now asks before discarding them.
 - A running audit, sweep, backup, restore or bulk run marks its page in the navigation while you are elsewhere.
@@ -44,7 +43,7 @@ After 0.34.1, each change is one line written for the person using the app.
 
 - Unsaved edits on one tab are no longer lost when another tab of the same item saves or reloads.
 - Owner replacements, federated credential forms, SSO settings and enterprise notes now count as unsaved edits.
-- Revoking an enterprise app or managed identity permission, a site grant, or assigning an Azure role now confirms.
+- Revoking a permission or a site grant, or assigning an Azure role, now shows a notification when it succeeds.
 - Switching between the Bulk Actions tabs no longer drops a running action's progress, failures or Undo.
 - Refresh on Credential expiry and SSO certificates now re-reads from Microsoft Entra instead of the cached board.
 - The Managed Identities list no longer draws a card inside a card.

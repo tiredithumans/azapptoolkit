@@ -493,7 +493,10 @@ pub fn CredentialsTab(
     };
 
     let gencert_open = RwSignal::new(false);
-    let gencert_subject = RwSignal::new(detail.with(|d| d.application.display_name.clone()));
+    // A starting value for the form, so read once (untracked): the pane's
+    // detail is a live signal now, and a reload must not retype the field.
+    let gencert_subject =
+        RwSignal::new(detail.with_untracked(|d| d.application.display_name.clone()));
     let gencert_validity = RwSignal::new(DEFAULT_CERT_LIFETIME_DAYS.to_string());
     let cmd_gencert = use_command();
     let gencert_result: RwSignal<Option<GeneratedCertificateResult>> = RwSignal::new(None);

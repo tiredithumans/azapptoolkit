@@ -3,7 +3,9 @@ use super::*;
 #[component]
 pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) -> impl IntoView {
     let session = use_session();
-    let sp = signal.with(|d| d.service_principal.clone());
+    // A snapshot for this mount (untracked): the pane rebuilds the tab when
+    // fresh data should replace it, and keeps it when it holds unsaved notes.
+    let sp = signal.with_untracked(|d| d.service_principal.clone());
 
     // My Apps portal visibility (the `HideApp` tag). Toggled optimistically so
     // the row reflects the change without re-fetching the whole detail.
@@ -132,6 +134,9 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
         .clone()
         .unwrap_or_else(|| "—".to_string());
     let created = fmt_date(sp.created_date_time);
+    // Monospace only for a real id: the placeholder dash in the mono face is a
+    // different, shorter glyph than the "—" in the cells beside it.
+    let has_owner_org = sp.app_owner_organization_id.is_some();
     let owner_org = sp
         .app_owner_organization_id
         .clone()
@@ -214,7 +219,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
             </div>
             <div class="read-grid__item">
                 <dt>"Owner tenant"</dt>
-                <dd class="mono">{owner_org}</dd>
+                <dd class=("mono", has_owner_org)>{owner_org}</dd>
             </div>
             <div class="read-grid__item">
             <dt>"My Apps visibility"</dt>
@@ -248,12 +253,14 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
         <Field label="Management notes (max 1024 characters)">
             <Textarea value=notes_text />
         </Field>
-        <Button
-            appearance=Signal::derive(|| ButtonAppearance::Primary)
-            disabled=Signal::derive(move || notes_cmd.busy.get() || !notes_dirty())
-            on_click=Box::new(save_notes)
-        >
-            "Save notes"
-        </Button>
+        <div class="actions-row">
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Primary)
+                disabled=Signal::derive(move || notes_cmd.busy.get() || !notes_dirty())
+                on_click=Box::new(save_notes)
+            >
+                "Save notes"
+            </Button>
+        </div>
     }
 }
