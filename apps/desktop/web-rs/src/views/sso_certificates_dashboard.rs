@@ -20,6 +20,7 @@ use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS as WARNING_
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
+use crate::bindings::diagnostics::ListCacheKindDto;
 use crate::bindings::sso::{self, RolloverPhase, SsoCertificateRowDto};
 use crate::components::audit_dashboard::AuditDashboard;
 use crate::components::bulk_action_bar::{BulkAction, BulkActionBar};
@@ -113,6 +114,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
                 names=Signal::derive(move || names.get())
             />
             <AuditDashboard
+            cache_kind=ListCacheKindDto::SsoCertificates
             title="SSO certificate expiry"
             crumb="SAML token-signing certificates across the tenant"
             search_placeholder="Filter by app name or appId…"

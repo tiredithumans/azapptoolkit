@@ -17,7 +17,9 @@ use leptos::prelude::*;
 
 use crate::components::icon::IconName;
 use crate::components::list_scaffold::ListScaffold;
-use crate::components::ui::{DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList};
+use crate::components::ui::{
+    DataAge, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList, stamp_data_age,
+};
 use crate::components::virtual_list::VirtualList;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
@@ -90,6 +92,8 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
         "managed identities",
     );
 
+    // When the rows on screen were read, for the header's "Updated … ago".
+    let loaded_at = RwSignal::new(None);
     let identities = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = list_reload.get();
@@ -100,6 +104,14 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             };
             let result = managed_identity::list_managed_identities(&t.tenant_id).await;
             refreshing.set(false);
+            if result.is_ok() {
+                stamp_data_age(
+                    session,
+                    t.tenant_id.clone(),
+                    Some(ListCacheKindDto::ManagedIdentities),
+                    loaded_at,
+                );
+            }
             // Each row wrapped ONCE, here (every later stage — the resource's
             // own read, the filter memos, the export snapshot, the virtual
             // window — copies a refcount instead of the row), and tagged with
@@ -128,6 +140,7 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
             <div>
                 <SectionHeader title="Managed Identities".to_string() crumb="Inventory".to_string()>
                     <div class="list-header-actions">
+                        <DataAge loaded_at=loaded_at />
                         <ExportMenu
                             disabled=Signal::derive(move || exporting.get())
                             on_select=Callback::new(do_export)

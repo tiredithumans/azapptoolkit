@@ -27,7 +27,8 @@ use crate::components::list_scaffold::ListScaffold;
 use crate::components::select_all_bar::SelectAllBar;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, Callout, DataAge, DetailLoadError, EmptyState, IconButton, SectionHeader,
+    SkeletonList, stamp_data_age,
 };
 use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
@@ -236,6 +237,9 @@ pub fn ApplicationList() -> impl IntoView {
         "app registrations",
     );
 
+    // When the rows on screen were read from Graph, for the header's
+    // "Updated … ago" (`components::ui::DataAge`).
+    let loaded_at = RwSignal::new(None);
     let apps = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = reload.get();
@@ -249,6 +253,14 @@ pub fn ApplicationList() -> impl IntoView {
             };
             let result = applications::list_applications_with_pairing(&t.tenant_id).await;
             refreshing.set(false);
+            if result.is_ok() {
+                stamp_data_age(
+                    session,
+                    t.tenant_id.clone(),
+                    Some(ListCacheKindDto::Apps),
+                    loaded_at,
+                );
+            }
             // Each row wrapped ONCE, here (every later stage — the resource's
             // own read, the filter memos, the sort, the export snapshot, the
             // virtual window — copies a refcount instead of the row), and
@@ -296,6 +308,7 @@ pub fn ApplicationList() -> impl IntoView {
                             }
                         })
                 }}
+                <DataAge loaded_at=loaded_at />
                 <ExportMenu
                     disabled=Signal::derive(move || exporting.get())
                     on_select=Callback::new(do_export)

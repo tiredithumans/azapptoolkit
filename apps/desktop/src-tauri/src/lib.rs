@@ -150,6 +150,7 @@ pub fn run() {
             commands::diagnostics::cache_stats,
             commands::diagnostics::clear_cache,
             commands::diagnostics::invalidate_list_cache,
+            commands::diagnostics::list_cache_age,
             commands::diagnostics::set_cache_enabled,
             commands::diagnostics::set_cache_config,
             commands::diagnostics::get_support_paths,

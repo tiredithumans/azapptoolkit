@@ -3526,6 +3526,14 @@ h3 {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+  /* Buttons of mixed kinds plus the "Updated … ago" stamp share one baseline. */
+  align-items: center;
+}
+/* "Updated 5 min ago" beside a list's Refresh (`components::ui::DataAge`). */
+.data-age {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* =====================================================================

@@ -25,6 +25,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - A running audit, sweep, backup, restore or bulk run marks its page in the navigation while you are elsewhere.
 - An audit, sweep or bulk create that finishes while you are on another page now tells you, with a link back.
 - Notifications that carry an action (Undo, Reopen, View) stay for ten seconds instead of five.
+- The three lists and the Security lenses show "Updated … ago" beside Refresh, with the exact time on hover.
 
 ### Fixed
 
@@ -32,6 +33,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Owner replacements, federated credential forms, SSO settings and enterprise notes now count as unsaved edits.
 - Revoking an enterprise app or managed identity permission, a site grant, or assigning an Azure role now confirms.
 - Switching between the Bulk Actions tabs no longer drops a running action's progress, failures or Undo.
+- Refresh on Credential expiry and SSO certificates now re-reads from Microsoft Entra instead of the cached board.
 - Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
 - Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
 - Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.

@@ -22,7 +22,8 @@ use crate::components::index_cap_notice::IndexCapNotice;
 use crate::components::list_scaffold::ListScaffold;
 use crate::components::type_chip::{AppKind, TypeChip};
 use crate::components::ui::{
-    Badge, BadgeTone, DetailLoadError, EmptyState, IconButton, SectionHeader, SkeletonList,
+    Badge, BadgeTone, DataAge, DetailLoadError, EmptyState, IconButton, SectionHeader,
+    SkeletonList, stamp_data_age,
 };
 use crate::components::virtual_list::{VirtualList, reset_scroll_offset_on_change};
 use crate::constants::*;
@@ -96,6 +97,8 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
         "enterprise applications",
     );
 
+    // When the rows on screen were read, for the header's "Updated … ago".
+    let loaded_at = RwSignal::new(None);
     let sps = LocalResource::new(move || {
         let tenant = tenant.get();
         let _ = reload.get();
@@ -108,6 +111,14 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
             };
             let result = enterprise_application::list_enterprise_applications(&t.tenant_id).await;
             refreshing.set(false);
+            if result.is_ok() {
+                stamp_data_age(
+                    session,
+                    t.tenant_id.clone(),
+                    Some(ListCacheKindDto::Enterprise),
+                    loaded_at,
+                );
+            }
             // Each row wrapped ONCE, here (every later stage — the resource's
             // own read, the filter memos, the export snapshot, the virtual
             // window — copies a refcount instead of the row), and tagged with
@@ -136,6 +147,7 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                 title="Enterprise Applications".to_string()
                 crumb="Inventory".to_string()
             >
+                <DataAge loaded_at=loaded_at />
                 <ExportMenu
                     disabled=Signal::derive(move || exporting.get())
                     on_select=Callback::new(do_export)
