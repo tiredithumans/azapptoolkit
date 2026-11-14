@@ -1353,7 +1353,7 @@ impl Cache {
     /// caching is off.
     ///
     /// The wall clock, because it keeps counting while the machine sleeps
-    /// (see [`Entry::is_live`]); one set backwards falls back to the monotonic
+    /// (see `Entry::is_live`); one set backwards falls back to the monotonic
     /// clock. An in-place patch keeps an entry's `inserted`, so this is the age
     /// of the *scan* the page came from, not of the last patch to it.
     ///

@@ -231,7 +231,9 @@ shown on the item either way.
 The DR view lists the items under the counts, each that needs approval with a
 checkbox (none ticked by default; an "Approve all listed" button after the list
 ticks them all, for a large honest restore). Confirm stays enabled: an unticked item still restores, it just gets
-no standing access, and the confirm dialog says how many are left out.
+no standing access, and the confirm dialog says how many are left out. The confirm is a
+`ConfirmDialog` with `require_keyword="RESTORE"` (a restore creates objects tenant-wide and
+cannot be rolled back as a unit), so it is typed, not clicked.
 `restore_tenant` takes the ticked items as `approvals: Vec<RestoreApproval>` —
 **keyed by kind and source appId**, so approving an app never approves a managed
 identity with the same id (`manifest_problems` also requires MI source ids to be

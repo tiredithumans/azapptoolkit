@@ -137,10 +137,10 @@ Deep-dive: audit-findings-and-remediation.md
 
 Deep-dive: frontend-workspace.md
 
-- **Reactivity is closure-based** (`{move || sig.get()}`); state is `RwSignal<T>` on a context-provided `Session`; CSS is global BEM-ish; a bare-key shortcut must no-op in a text field.
-- **A result can land after its component is gone:** post-await, gate on `Session::is_active_tenant` (land nothing on a switch/sign-out), keep session-level effects when only the view closed, and `try_run` callbacks (`CommandState::land`; pinned by `tests/post_await_callbacks.rs`).
-- **One primitive per UI pattern** (`SectionHeader`, skeletons, `DetailLoadError`, `Callout`, `ShowMore`, `ModalShell`) — reuse, never re-implement.
-- **Open-items workspace:** `session.open_item(...)` fills ONE shared `Session.open_items`; dock + workspace mount once in `shell.rs`; `open_items` + `shown_items` reset in `set_active_tenant`; no `selected_*_id` signals.
+- **Reactivity is closure-based**; state is `RwSignal<T>` on a context-provided `Session`; CSS is global BEM-ish; a bare-key shortcut must no-op in a text field.
+- **A result can land after its component is gone:** post-await, gate on `Session::is_active_tenant` (land nothing on a switch/sign-out), keep session-level effects when only the view closed, and `try_run` callbacks (`CommandState::land`; `tests/post_await_callbacks.rs`); `util::blur_focus_within` before disposing focused fields.
+- **One primitive per UI pattern** (`SectionHeader`, skeletons, `DetailLoadError`, `Callout`, `ShowMore`, `ModalShell`, `Select`, `DataAge`) — reuse, never re-implement.
+- **Open-items workspace:** `session.open_item(...)` fills ONE shared `Session.open_items`; dock + workspace mount once in `shell.rs`; `open_items` + `shown_items` reset in `set_active_tenant`; no `selected_*_id` signals; a pane reload keeps a dirty tab (`hooks::pane_tabs`).
 - **Per-list filter state lives on `Session.tenant_ui`** and resets by structure — a new field goes in the substruct with a `reset()` line + the pinning test.
 - **Security tab is a findings-first workbench:** filtering has exactly two homes, `BulkActionBar` is the only bulk caller, no bulk admin consent (`BulkAction::Grant`) on audit surfaces.
 - **WASM gating:** server deps are `#[cfg(not(target_arch = "wasm32"))]` in shared crates; `web-rs` restates `unsafe_code = "deny"`.
@@ -166,7 +166,7 @@ Deep-dive: release-updater-demo.md
 
 ## Verification playbook
 
-1. `just verify` — fmt → clippy → test → doc → web-fmt → web-clippy → web-test → web-build → web-doc, then the browser GUI tests when this box can run them (`just verify-ui` requires them). `doc`/`web-doc` are the only gates that run rustdoc, so the only ones that fail on a broken intra-doc link (`[workspace.lints.rustdoc]` deny).
+1. `just verify` — fmt → clippy → test → doc → web-fmt → web-clippy → web-test → web-build → web-doc, then the browser GUI tests when this box can run them (`just verify-ui` requires them). `doc`/`web-doc` alone run rustdoc, so only they fail on a broken intra-doc link (`[workspace.lints.rustdoc]` deny).
 2. `just verify-full` — adds `audit`/`web-audit`/`deny`/`web-deny`/`machete` (required CI checks) + the shard ceiling.
 3. CI-only: actionlint, shellcheck of `.claude/hooks/`, a whole-history secrets scan (never gated on the change detector), CodeQL (build-mode `none`; macro expansion is a known gap).
 
@@ -174,4 +174,4 @@ The browser GUI tests are the frontend's only behavioural gate: renaming a CSS c
 
 ## Keeping this file up to date
 
-Crate/dir changes → Repo map; toolchain/MSRV or `justfile` recipes → Quick reference; a new command/IPC/cache/CSP/cancel invariant → one sentence in its Conventions subsection (no per-bullet doc link) plus its detail in `docs/architecture/` (and, for Claude, the matching `.claude/rules/` file); a CI gate → Verification playbook. The `staleness-check.sh` hook reminds you (once per session) when a structural edit likely needs this file. The hook and `repo_invariants/release.rs` hold this file under 18 000 bytes — past it, move detail out rather than raise the budget.
+Crate/dir changes → Repo map; toolchain/MSRV or `justfile` recipes → Quick reference; a new command/IPC/cache/CSP/cancel invariant → one sentence in its Conventions subsection (no per-bullet doc link) plus its detail in `docs/architecture/` (and, for Claude, the matching `.claude/rules/` file); a CI gate → Verification playbook. The `staleness-check.sh` hook reminds you (once per session) on a structural edit. It and `repo_invariants/release.rs` hold this file under 18 000 bytes — past it, move detail out rather than raise the budget.
