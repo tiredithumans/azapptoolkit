@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-14
+
 ### Added
 
 - The window reopens at the size and position you left it, including maximized.
@@ -50,7 +52,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
 - Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
 - Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.
-- An app's Created date shows as a date instead of a raw timestamp, and its ID labels are no longer monospace.
+- An app's Created date shows as a date instead of a raw timestamp.
 - The delete icon in the API permissions table lines up on every row; Disaster Recovery icons no longer touch labels.
 - The sign-on method reads "SAML" rather than "saml"; activity results, plurals and a few tooltips read as plain words.
 
