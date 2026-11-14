@@ -217,10 +217,11 @@ surfaces reuse it rather than re-implementing the markup.
 - **Form field labels** — thaw `<Field label=…>`, demoted app-wide by a single
   `.thaw-field__label` rule (medium weight, `--text-muted`). Thaw's default renders a label
   identical to body text, which flattens every form; don't re-specify label typography per view.
-- **Table row actions** — a control in a `.data-table` cell needs `class="cell-mid"`, because the
-  base rule is `vertical-align: top` and a 32px button sits ~7px below a single line of text.
-  Multi-line *identity* cells deliberately stay top-aligned — the name should start where you read
-  it — so classify the control columns, not the whole row.
+- **Table rows share one line** — every `.data-table` cell is `vertical-align: middle`, so text, a
+  pill, an id with its copy button and a 32px action button all centre on the row; never top-align
+  a cell to "fix" one column. A pill, `.scope-chips` or `CopyableId` directly in a cell takes a
+  negative `margin-block` (`styles.css`, beside `.cell-mid`) so it occupies one text line and rows
+  with and without it are the same height. `class="cell-mid"` still marks control columns.
 - **Detail-tab roots** must appear in the tab-grid selector in `styles.css` (`display: grid;
   gap: var(--space-4)`), or the tab's rhythm silently falls back to UA `<h4>`/`<p>` margin
   collapse. `.ent-access`/`.ent-owners` had no rule at all for exactly this reason. If a root also

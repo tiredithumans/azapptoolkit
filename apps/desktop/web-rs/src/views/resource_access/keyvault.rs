@@ -445,22 +445,24 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                                                 </div>
                                             </td>
                                             <td class="cell-mid">
-                                                {role_name}
-                                                {high
-                                                    .then(|| {
-                                                        view! {
-                                                            <Badge label="High-privilege" tone=BadgeTone::Warning />
-                                                        }
-                                                    })}
-                                                {inherited
-                                                    .then(|| {
-                                                        view! {
-                                                            <Badge
-                                                                label="Inherited"
-                                                                title=format!("Inherited from {scope}")
-                                                            />
-                                                        }
-                                                    })}
+                                                <span class="row-meta">
+                                                    {role_name}
+                                                    {high
+                                                        .then(|| {
+                                                            view! {
+                                                                <Badge label="High-privilege" tone=BadgeTone::Warning />
+                                                            }
+                                                        })}
+                                                    {inherited
+                                                        .then(|| {
+                                                            view! {
+                                                                <Badge
+                                                                    label="Inherited"
+                                                                    title=format!("Inherited from {scope}")
+                                                                />
+                                                            }
+                                                        })}
+                                                </span>
                                             </td>
                                         </tr>
                                     }

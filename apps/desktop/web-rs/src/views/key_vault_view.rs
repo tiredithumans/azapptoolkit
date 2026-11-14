@@ -214,17 +214,19 @@ pub fn KeyVaultView() -> impl IntoView {
                             view! {
                                 <tr>
                                     <td class="mono">
-                                        {name}
-                                        {managed
-                                            .then(|| {
-                                                view! {
-                                                    <Badge
-                                                        label="certificate-backed"
-                                                        tone=BadgeTone::Warning
-                                                        title="Vault certificate material — not a writable secret"
-                                                    />
-                                                }
-                                            })}
+                                        <span class="row-meta">
+                                            {name}
+                                            {managed
+                                                .then(|| {
+                                                    view! {
+                                                        <Badge
+                                                            label="certificate-backed"
+                                                            tone=BadgeTone::Warning
+                                                            title="Vault certificate material — not a writable secret"
+                                                        />
+                                                    }
+                                                })}
+                                        </span>
                                     </td>
                                     <td>{item.content_type.unwrap_or_else(|| "—".into())}</td>
                                     <td>{item.expires.unwrap_or_else(|| "—".into())}</td>

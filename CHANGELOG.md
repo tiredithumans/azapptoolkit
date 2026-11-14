@@ -6,6 +6,12 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- In the app lists, the status pill and the columns beside it sit in the middle of the row, not on the name line.
+- In every table, a row's text, pills, ids and buttons now share one line instead of sitting at different heights.
+- Status pills are the same height everywhere, and a pill that follows text no longer hangs below it.
+
 ## [0.36.0] - 2026-11-14
 
 ### Added

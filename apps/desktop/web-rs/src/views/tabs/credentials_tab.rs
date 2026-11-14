@@ -983,19 +983,21 @@ pub fn CredentialsTab(
                                         </td>
                                         <td>{last_used}</td>
                                         <td>
-                                            {status_badge(days)}
-                                            {over_cap
-                                                .then(move || {
-                                                    view! {
-                                                        <Badge
-                                                            label="Over cap"
-                                                            tone=BadgeTone::Warning
-                                                            title=cap.map_or(String::new(), |cap| format!(
-                                                                "Longer than the {cap}-day secret-lifetime policy on this app"
-                                                            ))
-                                                        />
-                                                    }
-                                                })}
+                                            <span class="row-meta">
+                                                {status_badge(days)}
+                                                {over_cap
+                                                    .then(move || {
+                                                        view! {
+                                                            <Badge
+                                                                label="Over cap"
+                                                                tone=BadgeTone::Warning
+                                                                title=cap.map_or(String::new(), |cap| format!(
+                                                                    "Longer than the {cap}-day secret-lifetime policy on this app"
+                                                                ))
+                                                            />
+                                                        }
+                                                    })}
+                                            </span>
                                         </td>
                                         <td class="cell-mid">
                                             <div class="cell-actions">

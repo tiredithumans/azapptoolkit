@@ -837,7 +837,12 @@ fn view_row(
             >
                 <span class="row-meta">
                     <TypeChip kind=AppKind::AppRegistration compact=true />
-                    <span class="app-list__row-title" title=title_name>{display_name}</span>
+                    // Name over id, as one block: everything else in the row
+                    // (chip, badges, columns) centres on the row, not on the name.
+                    <span class="app-list__row-main">
+                        <span class="app-list__row-title" title=title_name>{display_name}</span>
+                        <span class="app-list__row-appid">{app_id_string}</span>
+                    </span>
                     <Badge label=cred_label tone=cred_tone />
                     // Always rendered (empty with no end date), so the columns
                     // after it line up from row to row on a wide window.
@@ -852,7 +857,6 @@ fn view_row(
                     <span class="app-list__row-col">{created_text}</span>
                     <span class="app-list__row-col app-list__row-col--extra">{audience_text}</span>
                 </span>
-                <span class="app-list__row-appid">{app_id_string}</span>
             </button>
             // A SIBLING of the row button, never nested inside it: nested
             // interactive content is invalid HTML, and Leptos builds the DOM
