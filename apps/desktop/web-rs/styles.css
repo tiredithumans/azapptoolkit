@@ -53,6 +53,13 @@
   --on-danger: #ffffff;
   --on-accent: #ffffff;
 
+  /* Two values that are not plain colours but still differ by theme, held as
+     tokens so the dark palette below is the ONLY place a theme is spelled:
+     the skeleton's moving highlight, and the <select> chevron (an inline SVG,
+     whose stroke has to be baked into the data URI). */
+  --skel-sheen: rgba(0, 0, 0, 0.06);
+  --select-chevron: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%235b5b5b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+
   /* ---- Spacing (4px grid) ---- */
   --space-1: 4px;
   --space-2: 8px;
@@ -127,8 +134,17 @@
   color-scheme: light;
 }
 
+/* ---- Dark palette ----
+   Applied two ways, with the SAME declarations (pinned equal by
+   `tests/stylesheet_coverage.rs::both_dark_palettes_are_the_same`):
+   - by the OS setting, unless the operator chose Light in Settings →
+     Appearance (`data-theme="light"` on <html>);
+   - by the operator choosing Dark there (`data-theme="dark"`), whatever the OS
+     says.
+   No `data-theme` at all is "follow the system", the default. Every themed
+   value is a token in this block; nothing else in the sheet tests the scheme. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --border: #3b3b3b;
     --border-strong: #4a4a4a;
@@ -169,7 +185,53 @@
     --shadow-4: 0 2px 4px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-8: 0 4px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-16: 0 8px 16px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.4);
+    --skel-sheen: rgba(255, 255, 255, 0.08);
+    --select-chevron: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --border: #3b3b3b;
+  --border-strong: #4a4a4a;
+  --control-border: #757575;
+  --canvas: #1a1a1a;
+  --bg-subtle: #242424;
+  --surface: #1f1f1f;
+  --surface-raised: #2a2a2a;
+  --acrylic: rgba(31, 31, 31, 0.72);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --text: #f3f3f3;
+  --text-muted: #b0b0b0;
+  --text-faint: #888;
+  --accent: #4cc2ff;
+  --accent-hover: #6dcdff;
+  --accent-soft: rgba(76, 194, 255, 0.18);
+  --accent-ent: #b48bff;
+  --accent-ent-soft: rgba(180, 139, 255, 0.18);
+  --accent-mi: #4cd17e;
+  --accent-mi-soft: rgba(76, 209, 126, 0.18);
+  --accent-mi-user: #4ec9d6;
+  --accent-mi-user-soft: rgba(78, 201, 214, 0.18);
+  /* Status colors must lighten too: the light-mode reds/greens land at
+   * ~2-3:1 against the dark surfaces, below WCAG AA for text. */
+  /* 4.66:1 on its --danger-soft tint over --surface-raised (a badge in a
+     modal or card); #ff6b70 was 3.94 there. */
+  --danger: #ff8589;
+  --danger-soft: rgba(255, 107, 112, 0.18);
+  --warning: #f0ab46;
+  --warning-soft: rgba(240, 171, 70, 0.18);
+  --ok: #4cd17e;
+  --ok-soft: rgba(76, 209, 126, 0.18);
+  /* The filled danger/accent surfaces lightened above, so their foreground
+   * has to darken to stay legible (near-black clears AA on both). */
+  --on-danger: #1a1a1a;
+  --on-accent: #1a1a1a;
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-4: 0 2px 4px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-8: 0 4px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-16: 0 8px 16px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.4);
+  --skel-sheen: rgba(255, 255, 255, 0.08);
+  --select-chevron: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 html,
@@ -328,6 +390,20 @@ h3 {
   margin: 0;
 }
 
+/* Chrome is not content. A drag that starts on the nav, a tab strip or the
+   dock used to paint a text selection across them, the way a web page does;
+   in a desktop app those are controls. Everything an operator would copy —
+   names, ids, table cells, messages — stays selectable. */
+.shell__nav,
+.shell__topbar-title,
+.ui-tabs,
+.open-dock,
+.filter-chips,
+.app-list__sortbar {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   word-break: break-all;
@@ -418,6 +494,12 @@ h3 {
   gap: var(--space-2);
   align-items: center;
 }
+/* A trailing action group whose optional buttons differ per row: packed to the
+   end, the last (destructive) action lines up down the column instead of
+   stepping left on every row that lacks the buttons before it. */
+.cell-actions--end {
+  justify-content: flex-end;
+}
 
 /* Vertically center the single-element control columns (Kind / Scope / Status /
    Actions) against the multi-line identity columns (Resource / Permission),
@@ -449,9 +531,44 @@ h3 {
   word-break: break-word;
 }
 
-.read-field strong {
-  display: block;
+/* ---- Read-only property grid (the Overview tab of all three detail panes) ----
+   One label/value language for app registrations, enterprise applications and
+   managed identities. Before it the app-registration Overview set its labels
+   in bold body text (monospace for the id rows, since the modifier sat on the
+   pair), the enterprise one in small muted text, and the managed-identity one
+   in an uppercase two-column box — and each ran as a single narrow column,
+   leaving most of the pane empty. A `<dl>` whose pairs are `__item` groups in
+   an auto-fill grid: the pane's width becomes columns, and a 900px window
+   still gets one. The label is the quieter half of the pair, as
+   `.thaw-field__label` is for a form. */
+.read-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--space-3) var(--space-5);
+  margin: 0;
+}
+.read-grid__item {
+  min-width: 0;
+}
+/* Free text (a description, notes) reads as a line, not a column cell. */
+.read-grid__item--wide {
+  grid-column: 1 / -1;
+}
+.read-grid dt {
   margin-bottom: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.read-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* A value with its control beside it (a state badge and the toggle for it). */
+.read-grid__value-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
 }
 /* A <dl> used as a read-only label/value pair. Without this the UA's default
    `margin-inline-start: 40px` on <dd> indents every value away from its own
@@ -1160,6 +1277,20 @@ h3 {
   color: var(--text);
   border-color: var(--accent);
 }
+/* "‹ Back to App Registrations" — a text link at the start of the bar, not a
+   boxed icon button: it is the pane's way out, and it names where it goes. */
+.workspace__pane-bar .workspace__pane-back {
+  gap: var(--space-1);
+  border-color: transparent;
+  background: transparent;
+  padding-left: 0;
+  color: var(--accent);
+}
+.workspace__pane-bar .workspace__pane-back:hover {
+  border-color: transparent;
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
 
 /* ---------- Nav items ---------- */
 .nav__item {
@@ -1215,6 +1346,33 @@ h3 {
   opacity: 0.9;
   flex-shrink: 0;
 }
+/* "A job this page owns is running" — a small accent dot on the nav icon's
+   corner, so it reads the same on the labelled rail and the collapsed one.
+   The pulse is a slow opacity change (no movement), and the reduced-motion
+   block turns it off: the dot alone still says it. */
+.nav__icon {
+  position: relative;
+}
+.nav__activity {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+  animation: ui-activity-pulse 1.6s var(--ease-standard) infinite;
+}
+@keyframes ui-activity-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
 .nav__label {
   flex: 1;
   overflow: hidden;
@@ -1223,11 +1381,13 @@ h3 {
 }
 
 /* ---------- Apps view ---------- */
+/* A flex column, not `auto 1fr` rows: the page header above the list is a
+   visually hidden <h1> now (the top bar names the page), and as a grid row it
+   would still have cost its row gap. */
 .apps-view {
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  gap: var(--space-3);
   min-height: 0;
 }
 .apps-view__body {
@@ -1236,6 +1396,7 @@ h3 {
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--space-3);
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -1256,12 +1417,49 @@ h3 {
   background: var(--surface);
   box-shadow: var(--shadow-2);
 }
-/* Right-aligned action cluster in a list/section header (export + refresh). */
-.list-header-actions {
+/* The card's one toolbar row: search (takes the slack), the Filters toggle,
+   then the page's actions packed to the end. Wraps at the 900px minimum — the
+   actions drop to a second line before the search box gets too short to type
+   in. */
+.app-list__toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+.app-list__toolbar-search {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.app-list__toolbar .filter-toggle {
+  align-self: center;
+}
+.app-list__toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+/* Count (with select-all) on the left, sort on the right, one line. */
+.app-list__metabar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 var(--space-3);
+}
+.app-list__metabar > .app-list__selectbar {
+  flex: 1 1 auto;
+}
+/* The selection bar sits at the foot of the card (after the rows), so opening
+   it takes height from the bottom of the list instead of pushing the rows
+   down. Capped, with its own scroll, for a long failure list or a tall
+   confirm form. */
+.app-list > .bulk-action-bar {
+  flex: 0 0 auto;
+  max-height: 55%;
+  overflow: auto;
 }
 .app-list__scroller {
   overflow: auto;
@@ -1353,6 +1551,43 @@ h3 {
   font-size: var(--text-xs);
   color: var(--text-muted);
   white-space: nowrap;
+}
+/* Extra row columns for a window with room to spare (credential counts,
+   created date, sign-in audience; type and created on the enterprise list).
+   Hidden by default — at the 900px minimum a row has room for its name and
+   state only — and switched on by window width, since container queries are
+   off the table here. Fixed widths, packed after the flexible name, so they
+   line up from row to row without a header: each value says what it is
+   ("2 secrets", "Created 2024-03-14"). Never wraps: a row is `ROW_HEIGHT`. */
+.app-list__row-col {
+  display: none;
+  flex: 0 0 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+@media (min-width: 1100px) {
+  .app-list__row-col {
+    display: block;
+  }
+  .app-list__row-col--extra {
+    display: none;
+  }
+  /* A fixed slot, so the columns after it start at the same x on every row
+     whatever the phrase ("12d left", "one expired 240d ago", nothing). */
+  .app-list__row .row-meta > .app-list__row-expiry {
+    flex: 0 0 136px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+@media (min-width: 1500px) {
+  .app-list__row-col--extra {
+    display: block;
+    flex-basis: 156px;
+  }
 }
 /* Column sort above the virtualized rows. Deliberately a strip of text buttons
    rather than a `<select>`: the three columns and the active direction stay
@@ -1503,9 +1738,8 @@ h3 {
 
 /* ---------- Managed identities view ---------- */
 .mi-view {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  gap: var(--space-3);
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
 }
@@ -1518,20 +1752,21 @@ h3 {
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--space-3);
+  flex: 1 1 auto;
   min-height: 0;
 }
+/* Layout only. The card is `ListScaffold`'s own `.app-list`; this wrapper used
+   to draw a second border, background and padding around it, so the Managed
+   Identities list was a card inside a card. */
 .mi-view__list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-2);
   /* Scrolling lives in the inner virtualized `.app-list__scroller`, so the
      search/type filters stay pinned (matching the other two lists). */
   min-height: 0;
-  padding: var(--space-2);
+}
+.mi-view__list > .app-list {
+  flex: 1 1 auto;
 }
 /* The managed-identity detail window in the workspace pane. Mirrors the old
    `.mi-view__detail` card (whole-card scroll), filling the pane below its bar. */
@@ -1555,27 +1790,6 @@ h3 {
   flex-direction: column;
   gap: var(--space-4);
   margin-top: var(--space-3);
-}
-.mi-properties {
-  display: grid;
-  /* The label column sizes to its longest label but never past 40%, and the
-     value column may shrink below an unbroken id's width (the id wraps) — a
-     bare `max-content 1fr` let either push the values past the pane edge. */
-  grid-template-columns: fit-content(40%) minmax(0, 1fr);
-  gap: var(--space-1) var(--space-3);
-  align-items: baseline;
-  padding: var(--space-3);
-  background: var(--bg-subtle);
-  border-radius: var(--radius-md);
-}
-.mi-properties dt {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.mi-properties dd {
-  margin: 0;
 }
 /* Collapsible scoping sections under the permissions table (Exchange /
    SharePoint) — bordered so they read as tools, not more table rows. */
@@ -1827,16 +2041,44 @@ h3 {
 }
 
 /* Home dashboard */
+/* No padding of its own: `.shell__content` already supplies the page gutter,
+   and the extra inset here put Home's left edge 24px inside every other
+   page's. Capped like the other tool pages so a maximized window gets wider
+   cards, not a sixth column. */
 .dashboard {
-  padding: var(--space-5);
+  max-width: var(--page-max);
 }
+/* Explicit column counts by window width, not `auto-fill`: the Security
+   posture card spans two columns, and with a free column count that left a
+   ragged last row (one card, then a gap) at most widths. One column on a
+   phone (the Pages demo), two on the collapsed-rail desktop, three from the
+   point the labelled rail fits beside them — every row comes out full:
+   [apps][enterprise][identities] / [credentials][posture · posture]. */
 .dash-grid {
   display: grid;
-  /* `min(100%, 280px)` keeps the track from ever exceeding its column, so on a
-     phone the cards drop to one column instead of forcing horizontal overflow. */
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4);
-  margin-top: var(--space-4);
+}
+@media (min-width: 700px) {
+  .dash-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dash-card--wide {
+    grid-column: span 2;
+  }
+}
+@media (min-width: 1200px) {
+  .dash-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+/* The wide card's ranked findings run in two columns, so nine findings are
+   five rows and each has room for its whole name. */
+@media (min-width: 700px) {
+  .dash-card--wide .posture-findings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--space-4);
+  }
 }
 .dash-card {
   background: var(--surface-raised);
@@ -1847,6 +2089,17 @@ h3 {
   flex-direction: column;
   gap: var(--space-3);
   box-shadow: var(--shadow-2);
+}
+/* A short card beside a tall one keeps its own height instead of stretching
+   to the row's (Credential health next to Security posture was 800px of
+   blank card with a button at the bottom). */
+.dash-card--compact {
+  align-self: start;
+}
+/* Text lines in a card take the card's own gap, not the UA's paragraph margins
+   on top of it. */
+.dash-card p {
+  margin: 0;
 }
 .dash-card__title {
   margin: 0;
@@ -2038,7 +2291,23 @@ h3 {
 .conditional-access-tab,
 .audit-view {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
+}
+/* The grid gap is the rhythm here; the header's own bottom margin would add
+   to it. */
+.audit-view > .ui-section-header {
+  margin-bottom: 0;
+}
+/* Facet tabs + filter box on one line. */
+.audit-view__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+}
+.audit-view__search {
+  flex: 1 1 260px;
+  min-width: 0;
 }
 /* The enterprise pane's own tab roots. These classes existed in the markup but
    had NO rule at all, so those tabs had no vertical rhythm of their own — the
@@ -2230,18 +2499,6 @@ h3 {
 }
 
 /* ---------- Bulk actions ---------- */
-.selection-bar {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin-right: var(--space-2);
-}
-.selection-bar__count {
-  font-size: var(--text-base);
-  font-weight: var(--weight-medium);
-  color: var(--text-muted);
-}
 .bulk-tab {
   display: grid;
   gap: var(--space-3);
@@ -2953,11 +3210,11 @@ h3 {
    rounded, padded inputs and buttons they read as someone else's control.
    Metrics deliberately match `.thaw-input` / `.ui-icon-btn` (32px box,
    --radius-md) so a select can sit beside either without a seam.
-   Applied via `.ui-select`; `.thaw-select` is swept in too so thaw's own Select
-   (claims editor) lands in the same language instead of thaw's separate token
-   set. */
-.ui-select,
-.thaw-select {
+   Applied via `.ui-select`, the class `components::ui::Select` and the
+   hand-written selects both render. (Thaw's own `Select` is retired: its
+   `.thaw-select` is a wrapper span, so sweeping it into this rule drew a box
+   around the box and a second chevron.) */
+.ui-select {
   -webkit-appearance: none;
   appearance: none;
   box-sizing: border-box;
@@ -2985,42 +3242,32 @@ h3 {
      as an inline SVG data URI — no network request (the CSP forbids one) and no
      extra wrapper element to hang a pseudo-element on, since these are bare
      <select>s inside a thaw Field. The stroke is baked into the URI and so
-     cannot use a CSS variable; the dark-mode override below swaps the whole
-     image. Keep the two in sync. */
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%235b5b5b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+     cannot use a colour token; `--select-chevron` holds the whole image, once
+     per theme, beside the other tokens. */
+  background-image: var(--select-chevron);
   background-repeat: no-repeat;
   background-position: right var(--space-2) center;
   background-size: 16px 16px;
 }
-.ui-select:hover,
-.thaw-select:hover {
+.ui-select:hover {
   border-color: var(--border-strong);
   background-color: var(--bg-subtle);
 }
-.ui-select:focus-visible,
-.thaw-select:focus-visible {
+.ui-select:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
-.ui-select:disabled,
-.thaw-select:disabled {
+.ui-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 /* The popup list is drawn by the OS; `color-scheme` on :root does the heavy
    lifting, but naming the colours keeps Linux/Chrome from falling back to white
    rows on a dark page. */
-.ui-select option,
-.thaw-select option {
+.ui-select option {
   background-color: var(--surface);
   color: var(--text);
-}
-@media (prefers-color-scheme: dark) {
-  .ui-select,
-  .thaw-select {
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  }
 }
 
 /* ---- SearchInput clear (×) ---- */
@@ -3110,22 +3357,11 @@ h3 {
   background: linear-gradient(
     90deg,
     var(--bg-subtle) 0%,
-    rgba(0, 0, 0, 0.06) 50%,
+    var(--skel-sheen) 50%,
     var(--bg-subtle) 100%
   );
   background-size: 200% 100%;
   animation: ui-skel-shimmer 1.4s linear infinite;
-}
-@media (prefers-color-scheme: dark) {
-  .ui-skel {
-    background: linear-gradient(
-      90deg,
-      var(--bg-subtle) 0%,
-      rgba(255, 255, 255, 0.08) 50%,
-      var(--bg-subtle) 100%
-    );
-    background-size: 200% 100%;
-  }
 }
 @keyframes ui-skel-shimmer {
   0% { background-position: 100% 0; }
@@ -3453,37 +3689,42 @@ h3 {
   letter-spacing: 0.03em;
 }
 
-/* ---- SectionHeader ---- */
+/* ---- SectionHeader ----
+   A page's description (left) and actions (right). The page's NAME is drawn
+   once, in the top bar; the <h1> here is visually hidden — see the component.
+   The description wraps before the actions do. */
 .ui-section-header {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
   flex-wrap: wrap;
 }
-.ui-section-header__group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+/* Neither a description nor actions: only the hidden heading, so no row. */
+.ui-section-header--bare {
+  margin-bottom: 0;
+}
+.ui-section-header__description {
+  flex: 1 1 24ch;
   min-width: 0;
-}
-.ui-section-header__crumb {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-.ui-section-header__title {
-  font-size: var(--text-xl);
-  font-weight: var(--weight-semibold);
+  max-width: 100ch;
   margin: 0;
-  letter-spacing: -0.01em;
+  color: var(--text-muted);
 }
 .ui-section-header__actions {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+  /* Buttons of mixed kinds plus the "Updated … ago" stamp share one baseline. */
+  align-items: center;
+  /* Right-aligned whether or not a description sits before them. */
+  margin-left: auto;
+}
+/* "Updated 5 min ago" beside a list's Refresh (`components::ui::DataAge`). */
+.data-age {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* =====================================================================
@@ -3551,16 +3792,8 @@ h3 {
   .shell__content {
     padding: var(--space-2);
   }
-  .dashboard {
-    padding: var(--space-3);
-  }
   .dash-grid {
-    grid-template-columns: 1fr;
     gap: var(--space-3);
-    margin-top: var(--space-3);
-  }
-  .ui-section-header__title {
-    font-size: var(--text-md);
   }
   /* Dialogs take nearly the full width with tighter padding so their content
      isn't boxed into a sliver. */
@@ -4011,10 +4244,26 @@ h3 {
   margin-top: var(--space-2);
 }
 
-/* Posture strip — the workbench header's read-only severity summary. */
-.posture-strip__counts {
-  margin-top: var(--space-2);
-  margin-bottom: var(--space-2);
+/* Posture strip — the audit's read-only severity summary, its age and its
+   actions on one line (wrapping at narrow widths: counts, then age, then the
+   buttons packed to the end). */
+.posture-strip__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 var(--space-2);
+}
+.posture-strip__age {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.posture-strip__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 /* Findings pane — ranked, expandable finding groups. */
@@ -4181,7 +4430,6 @@ h3 {
 
 /* Access-readiness checklist (role/scope readiness page). */
 .readiness {
-  padding: var(--space-3);
   max-width: var(--page-max);
 }
 /* Each plane's checks flow into as many ~390px columns as fit. */

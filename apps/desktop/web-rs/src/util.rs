@@ -54,6 +54,87 @@ where
     }
 }
 
+/// Takes keyboard focus off the focused element when it sits inside `scope`
+/// (anywhere in the document for `None`). Call it **before** the write that
+/// disposes that subtree — closing a dialog, closing an open item, a tenant
+/// switch, a tab rebuild.
+///
+/// A Thaw `Input` / `Textarea` validates on blur through a `Callback` its own
+/// component owns. Chromium fires `blur` synchronously while it removes a
+/// focused element, and by then the reactive owner is already cleaned up, so
+/// the handler ran a disposed callback and panicked the webview: Escape on a
+/// dialog with the caret in a field, or Cmd/Ctrl-W on a pane with one focused.
+/// Blurring first runs that handler while everything it reads is still alive,
+/// and the removal that follows has no focused element left to blur.
+pub fn blur_focus_within(scope: Option<&web_sys::Element>) {
+    use wasm_bindgen::JsCast;
+    let Some(active) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element())
+    else {
+        return;
+    };
+    if scope.is_some_and(|scope| !scope.contains(Some(&active))) {
+        return;
+    }
+    if let Ok(el) = active.dyn_into::<web_sys::HtmlElement>() {
+        let _ = el.blur();
+    }
+}
+
+/// [`blur_focus_within`] for the first element matching `selector` — for a
+/// caller in the state layer that holds no `NodeRef` (the open-items working
+/// set). A no-op when nothing matches.
+pub fn blur_focus_within_selector(selector: &str) {
+    if let Some(scope) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(selector).ok().flatten())
+    {
+        blur_focus_within(Some(&scope));
+    }
+}
+
+/// Whether this is an Apple platform, where the accelerator key is ⌘ rather
+/// than Ctrl. Read from the webview's own `navigator` (WKWebView on macOS
+/// reports "MacIntel"), so it needs no backend round trip.
+pub fn is_apple_platform() -> bool {
+    web_sys::window()
+        .map(|w| w.navigator())
+        .and_then(|n| n.platform().ok())
+        .is_some_and(|p| is_apple_platform_name(&p))
+}
+
+/// [`is_apple_platform`]'s test on a `navigator.platform` value.
+fn is_apple_platform_name(platform: &str) -> bool {
+    let p = platform.to_ascii_lowercase();
+    p.starts_with("mac") || p.starts_with("iphone") || p.starts_with("ipad")
+}
+
+/// A shortcut as this platform writes it: `⌘K` on a Mac, `Ctrl+K` elsewhere.
+/// The app used to print "Ctrl/Cmd+K" everywhere and leave the reader to pick.
+pub fn accel(key: &str) -> String {
+    accel_on(is_apple_platform(), key)
+}
+
+/// [`accel`] for a known platform (the unit-testable half).
+pub fn accel_on(apple: bool, key: &str) -> String {
+    if apple {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
+/// The accelerator-click gesture in this platform's words: `⌘-click` /
+/// `Ctrl-click`.
+pub fn accel_click() -> &'static str {
+    if is_apple_platform() {
+        "⌘-click"
+    } else {
+        "Ctrl-click"
+    }
+}
+
 /// Reads a `localStorage` value by key, returning `None` when the key is
 /// absent or the storage API is unavailable. Shared by the credential
 /// rotate-vault prefill (`credentials_tab`) and the saved-views persistence
@@ -300,6 +381,20 @@ pub fn created_in_range(
 
 #[cfg(test)]
 mod tests {
+    /// The accelerator is written the way the platform writes it, and the
+    /// platform is read from `navigator.platform`'s own values.
+    #[test]
+    fn a_shortcut_is_written_in_the_platforms_notation() {
+        assert_eq!(super::accel_on(true, "K"), "⌘K");
+        assert_eq!(super::accel_on(false, "K"), "Ctrl+K");
+        for mac in ["MacIntel", "MacARM", "iPhone", "iPad"] {
+            assert!(super::is_apple_platform_name(mac), "{mac}");
+        }
+        for other in ["Win32", "Linux x86_64", ""] {
+            assert!(!super::is_apple_platform_name(other), "{other}");
+        }
+    }
+
     use super::*;
 
     #[test]

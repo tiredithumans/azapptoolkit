@@ -400,6 +400,12 @@ impl Session {
     /// from the signal — the same "make it structural, not vigilant" trade as
     /// `TenantScopedUi::reset`.
     fn update_open_items(&self, f: impl FnOnce(&mut Vec<OpenItem>)) {
+        // Before the write: a close disposes that item's pane, and a field
+        // still holding focus inside it would blur into a disposed callback
+        // (`util::blur_focus_within`). Harmless for an open or a retitle —
+        // focus is on the row or chip that asked, outside the workspace.
+        #[cfg(target_arch = "wasm32")]
+        crate::util::blur_focus_within_selector(".workspace");
         self.open_items.update(f);
         if let Some(key) = self.workspace_key()
             && let Ok(raw) = serde_json::to_string(&self.open_items.get_untracked())

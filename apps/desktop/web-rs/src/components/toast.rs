@@ -24,6 +24,12 @@ use crate::state::use_session;
 /// never auto-dismiss ([`Toast::is_sticky`]).
 const TOAST_TIMEOUT_MS: i32 = 5000;
 
+/// The same, for a success / info toast that carries an action (Undo, Reopen,
+/// View changelog): twice as long, because the toast is the only place the
+/// action exists and five seconds is less than it takes to read the message
+/// and decide.
+const TOAST_ACTION_TIMEOUT_MS: i32 = 10_000;
+
 /// Optional action attached to a toast (e.g. "Retry"). CSR-only, single-
 /// threaded, so `Rc<dyn Fn()>` is used rather than Leptos `Callback`: the
 /// handler is a plain `'static` closure that re-runs an IPC call and never
@@ -113,13 +119,16 @@ pub fn ToastHost() -> impl IntoView {
             Some(w) => w,
             None => return,
         };
-        // Snapshot the (id, sticky) of the currently-present toasts.
-        let present: Vec<(u64, bool)> =
-            toasts.with(|list| list.iter().map(|t| (t.id, t.is_sticky())).collect());
+        // Snapshot the (id, sticky, has-action) of the currently-present toasts.
+        let present: Vec<(u64, bool, bool)> = toasts.with(|list| {
+            list.iter()
+                .map(|t| (t.id, t.is_sticky(), t.action.is_some()))
+                .collect()
+        });
 
         handles.update_value(|map| {
             // Cancel + drop timers for toasts that are gone.
-            let present_ids: Vec<u64> = present.iter().map(|(id, _)| *id).collect();
+            let present_ids: Vec<u64> = present.iter().map(|(id, ..)| *id).collect();
             let stale: Vec<u64> = map
                 .keys()
                 .copied()
@@ -131,7 +140,7 @@ pub fn ToastHost() -> impl IntoView {
                 }
             }
             // Schedule timers for new auto-dismissable toasts.
-            for (id, sticky) in present {
+            for (id, sticky, has_action) in present {
                 // Sticky toasts (`Toast::is_sticky`) stay; everything else expires.
                 if sticky || map.contains_key(&id) {
                     continue;
@@ -140,8 +149,13 @@ pub fn ToastHost() -> impl IntoView {
                 // inside a JS callback, which runs outside any reactive owner.
                 let cb = Closure::once_into_js(move || session.dismiss_toast(id));
                 let cb_fn = cb.unchecked_ref::<js_sys::Function>();
-                if let Ok(h) = win
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(cb_fn, TOAST_TIMEOUT_MS)
+                let timeout = if has_action {
+                    TOAST_ACTION_TIMEOUT_MS
+                } else {
+                    TOAST_TIMEOUT_MS
+                };
+                if let Ok(h) =
+                    win.set_timeout_with_callback_and_timeout_and_arguments_0(cb_fn, timeout)
                 {
                     map.insert(id, h);
                 }

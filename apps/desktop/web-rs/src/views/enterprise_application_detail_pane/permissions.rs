@@ -103,23 +103,6 @@ pub(super) fn PermissionsContent(
     // identical action): the panel's revoke icon sets `pending_revoke`, and
     // confirming runs `do_revoke`. On success clear the selection and re-fetch.
     let pending_revoke: RwSignal<Option<String>> = RwSignal::new(None);
-    let do_revoke = move |assignment_id: String| {
-        let id = sp_id.get();
-        revoke_cmd.run(
-            move |()| {
-                pending_revoke.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
-                    .await
-            },
-        );
-    };
-    let on_revoke = Callback::new(move |assignment_id: String| {
-        revoke_cmd.error.set(None);
-        pending_revoke.set(Some(assignment_id));
-    });
     // The revoke icon hands back only an assignment id, so the dialog resolves
     // the row's own permission out of the held list the table is already
     // rendering — same source, same fallback to the raw appRole id, so the
@@ -143,6 +126,32 @@ pub(super) fn PermissionsContent(
                 })
             })
             .unwrap_or_default()
+    });
+    let do_revoke = move |assignment_id: String| {
+        let id = sp_id.get();
+        revoke_cmd.run(
+            move |()| {
+                // Read before the clear below empties it. The App Registration
+                // tab has always confirmed a revoke; this one closed its dialog
+                // and said nothing.
+                let revoked = pending_revoke_label.get_untracked();
+                pending_revoke.set(None);
+                reload.update(|n| *n += 1);
+                session.toast_success(if revoked.is_empty() {
+                    "Permission revoked.".to_string()
+                } else {
+                    format!("Revoked {revoked}.")
+                });
+            },
+            move |tenant_id| async move {
+                permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
+                    .await
+            },
+        );
+    };
+    let on_revoke = Callback::new(move |assignment_id: String| {
+        revoke_cmd.error.set(None);
+        pending_revoke.set(Some(assignment_id));
     });
 
     let display_name =
@@ -171,7 +180,8 @@ pub(super) fn PermissionsContent(
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
     // permissions + the delegated scopes the app publishes.
-    let scopes = signal.with(|d| d.service_principal.oauth2_permission_scopes.clone());
+    // (A snapshot for this mount, untracked: the pane rebuilds the tab on a reload.)
+    let scopes = signal.with_untracked(|d| d.service_principal.oauth2_permission_scopes.clone());
 
     let scopes_view = view! {
         <DataTable
@@ -360,8 +370,8 @@ pub(super) fn PermissionsContent(
             </Suspense>
             <ConfirmDialog
                 open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
-                title="Revoke permission?"
-                body="Remove this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
+                title="Revoke this permission?"
+                body="Revokes this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
                 subject=pending_revoke_label
                 confirm_label="Revoke"
                 busy=revoke_cmd.busy

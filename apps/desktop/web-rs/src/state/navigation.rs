@@ -75,6 +75,52 @@ impl Session {
         self.view.set(view);
     }
 
+    /// Mark (or clear) a long-running job as in flight, so the nav shows which
+    /// page has work running while the operator is on another one. Called by
+    /// the job's own view, which mirrors its running flag here.
+    pub fn set_background_work(&self, work: BackgroundWork, running: bool) {
+        let ui = self.tenant_ui;
+        if ui.background_work.try_with_untracked(|w| w.contains(&work)) == Some(!running) {
+            ui.background_work.update(|w| {
+                if running {
+                    w.insert(work);
+                } else {
+                    w.remove(&work);
+                }
+            });
+        }
+    }
+
+    /// Whether `view` owns a job in flight — the nav row's activity mark
+    /// (tracked). A bulk run counts for the Bulk Actions page: every bar shares
+    /// the one `bulk_running` flag.
+    pub fn view_is_busy(&self, view: ActiveView) -> bool {
+        let ui = self.tenant_ui;
+        ui.background_work
+            .with(|w| w.iter().any(|work| work.view() == view))
+            || (view == ActiveView::BulkActions && ui.bulk_running.get())
+    }
+
+    /// Say that a job finished while the operator was on another page, with a
+    /// "View" action that goes back to it. A no-op when its page is the one on
+    /// screen: the result is already in front of them there.
+    ///
+    /// For a caller that has already checked the tenant the job ran for is
+    /// still active (`Session::is_active_tenant`).
+    pub fn notify_background_done(&self, work: BackgroundWork, kind: ToastKind, message: String) {
+        let view = work.view();
+        if self.view.try_get_untracked() == Some(view) {
+            return;
+        }
+        let session = *self;
+        self.push_toast(
+            kind,
+            message,
+            Some("View".to_string()),
+            Some(std::rc::Rc::new(move || session.set_view(view))),
+        );
+    }
+
     /// Navigate to the Security workbench on a specific sub-tab. Used by the
     /// Home cards and command palette to deep-link past the default Findings
     /// tab.
@@ -89,7 +135,7 @@ impl Session {
     }
 
     /// Navigate to Settings on a specific tab (`"app-reg"` | `"enterprise"` |
-    /// `"naming"` | `"connection"`). Settings lives behind the account menu —
+    /// `"naming"` | `"connection"` | `"appearance"`). Settings lives behind the account menu —
     /// the one destination with no shortcut and no rail row — so the callouts
     /// that say "set them in Settings" route through here instead of leaving
     /// the operator to find it.

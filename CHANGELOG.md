@@ -6,6 +6,54 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Added
+
+- The window reopens at the size and position you left it, including maximized.
+- Settings → Appearance lets you pick Light or Dark instead of following the system.
+- An open item has a "Back to …" link to the page underneath it.
+- On a wide window the App Registrations and Enterprise Applications rows also show credentials, type and created date.
+- The app shows its logo while it starts instead of a blank window.
+
+### Changed
+
+- Each page's title now appears once, in the top bar, and the lists start higher: about three more rows fit.
+- A list's search box, Filters and actions share one row; its count and sort share another.
+- Selecting apps opens one bar at the foot of the list instead of pushing the rows down; the header duplicate is gone.
+- Security's severity tiles and Run audit show only on the Findings and All apps tabs, so the other tabs get the room.
+- Home's Security posture card is two columns wide and Credential health no longer stretches to match it.
+- Search lists at most two pages that match only by keyword, so matching apps sit closer to the top.
+- Shortcuts are written for your platform (⌘K on a Mac, Ctrl+K elsewhere), and Refresh token has its own icon.
+- Right-click no longer opens the browser's Back / Reload menu, except in text fields and over selected text.
+- An app whose older credential has lapsed reads "one expired 240d ago" rather than "240 days ago".
+- Restoring a backup now asks you to type RESTORE, with Cancel first.
+- Replacing an app's owner set now confirms first, and can no longer be applied with no owners staged.
+- "Grant scoped (remove org-wide)" under Exchange's Advanced block now confirms before removing org-wide grants.
+- The Overview tabs of apps, enterprise apps and managed identities share one layout and say "Object ID" / "App ID".
+- "Grant admin consent" always means consenting an app's permissions; "Grant consent" is the toolkit's own access.
+- Labels use sentence case throughout ("Sign out", "Add default owners", the Settings tabs, the Home cards).
+- A SharePoint site grant's row button says "Revoke", as its dialog does; the Delegated grants page matches its tab.
+- Deleting an app registration now offers Undo on its confirmation, as the bulk delete does.
+- Refreshing an open item with unsaved edits now asks before discarding them.
+- A running audit, sweep, backup, restore or bulk run marks its page in the navigation while you are elsewhere.
+- An audit, sweep or bulk create that finishes while you are on another page now tells you, with a link back.
+- Notifications that carry an action (Undo, Reopen, View) stay for ten seconds instead of five.
+- The three lists and the Security lenses show "Updated … ago" beside Refresh, with the exact time on hover.
+
+### Fixed
+
+- Unsaved edits on one tab are no longer lost when another tab of the same item saves or reloads.
+- Owner replacements, federated credential forms, SSO settings and enterprise notes now count as unsaved edits.
+- Revoking a permission or a site grant, or assigning an Azure role, now shows a notification when it succeeds.
+- Switching between the Bulk Actions tabs no longer drops a running action's progress, failures or Undo.
+- Refresh on Credential expiry and SSO certificates now re-reads from Microsoft Entra instead of the cached board.
+- The Managed Identities list no longer draws a card inside a card.
+- Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
+- Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
+- Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.
+- An app's Created date shows as a date instead of a raw timestamp, and its ID labels are no longer monospace.
+- The delete icon in the API permissions table lines up on every row; Disaster Recovery icons no longer touch labels.
+- The sign-on method reads "SAML" rather than "saml"; activity results, plurals and a few tooltips read as plain words.
+
 ## [0.35.4] - 2026-11-10
 
 ### Changed

@@ -75,6 +75,10 @@ fn sweep_orphaned_mounts() {
 pub fn reset() {
     crate::ipc_mock::reset();
     sweep_orphaned_mounts();
+    // Every list and lens asks how old its cached data is, for its "Updated …
+    // ago" stamp. No test is about that read unless it mocks it itself, so it
+    // answers "nothing cached" by default rather than a loud reject per mount.
+    crate::ipc_mock::mock_ok("list_cache_age", &Option::<u64>::None);
 }
 
 /// A default signed-in tenant context, so views that guard on

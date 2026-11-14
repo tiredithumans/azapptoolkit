@@ -221,7 +221,7 @@ fn RetiredGroupRow(
                                         view! { <Spinner /> }
                                             .into_any()
                                     } else {
-                                        view! { "Delete permanently" }.into_any()
+                                        view! { "Delete forever" }.into_any()
                                     }
                                 }}
                             </Button>

@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::expose_api::{
@@ -24,7 +24,7 @@ use crate::bindings::expose_api::{
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError, Spinner,
+    Badge, BadgeTone, DataTable, DetailLoadError, DetailSkeleton, FormError, Select, Spinner,
 };
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
@@ -660,7 +660,7 @@ fn ExposeApiLoaded(
                     }
                 }
                 <Field label="Who can consent">
-                    <Select value=scope_type>
+                    <Select value=scope_type label="Who can consent">
                         <option value="User">"Admins and users"</option>
                         <option value="Admin">"Admins only"</option>
                     </Select>

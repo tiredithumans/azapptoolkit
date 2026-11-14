@@ -11,6 +11,7 @@ use thaw::Input;
 
 use crate::bindings::keyvault;
 use crate::state::use_session;
+use crate::util::count_noun;
 
 /// Max rows rendered at once (the list scrolls; the count line reports the rest).
 const SHOW_MAX: usize = 25;
@@ -62,7 +63,10 @@ pub fn VaultPicker(
                 <div class="vault-picker">
                     <div class="vault-picker__count muted small">
                         {if q.is_empty() {
-                            format!("{total} discovered vaults — type to filter")
+                            format!(
+                                "{} — type to filter",
+                                count_noun(total, "discovered vault", "discovered vaults"),
+                            )
                         } else {
                             format!("{match_count} of {total} match")
                         }}

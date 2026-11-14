@@ -38,6 +38,8 @@ pub fn ManagedScopeGroupPanel(
 ) -> impl IntoView {
     let session = use_session();
     let add_text = RwSignal::new(String::new());
+    // Mailboxes typed but not yet added are unsaved work.
+    crate::hooks::use_unsaved_marker(move || add_text.with(|t| !t.trim().is_empty()));
     // Drives the membership mutations (`do_add` / `do_remove`) + initial load.
     // The consent fallback offers this component's OWN scope set, not the Graph
     // write scopes `use_command` defaults to: these mutations ride an on-demand

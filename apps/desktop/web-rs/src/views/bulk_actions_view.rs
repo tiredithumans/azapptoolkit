@@ -1,6 +1,6 @@
 //! Bulk actions page. Two sections behind a sub-tab bar:
 //!
-//! - **Selected apps** — the shared [`BulkActionBar`] (Grant consent / Remove
+//! - **Selected apps** — the shared [`BulkActionBar`] (Grant admin consent / Remove
 //!   expired credentials / Delete) over the apps checked in the App
 //!   Registrations list (`session.tenant_ui.selected_app_ids`). The bar is the single home
 //!   of the bulk command-calling logic; this page just hosts it. It reviews the
@@ -17,6 +17,9 @@
 
 use crate::hooks::use_progress_stream::use_progress_stream;
 use leptos::prelude::*;
+use std::collections::HashSet;
+use std::rc::Rc;
+
 use thaw::{Button, ButtonAppearance, Textarea};
 
 use crate::bindings::bulk;
@@ -26,16 +29,29 @@ use crate::components::bulk_action_bar::{
     BulkAction, BulkActionBar, BulkFailure, BulkProgressRow, session_dead_error,
 };
 use crate::components::icon::IconName;
+use crate::components::toast::ToastKind;
 use crate::components::ui::{
     Callout, EmptyState, FormError, SectionHeader, TabBar, TabBarItem, tab_id,
 };
 use crate::state::{ActiveView, use_session};
-use crate::util::count_noun;
+use crate::util::{count_noun, keep_alive};
 
 #[component]
 pub fn BulkActionsView() -> impl IntoView {
     let session = use_session();
     let tab = RwSignal::new(String::from("selected"));
+    // Both sub-tabs mount on first visit and then stay mounted, hidden
+    // (`util::keep_alive`, as the Security workbench's panes). They used to be
+    // a `match` that remounted on every switch: leaving "Selected apps"
+    // mid-run disposed the bar's progress, failures and Undo, and coming back
+    // showed only "Another bulk action is still running" with no Cancel.
+    let visited = RwSignal::new(HashSet::from([tab.get_untracked()]));
+    Effect::new(move |_| {
+        let current = tab.get();
+        visited.update(|set| {
+            set.insert(current);
+        });
+    });
 
     // After a successful selection-driven run, refetch the App Registrations
     // list (a delete / remove-expired sweep invalidates the backend cache). The
@@ -59,15 +75,9 @@ pub fn BulkActionsView() -> impl IntoView {
 
     let create_json = RwSignal::new(String::new());
 
-    // Clear any prior create result/error when the active tab changes so
-    // messages don't bleed across sections.
-    Effect::new(move |_| {
-        let _ = tab.get();
-        summary.set(None);
-        failures.set(Vec::new());
-        error.set(None);
-        progress.set(None);
-    });
+    // (No clearing on a tab change: the create result renders only inside the
+    // Create tab, and wiping it on a switch threw away a result that landed
+    // while the operator was looking at the other tab.)
 
     // Its own flag, not `busy`: `busy` also shows the run's progress row, and
     // the file dialog is not a run.
@@ -172,12 +182,12 @@ pub fn BulkActionsView() -> impl IntoView {
                             .iter()
                             .any(|o| o.status == BulkCreateStatus::Created)
                     {
-                        " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant consent."
+                        " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant admin consent."
                     } else {
                         ""
                     };
-                    summary.set(Some(format!(
-                        "{}: {ok} ok, {}{}.{consent_note}",
+                    let headline = format!(
+                        "{}: {ok} ok, {}{}.",
                         if r.validate_only {
                             "Validated"
                         } else {
@@ -185,7 +195,28 @@ pub fn BulkActionsView() -> impl IntoView {
                         },
                         count_noun(fails.len(), "problem", "problems"),
                         if r.cancelled { " (cancelled)" } else { "" }
-                    )));
+                    );
+                    summary.set(Some(format!("{headline}{consent_note}")));
+                    // A create that finished while the operator was on another
+                    // page or tab ended without a word: say so, with the way
+                    // back to its result.
+                    let away = session.view.try_get_untracked() != Some(ActiveView::BulkActions)
+                        || tab.try_get_untracked().as_deref() != Some("create");
+                    if away && !r.validate_only {
+                        session.push_toast(
+                            if fails.is_empty() {
+                                ToastKind::Success
+                            } else {
+                                ToastKind::Info
+                            },
+                            format!("Bulk create finished. {headline}"),
+                            Some("View".to_string()),
+                            Some(Rc::new(move || {
+                                session.set_view(ActiveView::BulkActions);
+                                tab.set("create".to_string());
+                            })),
+                        );
+                    }
                     // A row that failed because the session died is the
                     // run stopping, not that app being broken: offer
                     // Re-authenticate like the bulk bar does.
@@ -208,7 +239,7 @@ pub fn BulkActionsView() -> impl IntoView {
         <main class="tool-page">
             <SectionHeader
                 title="Bulk Actions".to_string()
-                crumb="Act on the App Registrations you've selected, or create apps in bulk"
+                description="Act on the app registrations you've selected, or create apps in bulk."
                     .to_string()
             />
             <TabBar
@@ -226,8 +257,7 @@ pub fn BulkActionsView() -> impl IntoView {
                 role="tabpanel"
                 aria-labelledby=move || tab_id("bulk-tab", &tab.get())
             >
-                {move || match tab.get().as_str() {
-                    "create" => {
+                {keep_alive(tab, visited, "create", move || {
                         view! {
                             <div class="bulk-action">
                                 <span class="ui-text">
@@ -316,9 +346,8 @@ pub fn BulkActionsView() -> impl IntoView {
                                 {move || error.get().map(|e| view! { <FormError>{e}</FormError> })}
                             </div>
                         }
-                            .into_any()
-                    }
-                    _ => {
+                })}
+                {keep_alive(tab, visited, "selected", move || {
                         // The bar self-gates (visible while there's a selection or
                         // a result on screen); the hint shows whenever nothing is
                         // checked, including right after a run clears the selection.
@@ -356,9 +385,7 @@ pub fn BulkActionsView() -> impl IntoView {
                                 </EmptyState>
                             </Show>
                         }
-                            .into_any()
-                    }
-                }}
+                })}
             </div>
         </main>
     }

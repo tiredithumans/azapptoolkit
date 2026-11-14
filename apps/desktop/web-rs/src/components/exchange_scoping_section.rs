@@ -116,6 +116,9 @@ pub fn ExchangeScopingSection(
     let mig_planned = RwSignal::new(false);
     // The recommended grant's "this strips org-wide grants" confirmation.
     let confirm_strip = RwSignal::new(false);
+    // The same strip from the Advanced block (free-text groups): it removes the
+    // same org-wide grants, so it asks the same question.
+    let confirm_strip_advanced = RwSignal::new(false);
     // A grant outcome that carries warnings, kept inline until it's been read.
     // A clean grant toasts and reloads the caller (which rebuilds this whole
     // section), but a warned one must survive that: the backend reports
@@ -433,6 +436,21 @@ pub fn ExchangeScopingSection(
                 })
                 on_close=Callback::new(move |_| confirm_strip.set(false))
             />
+            // The Advanced block's "remove org-wide" grant ran on one click
+            // while the recommended one above asked first — the guard follows
+            // what the action does, not which button started it.
+            <ConfirmDialog
+                open=confirm_strip_advanced
+                title="Grant scoped access to these groups and remove org-wide grants?"
+                body="Scoped access to the groups you entered is granted first. Then the org-wide Microsoft Entra grants for the scoped mail permissions are removed, so this principal can reach only the mailboxes in those groups. Exchange can take 30 min–2 h to apply the change."
+                subject=Signal::derive(move || target.with(|t| t.display_name.clone()))
+                confirm_label="Grant scoped access"
+                on_confirm=Callback::new(move |_| {
+                    confirm_strip_advanced.set(false);
+                    do_grant(true);
+                })
+                on_close=Callback::new(move |_| confirm_strip_advanced.set(false))
+            />
 
             // Warned grant outcome (either grant path — this sits above both).
             {move || {
@@ -485,7 +503,7 @@ pub fn ExchangeScopingSection(
                             <div class="actions-row">
                                 <Button
                                     appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                    on_click=Box::new(move |_| do_grant(true))
+                                    on_click=Box::new(move |_| confirm_strip_advanced.set(true))
                                     disabled=Signal::derive(move || grant_cmd.busy.get())
                                 >
                                     "Grant scoped (remove org-wide)"

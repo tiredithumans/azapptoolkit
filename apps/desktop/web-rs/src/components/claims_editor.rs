@@ -12,13 +12,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Input, Select};
+use thaw::{Button, ButtonAppearance, Input};
 
 use crate::bindings::sso::{
     ClaimSchemaEntryDto, ClaimsPolicyDto, ClaimsTransformationDto, DEFAULT_NAME_ID_ATTRIBUTE,
     DEFAULT_SAML_CLAIMS, TransformInputClaimDto, TransformOutputClaimDto, TransformParamDto,
 };
-use crate::components::ui::Callout;
+use crate::components::ui::{Callout, Select};
 
 /// The directory `Source` values plus the UI-only `constant` sentinel (a claim
 /// with no source, just a static `Value`).
@@ -688,7 +688,7 @@ fn SchemaRowView(row: SchemaRow, schema: RwSignal<Vec<SchemaRow>>) -> impl IntoV
 
     view! {
         <div class="claims-editor__row">
-            <Select value=row.source>
+            <Select value=row.source label="Claim source">
                 {SOURCE_OPTIONS
                     .iter()
                     .map(|(v, label)| view! { <option value=*v>{*label}</option> })
@@ -855,7 +855,7 @@ fn TransformRowView(
         <div class="claims-editor__transform">
             <div class="claims-editor__transform-head">
                 <LabelledInput value=row.id label="Transformation id" placeholder="Transformation id" />
-                <Select value=row.method>
+                <Select value=row.method label="Transformation method">
                     {TRANSFORM_METHODS
                         .iter()
                         .map(|m| view! { <option value=*m>{*m}</option> })

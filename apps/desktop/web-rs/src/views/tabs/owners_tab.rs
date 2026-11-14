@@ -47,6 +47,9 @@ pub fn OwnersTab(
     // reconcile in one call.
     let replacing = RwSignal::new(false);
     let staged: RwSignal<Vec<DirectoryObject>> = RwSignal::new(Vec::new());
+    // A staged replacement is unsaved work: closing or refreshing the pane,
+    // or another tab's reload, asks before (or avoids) discarding it.
+    crate::hooks::use_unsaved_marker(move || replacing.get());
     let applying = RwSignal::new(false);
 
     // Hidden from the search: the staged set while replacing, else the
@@ -207,7 +210,27 @@ pub fn OwnersTab(
         staged.update(|s| s.retain(|x| x.id != id));
     };
 
-    let apply_replace = move |_| {
+    // Asked before `apply_replace` runs: replacing the set removes every
+    // current owner that is not staged, and a single removal already confirms.
+    let confirm_replace = RwSignal::new(false);
+    // What the confirm names: how many owners the app ends up with and how
+    // many current ones the replace removes.
+    let replace_summary = move || {
+        let staged_ids: Vec<String> = staged.with(|s| s.iter().map(|o| o.id.clone()).collect());
+        let removed = detail.with(|d| {
+            d.owners
+                .iter()
+                .filter(|o| !staged_ids.contains(&o.id))
+                .count()
+        });
+        format!(
+            "{}: {} in the new set, {} removed",
+            detail.with(|d| d.application.display_name.clone()),
+            count_noun(staged_ids.len(), "owner", "owners"),
+            count_noun(removed, "current owner", "current owners"),
+        )
+    };
+    let apply_replace = move || {
         if applying.get() {
             return;
         }
@@ -311,7 +334,7 @@ pub fn OwnersTab(
                 {move || {
                     view! {
                         <DataTable
-                            headers=vec!["Name", "UPN / Id", "Kind", ""]
+                            headers=vec!["Name", "UPN / ID", "Kind", ""]
                             rows=detail.with(|d| d.owners.clone())
                             empty_message="No owners. Anyone with Application Administrator rights can manage it."
                             row=move |o: DirectoryObject| {
@@ -386,7 +409,7 @@ pub fn OwnersTab(
                         if items.is_empty() {
                             view! {
                                 <FormError>
-                                    "No owners staged — applying would leave the app with no explicit owners."
+                                    "No owners staged — add at least one before applying; an empty set would leave the app with no owners."
                                 </FormError>
                             }
                                 .into_any()
@@ -434,8 +457,12 @@ pub fn OwnersTab(
                     <div class="actions-row">
                         <Button
                             appearance=Signal::derive(|| ButtonAppearance::Primary)
-                            disabled=Signal::derive(move || applying.get())
-                            on_click=Box::new(apply_replace)
+                            // An empty set would strip every owner; the
+                            // notice above says so, and the button stays off.
+                            disabled=Signal::derive(move || {
+                                applying.get() || staged.with(Vec::is_empty)
+                            })
+                            on_click=Box::new(move |_| confirm_replace.set(true))
                         >
                             {move || {
                                 if applying.get() {
@@ -471,7 +498,7 @@ pub fn OwnersTab(
                                     view! { <Spinner /> }
                                         .into_any()
                                 } else {
-                                    view! { "Add Default Owners" }.into_any()
+                                    view! { "Add default owners" }.into_any()
                                 }
                             }}
                         </Button>
@@ -515,6 +542,18 @@ pub fn OwnersTab(
             <Show when=move || no_owner_defaults.get() fallback=|| ()>
                 <OwnerDefaultsHint class="form-error" tab="app-reg" />
             </Show>
+            <ConfirmDialog
+                open=confirm_replace
+                title="Replace the owners of this app registration?"
+                body="The owners become exactly the staged set. Every current owner that is not in it loses the ability to manage this app registration."
+                subject=Signal::derive(replace_summary)
+                confirm_label="Replace owners"
+                on_confirm=Callback::new(move |()| {
+                    confirm_replace.set(false);
+                    apply_replace();
+                })
+                on_close=Callback::new(move |()| confirm_replace.set(false))
+            />
             <ConfirmDialog
                 open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
                 title="Remove this owner?"

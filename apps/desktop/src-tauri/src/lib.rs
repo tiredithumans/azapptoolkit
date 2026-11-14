@@ -26,6 +26,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(window_state_plugin())
         .setup(move |app| {
             // A browser that won't launch hands the sign-in link to the webview
             // instead of leaving the operator waiting out the redirect timeout.
@@ -149,6 +150,7 @@ pub fn run() {
             commands::diagnostics::cache_stats,
             commands::diagnostics::clear_cache,
             commands::diagnostics::invalidate_list_cache,
+            commands::diagnostics::list_cache_age,
             commands::diagnostics::set_cache_enabled,
             commands::diagnostics::set_cache_config,
             commands::diagnostics::get_support_paths,
@@ -262,6 +264,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Restores the main window's size, position and maximized/fullscreen state on
+/// launch and saves them on exit, so the app reopens where the operator left it
+/// instead of at the `tauri.conf.json` default every time.
+///
+/// Only the geometry flags: `VISIBLE` and `DECORATIONS` are left out so a state
+/// file written while the window was hidden (or by a future frameless
+/// experiment) can never bring the app back invisible or chromeless. The
+/// `minWidth`/`minHeight` in `tauri.conf.json` still bound a restored size.
+fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_window_state::StateFlags;
+    tauri_plugin_window_state::Builder::default()
+        .with_state_flags(
+            StateFlags::SIZE
+                | StateFlags::POSITION
+                | StateFlags::MAXIMIZED
+                | StateFlags::FULLSCREEN,
+        )
+        .build()
 }
 
 /// The macOS menu bar, built explicitly so that **Cmd-W is not a menu key

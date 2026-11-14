@@ -33,9 +33,12 @@ pub enum IconName {
     CheckCircle,
     Info,
     Key,
+    /// The signed-in operator, re-verified — the top bar's "Refresh token".
+    UserCheck,
     Lock,
     Clock,
     // Affordances
+    ChevronLeft,
     ChevronRight,
     ChevronDown,
     LogOut,
@@ -194,6 +197,12 @@ fn paths(name: IconName) -> AnyView {
             <path d="m15.5 7.5 3 3L22 7l-3-3"></path>
         }
         .into_any(),
+        IconName::UserCheck => view! {
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="m16 11 2 2 4-4"></path>
+        }
+        .into_any(),
         IconName::Lock => view! {
             <rect x="3" y="11" width="18" height="11" rx="2"></rect>
             <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
@@ -202,6 +211,10 @@ fn paths(name: IconName) -> AnyView {
         IconName::Clock => view! {
             <circle cx="12" cy="12" r="10"></circle>
             <path d="M12 6v6l4 2"></path>
+        }
+        .into_any(),
+        IconName::ChevronLeft => view! {
+            <path d="m15 6-6 6 6 6"></path>
         }
         .into_any(),
         IconName::ChevronRight => view! {

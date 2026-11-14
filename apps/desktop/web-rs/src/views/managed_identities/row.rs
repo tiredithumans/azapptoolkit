@@ -88,7 +88,7 @@ pub(super) fn render_row(idx: usize, mi: Arc<ManagedIdentityDto>) -> impl IntoVi
                                 <Badge
                                     label="Disabled"
                                     tone=BadgeTone::Unknown
-                                    title="Sign-in disabled — this identity's accountEnabled is false."
+                                    title="Sign-in is disabled for this managed identity."
                                 />
                             }
                         })}

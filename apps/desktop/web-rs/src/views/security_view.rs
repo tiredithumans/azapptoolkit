@@ -95,8 +95,23 @@ pub fn SecurityView() -> impl IntoView {
 
     view! {
         <div class="security-view">
-            <PostureStrip />
             <TabBar label="Security sections" selected=sub items=tabs />
+            // The strip is the AUDIT's: its counts, its age, Run audit and its
+            // export. It sat above all six tabs, so the four inventory lenses
+            // (which read their own data, not the scan) opened under ~200px of
+            // someone else's header and a second Export button. Hidden there,
+            // not unmounted: the controller's effects and a running scan's
+            // progress live in it.
+            <div style:display=move || {
+                let tab = sub.get();
+                if tab == SecurityTab::Findings.value() || tab == SecurityTab::Apps.value() {
+                    "contents"
+                } else {
+                    "none"
+                }
+            }>
+                <PostureStrip />
+            </div>
             {panes}
         </div>
     }
@@ -115,71 +130,77 @@ fn PostureStrip() -> impl IntoView {
 
     view! {
         <div class="posture-strip">
-            <SectionHeader title="Security".to_string() crumb="Posture".to_string()>
-                <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| ctrl.run())
-                    disabled=Signal::derive(move || scanning.get())
-                >
-                    {move || {
-                        if scanning.get() {
-                            view! { <Spinner /> }
-                                .into_any()
-                        } else {
-                            view! { "Run audit" }.into_any()
-                        }
-                    }}
-                </Button>
-                <Show when=move || scanning.get() fallback=|| view! { <></> }>
+            <SectionHeader title="Security".to_string() />
+            // One line: the severity counts, how old they are, and the audit's
+            // actions. These were three stacked bands (a header row for the
+            // buttons, the tiles, the age), above every tab.
+            <div class="posture-strip__bar">
+                {move || {
+                    ctrl.posture
+                        .get()
+                        .map(|c: PostureCounts| {
+                            view! {
+                                <div class="posture-strip__counts dash-metrics">
+                                    {metric_box(c.critical, "Critical", "danger")}
+                                    {metric_box(c.high, "High", "danger")}
+                                    {metric_box(c.medium, "Medium", "warning")}
+                                    {metric_box(c.low, "Low", "muted")}
+                                </div>
+                            }
+                        })
+                }}
+                // How old the counts above are. The run cache is in-process with a
+                // 60-minute TTL, so a scan an operator is about to act on can be an
+                // hour stale with nothing on screen saying so; the exact stamp
+                // hangs off the title for a change ticket that has to cite it.
+                {move || {
+                    ctrl.result
+                        .with(|r| r.as_ref().and_then(|r| r.completed_at.clone()))
+                        .and_then(|ts| time_ago(&ts))
+                        .map(|TimeAgo { relative, exact }| {
+                            view! {
+                                <p class="muted posture-strip__age" title=exact>
+                                    {format!("Scanned {relative}")}
+                                </p>
+                            }
+                        })
+                }}
+                <div class="posture-strip__actions">
                     <Button
-                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                        on_click=Box::new(move |_| ctrl.cancel())
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        on_click=Box::new(move |_| ctrl.run())
+                        disabled=Signal::derive(move || scanning.get())
                     >
-                        "Cancel"
+                        {move || {
+                            if scanning.get() {
+                                view! { <Spinner /> }
+                                    .into_any()
+                            } else {
+                                view! { "Run audit" }.into_any()
+                            }
+                        }}
                     </Button>
-                </Show>
-                <ExportMenu
-                    disabled=Signal::derive(move || {
-                        ctrl.exporting.get() || ctrl.result.with(|r| r.is_none())
-                    })
-                    on_select=Callback::new(move |fmt| ctrl.export(fmt))
-                    options=vec![
-                        ("csv", "Export as CSV…"),
-                        ("json", "Export as JSON…"),
-                        ("html", "Export as HTML…"),
-                    ]
-                />
-            </SectionHeader>
-            {move || {
-                ctrl.posture
-                    .get()
-                    .map(|c: PostureCounts| {
-                        view! {
-                            <div class="posture-strip__counts dash-metrics">
-                                {metric_box(c.critical, "Critical", "danger")}
-                                {metric_box(c.high, "High", "danger")}
-                                {metric_box(c.medium, "Medium", "warning")}
-                                {metric_box(c.low, "Low", "muted")}
-                            </div>
-                        }
-                    })
-            }}
-            // How old the counts above are. The run cache is in-process with a
-            // 60-minute TTL, so a scan an operator is about to act on can be an
-            // hour stale with nothing on screen saying so; the exact stamp
-            // hangs off the title for a change ticket that has to cite it.
-            {move || {
-                ctrl.result
-                    .with(|r| r.as_ref().and_then(|r| r.completed_at.clone()))
-                    .and_then(|ts| time_ago(&ts))
-                    .map(|TimeAgo { relative, exact }| {
-                        view! {
-                            <p class="muted posture-strip__age" title=exact>
-                                {format!("Scanned {relative}")}
-                            </p>
-                        }
-                    })
-            }}
+                    <Show when=move || scanning.get() fallback=|| view! { <></> }>
+                        <Button
+                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            on_click=Box::new(move |_| ctrl.cancel())
+                        >
+                            "Cancel"
+                        </Button>
+                    </Show>
+                    <ExportMenu
+                        disabled=Signal::derive(move || {
+                            ctrl.exporting.get() || ctrl.result.with(|r| r.is_none())
+                        })
+                        on_select=Callback::new(move |fmt| ctrl.export(fmt))
+                        options=vec![
+                            ("csv", "Export as CSV…"),
+                            ("json", "Export as JSON…"),
+                            ("html", "Export as HTML…"),
+                        ]
+                    />
+                </div>
+            </div>
             {move || {
                 progress
                     .get()

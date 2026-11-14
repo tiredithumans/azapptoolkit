@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use azapptoolkit_core::models::Application;
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::applications::{self, ApplicationDetail, UpdateApplicationInput};
-use crate::components::ui::{FormError, Spinner};
+use crate::components::ui::{FormError, Select, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
+use crate::util::fmt_date;
 
 /// The sign-in audiences, as `(Graph value, label)` in display order — the one
 /// list: this tab's editor and `create_app_dialog` both render from it.
@@ -182,7 +183,7 @@ pub fn OverviewTab(
                                 <Input value=display_name />
                             </Field>
                             <Field label="Sign-in audience">
-                                <Select value=audience>
+                                <Select value=audience label="Sign-in audience">
                                     {SIGN_IN_AUDIENCES
                                         .iter()
                                         .map(|(value, label)| {
@@ -271,7 +272,7 @@ pub fn OverviewTab(
                     };
                     let is_public_client = app.is_fallback_public_client == Some(true);
                     view! {
-                        <div class="form-grid">
+                        <dl class="read-grid">
                             <ReadField label="Object ID" value=app.id.clone() mono=true />
                             <ReadField label="App ID" value=app.app_id.clone() mono=true />
                             <ReadField label="Display name" value=app.display_name.clone() mono=false />
@@ -299,15 +300,16 @@ pub fn OverviewTab(
                                             value="Enabled — if used only as a public/installed client, it should not hold credentials"
                                                 .to_string()
                                             mono=false
+                                            wide=true
                                         />
                                     }
                                 })}
+                            // The app's one day format, as every list and
+                            // table shows it — this was the raw RFC 3339
+                            // stamp (`2023-03-14T00:00:00+00:00`).
                             <ReadField
                                 label="Created"
-                                value=app
-                                    .created_date_time
-                                    .map(|d| d.to_rfc3339())
-                                    .unwrap_or_else(|| "—".into())
+                                value=fmt_date(app.created_date_time)
                                 mono=false
                             />
                             <ReadField label="Service principal" value=sp_text mono=false />
@@ -316,7 +318,12 @@ pub fn OverviewTab(
                                 .as_ref()
                                 .map(|d| {
                                     view! {
-                                        <ReadField label="Description" value=d.clone() mono=false />
+                                        <ReadField
+                                            label="Description"
+                                            value=d.clone()
+                                            mono=false
+                                            wide=true
+                                        />
                                     }
                                 })}
                             <ReadField
@@ -327,15 +334,16 @@ pub fn OverviewTab(
                                     .filter(|n| !n.is_empty())
                                     .unwrap_or_else(|| "—".into())
                                 mono=false
+                                wide=true
                             />
-                            <div>
-                                <Button
-                                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                    on_click=Box::new(start_edit)
-                                >
-                                    "Edit"
-                                </Button>
-                            </div>
+                        </dl>
+                        <div class="actions-row">
+                            <Button
+                                appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                                on_click=Box::new(start_edit)
+                            >
+                                "Edit"
+                            </Button>
                         </div>
                     }
                 }}
@@ -344,17 +352,26 @@ pub fn OverviewTab(
     }
 }
 
+/// One label/value pair of the Overview's `.read-grid`. `mono` sets the
+/// *value* in monospace (an id) — it used to sit on the pair, so "Object ID"
+/// and "App ID" were the only labels in a different typeface. `wide` spans the
+/// grid for free text.
 #[component]
-fn ReadField(label: &'static str, value: String, mono: bool) -> impl IntoView {
-    let class = if mono {
-        "read-field mono"
+fn ReadField(
+    label: &'static str,
+    value: String,
+    mono: bool,
+    #[prop(optional)] wide: bool,
+) -> impl IntoView {
+    let item_class = if wide {
+        "read-grid__item read-grid__item--wide"
     } else {
-        "read-field"
+        "read-grid__item"
     };
     view! {
-        <div class=class>
-            <strong>{label}</strong>
-            <div>{value}</div>
+        <div class=item_class>
+            <dt>{label}</dt>
+            <dd class=mono.then_some("mono")>{value}</dd>
         </div>
     }
 }

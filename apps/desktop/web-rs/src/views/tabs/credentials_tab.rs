@@ -11,7 +11,7 @@ use azapptoolkit_dto::credentials::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
@@ -21,7 +21,8 @@ use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyIconButton, CopyableId, DataTable, DateInput, FormError, Spinner,
+    Badge, BadgeTone, Callout, CopyIconButton, CopyableId, DataTable, DateInput, FormError, Select,
+    Spinner,
 };
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
@@ -492,7 +493,10 @@ pub fn CredentialsTab(
     };
 
     let gencert_open = RwSignal::new(false);
-    let gencert_subject = RwSignal::new(detail.with(|d| d.application.display_name.clone()));
+    // A starting value for the form, so read once (untracked): the pane's
+    // detail is a live signal now, and a reload must not retype the field.
+    let gencert_subject =
+        RwSignal::new(detail.with_untracked(|d| d.application.display_name.clone()));
     let gencert_validity = RwSignal::new(DEFAULT_CERT_LIFETIME_DAYS.to_string());
     let cmd_gencert = use_command();
     let gencert_result: RwSignal<Option<GeneratedCertificateResult>> = RwSignal::new(None);
@@ -1145,7 +1149,7 @@ pub fn CredentialsTab(
                     <Input value=display_name />
                 </Field>
                 <Field label="Expires">
-                    <Select value=expires_preset>
+                    <Select value=expires_preset label="Expires">
                         {EXPIRES_PRESETS
                             .iter()
                             .map(|(value, label)| {
