@@ -41,7 +41,7 @@ pub fn CredentialsDashboard() -> impl IntoView {
         <AuditDashboard
             cache_kind=ListCacheKindDto::Credentials
             title="Credential expiry"
-            crumb="Secrets & certificates across the tenant"
+            description="Every client secret and certificate across the tenant."
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh credential expiry"
             view_key="credentials"

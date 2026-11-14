@@ -137,28 +137,13 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
 
     view! {
         <div class="mi-view">
-            <div>
-                <SectionHeader title="Managed Identities".to_string() crumb="Inventory".to_string()>
-                    <div class="list-header-actions">
-                        <DataAge loaded_at=loaded_at />
-                        <ExportMenu
-                            disabled=Signal::derive(move || exporting.get())
-                            on_select=Callback::new(do_export)
-                            options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
-                        />
-                        <IconButton
-                            icon=IconName::Refresh
-                            aria_label="Refresh managed identities".to_string()
-                            title="Refresh".to_string()
-                            on_click=Callback::new(on_refresh_list)
-                            busy=Signal::derive(move || refreshing.get())
-                        />
-                    </div>
-                </SectionHeader>
-                <span class="ui-text mi-view__intro">
-                    "Grant Microsoft Graph (or another resource) application permissions to a managed identity. Permissions you list (e.g. Mail.Read) are assigned to the selected identity's service principal."
-                </span>
-            </div>
+            // The page's one line of guidance is the header's description; the
+            // actions sit in the list's own toolbar, as on the other two lists.
+            <SectionHeader
+                title="Managed Identities".to_string()
+                description="Grant Microsoft Graph (or another resource) application permissions to a managed identity. Permissions you list (e.g. Mail.Read) are assigned to the selected identity's service principal."
+                    .to_string()
+            />
             <div class="mi-view__body">
                 <div class="mi-view__list">
                     // Was a hand-rolled search box + SavedViews pair, so this
@@ -166,11 +151,29 @@ pub fn ManagedIdentitiesView() -> impl IntoView {
                     // both sibling lists did.
                     <ListScaffold
                         search=raw_search
-                        search_placeholder="Filter Managed Identities by name or appId…"
+                        search_placeholder="Filter by name or app ID…"
+                        search_label="Filter Managed Identities by name or app ID"
                         saved_view_key="mi"
                         facet=mi_filter
                         filters_open=filters_open
                         active_filters=active_filters
+                        actions=move || {
+                            view! {
+                                <DataAge loaded_at=loaded_at />
+                                <ExportMenu
+                                    disabled=Signal::derive(move || exporting.get())
+                                    on_select=Callback::new(do_export)
+                                    options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+                                />
+                                <IconButton
+                                    icon=IconName::Refresh
+                                    aria_label="Refresh managed identities".to_string()
+                                    title="Refresh".to_string()
+                                    on_click=Callback::new(on_refresh_list)
+                                    busy=Signal::derive(move || refreshing.get())
+                                />
+                            }
+                        }
                     >
                     <Suspense fallback=move || view! { <SkeletonList rows=6 /> }>
                         {move || {

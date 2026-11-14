@@ -264,7 +264,7 @@ pub fn ReadinessView() -> impl IntoView {
 
     view! {
         <div class="readiness">
-            <SectionHeader title="Access Readiness".to_string() crumb="Account".to_string() />
+            <SectionHeader title="Access Readiness".to_string() />
             <span class="ui-text hint">
                 "azapptoolkit acts with your delegated rights across three independent \
                  authorization planes — there is no single role that unlocks everything. This \

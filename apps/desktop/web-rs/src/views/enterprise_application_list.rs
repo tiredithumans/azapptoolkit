@@ -31,7 +31,7 @@ use crate::hooks::use_debounced::use_debounced;
 use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list};
 use crate::hooks::use_list_export::{ExportRows, TenantRows, use_list_export};
 use crate::state::{ActiveView, OpenItemKind, use_session};
-use crate::util::{contains_ignore_case, created_in_range};
+use crate::util::{contains_ignore_case, created_in_range, fmt_day};
 use crate::views::pairing::jump_to_paired_app;
 
 #[component]
@@ -143,36 +143,12 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
 
     view! {
         <div class="apps-view">
-            <SectionHeader
-                title="Enterprise Applications".to_string()
-                crumb="Inventory".to_string()
-            >
-                <DataAge loaded_at=loaded_at />
-                <ExportMenu
-                    disabled=Signal::derive(move || exporting.get())
-                    on_select=Callback::new(do_export)
-                    options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
-                />
-                <IconButton
-                    icon=IconName::Refresh
-                    aria_label="Refresh Enterprise Applications".to_string()
-                    title="Refresh".to_string()
-                    on_click=Callback::new(on_refresh)
-                    busy=Signal::derive(move || refreshing.get())
-                />
-                <Button
-                    class="btn-icon-label"
-                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| session.open_new_app_chooser())
-                >
-                    <Icon name=IconName::Plus size=16 />
-                    "New application"
-                </Button>
-            </SectionHeader>
+            <SectionHeader title="Enterprise Applications".to_string() />
             <div class="apps-view__body">
                 <ListScaffold
                     search=raw_search
-                    search_placeholder="Filter Enterprise Apps by name or appId…"
+                    search_placeholder="Filter by name or app ID…"
+                    search_label="Filter Enterprise Applications by name or app ID"
                     saved_view_key="enterprise"
                     facet=ent_filter
                     filters_open=filters_open
@@ -186,6 +162,31 @@ pub fn EnterpriseApplicationList() -> impl IntoView {
                                 before=created_before
                                 noun="enterprise applications"
                             />
+                        }
+                    }
+                    actions=move || {
+                        view! {
+                        <DataAge loaded_at=loaded_at />
+                        <ExportMenu
+                            disabled=Signal::derive(move || exporting.get())
+                            on_select=Callback::new(do_export)
+                            options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+                        />
+                        <IconButton
+                            icon=IconName::Refresh
+                            aria_label="Refresh Enterprise Applications".to_string()
+                            title="Refresh".to_string()
+                            on_click=Callback::new(on_refresh)
+                            busy=Signal::derive(move || refreshing.get())
+                        />
+                        <Button
+                            class="btn-icon-label"
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(move |_| session.open_new_app_chooser())
+                        >
+                            <Icon name=IconName::Plus size=16 />
+                            "New application"
+                        </Button>
                         }
                     }
                 >
@@ -440,6 +441,18 @@ fn view_row(
     // application it opens.
     // The Disabled / Foreign badges are separate elements the row button's
     // label replaces, so the label has to carry them itself.
+    // The wide-window columns: the kind of service principal and its age.
+    let type_text = match sp.service_principal_type.as_deref() {
+        Some("Application") => "Application",
+        Some("Legacy") => "Legacy",
+        Some("SocialIdp") => "Social IdP",
+        Some("ManagedIdentity") => "Managed identity",
+        _ => "",
+    };
+    let created_text = sp
+        .created_date_time
+        .map(|d| format!("Created {}", fmt_day(d)))
+        .unwrap_or_default();
     let mut row_label = format!("{display_name} ({app_id_string})");
     if is_disabled {
         row_label.push_str(", sign-in disabled");
@@ -485,6 +498,10 @@ fn view_row(
                                 />
                             }
                         })}
+                    // Wide windows only (`.app-list__row-col`), packed to the
+                    // end after the badges so they line up from row to row.
+                    <span class="app-list__row-col">{type_text}</span>
+                    <span class="app-list__row-col">{created_text}</span>
                 </span>
                 <span class="app-list__row-appid">{app_id_string}</span>
             </button>

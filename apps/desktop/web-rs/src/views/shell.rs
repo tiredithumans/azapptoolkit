@@ -547,10 +547,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                 } else if refreshing.get() {
                                     "Refreshing token…"
                                 } else {
-                                    "Refresh token — re-applies roles activated since sign-in \
-                                     (e.g. an active PIM role) without signing out; if your \
-                                     session has expired, opens a browser to re-authenticate \
-                                     in place"
+                                    // One line. The paragraph this replaces
+                                    // (PIM, expiry, the browser round trip) was
+                                    // documentation in a tooltip; Access
+                                    // Readiness explains when to use it.
+                                    "Refresh token — picks up roles activated since you signed in"
                                 }
                             }
                             disabled=move || refreshing.get()
@@ -561,9 +562,11 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                     view! { <Spinner /> }
                                         .into_any()
                                 } else {
-                                    // A key, not the reload arrows: every list's Refresh
-                                    // re-reads data, this one renews the sign-in.
-                                    view! { <Icon name=IconName::Key size=16 /> }.into_any()
+                                    // Not the reload arrows (every list's Refresh
+                                    // re-reads data; this renews the sign-in), and
+                                    // not the key it used to be — that is the Key
+                                    // Vault nav icon, on screen at the same time.
+                                    view! { <Icon name=IconName::UserCheck size=16 /> }.into_any()
                                 }
                             }}
                         </button>
@@ -713,26 +716,12 @@ fn ToolDialogs() -> impl IntoView {
     }
 }
 
-/// The persistent top-bar identity for `view`: `(crumb, title)`. The crumb is
-/// the nav section group (Inventory / Security / Operations — the P5 IA), giving
-/// the app-level "where am I" context; the title mirrors the page's
-/// `SectionHeader` so the anchor keeps naming the page once its header scrolls
-/// out of view.
+/// The top-bar identity for `view`: `(crumb, title)` — the nav section group
+/// and the view's one name (`ActiveView::section` / `title`). This is the only
+/// place a page's title is drawn: the page's own `SectionHeader` keeps a
+/// visually hidden `<h1>` and no longer repeats it sixty pixels lower.
 fn topbar_labels(view: ActiveView) -> (&'static str, &'static str) {
-    match view {
-        ActiveView::Home => ("Inventory", "Overview"),
-        ActiveView::Apps => ("Inventory", "App Registrations"),
-        ActiveView::EnterpriseApps => ("Inventory", "Enterprise Applications"),
-        ActiveView::ManagedIdentities => ("Inventory", "Managed Identities"),
-        ActiveView::Security => ("Security", "Security"),
-        ActiveView::PermissionTester => ("Security", "Permission Tester"),
-        ActiveView::ResourceAccess => ("Security", "Resource Access"),
-        ActiveView::Readiness => ("Account", "Access Readiness"),
-        ActiveView::Settings => ("Account", "Settings"),
-        ActiveView::BulkActions => ("Operations", "Bulk Actions"),
-        ActiveView::DisasterRecovery => ("Operations", "Disaster Recovery"),
-        ActiveView::KeyVault => ("Operations", "Key Vault"),
-    }
+    (view.section(), view.title())
 }
 
 /// A persistent "this is a demo" strip, rendered only in the GitHub Pages `demo`

@@ -135,7 +135,7 @@ impl Session {
     }
 
     /// Navigate to Settings on a specific tab (`"app-reg"` | `"enterprise"` |
-    /// `"naming"` | `"connection"`). Settings lives behind the account menu —
+    /// `"naming"` | `"connection"` | `"appearance"`). Settings lives behind the account menu —
     /// the one destination with no shortcut and no rail row — so the callouts
     /// that say "set them in Settings" route through here instead of leaving
     /// the operator to find it.

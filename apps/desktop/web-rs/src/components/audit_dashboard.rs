@@ -31,7 +31,9 @@ use crate::state::use_session;
 #[component]
 pub fn AuditDashboard<T, Fetch, FetchFut, Export, ExportFut, Banner, Matches, Row>(
     #[prop(into)] title: String,
-    #[prop(into)] crumb: String,
+    /// What the lens lists, as one plain sentence under the tab strip.
+    #[prop(into)]
+    description: String,
     #[prop(into)] search_placeholder: String,
     /// Accessible name for the refresh control, e.g. `"Refresh credential
     /// expiry"` — an icon button needs a view-specific label, not "Refresh".
@@ -243,7 +245,7 @@ where
 
     view! {
         <main class="audit-view">
-            <SectionHeader title=title crumb=crumb>
+            <SectionHeader title=title description=description sub=true>
                 <DataAge loaded_at=loaded_at />
                 <ExportMenu
                     disabled=Signal::derive(move || {
@@ -281,17 +283,24 @@ where
             }}
             {move || banner.with_value(|b| rows.with(|all| b(all.as_slice())))}
 
-            <TabBar
-                label="Filter"
-                items={
-                    facets
-                        .into_iter()
-                        .map(|(value, label)| TabBarItem { value, label })
-                        .collect::<Vec<_>>()
-                }
-                selected=facet
-            />
-            <SearchInput value=search placeholder=search_placeholder />
+            // The facet tabs and the filter box on one line (the box takes the
+            // slack and drops under the tabs at a narrow width); they were two
+            // full-width bands above a table that then had room for one row.
+            <div class="audit-view__filters">
+                <TabBar
+                    label="Filter"
+                    items={
+                        facets
+                            .into_iter()
+                            .map(|(value, label)| TabBarItem { value, label })
+                            .collect::<Vec<_>>()
+                    }
+                    selected=facet
+                />
+                <div class="audit-view__search">
+                    <SearchInput value=search placeholder=search_placeholder />
+                </div>
+            </div>
             <SavedViews view_key=view_key facet=facet search=search />
 
             // Which non-table state (if any) this surface is in. Three lenses

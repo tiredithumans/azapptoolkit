@@ -102,6 +102,39 @@ pub enum ActiveView {
     Settings,
 }
 
+impl ActiveView {
+    /// The nav group this view is filed under — the top bar's crumb.
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::Home | Self::Apps | Self::EnterpriseApps | Self::ManagedIdentities => "Inventory",
+            Self::Security | Self::PermissionTester | Self::ResourceAccess => "Security",
+            Self::Readiness | Self::Settings => "Account",
+            Self::BulkActions | Self::DisasterRecovery | Self::KeyVault => "Operations",
+        }
+    }
+
+    /// The view's one name: its nav label, the top bar's title, the page's
+    /// (visually hidden) heading and the "Back to …" link of an open item. The
+    /// Home page used to be "Home" in the nav, "Overview" as its title and
+    /// "Inventory" in the crumb.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Apps => "App Registrations",
+            Self::EnterpriseApps => "Enterprise Applications",
+            Self::ManagedIdentities => "Managed Identities",
+            Self::Security => "Security",
+            Self::PermissionTester => "Permission Tester",
+            Self::ResourceAccess => "Resource Access",
+            Self::Readiness => "Access Readiness",
+            Self::Settings => "Settings",
+            Self::BulkActions => "Bulk Actions",
+            Self::DisasterRecovery => "Disaster Recovery",
+            Self::KeyVault => "Key Vault",
+        }
+    }
+}
+
 /// Which entity surface an [`OpenItem`] points at — the three list views whose
 /// rows can be opened into the shared workspace.
 ///
@@ -454,6 +487,13 @@ pub struct Session {
     // straight to the tab that holds it, rather than dropping them on Settings'
     // first tab to hunt for it.
     pub settings_tab: RwSignal<String>,
+    // The colour scheme the operator chose in Settings → Appearance: `"system"`
+    // (follow the OS, the default), `"light"` or `"dark"`. A device
+    // preference, not tenant state — it is read from `localStorage` at start
+    // and survives sign-out and a tenant switch. A `String` because `TabBar`
+    // binds one; `lib.rs` applies it (the `data-theme` attribute the
+    // stylesheet keys on, and Thaw's own theme) and writes it back.
+    pub theme_pref: RwSignal<String>,
     // Active sub-tab of the Security workbench (`SecurityTab::value`; typed
     // writers go through `open_security`).
     // Lifted to the session so the Home cards and command palette can
@@ -491,6 +531,7 @@ pub fn provide_session() {
         last_enterprise_tab: RwSignal::new(String::from("overview")),
         last_mi_tab: RwSignal::new(String::from("overview")),
         settings_tab: RwSignal::new(String::from("app-reg")),
+        theme_pref: RwSignal::new(stored_theme_pref()),
         security_tab: RwSignal::new(SecurityTab::Findings.value().to_string()),
         resource_access_tab: RwSignal::new(String::from("mailboxes")),
         enterprise_apps_reload: RwSignal::new(0),
@@ -502,6 +543,23 @@ pub fn provide_session() {
         toast_seq: RwSignal::new(0),
     };
     provide_context(session);
+}
+
+/// `localStorage` key of the colour-scheme choice. Unkeyed by tenant on
+/// purpose: it describes this screen, not a directory.
+pub const THEME_PREF_KEY: &str = "azapptoolkit:theme";
+
+/// The stored colour-scheme choice, or `"system"` when none (or an unknown
+/// value) is stored. Always `"system"` off-wasm: the native unit tests have no
+/// `localStorage`.
+fn stored_theme_pref() -> String {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(stored) = crate::util::ls_get(THEME_PREF_KEY)
+        && matches!(stored.as_str(), "light" | "dark")
+    {
+        return stored;
+    }
+    String::from("system")
 }
 
 /// Pull the session out of context. Panics if `provide_session()` was not

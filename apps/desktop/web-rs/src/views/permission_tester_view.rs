@@ -387,10 +387,7 @@ pub fn PermissionTesterView() -> impl IntoView {
 
     view! {
         <main class="permission-tester">
-            <SectionHeader
-                title="Permission Tester".to_string()
-                crumb="Verify effective access".to_string()
-            />
+            <SectionHeader title="Permission Tester".to_string() />
             <span class="ui-text">
                 "Check whether an app registration, enterprise app, or managed identity can actually reach a specific Exchange mailbox or SharePoint resource — a site collection, library, folder or file. This runs the live authorization check — it reflects effective access (organization-wide grant, scoped grant, or none), not just what the identity declares."
             </span>

@@ -69,7 +69,59 @@ pub fn run() {
     // so the first resource fires against fixtures, not a (missing) backend.
     #[cfg(feature = "demo")]
     demo::install();
+    suppress_webview_context_menu();
     mount_to_body(App);
+}
+
+/// Stops the webview's own right-click menu (Back, Reload, Save as, Print…)
+/// from opening over the app's chrome.
+///
+/// That menu belongs to a web page. In a desktop app its entries are wrong at
+/// best and destructive at worst: Reload restarts the frontend, dropping the
+/// open items, an audit's result and any one-time secret on screen. It is kept
+/// where it is the right tool — in a text field (cut / copy / paste / spelling)
+/// and over a text selection (copy an id or an error message) — and in debug
+/// builds, where Inspect is how the app is developed. The Pages demo is a web
+/// page and keeps the browser's menu.
+///
+/// The listener is leaked deliberately: it lives as long as the process.
+fn suppress_webview_context_menu() {
+    #[cfg(not(any(debug_assertions, feature = "demo")))]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let on_menu = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(
+            |ev: web_sys::Event| {
+                if !wants_native_context_menu(&ev) {
+                    ev.prevent_default();
+                }
+            },
+        );
+        let _ = window
+            .add_event_listener_with_callback("contextmenu", on_menu.as_ref().unchecked_ref());
+        on_menu.forget();
+    }
+}
+
+/// Whether a right-click should still get the webview's menu: on a text-entry
+/// control, or with text selected.
+#[cfg(not(any(debug_assertions, feature = "demo")))]
+fn wants_native_context_menu(ev: &web_sys::Event) -> bool {
+    let in_text_entry = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+        .is_some_and(|el| {
+            el.is_content_editable()
+                || matches!(
+                    el.tag_name().to_ascii_lowercase().as_str(),
+                    "input" | "textarea"
+                )
+        });
+    let has_selection = web_sys::window()
+        .and_then(|w| w.get_selection().ok().flatten())
+        .is_some_and(|sel| !sel.is_collapsed());
+    in_text_entry || has_selection
 }
 
 #[component]
@@ -79,8 +131,33 @@ fn App() -> impl IntoView {
     // sign-in gates fall through to the authenticated shell.
     #[cfg(feature = "demo")]
     use_session().set_active_tenant(Some(demo::demo_tenant()));
-    let theme = RwSignal::new(initial_theme());
-    follow_system_theme(theme);
+    // The OS setting, live, and the operator's own choice (Settings →
+    // Appearance) on top of it. Both feed one effect that sets Thaw's theme
+    // and the `data-theme` attribute `styles.css` keys its dark palette on, so
+    // the two halves of the UI can never disagree about the scheme.
+    let session = use_session();
+    let system_dark = RwSignal::new(system_prefers_dark());
+    follow_system_theme(system_dark);
+    let pref = session.theme_pref;
+    let thaw_theme = |dark: bool| if dark { Theme::dark() } else { Theme::light() };
+    // Seeded with the right theme, so the first paint is not a flash of the
+    // other one.
+    let theme = RwSignal::new(thaw_theme(wants_dark(
+        &pref.get_untracked(),
+        system_dark.get_untracked(),
+    )));
+    Effect::new(move |_| {
+        let choice = pref.get();
+        theme.set(thaw_theme(wants_dark(&choice, system_dark.get())));
+        if let Some(root) = document().document_element() {
+            // No attribute at all means "follow the system".
+            let _ = match choice.as_str() {
+                "light" | "dark" => root.set_attribute("data-theme", &choice),
+                _ => root.remove_attribute("data-theme"),
+            };
+        }
+        util::ls_set(state::THEME_PREF_KEY, &choice);
+    });
 
     view! {
         <ConfigProvider theme>
@@ -89,31 +166,34 @@ fn App() -> impl IntoView {
     }
 }
 
-/// Keeps the Thaw component theme in step with the OS light/dark setting for the
-/// life of the session.
+/// Whether the app should be dark: the operator's choice (`"light"` /
+/// `"dark"`), or the OS setting for anything else (`"system"`).
+fn wants_dark(choice: &str, system_dark: bool) -> bool {
+    match choice {
+        "dark" => true,
+        "light" => false,
+        _ => system_dark,
+    }
+}
+
+/// Keeps `system_dark` in step with the OS light/dark setting for the life of
+/// the session.
 ///
-/// `initial_theme` samples `prefers-color-scheme` **once**, but `styles.css`
-/// reacts to it live — so flipping the OS theme with the app open left Thaw's
-/// components (Input, Button, Spinner) rendering light on dark app
-/// chrome until the next restart. Subscribing to the media query fixes the half
-/// that was static.
+/// Sampling `prefers-color-scheme` once left Thaw's components (Input, Button)
+/// rendering light on dark app chrome after the OS theme was flipped with the
+/// app open, until the next restart — `styles.css` follows the media query
+/// live. Subscribing to it keeps the two together.
 ///
 /// The listener is leaked deliberately: it must outlive this call and live as
 /// long as the app root, which is the whole process.
-fn follow_system_theme(theme: RwSignal<Theme>) {
+fn follow_system_theme(system_dark: RwSignal<bool>) {
     let Some(mql) = web_sys::window()
         .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
     else {
         return;
     };
     let on_change = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MediaQueryListEvent)>::new(
-        move |ev: web_sys::MediaQueryListEvent| {
-            theme.set(if ev.matches() {
-                Theme::dark()
-            } else {
-                Theme::light()
-            });
-        },
+        move |ev: web_sys::MediaQueryListEvent| system_dark.set(ev.matches()),
     );
     // `addEventListener("change")` — `onchange` would clobber any other listener.
     let _ = mql.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
@@ -188,6 +268,17 @@ fn Root() -> impl IntoView {
             views::sign_in::attempt_restore(session, restore_failure, restore_generation).await;
         }
         restoring.set(false);
+    });
+
+    // The boot screen in `index.html` covers the window until there is a first
+    // screen to show in its place — the config probe has answered — and is
+    // then removed for good.
+    Effect::new(move |_| {
+        if config.with(Option::is_some)
+            && let Some(boot) = document().get_element_by_id("boot")
+        {
+            boot.remove();
+        }
     });
 
     view! {
@@ -342,13 +433,12 @@ fn AuthedShell() -> impl IntoView {
     }
 }
 
-/// Pick light or dark based on `prefers-color-scheme`.
-fn initial_theme() -> Theme {
-    let dark = web_sys::window()
+/// Whether the OS asks for a dark scheme right now (`prefers-color-scheme`).
+fn system_prefers_dark() -> bool {
+    web_sys::window()
         .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
         .map(|m| m.matches())
-        .unwrap_or(false);
-    if dark { Theme::dark() } else { Theme::light() }
+        .unwrap_or(false)
 }
 
 /// `build.rs`'s CHANGELOG parser, mounted so its tests run in `cargo test`.

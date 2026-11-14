@@ -38,7 +38,9 @@ pub fn OpenItemsDock() -> impl IntoView {
                     session.open_items.with(|l| l.len() > 1)
                         && session.shown_items.with(|s| s.len() < 2)
                 }>
-                    <span class="open-dock__hint">"Ctrl/Cmd-click a chip to compare"</span>
+                    <span class="open-dock__hint">
+                        {format!("{} a chip to compare", crate::util::accel_click())}
+                    </span>
                 </Show>
                 // Only meaningful with more than one open — a lone chip's × already
                 // closes it.
@@ -97,7 +99,11 @@ fn dock_chip(session: Session, item: OpenItem) -> impl IntoView {
                 // Surface the otherwise-invisible compare gesture; keeps the
                 // live-title behavior (closure form) the label comment requires.
                 title=move || {
-                    format!("{} — click to focus · Ctrl/Cmd-click to compare side-by-side", label())
+                    format!(
+                        "{} — click to focus · {} to compare side-by-side",
+                        label(),
+                        crate::util::accel_click(),
+                    )
                 }
                 on:click=move |ev: leptos::ev::MouseEvent| {
                     session.focus_item(id, ev.meta_key() || ev.ctrl_key());

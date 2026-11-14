@@ -27,7 +27,7 @@ use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 pub fn DisasterRecoveryView() -> impl IntoView {
     view! {
         <div class="tool-page dr-view">
-            <SectionHeader title="Disaster Recovery" crumb="Backup & Restore" />
+            <SectionHeader title="Disaster Recovery" />
             <BackupCard />
             <RestoreCard />
         </div>

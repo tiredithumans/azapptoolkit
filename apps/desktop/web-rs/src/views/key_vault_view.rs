@@ -154,7 +154,7 @@ pub fn KeyVaultView() -> impl IntoView {
         <main class="tool-page">
             <SectionHeader
                 title="Key Vault".to_string()
-                crumb="Browse and reveal secrets in a named vault".to_string()
+                description="Browse and reveal secrets in a named vault.".to_string()
             />
             <RequiresRole capability_key="keyvault_secrets" />
             <div class="row">

@@ -20,6 +20,58 @@
       data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
     />
     <link data-trunk rel="css" href="styles.css" />
+    <!-- The boot screen below is styled here, inline, on purpose: it has to
+         paint before styles.css and the wasm have loaded, which is the whole
+         of its job. The CSP allows inline styles ('unsafe-inline' in
+         style-src); the colours repeat the --canvas / --text / --accent tokens
+         for both schemes because the stylesheet that defines them is not there
+         yet. -->
+    <style>
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: #f4f6f8;
+        color: #5b5b5b;
+        font: 500 14px "Segoe UI Variable", "Segoe UI", -apple-system,
+          BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+      }
+      #boot .boot__mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #0f6cbd, #8a3ffc);
+        color: #fff;
+        font-size: 20px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      @media (prefers-color-scheme: dark) {
+        #boot {
+          background: #1a1a1a;
+          color: #b0b0b0;
+        }
+        #boot .boot__mark {
+          background: linear-gradient(135deg, #4cc2ff, #b48bff);
+          color: #1a1a1a;
+        }
+      }
+    </style>
   </head>
-  <body></body>
+  <body>
+    <!-- Shown from the first paint until the app has mounted its first screen
+         (`lib.rs` removes it): the window used to be blank while the wasm
+         loaded and the config probe ran. Decorative, so hidden from assistive
+         tech — the app announces itself once it is up. -->
+    <div id="boot" aria-hidden="true">
+      <div class="boot__mark">a</div>
+      <div>azapptoolkit</div>
+    </div>
+  </body>
 </html>

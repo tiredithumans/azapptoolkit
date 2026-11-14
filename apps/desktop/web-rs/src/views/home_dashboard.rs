@@ -132,7 +132,7 @@ pub fn HomeDashboard() -> impl IntoView {
 
     view! {
         <main class="dashboard">
-            <SectionHeader title="Overview".to_string() crumb="Home".to_string() />
+            <SectionHeader title="Home".to_string() />
             <div class="dash-grid">
                 <section class="dash-card">
                     <h3 class="dash-card__title">
@@ -361,7 +361,7 @@ pub fn HomeDashboard() -> impl IntoView {
                     </Suspense>
                 </section>
 
-                <section class="dash-card">
+                <section class="dash-card dash-card--compact">
                     <h3 class="dash-card__title">"Credential health"</h3>
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
@@ -428,7 +428,10 @@ pub fn HomeDashboard() -> impl IntoView {
                     </Suspense>
                 </section>
 
-                <section class="dash-card">
+                // Two columns wide: it holds the page's longest content (the
+                // consent note and the ranked findings), which a one-column card
+                // truncated while the slot beside it sat empty.
+                <section class="dash-card dash-card--wide">
                     <h3 class="dash-card__title">"Security posture"</h3>
                     // The consent-posture note sits ABOVE the run-derived counts
                     // and outside their Suspense: it answers "how did this tenant

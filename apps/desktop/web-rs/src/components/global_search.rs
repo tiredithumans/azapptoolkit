@@ -64,6 +64,19 @@ use crate::state::{ActiveView, OpenItemKind, SecurityTab, use_session};
 /// capped record group does.
 const GOTO_LIMIT: usize = 8;
 
+/// How many of those rows may be destinations reached only through a keyword
+/// (rank 3 in [`match_rank`]) rather than their own label or their parent
+/// page's name.
+///
+/// The group renders above the record hits — it is instant, they lag by a
+/// round trip, and swapping the order would make the list jump as they land —
+/// so a weak page match costs the operator a row before the app they typed.
+/// "con" used to put five page jumps (four of them keyword matches for
+/// "consent" / "connection") above "Contoso CRM". A label match, or a parent's
+/// name (which lists the parent and its sub-tabs), is what the operator typed
+/// a page's name for and keeps the full [`GOTO_LIMIT`].
+const GOTO_KEYWORD_LIMIT: usize = 2;
+
 /// The warning a GUID search shows when one of its exact lookups failed for a
 /// reason other than "not found" (`GlobalSearchResults::lookup_degraded`) — the
 /// one home for the wording, which the GUI test reads too.
@@ -246,7 +259,11 @@ pub fn GlobalSearch() -> impl IntoView {
                         // resolved from the flattened list, never guessed.
                         hits.with(|h| active_option_id(h, selected.get()))
                     }
-                    placeholder="Search apps or jump to a page… (Ctrl/Cmd+K)"
+                    // The shortcut as this platform writes it (⌘K / Ctrl+K).
+                    placeholder=format!(
+                        "Search apps or jump to a page… ({})",
+                        crate::util::accel("K"),
+                    )
                     prop:value=move || raw_query.get()
                     on:input=on_input
                     on:focus=move |_| {
@@ -728,12 +745,19 @@ const DESTINATIONS: &[Destination] = &[
         icon: IconName::Settings,
         route: Route::Settings("connection"),
     },
+    Destination {
+        label: "Appearance",
+        context: "Settings",
+        keywords: "theme dark mode light mode colour color scheme",
+        icon: IconName::Settings,
+        route: Route::Settings("appearance"),
+    },
 ];
 
 /// How well `d` matches `needle` (already trimmed, lowercased and non-empty),
 /// lowest first, or `None` when it doesn't match at all.
 ///
-/// Three tiers, because a shared word must not scramble the obvious answer:
+/// Four tiers, because a shared word must not scramble the obvious answer:
 /// "key" reaches "Key Vault (secrets)" by its label and "Vault access" only by
 /// a keyword, so the label match has to sort first.
 fn match_rank(d: &Destination, needle: &str) -> Option<u8> {
@@ -744,10 +768,25 @@ fn match_rank(d: &Destination, needle: &str) -> Option<u8> {
     if label.contains(needle) {
         return Some(1);
     }
-    if d.context.to_lowercase().contains(needle) || d.keywords.contains(needle) {
+    if starts_a_word(&d.context.to_lowercase(), needle) {
         return Some(2);
     }
+    if starts_a_word(d.keywords, needle) {
+        return Some(3);
+    }
     None
+}
+
+/// Whether `needle` begins a word of `text` (or, for a multi-word needle,
+/// occurs in it at all). A keyword is matched from the start of a word: a bare
+/// substring let "con" reach a destination through the middle of "icon" or
+/// "second", which nobody types on purpose.
+fn starts_a_word(text: &str, needle: &str) -> bool {
+    if needle.contains(' ') {
+        return text.contains(needle);
+    }
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|word| word.starts_with(needle))
 }
 
 /// The "Go to" group's rows: the capped list actually rendered, plus the total
@@ -769,8 +808,22 @@ fn goto_rows(query: &str) -> (Vec<&'static Destination>, usize) {
     // Stable, so equal-rank destinations keep the table's order.
     ranked.sort_by_key(|(rank, _)| *rank);
     let total = ranked.len();
-    ranked.truncate(GOTO_LIMIT);
-    (ranked.into_iter().map(|(_, d)| d).collect(), total)
+    // Label matches first (they sorted first), then at most
+    // `GOTO_KEYWORD_LIMIT` keyword-only ones; the footer names the rest.
+    let mut keyword_only = 0;
+    let rows: Vec<&'static Destination> = ranked
+        .into_iter()
+        .filter(|(rank, _)| {
+            if *rank < 3 {
+                return true;
+            }
+            keyword_only += 1;
+            keyword_only <= GOTO_KEYWORD_LIMIT
+        })
+        .map(|(_, d)| d)
+        .take(GOTO_LIMIT)
+        .collect();
+    (rows, total)
 }
 
 fn render_goto_group(
@@ -1155,6 +1208,41 @@ mod tests {
             more_matches_label(rows.len(), total).as_deref(),
             Some(footer.as_str()),
         );
+    }
+
+    /// A fragment that reaches several destinations only through their
+    /// keywords shows two of those at most, after every label match — so the
+    /// record hits are not pushed down a row per weak page match — while the
+    /// total still counts them all for the footer.
+    #[test]
+    fn keyword_only_destinations_are_capped_below_the_label_matches() {
+        let needle = "con";
+        let (rows, total) = goto_rows(needle);
+        let ranks: Vec<u8> = rows
+            .iter()
+            .map(|d| match_rank(d, needle).expect("a returned row matches"))
+            .collect();
+        assert!(
+            ranks.windows(2).all(|w| w[0] <= w[1]),
+            "label matches sort before keyword matches: {ranks:?}"
+        );
+        let keyword_only = ranks.iter().filter(|rank| **rank == 3).count();
+        assert!(
+            keyword_only <= GOTO_KEYWORD_LIMIT,
+            "{keyword_only} keyword-only destinations shown for {needle:?}"
+        );
+        let all = DESTINATIONS
+            .iter()
+            .filter(|d| match_rank(d, needle).is_some())
+            .count();
+        assert_eq!(total, all, "the footer's total counts what was left off");
+        assert!(
+            all > rows.len(),
+            "{needle:?} must reach more destinations than are shown, or this proves nothing"
+        );
+        // A keyword is matched from the start of a word, never mid-word.
+        assert!(starts_a_word("default owners sso", "own"));
+        assert!(!starts_a_word("default owners sso", "wner"));
     }
 
     #[test]

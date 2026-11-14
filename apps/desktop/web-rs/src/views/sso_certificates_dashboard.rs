@@ -116,7 +116,7 @@ pub fn SsoCertificatesDashboard() -> impl IntoView {
             <AuditDashboard
             cache_kind=ListCacheKindDto::SsoCertificates
             title="SSO certificate expiry"
-            crumb="SAML token-signing certificates across the tenant"
+            description="SAML token-signing certificates across the tenant."
             search_placeholder="Filter by app name or appId…"
             refresh_label="Refresh SSO certificate expiry"
             view_key="sso-certificates"

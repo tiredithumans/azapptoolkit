@@ -239,7 +239,7 @@ pub fn BulkActionsView() -> impl IntoView {
         <main class="tool-page">
             <SectionHeader
                 title="Bulk Actions".to_string()
-                crumb="Act on the App Registrations you've selected, or create apps in bulk"
+                description="Act on the app registrations you've selected, or create apps in bulk."
                     .to_string()
             />
             <TabBar

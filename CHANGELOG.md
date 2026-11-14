@@ -9,9 +9,22 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Added
 
 - The window reopens at the size and position you left it, including maximized.
+- Settings → Appearance lets you pick Light or Dark instead of following the system.
+- An open item has a "Back to …" link to the page underneath it.
+- On a wide window the App Registrations and Enterprise Applications rows also show credentials, type and created date.
+- The app shows its logo while it starts instead of a blank window.
 
 ### Changed
 
+- Each page's title now appears once, in the top bar, and the lists start higher: about three more rows fit.
+- A list's search box, Filters and actions share one row; its count and sort share another.
+- Selecting apps opens one bar at the foot of the list instead of pushing the rows down; the header duplicate is gone.
+- Security's severity tiles and Run audit show only on the Findings and All apps tabs, so the other tabs get the room.
+- Home's Security posture card is two columns wide and Credential health no longer stretches to match it.
+- Search lists at most two pages that match only by keyword, so matching apps sit closer to the top.
+- Shortcuts are written for your platform (⌘K on a Mac, Ctrl+K elsewhere), and Refresh token has its own icon.
+- Right-click no longer opens the browser's Back / Reload menu, except in text fields and over selected text.
+- An app whose older credential has lapsed reads "one expired 240d ago" rather than "240 days ago".
 - Restoring a backup now asks you to type RESTORE, with Cancel first.
 - Replacing an app's owner set now confirms first, and can no longer be applied with no owners staged.
 - "Grant scoped (remove org-wide)" under Exchange's Advanced block now confirms before removing org-wide grants.
@@ -34,6 +47,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - Revoking an enterprise app or managed identity permission, a site grant, or assigning an Azure role now confirms.
 - Switching between the Bulk Actions tabs no longer drops a running action's progress, failures or Undo.
 - Refresh on Credential expiry and SSO certificates now re-reads from Microsoft Entra instead of the cached board.
+- The Managed Identities list no longer draws a card inside a card.
 - Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
 - Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
 - Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.

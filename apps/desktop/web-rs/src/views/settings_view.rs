@@ -124,7 +124,7 @@ pub fn SettingsView() -> impl IntoView {
 
     view! {
         <div class="settings-view">
-            <SectionHeader title="Settings" crumb="Account" />
+            <SectionHeader title="Settings" />
             <span class="ui-text hint">
                 "Operator defaults for this tenant — stored locally and reused so you don't re-enter \
                  them each time. They apply only when you choose to (e.g. the \"Add default owners\" \
@@ -312,6 +312,7 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                     TabBarItem { value: "enterprise", label: "Enterprise application defaults" },
                     TabBarItem { value: "naming", label: "Naming defaults" },
                     TabBarItem { value: "connection", label: "Tenant connection" },
+                    TabBarItem { value: "appearance", label: "Appearance" },
                 ]
                 selected=active_tab
             />
@@ -385,6 +386,29 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
                         }
                             .into_any()
                     }
+                    // The colour scheme. Not a tenant default: it describes
+                    // this screen, applies as soon as it is picked, and is
+                    // remembered on this computer (`Session::theme_pref`).
+                    "appearance" => {
+                        view! {
+                            <section class="settings-section">
+                                <h3>"Theme"</h3>
+                                <span class="ui-text hint">
+                                    "Follow your system's light or dark setting, or pick one for azapptoolkit.                                      Applies immediately and is remembered on this computer."
+                                </span>
+                                <TabBar
+                                    label="Theme"
+                                    items=vec![
+                                        TabBarItem { value: "system", label: "System" },
+                                        TabBarItem { value: "light", label: "Light" },
+                                        TabBarItem { value: "dark", label: "Dark" },
+                                    ]
+                                    selected=session.theme_pref
+                                />
+                            </section>
+                        }
+                            .into_any()
+                    }
                     "connection" => {
                         view! {
                             <section class="settings-section">
@@ -442,9 +466,11 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             // Both belong to the defaults editor, so neither follows the
             // operator onto the connection tab: that tab saves through its own
             // button, and two "Save" controls on one page is a trap — the wrong
-            // one silently does nothing you asked for.
+            // one silently does nothing you asked for. Appearance has nothing
+            // to save: a theme applies when it is picked.
             {move || {
-                (active_tab.get() != "connection")
+                active_tab
+                    .with(|tab| tab != "connection" && tab != "appearance")
                     .then(|| {
                         view! {
                             {move || {

@@ -20,13 +20,13 @@ pub fn ShortcutsHelp(open: RwSignal<bool>) -> impl IntoView {
             <dl class="shortcuts">
                 {SHORTCUTS
                     .iter()
-                    .map(|(keys, what)| {
+                    .map(|shortcut| {
                         view! {
                             <div class="shortcuts__row">
                                 <dt class="shortcuts__keys">
-                                    <kbd class="ui-kbd">{*keys}</kbd>
+                                    <kbd class="ui-kbd">{shortcut.keys()}</kbd>
                                 </dt>
-                                <dd class="shortcuts__what">{*what}</dd>
+                                <dd class="shortcuts__what">{shortcut.what}</dd>
                             </div>
                         }
                     })

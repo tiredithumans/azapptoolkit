@@ -37,8 +37,7 @@ use crate::hooks::use_filtered_list::{Facet, FilteredListSpec, use_filtered_list
 use crate::hooks::use_list_export::{ExportRows, TenantRows, use_list_export};
 use crate::state::{ActiveView, OpenItemKind, use_session};
 use crate::util::{
-    contains_ignore_case, created_in_range, expiry_label, floored_days_until, fmt_day,
-    relative_time,
+    contains_ignore_case, count_noun, created_in_range, expiry_label, floored_days_until, fmt_day,
 };
 use crate::views::pairing::jump_to_paired_enterprise;
 
@@ -131,8 +130,9 @@ fn sort_rows(rows: &mut [Arc<ApplicationListRowDto>], col: AppSortCol, desc: boo
 struct CredentialMeta {
     label: &'static str,
     tone: BadgeTone,
-    /// `"12d left"` / `"3 days ago"`. `None` when nothing on the app carries an
-    /// end date, where the badge already says all there is to say.
+    /// `"12d left"` / `"Expired 3d ago"` / `"one expired 239d ago"`. `None`
+    /// when nothing on the app carries an end date, where the badge already
+    /// says all there is to say.
     expiry: Option<String>,
     /// The expiry date itself, hovered on the relative phrase — a relative
     /// phrase alone is unciteable in a change ticket.
@@ -154,12 +154,18 @@ fn credential_meta(
         label,
         tone,
         expiry: soonest.map(|end| {
-            if end <= now {
-                // Already gone: `relative_time` is the app's one past-tense phrase.
-                relative_time(now, end)
+            // The app's one expiry phrase, both ways ("12d left", "Expired 3d
+            // ago") — the past used to read "240 days ago", a different
+            // vocabulary from the row below it.
+            let phrase = expiry_label(floored_days_until(end, now));
+            // The soonest end date is in the past but the app still has a live
+            // credential (the badge says Active / Expiring): it is an OLDER
+            // credential that lapsed. Bare, "Active · 240 days ago" read as a
+            // contradiction.
+            if end <= now && status != ListCredentialStatus::Expired {
+                format!("one {}", phrase.to_lowercase())
             } else {
-                // Still to come, in the app's one expiry phrase ("12d left").
-                expiry_label(floored_days_until(end, now))
+                phrase
             }
         }),
         exact: soonest.map(fmt_day),
@@ -284,64 +290,12 @@ pub fn ApplicationList() -> impl IntoView {
 
     view! {
         <div class="apps-view">
-            <SectionHeader title="App Registrations".to_string() crumb="Inventory".to_string()>
-                {move || {
-                    let n = session.tenant_ui.selected_app_ids.with(|s| s.len());
-                    (n > 0)
-                        .then(|| {
-                            view! {
-                                <span class="selection-bar">
-                                    <span class="selection-bar__count">{format!("{n} selected")}</span>
-                                    <Button
-                                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                                        on_click=Box::new(move |_| session.set_view(ActiveView::BulkActions))
-                                    >
-                                        "Bulk Actions…"
-                                    </Button>
-                                    <Button
-                                        appearance=Signal::derive(|| ButtonAppearance::Subtle)
-                                        on_click=Box::new(move |_| session.clear_app_selection())
-                                    >
-                                        "Clear"
-                                    </Button>
-                                </span>
-                            }
-                        })
-                }}
-                <DataAge loaded_at=loaded_at />
-                <ExportMenu
-                    disabled=Signal::derive(move || exporting.get())
-                    on_select=Callback::new(do_export)
-                    options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
-                />
-                <IconButton
-                    icon=IconName::Refresh
-                    aria_label="Refresh App Registrations".to_string()
-                    title="Refresh".to_string()
-                    on_click=Callback::new(on_refresh)
-                    busy=Signal::derive(move || refreshing.get())
-                />
-                <Button
-                    class="btn-icon-label"
-                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                    on_click=Box::new(move |_| session.open_deleted_apps())
-                >
-                    <Icon name=IconName::Trash size=16 />
-                    "Recently deleted…"
-                </Button>
-                <Button
-                    class="btn-icon-label"
-                    appearance=Signal::derive(|| ButtonAppearance::Primary)
-                    on_click=Box::new(move |_| session.open_create_app())
-                >
-                    <Icon name=IconName::Plus size=16 />
-                    "New app"
-                </Button>
-            </SectionHeader>
+            <SectionHeader title="App Registrations".to_string() />
             <div class="apps-view__body">
                 <ListScaffold
                     search=raw_search
-                    search_placeholder="Filter App Registrations by name or appId…"
+                    search_placeholder="Filter by name or app ID…"
+                    search_label="Filter App Registrations by name or app ID"
                     saved_view_key="apps"
                     facet=cred_filter
                     filters_open=filters_open
@@ -353,21 +307,44 @@ pub fn ApplicationList() -> impl IntoView {
                             <DateRangeFilter after=created_after before=created_before noun="apps" />
                         }
                     }
+                    // One selection surface: the bar at the foot of the card
+                    // says how many are selected and what can be done to them.
+                    // The header used to repeat "N selected" and Clear beside a
+                    // "Bulk Actions…" jump to a page that hosts the same bar.
+                    actions=move || {
+                        view! {
+                        <DataAge loaded_at=loaded_at />
+                        <ExportMenu
+                            disabled=Signal::derive(move || exporting.get())
+                            on_select=Callback::new(do_export)
+                            options=vec![("csv", "Export as CSV…"), ("json", "Export as JSON…")]
+                        />
+                        <IconButton
+                            icon=IconName::Refresh
+                            aria_label="Refresh App Registrations".to_string()
+                            title="Refresh".to_string()
+                            on_click=Callback::new(on_refresh)
+                            busy=Signal::derive(move || refreshing.get())
+                        />
+                        <Button
+                            class="btn-icon-label"
+                            appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                            on_click=Box::new(move |_| session.open_deleted_apps())
+                        >
+                            <Icon name=IconName::Trash size=16 />
+                            "Recently deleted…"
+                        </Button>
+                        <Button
+                            class="btn-icon-label"
+                            appearance=Signal::derive(|| ButtonAppearance::Primary)
+                            on_click=Box::new(move |_| session.open_create_app())
+                        >
+                            <Icon name=IconName::Plus size=16 />
+                            "New app"
+                        </Button>
+                        }
+                    }
                 >
-                    // Persistent chrome, deliberately OUTSIDE the `Suspense`
-                    // body: a refetch remounts everything inside it, and this
-                    // bar's own `on_done` bumps `apps_reload` — mounting it
-                    // inside would wipe its run summary (and Undo) on the very
-                    // refetch the run triggers. Self-gating: renders nothing
-                    // until a selection or a run result exists.
-                    <BulkActionBar
-                        names=Signal::derive(move || session.tenant_ui.app_names.get())
-                        selection=session.tenant_ui.selected_app_ids
-                        actions=Signal::derive(|| {
-                            vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
-                        })
-                        on_done=Callback::new(move |_| session.bump_apps_reload())
-                    />
                     <Suspense fallback=move || view! { <SkeletonList rows=8 /> }>
                         {move || {
                             // Re-runs only on an actual refetch (tenant switch / reload
@@ -413,6 +390,26 @@ pub fn ApplicationList() -> impl IntoView {
                             })
                         }}
                     </Suspense>
+                    // At the FOOT of the card, after the rows: the bar appears
+                    // on the first tick and used to open above the list, pushing
+                    // the row just ticked 66px down from under the pointer. Here
+                    // the list gives up height from its bottom edge instead and
+                    // every row stays where it was.
+                    //
+                    // Persistent chrome, deliberately OUTSIDE the `Suspense`
+                    // body: a refetch remounts everything inside it, and this
+                    // bar's own `on_done` bumps `apps_reload` — mounting it
+                    // inside would wipe its run summary (and Undo) on the very
+                    // refetch the run triggers. Self-gating: renders nothing
+                    // until a selection or a run result exists.
+                    <BulkActionBar
+                        names=Signal::derive(move || session.tenant_ui.app_names.get())
+                        selection=session.tenant_ui.selected_app_ids
+                        actions=Signal::derive(|| {
+                            vec![BulkAction::Grant, BulkAction::RemoveExpired, BulkAction::Delete]
+                        })
+                        on_done=Callback::new(move |_| session.bump_apps_reload())
+                    />
                 </ListScaffold>
             </div>
         </div>
@@ -622,11 +619,35 @@ fn LoadedApps(
                 <FilterChip label="With certs" value="certs" count=certs facet=cred_filter />
             </div>
         </Show>
-        <SelectAllBar
-            count_label=count_label
-            visible_ids=visible_ids
-            selected=session.tenant_ui.selected_app_ids
-        />
+        // The count (with select-all) and the sort on ONE line — two bands of
+        // chrome before, for what is a single "what am I looking at, in what
+        // order" statement.
+        <div class="app-list__metabar">
+            <SelectAllBar
+                count_label=count_label
+                visible_ids=visible_ids
+                selected=session.tenant_ui.selected_app_ids
+            />
+            // Sits directly above the rows it reorders, outside the collapsed
+            // filter drawer: a sort an operator cannot see is a sort they will not
+            // use, and it is not a filter — it never changes the result count.
+            // Suppressed only for a tenant with no apps at all, where the onboarding
+            // empty state is the whole message; a filtered-empty list keeps it so
+            // the chrome doesn't jump as the operator widens the search back out.
+            {(total > 0)
+                .then(|| {
+                    view! {
+                        <div
+                            class="app-list__sortbar"
+                            role="group"
+                            aria-label="Sort app registrations"
+                        >
+                            <span class="app-list__sortbar-label">"Sort"</span>
+                            {sort_buttons}
+                        </div>
+                    }
+                })}
+        </div>
         {capped
             .then(|| {
                 view! {
@@ -642,25 +663,6 @@ fn LoadedApps(
         // `PairedEnterpriseAppId`) is joined from that index, so an app whose
         // service principal is past it reads as one with no enterprise app.
         <PairingCapNotice />
-        // Sits directly above the rows it reorders, outside the collapsed
-        // filter drawer: a sort an operator cannot see is a sort they will not
-        // use, and it is not a filter — it never changes the result count.
-        // Suppressed only for a tenant with no apps at all, where the onboarding
-        // empty state is the whole message; a filtered-empty list keeps it so
-        // the chrome doesn't jump as the operator widens the search back out.
-        {(total > 0)
-            .then(|| {
-                view! {
-                    <div
-                        class="app-list__sortbar"
-                        role="group"
-                        aria-label="Sort app registrations"
-                    >
-                        <span class="app-list__sortbar-label">"Sort"</span>
-                        {sort_buttons}
-                    </div>
-                }
-            })}
         <VirtualRows items=sorted total=total />
     }
 }
@@ -781,6 +783,29 @@ fn view_row(
         expiry: cred_expiry,
         exact: cred_exact,
     } = credential_meta(row.credential_status, row.soonest_credential_expiry, now);
+    // The wide-window columns: what the app authenticates with, when it was
+    // created, and who can sign in to it.
+    let creds_text = match (row.password_credential_count, row.key_credential_count) {
+        (0, 0) => String::new(),
+        (secrets, 0) => count_noun(secrets, "secret", "secrets"),
+        (0, certs) => count_noun(certs, "cert", "certs"),
+        (secrets, certs) => format!(
+            "{} · {}",
+            count_noun(secrets, "secret", "secrets"),
+            count_noun(certs, "cert", "certs")
+        ),
+    };
+    let created_text = row
+        .created_date_time
+        .map(|d| format!("Created {}", fmt_day(d)))
+        .unwrap_or_default();
+    let audience_text = match row.sign_in_audience.as_deref() {
+        Some("AzureADMyOrg") => "Single tenant",
+        Some("AzureADMultipleOrgs") => "Multitenant",
+        Some("AzureADandPersonalMicrosoftAccount") => "Multitenant + personal",
+        Some("PersonalMicrosoftAccount") => "Personal accounts",
+        _ => "",
+    };
     // Spelled out rather than left to the browser's name computation: the row
     // button's accessible name would otherwise be the concatenation of a type
     // chip, a truncated title, a badge and a monospace GUID.
@@ -814,14 +839,18 @@ fn view_row(
                     <TypeChip kind=AppKind::AppRegistration compact=true />
                     <span class="app-list__row-title" title=title_name>{display_name}</span>
                     <Badge label=cred_label tone=cred_tone />
-                    {cred_expiry
-                        .map(|expiry| {
-                            view! {
-                                <span class="app-list__row-expiry" title=cred_exact>
-                                    {expiry}
-                                </span>
-                            }
-                        })}
+                    // Always rendered (empty with no end date), so the columns
+                    // after it line up from row to row on a wide window.
+                    <span class="app-list__row-expiry" title=cred_exact>
+                        {cred_expiry.unwrap_or_default()}
+                    </span>
+                    // Shown only when the window has the room (`styles.css`,
+                    // `.app-list__row-col`): a maximized window used to leave a
+                    // 1,400px gap between the name and its badge, and the list
+                    // could be sorted by a Created date it never displayed.
+                    <span class="app-list__row-col">{creds_text}</span>
+                    <span class="app-list__row-col">{created_text}</span>
+                    <span class="app-list__row-col app-list__row-col--extra">{audience_text}</span>
                 </span>
                 <span class="app-list__row-appid">{app_id_string}</span>
             </button>
@@ -940,8 +969,21 @@ mod tests {
         // along as the hover title.
         assert_eq!(soon.exact.as_deref(), Some("2026-09-14"));
 
-        let lapsed = credential_meta(ListCredentialStatus::Expired, Some(at(-3)), now);
-        assert_eq!(lapsed.expiry.as_deref(), Some("3 days ago"));
+        // The same vocabulary in the past tense.
+        let lapsed = credential_meta(
+            ListCredentialStatus::Expired,
+            Some(at(-3) - Duration::hours(1)),
+            now,
+        );
+        assert_eq!(lapsed.expiry.as_deref(), Some("Expired 3d ago"));
+        // A live app whose soonest end date has passed: an older credential
+        // lapsed, and the phrase says so instead of contradicting the badge.
+        let mixed = credential_meta(
+            ListCredentialStatus::Active,
+            Some(at(-240) - Duration::hours(1)),
+            now,
+        );
+        assert_eq!(mixed.expiry.as_deref(), Some("one expired 240d ago"));
 
         // Nothing with an end date: the badge alone carries the state.
         let bare = credential_meta(ListCredentialStatus::None, None, now);
