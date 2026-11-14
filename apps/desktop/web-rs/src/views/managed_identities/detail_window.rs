@@ -174,8 +174,15 @@ pub fn ManagedIdentityDetailWindow(
     let do_revoke = move |assignment_id: String, sp_id: String| {
         cmd.run(
             move |()| {
+                // Read before the clear below empties it.
+                let revoked = pending_revoke_label.get_untracked();
                 reload.update(|n| *n += 1);
                 pending_revoke.set(None);
+                session.toast_success(if revoked.is_empty() {
+                    "Permission revoked.".to_string()
+                } else {
+                    format!("Revoked {revoked}.")
+                });
             },
             move |tenant_id| async move {
                 permissions_bindings::revoke_app_role_assignment(&tenant_id, &sp_id, &assignment_id)

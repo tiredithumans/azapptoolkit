@@ -16,13 +16,14 @@ use crate::bindings::keyvault_rbac::{
     self, KeyVaultAccessRow, KeyVaultSweepProgress, KeyVaultSweepResult,
 };
 use crate::components::export_menu::ExportMenu;
+use crate::components::toast::ToastKind;
 use crate::components::ui::{Badge, BadgeTone, Callout, ShowMore};
 use crate::components::ui::{ProgressBar, SearchInput};
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
-use crate::state::use_session;
+use crate::state::{BackgroundWork, use_session};
 use crate::util::plural;
 
 /// Lowercased haystack of a row's vault + principal + role facets, newline-joined
@@ -67,6 +68,10 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
 
     let result: RwSignal<Option<KeyVaultSweepResult>> = RwSignal::new(None);
     let scanning = RwSignal::new(false);
+    // The nav marks Resource Access while the sweep runs.
+    Effect::new(move |_| {
+        session.set_background_work(BackgroundWork::VaultSweep, scanning.get());
+    });
     let progress: RwSignal<Option<KeyVaultSweepProgress>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_required = RwSignal::new(false);
@@ -202,7 +207,20 @@ pub(super) fn KeyVaultPanel() -> impl IntoView {
                 return;
             }
             match res {
-                Ok(r) => result.set(Some(r)),
+                Ok(r) => {
+                    let cancelled = r.cancelled;
+                    result.set(Some(r));
+                    // Finished while the operator was on another page.
+                    session.notify_background_done(
+                        BackgroundWork::VaultSweep,
+                        ToastKind::Info,
+                        if cancelled {
+                            "The Key Vault sweep was cancelled.".to_string()
+                        } else {
+                            "The Key Vault sweep finished.".to_string()
+                        },
+                    );
+                }
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
                     step_up_required.set(e.is_interaction_required());

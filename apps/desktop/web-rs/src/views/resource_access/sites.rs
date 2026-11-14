@@ -11,12 +11,13 @@ use crate::bindings::events;
 use crate::bindings::sharepoint::{self, SiteAppGrantRow, SiteSweepProgress, SiteSweepResult};
 use crate::components::app_site_access_panel::site_sweep_cap_message;
 use crate::components::export_menu::ExportMenu;
+use crate::components::toast::ToastKind;
 use crate::components::ui::{Callout, ProgressBar, SearchInput, ShowMore};
 use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::hooks::use_list_export::use_list_export;
 use crate::hooks::use_progress_stream::use_progress_stream;
-use crate::state::use_session;
-use crate::util::plural;
+use crate::state::{BackgroundWork, use_session};
+use crate::util::{count_noun, plural};
 
 /// Lowercased haystack of a row's site + app facets, newline-joined so one
 /// search box serves both lookup directions without cross-field false matches.
@@ -44,6 +45,11 @@ pub(super) fn SitesPanel() -> impl IntoView {
 
     let result: RwSignal<Option<SiteSweepResult>> = RwSignal::new(None);
     let scanning = RwSignal::new(false);
+    // The nav marks Resource Access while the sweep runs (it can take minutes,
+    // and this pane stays mounted when the operator leaves it).
+    Effect::new(move |_| {
+        session.set_background_work(BackgroundWork::SiteSweep, scanning.get());
+    });
     let progress: RwSignal<Option<SiteSweepProgress>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_required = RwSignal::new(false);
@@ -177,7 +183,23 @@ pub(super) fn SitesPanel() -> impl IntoView {
                 return;
             }
             match res {
-                Ok(r) => result.set(Some(r)),
+                Ok(r) => {
+                    let (sites, cancelled) = (r.sites_scanned, r.cancelled);
+                    result.set(Some(r));
+                    // Finished while the operator was on another page.
+                    session.notify_background_done(
+                        BackgroundWork::SiteSweep,
+                        ToastKind::Info,
+                        if cancelled {
+                            "The site sweep was cancelled.".to_string()
+                        } else {
+                            format!(
+                                "The site sweep finished: {} checked.",
+                                count_noun(sites, "site", "sites")
+                            )
+                        },
+                    );
+                }
                 Err(e) => {
                     consent_required.set(e.is_consent_required());
                     // A dead session gets the Re-authenticate lever instead of a

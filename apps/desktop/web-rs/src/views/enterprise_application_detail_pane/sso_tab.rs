@@ -622,6 +622,30 @@ fn SsoEditor(
     // OIDC editable fields — one row per URI (`UriListEditor`).
     let redirect_uris = UriListState::validated(&cfg.redirect_uris, redirect_uri_reason);
     let spa_uris = UriListState::validated(&cfg.spa_redirect_uris, redirect_uri_reason);
+    // Edits to any of the fields above that are not saved yet. The tab had no
+    // marker at all, so closing or refreshing the pane dropped them unasked.
+    // (The claims editor keeps its own state and is not covered.)
+    {
+        let saved = StoredValue::new((
+            cfg.identifier_uris.clone(),
+            cfg.reply_urls.clone(),
+            cfg.logout_url.clone().unwrap_or_default(),
+            cfg.notification_emails.clone(),
+            cfg.redirect_uris.clone(),
+            cfg.spa_redirect_uris.clone(),
+        ));
+        crate::hooks::use_unsaved_marker(move || {
+            selected_mode.get() != saved_mode
+                || saved.with_value(|(ids, replies, logout, emails, redirects, spa)| {
+                    !identifiers.same_as(ids)
+                        || !reply_urls.same_as(replies)
+                        || logout_url.with(|l| l.trim() != logout.trim())
+                        || !notification_emails.same_as(emails)
+                        || !redirect_uris.same_as(redirects)
+                        || !spa_uris.same_as(spa)
+                })
+        });
+    }
     // Cert rotation. The big-bang path breaks sign-in for static-certificate
     // apps, so the button only opens a typed confirmation.
     let cert_subject = RwSignal::new(String::new());

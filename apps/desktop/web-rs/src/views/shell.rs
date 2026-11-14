@@ -267,7 +267,17 @@ pub fn AppShell(children: Children) -> impl IntoView {
                 aria-current=aria_current
                 on:click=move |_| session.set_view(target)
             >
-                <span class="nav__icon"><Icon name=icon size=18 /></span>
+                <span class="nav__icon">
+                    <Icon name=icon size=18 />
+                    // A job this page owns is running (an audit, a sweep, a
+                    // backup or restore, a bulk run). On the icon, so the
+                    // collapsed rail shows it too.
+                    <Show when=move || session.view_is_busy(target)>
+                        <span class="nav__activity" role="status">
+                            <span class="visually-hidden">"Work in progress"</span>
+                        </span>
+                    </Show>
+                </span>
                 <span class="nav__label">{label}</span>
             </button>
         }

@@ -588,14 +588,20 @@ fn AssignAzureRolePanel(
         busy.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            match managed_identity::assign_managed_identity_azure_role(
-                &tid, &scope_v, &role_v, &pid,
-            )
-            .await
-            {
+            let outcome =
+                managed_identity::assign_managed_identity_azure_role(&tid, &scope_v, &role_v, &pid)
+                    .await;
+            // Signed out or switched tenant while it ran: land nothing here,
+            // and no toast that would surface in the next sign-in.
+            if !session.is_active_tenant(&tid) {
+                return;
+            }
+            match outcome {
                 Ok(()) => {
                     open.set(false);
                     scope.set(String::new());
+                    // The form collapsing was the only sign it had worked.
+                    session.toast_success("Azure role assigned.");
                     on_assigned.try_run(());
                 }
                 Err(e) => {

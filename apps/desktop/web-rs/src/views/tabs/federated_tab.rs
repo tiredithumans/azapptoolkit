@@ -78,6 +78,9 @@ pub fn FederatedTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> imp
 
     // ---- Edit state (raw fields; name is immutable in Graph) ----
     let editing: RwSignal<Option<FederatedCredentialDto>> = RwSignal::new(None);
+    // An open add or edit form is unsaved work the pane should not drop
+    // silently (close, Refresh, another tab's reload).
+    crate::hooks::use_unsaved_marker(move || add_open.get() || editing.with(Option::is_some));
     let edit_issuer = RwSignal::new(String::new());
     let edit_subject = RwSignal::new(String::new());
     let edit_description = RwSignal::new(String::new());

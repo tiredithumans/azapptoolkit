@@ -103,11 +103,18 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
 
     // ---- Free-text management notes editor. ----
     let notes_text = RwSignal::new(sp.notes.clone().unwrap_or_default());
+    // What the directory holds, so Save is offered only for a real change and
+    // an unsaved note is known to the pane (closing or refreshing asks first).
+    let saved_notes = RwSignal::new(sp.notes.clone().unwrap_or_default());
+    let notes_dirty = move || notes_text.with(|n| saved_notes.with(|s| n != s));
+    crate::hooks::use_unsaved_marker(notes_dirty);
     let notes_cmd = use_command();
     let sp_id_notes = StoredValue::new(sp.id.clone());
     let save_notes = move |_| {
+        let saving = notes_text.get_untracked();
         notes_cmd.run_toast_err(
             move |()| {
+                saved_notes.set(saving.clone());
                 session.toast_success("Notes saved.");
             },
             move |tenant_id| {
@@ -243,7 +250,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
         </Field>
         <Button
             appearance=Signal::derive(|| ButtonAppearance::Primary)
-            disabled=Signal::derive(move || notes_cmd.busy.get())
+            disabled=Signal::derive(move || notes_cmd.busy.get() || !notes_dirty())
             on_click=Box::new(save_notes)
         >
             "Save notes"

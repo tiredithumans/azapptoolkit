@@ -19,8 +19,10 @@ use crate::bindings::audit::{
 };
 use crate::bindings::auth;
 use crate::bindings::events;
+use crate::components::toast::ToastKind;
 use crate::hooks::use_progress_stream::use_progress_stream;
-use crate::state::Session;
+use crate::state::{BackgroundWork, Session};
+use crate::util::count_noun;
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuditController {
@@ -252,6 +254,10 @@ impl AuditController {
         // running is what makes it one-shot — this effect also sees the signals
         // `run()` touches, and every re-run then finds it false and does
         // nothing.
+        // The nav marks Security while a scan runs: the workbench stays
+        // mounted, and a scan left running was invisible from anywhere else.
+        Effect::new(move |_| session.set_background_work(BackgroundWork::Audit, scanning.get()));
+
         Effect::new(move |_| {
             if session.tenant_ui.pending_audit_run.get() {
                 session.tenant_ui.pending_audit_run.set(false);
@@ -303,13 +309,37 @@ impl AuditController {
                     // A new run re-keys nothing in particular; a pending
                     // focus hand-over from a Fix is stale against it.
                     self.focus_row.set(None);
+                    let (scored, cancelled) = (r.items.len(), r.cancelled);
                     self.result.set(Some(r));
+                    // Finished while the operator was on another page: the
+                    // scan used to end without a word unless they came back.
+                    self.session.notify_background_done(
+                        BackgroundWork::Audit,
+                        ToastKind::Info,
+                        if cancelled {
+                            "The security audit was cancelled.".to_string()
+                        } else {
+                            format!(
+                                "The security audit finished: {} scored.",
+                                count_noun(scored, "principal", "principals")
+                            )
+                        },
+                    );
                     // Refresh the Home dashboard's "Security Posture" tile: it
                     // keeps its cached-audit resource alive across view
                     // switches, so it only refetches when this bumps.
                     self.session.bump_audit_reload();
                 }
-                Err(e) => self.fail(e),
+                Err(e) => {
+                    // The inline error lives on the Security page; away from
+                    // it, say the scan stopped and offer the way back.
+                    self.session.notify_background_done(
+                        BackgroundWork::Audit,
+                        ToastKind::Error,
+                        format!("The security audit failed: {}", e.message),
+                    );
+                    self.fail(e);
+                }
             }
             self.scanning.set(false);
             self.progress.set(None);

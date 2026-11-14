@@ -152,7 +152,11 @@ pub fn SharePointSitesSection(
         cmd.run_with(
             move |()| {
                 needs_consent.set(false);
+                // An earlier grant's green "Granted …" note would otherwise
+                // sit above a table that no longer lists it.
+                result.set(None);
                 reload.update(|n| *n += 1);
+                session.toast_success("Site permission revoked.");
             },
             move |e| {
                 if e.is_consent_required() {

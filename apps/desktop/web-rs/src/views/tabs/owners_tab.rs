@@ -47,6 +47,9 @@ pub fn OwnersTab(
     // reconcile in one call.
     let replacing = RwSignal::new(false);
     let staged: RwSignal<Vec<DirectoryObject>> = RwSignal::new(Vec::new());
+    // A staged replacement is unsaved work: closing or refreshing the pane,
+    // or another tab's reload, asks before (or avoids) discarding it.
+    crate::hooks::use_unsaved_marker(move || replacing.get());
     let applying = RwSignal::new(false);
 
     // Hidden from the search: the staged set while replacing, else the

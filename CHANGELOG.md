@@ -20,8 +20,18 @@ After 0.34.1, each change is one line written for the person using the app.
 - Labels use sentence case throughout ("Sign out", "Add default owners", the Settings tabs, the Home cards).
 - A SharePoint site grant's row button says "Revoke", as its dialog does; the Delegated grants page matches its tab.
 
+- Deleting an app registration now offers Undo on its confirmation, as the bulk delete does.
+- Refreshing an open item with unsaved edits now asks before discarding them.
+- A running audit, sweep, backup, restore or bulk run marks its page in the navigation while you are elsewhere.
+- An audit, sweep or bulk create that finishes while you are on another page now tells you, with a link back.
+- Notifications that carry an action (Undo, Reopen, View) stay for ten seconds instead of five.
+
 ### Fixed
 
+- Unsaved edits on one tab are no longer lost when another tab of the same item saves or reloads.
+- Owner replacements, federated credential forms, SSO settings and enterprise notes now count as unsaved edits.
+- Revoking an enterprise app or managed identity permission, a site grant, or assigning an Azure role now confirms.
+- Switching between the Bulk Actions tabs no longer drops a running action's progress, failures or Undo.
 - Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
 - Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
 - Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.

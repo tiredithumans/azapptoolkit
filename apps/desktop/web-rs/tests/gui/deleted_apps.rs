@@ -164,7 +164,7 @@ async fn a_truncated_bin_says_it_is_partial() {
     dto.truncated = true;
     let _m = mount_dialog(&dto);
 
-    ts::wait_for(|| ts::body_contains("this list is partial")).await;
+    ts::wait_for(|| ts::body_contains("This list is partial")).await;
 }
 
 /// The Undo path: after a delete run, the bar replays the run's confirmed-gone

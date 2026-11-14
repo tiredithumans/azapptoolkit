@@ -103,23 +103,6 @@ pub(super) fn PermissionsContent(
     // identical action): the panel's revoke icon sets `pending_revoke`, and
     // confirming runs `do_revoke`. On success clear the selection and re-fetch.
     let pending_revoke: RwSignal<Option<String>> = RwSignal::new(None);
-    let do_revoke = move |assignment_id: String| {
-        let id = sp_id.get();
-        revoke_cmd.run(
-            move |()| {
-                pending_revoke.set(None);
-                reload.update(|n| *n += 1);
-            },
-            move |tenant_id| async move {
-                permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
-                    .await
-            },
-        );
-    };
-    let on_revoke = Callback::new(move |assignment_id: String| {
-        revoke_cmd.error.set(None);
-        pending_revoke.set(Some(assignment_id));
-    });
     // The revoke icon hands back only an assignment id, so the dialog resolves
     // the row's own permission out of the held list the table is already
     // rendering — same source, same fallback to the raw appRole id, so the
@@ -143,6 +126,32 @@ pub(super) fn PermissionsContent(
                 })
             })
             .unwrap_or_default()
+    });
+    let do_revoke = move |assignment_id: String| {
+        let id = sp_id.get();
+        revoke_cmd.run(
+            move |()| {
+                // Read before the clear below empties it. The App Registration
+                // tab has always confirmed a revoke; this one closed its dialog
+                // and said nothing.
+                let revoked = pending_revoke_label.get_untracked();
+                pending_revoke.set(None);
+                reload.update(|n| *n += 1);
+                session.toast_success(if revoked.is_empty() {
+                    "Permission revoked.".to_string()
+                } else {
+                    format!("Revoked {revoked}.")
+                });
+            },
+            move |tenant_id| async move {
+                permissions_bindings::revoke_app_role_assignment(&tenant_id, &id, &assignment_id)
+                    .await
+            },
+        );
+    };
+    let on_revoke = Callback::new(move |assignment_id: String| {
+        revoke_cmd.error.set(None);
+        pending_revoke.set(Some(assignment_id));
     });
 
     let display_name =

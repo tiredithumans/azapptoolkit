@@ -1256,6 +1256,33 @@ h3 {
   opacity: 0.9;
   flex-shrink: 0;
 }
+/* "A job this page owns is running" — a small accent dot on the nav icon's
+   corner, so it reads the same on the labelled rail and the collapsed one.
+   The pulse is a slow opacity change (no movement), and the reduced-motion
+   block turns it off: the dot alone still says it. */
+.nav__icon {
+  position: relative;
+}
+.nav__activity {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+  animation: ui-activity-pulse 1.6s var(--ease-standard) infinite;
+}
+@keyframes ui-activity-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
 .nav__label {
   flex: 1;
   overflow: hidden;

@@ -19,7 +19,7 @@ use crate::components::ui::{
     Badge, BadgeTone, Callout, Card, CopyableId, FormError, ProgressBar, SectionHeader, Spinner,
 };
 use crate::hooks::use_progress_stream::use_progress_stream;
-use crate::state::use_session;
+use crate::state::{BackgroundWork, use_session};
 use crate::util::{count_noun, plural};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
@@ -42,6 +42,8 @@ fn BackupCard() -> impl IntoView {
 
     let captured: RwSignal<Option<backup::TenantBackup>> = RwSignal::new(None);
     let busy = RwSignal::new(false);
+    // The nav marks Disaster Recovery while the backup runs.
+    Effect::new(move |_| session.set_background_work(BackgroundWork::Backup, busy.get()));
     // Set by Cancel until the run ends, so a click reads as taken: the backup
     // stops only at its next chunk boundary.
     let cancelling = RwSignal::new(false);
@@ -362,6 +364,8 @@ fn RestoreCard() -> impl IntoView {
     let approvals: RwSignal<BTreeSet<backup::RestoreApproval>> = RwSignal::new(BTreeSet::new());
     let confirm_open = RwSignal::new(false);
     let restoring = RwSignal::new(false);
+    // The nav marks Disaster Recovery while the restore runs.
+    Effect::new(move |_| session.set_background_work(BackgroundWork::Restore, restoring.get()));
     // Set by Cancel until the run ends (see `BackupCard`).
     let cancelling = RwSignal::new(false);
     let restore_error: RwSignal<Option<String>> = RwSignal::new(None);

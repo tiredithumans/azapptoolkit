@@ -32,6 +32,37 @@ mod toasts;
 pub use navigation::SecurityTab;
 pub use open_items::PendingClose;
 
+/// A long-running job that keeps going when the operator leaves its page.
+///
+/// Each one has a progress row and a Cancel on its own view and nothing
+/// anywhere else, so a scan started and then navigated away from was invisible
+/// until someone went back to look. The shell marks the nav row of
+/// [`Self::view`] while any is in flight (`TenantScopedUi::background_work`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackgroundWork {
+    /// The security audit scan.
+    Audit,
+    /// A tenant backup.
+    Backup,
+    /// A restore into this tenant.
+    Restore,
+    /// The Resource Access site sweep.
+    SiteSweep,
+    /// The Resource Access Key Vault sweep.
+    VaultSweep,
+}
+
+impl BackgroundWork {
+    /// The nav destination that owns the job's progress and Cancel.
+    pub fn view(self) -> ActiveView {
+        match self {
+            Self::Audit => ActiveView::Security,
+            Self::Backup | Self::Restore => ActiveView::DisasterRecovery,
+            Self::SiteSweep | Self::VaultSweep => ActiveView::ResourceAccess,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveView {
     Home,
@@ -267,6 +298,12 @@ pub struct TenantScopedUi {
     // this is set. Kept by `RestoreCard`, which clears it on unmount;
     // tenant-scoped so it never outlives the tenant whose report it guards.
     pub dr_unsaved_secrets: RwSignal<bool>,
+    // The long-running jobs in flight for this tenant, so the nav can mark the
+    // page that owns each while the operator is somewhere else. Written only
+    // through `Session::set_background_work`, by the job's own view (which
+    // stays mounted, keep-alive). Tenant-scoped: a job cut off by sign-out
+    // must not leave its mark on the next tenant's nav.
+    pub background_work: RwSignal<HashSet<BackgroundWork>>,
 }
 
 impl TenantScopedUi {
@@ -304,6 +341,7 @@ impl TenantScopedUi {
             apps_scroll_top: RwSignal::new(0.0),
             enterprise_scroll_top: RwSignal::new(0.0),
             dr_unsaved_secrets: RwSignal::new(false),
+            background_work: RwSignal::new(HashSet::new()),
         }
     }
 
@@ -346,6 +384,7 @@ impl TenantScopedUi {
         self.apps_scroll_top.set(0.0);
         self.enterprise_scroll_top.set(0.0);
         self.dr_unsaved_secrets.set(false);
+        self.background_work.update(HashSet::clear);
     }
 }
 
@@ -573,6 +612,9 @@ mod tests {
             ui.apps_scroll_top.set(5200.0);
             ui.enterprise_scroll_top.set(5200.0);
             ui.dr_unsaved_secrets.set(true);
+            ui.background_work.update(|w| {
+                w.insert(BackgroundWork::Audit);
+            });
 
             session.set_active_tenant(None);
 
@@ -611,6 +653,7 @@ mod tests {
             assert_eq!(ui.apps_scroll_top.get_untracked(), 0.0);
             assert_eq!(ui.enterprise_scroll_top.get_untracked(), 0.0);
             assert!(!ui.dr_unsaved_secrets.get_untracked());
+            ui.background_work.with_untracked(|w| assert!(w.is_empty()));
             // And the Session-owned resets still happen alongside.
             assert_eq!(session.view.get_untracked(), ActiveView::Home);
         });
