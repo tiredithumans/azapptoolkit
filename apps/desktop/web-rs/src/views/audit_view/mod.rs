@@ -309,7 +309,7 @@ pub fn AuditAppsPane() -> impl IntoView {
                                             {move || sort_glyph(SortCol::Name)}
                                         </button>
                                     </th>
-                                    <th>"AppId"</th>
+                                    <th>"App ID"</th>
                                     <th aria-sort=move || sort_aria(SortCol::Score)>
                                         // Risk tier and Score are the same
                                         // ordering, so this header drives

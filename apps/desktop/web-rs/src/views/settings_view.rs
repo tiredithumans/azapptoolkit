@@ -3,7 +3,7 @@
 //! Edits the defaults persisted by `get_tenant_defaults` / `set_tenant_defaults`:
 //! default owners for app registrations and enterprise applications, the SSO
 //! notification-email seed, and the legacy-AAP management-scope-name pattern.
-//! These are reused elsewhere (the "Add Default Owners" buttons in the owner
+//! These are reused elsewhere (the "Add default owners" buttons in the owner
 //! tabs, the SSO field prefill, the migration default) so the operator configures
 //! them once.
 //!
@@ -127,7 +127,7 @@ pub fn SettingsView() -> impl IntoView {
             <SectionHeader title="Settings" crumb="Account" />
             <span class="ui-text hint">
                 "Operator defaults for this tenant — stored locally and reused so you don't re-enter \
-                 them each time. They apply only when you choose to (e.g. the \"Add Default Owners\" \
+                 them each time. They apply only when you choose to (e.g. the \"Add default owners\" \
                  button); nothing here changes an app on its own."
             </span>
             <Suspense fallback=move || view! { <DetailSkeleton /> }>
@@ -308,9 +308,9 @@ fn SettingsEditor(tenant_id: String, initial: TenantDefaults) -> impl IntoView {
             <TabBar
                 label="Settings sections"
                 items=vec![
-                    TabBarItem { value: "app-reg", label: "App Registration Defaults" },
-                    TabBarItem { value: "enterprise", label: "Enterprise Application Defaults" },
-                    TabBarItem { value: "naming", label: "Naming Defaults" },
+                    TabBarItem { value: "app-reg", label: "App registration defaults" },
+                    TabBarItem { value: "enterprise", label: "Enterprise application defaults" },
+                    TabBarItem { value: "naming", label: "Naming defaults" },
                     TabBarItem { value: "connection", label: "Tenant connection" },
                 ]
                 selected=active_tab

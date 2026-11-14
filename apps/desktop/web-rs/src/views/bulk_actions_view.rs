@@ -1,6 +1,6 @@
 //! Bulk actions page. Two sections behind a sub-tab bar:
 //!
-//! - **Selected apps** — the shared [`BulkActionBar`] (Grant consent / Remove
+//! - **Selected apps** — the shared [`BulkActionBar`] (Grant admin consent / Remove
 //!   expired credentials / Delete) over the apps checked in the App
 //!   Registrations list (`session.tenant_ui.selected_app_ids`). The bar is the single home
 //!   of the bulk command-calling logic; this page just hosts it. It reviews the
@@ -172,7 +172,7 @@ pub fn BulkActionsView() -> impl IntoView {
                             .iter()
                             .any(|o| o.status == BulkCreateStatus::Created)
                     {
-                        " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant consent."
+                        " Declared permissions are not consented yet — select the new apps in App Registrations and use Grant admin consent."
                     } else {
                         ""
                     };

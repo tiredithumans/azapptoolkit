@@ -345,7 +345,7 @@ fn VirtualRows(
                         <EmptyState
                             icon=IconName::Building
                             title="No enterprise applications yet".to_string()
-                            body="Add one from the gallery in the portal, or start a new SSO application here."
+                            body="Add one from the Entra gallery, or set up a new SSO application — both under New application."
                                 .to_string()
                         >
                             <Button
@@ -459,7 +459,7 @@ fn view_row(
                                 <Badge
                                     label="Disabled"
                                     tone=BadgeTone::Unknown
-                                    title="Sign-in disabled — this service principal's accountEnabled is false."
+                                    title="Sign-in is disabled for this enterprise application."
                                 />
                             }
                         })}

@@ -67,10 +67,10 @@ pub fn ConsentGrantsView() -> impl IntoView {
 
     view! {
         <AuditDashboard
-            title="Consent grants"
+            title="Delegated grants"
             crumb="Delegated (OAuth2) permission grants"
             search_placeholder="Filter by client name…"
-            refresh_label="Refresh consent grants"
+            refresh_label="Refresh delegated grants"
             view_key="consent"
             noun="grants"
             empty_message="No grants match this filter."

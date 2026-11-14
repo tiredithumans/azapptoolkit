@@ -360,8 +360,8 @@ pub(super) fn PermissionsContent(
             </Suspense>
             <ConfirmDialog
                 open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
-                title="Revoke permission?"
-                body="Remove this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
+                title="Revoke this permission?"
+                body="Revokes this app's held app-role assignment. The app loses that permission until it's granted again; the live grant is re-checked before removal."
                 subject=pending_revoke_label
                 confirm_label="Revoke"
                 busy=revoke_cmd.busy

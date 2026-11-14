@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::SP_SITES_SELECTED;
@@ -27,8 +27,8 @@ use crate::components::scope_badge::is_exchange_scopable_on;
 use crate::components::scope_unavailable_banner::ScopeUnavailableBanner;
 use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, FormError, SkeletonList,
-    Spinner, TabBar, TabBarItem,
+    Badge, BadgeTone, Callout, CopyableId, DataTable, DetailLoadError, FormError, Select,
+    SkeletonList, Spinner, TabBar, TabBarItem,
 };
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
@@ -143,13 +143,19 @@ pub fn ManagedIdentityDetailPane(
         />
         {keep_alive(active_tab, visited, "overview", move || view! {
         <div class="mi-tab">
-            <dl class="mi-properties">
-                <dt>"Service principal id"</dt>
-            <dd><CopyableId value=mi_id.clone() label="service principal id" full=true /></dd>
-            <dt>"App id"</dt>
-            <dd><CopyableId value=mi_app_id.clone() label="app id" full=true /></dd>
-            <dt>"Status"</dt>
-            <dd>{mi_enabled}</dd>
+            <dl class="read-grid">
+                <div class="read-grid__item">
+                    <dt>"Object ID"</dt>
+                    <dd><CopyableId value=mi_id.clone() label="object id" full=true /></dd>
+                </div>
+                <div class="read-grid__item">
+                    <dt>"App ID"</dt>
+                    <dd><CopyableId value=mi_app_id.clone() label="app id" full=true /></dd>
+                </div>
+                <div class="read-grid__item">
+                    <dt>"Status"</dt>
+                    <dd>{mi_enabled}</dd>
+                </div>
             </dl>
         </div>
         })}
@@ -627,7 +633,7 @@ fn AssignAzureRolePanel(
                         <div class="form-grid">
                             <RequiresRole capability_key="azure_role_assign" />
                             <Field label="Role">
-                                <Select value=role>
+                                <Select value=role label="Role">
                                     {COMMON_AZURE_ROLES
                                         .iter()
                                         .map(|(name, guid)| {

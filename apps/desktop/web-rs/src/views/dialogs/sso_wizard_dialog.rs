@@ -16,7 +16,7 @@ use azapptoolkit_dto::credentials::{
     MAX_SECRET_LIFETIME_DAYS as SECRET_MAX_DAYS,
 };
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select, Textarea};
+use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::auth;
 use crate::bindings::sso::{
@@ -25,7 +25,7 @@ use crate::bindings::sso::{
 use crate::components::claims_editor::{ClaimsEditor, ClaimsEditorState};
 use crate::components::modal_shell::ModalShell;
 use crate::components::sso_summary::{OidcSummaryView, SamlSummaryView};
-use crate::components::ui::{Callout, FormError, Spinner};
+use crate::components::ui::{Callout, FormError, Select, Spinner};
 use crate::state::use_session;
 
 /// Splits a textarea (one URL per line) into a trimmed, non-empty Vec.
@@ -347,7 +347,7 @@ pub fn SsoWizardDialog(
             // ---- Step 0: protocol + display name ----
             <Show when=move || step.get() == 0 fallback=|| ()>
                 <Field label="Single sign-on protocol">
-                    <Select value=protocol>
+                    <Select value=protocol label="Single sign-on protocol">
                         <option value="saml">"SAML"</option>
                         <option value="oidc">"OpenID Connect (OIDC)"</option>
                     </Select>
@@ -491,7 +491,7 @@ pub fn SsoWizardDialog(
                                         on_click=Box::new(grant_and_retry)
                                         disabled=Signal::derive(move || busy.get())
                                     >
-                                        "Grant admin consent & retry"
+                                        "Grant consent & retry"
                                     </Button>
                                 </Callout>
                             }

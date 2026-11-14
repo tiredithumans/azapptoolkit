@@ -496,7 +496,7 @@ pub fn AppShell(children: Children) -> impl IntoView {
                                     >
                                         <span class="nav__icon"><Icon name=IconName::LogOut size=16 /></span>
                                         <span>
-                                            {move || if signing_out.get() { "Signing out…" } else { "Sign Out" }}
+                                            {move || if signing_out.get() { "Signing out…" } else { "Sign out" }}
                                         </span>
                                     </button>
                                     // App version, baked at compile time — the release

@@ -150,7 +150,7 @@ fn render_report(rep: ReadinessReport, session: Session) -> impl IntoView {
     let banner = indeterminate.then(|| {
         view! {
             <Callout tone="warn" class="readiness__roles-error">
-                "Couldn't read your active directory roles, so directory-role requirements show as \
+                "Couldn't read your active Microsoft Entra roles, so directory-role requirements show as \
                  \"?\"."
                 {roles_error
                     .map(|e| {

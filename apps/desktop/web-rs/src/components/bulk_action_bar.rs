@@ -575,10 +575,13 @@ impl BulkAction {
     fn spec(self) -> Spec {
         match self {
             BulkAction::Grant => Spec {
-                label: "Grant consent",
+                // "admin consent", as the Permissions tab's button and its
+                // dialog say it: a bare "Grant consent" is what the app calls
+                // consenting ITS OWN scope (the recovery toasts and banners).
+                label: "Grant admin consent",
                 destructive: false,
                 confirm: Confirm::Keyword("GRANT"),
-                confirm_label: "Grant consent",
+                confirm_label: "Grant admin consent",
                 description: |n| {
                     format!(
                         "Grant admin consent to the {} — this consents every permission each app requests, tenant-wide, on behalf of all users. Consent stays in place until revoked per app.",

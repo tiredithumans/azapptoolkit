@@ -66,8 +66,9 @@ pub fn CredentialsDashboard() -> impl IntoView {
                         view! {
                             <Callout tone="warn">
                                 {format!(
-                                    "{} already expired; {soon} expire within {CRITICAL_DAYS} days.",
+                                    "{} already expired; {soon} {} within {CRITICAL_DAYS} days.",
                                     count_noun(expired, "credential", "credentials"),
+                                    if soon == 1 { "expires" } else { "expire" },
                                 )}
                             </Callout>
                         }

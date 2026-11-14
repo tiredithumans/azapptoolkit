@@ -6,6 +6,29 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Added
+
+- The window reopens at the size and position you left it, including maximized.
+
+### Changed
+
+- Restoring a backup now asks you to type RESTORE, with Cancel first.
+- Replacing an app's owner set now confirms first, and can no longer be applied with no owners staged.
+- "Grant scoped (remove org-wide)" under Exchange's Advanced block now confirms before removing org-wide grants.
+- The Overview tabs of apps, enterprise apps and managed identities share one layout and say "Object ID" / "App ID".
+- "Grant admin consent" always means consenting an app's permissions; "Grant consent" is the toolkit's own access.
+- Labels use sentence case throughout ("Sign out", "Add default owners", the Settings tabs, the Home cards).
+- A SharePoint site grant's row button says "Revoke", as its dialog does; the Delegated grants page matches its tab.
+
+### Fixed
+
+- Closing a dialog or an open item while the cursor was in a text field no longer raises a hidden error.
+- Dropdowns in the New app, New secret, federated credential, claims and SSO setup forms no longer draw a double box.
+- Key Vault's Reveal reads the vault that was listed, even if the vault name box was edited afterwards.
+- An app's Created date shows as a date instead of a raw timestamp, and its ID labels are no longer monospace.
+- The delete icon in the API permissions table lines up on every row; Disaster Recovery icons no longer touch labels.
+- The sign-on method reads "SAML" rather than "saml"; activity results, plurals and a few tooltips read as plain words.
+
 ## [0.35.4] - 2026-11-10
 
 ### Changed

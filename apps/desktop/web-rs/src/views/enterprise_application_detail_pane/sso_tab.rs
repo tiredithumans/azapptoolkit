@@ -582,10 +582,18 @@ fn SsoEditor(
     let is_saml = saved_mode == SsoMode::Saml;
     let is_oidc = saved_mode == SsoMode::Oidc;
     let configured = is_saml || is_oidc;
-    let saved_mode_label = cfg
-        .sso_mode
-        .clone()
-        .unwrap_or_else(|| "not configured".to_string());
+    // The method as a name, not Graph's `preferredSingleSignOnMode` value
+    // ("saml", "oidc", "notSupported") — the page showed "saml" above a
+    // dropdown that said "SAML".
+    let saved_mode_label = match cfg.sso_mode.as_deref() {
+        None | Some("") => "Not configured".to_string(),
+        Some("saml") => "SAML".to_string(),
+        Some("oidc") => "OpenID Connect (OIDC)".to_string(),
+        Some("password") => "Password-based".to_string(),
+        Some("linked") => "Linked".to_string(),
+        Some("notSupported") => "Not supported".to_string(),
+        Some(other) => other.to_string(),
+    };
     // Held in `StoredValue` (Copy) so the on_click handlers below capture only
     // Copy state and stay `Fn` — Leptos `<Show>` children must be re-callable.
     let object_id = StoredValue::new(cfg.object_id.clone());
@@ -815,7 +823,7 @@ fn SsoEditor(
                         "SAML"
                     </option>
                     <option value=SsoMode::Oidc.as_str() selected=is_oidc>
-                        "OIDC / OpenID Connect"
+                        "OpenID Connect (OIDC)"
                     </option>
                     <option value=SsoMode::Disabled.as_str() selected=!configured>
                         "Disabled"
@@ -1021,7 +1029,7 @@ fn SsoEditor(
                                         on_click=Box::new(grant_consent)
                                         disabled=Signal::derive(move || cmd.busy.get())
                                     >
-                                        "Grant admin consent"
+                                        "Grant consent"
                                     </Button>
                                 </Callout>
                             }

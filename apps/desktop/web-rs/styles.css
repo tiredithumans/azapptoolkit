@@ -418,6 +418,12 @@ h3 {
   gap: var(--space-2);
   align-items: center;
 }
+/* A trailing action group whose optional buttons differ per row: packed to the
+   end, the last (destructive) action lines up down the column instead of
+   stepping left on every row that lacks the buttons before it. */
+.cell-actions--end {
+  justify-content: flex-end;
+}
 
 /* Vertically center the single-element control columns (Kind / Scope / Status /
    Actions) against the multi-line identity columns (Resource / Permission),
@@ -449,9 +455,44 @@ h3 {
   word-break: break-word;
 }
 
-.read-field strong {
-  display: block;
+/* ---- Read-only property grid (the Overview tab of all three detail panes) ----
+   One label/value language for app registrations, enterprise applications and
+   managed identities. Before it the app-registration Overview set its labels
+   in bold body text (monospace for the id rows, since the modifier sat on the
+   pair), the enterprise one in small muted text, and the managed-identity one
+   in an uppercase two-column box — and each ran as a single narrow column,
+   leaving most of the pane empty. A `<dl>` whose pairs are `__item` groups in
+   an auto-fill grid: the pane's width becomes columns, and a 900px window
+   still gets one. The label is the quieter half of the pair, as
+   `.thaw-field__label` is for a form. */
+.read-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--space-3) var(--space-5);
+  margin: 0;
+}
+.read-grid__item {
+  min-width: 0;
+}
+/* Free text (a description, notes) reads as a line, not a column cell. */
+.read-grid__item--wide {
+  grid-column: 1 / -1;
+}
+.read-grid dt {
   margin-bottom: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.read-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* A value with its control beside it (a state badge and the toggle for it). */
+.read-grid__value-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
 }
 /* A <dl> used as a read-only label/value pair. Without this the UA's default
    `margin-inline-start: 40px` on <dd> indents every value away from its own
@@ -1555,27 +1596,6 @@ h3 {
   flex-direction: column;
   gap: var(--space-4);
   margin-top: var(--space-3);
-}
-.mi-properties {
-  display: grid;
-  /* The label column sizes to its longest label but never past 40%, and the
-     value column may shrink below an unbroken id's width (the id wraps) — a
-     bare `max-content 1fr` let either push the values past the pane edge. */
-  grid-template-columns: fit-content(40%) minmax(0, 1fr);
-  gap: var(--space-1) var(--space-3);
-  align-items: baseline;
-  padding: var(--space-3);
-  background: var(--bg-subtle);
-  border-radius: var(--radius-md);
-}
-.mi-properties dt {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.mi-properties dd {
-  margin: 0;
 }
 /* Collapsible scoping sections under the permissions table (Exchange /
    SharePoint) — bordered so they read as tools, not more table rows. */
@@ -2953,11 +2973,11 @@ h3 {
    rounded, padded inputs and buttons they read as someone else's control.
    Metrics deliberately match `.thaw-input` / `.ui-icon-btn` (32px box,
    --radius-md) so a select can sit beside either without a seam.
-   Applied via `.ui-select`; `.thaw-select` is swept in too so thaw's own Select
-   (claims editor) lands in the same language instead of thaw's separate token
-   set. */
-.ui-select,
-.thaw-select {
+   Applied via `.ui-select`, the class `components::ui::Select` and the
+   hand-written selects both render. (Thaw's own `Select` is retired: its
+   `.thaw-select` is a wrapper span, so sweeping it into this rule drew a box
+   around the box and a second chevron.) */
+.ui-select {
   -webkit-appearance: none;
   appearance: none;
   box-sizing: border-box;
@@ -2992,33 +3012,28 @@ h3 {
   background-position: right var(--space-2) center;
   background-size: 16px 16px;
 }
-.ui-select:hover,
-.thaw-select:hover {
+.ui-select:hover {
   border-color: var(--border-strong);
   background-color: var(--bg-subtle);
 }
-.ui-select:focus-visible,
-.thaw-select:focus-visible {
+.ui-select:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
-.ui-select:disabled,
-.thaw-select:disabled {
+.ui-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 /* The popup list is drawn by the OS; `color-scheme` on :root does the heavy
    lifting, but naming the colours keeps Linux/Chrome from falling back to white
    rows on a dark page. */
-.ui-select option,
-.thaw-select option {
+.ui-select option {
   background-color: var(--surface);
   color: var(--text);
 }
 @media (prefers-color-scheme: dark) {
-  .ui-select,
-  .thaw-select {
+  .ui-select {
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   }
 }

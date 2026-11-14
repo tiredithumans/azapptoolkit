@@ -14,7 +14,6 @@ use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::{backup, events};
 use crate::components::icon::{Icon, IconName};
-use crate::components::modal_shell::ModalShell;
 use crate::components::scope_badge::app_permission_risk_badge;
 use crate::components::ui::{
     Badge, BadgeTone, Callout, Card, CopyableId, FormError, ProgressBar, SectionHeader, Spinner,
@@ -195,6 +194,7 @@ fn BackupCard() -> impl IntoView {
 
             <div class="dr-view__actions">
                 <Button
+                    class="btn-icon-label"
                     appearance=ButtonAppearance::Primary
                     disabled=Signal::derive(move || busy.get())
                     on_click=run_backup
@@ -203,11 +203,14 @@ fn BackupCard() -> impl IntoView {
                         if busy.get() {
                             view! {
                                 <Spinner />
-                                " Backing up…"
+                                "Backing up…"
                             }
                                 .into_any()
                         } else {
-                            view! { <Icon name=IconName::Download size=16 /> " Back up this tenant" }
+                            view! {
+                                <Icon name=IconName::Download size=16 />
+                                "Back up this tenant"
+                            }
                                 .into_any()
                         }
                     }}
@@ -320,8 +323,13 @@ fn BackupCard() -> impl IntoView {
                                     )}
                                 </p>
                                 {skipped_notice}
-                                <Button appearance=ButtonAppearance::Primary on_click=save_file>
-                                    <Icon name=IconName::Download size=16 /> " Save backup file…"
+                                <Button
+                                    class="btn-icon-label"
+                                    appearance=ButtonAppearance::Primary
+                                    on_click=save_file
+                                >
+                                    <Icon name=IconName::Download size=16 />
+                                    "Save backup file…"
                                 </Button>
                             </div>
                         }
@@ -433,7 +441,7 @@ fn RestoreCard() -> impl IntoView {
             }
         });
     };
-    let do_restore = move |_| {
+    let do_restore = move || {
         let (Some(tenant), Some(b)) = (session.active_tenant.get(), loaded.get()) else {
             return;
         };
@@ -592,11 +600,13 @@ fn RestoreCard() -> impl IntoView {
 
             <div class="dr-view__actions">
                 <Button
+                    class="btn-icon-label"
                     appearance=ButtonAppearance::Secondary
                     disabled=Signal::derive(move || restoring.get() || unsaved_report())
                     on_click=load_file
                 >
-                    <Icon name=IconName::Upload size=16 /> " Load backup file…"
+                    <Icon name=IconName::Upload size=16 />
+                    "Load backup file…"
                 </Button>
                 <Show when=move || plan.with(Option::is_some) && !plan_blocked() && !restoring.get()>
                     <Button appearance=ButtonAppearance::Primary on_click=move |_| confirm_open.set(true)>
@@ -654,35 +664,34 @@ fn RestoreCard() -> impl IntoView {
             </Show>
         </Card>
 
-        // Confirmation modal.
-        <ModalShell
+        // The restore is the app's largest single write (it creates app
+        // registrations and re-grants their permissions across the tenant), so
+        // it takes the top confirmation tier: `ConfirmDialog` with a typed
+        // keyword, Cancel first. The hand-rolled modal this replaces put the
+        // primary "Restore" first, where the dialog's initial focus landed.
+        <ConfirmDialog
             open=Signal::derive(move || confirm_open.get())
-            title=Signal::derive(|| "Restore into this tenant?".to_string())
-            on_close=Callback::new(move |()| confirm_open.set(false))
-        >
-            <p>
-                "This creates new app registrations in the current tenant and regenerates their \
-                 secrets. It does not overwrite or delete anything that already exists. Running \
-                 it again with the same file recognises the apps an earlier run created (by \
-                 their restore tag) and completes them instead of duplicating them. The new \
-                 secret values are shown only once — save the report afterwards."
-            </p>
-            <Show when=move || { unapproved() > 0 }>
-                <p class="dr-view__note">
-                    {move || format!(
+            title="Restore into this tenant?"
+            body="This creates new app registrations in the current tenant and regenerates their secrets. It does not overwrite or delete anything that already exists. Running it again with the same file recognises the apps an earlier run created (by their restore tag) and completes them instead of duplicating them. The new secret values are shown only once — save the report afterwards."
+            // Named here so skipping an unapproved high-risk grant is a known
+            // choice, not a surprise in the report.
+            subject=Signal::derive(move || {
+                let n = unapproved();
+                if n == 0 {
+                    String::new()
+                } else {
+                    format!(
                         "{} not approved: the restore leaves out {} consent, credentials, owners, group memberships or app roles and lists them in the report for you to grant manually.",
-                        count_noun(unapproved(), "item needing approval is", "items needing approval are"),
-                        if unapproved() == 1 { "its" } else { "their" },
-                    )}
-                </p>
-            </Show>
-            <div class="dr-view__actions">
-                <Button appearance=ButtonAppearance::Primary on_click=do_restore>"Restore"</Button>
-                <Button appearance=ButtonAppearance::Subtle on_click=move |_| confirm_open.set(false)>
-                    "Cancel"
-                </Button>
-            </div>
-        </ModalShell>
+                        count_noun(n, "item needing approval is", "items needing approval are"),
+                        if n == 1 { "its" } else { "their" },
+                    )
+                }
+            })
+            confirm_label="Restore"
+            require_keyword="RESTORE"
+            on_confirm=Callback::new(move |()| do_restore())
+            on_close=Callback::new(move |()| confirm_open.set(false))
+        />
 
         // Clearing an unsaved report loses it for good — with its show-once
         // secrets when it has any, which only the first dialog mentions.
@@ -1097,8 +1106,13 @@ fn RestoreReportView(
                 </p>
             </Show>
             <div class="dr-view__actions">
-                <Button appearance=ButtonAppearance::Primary on_click=move |_| on_save.run(())>
-                    <Icon name=IconName::Download size=16 /> " Save report (contains secrets)…"
+                <Button
+                    class="btn-icon-label"
+                    appearance=ButtonAppearance::Primary
+                    on_click=move |_| on_save.run(())
+                >
+                    <Icon name=IconName::Download size=16 />
+                    "Save report (contains secrets)…"
                 </Button>
                 // The show-once values otherwise stay in this view (and its
                 // hidden DOM) for the rest of the session.

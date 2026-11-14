@@ -15,6 +15,11 @@ use super::*;
 impl Session {
     /// Switching tenant resets selections and view.
     pub fn set_active_tenant(&self, tenant: Option<TenantContext>) {
+        // A switch or sign-out unmounts the whole authed shell; give up focus
+        // first so no field in it blurs into a disposed callback
+        // (`util::blur_focus_within`).
+        #[cfg(target_arch = "wasm32")]
+        crate::util::blur_focus_within(None);
         self.active_tenant.set(tenant);
         // Clear the cross-entity working set — a previous tenant's open items are
         // stale and would leak its data into the next tenant's workspace (the

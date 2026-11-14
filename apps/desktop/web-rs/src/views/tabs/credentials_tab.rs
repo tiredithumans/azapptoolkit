@@ -11,7 +11,7 @@ use azapptoolkit_dto::credentials::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, Field, Input, Select};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use crate::bindings::applications::{
     self, AddPasswordInput, ApplicationDetail, GenerateCertificateInput,
@@ -21,7 +21,8 @@ use crate::bindings::credentials;
 use crate::bindings::keyvault::{self, RotateCredentialInput, RotateCredentialResult};
 use crate::components::modal_shell::ModalShell;
 use crate::components::ui::{
-    Badge, BadgeTone, Callout, CopyIconButton, CopyableId, DataTable, DateInput, FormError, Spinner,
+    Badge, BadgeTone, Callout, CopyIconButton, CopyableId, DataTable, DateInput, FormError, Select,
+    Spinner,
 };
 use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
@@ -1145,7 +1146,7 @@ pub fn CredentialsTab(
                     <Input value=display_name />
                 </Field>
                 <Field label="Expires">
-                    <Select value=expires_preset>
+                    <Select value=expires_preset label="Expires">
                         {EXPIRES_PRESETS
                             .iter()
                             .map(|(value, label)| {

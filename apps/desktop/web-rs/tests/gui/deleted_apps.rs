@@ -151,7 +151,7 @@ async fn an_empty_bin_says_so() {
         truncated: false,
     });
 
-    ts::wait_for(|| ts::body_contains("Recycle bin is empty")).await;
+    ts::wait_for(|| ts::body_contains("No recently deleted apps")).await;
     assert!(!ts::body_contains("Restore"));
 }
 

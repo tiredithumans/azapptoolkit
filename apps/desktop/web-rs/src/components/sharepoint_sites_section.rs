@@ -308,7 +308,10 @@ pub fn SharePointSitesSection(
                                                                         })
                                                                         disabled=Signal::derive(move || cmd.busy.get())
                                                                     >
-                                                                        "Remove"
+                                                                        // "Revoke", as the dialog it opens
+                                                                        // says: a granted permission is
+                                                                        // revoked, a declared item removed.
+                                                                        "Revoke"
                                                                     </Button>
                                                                 </td>
                                                             </tr>

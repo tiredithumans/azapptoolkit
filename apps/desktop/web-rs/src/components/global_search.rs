@@ -701,21 +701,21 @@ const DESTINATIONS: &[Destination] = &[
     },
     // Settings tabs.
     Destination {
-        label: "App Registration Defaults",
+        label: "App registration defaults",
         context: "Settings",
         keywords: "default owners app registration",
         icon: IconName::Settings,
         route: Route::Settings("app-reg"),
     },
     Destination {
-        label: "Enterprise Application Defaults",
+        label: "Enterprise application defaults",
         context: "Settings",
         keywords: "default owners sso notification emails",
         icon: IconName::Settings,
         route: Route::Settings("enterprise"),
     },
     Destination {
-        label: "Naming Defaults",
+        label: "Naming defaults",
         context: "Settings",
         keywords: "scope name pattern group name convention",
         icon: IconName::Settings,
@@ -1106,10 +1106,10 @@ mod tests {
         // Render order is destinations → apps → enterprise → MIs, and the
         // roving index is that order: a destination can never sort below a
         // record, or Arrow would walk the dropdown in an order the eye doesn't
-        // see. "Naming Defaults" is a single-destination match, so the record
+        // see. "Naming defaults" is a single-destination match, so the record
         // rows shift by exactly one.
         let flat = flatten_hits("naming", record_results());
-        assert!(matches!(&flat[0], Pick::Goto(d) if d.label == "Naming Defaults"));
+        assert!(matches!(&flat[0], Pick::Goto(d) if d.label == "Naming defaults"));
         assert_eq!(flat.len(), 4);
         assert!(
             flat[1..].iter().all(|p| matches!(p, Pick::Record(..))),

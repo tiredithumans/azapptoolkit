@@ -793,7 +793,7 @@ pub fn PermissionsTab(
                     matches!(pending_revoke.get(), Some(PendingRevoke::Application { .. }))
                 })
                 title="Revoke this permission?"
-                body="The app loses this app-role assignment as soon as this lands, and any call relying on it starts failing. The live grant is re-checked before removal, and it can be granted again."
+                body="The app loses this app-role assignment immediately, and any call relying on it starts failing. The live grant is re-checked before removal, and it can be granted again."
                 subject=Signal::derive(move || match pending_revoke.get() {
                     Some(PendingRevoke::Application { subject, .. }) => subject,
                     _ => String::new(),
@@ -861,7 +861,7 @@ pub fn PermissionsTab(
                 title="Grant admin consent?"
                 body="This consents every permission this app declares, tenant-wide, on behalf of all users. Consent stays in place until it is revoked."
                 subject=Signal::derive(move || detail.with(|d| d.application.display_name.clone()))
-                confirm_label="Grant consent"
+                confirm_label="Grant admin consent"
                 require_keyword="GRANT"
                 on_confirm=Callback::new(move |()| grant())
                 on_close=Callback::new(move |()| consent_open.set(false))
@@ -1234,7 +1234,10 @@ where
                 <Badge label=status_label tone=status_tone />
             </td>
             <td class="cell-mid">
-                <div class="cell-actions">
+                // `--end`: Scope… and Downgrade… exist only on some rows, so a
+                // start-packed group put the trash in a different column on
+                // each row.
+                <div class="cell-actions cell-actions--end">
                     {scope_button}
                     {downgrade_button}
                     {trash_button}

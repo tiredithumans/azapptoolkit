@@ -362,7 +362,7 @@ pub fn HomeDashboard() -> impl IntoView {
                 </section>
 
                 <section class="dash-card">
-                    <h3 class="dash-card__title">"Credential Health"</h3>
+                    <h3 class="dash-card__title">"Credential health"</h3>
                     <Suspense fallback=card_skeleton>
                         {move || Suspend::new(async move {
                             match creds.await {
@@ -429,7 +429,7 @@ pub fn HomeDashboard() -> impl IntoView {
                 </section>
 
                 <section class="dash-card">
-                    <h3 class="dash-card__title">"Security Posture"</h3>
+                    <h3 class="dash-card__title">"Security posture"</h3>
                     // The consent-posture note sits ABOVE the run-derived counts
                     // and outside their Suspense: it answers "how did this tenant
                     // get these grants" (tenant config, live read at mount), not

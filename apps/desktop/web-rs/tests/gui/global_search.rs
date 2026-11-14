@@ -115,7 +115,7 @@ async fn typing_a_destination_name_offers_it_and_enter_navigates_there() {
     // first, above every record group.
     ts::wait_for(|| ts::query("#gs-goto-0").is_some()).await;
     ts::wait_for(|| is_active("#gs-goto-0")).await;
-    assert!(ts::body_contains("Naming Defaults"));
+    assert!(ts::body_contains("Naming defaults"));
 
     // Enter routes through `Session::open_settings`, which sets the tab BEFORE
     // navigating — landing on the named tab, not Settings' first one.

@@ -131,15 +131,25 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
         .unwrap_or_else(|| "—".to_string());
 
     view! {
-        <dl class="read-field">
-            <dt>"Service principal id"</dt>
-            <dd class="mono">{sp.id.clone()}</dd>
-            <dt>"Application id"</dt>
-            <dd class="mono">{sp.app_id.clone()}</dd>
-            <dt>"Type"</dt>
-            <dd>{sp_type}</dd>
+        // The same `.read-grid` and the same id labels as the app-registration
+        // Overview ("Object ID" / "App ID") — the two panes are one object seen
+        // from two sides, and used to name and set these differently.
+        <dl class="read-grid">
+            <div class="read-grid__item">
+                <dt>"Object ID"</dt>
+                <dd class="mono">{sp.id.clone()}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"App ID"</dt>
+                <dd class="mono">{sp.app_id.clone()}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Type"</dt>
+                <dd>{sp_type}</dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"Enabled for sign-in"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let eff = enabled_override.get().or(initial_enabled);
                     let (label, tone) = match eff {
@@ -150,7 +160,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || enabled_cmd.busy.get())
                     on_click=Box::new(toggle_enabled)
                 >
@@ -163,8 +173,10 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"Assignment required"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let eff = assign_override.get().or(initial_assign);
                     let (label, tone) = match eff {
@@ -175,7 +187,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || assign_cmd.busy.get())
                     on_click=Box::new(toggle_assign)
                 >
@@ -188,12 +200,18 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
-            <dt>"Created"</dt>
-            <dd>{created}</dd>
-            <dt>"Owner tenant"</dt>
-            <dd class="mono">{owner_org}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Created"</dt>
+                <dd>{created}</dd>
+            </div>
+            <div class="read-grid__item">
+                <dt>"Owner tenant"</dt>
+                <dd class="mono">{owner_org}</dd>
+            </div>
+            <div class="read-grid__item">
             <dt>"My Apps visibility"</dt>
-            <dd class="row-meta">
+            <dd class="read-grid__value-row">
                 {move || {
                     let hidden = hidden_override.get().unwrap_or(initial_hidden);
                     let (label, tone) = if hidden {
@@ -204,7 +222,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     view! { <Badge label=label tone=tone /> }
                 }}
                 <Button
-                    appearance=Signal::derive(|| ButtonAppearance::Subtle)
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
                     disabled=Signal::derive(move || toggling.get())
                     on_click=Box::new(toggle_visibility)
                 >
@@ -217,6 +235,7 @@ pub(super) fn OverviewContent(signal: Signal<Arc<EnterpriseApplicationDetail>>) 
                     }}
                 </Button>
             </dd>
+            </div>
         </dl>
         <h4>"Notes"</h4>
         <Field label="Management notes (max 1024 characters)">

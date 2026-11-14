@@ -55,6 +55,21 @@ const REQUIRED: &[(&str, &str, &str)] = &[
     ),
     (
         "components/exchange_scoping_section.rs",
+        "title=\"Grant scoped access to these groups and remove org-wide grants?\"",
+        "the Advanced block's org-wide strip is confirmed, as the recommended one",
+    ),
+    (
+        "views/tabs/owners_tab.rs",
+        "title=\"Replace the owners of this app registration?\"",
+        "replacing the owner set removes owners: confirmed, as a single removal",
+    ),
+    (
+        "views/dr.rs",
+        "require_keyword=\"RESTORE\"",
+        "a restore re-grants permissions tenant-wide: typed keyword",
+    ),
+    (
+        "components/exchange_scoping_section.rs",
         "mig_cmd.busy.get() || !mig_planned.get()",
         "an AAP migration is offered only after its plan was shown",
     ),
