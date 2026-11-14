@@ -102,7 +102,9 @@ async fn open_focus_compare_close() {
         .get_attribute("title")
         .unwrap_or_default();
     assert!(
-        title.contains("Ctrl-click to compare"),
+        // "⌘-click" on a Mac, "Ctrl-click" elsewhere: the modifier is written
+        // for the platform the test browser runs on.
+        title.contains("-click to compare"),
         "chip title advertises the compare gesture: {title}"
     );
     // Single pane: the "Full" control would be a no-op, so it isn't shown.
