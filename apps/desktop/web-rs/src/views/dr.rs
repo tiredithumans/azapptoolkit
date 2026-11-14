@@ -1148,20 +1148,16 @@ fn RestoreReportView(
                                     value=Signal::stored(new_app_id.clone())
                                     aria_label="Copy new appId"
                                 />
-                                {consent_granted.then(|| view! { <span class="dr-view__badge">"consent re-granted"</span> })}
+                                {consent_granted.then(|| view! { <Badge label="consent re-granted" /> })}
                                 // "completed" only when this run did finish it.
                                 {adopted.then(|| view! {
-                                    <span class="dr-view__badge">
-                                        {if incomplete { "already restored" } else { "already restored — completed" }}
-                                    </span>
+                                    <Badge label=if incomplete { "already restored" } else { "already restored — completed" } />
                                 })}
                                 {incomplete.then(|| view! {
-                                    <span
-                                        class="dr-view__badge"
+                                    <Badge
+                                        label="Not finished"
                                         title="The restore stopped before wiring this app fully — run it again with the same backup file to finish it"
-                                    >
-                                        "Not finished"
-                                    </span>
+                                    />
                                 })}
                             </div>
                             {(!secrets.is_empty()).then(|| view! {

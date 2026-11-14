@@ -208,8 +208,10 @@ pub fn HeldPermissionsPanel(
             <tr>
                 <td>{res}</td>
                 <td>
-                    <span class="mono">{perm}</span>
-                    {risk}
+                    <span class="row-meta">
+                        <span class="mono">{perm}</span>
+                        {risk}
+                    </span>
                 </td>
                 {show_scope_column
                     .then(|| {

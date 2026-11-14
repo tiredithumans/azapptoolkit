@@ -81,7 +81,12 @@ pub(super) fn render_row(idx: usize, mi: Arc<ManagedIdentityDto>) -> impl IntoVi
             >
                 <span class="row-meta">
                     <TypeChip kind=chip_kind compact=true />
-                    <span class="app-list__row-title" title=title_name>{display_name}</span>
+                    // Name over id, as one block: everything else in the row
+                    // (chip, badges, columns) centres on the row, not on the name.
+                    <span class="app-list__row-main">
+                        <span class="app-list__row-title" title=title_name>{display_name}</span>
+                        <span class="app-list__row-appid">{app_id}</span>
+                    </span>
                     {is_disabled
                         .then(|| {
                             view! {
@@ -93,7 +98,6 @@ pub(super) fn render_row(idx: usize, mi: Arc<ManagedIdentityDto>) -> impl IntoVi
                             }
                         })}
                 </span>
-                <span class="app-list__row-appid">{app_id}</span>
             </button>
         </div>
     }
