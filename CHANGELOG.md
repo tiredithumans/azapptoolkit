@@ -6,6 +6,8 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-11-14
+
 ### Fixed
 
 - In the app lists, the status pill and the columns beside it sit in the middle of the row, not on the name line.
