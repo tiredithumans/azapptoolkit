@@ -8,7 +8,7 @@
 //! while a missing consent, a dead session or a step-up keeps its own code so
 //! the tab can offer that failure's lever.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::models::{DirectoryAuditLog, ServicePrincipalSignInActivity};
@@ -150,7 +150,7 @@ fn sign_in_token_failure(ui: UiError) -> Result<SignInActivityDto, UiError> {
 fn pick_last_sign_in(
     items: Vec<ServicePrincipalSignInActivity>,
     app_id: &str,
-) -> Option<DateTime<Utc>> {
+) -> Option<Timestamp> {
     items
         .into_iter()
         .find(|a| a.app_id.as_deref() == Some(app_id))
@@ -423,11 +423,7 @@ mod tests {
         ServicePrincipalSignInActivity {
             app_id: Some(app_id.into()),
             last_sign_in_activity: Some(SignInActivity {
-                last_sign_in_date_time: date.map(|d| {
-                    chrono::DateTime::parse_from_rfc3339(d)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc)
-                }),
+                last_sign_in_date_time: date.map(|d| str::parse::<Timestamp>(d).unwrap()),
             }),
         }
     }
@@ -439,7 +435,7 @@ mod tests {
             sp_activity("target", Some("2024-05-05T12:00:00Z")),
         ];
         let hit = pick_last_sign_in(items.clone(), "target").unwrap();
-        assert_eq!(hit.to_rfc3339(), "2024-05-05T12:00:00+00:00");
+        assert_eq!(hit.to_string(), "2024-05-05T12:00:00Z");
         // App absent from the report ⇒ no sign-in observed.
         assert!(pick_last_sign_in(items, "missing").is_none());
         // App present but with a null last-sign-in ⇒ None, not a panic.

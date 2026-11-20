@@ -6,6 +6,7 @@
 //! never merge the tiers (the credential tier exists to keep tenant-wide index
 //! re-scans off the credential path).
 
+use jiff::Timestamp;
 use std::sync::Arc;
 
 use azapptoolkit_core::cache::{Cache, CacheKind, IndexWatch, Patch};
@@ -266,7 +267,7 @@ fn invalidate_app_list_projections(cache: &Cache, tenant_id: &str) {
 /// into the App Registrations list, the app-name index and the expiry roll-up.
 /// A created service principal goes into the SP index.
 pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[CreatedApp<'_>]) {
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let apps: Vec<(Application, Option<String>)> = created
         .iter()
         .map(|c| {
@@ -1429,7 +1430,7 @@ mod patch_tier_tests {
     /// them (typed, pinned), holding `obj-1`, plus every projection.
     fn seeded(apps_in_list: Vec<Application>) -> Arc<Cache> {
         let cache = Cache::new();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let rows: Vec<ApplicationListRowDto> = apps_in_list
             .iter()
             .map(|a| ApplicationListRowDto::from_application(a.clone(), None, now))

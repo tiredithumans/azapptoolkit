@@ -3,6 +3,8 @@
 //! `tests` (pure helpers) so the mock-server fixtures don't grow into it.
 
 use crate::state::AppState;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 
 use super::config::{
     get_sso_config_core, set_claims_mapping_core, set_oidc_redirect_uris_core, set_saml_urls_core,
@@ -804,9 +806,9 @@ async fn an_oidc_secret_is_minted_inside_the_two_year_cap() {
     let end = body["passwordCredential"]["endDateTime"]
         .as_str()
         .expect("endDateTime is sent");
-    let end = chrono::DateTime::parse_from_rfc3339(end).expect("RFC 3339 endDateTime");
-    let want = chrono::Utc::now() + chrono::Duration::days(730);
-    let drift = (end.with_timezone(&chrono::Utc) - want).num_seconds().abs();
+    let end = str::parse::<Timestamp>(end).expect("RFC 3339 endDateTime");
+    let want = Timestamp::now() + SignedDuration::from_hours(730 * 24);
+    let drift = end.duration_since(want).as_secs().abs();
     assert!(drift <= 300, "endDateTime {end} is not now + 730 days");
 }
 

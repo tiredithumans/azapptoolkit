@@ -5,7 +5,7 @@ use std::fmt::Write;
 
 use azapptoolkit_core::audit::{AuditItem, RiskLevel};
 use azapptoolkit_core::cache::CacheKind;
-use chrono::Utc;
+use jiff::Timestamp;
 use tauri::{AppHandle, State};
 
 use crate::commands::export::{csv_field, write_via_dialog};
@@ -70,7 +70,7 @@ pub async fn save_audit_to_file(
             ));
         }
     };
-    let default_name = format!("audit-{}.{ext}", chrono::Utc::now().format("%Y%m%dT%H%M%S"));
+    let default_name = format!("audit-{}.{ext}", Timestamp::now().strftime("%Y%m%dT%H%M%S"));
     write_via_dialog(app_handle, filter_name, ext, default_name, content).await
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn audit_to_json(
         items: &'a [AuditItem],
     }
     let export = Export {
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: Timestamp::now().to_string(),
         completed_at: coverage.completed_at.as_deref(),
         scored: items.len(),
         total_apps: coverage.total_apps,
@@ -237,7 +237,7 @@ pub(crate) fn audit_to_html(items: &[AuditItem], coverage: &AuditExportCoverage)
         // is what the run set out to score, which is >= what it scored.
         total = coverage.total_apps.max(items.len()),
         scanned = html_escape(coverage.completed_at.as_deref().unwrap_or("unknown")),
-        generated = html_escape(&Utc::now().to_rfc3339()),
+        generated = html_escape(&Timestamp::now().to_string()),
     );
     for sentence in coverage_sentences(items.len(), coverage) {
         let _ = write!(header, "<p class=\"caveat\">{}</p>", html_escape(&sentence));
@@ -314,7 +314,7 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
         "# Scan completed: {}",
         coverage.completed_at.as_deref().unwrap_or("unknown")
     );
-    let _ = writeln!(out, "# Exported: {}", Utc::now().to_rfc3339());
+    let _ = writeln!(out, "# Exported: {}", Timestamp::now());
     for (label, n) in severity_summary(&items) {
         let _ = writeln!(out, "# {label}: {n}");
     }
@@ -333,12 +333,7 @@ pub(crate) fn export_audit_csv(items: Vec<AuditItem>, coverage: &AuditExportCove
             csv_field(&item.application_name),
             csv_field(&item.app_id),
             csv_field(&item.object_id),
-            csv_field(
-                &item
-                    .created_date
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default(),
-            ),
+            csv_field(&item.created_date.map(|d| d.to_string()).unwrap_or_default()),
             csv_field(item.publisher.as_deref().unwrap_or("")),
             csv_field(item.sign_in_audience.as_deref().unwrap_or("")),
             item.risk_score.to_string(),

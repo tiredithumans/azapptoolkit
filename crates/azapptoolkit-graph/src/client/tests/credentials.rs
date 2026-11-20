@@ -1,5 +1,7 @@
 use super::super::*;
 use super::common::*;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 
 #[tokio::test]
 async fn add_password_posts_expected_body() {
@@ -28,12 +30,8 @@ async fn add_password_posts_expected_body() {
 #[tokio::test]
 async fn add_password_window_sends_start_only_when_given() {
     let server = MockServer::start().await;
-    let start = chrono::DateTime::parse_from_rfc3339("2026-07-01T00:00:00+00:00")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let end = chrono::DateTime::parse_from_rfc3339("2027-07-01T00:00:00+00:00")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let start = str::parse::<Timestamp>("2026-07-01T00:00:00+00:00").unwrap();
+    let end = str::parse::<Timestamp>("2027-07-01T00:00:00+00:00").unwrap();
     let created = serde_json::json!({
         "keyId": "kid-2",
         "displayName": "scheduled secret",
@@ -45,8 +43,8 @@ async fn add_password_window_sends_start_only_when_given() {
         .and(wiremock::matchers::body_json(serde_json::json!({
             "passwordCredential": {
                 "displayName": "scheduled secret",
-                "startDateTime": "2026-07-01T00:00:00+00:00",
-                "endDateTime": "2027-07-01T00:00:00+00:00",
+                "startDateTime": "2026-07-01T00:00:00Z",
+                "endDateTime": "2027-07-01T00:00:00Z",
             }
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(created.clone()))
@@ -59,7 +57,7 @@ async fn add_password_window_sends_start_only_when_given() {
         .and(wiremock::matchers::body_json(serde_json::json!({
             "passwordCredential": {
                 "displayName": "scheduled secret",
-                "endDateTime": "2027-07-01T00:00:00+00:00",
+                "endDateTime": "2027-07-01T00:00:00Z",
             }
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(created))
@@ -233,7 +231,7 @@ async fn add_token_signing_certificate_returns_thumbprint() {
         .mount(&server)
         .await;
     let client = make_client(&server.uri());
-    let end = chrono::Utc::now() + chrono::Duration::days(365);
+    let end = Timestamp::now() + SignedDuration::from_hours(365 * 24);
     let cert = client
         .add_token_signing_certificate("sp-1", "CN=Demo", end)
         .await

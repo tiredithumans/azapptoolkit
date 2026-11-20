@@ -15,7 +15,7 @@ description = "Core domain types, cache, and risk scoring for azapptoolkit"
 base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 tracing = { workspace = true }
 
 # Used by the in-process cache, the BearerProvider trait, the http_retry

@@ -346,7 +346,7 @@ mod tests {
     use super::*;
     use crate::models::SecretAttributesRequest;
     use azapptoolkit_core::token::StaticTokenProvider;
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
     use wiremock::matchers::{
         body_json, header, method, path, query_param, query_param_is_missing,
     };
@@ -725,7 +725,7 @@ mod tests {
             tags: None,
             attributes: Some(SecretAttributesRequest {
                 enabled: Some(true),
-                expires: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+                expires: Some("2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()),
                 not_before: None,
             }),
         };

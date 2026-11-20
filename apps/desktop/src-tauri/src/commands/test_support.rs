@@ -31,7 +31,7 @@ use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, ServicePrincipal};
 use azapptoolkit_core::token::{BearerProvider, StaticTokenProvider, TokenError};
 use azapptoolkit_graph::GraphClient;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use wiremock::MockServer;
@@ -46,14 +46,12 @@ use crate::state::AppState;
 pub(crate) const FIXED_NOW: &str = "2026-01-01T00:00:00Z";
 
 /// Parses an RFC 3339 timestamp; panics on a malformed fixture.
-pub(crate) fn at(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("fixture timestamps are RFC 3339")
-        .with_timezone(&Utc)
+pub(crate) fn at(s: &str) -> Timestamp {
+    str::parse::<Timestamp>(s).expect("fixture timestamps are RFC 3339")
 }
 
 /// [`FIXED_NOW`] as a `DateTime`.
-pub(crate) fn fixed_now() -> DateTime<Utc> {
+pub(crate) fn fixed_now() -> Timestamp {
     at(FIXED_NOW)
 }
 

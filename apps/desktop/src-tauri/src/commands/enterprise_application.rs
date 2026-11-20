@@ -587,7 +587,7 @@ fn enterprise_apps_to_csv(rows: &[EnterpriseApplicationDto]) -> String {
             csv_field(r.paired_app_registration_id.as_deref().unwrap_or("")),
             csv_field(
                 &r.created_date_time
-                    .map(|d| d.to_rfc3339())
+                    .map(|d| d.to_string())
                     .unwrap_or_default(),
             ),
         ]
@@ -627,7 +627,7 @@ fn map_provisioning_job(j: SynchronizationJob) -> ProvisioningJobDto {
         last_state: last_exec.as_ref().and_then(|e| e.state.clone()),
         last_run: last_exec
             .as_ref()
-            .and_then(|e| e.time_ended.map(|d| d.to_rfc3339())),
+            .and_then(|e| e.time_ended.map(|d| d.to_string())),
         quarantine_reason: status
             .as_ref()
             .and_then(|s| s.quarantine.as_ref().and_then(|q| q.reason.clone())),
@@ -640,7 +640,7 @@ mod tests {
     use azapptoolkit_core::models::{
         SynchronizationExecution, SynchronizationQuarantine, SynchronizationStatus,
     };
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
 
     #[test]
     fn assignment_dto_carries_the_principal_id() {
@@ -685,7 +685,7 @@ mod tests {
                 code: Some("Active".into()),
                 last_execution: Some(SynchronizationExecution {
                     state: Some("Succeeded".into()),
-                    time_ended: Some(Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap()),
+                    time_ended: Some("2026-05-01T12:00:00Z".parse::<Timestamp>().unwrap()),
                 }),
                 quarantine: Some(SynchronizationQuarantine {
                     reason: Some("EncounteredBaseEscrowThreshold".into()),
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(dto.template_id.as_deref(), Some("AzureAD2AAD"));
         assert_eq!(dto.status_code.as_deref(), Some("Active"));
         assert_eq!(dto.last_state.as_deref(), Some("Succeeded"));
-        assert_eq!(dto.last_run.as_deref(), Some("2026-05-01T12:00:00+00:00"));
+        assert_eq!(dto.last_run.as_deref(), Some("2026-05-01T12:00:00Z"));
         assert_eq!(
             dto.quarantine_reason.as_deref(),
             Some("EncounteredBaseEscrowThreshold")

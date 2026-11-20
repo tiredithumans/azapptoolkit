@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -245,8 +245,8 @@ fn LoadedEnterpriseApps(
     loaded: TenantRows<EnterpriseApplicationDto>,
     search: Signal<String>,
     ent_filter: RwSignal<String>,
-    created_after: RwSignal<Option<NaiveDate>>,
-    created_before: RwSignal<Option<NaiveDate>>,
+    created_after: RwSignal<Option<Date>>,
+    created_before: RwSignal<Option<Date>>,
     /// Shared with the list view's filter toggle — the facet chips collapse with
     /// the rest of the drawer.
     filters_open: RwSignal<bool>,

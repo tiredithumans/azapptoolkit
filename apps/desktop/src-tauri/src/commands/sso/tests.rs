@@ -7,6 +7,7 @@ use super::config::{
 };
 use super::metadata::parse_signing_certs;
 use super::rollover::{activation_target, build_rollover, is_preferred_key, retire_target};
+use jiff::Timestamp;
 
 use crate::dto::sso::{SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto, SsoSummary};
 
@@ -122,7 +123,7 @@ fn a_signing_certificate_lifetime_is_bounded_by_entras_three_year_ceiling() {
     assert_eq!(err.code, "invalid_cert_lifetime");
     // Zero would mint an already-expired certificate.
     assert!(resolve_cert_lifetime_days(Some(0)).is_err());
-    // And an absurd value never reaches `chrono::Duration::days`, which
+    // And an absurd value never reaches `Duration::days`, which
     // panics rather than saturating.
     assert!(resolve_cert_lifetime_days(Some(u32::MAX)).is_err());
 }
@@ -139,7 +140,7 @@ fn a_client_secret_lifetime_is_bounded_by_entras_two_year_cap() {
     // Zero would mint an already-expired secret.
     let err = resolve_secret_lifetime_days(Some(0)).unwrap_err();
     assert_eq!(err.code, "invalid_secret_lifetime");
-    // And an absurd value never reaches `chrono` inside `add_password`,
+    // And an absurd value never reaches the time arithmetic inside `add_password`,
     // whose `now + Duration` panics rather than saturating.
     let err = resolve_secret_lifetime_days(Some(u32::MAX)).unwrap_err();
     assert_eq!(err.code, "invalid_secret_lifetime");
@@ -338,10 +339,8 @@ const B_HEX: &str = "EEEA94C8566A8F71189208C0BBA185A9DE2D077D";
 
 /// `now` for the rollover tables below. Fixed so "expired" and "valid" are
 /// properties of the fixture, not of the day the suite runs.
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc)
+fn now() -> Timestamp {
+    str::parse::<Timestamp>("2026-01-01T00:00:00Z").unwrap()
 }
 
 /// One `keyCredentials` entry. `thumbprint_b64` is the base64

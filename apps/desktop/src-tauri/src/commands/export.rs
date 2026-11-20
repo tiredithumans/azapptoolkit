@@ -6,6 +6,7 @@
 //! per-domain `*_to_csv` serializers stay with their domains; only the generic
 //! pieces live here.
 
+use jiff::Timestamp;
 use std::fmt::Write;
 use std::io::Read;
 use std::path::Path;
@@ -61,7 +62,7 @@ pub(crate) async fn save_export_via_dialog(
     };
     let default_name = format!(
         "{default_stem}-{}.{ext}",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+        Timestamp::now().strftime("%Y%m%dT%H%M%S")
     );
     write_via_dialog(app_handle.clone(), filter_name, ext, default_name, content).await
 }
@@ -180,7 +181,7 @@ pub(crate) async fn save_csv_via_dialog(
             format!("unsupported export format: {format}"),
         ));
     }
-    let default_name = format!("{stem}-{}.csv", chrono::Utc::now().format("%Y%m%dT%H%M%S"));
+    let default_name = format!("{stem}-{}.csv", Timestamp::now().strftime("%Y%m%dT%H%M%S"));
     write_via_dialog(app_handle, "CSV", "csv", default_name, to_csv()).await
 }
 
@@ -210,7 +211,7 @@ pub(crate) fn coverage_comment_block(title: &str, summary: &str) -> String {
     } else {
         let _ = writeln!(out, "# {}", summary.trim());
     }
-    let _ = writeln!(out, "# Exported: {}", chrono::Utc::now().to_rfc3339());
+    let _ = writeln!(out, "# Exported: {}", Timestamp::now());
     out
 }
 
@@ -230,7 +231,7 @@ pub(crate) fn coverage_json<T: serde::Serialize>(summary: &str, rows: &[T]) -> S
         rows: &'a [T],
     }
     let export = Export {
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: Timestamp::now().to_string(),
         coverage: summary,
         rows,
     };

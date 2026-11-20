@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::hash::Hash;
 
 use azapptoolkit_core::audit::{CredentialStatus, EXPIRY_WARNING_DAYS};
+use jiff::Timestamp;
+use jiff::civil::Date;
 use leptos::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -244,11 +246,8 @@ pub struct TimeAgo {
 /// (clock skew across a suspend/resume, or a machine whose clock drifted)
 /// reads "just now" as well rather than "in 3 minutes" — the phrase describes
 /// something that already happened.
-pub fn relative_time(
-    now: chrono::DateTime<chrono::Utc>,
-    then: chrono::DateTime<chrono::Utc>,
-) -> String {
-    let secs = (now - then).num_seconds();
+pub fn relative_time(now: Timestamp, then: Timestamp) -> String {
+    let secs = now.duration_since(then).as_secs();
     if secs < 60 {
         return "just now".to_string();
     }
@@ -285,16 +284,14 @@ pub fn count_noun<N: std::fmt::Display + PartialEq + From<u8>>(
 
 /// Parses an RFC3339 timestamp into its display pair — for the RFC3339
 /// `String` stamps the DTO crate carries where a bad value must degrade only
-/// its own field (see the `azapptoolkit-dto` crate doc; `DateTime<Utc>`
+/// its own field (see the `azapptoolkit-dto` crate doc; `Timestamp`
 /// fields arrive already parsed). `None` when the string isn't a timestamp —
 /// the caller renders nothing at all, because a stamp we can't read is a bug
 /// on our side, not a state an operator can act on.
 pub fn time_ago(rfc3339: &str) -> Option<TimeAgo> {
-    let then = chrono::DateTime::parse_from_rfc3339(rfc3339)
-        .ok()?
-        .with_timezone(&chrono::Utc);
+    let then = str::parse::<Timestamp>(rfc3339).ok()?;
     Some(TimeAgo {
-        relative: relative_time(chrono::Utc::now(), then),
+        relative: relative_time(Timestamp::now(), then),
         exact: fmt_datetime(then),
     })
 }
@@ -313,11 +310,8 @@ pub use azapptoolkit_dto::credentials::EXPIRY_CRITICAL_DAYS;
 /// Not for the audit's whole-day `is_expired` surfaces (the Credentials
 /// dashboard, the app-registration Credentials tab), which truncate on purpose
 /// so their counts match what the removal sweeps delete.
-pub fn floored_days_until(
-    end: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> i64 {
-    (end - now).num_seconds().div_euclid(86_400)
+pub fn floored_days_until(end: Timestamp, now: Timestamp) -> i64 {
+    end.duration_since(now).as_secs().div_euclid(86_400)
 }
 
 /// The one expiry phrase, for a **floored** day count: "12d left" / "0d left" /
@@ -346,19 +340,31 @@ pub fn expiry_tone(days: i64) -> BadgeTone {
 }
 
 /// Date-only display (`YYYY-MM-DD`) — the app's one day format.
-pub fn fmt_day(d: chrono::DateTime<chrono::Utc>) -> String {
-    d.date_naive().to_string()
+pub fn fmt_day(d: Timestamp) -> String {
+    utc_date(d).to_string()
+}
+
+/// The UTC calendar day `t` falls on — the day every date-only surface shows.
+pub fn utc_date(t: Timestamp) -> Date {
+    jiff::tz::Offset::UTC.to_datetime(t).date()
+}
+
+/// Midnight UTC at the start of `d`. `None` only past jiff's supported range.
+pub fn utc_midnight(d: Date) -> Option<Timestamp> {
+    jiff::tz::Offset::UTC
+        .to_timestamp(d.to_datetime(jiff::civil::Time::midnight()))
+        .ok()
 }
 
 /// [`fmt_day`], or "—" when there is no date.
-pub fn fmt_date(d: Option<chrono::DateTime<chrono::Utc>>) -> String {
+pub fn fmt_date(d: Option<Timestamp>) -> String {
     d.map(fmt_day).unwrap_or_else(|| "—".to_string())
 }
 
 /// Absolute timestamp display — `%Y-%m-%d %H:%M UTC` (a last sign-in, an
 /// activity row, [`time_ago`]'s exact stamp).
-pub fn fmt_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
-    d.format("%Y-%m-%d %H:%M UTC").to_string()
+pub fn fmt_datetime(d: Timestamp) -> String {
+    d.strftime("%Y-%m-%d %H:%M UTC").to_string()
 }
 
 /// Inclusive `[after, before]` creation-date filter shared by the App
@@ -368,11 +374,11 @@ pub fn fmt_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
 /// timestamp is missing is excluded (it can't be placed in the window). An
 /// inverted range (`after` later than `before`) matches nothing.
 pub fn created_in_range(
-    created: Option<chrono::DateTime<chrono::Utc>>,
-    after: Option<chrono::NaiveDate>,
-    before: Option<chrono::NaiveDate>,
+    created: Option<Timestamp>,
+    after: Option<Date>,
+    before: Option<Date>,
 ) -> bool {
-    let Some(day) = created.map(|c| c.date_naive()) else {
+    let Some(day) = created.map(utc_date) else {
         // Unknown creation date: keep it only while neither bound is active.
         return after.is_none() && before.is_none();
     };
@@ -381,6 +387,7 @@ pub fn created_in_range(
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
     /// The accelerator is written the way the platform writes it, and the
     /// platform is read from `navigator.platform`'s own values.
     #[test]
@@ -477,9 +484,10 @@ mod tests {
 
     #[test]
     fn created_in_range_bounds_are_inclusive_and_optional() {
-        use chrono::{NaiveDate, TimeZone, Utc};
-        let at = |y, m, d| Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).single();
-        let on = |y, m, d| NaiveDate::from_ymd_opt(y, m, d);
+        let at = |y, m, d| {
+            utc_midnight(Date::new(y, m, d).ok()?).map(|t| t + SignedDuration::from_hours(12))
+        };
+        let on = |y, m, d| Date::new(y, m, d).ok();
         let created = at(2024, 6, 15);
 
         // No bounds → always included (even a missing creation date).
@@ -510,32 +518,33 @@ mod tests {
 
     #[test]
     fn relative_time_buckets_by_minutes_hours_then_days() {
-        use chrono::{Duration, TimeZone, Utc};
-        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
-        let ago = |d: Duration| relative_time(now, now - d);
+        let now = "2026-09-02T12:00:00Z".parse::<Timestamp>().unwrap();
+        let ago = |d: SignedDuration| relative_time(now, now - d);
 
-        assert_eq!(ago(Duration::seconds(0)), "just now");
-        assert_eq!(ago(Duration::seconds(59)), "just now");
-        assert_eq!(ago(Duration::minutes(1)), "1 min ago");
-        assert_eq!(ago(Duration::minutes(12)), "12 min ago");
-        assert_eq!(ago(Duration::minutes(59)), "59 min ago");
-        assert_eq!(ago(Duration::hours(1)), "1 hour ago");
-        assert_eq!(ago(Duration::hours(3)), "3 hours ago");
-        assert_eq!(ago(Duration::hours(23)), "23 hours ago");
-        assert_eq!(ago(Duration::days(1)), "1 day ago");
-        assert_eq!(ago(Duration::days(9)), "9 days ago");
+        assert_eq!(ago(SignedDuration::from_secs(0)), "just now");
+        assert_eq!(ago(SignedDuration::from_secs(59)), "just now");
+        assert_eq!(ago(SignedDuration::from_mins(1)), "1 min ago");
+        assert_eq!(ago(SignedDuration::from_mins(12)), "12 min ago");
+        assert_eq!(ago(SignedDuration::from_mins(59)), "59 min ago");
+        assert_eq!(ago(SignedDuration::from_hours(1)), "1 hour ago");
+        assert_eq!(ago(SignedDuration::from_hours(3)), "3 hours ago");
+        assert_eq!(ago(SignedDuration::from_hours(23)), "23 hours ago");
+        assert_eq!(ago(SignedDuration::from_hours(24)), "1 day ago");
+        assert_eq!(ago(SignedDuration::from_hours(9 * 24)), "9 days ago");
         // Truncation, never rounding up: 89 minutes is "1 hour ago", so the
         // phrase can never claim a scan is fresher than it is.
-        assert_eq!(ago(Duration::minutes(89)), "1 hour ago");
+        assert_eq!(ago(SignedDuration::from_mins(89)), "1 hour ago");
     }
 
     #[test]
     fn a_future_timestamp_reads_as_just_now() {
         // Clock skew (a suspended laptop, a drifted VM) must not produce
         // "-3 min ago" on a security surface.
-        use chrono::{Duration, TimeZone, Utc};
-        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
-        assert_eq!(relative_time(now, now + Duration::hours(2)), "just now");
+        let now = "2026-09-02T12:00:00Z".parse::<Timestamp>().unwrap();
+        assert_eq!(
+            relative_time(now, now + SignedDuration::from_hours(2)),
+            "just now"
+        );
     }
 
     #[test]
@@ -552,21 +561,25 @@ mod tests {
 
     #[test]
     fn floored_days_until_floors_rather_than_truncates() {
-        use chrono::{Duration, TimeZone, Utc};
-        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
-        let d = |delta: Duration| floored_days_until(now + delta, now);
+        let now = "2026-09-02T12:00:00Z".parse::<Timestamp>().unwrap();
+        let d = |delta: SignedDuration| floored_days_until(now + delta, now);
         // The regression: lapsed 12h ago is -1, not a truncated 0 ("0d left").
-        assert_eq!(d(-Duration::hours(12)), -1);
-        assert_eq!(d(Duration::hours(12)), 0);
-        assert_eq!(d(-Duration::hours(24)), -1);
-        assert_eq!(d(-Duration::hours(24) - Duration::seconds(1)), -2);
-        assert_eq!(d(Duration::days(7)), 7);
-        assert_eq!(d(Duration::days(7) - Duration::seconds(1)), 6);
+        assert_eq!(d(-SignedDuration::from_hours(12)), -1);
+        assert_eq!(d(SignedDuration::from_hours(12)), 0);
+        assert_eq!(d(-SignedDuration::from_hours(24)), -1);
+        assert_eq!(
+            d(-SignedDuration::from_hours(24) - SignedDuration::from_secs(1)),
+            -2
+        );
+        assert_eq!(d(SignedDuration::from_hours(7 * 24)), 7);
+        assert_eq!(
+            d(SignedDuration::from_hours(7 * 24) - SignedDuration::from_secs(1)),
+            6
+        );
     }
 
     #[test]
     fn expiry_label_one_vocabulary() {
-        use chrono::{Duration, TimeZone, Utc};
         assert_eq!(expiry_label(12), "12d left");
         assert_eq!(expiry_label(0), "0d left");
         assert_eq!(expiry_label(1), "1d left");
@@ -574,9 +587,12 @@ mod tests {
         assert_eq!(expiry_label(-2), "Expired 1d ago");
         assert_eq!(expiry_label(-4), "Expired 3d ago");
         // An end 12h in the past renders "Expired", never "0d left".
-        let now = Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap();
+        let now = "2026-09-02T12:00:00Z".parse::<Timestamp>().unwrap();
         assert_eq!(
-            expiry_label(floored_days_until(now - Duration::hours(12), now)),
+            expiry_label(floored_days_until(
+                now - SignedDuration::from_hours(12),
+                now
+            )),
             "Expired"
         );
     }
@@ -592,8 +608,7 @@ mod tests {
 
     #[test]
     fn fmt_helpers() {
-        use chrono::{TimeZone, Utc};
-        let t = Utc.with_ymd_and_hms(2026, 9, 2, 9, 30, 0).unwrap();
+        let t = "2026-09-02T09:30:00Z".parse::<Timestamp>().unwrap();
         assert_eq!(fmt_date(None), "—");
         assert_eq!(fmt_date(Some(t)), "2026-09-02");
         assert_eq!(fmt_day(t), "2026-09-02");

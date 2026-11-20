@@ -1,7 +1,7 @@
 //! Credential-expiry dashboard IPC DTOs.
 
 use azapptoolkit_core::audit::{CredentialKind, CredentialStatus};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// The lifetime ceilings the app enforces on the credentials it creates, and
@@ -53,7 +53,7 @@ pub struct CredentialUsageDto {
 pub struct CredentialUsageRow {
     pub app_id: String,
     pub key_id: String,
-    pub last_used: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_used: Option<Timestamp>,
 }
 
 /// Per-app secret-lifetime policy context for the Credentials tab, decided
@@ -123,8 +123,8 @@ pub struct CredentialRowDto {
     /// The credential's display name (e.g. secret description / cert name).
     pub credential_name: String,
     pub kind: CredentialKind,
-    pub start_date_time: Option<DateTime<Utc>>,
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
+    pub end_date_time: Option<Timestamp>,
     pub days_to_expiry: Option<i64>,
     pub status: CredentialStatus,
 }

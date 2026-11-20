@@ -72,7 +72,7 @@ mod wire;
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::cloud::CloudEnvironment;
@@ -233,7 +233,7 @@ struct PassCtx<'a> {
     cloud: CloudEnvironment,
     /// When the backup was taken: the cutoff for
     /// [`expired_at_backup`](wire::expired_at_backup).
-    taken_at: DateTime<Utc>,
+    taken_at: Timestamp,
     /// The tenant the backup was taken from.
     source_tenant_id: &'a str,
     /// The destination tenant.

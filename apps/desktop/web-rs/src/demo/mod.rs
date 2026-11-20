@@ -59,7 +59,7 @@ use azapptoolkit_dto::sharepoint::{AppSiteAccessDto, SitePermissionDto, SiteSwee
 use azapptoolkit_dto::sso::{
     RolloverPhase, SigningCertRolloverDto, SsoCertificateRowDto, SsoConfigDto, SsoSummary,
 };
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 use crate::ipc_mock::{self, Unmocked, fixtures as f, mock_each, mock_ok};
 
@@ -459,7 +459,7 @@ fn app_details(apps: &[DemoApp]) -> HashMap<String, ApplicationDetail> {
 /// The list row, through the backend's own projection — so the credential
 /// badge is `ListCredentialStatus::classify` over the same credentials the
 /// Credentials tab reads, and the soonest expiry is filled in too.
-fn list_row(a: &DemoApp, now: DateTime<Utc>) -> ApplicationListRowDto {
+fn list_row(a: &DemoApp, now: Timestamp) -> ApplicationListRowDto {
     ApplicationListRowDto::from_application(app_detail(a).application, None, now)
 }
 
@@ -555,7 +555,7 @@ fn held_grants_for(
 /// tenant: `summarize_credentials` per app, sorted soonest-first with no-expiry
 /// rows last. Ids, names, days and status therefore all agree with the
 /// Credentials tab of the app a row opens.
-fn credential_rows(apps: &[DemoApp], now: DateTime<Utc>) -> Vec<CredentialRowDto> {
+fn credential_rows(apps: &[DemoApp], now: Timestamp) -> Vec<CredentialRowDto> {
     let mut rows: Vec<CredentialRowDto> = Vec::new();
     for a in apps {
         let application = app_detail(a).application;
@@ -587,7 +587,7 @@ fn credential_rows(apps: &[DemoApp], now: DateTime<Utc>) -> Vec<CredentialRowDto
 /// all three states on any load day and the stale ones sit past the 90-day
 /// audit threshold (Contoso CRM's legacy secret reads "no use recorded"-adjacent
 /// to a genuinely-used one, which is the story the column tells).
-fn credential_usage(apps: &[DemoApp], now: DateTime<Utc>) -> CredentialUsageDto {
+fn credential_usage(apps: &[DemoApp], now: Timestamp) -> CredentialUsageDto {
     let mut rows = Vec::new();
     for (i, a) in apps.iter().enumerate() {
         let app = app_detail(a).application;
@@ -598,8 +598,12 @@ fn credential_usage(apps: &[DemoApp], now: DateTime<Utc>) -> CredentialUsageDto 
             .chain(app.key_credentials.iter().map(|c| &c.key_id));
         for (j, key_id) in key_ids.enumerate() {
             let last_used = match (i + j) % 3 {
-                0 => Some(now - chrono::Duration::days(4 + ((i * 7 + j * 3) % 9) as i64)),
-                1 => Some(now - chrono::Duration::days(95 + ((i * 11 + j * 5) % 45) as i64)),
+                0 => {
+                    Some(now - SignedDuration::from_hours((4 + ((i * 7 + j * 3) % 9) as i64) * 24))
+                }
+                1 => Some(
+                    now - SignedDuration::from_hours((95 + ((i * 11 + j * 5) % 45) as i64) * 24),
+                ),
                 _ => None,
             };
             rows.push(CredentialUsageRow {
@@ -930,7 +934,7 @@ fn key_vault_rows() -> Vec<azapptoolkit_dto::keyvault::KeyVaultAccessRow> {
 }
 
 fn register_fixtures() {
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // ---- Startup / shell ----
     mock_ok("get_auth_config", &f::configured());
@@ -1142,7 +1146,8 @@ fn register_fixtures() {
     mock_ok("list_directory_audits_for_app", &f::directory_audits());
     mock_each("get_app_sign_in_activity", move |args| {
         f::sign_in_activity(
-            (arg(args, "appId") != api_app_id).then(|| Utc::now() - chrono::Duration::days(2)),
+            (arg(args, "appId") != api_app_id)
+                .then(|| Timestamp::now() - SignedDuration::from_hours(2 * 24)),
         )
     });
     mock_each("get_app_graph_usage", |args| {
@@ -1535,7 +1540,7 @@ mod tests {
     #[test]
     fn usage_rows_name_real_credentials_and_cover_all_three_states() {
         let apps = catalog();
-        let usage = credential_usage(&apps, Utc::now());
+        let usage = credential_usage(&apps, Timestamp::now());
         assert!(usage.available, "the demo always shows the report as read");
         let (mut recent, mut stale, mut never) = (0, 0, 0);
         for r in &usage.rows {
@@ -1554,7 +1559,7 @@ mod tests {
                 r.key_id
             );
             match r.last_used {
-                Some(d) if (Utc::now() - d).num_days() > 90 => stale += 1,
+                Some(d) if (Timestamp::now() - d).as_hours() / 24 > 90 => stale += 1,
                 Some(_) => recent += 1,
                 None => never += 1,
             }
@@ -1612,7 +1617,7 @@ mod tests {
         }
         assert!(sp_only_rows > 0, "the audit has no SP-only row to check");
 
-        for row in credential_rows(&apps, Utc::now()) {
+        for row in credential_rows(&apps, Timestamp::now()) {
             let detail = details.get(&row.app_object_id).unwrap_or_else(|| {
                 panic!(
                     "credential row for `{}` opens nothing",
@@ -1676,7 +1681,7 @@ mod tests {
             .into_iter()
             .map(|i| i.object_id)
             .chain(
-                credential_rows(&apps, Utc::now())
+                credential_rows(&apps, Timestamp::now())
                     .into_iter()
                     .map(|r| r.app_object_id),
             )
@@ -1716,7 +1721,7 @@ mod tests {
     /// credentials they must tell one story.
     #[test]
     fn list_badges_match_the_credential_board() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let apps = catalog();
         let board = credential_rows(&apps, now);
         for a in &apps {
@@ -1778,7 +1783,7 @@ mod tests {
     /// this month, the rest healthy — must hold on whatever day the page loads.
     #[test]
     fn the_credential_story_spans_every_bucket_whenever_loaded() {
-        let rows = credential_rows(&catalog(), Utc::now());
+        let rows = credential_rows(&catalog(), Timestamp::now());
         let days =
             |pred: &dyn Fn(i64) -> bool| rows.iter().any(|r| r.days_to_expiry.is_some_and(pred));
         assert!(rows.iter().any(|r| r.status == CredentialStatus::Expired));
@@ -1860,13 +1865,16 @@ mod tests {
             let end = row
                 .end_date_time
                 .as_deref()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .expect("every board row has a parseable expiry")
-                .with_timezone(&Utc);
+                .and_then(|s| str::parse::<Timestamp>(s).ok())
+                .expect("every board row has a parseable expiry");
             let left = row.days_to_expiry.expect("every board row has days left");
-            assert!(end > Utc::now(), "`{}` expired already", row.display_name);
             assert!(
-                ((end - Utc::now()).num_days() - left).abs() <= 1,
+                end > Timestamp::now(),
+                "`{}` expired already",
+                row.display_name
+            );
+            assert!(
+                ((end - Timestamp::now()).as_hours() / 24 - left).abs() <= 1,
                 "`{}`: {end} vs {left} days",
                 row.display_name
             );

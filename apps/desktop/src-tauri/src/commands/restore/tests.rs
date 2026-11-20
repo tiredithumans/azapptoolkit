@@ -159,9 +159,9 @@ fn build_restore_plan_counts_actions_and_flags_cloud_and_tenant_changes() {
         owners: vec![PrincipalRef::default(); owners],
         ..Default::default()
     };
-    let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+    let taken_at = jiff::Timestamp::from_second(1_000_000).ok().unwrap();
     let ending = |secs: i64| CredentialMeta {
-        end_date_time: chrono::DateTime::from_timestamp(secs, 0),
+        end_date_time: jiff::Timestamp::from_second(secs).ok(),
         ..Default::default()
     };
     // Two undated secrets, one still valid at backup time, one already
@@ -231,7 +231,7 @@ fn build_restore_plan_forecasts_passes_4_and_5_and_blocks_a_newer_schema() {
     const NO_SP: &str = "22222222-2222-2222-2222-222222222222";
     let mut backup = TenantBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
-        created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+        created_at: jiff::Timestamp::from_second(1_000_000).ok().unwrap(),
         source_tenant_id: "src-tenant".into(),
         cloud: CloudEnvironment::Commercial,
         app_registrations: vec![app(PAIRED, true), app(NO_SP, false)],
@@ -285,7 +285,7 @@ fn build_restore_plan_forecasts_passes_4_and_5_and_blocks_a_newer_schema() {
 fn manifest_with_ids(ids: &[&str]) -> TenantBackup {
     TenantBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
-        created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+        created_at: jiff::Timestamp::from_second(1_000_000).ok().unwrap(),
         source_tenant_id: "src-tenant".into(),
         cloud: CloudEnvironment::Commercial,
         app_registrations: ids
@@ -399,20 +399,20 @@ fn manifest_problems_are_capped() {
 
 #[test]
 fn expired_at_backup_uses_the_backup_time_not_now() {
-    let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
-    let ending = |end: Option<DateTime<Utc>>| CredentialMeta {
+    let taken_at = jiff::Timestamp::from_second(1_000_000).ok().unwrap();
+    let ending = |end: Option<Timestamp>| CredentialMeta {
         end_date_time: end,
         ..Default::default()
     };
     // Expired before the backup was taken: nothing could have used it.
     assert!(expired_at_backup(
-        &ending(chrono::DateTime::from_timestamp(999_999, 0)),
+        &ending(jiff::Timestamp::from_second(999_999).ok()),
         taken_at
     ));
     // Live at backup time, long expired by now: a recovering client still
     // holds it, so it is re-issued.
     assert!(!expired_at_backup(
-        &ending(chrono::DateTime::from_timestamp(1_000_001, 0)),
+        &ending(jiff::Timestamp::from_second(1_000_001).ok()),
         taken_at
     ));
     // No end date is not "expired".
@@ -442,14 +442,14 @@ fn adoption_for_creates_adopts_or_refuses() {
         }],
         ..Default::default()
     };
-    let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+    let taken_at = jiff::Timestamp::from_second(1_000_000).ok().unwrap();
     // Created after the backup was taken, as anything a restore of it made.
     let hit = |id: &str, name: &str| TagHit {
         app: Application {
             id: format!("obj-{id}"),
             app_id: format!("app-{id}"),
             display_name: name.into(),
-            created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+            created_date_time: jiff::Timestamp::from_second(1_000_600).ok(),
             ..Default::default()
         },
         ..Default::default()
@@ -468,7 +468,7 @@ fn adoption_for_creates_adopts_or_refuses() {
         key_id: "key-1".into(),
         display_name: Some("ci".into()),
         hint: Some("Ab1".into()),
-        start_date_time: chrono::DateTime::from_timestamp(1_000_700, 0),
+        start_date_time: jiff::Timestamp::from_second(1_000_700).ok(),
         ..Default::default()
     }];
     assert_eq!(
@@ -479,7 +479,7 @@ fn adoption_for_creates_adopts_or_refuses() {
             live_secrets: vec![LiveSecret {
                 name: "ci".into(),
                 key_id: "key-1".into(),
-                valid_from: chrono::DateTime::from_timestamp(1_000_700, 0),
+                valid_from: jiff::Timestamp::from_second(1_000_700).ok(),
                 hint: Some("Ab1".into()),
             }],
             pre_authorized: Vec::new(),
@@ -502,7 +502,7 @@ fn adoption_for_creates_adopts_or_refuses() {
     // time is unknown: no restore of this backup can be proven to have made
     // it, so it is refused rather than handed this app's consent.
     let mut older = hit("3", "App A");
-    older.app.created_date_time = chrono::DateTime::from_timestamp(999_000, 0);
+    older.app.created_date_time = jiff::Timestamp::from_second(999_000).ok();
     let Adoption::Refuse(reason) = decide_on(&[older]) else {
         panic!("an app older than the backup must be refused");
     };
@@ -3314,13 +3314,13 @@ fn a_hit_holding_credentials_the_manifest_does_not_name_is_refused() {
         }],
         ..Default::default()
     };
-    let taken_at = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+    let taken_at = jiff::Timestamp::from_second(1_000_000).ok().unwrap();
     let hit = || TagHit {
         app: Application {
             id: "obj-1".into(),
             app_id: "app-1".into(),
             display_name: "App A".into(),
-            created_date_time: chrono::DateTime::from_timestamp(1_000_600, 0),
+            created_date_time: jiff::Timestamp::from_second(1_000_600).ok(),
             ..Default::default()
         },
         ..Default::default()

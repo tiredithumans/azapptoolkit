@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -224,10 +224,10 @@ pub struct TenantScopedUi {
     // range set in one tenant would silently keep narrowing the next tenant's
     // list — with the drawer collapsed and only the badge hinting why rows are
     // missing.
-    pub apps_created_after: RwSignal<Option<NaiveDate>>,
-    pub apps_created_before: RwSignal<Option<NaiveDate>>,
-    pub enterprise_created_after: RwSignal<Option<NaiveDate>>,
-    pub enterprise_created_before: RwSignal<Option<NaiveDate>>,
+    pub apps_created_after: RwSignal<Option<Date>>,
+    pub apps_created_before: RwSignal<Option<Date>>,
+    pub enterprise_created_after: RwSignal<Option<Date>>,
+    pub enterprise_created_before: RwSignal<Option<Date>>,
     // One-shot "open the filter drawer on arrival" flag, naming the list it is
     // for. The App Registrations and Enterprise lists keep their facet chips in
     // a drawer collapsed by default, so a drill would land filtered with the
@@ -636,7 +636,7 @@ mod tests {
             ui.audit_severity.set("critical".into());
             ui.audit_expanded_group.set(Some("ownership".into()));
             ui.credentials_facet.set("expired".into());
-            let date = |d| NaiveDate::from_ymd_opt(2024, 1, d).unwrap();
+            let date = |d| Date::new(2024, 1, d).unwrap();
             ui.apps_created_after.set(Some(date(1)));
             ui.apps_created_before.set(Some(date(2)));
             ui.enterprise_created_after.set(Some(date(3)));

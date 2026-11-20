@@ -19,7 +19,7 @@ use azapptoolkit_core::scoping::{
 use azapptoolkit_exchange::ExchangeError;
 use azapptoolkit_exchange::targets::ScopableMailPermission;
 use azapptoolkit_exchange::verdict::apply_legacy_policy_verdict;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::commands::exchange::resolve_mail_scopes_audit_cached;
 use crate::dto::UiError;
@@ -170,7 +170,7 @@ pub(crate) fn score_sp_only(
     sp: &ServicePrincipal,
     ctx: &ScoreCtx,
     delegated_scopes_by_client: &HashMap<String, Vec<String>>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> AuditItem {
     // Every granted role with its own resource: Microsoft Graph's, plus the
     // Office 365 Exchange Online (EWS `full_access_as_app`,
@@ -334,7 +334,7 @@ async fn resolve_permissions(
 pub(crate) async fn score_one(
     ctx: &ScoreCtx,
     app: &Application,
-    last_sign_in: Option<Option<DateTime<Utc>>>,
+    last_sign_in: Option<Option<Timestamp>>,
 ) -> Result<AuditItem, UiError> {
     // The audit reads only `sp.id` and `sp.account_enabled`. The run's own SP
     // index answers first (`ScoreCtx::run_sps`, no Graph cost); an app it has
@@ -492,7 +492,7 @@ pub(crate) async fn score_one(
     );
 
     let sp_enabled = sp.as_ref().and_then(|s| s.account_enabled);
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let mut item = score_application(app, sp_enabled, &perms, now);
     // Rule 22: the risky-SP report is tenant-wide; join it onto this row by
     // the SP's object id (the same key the grant matrices use), then let the
@@ -539,7 +539,7 @@ pub(crate) async fn score_one(
     // creation date; a secret with no start date is as old as its app.
     if ctx.credential_usage_available {
         let activity = |key_id: &str| ctx.credential_activity_for(&app.app_id, key_id);
-        let usage: Vec<(String, CredentialActivity, Option<DateTime<Utc>>)> = app
+        let usage: Vec<(String, CredentialActivity, Option<Timestamp>)> = app
             .password_credentials
             .iter()
             .filter(|c| !is_expired(c.end_date_time, now))
@@ -563,7 +563,7 @@ pub(crate) async fn score_one(
                     }),
             )
             .collect();
-        let usage_refs: Vec<(&str, CredentialActivity, Option<DateTime<Utc>>)> =
+        let usage_refs: Vec<(&str, CredentialActivity, Option<Timestamp>)> =
             usage.iter().map(|(l, a, s)| (l.as_str(), *a, *s)).collect();
         if let Some((issue, rec)) = unused_credential_advisory(&usage_refs, now) {
             item.issues.push(issue);
@@ -582,7 +582,7 @@ pub(crate) async fn score_one(
         sp.as_ref().map(|s| s.id.as_str()),
         app.created_date_time,
     ) {
-        type OwnedLifetime = (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+        type OwnedLifetime = (String, Option<Timestamp>, Option<Timestamp>);
         let lifetimes: Vec<OwnedLifetime> = app
             .password_credentials
             .iter()

@@ -26,7 +26,7 @@ fn expired_secret(key_id: &str) -> PasswordCredential {
     PasswordCredential {
         key_id: key_id.to_string(),
         display_name: Some(key_id.to_string()),
-        end_date_time: Some(chrono::Utc::now() - chrono::Duration::days(30)),
+        end_date_time: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(30 * 24)),
         ..Default::default()
     }
 }
@@ -35,7 +35,7 @@ fn active_secret(key_id: &str) -> PasswordCredential {
     PasswordCredential {
         key_id: key_id.to_string(),
         display_name: Some(key_id.to_string()),
-        end_date_time: Some(chrono::Utc::now() + chrono::Duration::days(90)),
+        end_date_time: Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(90 * 24)),
         ..Default::default()
     }
 }

@@ -10,7 +10,7 @@ use tauri::{AppHandle, State};
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_graph::client::AppListQuery;
-use chrono::Utc;
+use jiff::Timestamp;
 
 use crate::commands::dispatch::dispatch_capped;
 use crate::commands::progress::emit_progress;
@@ -398,7 +398,7 @@ pub async fn run_audit(
     // tenant-wide, so `score_sp_only` is pure scoring — no per-item Graph
     // traffic, no fan-out needed.
     if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         // `done` continues from the fan-out's completion count; each scored SP
         // is one more item done.
         for (done_count, sp) in (meter.done() + 1..).zip(sp_candidates) {
@@ -455,7 +455,7 @@ pub async fn run_audit(
     // `serde_json::to_value` walk an untyped `put` did, and it makes every later
     // read (`get_cached_audit`, the Home summary, export) a refcount clone
     // instead of a full deserialize.
-    let completed_at = Utc::now().to_rfc3339();
+    let completed_at = Timestamp::now().to_string();
     // Computed once: the same tenant posture number goes to the cache entry
     // and to the run result, so the fresh view and its later cache reads can
     // never disagree about what the tenant caps secrets at.

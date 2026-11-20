@@ -3,7 +3,7 @@
 //! Field names use camelCase to match Graph JSON; `Option` wraps anything Graph
 //! may omit so deserialization stays tolerant.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::scoping::SelectedScopeLevel;
@@ -42,7 +42,7 @@ pub struct Application {
     #[serde(default)]
     pub publisher_domain: Option<String>,
     #[serde(default)]
-    pub created_date_time: Option<DateTime<Utc>>,
+    pub created_date_time: Option<Timestamp>,
     #[serde(default, deserialize_with = "null_to_default")]
     pub password_credentials: Vec<PasswordCredential>,
     #[serde(default, deserialize_with = "null_to_default")]
@@ -97,7 +97,7 @@ pub struct VerifiedPublisher {
     #[serde(default)]
     pub verified_publisher_id: Option<String>,
     #[serde(default)]
-    pub added_date_time: Option<DateTime<Utc>>,
+    pub added_date_time: Option<Timestamp>,
 }
 
 /// App instance property lock (`servicePrincipalLockConfiguration`). `is_enabled`
@@ -194,7 +194,7 @@ pub struct ServicePrincipal {
     pub tags: Vec<String>,
     /// When the app was created — used for date filtering on lists.
     #[serde(default)]
-    pub created_date_time: Option<DateTime<Utc>>,
+    pub created_date_time: Option<Timestamp>,
     /// Free-text management notes (max 1024 chars). Only fetched for the detail
     /// view; the enterprise-app Overview tab edits it.
     #[serde(default)]
@@ -289,9 +289,9 @@ pub struct PasswordCredential {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub end_date_time: Option<Timestamp>,
     /// Only populated on `addPassword` responses. Skipped from serialization
     /// when absent so list/read responses never carry a `"secretText": null`
     /// field to the frontend, and never leak the plaintext via `Debug`.
@@ -326,9 +326,9 @@ pub struct KeyCredential {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub end_date_time: Option<Timestamp>,
     /// Base64-encoded certificate thumbprint bytes (SHA-1) as Graph reports
     /// them. Crosses IPC as-is inside `Application` — renaming or retyping
     /// this field is a wire-format change. Also echoed back verbatim by the
@@ -376,9 +376,9 @@ pub struct NewKeyCredential {
     #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub end_date_time: Option<Timestamp>,
     /// Base64-encoded DER bytes of the certificate.
     pub key: String,
 }
@@ -414,7 +414,7 @@ pub struct AppRoleAssignment {
     #[serde(default)]
     pub resource_display_name: Option<String>,
     #[serde(default)]
-    pub created_date_time: Option<DateTime<Utc>>,
+    pub created_date_time: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -500,7 +500,7 @@ pub struct ServicePrincipalSignInActivity {
 #[serde(rename_all = "camelCase")]
 pub struct SignInActivity {
     #[serde(default)]
-    pub last_sign_in_date_time: Option<DateTime<Utc>>,
+    pub last_sign_in_date_time: Option<Timestamp>,
 }
 
 /// One row of the Entra beta `reports/appCredentialSignInActivities` report
@@ -559,7 +559,7 @@ pub struct CredentialRestrictionConfiguration {
     #[serde(default)]
     pub max_lifetime: Option<String>,
     #[serde(default)]
-    pub restrict_for_apps_created_after_date_time: Option<DateTime<Utc>>,
+    pub restrict_for_apps_created_after_date_time: Option<Timestamp>,
 }
 
 /// The restriction container shared by the policy shapes: the tenant default's
@@ -687,7 +687,7 @@ pub struct SynchronizationExecution {
     #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
-    pub time_ended: Option<DateTime<Utc>>,
+    pub time_ended: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -709,7 +709,7 @@ pub struct DirectoryAuditLog {
     #[serde(default)]
     pub activity_display_name: Option<String>,
     #[serde(default)]
-    pub activity_date_time: Option<DateTime<Utc>>,
+    pub activity_date_time: Option<Timestamp>,
     #[serde(default)]
     pub category: Option<String>,
     /// "success" / "failure" / "timeout" / "unknownFutureValue".
@@ -908,7 +908,7 @@ pub struct RiskyServicePrincipal {
     #[serde(default)]
     pub risk_detail: Option<String>,
     #[serde(default)]
-    pub risk_last_updated_date_time: Option<DateTime<Utc>>,
+    pub risk_last_updated_date_time: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1259,9 +1259,9 @@ pub struct SelfSignedCertificate {
     #[serde(default)]
     pub key_id: Option<String>,
     #[serde(default)]
-    pub start_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(default)]
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub end_date_time: Option<Timestamp>,
     #[serde(default)]
     pub usage: Option<String>,
     #[serde(default, rename = "type")]
@@ -1390,7 +1390,7 @@ pub struct DeletedApplication {
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
-    pub deleted_date_time: Option<DateTime<Utc>>,
+    pub deleted_date_time: Option<Timestamp>,
 }
 
 /// One entry of the recycle-bin read

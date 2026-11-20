@@ -15,6 +15,7 @@
 //! Progress events ride the same `bulk-progress` channel so the frontend can
 //! share a single listener.
 
+use jiff::Timestamp;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
@@ -454,7 +455,7 @@ pub async fn bulk_remove_expired_credentials(
     // cap is surfaced via `in_flight_cap` so the UI can show the back-off.
     let meter = FanOutMeter::attach(client.clone(), BULK_WRITE_CONCURRENCY);
 
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
 
     let run = run_bulk_capped(
         &app_handle,
@@ -496,7 +497,7 @@ async fn sweep_one(
     cancel: &CancelToken,
     session: &SessionDead,
     app: Application,
-    now: chrono::DateTime<chrono::Utc>,
+    now: Timestamp,
 ) -> SweepItem {
     let expired_key_ids = expired_password_key_ids(&app, now);
     let Application {

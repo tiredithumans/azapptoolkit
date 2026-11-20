@@ -4,6 +4,7 @@
 //! shared token adapter for the `https://vault.azure.net` audience.
 
 use futures::stream::{self, StreamExt};
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::defaults::AppVaultBinding;
@@ -40,7 +41,7 @@ pub async fn kv_list_secrets(
                 .attributes
                 .as_ref()
                 .and_then(|a| a.expires)
-                .map(|d| d.to_rfc3339()),
+                .map(|d| d.to_string()),
             content_type: item.content_type,
             managed: item.managed,
         })
@@ -60,10 +61,7 @@ pub async fn kv_get_secret(
         name: secret_name,
         value: sv.value,
         content_type: sv.content_type,
-        expires: sv
-            .attributes
-            .and_then(|a| a.expires)
-            .map(|d| d.to_rfc3339()),
+        expires: sv.attributes.and_then(|a| a.expires).map(|d| d.to_string()),
     })
 }
 
@@ -402,7 +400,7 @@ pub(crate) async fn rotate_app_credential_core(
         .unwrap_or(crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS)
         .clamp(1, crate::dto::credentials::MAX_SECRET_LIFETIME_DAYS);
     let lifetime = std::time::Duration::from_secs(u64::from(days) * 86_400);
-    let display_name = format!("rotated-{}", chrono::Utc::now().format("%Y%m%d"));
+    let display_name = format!("rotated-{}", Timestamp::now().strftime("%Y%m%d"));
 
     // 1. Mint the new app secret. A mint whose outcome is open may have left
     //    a secret on the app that nobody holds, so the credential tier hears
@@ -496,7 +494,7 @@ pub(crate) async fn rotate_app_credential_core(
         new_key_id: new_cred.key_id,
         vault_name: input.vault_name,
         secret_name: input.secret_name,
-        expires: new_cred.end_date_time.map(|d| d.to_rfc3339()),
+        expires: new_cred.end_date_time.map(|d| d.to_string()),
         removed_key_ids: removed,
         warnings,
     })

@@ -32,8 +32,12 @@ fn secret(key_id: &str, start_days_ago: i64, end_days_from_now: i64) -> Password
     PasswordCredential {
         key_id: key_id.to_string(),
         display_name: Some(key_id.to_string()),
-        start_date_time: Some(chrono::Utc::now() - chrono::Duration::days(start_days_ago)),
-        end_date_time: Some(chrono::Utc::now() + chrono::Duration::days(end_days_from_now)),
+        start_date_time: Some(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_hours(start_days_ago * 24),
+        ),
+        end_date_time: Some(
+            jiff::Timestamp::now() + jiff::SignedDuration::from_hours(end_days_from_now * 24),
+        ),
         ..Default::default()
     }
 }

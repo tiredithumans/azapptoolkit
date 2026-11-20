@@ -260,7 +260,7 @@ const DEFAULT_CERT_LIFETIME_DAYS: u32 = crate::dto::credentials::DEFAULT_CERT_LI
 /// value is a trust that never has to be re-established. Graph refuses past
 /// three years anyway; checking here turns a raw 400 into a typed rejection
 /// *before* any mutation, and keeps an absurd value out of
-/// `chrono::Duration::days`, which panics rather than saturating.
+/// `Duration::days`, which panics rather than saturating.
 fn resolve_cert_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
     let days = days.unwrap_or(DEFAULT_CERT_LIFETIME_DAYS);
     if days == 0 || days > MAX_CERT_LIFETIME_DAYS {
@@ -289,7 +289,7 @@ const MAX_SECRET_LIFETIME_DAYS: u32 = crate::dto::credentials::MAX_SECRET_LIFETI
 /// `0` would mint a secret that has already expired when the summary shows
 /// it; a large value reaches Graph only after `instantiate_application_template`
 /// has created the app and service principal, leaving a half-configured app —
-/// and `u32::MAX` days overflows `chrono` inside `GraphClient::add_password`.
+/// and `u32::MAX` days overflows the time arithmetic inside `GraphClient::add_password`.
 /// Checking here turns all of that into a typed rejection *before* any mutation.
 fn resolve_secret_lifetime_days(days: Option<u32>) -> Result<u32, UiError> {
     let days = days.unwrap_or(DEFAULT_SECRET_LIFETIME_DAYS);

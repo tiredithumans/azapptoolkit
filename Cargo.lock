@@ -353,7 +353,7 @@ dependencies = [
  "aws-lc-rs",
  "azapptoolkit-core",
  "base64 0.23.1",
- "chrono",
+ "jiff 1.0.1",
  "keyring-core",
  "parking_lot 0.13.0",
  "reqwest",
@@ -376,7 +376,7 @@ version = "0.36.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
- "chrono",
+ "jiff 1.0.1",
  "parking_lot 0.13.0",
  "serde",
  "serde_json",
@@ -395,7 +395,7 @@ dependencies = [
  "azapptoolkit-exchange",
  "azapptoolkit-graph",
  "azapptoolkit-keyvault",
- "chrono",
+ "jiff 1.0.1",
  "serde",
  "serde_json",
  "url",
@@ -424,8 +424,8 @@ dependencies = [
  "async-trait",
  "azapptoolkit-core",
  "bytes",
- "chrono",
  "futures",
+ "jiff 1.0.1",
  "parking_lot 0.13.0",
  "reqwest",
  "serde",
@@ -443,7 +443,7 @@ version = "0.36.1"
 dependencies = [
  "azapptoolkit-core",
  "bytes",
- "chrono",
+ "jiff 1.0.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -809,10 +809,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1241,8 +1239,8 @@ dependencies = [
  "azapptoolkit-keyvault",
  "azapptoolkit-permissions",
  "base64 0.23.1",
- "chrono",
  "futures",
+ "jiff 1.0.1",
  "p12-keystore",
  "parking_lot 0.13.0",
  "rand",
@@ -2481,14 +2479,28 @@ version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
- "jiff-core",
- "jiff-static",
+ "jiff-core 0.1.5",
+ "jiff-static 0.2.43",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
  "windows-link",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
+dependencies = [
+ "jiff-core 1.0.1",
+ "jiff-static 1.0.1",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
 ]
 
 [[package]]
@@ -2501,15 +2513,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.5",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
+dependencies = [
+ "jiff-core 1.0.1",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -4458,7 +4491,7 @@ dependencies = [
  "hex",
  "indexmap 1.9.3",
  "indexmap 2.14.2",
- "jiff",
+ "jiff 0.2.43",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
