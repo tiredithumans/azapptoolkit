@@ -1,6 +1,7 @@
 //! Federation-metadata probing: the public metadata fetch and the small XML
 //! scanners that read signing keys out of it.
 
+use jiff::Timestamp;
 use std::time::Duration;
 
 use azapptoolkit_core::http_body::{BodyCap, BodyTooLarge};
@@ -41,7 +42,7 @@ pub async fn probe_federation_metadata(
     // not an application (client) id.
     require_app_id(&app_id)?;
     let (_, _, _, metadata_url) = saml_summary_urls(state.auth.cloud(), &tenant_id, &app_id);
-    let fetched_at = chrono::Utc::now().to_rfc3339();
+    let fetched_at = Timestamp::now().to_string();
 
     let response = metadata_http_client().get(&metadata_url).send().await;
     let (status, body) = match response {

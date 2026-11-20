@@ -11,7 +11,7 @@ description = "Serializable DTOs shared between the Tauri backend and the WASM f
 
 [dependencies]
 serde = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 azapptoolkit-core = { path = "../azapptoolkit-core" }
 azapptoolkit-auth = { path = "../azapptoolkit-auth", optional = true }
 azapptoolkit-graph = { path = "../azapptoolkit-graph", optional = true }

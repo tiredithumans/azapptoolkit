@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{KeyCredential, PasswordCredential};
@@ -67,7 +67,7 @@ impl CredentialStatus {
     /// certificate board: no end date is `Unknown`, a negative day count is
     /// `Expired`, up to [`EXPIRY_WARNING_DAYS`] is `ExpiringSoon`.
     ///
-    /// `days` must be the truncating `(end - now).num_days()`, so this agrees
+    /// `days` must be the truncating `end.duration_since(now).as_hours() / 24`, so this agrees
     /// with [`is_expired`](super::is_expired): `Expired` exactly when that
     /// returns true, and a credential that lapsed under a day ago is still
     /// `ExpiringSoon`.
@@ -117,7 +117,7 @@ impl ListCredentialStatus {
     pub fn classify(
         passwords: &[PasswordCredential],
         certs: &[KeyCredential],
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Self {
         let mut has_any = false;
         let mut any_active = false;
@@ -134,7 +134,7 @@ impl ListCredentialStatus {
                 any_active = true;
                 continue;
             };
-            let days = (end - now).num_days();
+            let days = end.duration_since(now).as_hours() / 24;
             if days > EXPIRY_WARNING_DAYS {
                 any_active = true;
             } else if (0..=EXPIRY_WARNING_DAYS).contains(&days) {
@@ -173,8 +173,8 @@ impl CredentialKind {
 pub struct CredentialSummary {
     pub name: String,
     pub kind: CredentialKind,
-    pub start_date_time: Option<DateTime<Utc>>,
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
+    pub end_date_time: Option<Timestamp>,
     pub days_to_expiry: Option<i64>,
     pub status: CredentialStatus,
 }
@@ -599,7 +599,7 @@ pub struct AuditItem {
     pub application_name: String,
     pub app_id: String,
     pub object_id: String,
-    pub created_date: Option<DateTime<Utc>>,
+    pub created_date: Option<Timestamp>,
     pub publisher: Option<String>,
     pub sign_in_audience: Option<String>,
     pub risk_score: u32,
@@ -620,7 +620,7 @@ pub struct AuditItem {
     /// report was unavailable — disambiguate with [`Self::sign_in_report_available`].
     /// Set by the audit runner after [`score_application`]; defaults to `None`.
     #[serde(default)]
-    pub last_sign_in: Option<DateTime<Utc>>,
+    pub last_sign_in: Option<Timestamp>,
     /// `true` when the app is flagged unused (no sign-in past [`UNUSED_APP_DAYS`]),
     /// the structured equivalent of the free-text unused advisory. Drives the
     /// audit view's "Unused" facet without parsing issue text.
@@ -754,7 +754,7 @@ pub mod issue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, TimeZone};
+    use jiff::{SignedDuration, Timestamp};
 
     #[test]
     fn risk_level_orders_by_severity() {
@@ -762,15 +762,15 @@ mod tests {
         assert!(Low < Medium && Medium < High && High < Critical);
     }
 
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0).unwrap()
+    fn now() -> Timestamp {
+        "2026-04-22T12:00:00Z".parse::<Timestamp>().unwrap()
     }
 
     #[test]
     fn list_credential_status_classifies_by_expiry_window() {
         let now = now();
         let secret = |days: i64| PasswordCredential {
-            end_date_time: Some(now + Duration::days(days)),
+            end_date_time: Some(now + SignedDuration::from_hours(days * 24)),
             ..Default::default()
         };
         let classify = |p: &[PasswordCredential], c: &[KeyCredential]| {
@@ -787,7 +787,7 @@ mod tests {
         );
         // A cert counts the same as a secret.
         let cert = KeyCredential {
-            end_date_time: Some(now + Duration::days(10)),
+            end_date_time: Some(now + SignedDuration::from_hours(10 * 24)),
             ..Default::default()
         };
         assert_eq!(classify(&[], &[cert]), ListCredentialStatus::Expiring);

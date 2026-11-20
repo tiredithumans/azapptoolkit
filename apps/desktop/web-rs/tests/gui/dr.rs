@@ -99,7 +99,7 @@ async fn restore_progress_reads_as_the_whole_run() {
 fn backup() -> TenantBackup {
     TenantBackup {
         schema_version: 1,
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
         source_tenant_id: "source-tenant".to_string(),
         cloud: azapptoolkit_core::cloud::CloudEnvironment::Commercial,
         app_registrations: Vec::new(),

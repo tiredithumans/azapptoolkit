@@ -1,6 +1,7 @@
 //! Unit tests for the audit command layer (`super`).
 
 use super::*;
+use jiff::SignedDuration;
 
 use super::prefetch::{
     prefetch_admin_consent_grants, prefetch_office365_role_grants,
@@ -342,7 +343,7 @@ fn sp_holding_only_office365_roles_is_a_candidate_and_is_scored() {
         }
     };
     let ctx = server_less_ctx(Arc::new(roles));
-    let now = Utc::now();
+    let now = Timestamp::now();
     let by_id = |id: &str| {
         let sp = candidates.iter().find(|s| s.id == id).unwrap();
         score_sp_only(sp, &ctx, &HashMap::new(), now)
@@ -1359,7 +1360,7 @@ async fn a_risky_sp_anchors_its_row_at_high_with_one_disable_fix() {
     // Old + never signed in: the unused post-pass runs too, so this pins the
     // dedupe as well as the join.
     let app = Application {
-        created_date_time: Some(Utc::now() - chrono::Duration::days(400)),
+        created_date_time: Some(Timestamp::now() - SignedDuration::from_hours(400 * 24)),
         ..bare_app()
     };
 
@@ -1422,13 +1423,13 @@ async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
         wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})),
     )
     .await;
-    let now = Utc::now();
-    let secret = |key: &str, end: Option<DateTime<Utc>>| PasswordCredential {
+    let now = Timestamp::now();
+    let secret = |key: &str, end: Option<Timestamp>| PasswordCredential {
         key_id: key.into(),
         display_name: Some("ci".into()),
         // Older than the 90-day window, so this exercises the staleness rule,
         // not the "avoid flagging brand-new" age gate.
-        start_date_time: Some(now - chrono::Duration::days(200)),
+        start_date_time: Some(now - SignedDuration::from_hours(200 * 24)),
         end_date_time: end,
         ..Default::default()
     };
@@ -1439,7 +1440,7 @@ async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
     let stale_secret = || {
         app_with(vec![secret(
             "k-stale",
-            Some(now + chrono::Duration::days(30)),
+            Some(now + SignedDuration::from_hours(30 * 24)),
         )])
     };
 
@@ -1455,7 +1456,7 @@ async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
     ctx.credential_usage_available = true;
     ctx.credential_activity_map = Arc::new(HashMap::from([(
         "app-1|k-stale".to_string(),
-        CredentialActivity::LastSeen(now - chrono::Duration::days(150)),
+        CredentialActivity::LastSeen(now - SignedDuration::from_hours(150 * 24)),
     )]));
     let item = score_one(&ctx, &stale_secret(), None)
         .await
@@ -1493,7 +1494,7 @@ async fn credential_usage_post_pass_flags_only_tracked_stale_credentials() {
     )]));
     let expired = app_with(vec![secret(
         "k-stale",
-        Some(now - chrono::Duration::days(5)),
+        Some(now - SignedDuration::from_hours(5 * 24)),
     )]);
     let item = score_one(&ctx, &expired, None).await.expect("scores");
     assert!(!item.issues.iter().any(|i| i.starts_with(MARKER)));
@@ -1512,7 +1513,7 @@ async fn secret_lifetime_advisory_is_recommendation_only_and_never_guesses() {
         PasswordCredential, TenantAppManagementPolicy,
     };
 
-    let lifetime = |max: &str, gate: Option<DateTime<Utc>>| CredentialRestrictionConfiguration {
+    let lifetime = |max: &str, gate: Option<Timestamp>| CredentialRestrictionConfiguration {
         restriction_type: Some("passwordLifetime".into()),
         state: Some("enabled".into()),
         max_lifetime: Some(max.into()),
@@ -1522,19 +1523,19 @@ async fn secret_lifetime_advisory_is_recommendation_only_and_never_guesses() {
         password_credentials: caps,
         ..Default::default()
     };
-    let now = Utc::now();
+    let now = Timestamp::now();
     let long_secret = || PasswordCredential {
         key_id: "k-long".into(),
         display_name: Some("long".into()),
-        start_date_time: Some(now - chrono::Duration::days(200)),
+        start_date_time: Some(now - SignedDuration::from_hours(200 * 24)),
         // Still valid — a past end date is the expiry finding's job, not this
         // advisory's.
-        end_date_time: Some(now + chrono::Duration::days(20)),
+        end_date_time: Some(now + SignedDuration::from_hours(20 * 24)),
         ..Default::default()
     };
     let app = |id: &str| Application {
         id: id.into(),
-        created_date_time: Some(now - chrono::Duration::days(400)),
+        created_date_time: Some(now - SignedDuration::from_hours(400 * 24)),
         password_credentials: vec![long_secret()],
         ..bare_app()
     };
@@ -1595,7 +1596,7 @@ async fn secret_lifetime_advisory_is_recommendation_only_and_never_guesses() {
         default: Some(TenantAppManagementPolicy {
             application_restrictions: Some(restrict(vec![lifetime(
                 "P90D",
-                Some(now - chrono::Duration::days(100)),
+                Some(now - SignedDuration::from_hours(100 * 24)),
             )])),
             ..default_90.clone()
         }),

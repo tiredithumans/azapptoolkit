@@ -2,6 +2,7 @@
 //! app-owner summary), plus the in-place writers — mode, SAML URLs, claims
 //! mapping, notification emails, redirect URIs.
 
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
@@ -97,7 +98,7 @@ pub(crate) async fn get_sso_config_core(
             &service_principal_id,
             tenant_id,
             cloud,
-            chrono::Utc::now(),
+            Timestamp::now(),
         )
     });
 

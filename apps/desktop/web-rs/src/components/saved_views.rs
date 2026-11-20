@@ -2,7 +2,7 @@
 //! "Expiring ≤7d", "High-risk") and reapply it in one click. Persisted to
 //! `localStorage`, scoped per tenant + view so they don't cross-contaminate.
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -26,12 +26,12 @@ struct SavedView {
 /// Same format `DateRangeFilter`'s native date inputs read and write.
 const ISO: &str = "%Y-%m-%d";
 
-fn iso_of(d: Option<NaiveDate>) -> Option<String> {
-    d.map(|d| d.format(ISO).to_string())
+fn iso_of(d: Option<Date>) -> Option<String> {
+    d.map(|d| d.strftime(ISO).to_string())
 }
 
-fn parse_iso(s: Option<&String>) -> Option<NaiveDate> {
-    s.and_then(|s| NaiveDate::parse_from_str(s, ISO).ok())
+fn parse_iso(s: Option<&String>) -> Option<Date> {
+    s.and_then(|s| Date::strptime(ISO, s).ok())
 }
 
 /// A row of saved-view chips plus a save-current control. `facet`/`search` are
@@ -46,8 +46,8 @@ pub fn SavedViews(
     /// The host's "created on" window, saved and applied with the facet +
     /// search (F369). Lists without a date filter omit them.
     #[prop(optional_no_strip)]
-    after: Option<RwSignal<Option<NaiveDate>>>,
-    #[prop(optional_no_strip)] before: Option<RwSignal<Option<NaiveDate>>>,
+    after: Option<RwSignal<Option<Date>>>,
+    #[prop(optional_no_strip)] before: Option<RwSignal<Option<Date>>>,
 ) -> impl IntoView {
     let session = use_session();
     let tenant = session.active_tenant;

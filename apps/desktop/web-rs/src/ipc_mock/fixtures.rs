@@ -44,7 +44,8 @@ use azapptoolkit_dto::sso::{
     CertStatus, MetadataProbeDto, RolloverPhase, SamlSsoSummary, SigningCertDto,
     SigningCertRolloverDto, SsoCertResult, SsoCertificateRowDto, SsoConfigDto, SsoSummary,
 };
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::civil::Date;
+use jiff::{SignedDuration, Timestamp};
 
 /// A `UiError` with the given code and message (the error-path mock payload).
 pub fn ui_error(code: &str, message: &str) -> UiError {
@@ -394,10 +395,10 @@ const STAGED_SSO_CERT_END_DAYS: i64 = 1000;
 /// The active SSO certificate's expiry as the date-only string the SSO tab and
 /// owner summary carry (`YYYY-MM-DD`).
 fn active_sso_cert_expiry_day() -> String {
-    days_from_now(ACTIVE_SSO_CERT_END_DAYS)
-        .expect("midnight always exists in UTC")
-        .date_naive()
-        .to_string()
+    crate::util::utc_date(
+        days_from_now(ACTIVE_SSO_CERT_END_DAYS).expect("midnight always exists in UTC"),
+    )
+    .to_string()
 }
 
 /// A signing certificate for [`signing_cert_rollover`], dated relative to
@@ -567,8 +568,9 @@ pub fn bulk_stage_cert_result() -> BulkStageCertResult {
 pub fn metadata_probe() -> MetadataProbeDto {
     MetadataProbeDto {
         // Just now, like the button press it answers.
-        fetched_at: (Utc::now() - chrono::Duration::minutes(5))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        fetched_at: (Timestamp::now() - SignedDuration::from_mins(5))
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
         signing_key_count: 2,
         published_certs: vec![
             "MIIC-demo-active-certificate-body".to_string(),
@@ -876,7 +878,7 @@ pub fn audit_run_result() -> AuditRunResult {
         // Relative to "now" rather than a fixed date, so the demo renders a
         // plausible "Scanned 12 min ago" forever instead of aging into
         // "Scanned 400 days ago" the year after it was written.
-        completed_at: Some((Utc::now() - chrono::Duration::minutes(12)).to_rfc3339()),
+        completed_at: Some((Timestamp::now() - SignedDuration::from_mins(12)).to_string()),
         // Fully covered, like the rest of the demo run.
         mailbox_scoping_resolved: true,
     }
@@ -1276,7 +1278,7 @@ pub fn activity_log_item(
     ActivityLogItem {
         id: guid(&format!("audit:{activity}:{days_ago}")),
         activity: activity.to_string(),
-        activity_date_time: Some(Utc::now() - chrono::Duration::days(days_ago)),
+        activity_date_time: Some(Timestamp::now() - SignedDuration::from_hours(days_ago * 24)),
         category: Some("ApplicationManagement".to_string()),
         result: Some("success".to_string()),
         result_reason: None,
@@ -1319,9 +1321,7 @@ pub fn directory_audits() -> Vec<azapptoolkit_dto::activity::ActivityLogItem> {
 
 /// A readable sign-in report whose latest entry for the app is `last`
 /// (`None` = the report holds no sign-in for it — the "unused" signal).
-pub fn sign_in_activity(
-    last: Option<DateTime<Utc>>,
-) -> azapptoolkit_dto::activity::SignInActivityDto {
+pub fn sign_in_activity(last: Option<Timestamp>) -> azapptoolkit_dto::activity::SignInActivityDto {
     azapptoolkit_dto::activity::SignInActivityDto {
         available: true,
         consent_required: false,
@@ -1339,8 +1339,9 @@ pub fn graph_usage(app_id: &str, days: u32) -> azapptoolkit_dto::usage::GraphUsa
         path: path.to_string(),
         count,
         last_seen: Some(
-            (Utc::now() - chrono::Duration::hours(hours_ago))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            (Timestamp::now() - SignedDuration::from_hours(hours_ago))
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
         ),
     };
     GraphUsageResult {
@@ -1656,18 +1657,16 @@ pub fn exchange_access_result() -> ExchangeAccessResult {
 /// as *time left* — a credential or certificate expiry — uses
 /// [`days_from_now`] instead: a fixed expiry ages past today and turns every
 /// "expiring" badge into a contradiction with the tab that computes it live.
-pub fn date(year: i32, month: u32, day: u32) -> Option<DateTime<Utc>> {
-    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()
+pub fn date(year: i16, month: i8, day: i8) -> Option<Timestamp> {
+    crate::util::utc_midnight(Date::new(year, month, day).ok()?)
 }
 
 /// Midnight UTC `days` from today (negative = in the past). Anchored to the
 /// start of the day so every rendered date stays stable within a UTC day, the
 /// way the fixed [`date`]s it replaces were.
-pub fn days_from_now(days: i64) -> Option<DateTime<Utc>> {
-    Utc::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .map(|d| d.and_utc() + chrono::Duration::days(days))
+pub fn days_from_now(days: i64) -> Option<Timestamp> {
+    crate::util::utc_midnight(crate::util::utc_date(Timestamp::now()))
+        .map(|d| d + SignedDuration::from_hours(days * 24))
 }
 
 /// [`days_from_now`] as the RFC 3339 string the SSO DTOs carry
@@ -1675,13 +1674,14 @@ pub fn days_from_now(days: i64) -> Option<DateTime<Utc>> {
 pub fn rfc3339_days_from_now(days: i64) -> String {
     days_from_now(days)
         .expect("midnight always exists in UTC")
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 /// Whole days from now until `end` — the backend's `days_to_expiry` arithmetic
-/// (`(end - now).num_days()`), so a fixture's count agrees with its date.
-pub fn days_until(end: DateTime<Utc>) -> i64 {
-    (end - Utc::now()).num_days()
+/// (`end.duration_since(now).as_hours() / 24`), so a fixture's count agrees with its date.
+pub fn days_until(end: Timestamp) -> i64 {
+    end.duration_since(Timestamp::now()).as_hours() / 24
 }
 
 /// A deterministic, synthetic v4-shaped GUID from a seed string: stable across
@@ -1719,7 +1719,7 @@ pub fn guid(seed: &str) -> String {
 pub fn password_credential(
     display_name: &str,
     hint: &str,
-    end: Option<DateTime<Utc>>,
+    end: Option<Timestamp>,
 ) -> PasswordCredential {
     PasswordCredential {
         key_id: guid(&format!("secret:{display_name}")),
@@ -1732,7 +1732,7 @@ pub fn password_credential(
 }
 
 /// A certificate (key) credential with a display name and expiry (Credentials tab).
-pub fn key_credential(display_name: &str, end: Option<DateTime<Utc>>) -> KeyCredential {
+pub fn key_credential(display_name: &str, end: Option<Timestamp>) -> KeyCredential {
     KeyCredential {
         key_id: guid(&format!("cert:{display_name}")),
         display_name: Some(display_name.to_string()),
@@ -1754,13 +1754,13 @@ pub fn deleted_apps() -> DeletedAppsDto {
                 object_id: guid("deleted-crm"),
                 app_id: Some(guid("deleted-crm-app")),
                 display_name: Some("Contoso CRM".to_string()),
-                deleted_date_time: Some(Utc::now() - chrono::Duration::days(4)),
+                deleted_date_time: Some(Timestamp::now() - SignedDuration::from_hours(4 * 24)),
             },
             DeletedAppDto {
                 object_id: guid("deleted-sync"),
                 app_id: Some(guid("deleted-sync-app")),
                 display_name: Some("HR Sync".to_string()),
-                deleted_date_time: Some(Utc::now() - chrono::Duration::days(27)),
+                deleted_date_time: Some(Timestamp::now() - SignedDuration::from_hours(27 * 24)),
             },
         ],
         truncated: false,

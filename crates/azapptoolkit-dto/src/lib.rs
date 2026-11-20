@@ -12,7 +12,7 @@
 //! `scoping::SelectedScopeLevel` and `cloud::CloudEnvironment`. The
 //! frontend bindings also take `Organization`, `TenantContext` /
 //! `SignInOutcome` and `TenantDefaults` straight from core. Kept
-//! dependency-light (`serde` + `chrono`) so it compiles cleanly to
+//! dependency-light (`serde` + `jiff`) so it compiles cleanly to
 //! `wasm32-unknown-unknown`. Backend-only `From<…Error>` conversions are gated
 //! behind the `backend` feature.
 //!
@@ -21,7 +21,7 @@
 //! Timestamps cross IPC in one of two Rust types, both putting identical
 //! RFC3339 UTC text on the wire:
 //!
-//! - **`DateTime<Utc>`** — the default for a **new** field whenever the
+//! - **`Timestamp`** — the default for a **new** field whenever the
 //!   backend holds a parsed value: a typed Graph model (`credentials.rs`) or a
 //!   stamp the backend mints itself (`backup.rs` `created_at`).
 //! - **`String`, documented as RFC3339 UTC** — kept where one bad value must

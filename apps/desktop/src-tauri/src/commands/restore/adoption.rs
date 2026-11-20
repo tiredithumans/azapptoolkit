@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
 use azapptoolkit_core::models::{
@@ -69,7 +69,7 @@ pub(super) struct LiveSecret {
     pub(super) name: String,
     pub(super) key_id: String,
     /// Its `startDateTime`: when the secret became valid.
-    pub(super) valid_from: Option<DateTime<Utc>>,
+    pub(super) valid_from: Option<Timestamp>,
     /// The first characters of its value, as Entra shows them.
     pub(super) hint: Option<String>,
 }
@@ -119,7 +119,7 @@ impl TagHit {
 pub(super) fn adoption_for(
     app: &AppRegistrationBackup,
     hits: &[TagHit],
-    taken_at: DateTime<Utc>,
+    taken_at: Timestamp,
     source_tenant_id: &str,
     dest_tenant_id: &str,
 ) -> Adoption {
@@ -135,7 +135,7 @@ pub(super) fn adoption_for(
         [hit] if !hit.app.created_date_time.is_some_and(|t| t >= taken_at) => {
             let created = hit.app.created_date_time.map_or_else(
                 || "an unknown time".to_string(),
-                |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+                |t| t.strftime("%Y-%m-%d %H:%M UTC").to_string(),
             );
             Adoption::Refuse(format!(
                 "An app carrying the restore tag for source appId {} already exists as '{}' \
@@ -146,7 +146,7 @@ pub(super) fn adoption_for(
                 app.source_app_id,
                 hit.app.display_name,
                 hit.app.app_id,
-                taken_at.format("%Y-%m-%d %H:%M UTC")
+                taken_at.strftime("%Y-%m-%d %H:%M UTC")
             ))
         }
         // Credentials are the standing access an owner check cannot see. A
@@ -438,7 +438,7 @@ fn certificate_thumbprint(der: &[u8]) -> String {
 fn foreign_secrets(
     hit: &Application,
     app: &AppRegistrationBackup,
-    taken_at: DateTime<Utc>,
+    taken_at: Timestamp,
 ) -> Vec<String> {
     let mut budget: HashMap<String, usize> = HashMap::new();
     for meta in app

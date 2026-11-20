@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use leptos::prelude::*;
 
 /// The ISO format a native `<input type="date">` reads and writes.
@@ -17,7 +17,7 @@ const ISO: &str = "%Y-%m-%d";
 /// next to the styled `ui-date-input` base.
 #[component]
 pub fn DateInput(
-    value: RwSignal<Option<NaiveDate>>,
+    value: RwSignal<Option<Date>>,
     label: &'static str,
     #[prop(optional)] class: &'static str,
 ) -> impl IntoView {
@@ -31,8 +31,8 @@ pub fn DateInput(
             type="date"
             class=class
             aria-label=label
-            prop:value=move || value.get().map(|d| d.format(ISO).to_string()).unwrap_or_default()
-            on:input=move |ev| value.set(NaiveDate::parse_from_str(&event_target_value(&ev), ISO).ok())
+            prop:value=move || value.get().map(|d| d.strftime(ISO).to_string()).unwrap_or_default()
+            on:input=move |ev| value.set(Date::strptime(ISO, event_target_value(&ev)).ok())
         />
     }
 }

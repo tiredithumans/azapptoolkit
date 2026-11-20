@@ -2,6 +2,8 @@
 //! the shared mint + preferred-key writers, and the pure projection/guard
 //! helpers behind them.
 
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::cloud::CloudEnvironment;
@@ -81,7 +83,7 @@ pub async fn get_signing_cert_rollover(
         &service_principal_id,
         &tenant_id,
         state.auth.cloud(),
-        chrono::Utc::now(),
+        Timestamp::now(),
     ))
 }
 
@@ -244,7 +246,7 @@ pub(crate) async fn mint_signing_certificate(
     };
     // Typed rejection instead of a raw Graph 400 (consistent with create).
     validate_cert_subject(subject)?;
-    let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
+    let end = Timestamp::now() + SignedDuration::from_hours((days as i64) * 24);
     let cert = state
         .graph_for(tenant_id)
         .add_token_signing_certificate(service_principal_id, subject, end)
@@ -252,7 +254,7 @@ pub(crate) async fn mint_signing_certificate(
     Ok(SsoCertResult {
         thumbprint: cert.thumbprint.clone(),
         base64: cert.key.clone(),
-        expiry: cert.end_date_time.map(|d| d.to_rfc3339()),
+        expiry: cert.end_date_time.map(|d| d.to_string()),
     })
 }
 
@@ -344,7 +346,7 @@ pub(crate) fn build_rollover(
     service_principal_id: &str,
     tenant_id: &str,
     cloud: CloudEnvironment,
-    now: chrono::DateTime<chrono::Utc>,
+    now: Timestamp,
 ) -> SigningCertRolloverDto {
     use azapptoolkit_dto::sso::{CertStatus, RolloverPhase, SigningCertDto};
 
@@ -355,14 +357,13 @@ pub(crate) fn build_rollover(
         .to_string();
     let preferred = preferred_thumbprint(sp);
 
-    let parse_time = |v: Option<&serde_json::Value>| -> Option<chrono::DateTime<chrono::Utc>> {
+    let parse_time = |v: Option<&serde_json::Value>| -> Option<Timestamp> {
         v.and_then(|x| x.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc))
+            .and_then(|s| str::parse::<Timestamp>(s).ok())
     };
 
     // Dedupe the Sign/Verify pair down to one row per certificate.
-    let mut certs: Vec<(SigningCertDto, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+    let mut certs: Vec<(SigningCertDto, Option<Timestamp>)> = Vec::new();
     for cred in sp
         .get("keyCredentials")
         .and_then(|v| v.as_array())
@@ -417,7 +418,7 @@ pub(crate) fn build_rollover(
                 // check downstream would call it alive while the `end <= now`
                 // comparison below calls it Expired. `div_euclid` keeps the
                 // day count's sign in agreement with that comparison.
-                days_to_expiry: end.map(|e| (e - now).num_seconds().div_euclid(86_400)),
+                days_to_expiry: end.map(|e| e.duration_since(now).as_secs().div_euclid(86_400)),
                 // Provisional; the pass below needs the active cert's expiry.
                 status: CertStatus::Expired,
             },

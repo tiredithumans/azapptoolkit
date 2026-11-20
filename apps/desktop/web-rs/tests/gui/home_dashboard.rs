@@ -47,7 +47,8 @@ fn mock_inventory() {
 async fn posture_card_renders_the_summary_with_its_age_stamp() {
     ts::reset();
     mock_inventory();
-    let five_minutes_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let five_minutes_ago =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_mins(5)).to_string();
     let summary = CachedAuditSummary::from_items(
         &fixtures::audit_run_result().items,
         Some(five_minutes_ago),
@@ -88,7 +89,8 @@ async fn posture_card_renders_the_summary_with_its_age_stamp() {
 async fn posture_card_states_a_known_tenant_cap() {
     ts::reset();
     mock_inventory();
-    let five_minutes_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let five_minutes_ago =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_mins(5)).to_string();
     let summary = CachedAuditSummary::from_items(
         &fixtures::audit_run_result().items,
         Some(five_minutes_ago),

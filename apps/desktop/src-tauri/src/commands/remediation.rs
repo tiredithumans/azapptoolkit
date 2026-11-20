@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::audit::{
@@ -32,7 +32,7 @@ use crate::state::AppState;
 /// as paired Sign/Verify entries sharing one keyId; `remove_key_credential`
 /// drops every entry with that keyId, so we dedup to avoid a redundant second
 /// PATCH (and an inflated removal count).
-fn expired_cert_key_ids(app: &Application, now: DateTime<Utc>) -> Vec<String> {
+fn expired_cert_key_ids(app: &Application, now: Timestamp) -> Vec<String> {
     let mut ids: Vec<String> = app
         .key_credentials
         .iter()
@@ -74,7 +74,7 @@ pub(crate) async fn remediate_remove_expired_credentials_core(
     // Fail before any mutation if we can't read the live app — nothing changed,
     // so no cache bust is needed on this path.
     let app = client.get_application(object_id).await?;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     let expired_secrets = expired_password_key_ids(&app, now);
     let expired_certs = expired_cert_key_ids(&app, now);
@@ -557,15 +557,13 @@ pub(crate) async fn remediate_remove_redundant_permissions_core(
 mod tests {
     use super::*;
     use azapptoolkit_core::models::KeyCredential;
-    use chrono::Duration;
+    use jiff::{SignedDuration, Timestamp};
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> Timestamp {
+        str::parse::<Timestamp>("2026-01-01T00:00:00Z").unwrap()
     }
 
-    fn cert(key_id: &str, end: Option<DateTime<Utc>>) -> KeyCredential {
+    fn cert(key_id: &str, end: Option<Timestamp>) -> KeyCredential {
         KeyCredential {
             key_id: key_id.into(),
             end_date_time: end,
@@ -578,9 +576,9 @@ mod tests {
         // A cert with Sign + Verify entries shares one keyId; expired once → one id.
         let app = Application {
             key_credentials: vec![
-                cert("cert-a", Some(now() - Duration::days(5))),
-                cert("cert-a", Some(now() - Duration::days(5))),
-                cert("cert-b", Some(now() + Duration::days(5))), // still valid
+                cert("cert-a", Some(now() - SignedDuration::from_hours(5 * 24))),
+                cert("cert-a", Some(now() - SignedDuration::from_hours(5 * 24))),
+                cert("cert-b", Some(now() + SignedDuration::from_hours(5 * 24))), // still valid
             ],
             ..Default::default()
         };

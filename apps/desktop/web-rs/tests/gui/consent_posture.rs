@@ -81,7 +81,7 @@ fn mount_home(p: TenantConsentPostureDto) -> ts::Mounted {
     );
     let summary = CachedAuditSummary::from_items(
         &fixtures::audit_run_result().items,
-        Some(chrono::Utc::now().to_rfc3339()),
+        Some(jiff::Timestamp::now().to_string()),
         false,
         None,
     );

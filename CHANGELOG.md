@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Changed
+
+- Timestamps in exports and reports now end in `Z` instead of `+00:00`; they mark the same moment.
+
 ## [0.36.1] - 2026-11-14
 
 ### Fixed

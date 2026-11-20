@@ -9,7 +9,7 @@
 //! runs against the shipped `BulkActionBar`.
 #![cfg(target_arch = "wasm32")]
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
@@ -26,7 +26,7 @@ fn one_row_bin() -> DeletedAppsDto {
             object_id: "del-1".to_string(),
             app_id: Some("app-1".to_string()),
             display_name: Some("Contoso CRM".to_string()),
-            deleted_date_time: Some(Utc::now() - Duration::days(4)),
+            deleted_date_time: Some(Timestamp::now() - SignedDuration::from_hours(4 * 24)),
         }],
         truncated: false,
     }

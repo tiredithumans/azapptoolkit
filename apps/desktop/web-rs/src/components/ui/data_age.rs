@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use leptos::prelude::*;
 
 use crate::bindings::diagnostics::{self, ListCacheKindDto};
@@ -22,9 +22,9 @@ const TICK: Duration = Duration::from_secs(30);
 /// Renders nothing until `loaded_at` is set. The phrase ticks on its own timer
 /// so it does not go stale itself.
 #[component]
-pub fn DataAge(#[prop(into)] loaded_at: Signal<Option<DateTime<Utc>>>) -> impl IntoView {
-    let now = RwSignal::new(Utc::now());
-    if let Ok(timer) = set_interval_with_handle(move || now.set(Utc::now()), TICK) {
+pub fn DataAge(#[prop(into)] loaded_at: Signal<Option<Timestamp>>) -> impl IntoView {
+    let now = RwSignal::new(Timestamp::now());
+    if let Ok(timer) = set_interval_with_handle(move || now.set(Timestamp::now()), TICK) {
         on_cleanup(move || timer.clear());
     }
     view! {
@@ -55,7 +55,7 @@ pub fn stamp_data_age(
     session: Session,
     tenant_id: String,
     kind: Option<ListCacheKindDto>,
-    loaded_at: RwSignal<Option<DateTime<Utc>>>,
+    loaded_at: RwSignal<Option<Timestamp>>,
 ) {
     leptos::task::spawn_local(async move {
         let age_secs = match kind {
@@ -69,7 +69,7 @@ pub fn stamp_data_age(
         if !session.is_active_tenant(&tenant_id) {
             return;
         }
-        let age = chrono::Duration::seconds(i64::try_from(age_secs.unwrap_or(0)).unwrap_or(0));
-        loaded_at.set(Some(Utc::now() - age));
+        let age = SignedDuration::from_secs(i64::try_from(age_secs.unwrap_or(0)).unwrap_or(0));
+        loaded_at.set(Some(Timestamp::now() - age));
     });
 }

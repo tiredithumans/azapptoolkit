@@ -11,7 +11,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::ListCredentialStatus;
-use chrono::{DateTime, NaiveDate, Utc};
+use jiff::Timestamp;
+use jiff::civil::Date;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
@@ -141,8 +142,8 @@ struct CredentialMeta {
 
 fn credential_meta(
     status: ListCredentialStatus,
-    soonest: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    soonest: Option<Timestamp>,
+    now: Timestamp,
 ) -> CredentialMeta {
     let (label, tone) = match status {
         ListCredentialStatus::Active => ("Active", BadgeTone::Ok),
@@ -426,8 +427,8 @@ fn LoadedApps(
     loaded: TenantRows<ApplicationListRowDto>,
     search: Signal<String>,
     cred_filter: RwSignal<String>,
-    created_after: RwSignal<Option<NaiveDate>>,
-    created_before: RwSignal<Option<NaiveDate>>,
+    created_after: RwSignal<Option<Date>>,
+    created_before: RwSignal<Option<Date>>,
     /// Shared with the list view's filter toggle — the facet chips collapse with
     /// the rest of the drawer.
     filters_open: RwSignal<bool>,
@@ -684,7 +685,7 @@ fn VirtualRows(
     // classified `credential_status` at fetch time, so a row's relative expiry
     // is already a snapshot of that moment — re-reading the clock per row would
     // only let neighbouring rows disagree about "today".
-    let now = Utc::now();
+    let now = Timestamp::now();
     view! {
         <Show
             when=move || items.with(|v| !v.is_empty())
@@ -741,7 +742,7 @@ fn view_row(
     idx: usize,
     row: Arc<ApplicationListRowDto>,
     session: crate::state::Session,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> impl IntoView {
     let paired_sp_id = row.paired_service_principal_id.clone();
     // One shared allocation for the row id; the per-handler captures below are
@@ -884,10 +885,10 @@ fn view_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, TimeZone};
+    use jiff::{SignedDuration, Timestamp};
 
-    fn at(days: i64) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 9, 2, 12, 0, 0).unwrap() + Duration::days(days)
+    fn at(days: i64) -> Timestamp {
+        "2026-09-02T12:00:00Z".parse::<Timestamp>().unwrap() + SignedDuration::from_hours(days * 24)
     }
 
     fn row(name: &str, expiry: Option<i64>, created: Option<i64>) -> Arc<ApplicationListRowDto> {
@@ -976,7 +977,7 @@ mod tests {
         // The same vocabulary in the past tense.
         let lapsed = credential_meta(
             ListCredentialStatus::Expired,
-            Some(at(-3) - Duration::hours(1)),
+            Some(at(-3) - SignedDuration::from_hours(1)),
             now,
         );
         assert_eq!(lapsed.expiry.as_deref(), Some("Expired 3d ago"));
@@ -984,7 +985,7 @@ mod tests {
         // lapsed, and the phrase says so instead of contradicting the badge.
         let mixed = credential_meta(
             ListCredentialStatus::Active,
-            Some(at(-240) - Duration::hours(1)),
+            Some(at(-240) - SignedDuration::from_hours(1)),
             now,
         );
         assert_eq!(mixed.expiry.as_deref(), Some("one expired 240d ago"));

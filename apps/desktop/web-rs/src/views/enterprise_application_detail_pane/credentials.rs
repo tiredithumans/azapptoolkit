@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use super::*;
 use crate::util::{expiry_label, expiry_tone, floored_days_until};
@@ -7,7 +7,7 @@ use crate::util::{expiry_label, expiry_tone, floored_days_until};
 /// are FLOORED, so one that lapsed hours ago reads "Expired", never "0d left".
 /// This tab is display-only (no removal path), so it need not follow the
 /// audit's whole-day `is_expired` rule the removal sweeps count by.
-fn expiry_badge(end: Option<DateTime<Utc>>, now: DateTime<Utc>) -> AnyView {
+fn expiry_badge(end: Option<Timestamp>, now: Timestamp) -> AnyView {
     match end.map(|e| floored_days_until(e, now)) {
         None => view! { <Badge label="No expiry" /> }.into_any(),
         Some(d) => view! { <Badge label=expiry_label(d) tone=expiry_tone(d) /> }.into_any(),
@@ -21,7 +21,7 @@ pub(super) fn CredentialsContent(
     // Snapshots for this mount (untracked): the pane rebuilds the tab on a reload.
     let secrets = signal.with_untracked(|d| d.service_principal.password_credentials.clone());
     let certs = signal.with_untracked(|d| d.service_principal.key_credentials.clone());
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     let secrets_view = view! {
         <DataTable

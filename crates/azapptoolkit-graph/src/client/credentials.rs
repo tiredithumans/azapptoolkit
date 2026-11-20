@@ -1,4 +1,6 @@
 use super::*;
+use jiff::SignedDuration;
+use jiff::Timestamp;
 
 /// Body for `POST /applications/{id}/federatedIdentityCredentials`. `audiences`
 /// defaults to `["api://AzureADTokenExchange"]` (the value Entra recommends for
@@ -34,8 +36,8 @@ impl GraphClient {
         display_name: &str,
         lifetime: Duration,
     ) -> Result<PasswordCredential> {
-        let end = chrono::Utc::now()
-            + chrono::Duration::from_std(lifetime).unwrap_or(chrono::Duration::days(180));
+        let end = Timestamp::now()
+            + SignedDuration::try_from(lifetime).unwrap_or(SignedDuration::from_hours(180 * 24));
         self.add_password_window(object_id, display_name, None, end)
             .await
     }
@@ -47,16 +49,16 @@ impl GraphClient {
         &self,
         object_id: &str,
         display_name: &str,
-        start: Option<chrono::DateTime<chrono::Utc>>,
-        end: chrono::DateTime<chrono::Utc>,
+        start: Option<Timestamp>,
+        end: Timestamp,
     ) -> Result<PasswordCredential> {
         validate::require_path_segment("object id", object_id)?;
         let mut credential = serde_json::json!({
             "displayName": display_name,
-            "endDateTime": end.to_rfc3339(),
+            "endDateTime": end.to_string(),
         });
         if let Some(start) = start {
-            credential["startDateTime"] = serde_json::Value::String(start.to_rfc3339());
+            credential["startDateTime"] = serde_json::Value::String(start.to_string());
         }
         let body = serde_json::json!({ "passwordCredential": credential });
         let path = format!("/applications/{object_id}/addPassword");
@@ -253,12 +255,12 @@ impl GraphClient {
         &self,
         service_principal_id: &str,
         display_name: &str,
-        end: chrono::DateTime<chrono::Utc>,
+        end: Timestamp,
     ) -> Result<SelfSignedCertificate> {
         validate::require_path_segment("service principal id", service_principal_id)?;
         let body = serde_json::json!({
             "displayName": display_name,
-            "endDateTime": end.to_rfc3339(),
+            "endDateTime": end.to_string(),
         });
         let path = format!("/servicePrincipals/{service_principal_id}/addTokenSigningCertificate");
         let cert = self.send_json(Method::POST, &path, &body).await?;

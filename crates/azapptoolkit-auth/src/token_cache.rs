@@ -11,7 +11,7 @@
 //! sign-in fails with [`AuthError::KeyringUnavailable`]) — shared across
 //! audiences for the same account.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -95,14 +95,14 @@ fn register_native_store() -> std::result::Result<(), String> {
 #[derive(Clone)]
 pub struct AccessToken {
     pub token: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
     pub scopes: Vec<String>,
 }
 
 impl AccessToken {
     pub fn needs_refresh(&self, leeway_secs: i64) -> bool {
-        let now = Utc::now();
-        (self.expires_at - now).num_seconds() < leeway_secs
+        let now = Timestamp::now();
+        self.expires_at.duration_since(now).as_secs() < leeway_secs
     }
 }
 
@@ -705,13 +705,13 @@ pub(crate) fn fail_next_keyring_op(tenant_id: &str, account_oid: &str, chunk: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use jiff::{SignedDuration, Timestamp};
 
     #[test]
     fn needs_refresh_returns_true_inside_leeway() {
         let tok = AccessToken {
             token: "t".into(),
-            expires_at: Utc::now() + Duration::seconds(30),
+            expires_at: Timestamp::now() + SignedDuration::from_secs(30),
             scopes: vec![],
         };
         assert!(tok.needs_refresh(60));
@@ -721,7 +721,7 @@ mod tests {
     fn needs_refresh_returns_false_when_fresh() {
         let tok = AccessToken {
             token: "t".into(),
-            expires_at: Utc::now() + Duration::seconds(3600),
+            expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
             scopes: vec![],
         };
         assert!(!tok.needs_refresh(60));
@@ -912,7 +912,7 @@ mod tests {
             false,
             AccessToken {
                 token: "graph".into(),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
                 scopes: graph_scopes.clone(),
             },
         );
@@ -922,7 +922,7 @@ mod tests {
             false,
             AccessToken {
                 token: "kv".into(),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
                 scopes: kv_scopes.clone(),
             },
         );
@@ -939,7 +939,7 @@ mod tests {
         let scopes = vec!["https://graph.microsoft.com/Directory.Read.All".to_string()];
         let token = |t: &str| AccessToken {
             token: t.into(),
-            expires_at: Utc::now() + Duration::seconds(3600),
+            expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
             scopes: scopes.clone(),
         };
         // A non-CAE seed is never served to a CAE consumer.
@@ -965,7 +965,7 @@ mod tests {
             true,
             AccessToken {
                 token: "t".into(),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
                 scopes: scopes.clone(),
             },
         );

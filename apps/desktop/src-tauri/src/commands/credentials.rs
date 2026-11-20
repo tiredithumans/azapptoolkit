@@ -24,7 +24,7 @@ use tauri::{AppHandle, State};
 
 use azapptoolkit_core::audit::{enforced_secret_max_days, summarize_credentials};
 use azapptoolkit_core::models::{AppManagementPolicy, Application, TenantAppManagementPolicy};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::commands::export::csv_field;
 use crate::dto::UiError;
@@ -108,7 +108,7 @@ pub async fn list_credential_usage(
         });
     };
     let requested_app_id = app_id;
-    let mut merged: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
+    let mut merged: HashMap<(String, String), Option<Timestamp>> = HashMap::new();
     for r in &rows {
         let (Some(app_id), Some(key_id)) = (r.app_id.as_deref(), r.key_id.as_deref()) else {
             continue;
@@ -158,7 +158,7 @@ pub async fn list_credential_usage(
 fn effective_cap_days(
     default: Option<&TenantAppManagementPolicy>,
     assigned: &[AppManagementPolicy],
-    created: Option<DateTime<Utc>>,
+    created: Option<Timestamp>,
 ) -> Option<i64> {
     if assigned.len() >= 2 {
         return None;
@@ -218,7 +218,7 @@ pub async fn get_app_credential_policy(
 /// Flattens every app's client secrets + certificates into one expiry-sorted
 /// list, reusing the audit's [`summarize_credentials`] so the roll-up's expiry
 /// semantics match the security audit's.
-pub(crate) fn credential_rows(apps: &[Application], now: DateTime<Utc>) -> Vec<CredentialRowDto> {
+pub(crate) fn credential_rows(apps: &[Application], now: Timestamp) -> Vec<CredentialRowDto> {
     let mut rows: Vec<CredentialRowDto> = Vec::new();
     for app in apps {
         let (secrets, certs) = summarize_credentials(app, now);
@@ -282,7 +282,7 @@ fn credentials_to_csv(rows: &[CredentialRowDto]) -> String {
             csv_field(&r.app_object_id),
             csv_field(&r.credential_name),
             csv_field(r.kind.as_str()),
-            csv_field(&r.end_date_time.map(|d| d.to_rfc3339()).unwrap_or_default()),
+            csv_field(&r.end_date_time.map(|d| d.to_string()).unwrap_or_default()),
             r.days_to_expiry.map(|d| d.to_string()).unwrap_or_default(),
             csv_field(r.status.as_str()),
         ]
@@ -297,6 +297,7 @@ fn credentials_to_csv(rows: &[CredentialRowDto]) -> String {
 mod tests {
     use super::*;
     use azapptoolkit_core::audit::{CredentialKind, CredentialStatus};
+    use jiff::SignedDuration;
 
     fn row(name: &str, days: Option<i64>) -> CredentialRowDto {
         CredentialRowDto {
@@ -325,7 +326,7 @@ mod tests {
     #[test]
     fn credential_rows_flattens_and_sorts_across_apps() {
         use azapptoolkit_core::models::{KeyCredential, PasswordCredential};
-        let now = Utc::now();
+        let now = Timestamp::now();
         let a = Application {
             id: "obj-a".into(),
             app_id: "app-a".into(),
@@ -333,7 +334,7 @@ mod tests {
             password_credentials: vec![PasswordCredential {
                 key_id: "k1".into(),
                 display_name: Some("later".into()),
-                end_date_time: Some(now + chrono::Duration::days(90)),
+                end_date_time: Some(now + SignedDuration::from_hours(90 * 24)),
                 ..Default::default()
             }],
             key_credentials: vec![KeyCredential {
@@ -350,7 +351,7 @@ mod tests {
             password_credentials: vec![PasswordCredential {
                 key_id: "k3".into(),
                 display_name: Some("expired".into()),
-                end_date_time: Some(now - chrono::Duration::days(5)),
+                end_date_time: Some(now - SignedDuration::from_hours(5 * 24)),
                 ..Default::default()
             }],
             ..Default::default()
@@ -398,7 +399,7 @@ mod tests {
             restrictions: Some(policy(caps)),
             applies_to: vec![],
         };
-        let old = Some(Utc::now() - chrono::Duration::days(400));
+        let old = Some(Timestamp::now() - SignedDuration::from_hours(400 * 24));
 
         // No policy at all ⇒ no cap — and, crucially, an UNREAD policy never
         // reaches here: the command degrades before this runs.

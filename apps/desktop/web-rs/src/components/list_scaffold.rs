@@ -16,7 +16,7 @@
 
 use leptos::prelude::*;
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 
 use crate::components::filter_toggle::FilterToggle;
 use crate::components::saved_views::SavedViews;
@@ -55,8 +55,8 @@ pub fn ListScaffold(
     /// The drawer's created-on window (F369), forwarded to `SavedViews` so a
     /// saved view carries and restores it along with facet + search.
     #[prop(optional_no_strip)]
-    after: Option<RwSignal<Option<NaiveDate>>>,
-    #[prop(optional_no_strip)] before: Option<RwSignal<Option<NaiveDate>>>,
+    after: Option<RwSignal<Option<Date>>>,
+    #[prop(optional_no_strip)] before: Option<RwSignal<Option<Date>>>,
     /// The loaded body — usually a `Suspense` wrapping the rows.
     children: Children,
 ) -> impl IntoView {

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use azapptoolkit_core::federation::validate_federated_credential;
 use azapptoolkit_core::models::FederatedIdentityCredential;
@@ -84,7 +84,7 @@ const REGEN_SECRET_DAYS: u32 = crate::dto::credentials::DEFAULT_SECRET_LIFETIME_
 /// The cutoff is the backup's own timestamp, never "now": a secret that was
 /// live at backup time and expired during the outage is exactly the one a
 /// recovering client still holds, so it is re-issued. No end date = not expired.
-pub(super) fn expired_at_backup(meta: &CredentialMeta, taken_at: DateTime<Utc>) -> bool {
+pub(super) fn expired_at_backup(meta: &CredentialMeta, taken_at: Timestamp) -> bool {
     meta.end_date_time.is_some_and(|end| end < taken_at)
 }
 
@@ -494,7 +494,7 @@ pub(super) async fn wire_application(
         if expired_at_backup(meta, taken_at) {
             let end = meta
                 .end_date_time
-                .map(|d| d.format("%Y-%m-%d").to_string())
+                .map(|d| d.strftime("%Y-%m-%d").to_string())
                 .unwrap_or_default();
             out.warnings.push(format!(
                 "secret '{name}' had already expired at backup time ({end}) — not re-issued"
@@ -548,7 +548,7 @@ pub(super) async fn wire_application(
 fn live_secret_label(live: &LiveSecret) -> String {
     let valid_from = live.valid_from.map_or_else(
         || "an unknown time".to_string(),
-        |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+        |t| t.strftime("%Y-%m-%d %H:%M UTC").to_string(),
     );
     let hint = live
         .hint
