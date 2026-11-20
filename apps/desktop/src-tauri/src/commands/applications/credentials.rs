@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use jiff::{SignedDuration, Timestamp};
 use tauri::{AppHandle, State};
 
 use azapptoolkit_core::models::{NewKeyCredential, PasswordCredential};
@@ -40,7 +41,7 @@ pub(crate) async fn add_password_core(
     object_id: &str,
     input: AddPasswordInput,
 ) -> Result<PasswordCredential, UiError> {
-    let (start, end) = resolve_password_window(&input, chrono::Utc::now())
+    let (start, end) = resolve_password_window(&input, Timestamp::now())
         .map_err(|e| UiError::validation("invalid_secret_window", e.to_string()))?;
     let client = state.graph_for(tenant_id);
     let cred = match client
@@ -114,21 +115,15 @@ impl std::fmt::Display for SecretWindowError {
 /// portal's recommended preset.
 fn resolve_password_window(
     input: &AddPasswordInput,
-    now: chrono::DateTime<chrono::Utc>,
-) -> std::result::Result<
-    (
-        Option<chrono::DateTime<chrono::Utc>>,
-        chrono::DateTime<chrono::Utc>,
-    ),
-    SecretWindowError,
-> {
+    now: Timestamp,
+) -> std::result::Result<(Option<Timestamp>, Timestamp), SecretWindowError> {
     match input.end_date_time {
         Some(end) => {
             let effective_start = input.start_date_time.unwrap_or(now);
             if end <= effective_start {
                 return Err(SecretWindowError::EndNotAfterStart);
             }
-            if end - effective_start > chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS) {
+            if end - effective_start > SignedDuration::from_hours(MAX_SECRET_LIFETIME_DAYS * 24) {
                 return Err(SecretWindowError::LifetimeOverCap);
             }
             Ok((input.start_date_time, end))
@@ -144,14 +139,11 @@ fn resolve_password_window(
 /// The one definition of that rule — `add_password` and the initial secret
 /// `create_application` mints both read it, so neither path can mint a
 /// zero-length or a past-the-cap secret the other would refuse.
-pub(crate) fn preset_secret_end(
-    lifetime_days: Option<u32>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn preset_secret_end(lifetime_days: Option<u32>, now: Timestamp) -> Timestamp {
     let days =
         i64::from(lifetime_days.unwrap_or(crate::dto::credentials::DEFAULT_SECRET_LIFETIME_DAYS))
             .clamp(1, MAX_SECRET_LIFETIME_DAYS);
-    now + chrono::Duration::days(days)
+    now + SignedDuration::from_hours(days * 24)
 }
 
 #[tauri::command]
@@ -195,7 +187,7 @@ pub(crate) async fn add_certificate_credential_core(
     object_id: &str,
     input: AddCertificateInput,
 ) -> Result<UploadedCertificate, UiError> {
-    let parsed = parse_cert_upload(&input.pem_or_base64, chrono::Utc::now())
+    let parsed = parse_cert_upload(&input.pem_or_base64, Timestamp::now())
         .map_err(|msg| UiError::validation("invalid_certificate", msg))?;
     let client = state.graph_for(tenant_id);
     let new_cred = NewKeyCredential {
@@ -242,8 +234,7 @@ pub async fn generate_self_signed_certificate(
     })?
     .map_err(|e| UiError::validation("cert_generation_failed", e.to_string()))?;
 
-    let expires_dt =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(generated.not_after.unix_timestamp(), 0);
+    let expires_dt = Timestamp::from_second(generated.not_after.unix_timestamp()).ok();
 
     let client = state.graph_for(&tenant_id);
     // `GeneratedCert: Drop`, so its fields cannot be moved out; each one
@@ -275,7 +266,7 @@ pub async fn generate_self_signed_certificate(
         private_key_pem: std::mem::take(&mut generated.private_key_pem),
         pfx_base64: STANDARD.encode(&generated.pfx_der),
         pfx_password: std::mem::take(&mut generated.pfx_password),
-        expires: expires_dt.map(|d| d.to_rfc3339()).unwrap_or_default(),
+        expires: expires_dt.map(|d| d.to_string()).unwrap_or_default(),
     })
 }
 
@@ -306,7 +297,7 @@ pub async fn save_generated_certificate_pfx(
     let default_name = format!(
         "{}-{}.pfx",
         pfx_file_stem(&subject),
-        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+        Timestamp::now().strftime("%Y%m%dT%H%M%S")
     );
     crate::commands::export::write_bytes_via_dialog(
         app_handle,
@@ -363,7 +354,7 @@ struct UploadedCert {
     key_b64: String,
     /// SHA-1, uppercase hex (Entra's `customKeyIdentifier`).
     thumbprint: String,
-    not_after: chrono::DateTime<chrono::Utc>,
+    not_after: Timestamp,
 }
 
 /// Reads an operator-pasted certificate: PEM-armoured text
@@ -380,10 +371,7 @@ struct UploadedCert {
 ///
 /// **Never echoes the pasted material** — a refusal names the PEM label or the
 /// problem, never a body line — and logs nothing: the paste may hold a key.
-fn parse_cert_upload(
-    input: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> std::result::Result<UploadedCert, String> {
+fn parse_cert_upload(input: &str, now: Timestamp) -> std::result::Result<UploadedCert, String> {
     let body = certificate_body(input)?;
     if body.is_empty() {
         return Err("certificate body is empty".to_string());
@@ -399,13 +387,13 @@ fn parse_cert_upload(
     if !rest.is_empty() {
         return Err("unexpected data after the certificate".to_string());
     }
-    let not_after =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
-            .ok_or_else(|| "the certificate's expiry date is out of range".to_string())?;
+    let not_after = Timestamp::from_second(cert.validity().not_after.timestamp())
+        .ok()
+        .ok_or_else(|| "the certificate's expiry date is out of range".to_string())?;
     if not_after <= now {
         return Err(format!(
             "this certificate expired on {}; upload a current one",
-            not_after.format("%Y-%m-%d")
+            not_after.strftime("%Y-%m-%d")
         ));
     }
     // SHA-1 because it is Entra's `customKeyIdentifier` (the portal's
@@ -503,7 +491,7 @@ pub(crate) async fn remove_expired_passwords_core(
 ) -> Result<RemoveExpiredResult, UiError> {
     let client = state.graph_for(tenant_id);
     let app = client.get_application(object_id).await?;
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
 
     let mut removed_key_ids = Vec::new();
     let mut failures = Vec::new();
@@ -544,6 +532,7 @@ mod password_window_tests {
         resolve_password_window,
     };
     use crate::commands::test_support::{at, fixed_now};
+    use jiff::SignedDuration;
 
     fn input(
         lifetime_days: Option<u32>,
@@ -569,10 +558,10 @@ mod password_window_tests {
     #[test]
     fn defaults_to_180_days_and_clamps_to_cap() {
         let (_, end) = resolve_password_window(&input(None, None, None), fixed_now()).unwrap();
-        assert_eq!(end, fixed_now() + chrono::Duration::days(180));
+        assert_eq!(end, fixed_now() + SignedDuration::from_hours(180 * 24));
         let (_, end) =
             resolve_password_window(&input(Some(9999), None, None), fixed_now()).unwrap();
-        assert_eq!(end, fixed_now() + chrono::Duration::days(730));
+        assert_eq!(end, fixed_now() + SignedDuration::from_hours(730 * 24));
     }
 
     /// The initial secret `create_application` mints rides the same clamp as
@@ -591,7 +580,7 @@ mod password_window_tests {
         ] {
             assert_eq!(
                 preset_secret_end(days, now),
-                now + chrono::Duration::days(expected),
+                now + SignedDuration::from_hours(expected * 24),
                 "{days:?}"
             );
         }
@@ -659,13 +648,13 @@ mod password_window_tests {
             start_date_time: Some(start),
             end_date_time: Some(end),
         };
-        let cap = start + chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS);
+        let cap = start + SignedDuration::from_hours(MAX_SECRET_LIFETIME_DAYS * 24);
         assert_eq!(
             resolve_password_window(&window(cap), fixed_now()),
             Ok((Some(start), cap))
         );
         assert_eq!(
-            resolve_password_window(&window(cap + chrono::Duration::seconds(1)), fixed_now()),
+            resolve_password_window(&window(cap + SignedDuration::from_secs(1)), fixed_now()),
             Err(SecretWindowError::LifetimeOverCap)
         );
     }
@@ -689,6 +678,8 @@ mod password_window_tests {
 mod cert_tests {
     use super::{STANDARD, parse_cert_upload, pfx_file_stem};
     use base64::Engine as _;
+    use jiff::SignedDuration;
+    use jiff::Timestamp;
 
     /// The subject is operator-typed and lands in a *filename*. It only seeds
     /// the save dialog, but a default carrying a path separator is one nobody
@@ -717,8 +708,8 @@ mod cert_tests {
         crate::cert::generate_self_signed("Upload Test", 30).unwrap()
     }
 
-    fn now() -> chrono::DateTime<chrono::Utc> {
-        chrono::Utc::now()
+    fn now() -> Timestamp {
+        Timestamp::now()
     }
 
     /// The base64 body of a PEM block, armour stripped.
@@ -735,7 +726,7 @@ mod cert_tests {
         assert_eq!(up.key_b64, c.cert_der_base64);
         // The two SHA-1 derivations (upload, generate) must agree.
         assert_eq!(up.thumbprint, c.thumbprint);
-        assert_eq!(up.not_after.timestamp(), c.not_after.unix_timestamp());
+        assert_eq!(up.not_after.as_second(), c.not_after.unix_timestamp());
     }
 
     #[test]
@@ -818,14 +809,14 @@ mod cert_tests {
     #[test]
     fn refuses_an_expired_certificate() {
         let c = generated();
-        let not_after =
-            chrono::DateTime::<chrono::Utc>::from_timestamp(c.not_after.unix_timestamp(), 0)
-                .unwrap();
-        let err = parse_cert_upload(&c.cert_pem, not_after + chrono::Duration::days(1))
+        let not_after = Timestamp::from_second(c.not_after.unix_timestamp())
+            .ok()
+            .unwrap();
+        let err = parse_cert_upload(&c.cert_pem, not_after + SignedDuration::from_hours(24))
             .err()
             .expect("expired");
         assert!(err.contains("expired"), "{err}");
-        assert!(parse_cert_upload(&c.cert_pem, not_after - chrono::Duration::days(1)).is_ok());
+        assert!(parse_cert_upload(&c.cert_pem, not_after - SignedDuration::from_hours(24)).is_ok());
     }
 
     #[test]
@@ -1073,7 +1064,7 @@ mod handler_tests {
 
         assert_eq!(uploaded.thumbprint, generated.thumbprint);
         assert_eq!(
-            uploaded.not_after.timestamp(),
+            uploaded.not_after.as_second(),
             generated.not_after.unix_timestamp(),
             "the reply reports the certificate's own notAfter",
         );
@@ -1121,7 +1112,7 @@ mod handler_tests {
 
         // An explicit window past the 24-month cap is REJECTED (a bare
         // `lifetime_days` is clamped instead, so it wouldn't exercise this).
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let err = add_password_core(
             &state,
             TENANT,
@@ -1130,7 +1121,9 @@ mod handler_tests {
                 display_name: "too long".to_string(),
                 lifetime_days: None,
                 start_date_time: Some(now),
-                end_date_time: Some(now + chrono::Duration::days(MAX_SECRET_LIFETIME_DAYS + 1)),
+                end_date_time: Some(
+                    now + SignedDuration::from_hours((MAX_SECRET_LIFETIME_DAYS + 1) * 24),
+                ),
             },
         )
         .await

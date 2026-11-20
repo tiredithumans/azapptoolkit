@@ -33,7 +33,7 @@ use azapptoolkit_core::models::{
 };
 
 use crate::managed_identity::MiSubtype;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Manifest schema version. Bump on any breaking shape change so a restore can
@@ -45,7 +45,7 @@ pub const BACKUP_SCHEMA_VERSION: u32 = 1;
 #[serde(rename_all = "camelCase")]
 pub struct TenantBackup {
     pub schema_version: u32,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Tenant the backup was taken from. Informational: restore warns (does not
     /// fail) when this differs from the destination tenant — that mismatch is
     /// the *expected* DR case.
@@ -265,9 +265,9 @@ pub struct CredentialMeta {
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
-    pub start_date_time: Option<DateTime<Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(default)]
-    pub end_date_time: Option<DateTime<Utc>>,
+    pub end_date_time: Option<Timestamp>,
     /// SHA-1 thumbprint (certificates only) — tells the operator which cert to
     /// re-supply from their PKI/offline backup.
     #[serde(default)]
@@ -670,7 +670,7 @@ pub struct RegeneratedSecret {
     pub key_id: String,
     pub secret_value: String,
     #[serde(default)]
-    pub expires: Option<DateTime<Utc>>,
+    pub expires: Option<Timestamp>,
 }
 
 impl std::fmt::Debug for RegeneratedSecret {
@@ -705,9 +705,8 @@ mod tests {
     fn tenant_backup_round_trips_through_camel_case_json() {
         let backup = TenantBackup {
             schema_version: BACKUP_SCHEMA_VERSION,
-            created_at: chrono::DateTime::parse_from_rfc3339("2026-06-15T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            created_at: str::parse::<Timestamp>("2026-06-15T00:00:00Z")
+                .unwrap(),
             source_tenant_id: "tenant-src".into(),
             cloud: CloudEnvironment::Commercial,
             app_registrations: vec![AppRegistrationBackup {
@@ -718,9 +717,8 @@ mod tests {
                 secrets: vec![CredentialMeta {
                     display_name: Some("rotate-me".into()),
                     end_date_time: Some(
-                        chrono::DateTime::parse_from_rfc3339("2026-12-01T00:00:00Z")
-                            .unwrap()
-                            .with_timezone(&Utc),
+                        str::parse::<Timestamp>("2026-12-01T00:00:00Z")
+                            .unwrap(),
                     ),
                     ..Default::default()
                 }],

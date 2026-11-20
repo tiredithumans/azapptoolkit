@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use jiff::Timestamp;
 
 #[tokio::test]
 async fn get_organization_returns_first_item() {
@@ -438,11 +439,7 @@ async fn credential_activities_parse_and_follow_paging_on_the_audit_token() {
             .sign_in_activity
             .as_ref()
             .and_then(|a| a.last_sign_in_date_time),
-        Some(
-            chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc)
-        )
+        Some(str::parse::<Timestamp>("2026-04-01T00:00:00Z").unwrap())
     );
     // Absent signInActivity and an explicit null date both read as
     // "no use recorded", NOT as a parsed timestamp — callers must not

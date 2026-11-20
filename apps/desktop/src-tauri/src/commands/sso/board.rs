@@ -2,6 +2,7 @@
 //! the row classifier, and the cache key/invalidation pair the rest of the SSO
 //! layer (and bulk remediation) uses to keep it fresh.
 
+use jiff::Timestamp;
 use tauri::State;
 
 use azapptoolkit_core::cache::CacheKind;
@@ -51,7 +52,7 @@ pub async fn list_sso_certificate_expirations(
     // not a bound a real tenant reaches — a directory with more than ten
     // thousand SAML SSO applications does not exist in practice.
     let (sps, _truncated) = client.list_saml_sso_service_principals().await?;
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let cloud = state.auth.cloud();
 
     let mut rows: Vec<SsoCertificateRowDto> = sps

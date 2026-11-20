@@ -9,10 +9,10 @@ use crate::models::{
     Application, KeyCredential, PasswordCredential, ServicePrincipalLockConfiguration,
     VerifiedPublisher,
 };
-use chrono::{Duration, TimeZone};
+use jiff::{SignedDuration, Timestamp};
 
-fn now() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0).unwrap()
+fn now() -> Timestamp {
+    "2026-04-22T12:00:00Z".parse::<Timestamp>().unwrap()
 }
 
 fn base_app() -> Application {
@@ -20,7 +20,7 @@ fn base_app() -> Application {
         id: "obj-1".into(),
         app_id: "app-1".into(),
         display_name: "Demo".into(),
-        created_date_time: Some(now() - Duration::days(10)),
+        created_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
         ..Default::default()
     }
 }
@@ -30,7 +30,7 @@ fn base_sp() -> SpAuditInput {
         display_name: "Foreign App".into(),
         app_id: "app-f".into(),
         sp_object_id: "sp-1".into(),
-        created_date_time: Some(now() - Duration::days(10)),
+        created_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
         account_enabled: Some(true),
         app_owner_organization_id: Some("11111111-2222-3333-4444-555555555555".into()),
         service_principal_type: Some("Application".into()),
@@ -287,7 +287,7 @@ fn sp_scoring_never_emits_credential_or_manifest_findings() {
     // stale-app and Rule-18 findings; the SP path must not (credentials and
     // the manifest live on the application in its home tenant).
     let old = SpAuditInput {
-        created_date_time: Some(now() - Duration::days(2000)),
+        created_date_time: Some(now() - SignedDuration::from_hours(2000 * 24)),
         ..base_sp()
     };
     let item = score_service_principal(&old, &sp_perms(&["Mail.Read", "Mail.ReadWrite"]), now());
@@ -613,8 +613,8 @@ fn external_exposure_scores_only_reachable_multitenant_apps() {
             app.password_credentials = vec![PasswordCredential {
                 key_id: "k1".into(),
                 display_name: Some("secret".into()),
-                start_date_time: Some(now() - Duration::days(1)),
-                end_date_time: Some(now() + Duration::days(90)),
+                start_date_time: Some(now() - SignedDuration::from_hours(24)),
+                end_date_time: Some(now() + SignedDuration::from_hours(90 * 24)),
                 ..Default::default()
             }];
         }
@@ -1684,23 +1684,23 @@ fn rich_app() -> Application {
         id: "obj-rich".into(),
         app_id: "app-rich".into(),
         display_name: "Rich".into(),
-        created_date_time: Some(n - Duration::days(400)), // stale (>90d)
-        owners: Some(vec![]),                             // no owners
-        service_principal_lock_configuration: None,       // lock off
-        is_fallback_public_client: Some(true),            // public-client flows
+        created_date_time: Some(n - SignedDuration::from_hours(400 * 24)), // stale (>90d)
+        owners: Some(vec![]),                                              // no owners
+        service_principal_lock_configuration: None,                        // lock off
+        is_fallback_public_client: Some(true),                             // public-client flows
         password_credentials: vec![
             PasswordCredential {
                 key_id: "k-exp".into(),
                 display_name: Some("expired".into()),
-                start_date_time: Some(n - Duration::days(800)),
-                end_date_time: Some(n - Duration::days(5)), // expired
+                start_date_time: Some(n - SignedDuration::from_hours(800 * 24)),
+                end_date_time: Some(n - SignedDuration::from_hours(5 * 24)), // expired
                 ..Default::default()
             },
             PasswordCredential {
                 key_id: "k-act".into(),
                 display_name: Some("active-long".into()),
-                start_date_time: Some(n - Duration::days(200)),
-                end_date_time: Some(n + Duration::days(200)), // active, 400d span > 365 = long-lived
+                start_date_time: Some(n - SignedDuration::from_hours(200 * 24)),
+                end_date_time: Some(n + SignedDuration::from_hours(200 * 24)), // active, 400d span > 365 = long-lived
                 ..Default::default()
             },
         ],
@@ -1732,8 +1732,8 @@ fn scoped_app() -> Application {
         id: "obj-scoped".into(),
         app_id: "app-scoped".into(),
         display_name: "Scoped".into(),
-        created_date_time: Some(n - Duration::days(10)), // fresh (not stale)
-        owners: Some(vec![crate::models::DirectoryObject::default()]), // single owner
+        created_date_time: Some(n - SignedDuration::from_hours(10 * 24)), // fresh (not stale)
+        owners: Some(vec![crate::models::DirectoryObject::default()]),    // single owner
         service_principal_lock_configuration: Some(ServicePrincipalLockConfiguration {
             is_enabled: Some(true),
             all_properties: Some(true),
@@ -1742,8 +1742,8 @@ fn scoped_app() -> Application {
         password_credentials: vec![PasswordCredential {
             key_id: "k-soon".into(),
             display_name: Some("soon".into()),
-            start_date_time: Some(n - Duration::days(30)),
-            end_date_time: Some(n + Duration::days(7)), // expiring soon, none active
+            start_date_time: Some(n - SignedDuration::from_hours(30 * 24)),
+            end_date_time: Some(n + SignedDuration::from_hours(7 * 24)), // expiring soon, none active
             ..Default::default()
         }],
         ..Default::default()
@@ -1914,8 +1914,8 @@ fn all_creds_expired_adds_eight() {
     app.password_credentials = vec![PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("s1".into()),
-        start_date_time: Some(now() - Duration::days(200)),
-        end_date_time: Some(now() - Duration::days(10)),
+        start_date_time: Some(now() - SignedDuration::from_hours(200 * 24)),
+        end_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
         ..Default::default()
     }];
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
@@ -1935,13 +1935,13 @@ fn expired_creds_offer_remove_remediation() {
         PasswordCredential {
             key_id: "k1".into(),
             display_name: Some("old-a".into()),
-            end_date_time: Some(now() - Duration::days(10)),
+            end_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
             ..Default::default()
         },
         PasswordCredential {
             key_id: "k2".into(),
             display_name: Some("old-b".into()),
-            end_date_time: Some(now() - Duration::days(3)),
+            end_date_time: Some(now() - SignedDuration::from_hours(3 * 24)),
             ..Default::default()
         },
     ];
@@ -2094,15 +2094,15 @@ fn mixed_expired_and_active_adds_four() {
         PasswordCredential {
             key_id: "k1".into(),
             display_name: Some("expired".into()),
-            start_date_time: Some(now() - Duration::days(200)),
-            end_date_time: Some(now() - Duration::days(1)),
+            start_date_time: Some(now() - SignedDuration::from_hours(200 * 24)),
+            end_date_time: Some(now() - SignedDuration::from_hours(24)),
             ..Default::default()
         },
         PasswordCredential {
             key_id: "k2".into(),
             display_name: Some("fresh".into()),
-            start_date_time: Some(now() - Duration::days(10)),
-            end_date_time: Some(now() + Duration::days(200)),
+            start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+            end_date_time: Some(now() + SignedDuration::from_hours(200 * 24)),
             ..Default::default()
         },
     ];
@@ -2117,8 +2117,8 @@ fn all_expiring_soon_adds_three() {
     app.password_credentials = vec![PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("s1".into()),
-        start_date_time: Some(now() - Duration::days(10)),
-        end_date_time: Some(now() + Duration::days(3)),
+        start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+        end_date_time: Some(now() + SignedDuration::from_hours(3 * 24)),
         ..Default::default()
     }];
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
@@ -2144,15 +2144,15 @@ fn one_expired_beside_one_expiring_is_mixed_not_all_expired() {
         PasswordCredential {
             key_id: "k1".into(),
             display_name: Some("dead".into()),
-            start_date_time: Some(now() - Duration::days(400)),
-            end_date_time: Some(now() - Duration::days(1)),
+            start_date_time: Some(now() - SignedDuration::from_hours(400 * 24)),
+            end_date_time: Some(now() - SignedDuration::from_hours(24)),
             ..Default::default()
         },
         PasswordCredential {
             key_id: "k2".into(),
             display_name: Some("expiring".into()),
-            start_date_time: Some(now() - Duration::days(10)),
-            end_date_time: Some(now() + Duration::days(3)),
+            start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+            end_date_time: Some(now() + SignedDuration::from_hours(3 * 24)),
             ..Default::default()
         },
     ];
@@ -2183,8 +2183,8 @@ fn every_credential_expired_is_still_reported_as_all_expired() {
     app.password_credentials = vec![PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("dead".into()),
-        start_date_time: Some(now() - Duration::days(400)),
-        end_date_time: Some(now() - Duration::days(1)),
+        start_date_time: Some(now() - SignedDuration::from_hours(400 * 24)),
+        end_date_time: Some(now() - SignedDuration::from_hours(24)),
         ..Default::default()
     }];
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
@@ -2198,15 +2198,15 @@ fn mixed_expiring_and_active_adds_two() {
         PasswordCredential {
             key_id: "k1".into(),
             display_name: Some("expiring".into()),
-            start_date_time: Some(now() - Duration::days(10)),
-            end_date_time: Some(now() + Duration::days(3)),
+            start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+            end_date_time: Some(now() + SignedDuration::from_hours(3 * 24)),
             ..Default::default()
         },
         PasswordCredential {
             key_id: "k2".into(),
             display_name: Some("fresh".into()),
-            start_date_time: Some(now() - Duration::days(10)),
-            end_date_time: Some(now() + Duration::days(200)),
+            start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+            end_date_time: Some(now() + SignedDuration::from_hours(200 * 24)),
             ..Default::default()
         },
     ];
@@ -2220,8 +2220,8 @@ fn long_lived_secret_adds_three() {
     app.password_credentials = vec![PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("s1".into()),
-        start_date_time: Some(now() - Duration::days(10)),
-        end_date_time: Some(now() + Duration::days(400)),
+        start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+        end_date_time: Some(now() + SignedDuration::from_hours(400 * 24)),
         ..Default::default()
     }];
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
@@ -2231,7 +2231,7 @@ fn long_lived_secret_adds_three() {
 #[test]
 fn stale_app_adds_two() {
     let mut app = base_app();
-    app.created_date_time = Some(now() - Duration::days(100));
+    app.created_date_time = Some(now() - SignedDuration::from_hours(100 * 24));
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
     assert_eq!(item.risk_score, 2);
     assert_eq!(item.days_since_created, Some(100));
@@ -2254,8 +2254,8 @@ fn active_secret() -> PasswordCredential {
     PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("s1".into()),
-        start_date_time: Some(now() - Duration::days(10)),
-        end_date_time: Some(now() + Duration::days(100)),
+        start_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
+        end_date_time: Some(now() + SignedDuration::from_hours(100 * 24)),
         ..Default::default()
     }
 }
@@ -2399,8 +2399,8 @@ fn expired_certificate_is_all_expired_and_offers_remove_fix() {
     app.key_credentials = vec![KeyCredential {
         key_id: "c1".into(),
         display_name: Some("cert".into()),
-        start_date_time: Some(now() - Duration::days(200)),
-        end_date_time: Some(now() - Duration::days(10)),
+        start_date_time: Some(now() - SignedDuration::from_hours(200 * 24)),
+        end_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
         ..Default::default()
     }];
     let item = score_application(&app, Some(true), &AppPermissions::default(), now());
@@ -2428,22 +2428,22 @@ fn expired_certificate_is_all_expired_and_offers_remove_fix() {
 #[test]
 fn long_lived_credentials_are_named_by_kind() {
     fn secret(days: i64) -> PasswordCredential {
-        let start = now() - Duration::days(10);
+        let start = now() - SignedDuration::from_hours(10 * 24);
         PasswordCredential {
             key_id: "k1".into(),
             display_name: Some("s".into()),
             start_date_time: Some(start),
-            end_date_time: Some(start + Duration::days(days)),
+            end_date_time: Some(start + SignedDuration::from_hours(days * 24)),
             ..Default::default()
         }
     }
     fn cert(days: i64) -> KeyCredential {
-        let start = now() - Duration::days(10);
+        let start = now() - SignedDuration::from_hours(10 * 24);
         KeyCredential {
             key_id: "c1".into(),
             display_name: Some("c".into()),
             start_date_time: Some(start),
-            end_date_time: Some(start + Duration::days(days)),
+            end_date_time: Some(start + SignedDuration::from_hours(days * 24)),
             ..Default::default()
         }
     }
@@ -2520,29 +2520,39 @@ fn long_lived_credentials_are_named_by_kind() {
 /// credentials). Each row is (name, start, end, long-lived?).
 #[test]
 fn long_lived_boundary_uses_whole_days_with_grace() {
-    use chrono::TimeZone;
-    let leap_start = Utc.with_ymd_and_hms(2027, 6, 1, 0, 0, 0).unwrap();
-    let base = now() - Duration::days(10);
+    use jiff::{SignedDuration, Timestamp};
+    let leap_start = "2027-06-01T00:00:00Z".parse::<Timestamp>().unwrap();
+    let base = now() - SignedDuration::from_hours(10 * 24);
     // (name, start, end, long-lived?)
-    type Row = (&'static str, DateTime<Utc>, Option<DateTime<Utc>>, bool);
+    type Row = (&'static str, Timestamp, Option<Timestamp>, bool);
     let rows: [Row; 5] = [
         // The toolkit's own default certificate: one year, `not_before`
         // backdated an hour for clock skew.
         (
             "365 d + 1 h (toolkit default cert)",
             base,
-            Some(base + Duration::days(365) + Duration::hours(1)),
+            Some(base + SignedDuration::from_hours(365 * 24) + SignedDuration::from_hours(1)),
             false,
         ),
         // A 12-month secret whose year contains 29 February 2028.
         (
             "366 d over a leap day",
             leap_start,
-            Some(Utc.with_ymd_and_hms(2028, 6, 1, 0, 0, 0).unwrap()),
+            Some("2028-06-01T00:00:00Z".parse::<Timestamp>().unwrap()),
             false,
         ),
-        ("367 d", base, Some(base + Duration::days(367)), true),
-        ("400 d", base, Some(base + Duration::days(400)), true),
+        (
+            "367 d",
+            base,
+            Some(base + SignedDuration::from_hours(367 * 24)),
+            true,
+        ),
+        (
+            "400 d",
+            base,
+            Some(base + SignedDuration::from_hours(400 * 24)),
+            true,
+        ),
         // No end date: the longest lifetime there is (as `credential_over_cap`
         // reads it).
         ("no end date", base, None, true),
@@ -2573,12 +2583,12 @@ fn worst_case_combines_multiple_rules() {
     // 2 high-risk app perms (+20) + admin consent (+5) + disabled SP (+2)
     // + all-expired (+8) + stale (+2) = 37 → Critical
     let mut app = base_app();
-    app.created_date_time = Some(now() - Duration::days(200));
+    app.created_date_time = Some(now() - SignedDuration::from_hours(200 * 24));
     app.password_credentials = vec![PasswordCredential {
         key_id: "k1".into(),
         display_name: Some("s1".into()),
-        start_date_time: Some(now() - Duration::days(200)),
-        end_date_time: Some(now() - Duration::days(10)),
+        start_date_time: Some(now() - SignedDuration::from_hours(200 * 24)),
+        end_date_time: Some(now() - SignedDuration::from_hours(10 * 24)),
         ..Default::default()
     }];
     let perms = AppPermissions {

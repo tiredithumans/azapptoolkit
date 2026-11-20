@@ -11,7 +11,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use azapptoolkit_core::audit::ListCredentialStatus;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use leptos::prelude::*;
 use wasm_bindgen_test::*;
 
@@ -84,9 +84,10 @@ async fn rows_show_credential_state_and_expiry() {
     ts::reset();
     let mut rows = fixtures::apps(&["Expiring App"]);
     rows[0].credential_status = ListCredentialStatus::Expiring;
-    // Plus an hour so the render's own `Utc::now()`, taken a few ms later,
+    // Plus an hour so the render's own `Timestamp::now()`, taken a few ms later,
     // still truncates to 9 whole days rather than 8.
-    rows[0].soonest_credential_expiry = Some(Utc::now() + Duration::days(9) + Duration::hours(1));
+    rows[0].soonest_credential_expiry =
+        Some(Timestamp::now() + SignedDuration::from_hours(9 * 24) + SignedDuration::from_hours(1));
     ts::mock_ok("list_applications_with_pairing", &rows);
 
     let _mounted = ts::mount_view(|| view! { <ApplicationList /> });

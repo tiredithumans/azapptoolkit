@@ -53,7 +53,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -108,7 +108,7 @@ p12-keystore = { version = "0.2.1", default-features = false }
 x509-parser = { version = "0.18", default-features = false }
 rand = "0.10"
 zeroize = { workspace = true }
-# rcgen's validity fields are time::OffsetDateTime; chrono everywhere else (keep time inside cert.rs).
+# rcgen's validity fields are time::OffsetDateTime; jiff everywhere else (keep time inside cert.rs).
 time = "0.3"
 
 [dev-dependencies]

@@ -1,3 +1,4 @@
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -221,7 +222,7 @@ pub(crate) async fn scan_app_list(
         "app list scan joined"
     );
 
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
 
     // The credential roll-up, pinned and guarded: a credential add/remove that
     // raced this scan dropped the key, and the pre-mutation snapshot must not
@@ -609,7 +610,7 @@ pub(crate) async fn create_application_core_with(
     if error.is_none()
         && let Some(name) = input.initial_secret_display_name.as_deref()
     {
-        let end = preset_secret_end(input.initial_secret_lifetime_days, chrono::Utc::now());
+        let end = preset_secret_end(input.initial_secret_lifetime_days, Timestamp::now());
         match client
             .add_password_window(&application.id, name, None, end)
             .await
@@ -747,14 +748,14 @@ fn applications_to_csv(rows: &[ApplicationListRowDto]) -> String {
             csv_field(r.publisher_domain.as_deref().unwrap_or("")),
             csv_field(
                 &r.created_date_time
-                    .map(|d| d.to_rfc3339())
+                    .map(|d| d.to_string())
                     .unwrap_or_default(),
             ),
             r.password_credential_count.to_string(),
             r.key_credential_count.to_string(),
             csv_field(
                 &r.soonest_credential_expiry
-                    .map(|d| d.to_rfc3339())
+                    .map(|d| d.to_string())
                     .unwrap_or_default(),
             ),
             csv_field(r.paired_service_principal_id.as_deref().unwrap_or("")),
@@ -792,19 +793,13 @@ mod export_tests {
     use azapptoolkit_core::models::{Application, PasswordCredential};
 
     fn row(name: &str, paired: Option<&str>) -> ApplicationListRowDto {
-        let now = chrono::DateTime::parse_from_rfc3339("2024-06-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = str::parse::<Timestamp>("2024-06-01T00:00:00Z").unwrap();
         let app = Application {
             id: "obj-1".into(),
             app_id: "app-1".into(),
             display_name: name.into(),
             password_credentials: vec![PasswordCredential {
-                end_date_time: Some(
-                    chrono::DateTime::parse_from_rfc3339("2024-09-01T00:00:00Z")
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
-                ),
+                end_date_time: Some(str::parse::<Timestamp>("2024-09-01T00:00:00Z").unwrap()),
                 ..Default::default()
             }],
             ..Default::default()

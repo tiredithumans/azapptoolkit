@@ -27,7 +27,7 @@ reqwest = { workspace = true }
 # so this adds an edge, not a crate.
 aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 url = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 keyring-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -1,7 +1,7 @@
 //! The rule helpers and the two scoring entry points ([`score_application`]
 //! and [`score_service_principal`]) that fold them into an [`AuditItem`].
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::models::Application;
 
@@ -1025,7 +1025,7 @@ pub fn score_application(
     app: &Application,
     sp_enabled: Option<bool>,
     perms: &AppPermissions,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> AuditItem {
     // Collapse duplicate grants on (resource, value) BEFORE any rule counts
     // them: risk points scale with grant count, so a twice-listed permission
@@ -1088,7 +1088,9 @@ pub fn score_application(
     )); // Rules 5-9
 
     // Rule 10 (days_since_created is also stored on the AuditItem).
-    let days_since_created = app.created_date_time.map(|c| (now - c).num_days());
+    let days_since_created = app
+        .created_date_time
+        .map(|c| now.duration_since(c).as_hours() / 24);
     acc.merge(rule_stale_app(days_since_created));
 
     // Invariant: every rule classifies from `app_role_grants`, so the resource
@@ -1188,7 +1190,7 @@ pub struct SpAuditInput {
     pub display_name: String,
     pub app_id: String,
     pub sp_object_id: String,
-    pub created_date_time: Option<DateTime<Utc>>,
+    pub created_date_time: Option<Timestamp>,
     pub account_enabled: Option<bool>,
     /// Home tenant of the owning application — surfaced as the item's
     /// `app_owner_organization_id` (its own export column), not `publisher`,
@@ -1214,7 +1216,7 @@ pub struct SpAuditInput {
 pub fn score_service_principal(
     sp: &SpAuditInput,
     perms: &AppPermissions,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> AuditItem {
     // Same normalization as `score_application` — an SP's granted roles can
     // repeat too, and the risk rules count them the same way.
@@ -1273,7 +1275,9 @@ pub fn score_service_principal(
         credential_status: CredentialStatus::Unknown,
         permission_count: (perms.app_role_grants.len() + perms.scope_values.len()) as u32,
         service_principal_enabled: sp.account_enabled,
-        days_since_created: sp.created_date_time.map(|c| (now - c).num_days()),
+        days_since_created: sp
+            .created_date_time
+            .map(|c| now.duration_since(c).as_hours() / 24),
         certificates: Vec::new(),
         secrets: Vec::new(),
         last_sign_in: None,

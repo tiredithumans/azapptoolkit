@@ -35,7 +35,7 @@ use azapptoolkit_core::cache::Cache;
 use azapptoolkit_core::models::{AppManagementPolicy, ServicePrincipal, TenantAppManagementPolicy};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use tokio::sync::Mutex;
 
 use crate::dto::UiError;
@@ -112,7 +112,7 @@ pub(crate) struct ScoreCtx {
     /// `AuditRunResult::mailbox_scoping_resolved`.
     pub(crate) mail_scoping_unresolved: AtomicBool,
     pub(crate) sign_in_available: bool,
-    pub(crate) sign_in_map: Arc<HashMap<String, Option<DateTime<Utc>>>>,
+    pub(crate) sign_in_map: Arc<HashMap<String, Option<Timestamp>>>,
     /// Whether the Identity Protection risky-service-principal report was
     /// readable for this run (consented scope + Workload Identities premium).
     /// `false` skips Rule 22 entirely — the run either says "report not
@@ -194,7 +194,7 @@ impl ScoreCtx {
     /// The principal's recorded last sign-in for the unused-app advisory. Outer
     /// `None` = report unavailable (skip). Otherwise the recorded time; absent
     /// from the report ⇒ `Some(None)` = no sign-in observed.
-    pub(crate) fn last_sign_in_for(&self, app_id: &str) -> Option<Option<DateTime<Utc>>> {
+    pub(crate) fn last_sign_in_for(&self, app_id: &str) -> Option<Option<Timestamp>> {
         if self.sign_in_available {
             Some(self.sign_in_map.get(app_id).copied().flatten())
         } else {
@@ -243,7 +243,7 @@ impl ScoreCtx {
         &self,
         app_object_id: &str,
         sp_object_id: Option<&str>,
-        created: Option<DateTime<Utc>>,
+        created: Option<Timestamp>,
     ) -> Option<i64> {
         if !self.app_policy_available {
             return None;

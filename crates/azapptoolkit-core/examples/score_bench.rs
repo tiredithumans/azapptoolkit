@@ -7,9 +7,11 @@
 
 use azapptoolkit_core::audit::{AppPermissions, ResourcePermission, score_application};
 use azapptoolkit_core::models::{Application, PasswordCredential};
+use jiff::SignedDuration;
+use jiff::Timestamp;
 
 fn main() {
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let perms = AppPermissions {
         app_role_grants: vec![
             ResourcePermission::graph("Mail.ReadWrite"),
@@ -28,10 +30,10 @@ fn main() {
         id: "obj".into(),
         app_id: "app".into(),
         display_name: "Bench App".into(),
-        created_date_time: Some(now - chrono::Duration::days(400)),
+        created_date_time: Some(now - SignedDuration::from_hours(400 * 24)),
         password_credentials: vec![PasswordCredential {
             display_name: Some("s1".into()),
-            end_date_time: Some(now - chrono::Duration::days(1)),
+            end_date_time: Some(now - SignedDuration::from_hours(24)),
             ..Default::default()
         }],
         owners: Some(vec![]),

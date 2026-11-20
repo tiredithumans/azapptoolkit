@@ -29,7 +29,7 @@ mod scopes;
 mod wire;
 
 use crate::pkce::{CsrfToken, PkceCodeChallenge};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,8 +60,8 @@ const REFRESH_LEEWAY_SECS: i64 = 60;
 
 /// The longest lifetime an access token is trusted for, whatever `expires_in`
 /// says. Entra issues at most ~28 hours (a CAE token); a larger value is a
-/// broken or hostile responder, and taken as-is it panicked `chrono` under the
-/// refresh lock (seconds past `i64::MAX / 1000`, or a `DateTime` overflow).
+/// broken or hostile responder, and taken as-is it could overflow the expiry
+/// arithmetic under the refresh lock.
 /// Capped, the token just refreshes early.
 const MAX_TOKEN_TTL_SECS: i64 = 2 * 24 * 60 * 60;
 
@@ -1044,9 +1044,9 @@ impl EntraAuthService {
         // the checked add only makes that explicit.
         let ttl = i64::try_from(token.expires_in)
             .map_or(MAX_TOKEN_TTL_SECS, |secs| secs.min(MAX_TOKEN_TTL_SECS));
-        let now = Utc::now();
+        let now = Timestamp::now();
         let expires_at = now
-            .checked_add_signed(Duration::seconds(ttl))
+            .checked_add(SignedDuration::from_secs(ttl))
             .unwrap_or(now);
         let scopes = parse_scopes(token.scope.as_deref(), scope_fallback);
         // `refresh` is `Zeroizing`: wiped when the blocking closure drops it.
@@ -2489,7 +2489,7 @@ mod tests {
             true,
             AccessToken {
                 token: "cached".into(),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
                 scopes: read.clone(),
             },
         );
@@ -3152,7 +3152,7 @@ mod tests {
             true,
             AccessToken {
                 token: "stale-from-before-pim-activation".into(),
-                expires_at: Utc::now() + Duration::seconds(3600),
+                expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
                 scopes: read.clone(),
             },
         );
@@ -3482,7 +3482,7 @@ mod tests {
     fn fresh_token(token: &str, scopes: &[String]) -> AccessToken {
         AccessToken {
             token: token.into(),
-            expires_at: Utc::now() + Duration::seconds(3600),
+            expires_at: Timestamp::now() + SignedDuration::from_secs(3600),
             scopes: scopes.to_vec(),
         }
     }
@@ -4284,7 +4284,8 @@ mod tests {
                 .unwrap();
 
             assert!(
-                token.expires_at <= Utc::now() + Duration::seconds(MAX_TOKEN_TTL_SECS),
+                token.expires_at
+                    <= Timestamp::now() + SignedDuration::from_secs(MAX_TOKEN_TTL_SECS),
                 "expires_in {expires_in} → {:?}",
                 token.expires_at
             );

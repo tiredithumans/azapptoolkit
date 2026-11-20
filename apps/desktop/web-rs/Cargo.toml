@@ -95,7 +95,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 # as JSON instead (`serde_json` -> `JSON.parse`), the shape Tauri delivers.
 serde-wasm-bindgen = { version = "0.6.5", optional = true }
 
-chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+# `js`: on wasm32-unknown-unknown, `Timestamp::now()` reads the clock through
+# `Date.now()` (chrono's `wasmbind` did the same).
+jiff = { version = "1", default-features = false, features = ["std", "serde", "js"] }
 
 [features]
 # The shared mock Tauri IPC bridge (`src/ipc_mock/`): installs a fake

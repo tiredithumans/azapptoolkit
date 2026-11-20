@@ -13,7 +13,7 @@ use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_exchange::verdict::aap_verdict_for;
 use azapptoolkit_graph::GraphClient;
 use azapptoolkit_graph::GraphError;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::commands::exchange::exchange_client;
 use crate::commands::graph_err::looks_like_missing_license;
@@ -369,7 +369,7 @@ pub(crate) async fn prefetch_sp_index(
 pub(crate) type SignInPrefetch = (
     bool,
     bool,
-    Arc<HashMap<String, Option<DateTime<Utc>>>>,
+    Arc<HashMap<String, Option<Timestamp>>>,
     Option<AuditCoverageGap>,
 );
 
@@ -446,7 +446,7 @@ pub(crate) fn sign_in_activity_outcome(
 ) -> SignInPrefetch {
     match read {
         Ok(items) => {
-            let map: HashMap<String, Option<DateTime<Utc>>> = items
+            let map: HashMap<String, Option<Timestamp>> = items
                 .into_iter()
                 .filter_map(|a| {
                     a.app_id.map(|id| {

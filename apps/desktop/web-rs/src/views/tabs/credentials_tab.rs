@@ -9,7 +9,8 @@ use azapptoolkit_dto::credentials::{
     CredentialUsageDto, DEFAULT_CERT_LIFETIME_DAYS, DEFAULT_SECRET_LIFETIME_DAYS,
     MAX_CERT_LIFETIME_DAYS as MAX_CERT_VALIDITY_DAYS, MAX_SECRET_LIFETIME_DAYS,
 };
-use chrono::{DateTime, NaiveDate, Utc};
+use jiff::civil::Date;
+use jiff::{SignedDuration, Timestamp};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field, Input};
 
@@ -28,7 +29,8 @@ use crate::components::vault_picker::VaultPicker;
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{
-    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date, ls_get, ls_set, write_clipboard,
+    EXPIRY_CRITICAL_DAYS as CRITICAL_DAYS, count_noun, fmt_date, ls_get, ls_set, utc_date,
+    utc_midnight, write_clipboard,
 };
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::secret_reveal_dialog::SecretRevealDialog;
@@ -37,10 +39,10 @@ use crate::views::tabs::federated_tab::FederatedTab;
 
 /// Truncates like `core::audit::is_expired`, so `expired_count` equals what
 /// Remove-expired deletes — deliberately not `util::floored_days_until`.
-fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
+fn days_until(end: Option<Timestamp>) -> Option<i64> {
     let end = end?;
-    let now = chrono::Utc::now();
-    Some((end - now).num_days())
+    let now = Timestamp::now();
+    Some(end.duration_since(now).as_hours() / 24)
 }
 
 /// Last-used lookup for the two credential tables: `(app_id, key_id)` → the
@@ -54,11 +56,11 @@ fn days_until(end: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
 /// under both the `application` and `servicePrincipal` origins.
 fn usage_lookup(
     usage: Option<&CredentialUsageDto>,
-) -> HashMap<(String, String), Option<DateTime<Utc>>> {
+) -> HashMap<(String, String), Option<Timestamp>> {
     let Some(dto) = usage.filter(|u| u.available) else {
         return HashMap::new();
     };
-    let mut map: HashMap<(String, String), Option<DateTime<Utc>>> = HashMap::new();
+    let mut map: HashMap<(String, String), Option<Timestamp>> = HashMap::new();
     for r in &dto.rows {
         let entry = map
             .entry((r.app_id.clone(), r.key_id.clone()))
@@ -76,7 +78,7 @@ fn usage_lookup(
 /// recorded"; unknown → "—". Three states because "we don't know" and "never
 /// used" are different facts.
 fn last_used_text(
-    map: &HashMap<(String, String), Option<DateTime<Utc>>>,
+    map: &HashMap<(String, String), Option<Timestamp>>,
     app_id: &str,
     key_id: &str,
 ) -> String {
@@ -192,11 +194,7 @@ fn parse_days(raw: &str, min: u32, max: u32) -> Result<u32, String> {
 }
 
 /// `AddPasswordInput`'s `(lifetime_days, start_date_time, end_date_time)`.
-type ExpiryFields = (
-    Option<u32>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
+type ExpiryFields = (Option<u32>, Option<Timestamp>, Option<Timestamp>);
 
 /// Resolves the Expires controls into `AddPasswordInput`'s
 /// `(lifetime_days, start_date_time, end_date_time)`. Mirrors the backend's
@@ -204,9 +202,9 @@ type ExpiryFields = (
 /// errors; dates resolve to midnight UTC, like the portal.
 fn resolve_expiry_fields(
     preset: &str,
-    start: Option<NaiveDate>,
-    end: Option<NaiveDate>,
-    today: NaiveDate,
+    start: Option<Date>,
+    end: Option<Date>,
+    today: Date,
 ) -> Result<ExpiryFields, String> {
     if preset != CUSTOM_PRESET {
         let days = preset
@@ -219,13 +217,12 @@ fn resolve_expiry_fields(
     if end <= effective_start {
         return Err("End date must be after the start date.".to_string());
     }
-    if (end - effective_start).num_days() > i64::from(MAX_SECRET_LIFETIME_DAYS) {
+    if end.duration_since(effective_start).as_hours() / 24 > i64::from(MAX_SECRET_LIFETIME_DAYS) {
         return Err("Secret lifetime cannot exceed 24 months.".to_string());
     }
-    // Midnight construction never fails on a valid NaiveDate, so to_utc is
+    // Midnight construction never fails on a valid Date, so to_utc is
     // total in practice.
-    let to_utc = |d: NaiveDate| d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc());
-    Ok((None, start.and_then(to_utc), to_utc(end)))
+    Ok((None, start.and_then(utc_midnight), utc_midnight(end)))
 }
 
 /// Derives a valid Key Vault secret name from an app's display name. Vault
@@ -342,7 +339,7 @@ pub fn CredentialsTab(
         let pol = policy.get().and_then(|r| r.ok()).filter(|p| p.available)?;
         let cap = pol.effective_cap_days.filter(|c| *c > 0)?;
         let created = detail.with(|d| d.application.created_date_time);
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let over = secrets.with(|list| {
             list.iter()
                 .filter(|c| !is_expired(c.end_date_time, now))
@@ -358,10 +355,10 @@ pub fn CredentialsTab(
     let add_open = RwSignal::new(false);
     let display_name = RwSignal::new("client-secret".to_string());
     let expires_preset = RwSignal::new("180".to_string());
-    let today = chrono::Utc::now().date_naive();
-    let custom_start: RwSignal<Option<NaiveDate>> = RwSignal::new(Some(today));
-    let custom_end: RwSignal<Option<NaiveDate>> = RwSignal::new(Some(
-        today + chrono::Duration::days(i64::from(DEFAULT_SECRET_LIFETIME_DAYS)),
+    let today = utc_date(Timestamp::now());
+    let custom_start: RwSignal<Option<Date>> = RwSignal::new(Some(today));
+    let custom_end: RwSignal<Option<Date>> = RwSignal::new(Some(
+        today + SignedDuration::from_hours((i64::from(DEFAULT_SECRET_LIFETIME_DAYS)) * 24),
     ));
     // One inline `error` signal shared by every credential mutation (rendered
     // once below). Each command keeps its own `bool` busy guard, so it gets a
@@ -529,7 +526,7 @@ pub fn CredentialsTab(
             &expires_preset.get(),
             custom_start.get(),
             custom_end.get(),
-            chrono::Utc::now().date_naive(),
+            utc_date(Timestamp::now()),
         ) {
             Ok(fields) => fields,
             Err(msg) => {
@@ -1172,7 +1169,7 @@ pub fn CredentialsTab(
                         CUSTOM_PRESET => {
                             let end = custom_end.get()?;
                             let start = custom_start.get().unwrap_or(today);
-                            (end - start).num_days()
+                            end.duration_since(start).as_hours() / 24
                         }
                         p => p.parse::<i64>().ok()?,
                     };

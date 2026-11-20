@@ -2,8 +2,8 @@
 
 use super::*;
 
-fn d(s: &str) -> NaiveDate {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+fn d(s: &str) -> Date {
+    Date::strptime("%Y-%m-%d", s).unwrap()
 }
 
 /// The Last-used column's three states must stay distinguishable, and the
@@ -15,15 +15,15 @@ fn d(s: &str) -> NaiveDate {
 #[test]
 fn last_used_cell_reads_three_states() {
     use azapptoolkit_dto::credentials::CredentialUsageRow;
-    use chrono::{TimeZone, Utc};
-    let old = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
-    let fresh = Utc.with_ymd_and_hms(2026, 9, 20, 8, 30, 0).unwrap();
-    let row =
-        |app_id: &str, key_id: &str, last_used: Option<chrono::DateTime<Utc>>| CredentialUsageRow {
-            app_id: app_id.into(),
-            key_id: key_id.into(),
-            last_used,
-        };
+    use jiff::Timestamp;
+
+    let old = "2026-06-01T12:00:00Z".parse::<Timestamp>().unwrap();
+    let fresh = "2026-09-20T08:30:00Z".parse::<Timestamp>().unwrap();
+    let row = |app_id: &str, key_id: &str, last_used: Option<jiff::Timestamp>| CredentialUsageRow {
+        app_id: app_id.into(),
+        key_id: key_id.into(),
+        last_used,
+    };
     let dto = CredentialUsageDto {
         available: true,
         rows: vec![
@@ -138,8 +138,8 @@ fn custom_resolves_midnight_utc_window() {
     )
     .unwrap();
     assert!(days.is_none());
-    assert_eq!(start.unwrap().to_rfc3339(), "2026-02-01T00:00:00+00:00");
-    assert_eq!(end.unwrap().to_rfc3339(), "2026-08-01T00:00:00+00:00");
+    assert_eq!(start.unwrap().to_string(), "2026-02-01T00:00:00Z");
+    assert_eq!(end.unwrap().to_string(), "2026-08-01T00:00:00Z");
 }
 
 #[test]

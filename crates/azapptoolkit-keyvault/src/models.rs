@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// A secret's metadata, never its value: an entry of `GET /secrets` or of
@@ -39,13 +39,13 @@ pub struct SecretAttributes {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default, with = "optional_unix_timestamp")]
-    pub created: Option<DateTime<Utc>>,
+    pub created: Option<Timestamp>,
     #[serde(default, with = "optional_unix_timestamp")]
-    pub updated: Option<DateTime<Utc>>,
+    pub updated: Option<Timestamp>,
     #[serde(default, with = "optional_unix_timestamp", rename = "exp")]
-    pub expires: Option<DateTime<Utc>>,
+    pub expires: Option<Timestamp>,
     #[serde(default, with = "optional_unix_timestamp", rename = "nbf")]
-    pub not_before: Option<DateTime<Utc>>,
+    pub not_before: Option<Timestamp>,
 }
 
 /// `GET /secrets/{name}` — full value included.
@@ -134,54 +134,54 @@ pub struct SecretAttributesRequest {
         rename = "exp",
         with = "optional_unix_timestamp_ser"
     )]
-    pub expires: Option<DateTime<Utc>>,
+    pub expires: Option<Timestamp>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "nbf",
         with = "optional_unix_timestamp_ser"
     )]
-    pub not_before: Option<DateTime<Utc>>,
+    pub not_before: Option<Timestamp>,
 }
 
 mod optional_unix_timestamp {
-    use chrono::{DateTime, TimeZone, Utc};
+    use jiff::Timestamp;
     use serde::{Deserialize, Deserializer, Serializer};
 
     // `serialize_with` hands the helper `&Option<T>` by contract — the
     // signature is serde's, not a style choice.
     #[allow(clippy::ref_option)]
-    pub fn serialize<S>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &Option<Timestamp>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match value {
-            Some(dt) => serializer.serialize_i64(dt.timestamp()),
+            Some(dt) => serializer.serialize_i64(dt.as_second()),
             None => serializer.serialize_none(),
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let opt = Option::<i64>::deserialize(deserializer)?;
-        Ok(opt.and_then(|t| Utc.timestamp_opt(t, 0).single()))
+        Ok(opt.and_then(|t| Timestamp::from_second(t).ok()))
     }
 }
 
 mod optional_unix_timestamp_ser {
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
     use serde::Serializer;
 
     // `serialize_with` hands the helper `&Option<T>` by contract — the
     // signature is serde's, not a style choice.
     #[allow(clippy::ref_option)]
-    pub fn serialize<S>(value: &Option<DateTime<Utc>>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &Option<Timestamp>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match value {
-            Some(dt) => serializer.serialize_i64(dt.timestamp()),
+            Some(dt) => serializer.serialize_i64(dt.as_second()),
             None => serializer.serialize_none(),
         }
     }
@@ -273,7 +273,7 @@ mod tests {
     /// would leave every rotated secret without an expiry Key Vault honours.
     #[test]
     fn set_request_serialises_exp_and_nbf_as_unix_seconds() {
-        use chrono::TimeZone;
+        use jiff::Timestamp;
         // Explicit fields: the Drop (zeroize) impl forbids `..Default::default()`.
         let req = SecretSetRequest {
             value: "v".into(),
@@ -281,8 +281,8 @@ mod tests {
             tags: None,
             attributes: Some(SecretAttributesRequest {
                 enabled: Some(true),
-                expires: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
-                not_before: Some(Utc.with_ymd_and_hms(2025, 12, 31, 0, 0, 0).unwrap()),
+                expires: Some("2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()),
+                not_before: Some("2025-12-31T00:00:00Z".parse::<Timestamp>().unwrap()),
             }),
         };
         let s = serde_json::to_string(&req).unwrap();

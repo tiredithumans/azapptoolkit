@@ -1,6 +1,8 @@
 //! The create flows: the "New SSO application" wizard's two end-to-end setups
 //! (SAML and OIDC) and their per-step configure helpers.
 
+use jiff::SignedDuration;
+use jiff::Timestamp;
 use std::time::Duration;
 
 use tauri::State;
@@ -166,7 +168,7 @@ pub(crate) async fn configure_saml(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("CN={}", input.display_name));
     let days = resolve_cert_lifetime_days(input.cert_lifetime_days)?;
-    let end = chrono::Utc::now() + chrono::Duration::days(days as i64);
+    let end = Timestamp::now() + SignedDuration::from_hours((days as i64) * 24);
     // Retrying the POST on NotFound is safe: NotFound means nothing was minted.
     let cert =
         with_replication_retry(|| client.add_token_signing_certificate(sp_id, &subject, end))
@@ -241,7 +243,7 @@ pub(crate) async fn configure_saml(
         reply_url: input.reply_url.clone(),
         signing_cert_base64: cert.key.clone(),
         signing_cert_thumbprint: Some(cert.thumbprint.clone()),
-        signing_cert_expiry: cert.end_date_time.map(|d| d.to_rfc3339()),
+        signing_cert_expiry: cert.end_date_time.map(|d| d.to_string()),
         claims_policy_id,
         warnings,
     })
@@ -366,7 +368,7 @@ pub(crate) async fn configure_oidc(
             .map_err(|e| add_password_failed(e).0)?;
         (
             secret.secret_text.take(),
-            secret.end_date_time.map(|d| d.to_rfc3339()),
+            secret.end_date_time.map(|d| d.to_string()),
             Some(secret),
         )
     } else {

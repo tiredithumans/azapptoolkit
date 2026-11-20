@@ -22,7 +22,7 @@ use crate::util::{expiry_label, floored_days_until, relative_time};
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
 use azapptoolkit_dto::applications::{DeletedAppDto, DeletedAppsDto};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 /// The recycle-bin window Graph documents; the dialog shows how much of it is
 /// left per row so "expires in 2d" is a fact, not a guess.
@@ -274,10 +274,10 @@ pub fn DeletedAppsDialog(
                                         let deleted_line = row.deleted_date_time.map_or_else(
                                             || "unknown".to_string(),
                                             |d| {
-                                                let now = Utc::now();
+                                                let now = Timestamp::now();
                                                 let rel = relative_time(now, d);
                                                 let window_end =
-                                                    d + Duration::days(DELETED_WINDOW_DAYS);
+                                                    d + SignedDuration::from_hours(DELETED_WINDOW_DAYS * 24);
                                                 let left =
                                                     expiry_label(floored_days_until(window_end, now));
                                                 format!("{rel} · {left}")

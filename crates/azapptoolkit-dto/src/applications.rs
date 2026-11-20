@@ -5,7 +5,7 @@ use azapptoolkit_core::models::{
     AppRoleAssignment, Application, DirectoryObject, OAuth2PermissionGrant, PasswordCredential,
     ServicePrincipal,
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::permissions::ResolvedPermission;
@@ -29,7 +29,7 @@ pub struct DeletedAppDto {
     pub object_id: String,
     pub app_id: Option<String>,
     pub display_name: Option<String>,
-    pub deleted_date_time: Option<DateTime<Utc>>,
+    pub deleted_date_time: Option<Timestamp>,
 }
 
 /// The full recycle-bin payload: rows plus the truncation flag, so a partial
@@ -99,11 +99,11 @@ pub struct ApplicationListRowDto {
     pub display_name: String,
     pub sign_in_audience: Option<String>,
     pub publisher_domain: Option<String>,
-    pub created_date_time: Option<DateTime<Utc>>,
+    pub created_date_time: Option<Timestamp>,
     pub password_credential_count: usize,
     pub key_credential_count: usize,
     /// Soonest end date across secrets + certs (the export's expiry column).
-    pub soonest_credential_expiry: Option<DateTime<Utc>>,
+    pub soonest_credential_expiry: Option<Timestamp>,
     pub credential_status: ListCredentialStatus,
     pub paired_service_principal_id: Option<String>,
 }
@@ -114,7 +114,7 @@ impl ApplicationListRowDto {
     pub fn from_application(
         app: Application,
         paired_service_principal_id: Option<String>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Self {
         let credential_status =
             ListCredentialStatus::classify(&app.password_credentials, &app.key_credentials, now);
@@ -247,9 +247,9 @@ pub struct AddPasswordInput {
     /// takes precedence over `lifetime_days`; `start_date_time` may schedule a
     /// not-yet-valid secret. Capped at 24 months backend-side.
     #[serde(default)]
-    pub start_date_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub start_date_time: Option<Timestamp>,
     #[serde(default)]
-    pub end_date_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub end_date_time: Option<Timestamp>,
 }
 
 /// Input for uploading an operator-supplied certificate as a key credential.
@@ -344,7 +344,7 @@ pub struct UploadedCertificate {
     /// `customKeyIdentifier` and the portal lists as Thumbprint.
     pub thumbprint: String,
     /// The certificate's notAfter.
-    pub not_after: DateTime<Utc>,
+    pub not_after: Timestamp,
 }
 
 /// Result of generating a self-signed certificate. `private_key_pem`,
@@ -457,6 +457,7 @@ pub struct RemoveExpiredResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
 
     fn list_row(secrets: usize, certs: usize) -> ApplicationListRowDto {
         ApplicationListRowDto {
@@ -544,21 +545,19 @@ mod tests {
 
     #[test]
     fn list_row_flattens_application_and_classifies_credentials() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = str::parse::<Timestamp>("2026-01-01T00:00:00Z").unwrap();
         let app = Application {
             id: "obj-1".into(),
             app_id: "app-1".into(),
             display_name: "Demo".into(),
             sign_in_audience: Some("AzureADMyOrg".into()),
-            created_date_time: Some(now - chrono::Duration::days(10)),
+            created_date_time: Some(now - SignedDuration::from_hours(10 * 24)),
             password_credentials: vec![PasswordCredential {
-                end_date_time: Some(now + chrono::Duration::days(60)),
+                end_date_time: Some(now + SignedDuration::from_hours(60 * 24)),
                 ..Default::default()
             }],
             key_credentials: vec![KeyCredential {
-                end_date_time: Some(now + chrono::Duration::days(7)),
+                end_date_time: Some(now + SignedDuration::from_hours(7 * 24)),
                 ..Default::default()
             }],
             ..Default::default()
@@ -570,7 +569,7 @@ mod tests {
         // The cert (7d) is the soonest expiry; the 60d secret keeps it Active.
         assert_eq!(
             row.soonest_credential_expiry,
-            Some(now + chrono::Duration::days(7))
+            Some(now + SignedDuration::from_hours(7 * 24))
         );
         assert_eq!(row.credential_status, ListCredentialStatus::Active);
         assert_eq!(row.paired_service_principal_id.as_deref(), Some("sp-1"));
@@ -705,16 +704,8 @@ mod tests {
         let input = AddPasswordInput {
             display_name: "s".into(),
             lifetime_days: None,
-            start_date_time: Some(
-                chrono::DateTime::parse_from_rfc3339("2026-07-01T00:00:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            ),
-            end_date_time: Some(
-                chrono::DateTime::parse_from_rfc3339("2027-07-01T00:00:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            ),
+            start_date_time: Some(str::parse::<Timestamp>("2026-07-01T00:00:00Z").unwrap()),
+            end_date_time: Some(str::parse::<Timestamp>("2027-07-01T00:00:00Z").unwrap()),
         };
         let json = serde_json::to_value(&input).unwrap();
         assert!(json.get("startDateTime").is_some() && json.get("endDateTime").is_some());

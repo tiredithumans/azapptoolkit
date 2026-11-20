@@ -15,6 +15,7 @@
 //!   memberships; managed identities with their held Graph app-roles. Azure
 //!   RBAC is deliberately not captured — restore lists it as a runbook item.
 
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -289,7 +290,7 @@ pub async fn backup_tenant(
 
     Ok(TenantBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
-        created_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
         source_tenant_id: tenant_id,
         cloud: state.auth.cloud(),
         app_registrations: app_backups,
@@ -1356,7 +1357,7 @@ mod tests {
     fn a_backup_file_over_the_cap_is_refused() {
         let json = serde_json::to_vec(&TenantBackup {
             schema_version: BACKUP_SCHEMA_VERSION,
-            created_at: chrono::DateTime::from_timestamp(1_000_000, 0).unwrap(),
+            created_at: jiff::Timestamp::from_second(1_000_000).ok().unwrap(),
             source_tenant_id: "src-tenant".into(),
             cloud: azapptoolkit_core::cloud::CloudEnvironment::Commercial,
             app_registrations: Vec::new(),

@@ -4,6 +4,7 @@
 //! Managed Identities: foreign-tenant marker, paired App Registration id,
 //! credential data, app roles.
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Home's Enterprise Applications card: the counts, not the rows.
@@ -56,7 +57,7 @@ pub struct EnterpriseApplicationDto {
     /// OAuth2 permission scopes — non-empty for the detail view.
     pub oauth2_permission_scopes: Vec<azapptoolkit_core::models::OAuth2PermissionScope>,
     /// When the app was created (from Graph). Used for date filtering on the list.
-    pub created_date_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_date_time: Option<Timestamp>,
     /// Custom tags. `HideApp` present ⇒ hidden from the My Apps portal. Only
     /// populated on the detail (the list index doesn't `$select` tags).
     #[serde(default)]

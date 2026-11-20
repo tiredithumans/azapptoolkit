@@ -301,8 +301,8 @@ async fn find_applications_by_tag_filters_on_the_exact_tag() {
     );
     let app: Application = serde_json::from_value(hits[0].clone()).unwrap();
     assert_eq!(
-        app.created_date_time.map(|t| t.to_rfc3339()).as_deref(),
-        Some("2026-01-02T03:04:05+00:00")
+        app.created_date_time.map(|t| t.to_string()).as_deref(),
+        Some("2026-01-02T03:04:05Z")
     );
     assert_eq!(
         app.password_credentials[0].display_name.as_deref(),

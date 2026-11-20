@@ -9,7 +9,7 @@
 //! view on open — it opens reliably and clears properly when its bound value is
 //! reset to `None` (an empty controlled `value` empties a native date input).
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use leptos::prelude::*;
 
 use crate::components::icon::IconName;
@@ -18,9 +18,9 @@ use crate::components::ui::{DateInput, IconButton};
 #[component]
 pub fn DateRangeFilter(
     /// Inclusive lower bound; `None` leaves the early side open.
-    after: RwSignal<Option<NaiveDate>>,
+    after: RwSignal<Option<Date>>,
     /// Inclusive upper bound; `None` leaves the late side open.
-    before: RwSignal<Option<NaiveDate>>,
+    before: RwSignal<Option<Date>>,
     /// Plural noun for the inverted-range hint (e.g. "apps").
     noun: &'static str,
 ) -> impl IntoView {
@@ -54,7 +54,7 @@ pub fn DateRangeFilter(
 fn date_field(
     label: &'static str,
     clear_aria: &'static str,
-    value: RwSignal<Option<NaiveDate>>,
+    value: RwSignal<Option<Date>>,
 ) -> impl IntoView {
     view! {
         <div class="date-range-field">

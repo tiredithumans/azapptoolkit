@@ -4,7 +4,7 @@
 //! initiator and target resources are already resolved to human strings, so
 //! the frontend renders a flat table.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,7 @@ pub struct ActivityLogItem {
     pub id: String,
     /// Human-readable activity (Graph `activityDisplayName`).
     pub activity: String,
-    pub activity_date_time: Option<DateTime<Utc>>,
+    pub activity_date_time: Option<Timestamp>,
     pub category: Option<String>,
     /// "success" / "failure" / … as reported by Graph.
     pub result: Option<String>,
@@ -50,7 +50,7 @@ pub struct SignInActivityDto {
     pub consent_required: bool,
     /// Most recent recorded sign-in for this app's SP, or `None` when the report
     /// is available but holds no entry for it (no sign-in observed in the window).
-    pub last_sign_in_date_time: Option<DateTime<Utc>>,
+    pub last_sign_in_date_time: Option<Timestamp>,
     /// Friendly reason shown when `available` is false (license / transient / …).
     pub message: Option<String>,
 }
@@ -64,11 +64,7 @@ mod tests {
         let item = ActivityLogItem {
             id: "change-123".into(),
             activity: "Update application".into(),
-            activity_date_time: Some(
-                chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            ),
+            activity_date_time: Some(str::parse::<Timestamp>("2024-01-15T10:30:00Z").unwrap()),
             category: Some("ApplicationManagement".into()),
             result: Some("success".into()),
             result_reason: None,
@@ -99,11 +95,7 @@ mod tests {
         let dto = SignInActivityDto {
             available: true,
             consent_required: false,
-            last_sign_in_date_time: Some(
-                chrono::DateTime::parse_from_rfc3339("2024-02-20T08:00:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            ),
+            last_sign_in_date_time: Some(str::parse::<Timestamp>("2024-02-20T08:00:00Z").unwrap()),
             message: None,
         };
         let json = serde_json::to_value(&dto).unwrap();
