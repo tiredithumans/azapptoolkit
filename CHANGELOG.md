@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- Open-dock chips keep the app's name instead of reverting to its ID when reopened from a link.
+
 ## [0.36.2] - 2026-11-23
 
 ### Changed

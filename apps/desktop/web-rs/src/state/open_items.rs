@@ -124,8 +124,9 @@ fn sanitize_restored(list: Vec<OpenItem>) -> Vec<OpenItem> {
 impl Session {
     /// Open `entity_id` into the shared working set and focus it (1-up).
     /// Deduped by `(kind, entity_id)`: re-opening an already-open item just
-    /// re-focuses it (and refreshes its chip title) instead of stacking a
-    /// duplicate. Returns the `OpenItem.id` (existing or freshly minted).
+    /// re-focuses it (and refreshes its chip title, unless the caller only had
+    /// the id to offer) instead of stacking a duplicate. Returns the
+    /// `OpenItem.id` (existing or freshly minted).
     pub fn open_item(
         &self,
         kind: OpenItemKind,
@@ -135,7 +136,13 @@ impl Session {
         let entity_id = entity_id.into();
         let title = title.into();
         if let Some(existing) = self.is_open(kind, &entity_id) {
-            self.set_open_item_title(existing, title);
+            // A deep link or pairing jump knows only the id and passes it as a
+            // placeholder title. On a fresh open the pane replaces it once the
+            // detail loads; on a re-open the pane is already loaded and never
+            // reports again, so the placeholder would stick — and be parked.
+            if title != entity_id {
+                self.set_open_item_title(existing, title);
+            }
             self.focus_item(existing, false);
             return existing;
         }
