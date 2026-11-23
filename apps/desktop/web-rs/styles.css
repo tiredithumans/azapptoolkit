@@ -247,6 +247,35 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ---------- Boot screen ---------- */
+/* `#boot` in index.html: covers the window from the first paint until the app
+   mounts its first screen (`lib.rs` removes it). The rules live here and NOT
+   in an inline style element in index.html — see the comment there. */
+#boot {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--canvas);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+#boot .boot__mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-ent));
+  color: var(--on-accent);
+  font-size: 20px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Thaw's <ConfigProvider> wraps the entire app in this div, and Thaw's own
  * runtime CSS gives it no height — so without this rule every `height: 100%`
  * below it (the root flex div, `.shell`, `.apps-view`/`.mi-view`) resolves to
