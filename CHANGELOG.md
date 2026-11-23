@@ -10,6 +10,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 - Timestamps in exports and reports now end in `Z` instead of `+00:00`; they mark the same moment.
 
+### Fixed
+
+- The window no longer scrolls as one page: the sidebar and the open-items tabs stay in place again.
+
 ## [0.36.1] - 2026-11-14
 
 ### Fixed

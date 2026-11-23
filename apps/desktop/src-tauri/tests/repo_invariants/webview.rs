@@ -120,3 +120,24 @@ fn the_connect_src_scanner_reads_real_csp_shapes() {
     // A directive whose name merely starts with `connect-src` is not it.
     assert_eq!(connect_src("connect-srcx 'self'"), None);
 }
+
+/// `index.html` carries no inline `<style>` element.
+///
+/// Tauri stamps a nonce on every `<style>` in the page and appends it to the
+/// CSP's `style-src`. A nonce there makes the webview ignore `'unsafe-inline'`,
+/// so every `style="…"` attribute and every stylesheet Thaw injects at runtime
+/// is blocked — in the packaged app only, never in the browser tests or the
+/// Pages demo. 0.36.0 shipped exactly that: the root `div` lost its inline
+/// `height: 100%` and the whole window scrolled. Styles belong in `styles.css`.
+#[test]
+fn index_html_has_no_inline_style_element() {
+    let html = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../web-rs/index.html"),
+    )
+    .expect("read web-rs/index.html");
+    assert!(
+        !html.to_ascii_lowercase().contains("<style"),
+        "web-rs/index.html has an inline <style>: Tauri nonces it, which disables \
+         'unsafe-inline' and blocks every style attribute in the packaged app"
+    );
+}
