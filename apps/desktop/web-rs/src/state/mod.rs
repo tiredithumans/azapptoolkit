@@ -743,6 +743,23 @@ mod tests {
     }
 
     #[test]
+    fn reopening_by_id_keeps_the_resolved_title() {
+        with_session(|session| {
+            let a = session.open_item(OpenItemKind::AppReg, "app-1", "Contoso");
+            // A deep link / pairing jump knows only the id.
+            session.open_app_on_tab("app-1".to_string(), "credentials");
+            session.open_item(OpenItemKind::AppReg, "app-1", "app-1");
+            session.open_items.with_untracked(|list| {
+                let item = list.iter().find(|it| it.id == a).unwrap();
+                assert_eq!(
+                    item.title, "Contoso",
+                    "an id placeholder never replaces a name"
+                );
+            });
+        });
+    }
+
+    #[test]
     fn open_item_dedupes_and_refocuses() {
         with_session(|session| {
             let a = session.open_item(OpenItemKind::AppReg, "app-1", "Contoso");
