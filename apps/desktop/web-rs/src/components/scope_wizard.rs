@@ -57,6 +57,7 @@ use crate::components::site_selection_panel::SiteSelectionPanel;
 use crate::components::ui::{Callout, FormError, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
+use azapptoolkit_core::audit::is_unscopable_privileged;
 use azapptoolkit_core::scoping::{
     ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
 };
@@ -219,6 +220,26 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
 /// Comma-joined permission values for the review line / summaries.
 fn perm_values(items: &[PickerSelection]) -> Vec<String> {
     items.iter().map(|i| i.permission_value.clone()).collect()
+}
+
+/// The review step's warning for cart items Microsoft offers no way to narrow
+/// (application permissions only — the audit's Rule 24 classifier), or `None`
+/// when there are none. They are granted org-wide by definition.
+fn unscopable_cart_warning(items: &[PickerSelection]) -> Option<String> {
+    let values: Vec<&str> = items
+        .iter()
+        .filter(|i| {
+            i.kind == PermissionKind::Application
+                && is_unscopable_privileged(Some(&i.resource_app_id), &i.permission_value)
+        })
+        .map(|i| i.permission_value.as_str())
+        .collect();
+    (!values.is_empty()).then(|| {
+        format!(
+            "{}: Microsoft offers no way to narrow these, so the app will reach the whole tenant with each.",
+            values.join(", ")
+        )
+    })
 }
 
 /// Exchange scoped path: declare each permission without an org-wide grant (app
@@ -1082,6 +1103,17 @@ pub fn ScopeWizard(
                 </dl>
                 <span class="ui-text">{review_line}</span>
                 {move || {
+                    selected
+                        .with(|s| unscopable_cart_warning(s))
+                        .map(|w| {
+                            view! {
+                                <Callout tone="warn">
+                                    <span class="ui-text">{w}</span>
+                                </Callout>
+                            }
+                        })
+                }}
+                {move || {
                     strip_warning()
                         .map(|w| {
                             view! {
@@ -1293,6 +1325,27 @@ mod tests {
             permission_id: format!("id-{value}"),
             permission_value: value.to_string(),
         }
+    }
+
+    #[test]
+    fn unscopable_cart_warning_names_only_unnarrowable_application_items() {
+        let mut chat = app(MICROSOFT_GRAPH_APP_ID, "Chat.Read.All");
+        chat.kind = PermissionKind::Delegated;
+        assert_eq!(
+            unscopable_cart_warning(&[
+                app(MICROSOFT_GRAPH_APP_ID, "CallRecords.Read.All"),
+                app(MICROSOFT_GRAPH_APP_ID, "Mail.Read"),
+                chat,
+            ]),
+            Some(
+                "CallRecords.Read.All: Microsoft offers no way to narrow these, so the app will reach the whole tenant with each."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            unscopable_cart_warning(&[app(MICROSOFT_GRAPH_APP_ID, "Mail.Read")]),
+            None
+        );
     }
 
     fn delegated(resource: &str, value: &str) -> PickerSelection {

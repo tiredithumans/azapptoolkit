@@ -655,6 +655,12 @@ pub struct AuditItem {
     /// The report's `riskLevel` (`low`/`medium`/`high`) for the same flag.
     #[serde(default)]
     pub sp_risk_level: Option<String>,
+    /// Rule 24: the held Microsoft Graph application permissions Microsoft
+    /// offers no way to narrow, each with its Conditional Access network-lock
+    /// verdict (filled by the audit runner). Empty on a clean row and on
+    /// cached runs from before the field existed.
+    #[serde(default)]
+    pub unscopable_grants: Vec<super::UnscopableGrant>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -749,6 +755,11 @@ pub mod issue {
     /// multi-tenant + personal Microsoft accounts).
     pub const MULTITENANT_AUDIENCE: &str = "Sign-in audience reaches outside this tenant";
     pub const UNVERIFIED_PUBLISHER: &str = "No verified publisher";
+    /// Rule 24 (advisory, no score): held Microsoft Graph application
+    /// permissions Microsoft offers no way to narrow, so each reaches the
+    /// whole tenant. The structured list is `AuditItem::unscopable_grants`.
+    /// No remediation — removing a permission is admin-judged.
+    pub const UNSCOPABLE_PRIVILEGED: &str = "No built-in scoping:";
 }
 
 #[cfg(test)]
@@ -849,9 +860,38 @@ mod tests {
             "\"managed_identity\""
         );
         assert_eq!(
+            json(&crate::audit::UnmanagedMechanism::ResourceSpecificConsent),
+            "\"resource_specific_consent\""
+        );
+        assert_eq!(
+            json(&crate::conditional_access::NetworkLock::ReportOnly),
+            "{\"state\":\"report_only\"}"
+        );
+        assert_eq!(
             serde_json::from_str::<CredentialStatus>("\"ExpiringSoon\"").unwrap(),
             CredentialStatus::ExpiringSoon
         );
+    }
+
+    /// A run cached before Rule 24 existed carries no `unscopable_grants`; it
+    /// must still load (and show no checklist).
+    #[test]
+    fn audit_item_without_unscopable_grants_deserializes() {
+        let item = crate::audit::score_application(
+            &crate::models::Application::default(),
+            None,
+            &AppPermissions::default(),
+            now(),
+        );
+        let mut v = serde_json::to_value(&item).unwrap();
+        assert!(
+            v.as_object_mut()
+                .unwrap()
+                .remove("unscopable_grants")
+                .is_some()
+        );
+        let back: AuditItem = serde_json::from_value(v).unwrap();
+        assert!(back.unscopable_grants.is_empty());
     }
 
     #[test]

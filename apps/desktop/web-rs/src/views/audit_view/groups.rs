@@ -135,6 +135,17 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Rule 24 — Graph permissions Microsoft offers no way to narrow. The
+    // grants are weighted under `high_risk_perms`; this group carries the
+    // per-grant safeguards checklist. Advisory: removing a permission is
+    // admin-judged, and no safeguard narrows what the app can read.
+    GroupSpec {
+        key: "unscopable_privileged",
+        title: "No built-in scoping",
+        blurb: "Application permissions Microsoft offers no way to narrow (e.g. CallRecords.Read.All), so each reaches the whole tenant. Each row lists the safeguards around the app; none of them narrows what it can read.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     // Org-wide reach the toolkit cannot confine — advisory siblings of
     // `high_risk_perms`, split by the scorer's advice (remove vs. review).
     GroupSpec {
@@ -402,6 +413,7 @@ mod tests {
             app_owner_organization_id: None,
             sp_risk_state: None,
             sp_risk_level: None,
+            unscopable_grants: Vec::new(),
         }
     }
 
@@ -775,6 +787,7 @@ mod tests {
             issue::RISKY_SERVICE_PRINCIPAL,
             issue::UNUSED_CREDENTIAL,
             issue::GRANTED_NOT_DECLARED,
+            issue::UNSCOPABLE_PRIVILEGED,
         ] {
             let item = with_issue(format!("{marker}: x"), 0, RiskLevel::Low);
             assert!(

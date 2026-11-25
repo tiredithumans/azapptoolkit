@@ -810,6 +810,27 @@ pub struct CaConditions {
     /// clients — the pre-workload-identity shape every user policy uses.
     #[serde(default)]
     pub client_applications: Option<CaClientApplications>,
+    /// The network-location condition (`conditionalAccessLocations`): named
+    /// location ids or the `All` / `AllTrusted` tokens. A block policy with a
+    /// location include is what locks a workload identity to known networks.
+    #[serde(default)]
+    pub locations: Option<CaLocations>,
+    /// `servicePrincipalRiskLevels`: a workload-identity policy limited to
+    /// risky sign-ins (`low` / `medium` / `high`). Empty = every sign-in. A
+    /// block gated on risk is not a network lock.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub service_principal_risk_levels: Vec<String>,
+}
+
+/// `conditionalAccessLocations`. Named-location contents are not resolved —
+/// the ids alone say whether the policy has a location condition.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CaLocations {
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub include_locations: Vec<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub exclude_locations: Vec<String>,
 }
 
 /// `conditionalAccessClientApplications`. Targets the *client* of a sign-in
@@ -1422,6 +1443,27 @@ pub struct Paged<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The network-lock check reads `conditions.locations`; Graph sends it as
+    /// an object, as `null`, or with a `null` list inside.
+    #[test]
+    fn ca_policy_reads_locations_and_tolerates_null() {
+        let with = r#"{"id":"p1","conditions":{"locations":{"includeLocations":["All"],"excludeLocations":["AllTrusted"]}}}"#;
+        let p: ConditionalAccessPolicy = serde_json::from_str(with).unwrap();
+        let loc = p.conditions.unwrap().locations.unwrap();
+        assert_eq!(loc.include_locations, vec!["All".to_string()]);
+        assert_eq!(loc.exclude_locations, vec!["AllTrusted".to_string()]);
+
+        let null = r#"{"id":"p2","conditions":{"locations":null}}"#;
+        let p: ConditionalAccessPolicy = serde_json::from_str(null).unwrap();
+        assert!(p.conditions.unwrap().locations.is_none());
+
+        let null_list = r#"{"id":"p3","conditions":{"locations":{"includeLocations":null,"excludeLocations":["x"]}}}"#;
+        let p: ConditionalAccessPolicy = serde_json::from_str(null_list).unwrap();
+        let loc = p.conditions.unwrap().locations.unwrap();
+        assert!(loc.include_locations.is_empty());
+        assert_eq!(loc.exclude_locations, vec!["x".to_string()]);
+    }
 
     #[test]
     fn deleted_items_decode_full_and_limited_info_entries() {

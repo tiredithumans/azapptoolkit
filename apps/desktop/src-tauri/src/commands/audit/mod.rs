@@ -32,7 +32,9 @@ use azapptoolkit_core::audit::{
     CredentialActivity, MailPermissionScope, ResourcePermission, enforced_secret_max_days,
 };
 use azapptoolkit_core::cache::Cache;
-use azapptoolkit_core::models::{AppManagementPolicy, ServicePrincipal, TenantAppManagementPolicy};
+use azapptoolkit_core::models::{
+    AppManagementPolicy, ConditionalAccessPolicy, ServicePrincipal, TenantAppManagementPolicy,
+};
 use azapptoolkit_exchange::ExchangeClient;
 use azapptoolkit_graph::GraphClient;
 use jiff::Timestamp;
@@ -141,6 +143,14 @@ pub(crate) struct ScoreCtx {
     /// The tenant default policy plus every per-target override, from the run's
     /// one tenant-wide policy pair read. Empty when unavailable.
     pub(crate) app_policy: Arc<AppPolicyData>,
+    /// Whether the tenant's Conditional Access policies were readable this
+    /// run. `false` leaves every Rule 24 network lock `Unknown` — never "no
+    /// lock" — whether unavailable (no gap) or a failed read (the
+    /// `ConditionalAccess` gap).
+    pub(crate) ca_available: bool,
+    /// Every Conditional Access policy, from the run's one tenant-wide read.
+    /// Empty when unavailable.
+    pub(crate) ca_policies: Arc<Vec<ConditionalAccessPolicy>>,
 }
 
 /// The service principals the run's tenant-wide SP index read

@@ -236,6 +236,11 @@ pub const HIGH_RISK_APP_PERMISSIONS: &[&str] = &[
     // because only Graph names were listed. Unambiguous as a bare value — no
     // other resource exposes it.
     "Exchange.ManageAsApp",
+    // Net-new: tenant-wide Teams communications writes. Creates and edits
+    // online meetings as the app for any organizer, and taps the live audio /
+    // video of any call it joins. Each scored ZERO.
+    "OnlineMeetings.ReadWrite.All",
+    "Calls.AccessMedia.All",
 ];
 
 /// Medium-risk application permissions (by `value` string). Mirrors
@@ -293,6 +298,18 @@ pub const MEDIUM_RISK_APP_PERMISSIONS: &[&str] = &[
     // Tenant-wide read of Entra role definitions and assignments, which maps
     // who holds privileged roles.
     "RoleManagement.Read.Directory",
+    // Net-new: tenant-wide Teams communications reads (call records, meeting
+    // content, channel messages) — read = medium. Who called whom with which
+    // phone numbers and IP addresses, every meeting's transcript and
+    // recording, every channel post. Microsoft offers no way to narrow call
+    // records at all. Each scored ZERO.
+    "CallRecords.Read.All",
+    "CallRecord-PstnCalls.Read.All",
+    "OnlineMeetings.Read.All",
+    "OnlineMeetingTranscript.Read.All",
+    "OnlineMeetingRecording.Read.All",
+    "OnlineMeetingArtifact.Read.All",
+    "ChannelMessage.Read.All",
 ];
 
 /// High-risk delegated permissions (by scope `value`). Ported from
@@ -1154,6 +1171,36 @@ mod tests {
         const {
             assert!(PTS_TIER0_APP_PERM >= RISK_CRITICAL);
             assert!(PTS_HIGH_RISK_APP_PERM < RISK_CRITICAL);
+        }
+    }
+
+    /// The tenant-wide Teams communications permissions scored zero: none was
+    /// on a risk list. Reads (call records, meeting content, channel messages)
+    /// are medium per the read = medium split; creating meetings as the app and
+    /// raw call media are high.
+    #[test]
+    fn communications_permissions_carry_a_risk_weight() {
+        for v in [
+            "CallRecords.Read.All",
+            "CallRecord-PstnCalls.Read.All",
+            "OnlineMeetings.Read.All",
+            "OnlineMeetingTranscript.Read.All",
+            "OnlineMeetingRecording.Read.All",
+            "OnlineMeetingArtifact.Read.All",
+            "ChannelMessage.Read.All",
+        ] {
+            assert_eq!(
+                risk_level_for_app_permission(v),
+                Some(RiskLevel::Medium),
+                "{v}"
+            );
+        }
+        for v in ["OnlineMeetings.ReadWrite.All", "Calls.AccessMedia.All"] {
+            assert_eq!(
+                risk_level_for_app_permission(v),
+                Some(RiskLevel::High),
+                "{v}"
+            );
         }
     }
 

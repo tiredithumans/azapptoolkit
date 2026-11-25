@@ -342,6 +342,12 @@ pub enum AuditCoverageGap {
     /// it. A transient failure means the detection silently stopped working
     /// for this run, so an unused app reads as not flagged.
     SignInActivity,
+    /// The tenant's Conditional Access policies could not be read just now
+    /// (throttled, failing or unreachable) on a tenant and operator that CAN
+    /// read them, so the "no built-in scoping" checklist shows every network
+    /// lock as unknown. A tenant without the license, or an operator without
+    /// a role that reads policies, is "unavailable" instead — never this gap.
+    ConditionalAccess,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -400,6 +406,12 @@ impl AuditCoverageGap {
                  throttling, failing or unreachable), so this run did not check for unused \
                  applications — re-run to include them."
             }
+            AuditCoverageGap::ConditionalAccess => {
+                "The tenant's Conditional Access policies could not be read just now (Microsoft \
+                 Graph was throttling, failing or unreachable), so this run could not check \
+                 whether apps holding unnarrowable permissions are locked to named networks — \
+                 re-run to include it."
+            }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."
             }
@@ -439,6 +451,7 @@ mod tests {
             app_owner_organization_id: None,
             sp_risk_state: None,
             sp_risk_level: None,
+            unscopable_grants: Vec::new(),
         };
         let items = [
             item(RiskLevel::High, CredentialStatus::Expired, false),

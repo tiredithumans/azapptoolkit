@@ -791,6 +791,7 @@ fn emitted_issue_markers_are_stable() {
             ResourcePermission::graph("Sites.Read.All"),     // ORG_WIDE_SHAREPOINT
             ResourcePermission::graph("Sites.Selected"),     // SCOPED_SHAREPOINT
             ResourcePermission::graph("Files.ReadWrite.All"), // ORG_WIDE_FILES
+            ResourcePermission::graph("CallRecords.Read.All"), // UNSCOPABLE_PRIVILEGED
         ],
         scope_values: vec!["Directory.AccessAsUser.All".into()], // HIGH_RISK_DELEGATED_PERMS
         ..Default::default()
@@ -806,6 +807,7 @@ fn emitted_issue_markers_are_stable() {
         issue::SCOPED_SHAREPOINT,
         issue::NO_OWNERS,
         issue::REDUNDANT_APP_PERMS,
+        issue::UNSCOPABLE_PRIVILEGED,
     ] {
         assert!(
             emits(marker),
@@ -1803,6 +1805,7 @@ fn characterizes_full_output_for_a_rich_app() {
             "Organization-wide mailbox access: Mail.ReadWrite, Mail.Read",
             "Organization-wide SharePoint access: Sites.ReadWrite.All",
             "High-risk delegated permissions: Directory.AccessAsUser.All",
+            "No built-in scoping: Directory.ReadWrite.All — Microsoft offers no way to narrow these, so each reaches the whole tenant",
             "No owners assigned — ownership/accountability gap",
             "App instance property lock is not fully enabled — credentials could be added to the service principal to abuse its permissions",
             "Public client flows are enabled and credentials are present — if this app is used only as a public/installed client, the credentials should be removed",
@@ -1822,6 +1825,7 @@ fn characterizes_full_output_for_a_rich_app() {
             "Scope mailbox access to specific mailboxes using RBAC for Applications",
             "Restrict SharePoint access to specific sites using Sites.Selected",
             "Review high-risk delegated permissions; prefer narrowly-scoped delegated permissions and user consent where appropriate",
+            "Remove any the app doesn't need; for the rest, review the safeguards around it (a Conditional Access network lock, certificate-only credentials, owners)",
             "Assign at least one owner so the application has clear accountability",
             "Enable the app instance property lock for all sensitive properties (servicePrincipalLockConfiguration) — especially for multitenant apps, where a foreign tenant's admin could otherwise add credentials to the service principal",
             "If this app is used only as a public/installed client, remove its client secrets/certificates — public clients authenticate without app credentials. (A confidential app that merely allows public-client flows can keep them.)",
@@ -2603,13 +2607,14 @@ fn worst_case_combines_multiple_rules() {
     let item = score_application(&app, Some(false), &perms, now());
     assert_eq!(item.risk_score, 37);
     assert_eq!(item.risk_level, RiskLevel::Critical);
-    // 9 issues: high perms, admin consent, SP disabled, all expired, stale
+    // 10 issues: high perms, admin consent, SP disabled, all expired, stale
     // app, the advisory org-wide mailbox access flag (Mail.Send), the advisory
-    // high-risk delegated flag (Directory.AccessAsUser.All), the instance-lock
+    // high-risk delegated flag (Directory.AccessAsUser.All), the Rule 24
+    // no-built-in-scoping advisory (Directory.ReadWrite.All), the instance-lock
     // advisory (app holds permissions/credentials with the lock off), and the
     // prefer-certificate-over-secret advisory (the app carries a secret). All
     // advisory flags add no score (still 37).
-    assert_eq!(item.issues.len(), 9);
+    assert_eq!(item.issues.len(), 10);
 }
 
 #[test]
@@ -3022,4 +3027,91 @@ fn undeclared_grants_score_but_never_seed_a_manifest_fix() {
         .find(|r| r.kind == RemediationKind::ScopeMailboxAccess)
         .expect("the declared mail permission keeps its Scope Fix");
     assert_eq!(fix.targets, vec!["Mail.Send".to_string()]);
+}
+
+// ---- Rule 24: no built-in scoping (advisory) ----------------------------
+
+fn unscopable(value: &str, risk: RiskLevel, m: Option<UnmanagedMechanism>) -> UnscopableGrant {
+    UnscopableGrant {
+        permission: ResourcePermission::graph(value),
+        risk,
+        microsoft_mechanism: m,
+        network_lock: crate::conditional_access::NetworkLock::Unknown,
+    }
+}
+
+#[test]
+fn rule24_lists_unscopable_grants_without_score() {
+    let with = AppPermissions {
+        app_role_grants: vec![
+            ResourcePermission::graph("CallRecords.Read.All"),
+            ResourcePermission::graph("Mail.Read"),
+        ],
+        ..Default::default()
+    };
+    let without = AppPermissions {
+        app_role_grants: vec![ResourcePermission::graph("Mail.Read")],
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &with, now());
+    let baseline = score_application(&base_app(), Some(true), &without, now());
+    assert_eq!(
+        item.unscopable_grants,
+        vec![unscopable("CallRecords.Read.All", RiskLevel::Medium, None)]
+    );
+    let line = item
+        .issues
+        .iter()
+        .find(|i| i.starts_with(issue::UNSCOPABLE_PRIVILEGED))
+        .expect("Rule 24 issue line");
+    assert!(line.contains("CallRecords.Read.All"), "{line}");
+    assert!(!line.contains("Mail.Read"), "{line}");
+    // Rule 24 itself adds nothing: the difference is the grant's tier weight.
+    assert_eq!(
+        item.risk_score,
+        baseline.risk_score + PTS_MEDIUM_RISK_APP_PERM
+    );
+    assert!(baseline.unscopable_grants.is_empty());
+    assert!(
+        !baseline
+            .issues
+            .iter()
+            .any(|i| i.starts_with(issue::UNSCOPABLE_PRIVILEGED))
+    );
+}
+
+#[test]
+fn rule24_counts_undeclared_grants_once() {
+    let perms = AppPermissions {
+        // Declared AND granted-but-undeclared: merged into the list twice.
+        app_role_grants: vec![
+            ResourcePermission::graph("CallRecords.Read.All"),
+            ResourcePermission::graph("CallRecords.Read.All"),
+        ],
+        undeclared_grants: vec![ResourcePermission::graph("CallRecords.Read.All")],
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &perms, now());
+    assert_eq!(
+        item.unscopable_grants,
+        vec![unscopable("CallRecords.Read.All", RiskLevel::Medium, None)]
+    );
+}
+
+#[test]
+fn rule24_runs_on_sp_only_rows() {
+    let item = score_service_principal(&base_sp(), &sp_perms(&["Chat.Read.All"]), now());
+    assert_eq!(
+        item.unscopable_grants,
+        vec![unscopable(
+            "Chat.Read.All",
+            RiskLevel::Medium,
+            Some(UnmanagedMechanism::ResourceSpecificConsent)
+        )]
+    );
+    assert!(
+        item.issues
+            .iter()
+            .any(|i| i.starts_with(issue::UNSCOPABLE_PRIVILEGED))
+    );
 }

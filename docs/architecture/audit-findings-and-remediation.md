@@ -29,6 +29,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 12 | `rule_sharepoint_advisory` | advisory | `ORG_WIDE_SHAREPOINT`, `UNCONFINABLE_SHAREPOINT`, `ORG_WIDE_FILES`, `SCOPED_SHAREPOINT` | `orgwide_sharepoint`, `unconfinable_orgwide`, `orgwide_files`, `scoped_sites` | `ScopeSharePointAccess` (Sites only — the Files advisory has no fix) | not cited |
 | 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130`; the broad-prefix half (`is_risky_delegated_scope`, every Selected scope excluded) is net-new |
 | 23 | `rule_granted_undeclared` | advisory (the grants themselves are weighted by Rules 1/2 — the runner merges them into `app_role_grants`) | `GRANTED_NOT_DECLARED` | `granted_undeclared` | — (revoking a deliberate grant is admin-judged) | net-new |
+| 24 | `rule_unscopable_privileged` (+ the runner's `apply_network_locks` post-pass) | advisory (the grants are weighted by Rules 1/2) | `UNSCOPABLE_PRIVILEGED` (structured `unscopable_grants`) | `unscopable_privileged` | — (removing a permission is admin-judged) | net-new; see [No built-in scoping](#no-built-in-scoping-rule-24) |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
 | 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
@@ -67,7 +68,7 @@ scoring but never labelled undeclared (its declarations were what failed — the
 carries `PermissionResolution`).
 
 SP-only rows run
-Rules 1–4, 11–13 and 21–22 plus the risky-SP and sign-in post-passes (not the credential-usage
+Rules 1–4, 11–13 and 21–22 and 24 plus the risky-SP and sign-in post-passes (not the credential-usage
 one: a service principal carries no local credentials to judge; see
 [SP-only principals](#sp-only-principals-in-the-audit-no-local-application)).
 
@@ -385,6 +386,47 @@ cores), then swap the declaration in one `requiredResourceAccess` patch (`swap_d
 pure — note `remove_declared_access` prunes an emptied resource entry, so a broad-only resource is
 recreated to carry the narrow role). Idempotent: a broad permission already gone is a no-op
 success with every `DowngradeOutcome` flag `false`.
+
+## No built-in scoping (Rule 24)
+
+Some Graph application permissions have no Microsoft-provided way to narrow them —
+`CallRecords.Read.All` is the canonical one (Microsoft's call-records FAQ: tenant-wide by
+design). Rule 24 names them; it never changes the score (their tier weight is Rules 1/2's), and
+nothing it reports is a scope.
+
+- **One classifier**, `audit::is_unscopable_privileged` (`audit/unscopable.rs`), read by Rule 24,
+  the Permissions-tab / held-permissions "No built-in scoping" badge (`scope_badge.rs`), the
+  picker note (`permission_picker::scope_hint_note`) and the Grant access wizard's review
+  warning. True for a risk-weighted **Microsoft Graph** application permission (an unresolved
+  resource is treated as Graph; the Graph appId compares case-insensitively) that is not a
+  directory read (`DIRECTORY_READ_EXCLUSIONS`), not mailbox-reaching / SharePoint site access /
+  org-wide Files (Rules 11/12 own those, with different advice), and has no mechanism the toolkit
+  applies (`scope_kind_for`) or swaps to (`least_privilege_alternative_for`, or
+  `Application.ReadWrite.All` → `Application.ReadWrite.OwnedBy`). `Application.ReadWrite.OwnedBy`
+  is itself the narrowed form and is never flagged.
+- **Microsoft mechanisms the toolkit doesn't manage** (`UnmanagedMechanism`: Teams meeting access
+  policy, resource-specific consent, admin-unit-scoped roles) still flag — the toolkit can't apply
+  them — and the copy says Microsoft can narrow the permission that way. Graph only.
+- **Network lock, per grant.** The run reads Conditional Access policies once
+  (`prefetch_conditional_access`, `Policy.Read.All`) and `apply_network_locks` fills each grant's
+  `NetworkLock` via `conditional_access::network_lock_for`: an enabled policy whose client axis
+  names the service principal (or every workload identity, `ServicePrincipalsInMyTenant`
+  included), whose resource axis covers the **grant's** resource (exclude wins; `Office365` / an
+  application filter only "may"), that includes every location (`All`, trusted ones excluded)
+  with a `block` control and no `servicePrincipalRiskLevels` gate — a block on a deny-list of
+  places or on `AllTrusted` is not a lock. Report-only and may-apply policies get their own
+  verdicts. `NotPossible` covers what Conditional Access for workload identities can't target
+  (managed identities, apps owned by another tenant, multi-tenant apps, apps without a service
+  principal — `lock_ineligibility_for_app` / `_sp`), and wins over `Unknown`: it is known
+  without the read.
+- **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
+  every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
+  can read policies → `AuditCoverageGap::ConditionalAccess`. `Unknown` is never shown as "no lock".
+- **The checklist** (`views/audit_view/unscopable_checklist.rs`) is the group's Detail cell:
+  per grant the lock line and any Microsoft mechanism, then credentials, owners and the instance
+  property lock (application
+  rows only — an SP-only row's live in its home tenant) and the last sign-in. No line says
+  "scoped", "confined" or "limited to" (pinned by test). Not a posture bucket.
 
 ## The risky-service-principal signal (Rule 22)
 

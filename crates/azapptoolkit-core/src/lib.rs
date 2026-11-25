@@ -4,6 +4,7 @@ pub mod azure_roles;
 pub mod cache;
 pub mod capabilities;
 pub mod cloud;
+pub mod conditional_access;
 pub mod constants;
 // Pure data types, ungated for wasm: used as the get/set_tenant_defaults IPC
 // payload; persistence lives in `settings`.
