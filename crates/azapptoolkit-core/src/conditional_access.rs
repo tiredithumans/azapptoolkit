@@ -381,6 +381,115 @@ pub fn lock_ineligibility_for_sp(
     }
 }
 
+// ---- the toolkit's own lock (B2) -------------------------------------------
+
+/// Display-name prefix of every lock policy the toolkit creates — one of the
+/// three things [`toolkit_lock_for`] checks before the toolkit will change or
+/// delete a policy.
+pub const TOOLKIT_LOCK_PREFIX: &str = "azapptoolkit network lock — ";
+
+/// The lock policy's display name for an app, within Graph's 256-char limit
+/// (cut on a character boundary).
+pub fn lock_display_name(app_display_name: &str) -> String {
+    format!("{TOOLKIT_LOCK_PREFIX}{app_display_name}")
+        .chars()
+        .take(256)
+        .collect()
+}
+
+/// The create body for a per-app network lock: report-only, block every
+/// resource for this one service principal from everywhere except the given
+/// named locations. Shape per Microsoft Learn's workload-identity sample plus
+/// the documented-required `clientAppTypes`; [`network_lock_for`] reads it
+/// back as `ReportOnly` (then `Enforced` once enabled) — pinned by test.
+pub fn lock_policy_body(
+    display_name: &str,
+    sp_object_id: &str,
+    excluded_location_ids: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "displayName": display_name,
+        "state": "enabledForReportingButNotEnforced",
+        "conditions": {
+            "applications": { "includeApplications": ["All"] },
+            "clientApplications": { "includeServicePrincipals": [sp_object_id] },
+            "clientAppTypes": ["all"],
+            "locations": {
+                "includeLocations": ["All"],
+                "excludeLocations": excluded_location_ids,
+            },
+        },
+        "grantControls": { "operator": "OR", "builtInControls": ["block"] },
+    })
+}
+
+/// The toolkit's own lock for `sp_object_id`, in ANY state (report-only,
+/// enabled, or disabled in the portal): our display-name prefix, exactly this
+/// one service principal, and the exact lock shape. Anything else — someone's
+/// own policy, a tenant-wide lock, or ours edited in the portal — is not ours
+/// to change or delete.
+pub fn toolkit_lock_for<'a>(
+    policies: &'a [ConditionalAccessPolicy],
+    sp_object_id: &str,
+) -> Option<&'a ConditionalAccessPolicy> {
+    policies.iter().find(|p| {
+        let Some(c) = &p.conditions else {
+            return false;
+        };
+        let named = p
+            .display_name
+            .as_deref()
+            .is_some_and(|n| n.starts_with(TOOLKIT_LOCK_PREFIX));
+        let only_this_sp = c.client_applications.as_ref().is_some_and(|ca| {
+            ca.include_service_principals.len() == 1
+                && ca.include_service_principals[0].eq_ignore_ascii_case(sp_object_id)
+        });
+        let all_apps = c
+            .applications
+            .as_ref()
+            .is_some_and(|a| a.include_applications == ["All"]);
+        let all_but_some_places = c.locations.as_ref().is_some_and(|l| {
+            l.include_locations.iter().any(|x| x == "All") && !l.exclude_locations.is_empty()
+        });
+        let blocks = p
+            .grant_controls
+            .as_ref()
+            .is_some_and(|g| g.built_in_controls.iter().any(|x| x == "block"));
+        named
+            && only_this_sp
+            && all_apps
+            && all_but_some_places
+            && blocks
+            && c.service_principal_risk_levels.is_empty()
+    })
+}
+
+/// Why a CIDR range was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CidrError {
+    /// Not `address/prefix`, or the prefix is past the address family's width.
+    Malformed,
+    /// `/0` covers every address: an exclusion of it makes the lock meaningless.
+    PrefixZero,
+}
+
+/// Parses an IPv4 / IPv6 CIDR range for a named location: `(is_ipv6, text)`
+/// with surrounding whitespace trimmed. `/0` is refused.
+pub fn parse_cidr(input: &str) -> Result<(bool, String), CidrError> {
+    let text = input.trim();
+    let (addr, prefix) = text.split_once('/').ok_or(CidrError::Malformed)?;
+    let addr: std::net::IpAddr = addr.parse().map_err(|_| CidrError::Malformed)?;
+    let prefix: u8 = prefix.parse().map_err(|_| CidrError::Malformed)?;
+    let max = if addr.is_ipv6() { 128 } else { 32 };
+    if prefix > max {
+        return Err(CidrError::Malformed);
+    }
+    if prefix == 0 {
+        return Err(CidrError::PrefixZero);
+    }
+    Ok((addr.is_ipv6(), text.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,6 +1029,134 @@ mod tests {
                 serde_json::json!({"state": "enforced", "policy_ids": ["p"]})
             );
             assert_eq!(NetworkLock::default(), NetworkLock::Unknown);
+        }
+    }
+
+    // ---- the toolkit's own lock (B2) ------------------------------------
+
+    mod toolkit_lock {
+        use super::*;
+        use crate::models::ConditionalAccessPolicy;
+
+        const G: &str = "00000003-0000-0000-c000-000000000000";
+        const LOC: &str = "aaaaaaaa-0000-0000-0000-00000000loc1";
+
+        fn body_policy() -> ConditionalAccessPolicy {
+            let mut v = lock_policy_body(&lock_display_name("Payroll"), SP, &[LOC.to_string()]);
+            v["id"] = serde_json::json!("pol-1");
+            serde_json::from_value(v).unwrap()
+        }
+
+        #[test]
+        fn lock_body_round_trips_as_a_report_only_lock() {
+            let p = body_policy();
+            assert_eq!(
+                network_lock_for(&[p.clone()], SP, G),
+                NetworkLock::ReportOnly
+            );
+            let mut enabled = p.clone();
+            enabled.state = Some("enabled".into());
+            assert_eq!(
+                network_lock_for(&[enabled.clone()], SP, G),
+                NetworkLock::Enforced {
+                    policy_ids: vec!["pol-1".into()]
+                }
+            );
+            let mut disabled = p.clone();
+            disabled.state = Some("disabled".into());
+            for policy in [p, enabled, disabled] {
+                assert!(
+                    toolkit_lock_for(std::slice::from_ref(&policy), SP).is_some(),
+                    "{:?}",
+                    policy.state
+                );
+            }
+            let v = lock_policy_body("n", SP, &[LOC.to_string()]);
+            assert_eq!(v["state"], "enabledForReportingButNotEnforced");
+            assert_eq!(
+                v["conditions"]["clientAppTypes"],
+                serde_json::json!(["all"])
+            );
+        }
+
+        #[test]
+        fn toolkit_lock_for_refuses_foreign_or_changed_policies() {
+            let changed: [fn(&mut ConditionalAccessPolicy); 6] = [
+                |p| p.display_name = Some("Someone's lock".into()),
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .client_applications
+                        .as_mut()
+                        .unwrap()
+                        .include_service_principals
+                        .push(OTHER_SP.into())
+                },
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .client_applications
+                        .as_mut()
+                        .unwrap()
+                        .include_service_principals = vec!["ServicePrincipalsInMyTenant".into()]
+                },
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .locations
+                        .as_mut()
+                        .unwrap()
+                        .include_locations = vec!["AllTrusted".into()]
+                },
+                |p| p.grant_controls.as_mut().unwrap().built_in_controls = vec!["mfa".into()],
+                |p| {
+                    p.conditions.as_mut().unwrap().service_principal_risk_levels =
+                        vec!["high".into()]
+                },
+            ];
+            for (i, change) in changed.iter().enumerate() {
+                let mut p = body_policy();
+                change(&mut p);
+                assert!(toolkit_lock_for(&[p], SP).is_none(), "case {i}");
+            }
+            // The SP compare is case-insensitive.
+            assert!(toolkit_lock_for(&[body_policy()], &SP.to_uppercase()).is_some());
+        }
+
+        #[test]
+        fn parse_cidr_table() {
+            let cases: [(&str, Result<(bool, &str), CidrError>); 7] = [
+                ("10.0.0.0/8", Ok((false, "10.0.0.0/8"))),
+                (" 2001:db8::/32 ", Ok((true, "2001:db8::/32"))),
+                ("0.0.0.0/0", Err(CidrError::PrefixZero)),
+                ("::/0", Err(CidrError::PrefixZero)),
+                ("10.0.0.0/33", Err(CidrError::Malformed)),
+                ("10.0.0.0", Err(CidrError::Malformed)),
+                ("nope/8", Err(CidrError::Malformed)),
+            ];
+            for (input, want) in cases {
+                let got = parse_cidr(input);
+                assert_eq!(
+                    got.as_ref().map(|(v6, t)| (*v6, t.as_str())),
+                    want.as_ref().map(|(v6, t)| (*v6, *t)),
+                    "{input}"
+                );
+            }
+        }
+
+        #[test]
+        fn lock_display_name_caps_at_256() {
+            assert_eq!(
+                lock_display_name("Payroll"),
+                format!("{TOOLKIT_LOCK_PREFIX}Payroll")
+            );
+            let long = "é".repeat(400);
+            let name = lock_display_name(&long);
+            assert!(name.chars().count() <= 256);
+            assert!(name.starts_with(TOOLKIT_LOCK_PREFIX));
         }
     }
 }
