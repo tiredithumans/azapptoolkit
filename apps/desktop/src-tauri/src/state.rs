@@ -800,6 +800,13 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_conditional_access_write_scopes(),
             );
+            // RoleManagement.ReadWrite.Directory + AdministrativeUnit.ReadWrite.All
+            // for admin-unit scoping — on demand, never at sign-in.
+            let admin_unit_roles_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_admin_unit_roles_scopes(),
+            );
             // Sites.FullControl.All for the SharePoint Sites.Selected tab — on demand
             // (incremental consent), never at sign-in; the site-permission reads as
             // well as writes require it, so the SharePoint calls ride this token.
@@ -832,6 +839,7 @@ impl AppState {
                 .with_risky_sp_token(risky_sp_token)
                 .with_policy_write_token(policy_write_token)
                 .with_conditional_access_write_token(conditional_access_write_token)
+                .with_admin_unit_roles_token(admin_unit_roles_token)
                 .with_sharepoint_token(sharepoint_token)
                 .with_group_member_token(group_member_token),
             )

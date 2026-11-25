@@ -4,6 +4,7 @@
 
 mod common;
 
+mod admin_units;
 mod applications;
 mod batch;
 mod conditional_access;

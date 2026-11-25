@@ -905,6 +905,74 @@ pub struct CaGrantControls {
     pub operator: Option<String>,
 }
 
+/// A Microsoft Entra administrative unit (`/directory/administrativeUnits`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AdministrativeUnit {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// `Dynamic` or `Assigned` (absent on older units = assigned).
+    #[serde(default)]
+    pub membership_type: Option<String>,
+    #[serde(default)]
+    pub membership_rule: Option<String>,
+    /// `On` or `Paused`.
+    #[serde(default)]
+    pub membership_rule_processing_state: Option<String>,
+    #[serde(default)]
+    pub is_member_management_restricted: Option<bool>,
+}
+
+/// A direct, active Microsoft Entra directory role assignment
+/// (`/roleManagement/directory/roleAssignments`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryRoleAssignment {
+    pub id: String,
+    pub principal_id: String,
+    /// For a built-in role, its template id.
+    pub role_definition_id: String,
+    /// `/` (tenant), `/administrativeUnits/{id}`, or `/{objectId}`.
+    pub directory_scope_id: String,
+    #[serde(default)]
+    pub role_definition: Option<DirectoryRoleDefinition>,
+}
+
+impl DirectoryRoleAssignment {
+    /// The admin unit this assignment is scoped to, if any.
+    pub fn admin_unit_id(&self) -> Option<&str> {
+        self.directory_scope_id
+            .strip_prefix("/administrativeUnits/")
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    }
+
+    /// Whether it applies tenant-wide.
+    pub fn is_tenant_scope(&self) -> bool {
+        self.directory_scope_id == "/"
+    }
+
+    /// The role's template id (the definition's, else the assignment's
+    /// `roleDefinitionId`, which is the template id for a built-in role).
+    pub fn role_template_id(&self) -> &str {
+        self.role_definition
+            .as_ref()
+            .and_then(|d| d.template_id.as_deref())
+            .unwrap_or(&self.role_definition_id)
+    }
+}
+
+/// The role definition expanded on a [`DirectoryRoleAssignment`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryRoleDefinition {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub template_id: Option<String>,
+}
+
 /// A Conditional Access named location (`/identity/conditionalAccess/namedLocations`).
 /// Only IP locations carry ranges; country locations deserialize with none.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
