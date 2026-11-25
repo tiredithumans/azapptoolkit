@@ -45,6 +45,7 @@ use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{
     GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in,
 };
+use azapptoolkit_core::scoping::admin_unit::is_scopable_directory_write_resource_permission;
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
@@ -85,8 +86,12 @@ fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKin
     // until a resource is picked. A held `Files.SelectedOperations.Selected` with
     // no per-item grants is an app that cannot read a single file, and this is
     // the row an operator lands on when they go looking for why.
-    is_scoped_sharepoint_item_resource_permission(resource_app_id, value)
-        .then_some(ScopeKind::SharePointItem)
+    if is_scoped_sharepoint_item_resource_permission(resource_app_id, value) {
+        return Some(ScopeKind::SharePointItem);
+    }
+    // A tenant-wide directory write can be limited to an admin unit.
+    is_scopable_directory_write_resource_permission(resource_app_id, value)
+        .then_some(ScopeKind::AdministrativeUnit)
 }
 
 /// The admin-consent outcome as a toast message: `Ok` for a clean grant, `Err`
@@ -1434,6 +1439,18 @@ mod tests {
     fn a_non_sites_permission_has_no_per_row_mechanism() {
         assert_eq!(
             row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Directory.Read.All"),
+            None
+        );
+    }
+
+    #[test]
+    fn directory_writes_get_the_scope_button() {
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "User.ReadWrite.All"),
+            Some(ScopeKind::AdministrativeUnit)
+        );
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "User.Read.All"),
             None
         );
     }

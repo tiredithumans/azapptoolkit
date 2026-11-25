@@ -45,8 +45,10 @@ use std::fmt::Write;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, Field};
 
+use crate::bindings::admin_units::{self, AdminUnitDto};
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
+use crate::components::admin_unit_panel::AdminUnitPanel;
 use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
@@ -58,8 +60,9 @@ use crate::components::ui::{Callout, FormError, Select, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::audit::is_unscopable_privileged;
+use azapptoolkit_core::scoping::admin_unit::directory_write_mapping;
 use azapptoolkit_core::scoping::{
-    ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
+    MICROSOFT_GRAPH_APP_ID, ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
 };
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{GrantRef, PermissionKind};
@@ -89,6 +92,7 @@ enum ScopeMode {
     Existing,
     Sites,
     Items,
+    AdminUnit,
     OrgWide,
 }
 
@@ -105,9 +109,7 @@ fn mode_options(kind: ScopeKind) -> &'static [(ScopeMode, &'static str)] {
         ],
         ScopeKind::SharePoint => &[(ScopeMode::Sites, "Specific sites")],
         ScopeKind::SharePointItem => &[(ScopeMode::Items, "Specific libraries, folders & files")],
-        // Not offered yet: `cart_mechanism` maps this kind to org-wide until
-        // the admin-unit panel lands, so this row is never read.
-        ScopeKind::AdministrativeUnit => &[],
+        ScopeKind::AdministrativeUnit => &[(ScopeMode::AdminUnit, "One admin unit")],
     }
 }
 
@@ -149,6 +151,7 @@ fn consent_scope(mode: ScopeMode) -> &'static str {
         ScopeMode::OrgWide => "write",
         ScopeMode::Managed | ScopeMode::Existing => "exchange",
         ScopeMode::Sites | ScopeMode::Items => "sharepoint",
+        ScopeMode::AdminUnit => "admin_unit_roles",
     }
 }
 
@@ -516,6 +519,49 @@ async fn apply_orgwide(
     Ok(applied)
 }
 
+/// Limits `value` to the admin unit `unit` (assign the matching role at the
+/// unit, ensure tenant-wide read, strip the tenant-wide write when safe).
+/// What was kept, or still covers the app, comes back as warnings so the
+/// wizard stays open on them.
+async fn apply_admin_unit_scoped(
+    tenant_id: String,
+    target: ScopeTarget,
+    value: String,
+    unit: AdminUnitDto,
+    created_now: bool,
+) -> Result<Applied, UiError> {
+    let r = admin_units::scope_directory_write(admin_units::ScopeDirectoryWriteArgs {
+        tenant_id: &tenant_id,
+        sp_object_id: &target.sp_object_id,
+        object_id: target.object_id.as_deref(),
+        app_id: &target.app_id,
+        permission_value: &value,
+        admin_unit_id: &unit.id,
+        created_now,
+    })
+    .await?;
+    let role = directory_write_mapping(Some(MICROSOFT_GRAPH_APP_ID), &value)
+        .map_or("The admin role", |m| m.role_name);
+    let mut summary = if r.role_already_held {
+        format!("{role} was already limited to {}.", unit.display_name)
+    } else {
+        format!("{role} assigned, limited to {}.", unit.display_name)
+    };
+    if r.orgwide_removed {
+        let _ = write!(summary, " Removed the tenant-wide {value}.");
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(r.kept_reason);
+    if let Some(covering) = r.covering_role {
+        warnings.push(format!(
+            "The app also holds {covering} tenant-wide, so its writes still reach everyone. \
+             Remove that role to make the limit real."
+        ));
+    }
+    warnings.extend(r.warnings);
+    Ok(Applied { summary, warnings })
+}
+
 /// The single scoping mechanism this cart can apply, or `None` for org-wide.
 ///
 /// `Some(k)` only when the cart is non-empty **and** every item is an
@@ -542,10 +588,6 @@ fn cart_mechanism(cart: &[PickerSelection]) -> Option<ScopeKind> {
         // be confined. Inferring from the value alone offered an apply step that
         // would leave the grant org-wide on the legacy resource.
         let k = scope_kind_for(Some(&item.resource_app_id), &item.permission_value)?;
-        // The admin-unit mechanism has no wizard panel yet: org-wide only.
-        if k == ScopeKind::AdministrativeUnit {
-            return None;
-        }
         match kind {
             None => kind = Some(k),
             Some(prev) if prev == k => {}
@@ -560,6 +602,11 @@ fn cart_mechanism(cart: &[PickerSelection]) -> Option<ScopeKind> {
     // panel to show and falls back to org-wide, exactly as a mixed-mechanism
     // cart does. One level is what makes the resolved-target preview meaningful.
     if kind == Some(ScopeKind::SharePointItem) && cart_level(cart).is_none() {
+        return None;
+    }
+    // One directory write per run: each needs a different role and a
+    // different kind of admin unit, so one unit can't serve two.
+    if kind == Some(ScopeKind::AdministrativeUnit) && cart.len() != 1 {
         return None;
     }
     kind
@@ -636,6 +683,10 @@ pub fn ScopeWizard(
     let site_write = RwSignal::new(false);
     let item_urls = RwSignal::new(String::new());
     let item_write = RwSignal::new(false);
+    // The admin-unit mechanism's target: the unit picked or created, and
+    // whether it was created in this run.
+    let au_selected: RwSignal<Option<AdminUnitDto>> = RwSignal::new(None);
+    let au_created_now = RwSignal::new(false);
     // The org-wide path's "Expires" choice: `never` or a day count.
     let expires_in = RwSignal::new("never".to_string());
     // Only Application grants can carry an expiry (it's a tag on the holding
@@ -684,6 +735,8 @@ pub fn ScopeWizard(
         // open of the wizard, pre-filled against a different permission.
         item_urls.set(String::new());
         item_write.set(false);
+        au_selected.set(None);
+        au_created_now.set(false);
         expires_in.set("never".to_string());
         busy.set(false);
         error.set(None);
@@ -789,6 +842,7 @@ pub fn ScopeWizard(
             ExchangeScoped(Vec<String>),
             SharePointScoped(Vec<String>, &'static str),
             SharePointItemScoped(Vec<String>, &'static str, String),
+            AdminUnitScoped(String, AdminUnitDto, bool),
             OrgWide,
         }
         // Keyed on the effective mode alone: a scoped mode exists only while its
@@ -853,6 +907,17 @@ pub fn ScopeWizard(
                 };
                 Plan::SharePointItemScoped(urls, role, value)
             }
+            ScopeMode::AdminUnit => {
+                let Some(unit) = au_selected.get_untracked() else {
+                    error.set(Some("Pick an admin unit, or create one.".into()));
+                    return;
+                };
+                let Some(value) = items.first().map(|i| i.permission_value.clone()) else {
+                    error.set(Some("Select at least one permission.".into()));
+                    return;
+                };
+                Plan::AdminUnitScoped(value, unit, au_created_now.get_untracked())
+            }
         };
 
         let expires_on = expiry_date_in(&expires_in.get_untracked(), jiff::Timestamp::now());
@@ -872,6 +937,9 @@ pub fn ScopeWizard(
                 }
                 Plan::SharePointItemScoped(urls, role, value) => {
                     apply_sharepoint_item_scoped(tenant_id, target, urls, role, value).await
+                }
+                Plan::AdminUnitScoped(value, unit, created_now) => {
+                    apply_admin_unit_scoped(tenant_id, target, value, unit, created_now).await
                 }
             };
             // Land nothing on a switched or signed-out tenant: the task outlives
@@ -956,6 +1024,7 @@ pub fn ScopeWizard(
         ScopeMode::Managed | ScopeMode::Existing => "Mailbox groups",
         ScopeMode::Sites => "Sites",
         ScopeMode::Items => "Libraries, folders & files",
+        ScopeMode::AdminUnit => "Admin unit",
         ScopeMode::OrgWide => "Reach",
     };
 
@@ -976,6 +1045,10 @@ pub fn ScopeWizard(
             ScopeMode::Existing => parse_lines(&existing_groups.get()),
             ScopeMode::Sites => parse_lines(&site_urls.get()),
             ScopeMode::Items => parse_lines(&item_urls.get()),
+            ScopeMode::AdminUnit => au_selected
+                .with(|u| u.as_ref().map(|u| u.display_name.clone()))
+                .into_iter()
+                .collect(),
             ScopeMode::OrgWide => Vec::new(),
         }
     };
@@ -995,6 +1068,12 @@ pub fn ScopeWizard(
         let after = match active_mode.get() {
             ScopeMode::Managed | ScopeMode::Existing => "the scoped role assignment",
             ScopeMode::Sites => "per-site access",
+            ScopeMode::AdminUnit => {
+                if au_created_now.get() {
+                    return None;
+                }
+                "the limited role and tenant-wide read"
+            }
             ScopeMode::Items | ScopeMode::OrgWide => return None,
         };
         let perms = selected.with(|s| perm_values(s).join(", "));
@@ -1018,6 +1097,24 @@ pub fn ScopeWizard(
             ScopeMode::Items => format!(
                 "Grant {perms}, scoped to the chosen libraries, folders or files. The app reaches nothing else, and permission inheritance is broken on each target.",
             ),
+            ScopeMode::AdminUnit => {
+                let role = selected.with(|s| {
+                    s.first()
+                        .and_then(|i| {
+                            directory_write_mapping(Some(&i.resource_app_id), &i.permission_value)
+                        })
+                        .map_or("The matching admin role", |m| m.role_name)
+                });
+                if au_created_now.get() {
+                    format!(
+                        "Assign {role}, limited to this admin unit. The unit was just created, so the tenant-wide {perms} stays for now."
+                    )
+                } else {
+                    format!(
+                        "Assign {role}, limited to this admin unit, in place of the tenant-wide {perms}. The app keeps reading the whole directory; its writes reach only the unit's members."
+                    )
+                }
+            }
         }
     };
 
@@ -1043,8 +1140,71 @@ pub fn ScopeWizard(
                 />
             }
             .into_any(),
+            ScopeMode::AdminUnit => {
+                let kind = Signal::derive(move || {
+                    selected.with(|s| {
+                        s.first()
+                            .and_then(|i| {
+                                directory_write_mapping(
+                                    Some(&i.resource_app_id),
+                                    &i.permission_value,
+                                )
+                            })
+                            .map(|m| m.member_kind)
+                    })
+                });
+                view! {
+                    <AdminUnitPanel
+                        member_kind=kind
+                        selected=au_selected
+                        created_now=au_created_now
+                    />
+                }
+                .into_any()
+            }
             ScopeMode::OrgWide => ().into_any(),
         }
+    };
+
+    // The admin-unit mechanism's disclosures, shown before the operator
+    // confirms: the tenant-wide read it keeps, what the role also allows, and
+    // what the app can no longer do.
+    let au_disclosures = move || {
+        if active_mode.get() != ScopeMode::AdminUnit {
+            return None;
+        }
+        let mapping = selected.with(|s| {
+            s.first().and_then(|i| {
+                directory_write_mapping(Some(&i.resource_app_id), &i.permission_value)
+            })
+        })?;
+        Some(view! {
+            <div class="scope-wizard__disclosures">
+                <span class="ui-text">
+                    {format!(
+                        "Role: {}. Keeps tenant-wide read ({} or Directory.Read.All), which the role needs.",
+                        mapping.role_name,
+                        mapping.read_permission,
+                    )}
+                </span>
+                <strong>"The role also allows"</strong>
+                <ul class="member-list">
+                    {mapping
+                        .also_allows
+                        .iter()
+                        .map(|l| view! { <li>{*l}</li> })
+                        .collect_view()}
+                </ul>
+                <strong>"The app can no longer"</strong>
+                <ul class="member-list">
+                    {mapping
+                        .no_longer
+                        .iter()
+                        .map(|l| view! { <li>{*l}</li> })
+                        .collect_view()}
+                </ul>
+            </div>
+        })
     };
 
     view! {
@@ -1229,6 +1389,7 @@ pub fn ScopeWizard(
                     }}
                 </dl>
                 <span class="ui-text">{review_line}</span>
+                {au_disclosures}
                 {move || {
                     selected
                         .with(|s| unscopable_cart_warning(s))
@@ -1571,17 +1732,39 @@ mod tests {
         );
     }
 
-    const MECHANISMS: [ScopeKind; 3] = [
+    const MECHANISMS: [ScopeKind; 4] = [
         ScopeKind::Exchange,
         ScopeKind::SharePoint,
         ScopeKind::SharePointItem,
+        ScopeKind::AdministrativeUnit,
     ];
-    const SCOPED_MODES: [ScopeMode; 4] = [
+    const SCOPED_MODES: [ScopeMode; 5] = [
         ScopeMode::Managed,
         ScopeMode::Existing,
         ScopeMode::Sites,
         ScopeMode::Items,
+        ScopeMode::AdminUnit,
     ];
+
+    #[test]
+    fn one_directory_write_per_run_takes_the_admin_unit_mechanism() {
+        let pick = |value: &str| PickerSelection {
+            resource_app_id: MICROSOFT_GRAPH_APP_ID.to_string(),
+            kind: PermissionKind::Application,
+            permission_id: format!("{value}-id"),
+            permission_value: value.to_string(),
+        };
+        assert_eq!(
+            cart_mechanism(&[pick("User.ReadWrite.All")]),
+            Some(ScopeKind::AdministrativeUnit)
+        );
+        assert_eq!(
+            cart_mechanism(&[pick("User.ReadWrite.All"), pick("Group.ReadWrite.All")]),
+            None,
+            "each permission needs a different role and kind of unit"
+        );
+        assert_eq!(consent_scope(ScopeMode::AdminUnit), "admin_unit_roles");
+    }
 
     #[test]
     fn every_mechanism_offers_a_scoped_mode_and_defaults_to_its_first() {

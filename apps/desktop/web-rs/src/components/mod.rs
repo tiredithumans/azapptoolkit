@@ -1,6 +1,7 @@
 //! Shared UI components used across multiple views.
 
 pub mod aap_migration_report;
+pub mod admin_unit_panel;
 pub mod app_site_access_panel;
 pub mod audit_dashboard;
 pub mod browser_fallback_notice;

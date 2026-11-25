@@ -48,6 +48,10 @@ use crate::util::count_noun;
 /// button. Mirrors the SharePoint arm of `permissions_tab::row_scope_kind`.
 fn is_held_scopable(resource_app_id: Option<&str>, value: &str) -> bool {
     is_scopable_sharepoint_resource_permission(resource_app_id, value)
+        || azapptoolkit_core::scoping::admin_unit::is_scopable_directory_write_resource_permission(
+            resource_app_id,
+            value,
+        )
 }
 
 #[component]

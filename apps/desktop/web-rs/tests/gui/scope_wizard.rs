@@ -963,3 +963,140 @@ async fn orgwide_with_expiry_sets_it_after_granting() {
     );
     assert_eq!(args["expiresOn"], expected.as_str());
 }
+
+// ---- Admin-unit scoping (C1) ----------------------------------------------
+
+const FINANCE_AU: &str = "6c3e1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01";
+const SALES_AU: &str = "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12";
+
+fn admin_units() -> Vec<azapptoolkit_dto::admin_units::AdminUnitDto> {
+    vec![
+        azapptoolkit_dto::admin_units::AdminUnitDto {
+            id: FINANCE_AU.into(),
+            display_name: "Finance".into(),
+            dynamic: true,
+            membership_rule: Some("(user.department -eq \"Finance\")".into()),
+            rule_processing_on: true,
+            restricted: false,
+        },
+        azapptoolkit_dto::admin_units::AdminUnitDto {
+            id: SALES_AU.into(),
+            display_name: "Sales".into(),
+            dynamic: false,
+            membership_rule: None,
+            rule_processing_on: true,
+            restricted: false,
+        },
+    ]
+}
+
+/// The admin-unit radio whose row names `unit`.
+fn admin_unit_radio(unit: &str) -> web_sys::HtmlInputElement {
+    ts::query_all(".admin-unit-panel label")
+        .into_iter()
+        .find(|l| l.text_content().unwrap_or_default().contains(unit))
+        .and_then(|l| l.query_selector("input").ok().flatten())
+        .unwrap_or_else(|| panic!("no admin-unit row for {unit}"))
+        .unchecked_into()
+}
+
+#[wasm_bindgen_test]
+async fn admin_unit_path_assigns_then_reports_kept_or_removed() {
+    let _m = mount_wizard(Some(graph_app_selection("User.ReadWrite.All")));
+    ts::mock_ok("list_admin_units", &admin_units());
+    ts::mock_ok(
+        "scope_directory_write",
+        &azapptoolkit_dto::admin_units::DirectoryWriteScopeResult {
+            role_assigned: true,
+            read_granted: true,
+            orgwide_removed: true,
+            ..Default::default()
+        },
+    );
+    ts::wait_for(|| ts::query(".admin-unit-panel label").is_some()).await;
+    admin_unit_radio("Sales").click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("User Administrator")).await;
+    assert!(
+        ts::body_contains("Reset the passwords of users in the unit"),
+        "the review says what else the role allows"
+    );
+    assert!(
+        ts::body_contains("Change users outside the unit"),
+        "and what the app can no longer do"
+    );
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
+    let args = ts::last_call("scope_directory_write").unwrap().args;
+    assert_eq!(args["adminUnitId"], SALES_AU);
+    assert_eq!(args["permissionValue"], "User.ReadWrite.All");
+    assert_eq!(args["createdNow"], false);
+    assert_eq!(args["spObjectId"], "sp-app");
+    assert_eq!(args["objectId"], "obj-app");
+    assert_eq!(args["appId"], "app-0");
+}
+
+#[wasm_bindgen_test]
+async fn create_by_rule_builds_the_rule_and_keeps_tenant_wide() {
+    let _m = mount_wizard(Some(graph_app_selection("User.ReadWrite.All")));
+    ts::mock_ok(
+        "list_admin_units",
+        &Vec::<azapptoolkit_dto::admin_units::AdminUnitDto>::new(),
+    );
+    ts::mock_ok(
+        "create_admin_unit_by_rule",
+        &azapptoolkit_dto::admin_units::AdminUnitDto {
+            id: FINANCE_AU.into(),
+            display_name: "Finance".into(),
+            dynamic: true,
+            membership_rule: Some("(user.department -eq \"Finance\")".into()),
+            rule_processing_on: true,
+            restricted: false,
+        },
+    );
+    ts::mock_ok(
+        "scope_directory_write",
+        &azapptoolkit_dto::admin_units::DirectoryWriteScopeResult {
+            role_assigned: true,
+            read_already_held: true,
+            kept_reason: Some("The admin unit was just created".into()),
+            ..Default::default()
+        },
+    );
+    ts::wait_for(|| ts::query(".admin-unit-panel__name input").is_some()).await;
+    ts::set_input_value(".admin-unit-panel__name input", "Finance");
+    ts::set_input_value(".admin-unit-panel__value input", "Finance");
+    ts::tick().await;
+    ts::click_button_labelled("Create admin unit");
+    ts::wait_for(|| ts::call_count("create_admin_unit_by_rule") == 1).await;
+    let args = ts::last_call("create_admin_unit_by_rule").unwrap().args;
+    assert_eq!(args["displayName"], "Finance");
+    assert_eq!(args["membershipRule"], "(user.department -eq \"Finance\")");
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::has_button_labelled("Grant access")).await;
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
+    let args = ts::last_call("scope_directory_write").unwrap().args;
+    assert_eq!(args["adminUnitId"], FINANCE_AU);
+    assert_eq!(args["createdNow"], true);
+    ts::wait_for(|| ts::body_contains("just created")).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_group_permission_disables_dynamic_units() {
+    let _m = mount_wizard(Some(graph_app_selection("Group.ReadWrite.All")));
+    ts::mock_ok("list_admin_units", &admin_units());
+    ts::wait_for(|| ts::query(".admin-unit-panel label").is_some()).await;
+    assert!(
+        admin_unit_radio("Finance").disabled(),
+        "a dynamic unit can't hold groups"
+    );
+    assert!(!admin_unit_radio("Sales").disabled());
+    assert!(ts::body_contains("Dynamic rules can't add groups"));
+    assert!(
+        ts::query(".admin-unit-panel__name input").is_none(),
+        "no create-by-rule for groups"
+    );
+}
