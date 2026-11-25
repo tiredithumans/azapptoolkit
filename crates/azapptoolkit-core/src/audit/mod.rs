@@ -27,6 +27,7 @@ mod posture;
 mod scoring;
 mod types;
 mod unscopable;
+mod usage;
 
 pub use credentials::{
     CredentialActivity, CredentialLifetime, SignInStatus, credential_over_cap,
@@ -56,4 +57,8 @@ pub use types::{
 pub use unscopable::{
     DIRECTORY_READ_EXCLUSIONS, NativeScoping, UnmanagedMechanism, UnscopableGrant,
     is_unscopable_privileged, native_scoping_for, unmanaged_mechanism_for,
+};
+pub use usage::{
+    FAMILIES as USAGE_FAMILIES, GrantUsage, USAGE_WINDOW_DAYS, UsageFamily, UsageUnknownReason,
+    families_for_permission, family_for_path, grant_usage, graph_usage_kql, graph_usage_since_kql,
 };
