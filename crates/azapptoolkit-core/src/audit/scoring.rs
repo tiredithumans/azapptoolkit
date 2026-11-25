@@ -617,6 +617,48 @@ fn rule_granted_undeclared(perms: &AppPermissions) -> RuleContribution {
     c
 }
 
+/// Rule 24 (advisory, no score): the held Microsoft Graph application
+/// permissions Microsoft offers no way to narrow (`is_unscopable_privileged`).
+/// Reads every HELD grant (declared and granted-but-undeclared, already
+/// deduped) — it has no Fix to re-plan from the manifest. Their weight is
+/// Rules 1/2's; this rule only names them and returns the structured list.
+fn rule_unscopable_privileged(perms: &AppPermissions) -> (RuleContribution, Vec<UnscopableGrant>) {
+    let mut c = RuleContribution::default();
+    let grants: Vec<UnscopableGrant> = perms
+        .app_role_grants
+        .iter()
+        .filter(|g| is_unscopable_privileged(g.resource_app_id.as_deref(), &g.value))
+        .filter_map(|g| {
+            Some(UnscopableGrant {
+                permission: g.clone(),
+                risk: risk_level_for_app_permission(&g.value)?,
+                // Only Graph (or unresolved) grants get here; the mechanism
+                // table is Graph's.
+                microsoft_mechanism: unmanaged_mechanism_for(
+                    Some(crate::scoping::MICROSOFT_GRAPH_APP_ID),
+                    &g.value,
+                ),
+                network_lock: crate::conditional_access::NetworkLock::Unknown,
+            })
+        })
+        .collect();
+    if grants.is_empty() {
+        return (c, grants);
+    }
+    let refs: Vec<&ResourcePermission> = grants.iter().map(|g| &g.permission).collect();
+    c.issues.push(format!(
+        "{} {} — Microsoft offers no way to narrow these, so each reaches the whole tenant",
+        issue::UNSCOPABLE_PRIVILEGED,
+        join_values(&refs)
+    ));
+    c.recommendations.push(
+        "Remove any the app doesn't need; for the rest, review the safeguards around it (a \
+         Conditional Access network lock, certificate-only credentials, owners)"
+            .to_string(),
+    );
+    (c, grants)
+}
+
 /// Rules 14-17 (advisory, no score), in emit order: ownership hygiene, the
 /// app-instance property lock, public-client flows with credentials, and the
 /// prefer-cert guidance. The booleans are precomputed in `score_application`
@@ -1111,6 +1153,8 @@ pub fn score_application(
         perms.admin_consented_scopes.as_deref(),
     )); // Rule 13
     acc.merge(rule_granted_undeclared(perms)); // Rule 23
+    let (unscopable_contrib, unscopable_grants) = rule_unscopable_privileged(perms); // Rule 24
+    acc.merge(unscopable_contrib);
 
     let has_app_permissions = !perms.app_role_grants.is_empty();
     let has_credentials = !all_creds.is_empty();
@@ -1177,6 +1221,7 @@ pub fn score_application(
         // fields above.
         sp_risk_state: None,
         sp_risk_level: None,
+        unscopable_grants,
     }
 }
 
@@ -1241,6 +1286,8 @@ pub fn score_service_principal(
         &perms.scope_values,
         Some(&perms.scope_values),
     )); // Rule 13
+    let (unscopable_contrib, unscopable_grants) = rule_unscopable_privileged(perms); // Rule 24
+    acc.merge(unscopable_contrib);
 
     // Only the scope remediations (SP-only cores exist): expired credentials
     // are unknowable, redundancy removal edits the manifest, and SP owners
@@ -1290,6 +1337,7 @@ pub fn score_service_principal(
         },
         sp_risk_state: None,
         sp_risk_level: None,
+        unscopable_grants,
     }
 }
 

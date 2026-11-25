@@ -638,6 +638,7 @@ mod tests {
             app_owner_organization_id: None,
             sp_risk_state: None,
             sp_risk_level: None,
+            unscopable_grants: Vec::new(),
         }
     }
 

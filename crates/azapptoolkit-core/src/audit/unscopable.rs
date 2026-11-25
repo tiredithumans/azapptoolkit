@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::permissions::{least_privilege_alternative_for, risk_level_for_app_permission};
+use super::{ResourcePermission, RiskLevel};
+use crate::conditional_access::NetworkLock;
 use crate::scoping::{
     MICROSOFT_GRAPH_APP_ID, ScopeKind, is_files_orgwide_permission, is_mailbox_reaching_permission,
     is_sharepoint_site_access_permission, scope_kind_for,
@@ -59,6 +61,19 @@ impl UnmanagedMechanism {
             }
         }
     }
+}
+
+/// One held application permission with no built-in scoping, as audit Rule 24
+/// lists it on an [`super::AuditItem`]. `network_lock` is filled by the audit
+/// runner from its tenant-wide Conditional Access read; the scorer leaves it
+/// [`NetworkLock::Unknown`]. Crosses IPC inside `AuditItem`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnscopableGrant {
+    pub permission: ResourcePermission,
+    pub risk: RiskLevel,
+    pub microsoft_mechanism: Option<UnmanagedMechanism>,
+    #[serde(default)]
+    pub network_lock: NetworkLock,
 }
 
 /// How (if at all) a permission's reach can be narrowed.

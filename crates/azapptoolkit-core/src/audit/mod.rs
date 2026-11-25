@@ -10,7 +10,7 @@
 //! corresponding test in the owning submodule. Net-new rules, weights and list
 //! entries say so where they are defined.
 //!
-//! The numbered rules (1–23) with their helper, weight, issue marker, finding
+//! The numbered rules (1–24) with their helper, weight, issue marker, finding
 //! key, remediation and provenance are catalogued in
 //! `docs/architecture/audit-findings-and-remediation.md` ("Rule catalog").
 //!
@@ -54,6 +54,6 @@ pub use types::{
     RemediationKind, ResourcePermission, RiskLevel, ScopeMechanism, issue,
 };
 pub use unscopable::{
-    DIRECTORY_READ_EXCLUSIONS, NativeScoping, UnmanagedMechanism, is_unscopable_privileged,
-    native_scoping_for, unmanaged_mechanism_for,
+    DIRECTORY_READ_EXCLUSIONS, NativeScoping, UnmanagedMechanism, UnscopableGrant,
+    is_unscopable_privileged, native_scoping_for, unmanaged_mechanism_for,
 };
