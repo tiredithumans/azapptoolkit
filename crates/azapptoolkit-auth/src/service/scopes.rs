@@ -86,6 +86,19 @@ impl EntraAuthService {
         self.graph_scopes(&["Policy.Read.All", "Policy.ReadWrite.ConditionalAccess"])
     }
 
+    /// `RoleManagement.ReadWrite.Directory` + `AdministrativeUnit.ReadWrite.All`
+    /// — admin-unit scoping: assign (and remove) an admin role at
+    /// administrative-unit scope, and create an admin unit by rule. Among the
+    /// most powerful delegated scopes (with Privileged Role Administrator it
+    /// can assign any role), so admin-consent-only and acquired on demand,
+    /// never at sign-in.
+    pub fn default_graph_admin_unit_roles_scopes(&self) -> Vec<String> {
+        self.graph_scopes(&[
+            "RoleManagement.ReadWrite.Directory",
+            "AdministrativeUnit.ReadWrite.All",
+        ])
+    }
+
     /// `Sites.FullControl.All` Graph scope for the SharePoint `Sites.Selected`
     /// model — listing, granting, and revoking a site's per-app permissions
     /// (the Permissions tab's SharePoint site access section). The

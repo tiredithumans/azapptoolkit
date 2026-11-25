@@ -56,9 +56,6 @@ pub enum UnmanagedMechanism {
     /// (`ChannelMessage.Read.Group`, `ChatMessage.Read.Chat`) instead of the
     /// tenant-wide one.
     ResourceSpecificConsent,
-    /// An Entra admin role assigned to the service principal at
-    /// administrative-unit scope, instead of the tenant-wide app permission.
-    AdministrativeUnitRole,
 }
 
 impl UnmanagedMechanism {
@@ -67,9 +64,6 @@ impl UnmanagedMechanism {
         match self {
             UnmanagedMechanism::TeamsMeetingAccessPolicy => "a Teams meeting access policy",
             UnmanagedMechanism::ResourceSpecificConsent => "per-team (resource-specific) consent",
-            UnmanagedMechanism::AdministrativeUnitRole => {
-                "an admin role limited to an administrative unit"
-            }
         }
     }
 }
@@ -146,18 +140,6 @@ const MICROSOFT_UNMANAGED: &[(&str, UnmanagedMechanism)] = &[
     ),
     // User / Groups / Cloud Device Administrator, assigned to the service
     // principal over an administrative unit.
-    (
-        "User.ReadWrite.All",
-        UnmanagedMechanism::AdministrativeUnitRole,
-    ),
-    (
-        "Group.ReadWrite.All",
-        UnmanagedMechanism::AdministrativeUnitRole,
-    ),
-    (
-        "Device.ReadWrite.All",
-        UnmanagedMechanism::AdministrativeUnitRole,
-    ),
 ];
 
 /// `Some(MICROSOFT_GRAPH_APP_ID)` for the Graph appId in any case, the
@@ -310,10 +292,8 @@ mod tests {
             unmanaged_mechanism_for(G, "OnlineMeetings.Read.All"),
             Some(UnmanagedMechanism::TeamsMeetingAccessPolicy)
         );
-        assert_eq!(
-            unmanaged_mechanism_for(G, "User.ReadWrite.All"),
-            Some(UnmanagedMechanism::AdministrativeUnitRole)
-        );
+        // Admin-unit roles are a toolkit mechanism now (`ScopeKind::AdministrativeUnit`).
+        assert_eq!(unmanaged_mechanism_for(G, "User.ReadWrite.All"), None);
         assert_eq!(unmanaged_mechanism_for(EXO, "User.ReadWrite.All"), None);
     }
 
@@ -339,5 +319,25 @@ mod tests {
             native_scoping_for(G, "Application.ReadWrite.All"),
             NativeScoping::Swappable("Application.ReadWrite.OwnedBy")
         );
+    }
+
+    #[test]
+    fn directory_writes_are_managed_by_admin_unit_scoping() {
+        use crate::scoping::{MICROSOFT_GRAPH_APP_ID, ScopeKind};
+        for v in [
+            "User.ReadWrite.All",
+            "Group.ReadWrite.All",
+            "Device.ReadWrite.All",
+        ] {
+            assert_eq!(
+                native_scoping_for(Some(MICROSOFT_GRAPH_APP_ID), v),
+                NativeScoping::Managed(ScopeKind::AdministrativeUnit),
+                "{v}"
+            );
+            assert!(
+                !is_unscopable_privileged(Some(MICROSOFT_GRAPH_APP_ID), v),
+                "{v}"
+            );
+        }
     }
 }

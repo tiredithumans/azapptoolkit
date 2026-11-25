@@ -105,6 +105,9 @@ fn mode_options(kind: ScopeKind) -> &'static [(ScopeMode, &'static str)] {
         ],
         ScopeKind::SharePoint => &[(ScopeMode::Sites, "Specific sites")],
         ScopeKind::SharePointItem => &[(ScopeMode::Items, "Specific libraries, folders & files")],
+        // Not offered yet: `cart_mechanism` maps this kind to org-wide until
+        // the admin-unit panel lands, so this row is never read.
+        ScopeKind::AdministrativeUnit => &[],
     }
 }
 
@@ -539,6 +542,10 @@ fn cart_mechanism(cart: &[PickerSelection]) -> Option<ScopeKind> {
         // be confined. Inferring from the value alone offered an apply step that
         // would leave the grant org-wide on the legacy resource.
         let k = scope_kind_for(Some(&item.resource_app_id), &item.permission_value)?;
+        // The admin-unit mechanism has no wizard panel yet: org-wide only.
+        if k == ScopeKind::AdministrativeUnit {
+            return None;
+        }
         match kind {
             None => kind = Some(k),
             Some(prev) if prev == k => {}
@@ -711,7 +718,10 @@ pub fn ScopeWizard(
             Some(ScopeKind::SharePoint) => {
                 site_write.set(selected.with_untracked(|s| sites_need_write(s)));
             }
-            Some(ScopeKind::Exchange | ScopeKind::SharePointItem) | None => {}
+            Some(
+                ScopeKind::Exchange | ScopeKind::SharePointItem | ScopeKind::AdministrativeUnit,
+            )
+            | None => {}
         }
         scope_mode.set(kind.map_or(ScopeMode::OrgWide, default_mode));
     };

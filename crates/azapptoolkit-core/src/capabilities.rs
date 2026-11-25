@@ -286,6 +286,30 @@ pub static CAPABILITIES: &[Capability] = &[
                       Administrator role and a Microsoft Entra Workload ID Premium licence.",
     },
     Capability {
+        key: "admin_unit_roles",
+        plane: Plane::EntraDirectory,
+        label: "Admin-unit roles",
+        description: "Assign an app the admin role that matches a tenant-wide directory write \
+                      permission, limited to an administrative unit, and create admin units by \
+                      rule.",
+        directory_roles_any: &[
+            (
+                "Privileged Role Administrator",
+                Some(TID_PRIVILEGED_ROLE_ADMIN),
+            ),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &[
+            "RoleManagement.ReadWrite.Directory",
+            "AdministrativeUnit.ReadWrite.All",
+        ],
+        scope_feature: Some("admin_unit_roles"),
+        remediation: "Limiting an app's writes to an admin unit needs the \
+                      RoleManagement.ReadWrite.Directory and AdministrativeUnit.ReadWrite.All \
+                      scopes and the Privileged Role Administrator role.",
+    },
+    Capability {
         key: "app_management_policies",
         plane: Plane::EntraDirectory,
         label: "App-management policies (credential lifetime, read)",
@@ -939,5 +963,20 @@ mod tests {
                 "no capability on {plane:?}"
             );
         }
+    }
+
+    #[test]
+    fn admin_unit_roles_needs_privileged_role_administrator() {
+        let c = CAPABILITIES
+            .iter()
+            .find(|c| c.key == "admin_unit_roles")
+            .expect("admin_unit_roles entry");
+        assert_eq!(c.scope_feature, Some("admin_unit_roles"));
+        assert!(
+            c.directory_roles_any
+                .iter()
+                .any(|(name, id)| *name == "Privileged Role Administrator"
+                    && *id == Some(TID_PRIVILEGED_ROLE_ADMIN))
+        );
     }
 }
