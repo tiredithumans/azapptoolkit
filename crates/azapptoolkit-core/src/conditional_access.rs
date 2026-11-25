@@ -1051,7 +1051,7 @@ mod tests {
         fn lock_body_round_trips_as_a_report_only_lock() {
             let p = body_policy();
             assert_eq!(
-                network_lock_for(&[p.clone()], SP, G),
+                network_lock_for(std::slice::from_ref(&p), SP, G),
                 NetworkLock::ReportOnly
             );
             let mut enabled = p.clone();
@@ -1128,7 +1128,8 @@ mod tests {
 
         #[test]
         fn parse_cidr_table() {
-            let cases: [(&str, Result<(bool, &str), CidrError>); 7] = [
+            type Case<'a> = (&'a str, Result<(bool, &'a str), CidrError>);
+            let cases: [Case<'_>; 7] = [
                 ("10.0.0.0/8", Ok((false, "10.0.0.0/8"))),
                 (" 2001:db8::/32 ", Ok((true, "2001:db8::/32"))),
                 ("0.0.0.0/0", Err(CidrError::PrefixZero)),

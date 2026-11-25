@@ -409,9 +409,6 @@ impl GraphClient {
         )
     }
 
-    /// Unwrap an `Option<&Arc<dyn BearerProvider>>` into a typed error, or return the inner
-    /// reference for chaining.
-    #[allow(clippy::unused_self)]
     fn conditional_access_write_token(&self) -> Result<&Arc<dyn BearerProvider>> {
         self.require_token(
             self.conditional_access_write_token.as_ref(),
@@ -419,6 +416,9 @@ impl GraphClient {
         )
     }
 
+    /// Unwrap an `Option<&Arc<dyn BearerProvider>>` into a typed error, or return the inner
+    /// reference for chaining.
+    #[allow(clippy::unused_self)]
     fn require_token<'a>(
         &self,
         token: Option<&'a Arc<dyn BearerProvider>>,
