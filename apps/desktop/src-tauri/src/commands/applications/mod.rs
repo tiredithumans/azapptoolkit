@@ -1599,9 +1599,12 @@ mod handler_tests {
 
         let sps = sp_index_hit(&state.cache, TENANT).expect("the SP index is kept");
         let sp = sps.iter().find(|s| s.id == "sp-new").expect("new SP");
-        assert!(
-            sp.tags.is_empty(),
-            "the patched SP carries only the index's fields"
+        // The index selects tags (grant expiries live there), so the patched
+        // row carries them — exactly what the next scan would return.
+        assert_eq!(
+            sp.tags,
+            vec!["WindowsAzureActiveDirectoryIntegratedApp".to_string()],
+            "the patched SP carries the index's fields"
         );
         let names = app_name_index_hit(&state.cache, TENANT).expect("the name index is kept");
         assert!(names.iter().any(|a| a.id == "obj-new"));

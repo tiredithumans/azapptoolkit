@@ -507,6 +507,11 @@ pub(crate) async fn remediate_remove_redundant_permissions_core(
         }
     }
 
+    // An expiry set on a revoked grant must not pass to a later one.
+    if grants_revoked && let Some(sp_id) = &sp_id {
+        crate::commands::grant_expiry::prune_unheld_expiries(state, tenant_id, sp_id).await;
+    }
+
     // One trailing manifest patch for every narrower permission whose grant is
     // gone (just revoked, or never granted).
     let mut next = app.required_resource_access.clone();

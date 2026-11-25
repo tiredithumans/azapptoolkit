@@ -644,6 +644,7 @@ fn rule_unscopable_privileged(perms: &AppPermissions) -> (RuleContribution, Vec<
                 } else {
                     GrantUsage::default()
                 },
+                expires_on: None,
             })
         })
         .collect();
@@ -1227,6 +1228,7 @@ pub fn score_application(
         sp_risk_state: None,
         sp_risk_level: None,
         unscopable_grants,
+        expired_grants: Vec::new(),
     }
 }
 
@@ -1343,6 +1345,7 @@ pub fn score_service_principal(
         sp_risk_state: None,
         sp_risk_level: None,
         unscopable_grants,
+        expired_grants: Vec::new(),
     }
 }
 

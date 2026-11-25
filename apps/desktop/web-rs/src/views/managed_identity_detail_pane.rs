@@ -33,6 +33,7 @@ use crate::components::ui::{
 use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyIdentityButton};
 use crate::state::use_session;
 use crate::util::keep_alive;
+use crate::views::dialogs::grant_expiry_dialog::{GrantExpiryDialog, use_held_expiries};
 use crate::views::managed_identities::chip_kind_for;
 
 #[component]
@@ -93,6 +94,10 @@ pub fn ManagedIdentityDetailPane(
     let wiz_sp = mi.id.clone();
     let wiz_name = mi.display_name.clone();
     let wiz_app = mi.app_id.clone();
+    // Grant expiries (B3) on the identity's service principal: read live, and
+    // again after each save.
+    let expiry_sp = mi.id.clone();
+    let held_expiries = use_held_expiries(Signal::derive(move || expiry_sp.clone()));
     let wizard_target = Signal::derive(move || ScopeTarget {
         object_id: None,
         sp_object_id: wiz_sp.clone(),
@@ -186,6 +191,11 @@ pub fn ManagedIdentityDetailPane(
                     wizard_preseed.set(None);
                 })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
+            <GrantExpiryDialog
+                target=held_expiries.target
+                on_close=Callback::new(move |()| held_expiries.target.set(None))
+                on_saved=held_expiries.on_saved
             />
             <Suspense fallback=move || view! { <SkeletonList rows=4 /> }>
                 {move || {
@@ -319,6 +329,8 @@ pub fn ManagedIdentityDetailPane(
                                     show_scope_column=true
                                     on_revoke=on_revoke
                                     on_scope=on_scope
+                                    on_expiry=held_expiries.on_expiry
+                                    expiries=held_expiries.expiries
                                     busy=Signal::derive(move || busy.get())
                                 />
                                 {exchange_section}

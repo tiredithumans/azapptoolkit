@@ -21,6 +21,9 @@ pub async fn revoke_app_role_assignment(
         .remove_app_role_assignment(&service_principal_id, &assignment_id)
         .await?;
     invalidate_app_detail_state(&state.cache, &tenant_id);
+    // An expiry set on the revoked grant must not pass to a later one.
+    crate::commands::grant_expiry::prune_unheld_expiries(&state, &tenant_id, &service_principal_id)
+        .await;
     Ok(())
 }
 

@@ -202,7 +202,7 @@ async fn list_service_principals_index_selects_superset_and_returns_all_sps() {
         .and(path("/servicePrincipals"))
         .and(query_param(
             "$select",
-            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus",
+            "id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,createdDateTime,alternativeNames,disabledByMicrosoftStatus,tags",
         ))
         .and(query_param("$top", MAX_PAGE_SIZE))
         .and(query_param_is_missing("$count"))
@@ -866,4 +866,30 @@ async fn ensure_service_principal_recovers_from_a_stale_cached_miss() {
     assert_eq!(sp.id, "sp-1");
     assert!(!created);
     server.verify().await;
+}
+
+/// An SP's tags, read on their own (the grant-expiry and HideApp writers
+/// re-read the live set before writing the whole collection back).
+#[tokio::test]
+async fn get_service_principal_tags_selects_tags() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servicePrincipals/sp-1"))
+        .and(query_param("$select", "id,tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "sp-1", "tags": ["HideApp", "azapptoolkit:grantExpiry:v1|a|b|2026-12-24"]
+        })))
+        .mount(&server)
+        .await;
+    let tags = make_client(&server.uri())
+        .get_service_principal_tags("sp-1")
+        .await
+        .unwrap();
+    assert_eq!(tags.len(), 2);
+    assert!(matches!(
+        make_client(&server.uri())
+            .get_service_principal_tags("a/b")
+            .await,
+        Err(GraphError::Protocol(_))
+    ));
 }

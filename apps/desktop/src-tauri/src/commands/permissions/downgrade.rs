@@ -32,7 +32,7 @@ pub async fn downgrade_application_permission(
     narrow_value: String,
 ) -> Result<DowngradeOutcome, UiError> {
     let client = state.graph_for(&tenant_id);
-    let (outcome, error) = downgrade_application_permission_core(
+    let (outcome, error, swap) = downgrade_application_permission_core(
         &client,
         &object_id,
         &resource_app_id,
@@ -40,6 +40,18 @@ pub async fn downgrade_application_permission(
         &narrow_value,
     )
     .await?;
+    // The broad grant's expiry moves onto its narrower replacement.
+    if let Some(swap) = &swap {
+        crate::commands::grant_expiry::carry_expiry(
+            &state,
+            &tenant_id,
+            &swap.sp_object_id,
+            &resource_app_id,
+            &swap.from_role,
+            &swap.to_role,
+        )
+        .await;
+    }
 
     if outcome.narrow_granted || outcome.broad_revoked || outcome.declaration_swapped {
         invalidate_app_detail_state(&state.cache, &tenant_id);
@@ -60,10 +72,18 @@ fn is_documented_downgrade(broad_value: &str, narrow_value: &str) -> bool {
     azapptoolkit_core::audit::downgrade_alternatives(broad_value).contains(&narrow_value)
 }
 
+/// The swap a downgrade made on a service principal: `from_role` revoked,
+/// `to_role` held.
+pub(crate) struct RoleSwap {
+    pub sp_object_id: String,
+    pub from_role: String,
+    pub to_role: String,
+}
+
 /// Shared core of [`downgrade_application_permission`]: grant-before-strip, then
 /// the declaration swap. No `State`, no cache side effects.
 ///
-/// Returns `(outcome, error)` rather than `Result<outcome>` because a failure
+/// Returns `(outcome, error, swap)` rather than `Result<outcome>` because a failure
 /// *after* the first mutation still has real writes to report — the caller must
 /// invalidate on the partial success before surfacing the error, which is
 /// exactly the ordering the command layer used to inline.
@@ -73,7 +93,7 @@ pub(crate) async fn downgrade_application_permission_core(
     resource_app_id: &str,
     broad_value: &str,
     narrow_value: &str,
-) -> Result<(DowngradeOutcome, Option<UiError>), UiError> {
+) -> Result<(DowngradeOutcome, Option<UiError>, Option<RoleSwap>), UiError> {
     if !is_documented_downgrade(broad_value, narrow_value) {
         return Err(UiError::validation(
             "not_a_downgrade",
@@ -113,6 +133,7 @@ pub(crate) async fn downgrade_application_permission_core(
 
     let mut outcome = DowngradeOutcome::default();
     let mut error: Option<UiError> = None;
+    let mut swap: Option<RoleSwap> = None;
 
     // Live grants first. Failures before the first mutation return early via
     // `?`; once anything has landed, errors are collected so the cache bust
@@ -137,7 +158,14 @@ pub(crate) async fn downgrade_application_permission_core(
                 .remove_app_role_assignment(&sp.id, &broad_assignment.id)
                 .await
             {
-                Ok(()) => outcome.broad_revoked = true,
+                Ok(()) => {
+                    outcome.broad_revoked = true;
+                    swap = Some(RoleSwap {
+                        sp_object_id: sp.id.clone(),
+                        from_role: broad_id.clone(),
+                        to_role: narrow_id.clone(),
+                    });
+                }
                 Err(e) => error = Some(e.into()),
             }
         }
@@ -159,7 +187,7 @@ pub(crate) async fn downgrade_application_permission_core(
         }
     }
 
-    Ok((outcome, error))
+    Ok((outcome, error, swap))
 }
 
 #[cfg(test)]

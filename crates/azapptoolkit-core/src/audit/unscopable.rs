@@ -90,6 +90,10 @@ pub struct UnscopableGrant {
     /// `Unknown { NotChecked }` and an untracked one `NotTracked`.
     #[serde(default)]
     pub last_used: super::GrantUsage,
+    /// The grant's expiry date when one is set (Rule 25's tag), for the
+    /// checklist. Filled by the runner's expiry pass.
+    #[serde(default)]
+    pub expires_on: Option<jiff::civil::Date>,
 }
 
 /// How (if at all) a permission's reach can be narrowed.

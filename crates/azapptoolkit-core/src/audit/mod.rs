@@ -10,7 +10,7 @@
 //! corresponding test in the owning submodule. Net-new rules, weights and list
 //! entries say so where they are defined.
 //!
-//! The numbered rules (1–24) with their helper, weight, issue marker, finding
+//! The numbered rules (1–25) with their helper, weight, issue marker, finding
 //! key, remediation and provenance are catalogued in
 //! `docs/architecture/audit-findings-and-remediation.md` ("Rule catalog").
 //!
@@ -22,6 +22,7 @@
 
 mod credentials;
 mod finding;
+mod grant_expiry;
 mod permissions;
 mod posture;
 mod scoring;
@@ -36,6 +37,10 @@ pub use credentials::{
     unused_credential_advisory,
 };
 pub use finding::{finding_issue_marker, matches_finding};
+pub use grant_expiry::{
+    ExpiredGrant, GRANT_EXPIRY_TAG_FAMILY, GrantExpiry, decode_expiry_tag, encode_expiry_tag,
+    expiries_in, expiry_has_passed, revoke_expired_remediation, with_expiry,
+};
 pub use permissions::{
     EXPIRY_WARNING_DAYS, HIGH_RISK_APP_PERMISSIONS, HIGH_RISK_DELEGATED_PERMISSIONS,
     LONG_LIVED_SECRET_DAYS, MEDIUM_RISK_APP_PERMISSIONS, RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM,

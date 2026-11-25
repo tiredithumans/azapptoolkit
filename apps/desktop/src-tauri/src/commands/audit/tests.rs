@@ -10,8 +10,9 @@ use super::prefetch::{
 };
 use super::run::await_usage;
 use super::score::{
-    apply_graph_usage, apply_network_locks, combine_granted_roles, derive_orgwide_mail_scopes,
-    ews_full_access_holders, merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
+    apply_grant_expiries_with, apply_graph_usage, apply_network_locks, combine_granted_roles,
+    derive_orgwide_mail_scopes, ews_full_access_holders, merge_granted_roles, score_one,
+    score_sp_only, sp_audit_candidates,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -149,6 +150,7 @@ fn sample(name: &str) -> AuditItem {
         sp_risk_state: None,
         sp_risk_level: None,
         unscopable_grants: Vec::new(),
+        expired_grants: Vec::new(),
     }
 }
 
@@ -284,10 +286,16 @@ fn sp_audit_candidates_filters_paired_and_grantless() {
         sp("sp-grantless", "gallery-app", Some("Application")),
         sp("sp-empty", "empty-app", Some("Application")),
     ];
-    let got: Vec<String> = sp_audit_candidates(&index, &local_app_ids, &roles, &HashMap::new())
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    let got: Vec<String> = sp_audit_candidates(
+        &index,
+        &local_app_ids,
+        &roles,
+        &HashMap::new(),
+        jiff::Timestamp::now(),
+    )
+    .into_iter()
+    .map(|s| s.id)
+    .collect();
     // Paired (has a local app), grantless (not in the matrix), and
     // empty-role-list SPs are all excluded; the foreign SP and the MI stay.
     assert_eq!(got, vec!["sp-foreign".to_string(), "sp-mi".to_string()]);
@@ -323,7 +331,13 @@ fn sp_holding_only_office365_roles_is_a_candidate_and_is_scored() {
         sp("sp-exo-admin", "exo-app", Some("ManagedIdentity")),
         sp("sp-spo", "spo-app", Some("Application")),
     ];
-    let candidates = sp_audit_candidates(&index, &HashSet::new(), &roles, &HashMap::new());
+    let candidates = sp_audit_candidates(
+        &index,
+        &HashSet::new(),
+        &roles,
+        &HashMap::new(),
+        jiff::Timestamp::now(),
+    );
     assert_eq!(
         candidates.len(),
         3,
@@ -417,10 +431,16 @@ fn a_risky_grantless_sp_is_a_candidate_without_any_grant() {
         ("confirmedCompromised".to_string(), "high".to_string()),
     )]
     .into();
-    let got: Vec<String> = sp_audit_candidates(&index, &HashSet::new(), &HashMap::new(), &risky)
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    let got: Vec<String> = sp_audit_candidates(
+        &index,
+        &HashSet::new(),
+        &HashMap::new(),
+        &risky,
+        jiff::Timestamp::now(),
+    )
+    .into_iter()
+    .map(|s| s.id)
+    .collect();
     assert_eq!(got, vec!["sp-risky-mi".to_string()]);
 }
 
@@ -1989,6 +2009,7 @@ fn item_with_two_unscopable_grants() -> AuditItem {
             microsoft_mechanism: None,
             network_lock: NetworkLock::Unknown,
             last_used: Default::default(),
+            expires_on: None,
         },
         UnscopableGrant {
             permission: ResourcePermission {
@@ -1999,6 +2020,7 @@ fn item_with_two_unscopable_grants() -> AuditItem {
             microsoft_mechanism: None,
             network_lock: NetworkLock::Unknown,
             last_used: Default::default(),
+            expires_on: None,
         },
     ];
     item
@@ -2284,5 +2306,137 @@ fn apply_graph_usage_matches_app_id_case_insensitively() {
     assert_eq!(
         items[0].unscopable_grants[0].last_used,
         GrantUsage::Seen { at: seen_at }
+    );
+}
+
+// ---- grant expiries (Rule 25) --------------------------------------------
+
+const EXPIRY_ROLE_A: &str = "45bbb07e-7321-4fd7-a8f6-3ff27e6a81c8";
+const EXPIRY_ROLE_B: &str = "7ab1d382-f21e-4acd-a863-ba3e13f7da61";
+const UNKNOWN_RESOURCE: &str = "99999999-9999-9999-9999-999999999999";
+
+fn expiry_tag(resource: &str, role: &str, date: &str) -> String {
+    azapptoolkit_core::audit::encode_expiry_tag(&azapptoolkit_core::audit::GrantExpiry {
+        resource_app_id: resource.into(),
+        app_role_id: role.into(),
+        expires_on: date.parse().unwrap(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn sp_audit_candidates_admits_a_passed_expiry() {
+    let now = ts("2026-11-25T00:00:00Z");
+    let sp = |id: &str, date: &str| ServicePrincipal {
+        id: id.into(),
+        app_id: format!("app-{id}"),
+        tags: vec![expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, date)],
+        ..Default::default()
+    };
+    let index = vec![sp("sp-past", "2026-11-01"), sp("sp-future", "2027-01-01")];
+    let got: Vec<String> = sp_audit_candidates(
+        &index,
+        &HashSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        now,
+    )
+    .into_iter()
+    .map(|s| s.id)
+    .collect();
+    assert_eq!(got, vec!["sp-past"]);
+}
+
+#[test]
+fn grant_expiries_post_pass_flags_and_names() {
+    use azapptoolkit_core::audit::{RemediationKind, issue};
+    let now = ts("2026-11-25T00:00:00Z");
+    let mut items = vec![usage_item("app-1"), usage_item("app-2")];
+    let tags = vec![
+        expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, "2026-11-01"),
+        expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_B, "2027-01-31"),
+        expiry_tag(UNKNOWN_RESOURCE, EXPIRY_ROLE_A, "2026-10-01"),
+    ];
+    let names = HashMap::from([
+        (
+            (
+                MICROSOFT_GRAPH_APP_ID.to_string(),
+                EXPIRY_ROLE_A.to_string(),
+            ),
+            "Chat.Read.All".to_string(),
+        ),
+        (
+            (
+                MICROSOFT_GRAPH_APP_ID.to_string(),
+                EXPIRY_ROLE_B.to_string(),
+            ),
+            "CallRecords.Read.All".to_string(),
+        ),
+    ]);
+    apply_grant_expiries_with(
+        &mut items,
+        |app_id| (app_id == "app-1").then(|| tags.clone()),
+        &names,
+        now,
+    );
+    let line = items[0]
+        .issues
+        .iter()
+        .find(|i| i.starts_with(issue::GRANT_EXPIRED))
+        .expect("Rule 25 issue");
+    assert!(line.contains("Chat.Read.All"), "{line}");
+    assert!(
+        line.contains(EXPIRY_ROLE_A),
+        "an unknown resource names the role id: {line}"
+    );
+    assert!(
+        !line.contains("CallRecords.Read.All"),
+        "the future one isn't flagged: {line}"
+    );
+    let fix: Vec<_> = items[0]
+        .remediations
+        .iter()
+        .filter(|r| r.kind == RemediationKind::RevokeExpiredGrants)
+        .collect();
+    assert_eq!(fix.len(), 1);
+    assert_eq!(fix[0].targets.len(), 2);
+    let expired: Vec<(&str, &str, &str)> = items[0]
+        .expired_grants
+        .iter()
+        .map(|e| {
+            (
+                e.resource_app_id.as_str(),
+                e.app_role_id.as_str(),
+                e.name.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        expired,
+        vec![
+            (MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, "Chat.Read.All"),
+            (UNKNOWN_RESOURCE, EXPIRY_ROLE_A, EXPIRY_ROLE_A),
+        ],
+        "the pairs the Fix revokes, and the names the confirm shows"
+    );
+    // The future expiry still shows on the checklist's grant.
+    let call_records = items[0]
+        .unscopable_grants
+        .iter()
+        .find(|g| g.permission.value == "CallRecords.Read.All")
+        .unwrap();
+    assert_eq!(call_records.expires_on, Some("2027-01-31".parse().unwrap()));
+    // An app with no expiry tags is untouched.
+    assert!(
+        !items[1]
+            .issues
+            .iter()
+            .any(|i| i.starts_with(issue::GRANT_EXPIRED))
+    );
+    assert!(
+        items[1]
+            .remediations
+            .iter()
+            .all(|r| r.kind != RemediationKind::RevokeExpiredGrants)
     );
 }

@@ -19,6 +19,7 @@ pub mod exchange;
 pub(crate) mod export;
 pub mod expose_api;
 pub mod gallery;
+pub mod grant_expiry;
 pub(crate) mod graph_err;
 pub mod graph_roles;
 pub(crate) mod guid;

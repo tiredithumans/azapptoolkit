@@ -1144,6 +1144,11 @@ fn register_fixtures() {
         &f::conditional_access_policies(),
     );
     mock_ok("get_network_lock", &f::network_lock_status_none());
+    // No grant in the demo carries an expiry date.
+    mock_ok(
+        "get_grant_expiries",
+        &Vec::<azapptoolkit_core::audit::GrantExpiry>::new(),
+    );
     mock_ok("list_named_locations", &f::named_locations());
     mock_ok("list_directory_audits_for_app", &f::directory_audits());
     mock_each("get_app_sign_in_activity", move |args| {

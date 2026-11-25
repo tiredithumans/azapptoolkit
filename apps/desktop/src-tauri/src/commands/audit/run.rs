@@ -28,8 +28,9 @@ use super::prefetch::{
     prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{
-    apply_graph_usage, combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
-    score_one, score_sp_only, sp_audit_candidates,
+    apply_grant_expiries_with, apply_graph_usage, combine_granted_roles,
+    derive_orgwide_mail_scopes, ews_full_access_holders, resolve_expiry_names, score_one,
+    score_sp_only, sp_audit_candidates,
 };
 use super::{AuditFailure, ResourceResolver, RunSps, ScoreCtx, classify_audit_failure};
 
@@ -270,6 +271,7 @@ pub async fn run_audit(
         &local_app_ids,
         &granted_roles_by_sp,
         &risky_by_sp,
+        Timestamp::now(),
     );
     let total = apps.len() + sp_candidates.len();
 
@@ -467,6 +469,24 @@ pub async fn run_audit(
         None => Err(UsageUnknownReason::NotChecked),
     };
     apply_graph_usage(&mut items, &usage);
+    // Rule 25: grant expiries, from the run's SP index (a row whose SP is past
+    // the index cap gets no expiry check — the index is the only tag source).
+    if !cancelled {
+        let all_expiries: Vec<azapptoolkit_core::audit::GrantExpiry> = items
+            .iter()
+            .filter_map(|i| ctx.run_sps.get(&i.app_id))
+            .flat_map(|sp| azapptoolkit_core::audit::expiries_in(&sp.tags))
+            .collect();
+        if !all_expiries.is_empty() {
+            let names = resolve_expiry_names(&ctx, &all_expiries).await;
+            apply_grant_expiries_with(
+                &mut items,
+                |app_id| ctx.run_sps.get(app_id).map(|sp| sp.tags.clone()),
+                &names,
+                Timestamp::now(),
+            );
+        }
+    }
     // Whether every mail permission was actually checked against Exchange
     // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
     // which over-reports — but the operator has to be told, because the

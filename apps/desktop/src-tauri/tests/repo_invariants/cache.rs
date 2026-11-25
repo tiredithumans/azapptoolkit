@@ -2737,3 +2737,92 @@ fn sign_in_forgets_the_tenant_but_reauthenticate_keeps_its_caches() {
         "`reauthenticate` restores the SAME account in place and must keep the data caches"
     );
 }
+
+/// Every service-principal tag writer (the HideApp toggle, the grant-expiry
+/// commands) re-reads and writes back the whole collection, so each holds the
+/// one per-SP gate, `grant_expiry::sp_tags_gate_key`: two unserialized writers
+/// drop each other's tags (a HideApp toggle racing an expiry write loses one).
+#[test]
+fn every_sp_tag_writer_holds_the_shared_gate() {
+    use super::sources::{calls, command_functions};
+    /// `(writer, why it needs no gate)`.
+    const EXEMPT: &[(&str, &str)] = &[(
+        "restore_enterprise_app",
+        "writes the backup's tags onto a service principal this restore created moments \
+         earlier: no other writer can know its id yet",
+    )];
+    let writers: Vec<_> = command_functions()
+        .into_iter()
+        .filter(|f| calls(&f.body, "set_service_principal_tags"))
+        .filter(|f| !EXEMPT.iter().any(|(name, _)| *name == f.name))
+        .collect();
+    assert!(
+        writers.len() >= 3,
+        "expected the HideApp toggle and both grant-expiry writers, found {:?}",
+        writers.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    for f in &writers {
+        assert!(
+            calls(&f.body, "sp_tags_gate_key"),
+            "`{}` writes service-principal tags without holding the per-SP gate \
+             (`grant_expiry::sp_tags_gate_key`)",
+            f.name
+        );
+    }
+}
+
+/// A grant expiry outlives a grant revoked anywhere else, and a later grant of
+/// the same permission would inherit its date (and Rule 25 would revoke it).
+/// So every path that revokes an app-role assignment prunes the expiries the
+/// service principal no longer holds a grant for — or, for a downgrade,
+/// carries the expiry onto the narrower grant.
+#[test]
+fn every_app_role_revoke_prunes_unheld_expiries() {
+    use super::sources::{calls, command_functions};
+    /// `(revoker, why it needs no prune)`.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "revoke_expired",
+            "the Rule 25 Fix clears the expiries of the grants it ends itself",
+        ),
+        (
+            "strip_app_role_grants",
+            "strips an org-wide grant a scoped one just replaced; a stale expiry on it only \
+             reads as already gone at the Fix, which clears it and leaves the declaration",
+        ),
+    ];
+    /// `(stateless core, the caller that prunes for it)`.
+    const DELEGATED: &[(&str, &str)] = &[(
+        "downgrade_application_permission_core",
+        "downgrade_application_permission",
+    )];
+    let functions = command_functions();
+    let prunes = |name: &str| {
+        functions.iter().any(|f| {
+            f.name == name
+                && (calls(&f.body, "prune_unheld_expiries") || calls(&f.body, "carry_expiry"))
+        })
+    };
+    let revokers: Vec<_> = functions
+        .iter()
+        .filter(|f| calls(&f.body, "remove_app_role_assignment"))
+        .filter(|f| !EXEMPT.iter().any(|(name, _)| *name == f.name))
+        .collect();
+    assert!(
+        revokers.len() >= 3,
+        "expected the Permissions-tab revoke, the downgrade and the redundant-permissions Fix, \
+         found {:?}",
+        revokers.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    for f in &revokers {
+        let pruner = DELEGATED
+            .iter()
+            .find(|(core, _)| *core == f.name)
+            .map_or(f.name.as_str(), |(_, caller)| caller);
+        assert!(
+            prunes(pruner),
+            "`{pruner}` revokes an app-role assignment without pruning the expiries it no longer \
+             holds (`grant_expiry::prune_unheld_expiries` / `carry_expiry`)"
+        );
+    }
+}

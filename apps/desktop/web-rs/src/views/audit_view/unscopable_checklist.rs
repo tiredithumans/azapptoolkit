@@ -6,7 +6,7 @@
 //! what the app can read — no line says "scoped", "confined" or "limited to".
 
 use azapptoolkit_core::audit::{
-    AuditItem, AuditPrincipalKind, GrantUsage, UsageUnknownReason, issue,
+    AuditItem, AuditPrincipalKind, GrantUsage, UsageUnknownReason, expiry_has_passed, issue,
 };
 use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
 use leptos::prelude::*;
@@ -100,6 +100,23 @@ pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
     }
 }
 
+/// `(mark, text)` for a grant's expiry (Rule 25's tag), `None` when none is
+/// set. A grant expires at the end of its day (UTC).
+pub(super) fn expiry_line(
+    expires_on: Option<jiff::civil::Date>,
+    now: jiff::Timestamp,
+) -> Option<(&'static str, String)> {
+    let date = expires_on?;
+    Some(if expiry_has_passed(date, now) {
+        (
+            "✗",
+            format!("Expired {date} — revoke it from Grants past their expiry"),
+        )
+    } else {
+        ("·", format!("Expires {date}"))
+    })
+}
+
 /// `(mark, text)` for an app registration's credentials.
 fn credentials_line(item: &AuditItem) -> (&'static str, &'static str) {
     match (item.certificates.is_empty(), item.secrets.is_empty()) {
@@ -151,6 +168,8 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
         .map(|g| {
             let (mark, lock) = network_lock_line(&g.network_lock);
             let (umark, used) = usage_line(&g.last_used);
+            let expiry = expiry_line(g.expires_on, jiff::Timestamp::now())
+                .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
             let mechanism = g.microsoft_mechanism.map(|m| {
                 format!(
                     "Microsoft can narrow this with {}; this toolkit doesn't manage it yet.",
@@ -164,6 +183,7 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
                     <Badge label=g.risk.as_str() tone=risk_tone(&g.risk) />
                     <div>{format!("{mark} Network lock: {lock}")}</div>
                     <div>{format!("{umark} {used}")}</div>
+                    {expiry}
                     {mechanism.map(|m| view! { <div class="muted">{m}</div> })}
                 </li>
             }
@@ -337,5 +357,28 @@ mod tests {
                 assert!(!t.contains(banned), "{t:?} says {banned:?}");
             }
         }
+    }
+
+    #[test]
+    fn expiry_lines() {
+        let now: jiff::Timestamp = "2026-11-25T12:00:00Z".parse().unwrap();
+        let day = |d: &str| Some(d.parse::<jiff::civil::Date>().unwrap());
+        assert_eq!(expiry_line(None, now), None);
+        assert_eq!(
+            expiry_line(day("2026-12-24"), now),
+            Some(("·", "Expires 2026-12-24".to_string()))
+        );
+        assert_eq!(
+            expiry_line(day("2026-11-25"), now),
+            Some(("·", "Expires 2026-11-25".to_string())),
+            "a grant expires at the end of its day"
+        );
+        assert_eq!(
+            expiry_line(day("2026-11-24"), now),
+            Some((
+                "✗",
+                "Expired 2026-11-24 — revoke it from Grants past their expiry".to_string()
+            ))
+        );
     }
 }

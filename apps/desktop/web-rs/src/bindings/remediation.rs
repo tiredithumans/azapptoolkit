@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::bindings::ObjectIdArgs;
 
 pub use azapptoolkit_dto::exchange::ExchangeAccessResult;
+pub use azapptoolkit_dto::permissions::RevokeExpiredResult;
 pub use azapptoolkit_dto::remediation::{RedundantPermissionsOutcome, RemediationOutcome};
 pub use azapptoolkit_dto::sharepoint::SiteScopeResult;
 
@@ -113,6 +114,37 @@ pub async fn remediate_scope_sharepoint_access(
             object_id,
             site_urls,
             role,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevokeExpiredArgs<'a> {
+    tenant_id: &'a str,
+    object_id: &'a str,
+    principal_kind: azapptoolkit_core::audit::AuditPrincipalKind,
+    grants: &'a [azapptoolkit_dto::permissions::GrantRef],
+}
+
+/// Revokes `grants` (the ones the confirm named) that are still past their
+/// expiry, re-read live, and on an app registration removes them from its API
+/// permissions. `object_id` is the application on an `Application` row, the
+/// service principal otherwise.
+pub async fn remediate_revoke_expired_grants(
+    tenant_id: &str,
+    object_id: &str,
+    principal_kind: azapptoolkit_core::audit::AuditPrincipalKind,
+    grants: &[azapptoolkit_dto::permissions::GrantRef],
+) -> Result<RevokeExpiredResult, UiError> {
+    invoke_result(
+        "remediate_revoke_expired_grants",
+        RevokeExpiredArgs {
+            tenant_id,
+            object_id,
+            principal_kind,
+            grants,
         },
     )
     .await

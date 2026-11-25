@@ -38,8 +38,13 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::{Session, use_session};
 use crate::util::count_noun;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
+use crate::views::dialogs::grant_expiry_dialog::{
+    ExpiryTarget, GrantExpiryDialog, current_expiry, expiry_note,
+};
 use crate::views::tabs::usage_panel::UsagePanel;
-use azapptoolkit_core::audit::{MailPermissionScope, downgrade_alternatives};
+use azapptoolkit_core::audit::{
+    GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in,
+};
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
@@ -351,6 +356,33 @@ pub fn PermissionsTab(
         session.open_permission_tester_for(app_id);
     };
 
+    // Grant expiries (B3) live as tags on the app's service principal.
+    let sp_expiries = Memo::new(move |_| {
+        detail.with(|d| {
+            d.service_principal
+                .as_ref()
+                .map(|sp| expiries_in(&sp.tags))
+                .unwrap_or_default()
+        })
+    });
+    let expiry_target: RwSignal<Option<ExpiryTarget>> = RwSignal::new(None);
+    let open_expiry = move |resource_app_id: String, app_role_id: String, label: String| {
+        let Some(sp_object_id) =
+            detail.with_untracked(|d| d.service_principal.as_ref().map(|sp| sp.id.clone()))
+        else {
+            return;
+        };
+        let current =
+            sp_expiries.with_untracked(|v| current_expiry(v, &resource_app_id, &app_role_id));
+        expiry_target.set(Some(ExpiryTarget {
+            sp_object_id,
+            resource_app_id,
+            app_role_id,
+            label,
+            current,
+        }));
+    };
+
     // A row's "Scope…" opens the wizard pre-selected to that permission, jumping
     // to the choose-access step. The wizard infers the mechanism from it.
     let open_scope = move |sel: PickerSelection| {
@@ -577,6 +609,11 @@ pub fn PermissionsTab(
                     </Button>
                 </div>
             </header>
+            <GrantExpiryDialog
+                target=expiry_target
+                on_close=Callback::new(move |()| expiry_target.set(None))
+                on_saved=Callback::new(move |_| on_changed.run(()))
+            />
             <ScopeWizard
                 open=wizard_open
                 target=wizard_target
@@ -711,6 +748,8 @@ pub fn PermissionsTab(
                                         open_scope,
                                         open_downgrade,
                                         open_tester,
+                                        open_expiry,
+                                        sp_expiries,
                                     )
                                 }
                             />
@@ -990,12 +1029,12 @@ fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
     }
 }
 
-// Row renderer wiring one resolved permission to the five mutation callbacks the
-// table exposes (revoke app/delegated, remove declaration, scope, downgrade) plus
-// the read-only jump into the Permission tester; the props are genuinely
+// Row renderer wiring one resolved permission to the six mutation callbacks the
+// table exposes (revoke app/delegated, remove declaration, scope, downgrade,
+// expiry) plus the read-only jump into the Permission tester; the props are genuinely
 // independent, so a parameter struct would only add ceremony.
 #[allow(clippy::too_many_arguments)]
-fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess>(
+fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess, Expiry>(
     p: ResolvedPermission,
     // Read reactively in the Scope cell (below) so that under a keyed `<For>` a
     // row's scope still updates when the async mail-scopes resolve — without
@@ -1008,8 +1047,11 @@ fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess>(
     scope: Scope,
     downgrade: Downgrade,
     test_access: TestAccess,
+    expiry: Expiry,
+    expiries: Memo<Vec<GrantExpiry>>,
 ) -> impl IntoView
 where
+    Expiry: Fn(String, String, String) + Send + Sync + Copy + 'static,
     RevApp: Fn(String, String) + Send + Sync + Copy + 'static,
     RevDel: Fn(String, String) + Send + Sync + Copy + 'static,
     Remove: Fn(String, String, PermissionKind, String) + Send + Sync + Copy + 'static,
@@ -1170,6 +1212,32 @@ where
         _ => None,
     };
 
+    // "Expiry…" on a granted Application row: the date is a tag on the app's
+    // service principal; Rule 25's Fix revokes the grant once it passes.
+    let expiry_button = (permission_kind == PermissionKind::Application && granted).then(|| {
+        let resource_app_id = p.resource_app_id.clone();
+        let app_role_id = p.permission_id.clone();
+        let label = revoke_subject.clone();
+        let on_click = move |_| expiry(resource_app_id.clone(), app_role_id.clone(), label.clone());
+        view! {
+            <IconButton
+                icon=IconName::Clock
+                aria_label=format!("Set expiry for {row_name}")
+                title="Expiry…".to_string()
+                on_click=Callback::new(on_click)
+            />
+        }
+    });
+    let expiry_resource = p.resource_app_id.clone();
+    let expiry_role = p.permission_id.clone();
+    let expiry_note = move || {
+        if !(permission_kind == PermissionKind::Application && granted) {
+            return None;
+        }
+        let date = expiries.with(|v| current_expiry(v, &expiry_resource, &expiry_role))?;
+        Some(view! { <div class="permissions-cell__secondary">{expiry_note(date)}</div> })
+    };
+
     view! {
         <tr>
             <td class="permission-cell">
@@ -1232,6 +1300,7 @@ where
             </td>
             <td class="cell-mid">
                 <Badge label=status_label tone=status_tone />
+                {expiry_note}
             </td>
             <td class="cell-mid">
                 // `--end`: Scope… and Downgrade… exist only on some rows, so a
@@ -1240,6 +1309,7 @@ where
                 <div class="cell-actions cell-actions--end">
                     {scope_button}
                     {downgrade_button}
+                    {expiry_button}
                     {trash_button}
                 </div>
             </td>

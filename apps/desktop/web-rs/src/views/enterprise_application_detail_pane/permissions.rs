@@ -13,6 +13,7 @@ use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSection;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
+use crate::views::dialogs::grant_expiry_dialog::{GrantExpiryDialog, use_held_expiries};
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::{
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
@@ -177,6 +178,9 @@ pub(super) fn PermissionsContent(
         wizard_open.set(true);
     });
 
+    // Grant expiries (B3): read live, and again after each save.
+    let held_expiries = use_held_expiries(sp_id);
+
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
     // permissions + the delegated scopes the app publishes.
@@ -226,6 +230,11 @@ pub(super) fn PermissionsContent(
                     wizard_preseed.set(None);
                 })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
+            <GrantExpiryDialog
+                target=held_expiries.target
+                on_close=Callback::new(move |()| held_expiries.target.set(None))
+                on_saved=held_expiries.on_saved
             />
             <Suspense fallback=move || {
                 view! { <SkeletonList rows=6 /> }
@@ -357,6 +366,8 @@ pub(super) fn PermissionsContent(
                                     show_scope_column=true
                                     on_revoke=on_revoke
                                     on_scope=on_scope
+                                    on_expiry=held_expiries.on_expiry
+                                    expiries=held_expiries.expiries
                                     busy=Signal::derive(move || revoke_cmd.busy.get())
                                 />
                                 {exchange_section}

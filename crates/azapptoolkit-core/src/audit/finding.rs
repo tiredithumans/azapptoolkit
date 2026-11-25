@@ -80,6 +80,9 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // there, while this one carries the per-grant safeguards checklist
         // (`AuditItem::unscopable_grants`). Advisory, no remediation.
         "unscopable_privileged" => |x| x.starts_with(issue::UNSCOPABLE_PRIVILEGED),
+        // Rule 25 — grants past the expiry an operator set. Its own finding:
+        // its Fix revokes them, which no other group offers.
+        "expired_grants" => |x| x.starts_with(issue::GRANT_EXPIRED),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
         // Rule 21 — Microsoft's own disable flag. Its own group (not folded
         // into the credential or exposure findings): the flag is about the
@@ -160,6 +163,7 @@ mod tests {
             sp_risk_state: None,
             sp_risk_level: None,
             unscopable_grants: Vec::new(),
+            expired_grants: Vec::new(),
         }
     }
 
@@ -280,6 +284,13 @@ mod tests {
                 ),
                 "unscopable_privileged",
             ),
+            (
+                format!(
+                    "{} Chat.Read.All (expired 2026-11-01)",
+                    issue::GRANT_EXPIRED
+                ),
+                "expired_grants",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -300,6 +311,7 @@ mod tests {
             "unused_credential",
             "granted_undeclared",
             "unscopable_privileged",
+            "expired_grants",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());
