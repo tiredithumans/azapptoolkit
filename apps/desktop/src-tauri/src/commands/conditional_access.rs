@@ -258,8 +258,11 @@ fn client_filter_is_exclude(clients: &CaClientApplications) -> bool {
 /// has written this set with different casing/spelling across API versions;
 /// all spellings under-match (they never name a single foreign SP), so
 /// matching all of them only ever over-shows, never hides.
-const ALL_WORKLOAD_TOKENS: [&str; 4] = [
+/// `ServicePrincipalsInMyTenant` is the one Graph's v1.0
+/// `conditionalAccessClientApplications` reference documents.
+const ALL_WORKLOAD_TOKENS: [&str; 5] = [
     "All",
+    "ServicePrincipalsInMyTenant",
     "WorkloadIdentities",
     "workloadIdentity",
     "workloadIdentityAll",
@@ -493,6 +496,23 @@ mod tests {
             Some(clients(&["workloadIdentityAll"], &[])),
         );
         assert_eq!(applies(&c, APP, Some(SP)), Some(("all", true)));
+    }
+
+    /// Graph's v1.0 `conditionalAccessClientApplications` reference documents
+    /// `includeServicePrincipals` as SP object ids "or
+    /// ServicePrincipalsInMyTenant" — the value a tenant-wide workload-identity
+    /// policy carries. Read as an explicit list naming other clients, it hid
+    /// that policy from every app.
+    #[test]
+    fn documented_all_service_principals_token_matches_this_sp() {
+        let token = "ServicePrincipalsInMyTenant";
+        let c = cond(apps(&["All"], &[], &[]), Some(clients(&[token], &[])));
+        assert_eq!(applies(&c, APP, Some(SP)), Some(("all", true)));
+        let c = cond(apps(&[OTHER], &[], &[]), Some(clients(&[token], &[])));
+        assert_eq!(applies(&c, APP, Some(SP)), Some(("allWorkload", true)));
+        // An excluded SP stays excluded under the tenant-wide token.
+        let c = cond(apps(&["All"], &[], &[]), Some(clients(&[token], &[SP])));
+        assert_eq!(applies(&c, APP, Some(SP)), None);
     }
 
     #[test]

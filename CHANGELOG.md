@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Conditional Access tab now lists policies that cover every service principal in the tenant.
+
 ## [0.36.3] - 2026-11-23
 
 ### Fixed
