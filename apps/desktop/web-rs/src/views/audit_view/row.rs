@@ -19,7 +19,7 @@ use crate::views::dialogs::add_owner::AddOwnerButton;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::migrate_legacy_scope::MigrateLegacyScopeButton;
 use crate::views::dialogs::scope_remediation::{
-    ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
+    ScopeDirectoryWriteButton, ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
 };
 use azapptoolkit_dto::permissions::GrantRef;
 
@@ -158,6 +158,7 @@ pub(super) fn AuditRowActions(
     let add_owner = find(RemediationKind::AddOwner);
     let disable = find(RemediationKind::DisableSignIn);
     let revoke_expired = find(RemediationKind::RevokeExpiredGrants);
+    let directory_write = find(RemediationKind::ScopeDirectoryWrite);
 
     let tab = target_tab(&item, section);
     let kind = item.principal_kind;
@@ -201,6 +202,8 @@ pub(super) fn AuditRowActions(
         })
         .collect();
     let target_m = scope_target.clone();
+    let target_d = scope_target.clone();
+    let app_id_directory = item.app_id.clone();
     let target_s = scope_target;
 
     // A landed Fix re-keys this row, so the stack is rebuilt and the focus
@@ -325,6 +328,17 @@ pub(super) fn AuditRowActions(
                             app_name=app_name_disable.clone()
                             action=action
                             on_done=done(RemediationKind::DisableSignIn)
+                        />
+                    }
+                })}
+            {directory_write
+                .map(|action| {
+                    view! {
+                        <ScopeDirectoryWriteButton
+                            target=target_d.clone()
+                            app_id=app_id_directory.clone()
+                            action=action
+                            on_done=done(RemediationKind::ScopeDirectoryWrite)
                         />
                     }
                 })}

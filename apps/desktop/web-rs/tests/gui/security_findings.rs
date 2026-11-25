@@ -1261,3 +1261,85 @@ async fn a_partial_revoke_keeps_the_fix_and_says_why() {
         "unfinished work keeps the Fix"
     );
 }
+
+/// Rule 26: an org-wide directory write gets its own group, whose Fix opens
+/// the admin-unit picker and limits the write (an app row sends no SP id; the
+/// backend resolves it from the app id).
+#[wasm_bindgen_test]
+async fn orgwide_directory_write_group_offers_the_scope_fix() {
+    use azapptoolkit_core::audit::{RemediationAction, RemediationKind};
+    use azapptoolkit_dto::admin_units::{AdminUnitDto, DirectoryWriteScopeResult};
+    ts::reset();
+    let mut run = cached_run();
+    let mut app = fixtures::audit_item(
+        "Directory Sync",
+        RiskLevel::High,
+        &[format!(
+            "{} User.ReadWrite.All",
+            issue::ORG_WIDE_DIRECTORY_WRITE
+        )],
+    );
+    app.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeDirectoryWrite,
+        label: "Limit 1 directory write permission to an admin unit".into(),
+        detail:
+            "Assigns the matching admin role at an admin unit, then removes: User.ReadWrite.All"
+                .into(),
+        targets: vec!["User.ReadWrite.All".into()],
+    }];
+    run.items.push(app);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok(
+        "list_admin_units",
+        &vec![AdminUnitDto {
+            id: "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12".into(),
+            display_name: "Sales".into(),
+            dynamic: false,
+            membership_rule: None,
+            rule_processing_on: true,
+            restricted: false,
+        }],
+    );
+    ts::mock_ok(
+        "scope_directory_write",
+        &DirectoryWriteScopeResult {
+            role_assigned: true,
+            read_granted: true,
+            orgwide_removed: true,
+            ..Default::default()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Organization-wide directory write")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_directory_write".to_string()));
+    ts::wait_for(|| ts::has_button_labelled("Limit 1 directory write permission to an admin unit"))
+        .await;
+    ts::click_button_labelled("Limit 1 directory write permission to an admin unit");
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
+    let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
+        .unwrap()
+        .unchecked_into();
+    radio.click();
+    ts::tick().await;
+    assert!(
+        ts::body_contains("Change users outside the unit"),
+        "the disclosures show"
+    );
+    ts::click_button_labelled("Limit writes");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
+    let args = ts::last_call("scope_directory_write").unwrap().args;
+    assert!(args["spObjectId"].is_null(), "{args}");
+    assert_eq!(args["objectId"], "obj-Directory Sync");
+    assert_eq!(args["appId"], "Directory Sync-appid");
+    assert_eq!(args["permissionValue"], "User.ReadWrite.All");
+    assert_eq!(args["adminUnitId"], "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12");
+    assert_eq!(args["createdNow"], false);
+    ts::wait_for(|| {
+        !ts::has_button_labelled("Limit 1 directory write permission to an admin unit")
+    })
+    .await;
+}

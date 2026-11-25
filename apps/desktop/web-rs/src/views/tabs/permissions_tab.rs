@@ -14,6 +14,7 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::exchange;
 use crate::bindings::permissions::{self, GrantResult};
+use crate::components::directory_roles_section::DirectoryRolesSection;
 use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::icon::IconName;
 use crate::components::legacy_exchange_grants_callout::{
@@ -1009,6 +1010,12 @@ pub fn PermissionsTab(
                         }
                     })
             }}
+            <DirectoryRolesSection sp_object_id=Signal::derive(move || {
+                detail
+                    .with(|d| {
+                        d.service_principal.as_ref().map(|sp| sp.id.clone()).unwrap_or_default()
+                    })
+            }) />
             <UsagePanel detail=detail />
         </div>
     }

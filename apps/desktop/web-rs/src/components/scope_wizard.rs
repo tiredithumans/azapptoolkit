@@ -48,7 +48,7 @@ use thaw::{Button, ButtonAppearance, Field};
 use crate::bindings::admin_units::{self, AdminUnitDto};
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
-use crate::components::admin_unit_panel::AdminUnitPanel;
+use crate::components::admin_unit_panel::{AdminUnitPanel, DirectoryWriteDisclosures};
 use crate::components::group_autocomplete::MailboxGroupsField;
 use crate::components::item_selection_panel::ItemSelectionPanel;
 use crate::components::managed_scope_group_panel::ManagedScopeGroupPanel;
@@ -532,7 +532,7 @@ async fn apply_admin_unit_scoped(
 ) -> Result<Applied, UiError> {
     let r = admin_units::scope_directory_write(admin_units::ScopeDirectoryWriteArgs {
         tenant_id: &tenant_id,
-        sp_object_id: &target.sp_object_id,
+        sp_object_id: (!target.sp_object_id.is_empty()).then_some(target.sp_object_id.as_str()),
         object_id: target.object_id.as_deref(),
         app_id: &target.app_id,
         permission_value: &value,
@@ -1167,45 +1167,12 @@ pub fn ScopeWizard(
     };
 
     // The admin-unit mechanism's disclosures, shown before the operator
-    // confirms: the tenant-wide read it keeps, what the role also allows, and
-    // what the app can no longer do.
-    let au_disclosures = move || {
-        if active_mode.get() != ScopeMode::AdminUnit {
-            return None;
-        }
-        let mapping = selected.with(|s| {
-            s.first().and_then(|i| {
-                directory_write_mapping(Some(&i.resource_app_id), &i.permission_value)
-            })
-        })?;
-        Some(view! {
-            <div class="scope-wizard__disclosures">
-                <span class="ui-text">
-                    {format!(
-                        "Role: {}. Keeps tenant-wide read ({} or Directory.Read.All), which the role needs.",
-                        mapping.role_name,
-                        mapping.read_permission,
-                    )}
-                </span>
-                <strong>"The role also allows"</strong>
-                <ul class="member-list">
-                    {mapping
-                        .also_allows
-                        .iter()
-                        .map(|l| view! { <li>{*l}</li> })
-                        .collect_view()}
-                </ul>
-                <strong>"The app can no longer"</strong>
-                <ul class="member-list">
-                    {mapping
-                        .no_longer
-                        .iter()
-                        .map(|l| view! { <li>{*l}</li> })
-                        .collect_view()}
-                </ul>
-            </div>
-        })
-    };
+    // confirms (shared with the audit's Scope fix).
+    let au_permission = Signal::derive(move || {
+        (active_mode.get() == ScopeMode::AdminUnit)
+            .then(|| selected.with(|s| s.first().map(|i| i.permission_value.clone())))
+            .flatten()
+    });
 
     view! {
         <ModalShell open=open title="Grant access" busy=busy on_close=on_close wide=true>
@@ -1389,7 +1356,7 @@ pub fn ScopeWizard(
                     }}
                 </dl>
                 <span class="ui-text">{review_line}</span>
-                {au_disclosures}
+                <DirectoryWriteDisclosures permission=au_permission />
                 {move || {
                     selected
                         .with(|s| unscopable_cart_warning(s))

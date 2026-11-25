@@ -3,6 +3,7 @@ use crate::bindings::exchange as exchange_bindings;
 use crate::bindings::exchange::PrincipalPermission;
 use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
+use crate::components::directory_roles_section::DirectoryRolesSection;
 use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
@@ -379,6 +380,7 @@ pub(super) fn PermissionsContent(
                     }
                 })}
             </Suspense>
+            <DirectoryRolesSection sp_object_id=sp_id />
             <ConfirmDialog
                 open=Signal::derive(move || pending_revoke.with(|p| p.is_some()))
                 title="Revoke this permission?"

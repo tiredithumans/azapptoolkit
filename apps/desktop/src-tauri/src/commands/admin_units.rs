@@ -360,6 +360,25 @@ pub(crate) async fn scope_directory_write_core(
     Ok(result)
 }
 
+/// The principal's service principal: `sp_object_id` when the caller has it,
+/// else the one paired with `app_id` (an audit row for an app registration
+/// carries no SP id).
+pub(crate) async fn resolve_sp_object_id(
+    client: &GraphClient,
+    sp_object_id: Option<&str>,
+    app_id: &str,
+) -> Result<String, UiError> {
+    if let Some(id) = sp_object_id {
+        return Ok(id.to_string());
+    }
+    client
+        .get_service_principal_by_app_id(app_id)
+        .await
+        .map_err(admin_unit_err)?
+        .map(|sp| sp.id)
+        .ok_or_else(|| UiError::not_found("service_principal", "This app has no service principal"))
+}
+
 /// Limits `permission_value` (Microsoft Graph) held by the principal to the
 /// admin unit `admin_unit_id`. `created_now` says the unit was created in this
 /// same wizard run (its membership is still being calculated).
@@ -368,24 +387,22 @@ pub(crate) async fn scope_directory_write_core(
 pub async fn scope_directory_write(
     state: State<'_, AppState>,
     tenant_id: String,
-    sp_object_id: String,
+    sp_object_id: Option<String>,
     object_id: Option<String>,
     app_id: String,
     permission_value: String,
     admin_unit_id: String,
     created_now: bool,
 ) -> Result<DirectoryWriteScopeResult, UiError> {
-    for (what, id) in [
-        ("service principal id", sp_object_id.as_str()),
-        ("app id", app_id.as_str()),
-        ("admin unit id", admin_unit_id.as_str()),
-    ] {
-        if !is_guid(id) {
-            return Err(invalid_id(what));
-        }
+    crate::commands::guid::require_app_id(&app_id)?;
+    if !is_guid(&admin_unit_id) {
+        return Err(invalid_id("admin unit id"));
     }
     if object_id.as_deref().is_some_and(|o| !is_guid(o)) {
         return Err(invalid_id("app registration id"));
+    }
+    if sp_object_id.as_deref().is_some_and(|o| !is_guid(o)) {
+        return Err(invalid_id("service principal id"));
     }
     let mapping = directory_write_mapping(Some(MICROSOFT_GRAPH_APP_ID), &permission_value)
         .ok_or_else(|| {
@@ -395,6 +412,7 @@ pub async fn scope_directory_write(
             )
         })?;
     let client = state.graph_for(&tenant_id);
+    let sp_object_id = resolve_sp_object_id(&client, sp_object_id.as_deref(), &app_id).await?;
     scope_directory_write_core(
         &client,
         &state.cache,
@@ -1018,6 +1036,40 @@ mod tests {
         assert_eq!(
             code("Finance", &"x".repeat(3073)),
             Some("invalid_membership_rule".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_sp_id_resolves_from_the_app_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param("$filter", format!("appId eq '{APP}'")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": SP, "appId": APP, "displayName": "Directory Sync" }]
+            })))
+            .mount(&server)
+            .await;
+        let c = client(&server);
+        assert_eq!(resolve_sp_object_id(&c, None, APP).await.unwrap(), SP);
+        assert_eq!(resolve_sp_object_id(&c, Some(SP), APP).await.unwrap(), SP);
+        Mock::given(method("GET"))
+            .and(path("/v1.0/servicePrincipals"))
+            .and(query_param(
+                "$filter",
+                "appId eq '22222222-3333-4444-8555-666666666666'",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+            )
+            .mount(&server)
+            .await;
+        assert_eq!(
+            resolve_sp_object_id(&c, None, "22222222-3333-4444-8555-666666666666")
+                .await
+                .unwrap_err()
+                .code,
+            "service_principal_not_found"
         );
     }
 }

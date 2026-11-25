@@ -12,6 +12,7 @@ pub mod claims_overview;
 pub mod collapsible_scoping_section;
 pub mod date_range_filter;
 pub mod detail_header;
+pub mod directory_roles_section;
 pub mod directory_search;
 pub mod exchange_scoping_section;
 pub mod export_menu;

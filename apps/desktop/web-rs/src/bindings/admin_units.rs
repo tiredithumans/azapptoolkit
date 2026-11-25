@@ -93,7 +93,8 @@ pub async fn remove_admin_unit_role(
 #[serde(rename_all = "camelCase")]
 pub struct ScopeDirectoryWriteArgs<'a> {
     pub tenant_id: &'a str,
-    pub sp_object_id: &'a str,
+    /// The service principal; `None` resolves it from `app_id`.
+    pub sp_object_id: Option<&'a str>,
     /// The app registration, `None` for an SP-only principal.
     pub object_id: Option<&'a str>,
     pub app_id: &'a str,

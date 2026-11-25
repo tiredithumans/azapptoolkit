@@ -238,6 +238,44 @@ pub fn AdminUnitPanel(
     }
 }
 
+/// What limiting `permission` (Microsoft Graph) to an admin unit means, shown
+/// before the operator confirms: the role, the tenant-wide read it keeps, what
+/// the role also allows, and what the app can no longer do.
+#[component]
+pub fn DirectoryWriteDisclosures(
+    #[prop(into)] permission: Signal<Option<String>>,
+) -> impl IntoView {
+    move || {
+        let mapping = permission.with(|p| {
+            p.as_deref().and_then(|v| {
+                azapptoolkit_core::scoping::admin_unit::directory_write_mapping(
+                    Some(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID),
+                    v,
+                )
+            })
+        })?;
+        Some(view! {
+            <div class="scope-wizard__disclosures">
+                <span class="ui-text">
+                    {format!(
+                        "Role: {}. Keeps tenant-wide read ({} or Directory.Read.All), which the role needs.",
+                        mapping.role_name,
+                        mapping.read_permission,
+                    )}
+                </span>
+                <strong>"The role also allows"</strong>
+                <ul class="member-list">
+                    {mapping.also_allows.iter().map(|l| view! { <li>{*l}</li> }).collect_view()}
+                </ul>
+                <strong>"The app can no longer"</strong>
+                <ul class="member-list">
+                    {mapping.no_longer.iter().map(|l| view! { <li>{*l}</li> }).collect_view()}
+                </ul>
+            </div>
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
