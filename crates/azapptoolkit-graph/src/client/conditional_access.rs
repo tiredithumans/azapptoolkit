@@ -113,7 +113,7 @@ impl GraphClient {
     /// One app's service-principal sign-ins since `since` (beta: the
     /// `signInEventTypes` filter is beta-only), with the report-only CA
     /// results Graph hides unless asked (`Prefer: include-unknown-enum-members`).
-    /// Capped at [`SIGN_IN_ROW_CAP`] rows.
+    /// Capped at 1 000 rows.
     pub async fn list_service_principal_sign_ins(
         &self,
         app_id: &str,
