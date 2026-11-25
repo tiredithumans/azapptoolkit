@@ -640,11 +640,11 @@ mod tests {
 
         const G: &str = "00000003-0000-0000-c000-000000000000";
 
-        fn locs(include: &[&str], exclude: &[&str]) -> Option<CaLocations> {
-            Some(CaLocations {
+        fn locs(include: &[&str], exclude: &[&str]) -> CaLocations {
+            CaLocations {
                 include_locations: include.iter().map(|s| s.to_string()).collect(),
                 exclude_locations: exclude.iter().map(|s| s.to_string()).collect(),
-            })
+            }
         }
 
         /// One policy; the defaults are a textbook workload-identity lock.
@@ -678,7 +678,7 @@ mod tests {
                 "enabled",
                 Some(clients(&[SP], &[])),
                 apps(&["All"], &[], &[]),
-                locs(&["All"], &["AllTrusted"]),
+                Some(locs(&["All"], &["AllTrusted"])),
                 &["block"],
             )
         }
@@ -736,7 +736,7 @@ mod tests {
         #[test]
         fn exclude_only_locations_is_none() {
             let mut p = textbook("p1");
-            p.conditions.as_mut().unwrap().locations = locs(&[], &["AllTrusted"]);
+            p.conditions.as_mut().unwrap().locations = Some(locs(&[], &["AllTrusted"]));
             assert_eq!(verdict(p), NetworkLock::None);
         }
 
