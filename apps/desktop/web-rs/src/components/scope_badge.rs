@@ -11,7 +11,8 @@
 //!   so it needs no live lookup and is derived here from the value alone.
 
 use azapptoolkit_core::audit::{
-    MailPermissionScope, RiskLevel, ScopeMechanism, risk_level_for_app_permission,
+    MailPermissionScope, RiskLevel, ScopeMechanism, UnmanagedMechanism, is_unscopable_privileged,
+    risk_level_for_app_permission, unmanaged_mechanism_for,
 };
 use leptos::prelude::*;
 
@@ -88,6 +89,10 @@ enum ScopeCell {
     /// A sub-site Selected scope (`Lists.`/`ListItems.`/`Files.SelectedOperations.Selected`)
     /// — confined to individually-granted lists, folders or files.
     ItemsSelected,
+    /// A Graph application permission Microsoft offers no way to narrow — it
+    /// reaches the whole tenant (`is_unscopable_privileged`). Carries the
+    /// Microsoft mechanism this toolkit doesn't manage, if there is one.
+    NoBuiltInScoping(Option<UnmanagedMechanism>),
     /// Not scopable by any mechanism.
     NotApplicable,
 }
@@ -132,6 +137,11 @@ fn scope_cell_for(
         // no confident "Scoped" badge.
         Some(v) if is_scoped_sharepoint_item_resource_permission(resource_app_id, v) => {
             ScopeCell::ItemsSelected
+        }
+        // Application permissions only, like the Exchange arm: a delegated
+        // grant runs as the signed-in user, not tenant-wide as the app.
+        Some(v) if is_application && is_unscopable_privileged(resource_app_id, v) => {
+            ScopeCell::NoBuiltInScoping(unmanaged_mechanism_for(resource_app_id, v))
         }
         _ => ScopeCell::NotApplicable,
     }
@@ -191,6 +201,20 @@ pub fn permission_scope_cell(
             />
         }
         .into_any(),
+        ScopeCell::NoBuiltInScoping(mechanism) => {
+            let title = match mechanism {
+                Some(m) => format!(
+                    "This toolkit can't narrow this permission — it reaches the whole tenant. Microsoft can narrow it with {}, which this toolkit doesn't manage yet.",
+                    m.label()
+                ),
+                None => {
+                    "Microsoft offers no way to narrow this permission — it reaches the whole tenant"
+                        .to_string()
+                }
+            };
+            view! { <Badge label="No built-in scoping" tone=BadgeTone::Warning title=title /> }
+                .into_any()
+        }
         ScopeCell::NotApplicable => view! { <span class="muted">"—"</span> }.into_any(),
     }
 }
@@ -304,6 +328,40 @@ mod tests {
 
     fn cell(value: &str, resource: &str, scope: Option<MailPermissionScope>) -> ScopeCell {
         scope_cell_for(Some(value), Some(resource), scope, true, false)
+    }
+
+    #[test]
+    fn unnarrowable_permissions_get_the_no_built_in_scoping_cell() {
+        use azapptoolkit_core::audit::UnmanagedMechanism;
+        assert_eq!(
+            cell("CallRecords.Read.All", GRAPH, None),
+            ScopeCell::NoBuiltInScoping(None)
+        );
+        // Only application permissions: a delegated row runs as the user.
+        assert_eq!(
+            scope_cell_for(
+                Some("CallRecords.Read.All"),
+                Some(GRAPH),
+                None,
+                false,
+                false
+            ),
+            ScopeCell::NotApplicable
+        );
+        assert_eq!(
+            cell("Chat.Read.All", GRAPH, None),
+            ScopeCell::NoBuiltInScoping(Some(UnmanagedMechanism::ResourceSpecificConsent))
+        );
+        // Directory reads are deliberately not flagged.
+        assert_eq!(cell("User.Read.All", GRAPH, None), ScopeCell::NotApplicable);
+        // The Permission tester can't answer "which call records" — no jump.
+        assert!(!permission_scope_reach_is_unstated(
+            Some("CallRecords.Read.All"),
+            Some(GRAPH),
+            None,
+            true,
+            false
+        ));
     }
 
     #[test]

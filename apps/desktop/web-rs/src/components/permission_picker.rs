@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 
 use azapptoolkit_core::audit::{
-    downgrade_alternatives, is_risky_delegated_scope, least_privilege_alternative_for,
+    downgrade_alternatives, is_risky_delegated_scope, is_unscopable_privileged,
+    least_privilege_alternative_for, unmanaged_mechanism_for,
 };
 use azapptoolkit_core::scoping::{
     SP_FILES_SELECTED, SP_LIST_ITEMS_SELECTED, SP_LISTS_SELECTED, SP_SITES_SELECTED,
@@ -281,7 +282,22 @@ fn scope_hint_note(resource_app_id: &str, value: &str) -> Option<(bool, String)>
             format!("Scoped — grants nothing until you pick {target} (least privilege)"),
         ));
     }
-    let alt = least_privilege_alternative_for(Some(resource_app_id), value)?;
+    let Some(alt) = least_privilege_alternative_for(Some(resource_app_id), value) else {
+        // No narrower model to point at. A permission Microsoft offers no
+        // way to narrow says so — the same classifier the audit's Rule 24
+        // and the Permissions tab's badge read.
+        if !is_unscopable_privileged(Some(resource_app_id), value) {
+            return None;
+        }
+        let note = match unmanaged_mechanism_for(Some(resource_app_id), value) {
+            Some(m) => format!(
+                "Tenant-wide. Microsoft can narrow it with {}; this toolkit doesn't manage that yet.",
+                m.label()
+            ),
+            None => "Tenant-wide — Microsoft offers no way to narrow this permission.".to_string(),
+        };
+        return Some((false, note));
+    };
     // Worded off the helper's own answer, so the two can never disagree.
     let note = if alt == SP_SITES_SELECTED {
         format!("Org-wide — reaches every site. Prefer {alt}.")
@@ -507,6 +523,31 @@ fn PermissionList(
 mod tests {
     use super::*;
     use azapptoolkit_core::scoping::{MICROSOFT_GRAPH_APP_ID, OFFICE365_EXCHANGE_ONLINE_APP_ID};
+
+    #[test]
+    fn scope_hint_flags_permissions_with_no_built_in_scoping() {
+        assert_eq!(
+            scope_hint_note(MICROSOFT_GRAPH_APP_ID, "CallRecords.Read.All"),
+            Some((
+                false,
+                "Tenant-wide — Microsoft offers no way to narrow this permission.".to_string()
+            ))
+        );
+        let (scoped, text) = scope_hint_note(MICROSOFT_GRAPH_APP_ID, "Chat.Read.All")
+            .expect("an unnarrowable Graph permission gets a note");
+        assert!(!scoped);
+        assert!(
+            text.ends_with(
+                "Microsoft can narrow it with per-team (resource-specific) consent; this toolkit doesn't manage that yet."
+            ),
+            "{text}"
+        );
+        // Not Graph: no claim either way.
+        assert_eq!(
+            scope_hint_note(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Exchange.ManageAsApp"),
+            None
+        );
+    }
 
     #[test]
     fn scope_hint_offers_mailbox_scoping_only_where_rbac_applies() {

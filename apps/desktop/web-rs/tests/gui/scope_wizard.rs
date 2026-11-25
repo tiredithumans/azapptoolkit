@@ -897,3 +897,19 @@ async fn a_consent_retry_does_not_apply_to_a_tenant_switched_to_meanwhile() {
         "the gate releases `busy` when it bails"
     );
 }
+
+/// A permission Microsoft offers no way to narrow is granted org-wide by
+/// definition; the review step says so before the grant runs.
+#[wasm_bindgen_test]
+async fn the_review_step_warns_about_a_permission_with_no_built_in_scoping() {
+    let _m = mount_wizard(Some(graph_app_selection("CallRecords.Read.All")));
+    ts::wait_for(|| ts::body_contains("Step 2 of 3")).await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("EVERY resource")).await;
+    assert!(
+        ts::body_contains(
+            "CallRecords.Read.All: Microsoft offers no way to narrow these, so the app will reach the whole tenant with each."
+        ),
+        "the review step names the unnarrowable permission"
+    );
+}
