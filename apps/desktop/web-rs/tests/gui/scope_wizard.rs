@@ -264,6 +264,7 @@ async fn managed_group_panel_marks_an_existing_group_and_lists_members() {
 async fn orgwide_option_grants_without_scoping() {
     let _m = mount_wizard(None);
     ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+    ts::mock_ok("set_grant_expiry", &());
     ts::mock_ok("list_exchange_scope_group", &populated_scope_group());
 
     ts::wait_for(|| ts::body_contains("Mail.Read")).await;
@@ -285,11 +286,11 @@ async fn orgwide_option_grants_without_scoping() {
 
     assert_eq!(ts::call_count("grant_exchange_mailbox_access"), 0);
     assert_eq!(ts::call_count("declare_app_permission"), 0);
-    assert_eq!(
-        ts::call_count("set_grant_expiry"),
-        0,
-        "Never is the default"
-    );
+    // "Never" (the default) still writes: it clears an expiry an earlier grant
+    // of the same permission left behind.
+    ts::wait_for(|| ts::call_count("set_grant_expiry") == 1).await;
+    let args = ts::last_call("set_grant_expiry").unwrap().args;
+    assert!(args["expiresOn"].is_null(), "{args}");
 }
 
 #[wasm_bindgen_test]
@@ -953,7 +954,12 @@ async fn orgwide_with_expiry_sets_it_after_granting() {
     ts::wait_for(|| ts::call_count("set_grant_expiry") == 1).await;
     let args = ts::last_call("set_grant_expiry").unwrap().args;
     assert_eq!(args["spObjectId"], "client-sp");
-    assert_eq!(args["resourceAppId"], fixtures::MICROSOFT_GRAPH_APP_ID);
-    assert_eq!(args["appRoleId"], "User.Read.All-role-id");
+    assert_eq!(
+        args["grants"],
+        serde_json::json!([{
+            "resourceAppId": fixtures::MICROSOFT_GRAPH_APP_ID,
+            "appRoleId": "User.Read.All-role-id"
+        }])
+    );
     assert_eq!(args["expiresOn"], expected.as_str());
 }

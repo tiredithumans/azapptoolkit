@@ -63,9 +63,21 @@ pub fn decode_expiry_tag(tag: &str) -> Option<Option<GrantExpiry>> {
     }))
 }
 
-/// Rule 25's Fix for the named expired grants (the names ride `targets` for
-/// the confirm).
-pub fn revoke_expired_remediation(names: &[String]) -> super::RemediationAction {
+/// A grant whose expiry has passed, as Rule 25 found it: the pair the Fix
+/// revokes, and the name the confirm shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiredGrant {
+    pub resource_app_id: String,
+    pub app_role_id: String,
+    /// The permission's value, or the role id when it couldn't be resolved.
+    pub name: String,
+    pub expires_on: Date,
+}
+
+/// Rule 25's Fix for `expired` (their names ride `targets` for the confirm;
+/// the Fix revokes exactly these pairs, from `AuditItem.expired_grants`).
+pub fn revoke_expired_remediation(expired: &[ExpiredGrant]) -> super::RemediationAction {
+    let names: Vec<String> = expired.iter().map(|e| e.name.clone()).collect();
     super::RemediationAction {
         kind: super::RemediationKind::RevokeExpiredGrants,
         label: format!(
@@ -74,7 +86,7 @@ pub fn revoke_expired_remediation(names: &[String]) -> super::RemediationAction 
             if names.len() == 1 { "" } else { "s" }
         ),
         detail: names.join(", "),
-        targets: names.to_vec(),
+        targets: names,
     }
 }
 

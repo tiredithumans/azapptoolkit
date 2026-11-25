@@ -13,12 +13,11 @@ use crate::components::scope_wizard::{ScopeTarget, ScopeWizard};
 use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSection;
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
-use crate::views::dialogs::grant_expiry_dialog::{ExpiryTarget, GrantExpiryDialog, current_expiry};
-use azapptoolkit_core::audit::{GrantExpiry, MailPermissionScope, expiries_in};
+use crate::views::dialogs::grant_expiry_dialog::{GrantExpiryDialog, use_held_expiries};
+use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::{
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
 };
-use jiff::civil::Date;
 use std::collections::HashMap;
 
 #[component]
@@ -179,45 +178,8 @@ pub(super) fn PermissionsContent(
         wizard_open.set(true);
     });
 
-    // Grant expiries (B3) are tags on this SP. The detail isn't re-read after
-    // a save, so the tab keeps its own copy, updated from each landed write.
-    let expiries = RwSignal::new(signal.with_untracked(|d| expiries_in(&d.service_principal.tags)));
-    let expiry_target: RwSignal<Option<ExpiryTarget>> = RwSignal::new(None);
-    let on_expiry = Callback::new(
-        move |(resource_app_id, app_role_id, label): (String, String, String)| {
-            let current =
-                expiries.with_untracked(|v| current_expiry(v, &resource_app_id, &app_role_id));
-            expiry_target.set(Some(ExpiryTarget {
-                sp_object_id: sp_id.get_untracked(),
-                resource_app_id,
-                app_role_id,
-                label,
-                current,
-            }));
-        },
-    );
-    let on_expiry_saved = Callback::new(move |date: Option<Date>| {
-        let Some(t) = expiry_target.get_untracked() else {
-            return;
-        };
-        expiries.update(|v| {
-            v.retain(|e| {
-                !(e.resource_app_id.eq_ignore_ascii_case(&t.resource_app_id)
-                    && e.app_role_id.eq_ignore_ascii_case(&t.app_role_id))
-            });
-            if let Some(expires_on) = date {
-                v.push(GrantExpiry {
-                    resource_app_id: t.resource_app_id.to_ascii_lowercase(),
-                    app_role_id: t.app_role_id.to_ascii_lowercase(),
-                    expires_on,
-                });
-            }
-        });
-        session.toast_success(match date {
-            Some(d) => format!("{} expires {d}.", t.label),
-            None => format!("Expiry cleared for {}.", t.label),
-        });
-    });
+    // Grant expiries (B3): read live, and again after each save.
+    let held_expiries = use_held_expiries(sp_id);
 
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
@@ -270,9 +232,9 @@ pub(super) fn PermissionsContent(
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
             />
             <GrantExpiryDialog
-                target=expiry_target
-                on_close=Callback::new(move |()| expiry_target.set(None))
-                on_saved=on_expiry_saved
+                target=held_expiries.target
+                on_close=Callback::new(move |()| held_expiries.target.set(None))
+                on_saved=held_expiries.on_saved
             />
             <Suspense fallback=move || {
                 view! { <SkeletonList rows=6 /> }
@@ -404,7 +366,8 @@ pub(super) fn PermissionsContent(
                                     show_scope_column=true
                                     on_revoke=on_revoke
                                     on_scope=on_scope
-                                    on_expiry=on_expiry
+                                    on_expiry=held_expiries.on_expiry
+                                    expiries=held_expiries.expiries
                                     busy=Signal::derive(move || revoke_cmd.busy.get())
                                 />
                                 {exchange_section}

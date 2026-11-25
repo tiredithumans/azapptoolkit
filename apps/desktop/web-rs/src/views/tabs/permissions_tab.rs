@@ -38,10 +38,12 @@ use crate::hooks::use_grid_keynav::use_grid_keynav;
 use crate::state::{Session, use_session};
 use crate::util::count_noun;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
-use crate::views::dialogs::grant_expiry_dialog::{ExpiryTarget, GrantExpiryDialog, current_expiry};
+use crate::views::dialogs::grant_expiry_dialog::{
+    ExpiryTarget, GrantExpiryDialog, current_expiry, expiry_note,
+};
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{
-    GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in, expiry_has_passed,
+    GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in,
 };
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
@@ -1233,12 +1235,7 @@ where
             return None;
         }
         let date = expiries.with(|v| current_expiry(v, &expiry_resource, &expiry_role))?;
-        let text = if expiry_has_passed(date, jiff::Timestamp::now()) {
-            format!("Expired {date}")
-        } else {
-            format!("Expires {date}")
-        };
-        Some(view! { <div class="permissions-cell__secondary">{text}</div> })
+        Some(view! { <div class="permissions-cell__secondary">{expiry_note(date)}</div> })
     };
 
     view! {

@@ -62,7 +62,7 @@ use azapptoolkit_core::scoping::{
     ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
 };
 use azapptoolkit_dto::UiError;
-use azapptoolkit_dto::permissions::PermissionKind;
+use azapptoolkit_dto::permissions::{GrantRef, PermissionKind};
 
 /// Everything the wizard needs about the principal, across mechanisms.
 /// `object_id` is the app-registration object id (drives the Exchange
@@ -465,29 +465,50 @@ async fn apply_orgwide(
         }
         Applied::clean(s)
     };
-    if let Some(date) = expires_on {
-        let day = date.to_string();
-        let mut set = 0usize;
-        for (sp_object_id, item) in &held {
-            match permissions::set_grant_expiry(
-                &tenant_id,
-                sp_object_id,
-                &item.resource_app_id,
-                &item.permission_id,
-                Some(&day),
-            )
-            .await
-            {
-                Ok(()) => set += 1,
-                Err(e) => applied.warnings.push(format!(
-                    "Granted {}, but its expiry couldn't be set ({}) — set it on the Permissions tab.",
-                    item.permission_value, e.message
-                )),
+    // The expiry, written per holding service principal in one write. "Never"
+    // writes too: it clears a date an earlier grant of the same permission
+    // left behind.
+    let day = expires_on.map(|d| d.to_string());
+    let mut by_sp: std::collections::BTreeMap<&str, Vec<&PickerSelection>> =
+        std::collections::BTreeMap::new();
+    for (sp_object_id, item) in &held {
+        by_sp.entry(sp_object_id.as_str()).or_default().push(item);
+    }
+    let mut dated = 0usize;
+    for (sp_object_id, items) in by_sp {
+        let grants: Vec<GrantRef> = items
+            .iter()
+            .map(|i| GrantRef {
+                resource_app_id: i.resource_app_id.clone(),
+                app_role_id: i.permission_id.clone(),
+            })
+            .collect();
+        match permissions::set_grant_expiry(&tenant_id, sp_object_id, &grants, day.as_deref()).await
+        {
+            Ok(()) => dated += grants.len(),
+            Err(e) => {
+                let names: Vec<&str> = items.iter().map(|i| i.permission_value.as_str()).collect();
+                applied.warnings.push(match &day {
+                    Some(_) => format!(
+                        "Granted {}, but the expiry couldn't be set ({}). Set it with Expiry… on \
+                         the Permissions tab.",
+                        names.join(", "),
+                        e.message
+                    ),
+                    None => format!(
+                        "Granted {}, but an earlier expiry on it couldn't be cleared ({}). Check \
+                         it with Expiry… on the Permissions tab.",
+                        names.join(", "),
+                        e.message
+                    ),
+                });
             }
         }
-        if set > 0 {
-            let _ = write!(applied.summary, " Expires {day}.");
-        }
+    }
+    if let Some(day) = &day
+        && dated > 0
+    {
+        let _ = write!(applied.summary, " Expires {day}.");
     }
     Ok(applied)
 }

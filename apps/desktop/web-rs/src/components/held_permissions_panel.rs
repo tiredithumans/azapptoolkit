@@ -12,6 +12,9 @@
 //! panel is shared with the grant flow — so a row's "Scope…" action just emits
 //! a [`PickerSelection`] for the permission and the caller opens its own panel.
 
+use azapptoolkit_core::audit::GrantExpiry;
+
+use crate::views::dialogs::grant_expiry_dialog::{current_expiry, expiry_note};
 use std::collections::HashMap;
 
 use azapptoolkit_core::audit::{
@@ -72,6 +75,9 @@ pub fn HeldPermissionsPanel(
     /// label)`. Rendered only on rows whose resource resolved.
     #[prop(optional, into)]
     on_expiry: Option<Callback<(String, String, String)>>,
+    /// The expiries set on these grants, shown under each permission.
+    #[prop(optional, into)]
+    expiries: Option<Signal<Vec<GrantExpiry>>>,
     /// When true, the per-row revoke/scope actions are disabled — the caller
     /// sets this while a mutation it owns is in flight, so a second click can't
     /// fire a duplicate revoke/scope (and the greyed buttons signal "in
@@ -211,6 +217,13 @@ pub fn HeldPermissionsPanel(
                 />
             })
         });
+        let note_resource = row_resource_app_id.clone();
+        let note_role = app_role_id.clone();
+        let expiry_note = move || {
+            let resource = note_resource.as_deref()?;
+            let date = expiries?.with(|v| current_expiry(v, resource, &note_role))?;
+            Some(view! { <div class="permissions-cell__secondary">{expiry_note(date)}</div> })
+        };
         let revoke_btn = on_revoke.map(|cb| {
             let aid = assignment_id.clone();
             view! {
@@ -232,6 +245,7 @@ pub fn HeldPermissionsPanel(
                         <span class="mono">{perm}</span>
                         {risk}
                     </span>
+                    {expiry_note}
                 </td>
                 {show_scope_column
                     .then(|| {

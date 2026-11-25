@@ -56,8 +56,10 @@ async fn the_expiry_dialog_sets_and_clears() {
     ts::wait_for(|| ts::call_count("set_grant_expiry") == 1).await;
     let args = ts::last_call("set_grant_expiry").unwrap().args;
     assert_eq!(args["spObjectId"], SP);
-    assert_eq!(args["resourceAppId"], RES);
-    assert_eq!(args["appRoleId"], ROLE);
+    assert_eq!(
+        args["grants"],
+        serde_json::json!([{ "resourceAppId": RES, "appRoleId": ROLE }])
+    );
     assert_eq!(args["expiresOn"], "2027-01-31");
     ts::wait_for(|| saved.get_untracked() == 1).await;
     ts::wait_for(|| !ts::body_contains("Expiry for")).await;

@@ -125,16 +125,18 @@ struct RevokeExpiredArgs<'a> {
     tenant_id: &'a str,
     object_id: &'a str,
     principal_kind: azapptoolkit_core::audit::AuditPrincipalKind,
+    grants: &'a [azapptoolkit_dto::permissions::GrantRef],
 }
 
-/// Revokes the principal's grants whose expiry has passed (re-read live) and,
-/// on an app registration, removes them from its API permissions.
-/// `object_id` is the application on an `Application` row, the service
-/// principal otherwise.
+/// Revokes `grants` (the ones the confirm named) that are still past their
+/// expiry, re-read live, and on an app registration removes them from its API
+/// permissions. `object_id` is the application on an `Application` row, the
+/// service principal otherwise.
 pub async fn remediate_revoke_expired_grants(
     tenant_id: &str,
     object_id: &str,
     principal_kind: azapptoolkit_core::audit::AuditPrincipalKind,
+    grants: &[azapptoolkit_dto::permissions::GrantRef],
 ) -> Result<RevokeExpiredResult, UiError> {
     invoke_result(
         "remediate_revoke_expired_grants",
@@ -142,6 +144,7 @@ pub async fn remediate_revoke_expired_grants(
             tenant_id,
             object_id,
             principal_kind,
+            grants,
         },
     )
     .await

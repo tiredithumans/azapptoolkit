@@ -1152,7 +1152,7 @@ async fn expired_grants_group_offers_revoke_with_a_named_confirm() {
         )],
     );
     vendor.principal_kind = AuditPrincipalKind::ServicePrincipal;
-    vendor.expired_grants = vec!["Chat.Read.All".to_string()];
+    vendor.expired_grants = vec![chat_read_all_expired()];
     vendor.remediations = vec![revoke_expired_remediation(&vendor.expired_grants)];
     run.items.push(vendor);
     run.total_apps = run.items.len();
@@ -1186,5 +1186,78 @@ async fn expired_grants_group_offers_revoke_with_a_named_confirm() {
         .args;
     assert_eq!(args["objectId"], "obj-Chat Archiver");
     assert_eq!(args["principalKind"], "service_principal");
+    assert_eq!(
+        args["grants"],
+        serde_json::json!([{
+            "resourceAppId": fixtures::MICROSOFT_GRAPH_APP_ID,
+            "appRoleId": CHAT_READ_ALL_ROLE
+        }]),
+        "the Fix revokes exactly what the confirm named"
+    );
     ts::wait_for(|| !ts::has_button_labelled("Revoke 1 expired grant")).await;
+}
+
+const CHAT_READ_ALL_ROLE: &str = "6b7d71aa-70aa-4810-a8d9-5d9fb2830017";
+
+fn chat_read_all_expired() -> azapptoolkit_core::audit::ExpiredGrant {
+    azapptoolkit_core::audit::ExpiredGrant {
+        resource_app_id: fixtures::MICROSOFT_GRAPH_APP_ID.to_string(),
+        app_role_id: CHAT_READ_ALL_ROLE.to_string(),
+        name: "Chat.Read.All".to_string(),
+        expires_on: "2026-11-01".parse().unwrap(),
+    }
+}
+
+/// A revoke that landed but left work undone (here, the manifest write
+/// failed) keeps the row's Fix and says why in an error toast, which stays.
+#[wasm_bindgen_test]
+async fn a_partial_revoke_keeps_the_fix_and_says_why() {
+    use azapptoolkit_core::audit::revoke_expired_remediation;
+    use azapptoolkit_dto::permissions::RevokeExpiredResult;
+    use azapptoolkit_web_rs::components::toast::ToastKind;
+    ts::reset();
+    let mut run = cached_run();
+    let mut app = fixtures::audit_item(
+        "Chat Archiver",
+        RiskLevel::Medium,
+        &[format!(
+            "{} Chat.Read.All (expired 2026-11-01)",
+            issue::GRANT_EXPIRED
+        )],
+    );
+    app.expired_grants = vec![chat_read_all_expired()];
+    app.remediations = vec![revoke_expired_remediation(&app.expired_grants)];
+    run.items.push(app);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok(
+        "remediate_revoke_expired_grants",
+        &RevokeExpiredResult {
+            revoked: vec!["Chat.Read.All".to_string()],
+            warnings: vec!["Removing them from the app's API permissions failed".to_string()],
+            ..Default::default()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Grants past their expiry")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("expired_grants".to_string()));
+    ts::wait_for(|| ts::has_button_labelled("Revoke 1 expired grant")).await;
+    ts::click_button_labelled("Revoke 1 expired grant");
+    ts::wait_for(|| ts::body_contains("Revoke expired grants?")).await;
+    ts::click_button_labelled("Revoke");
+    ts::wait_for(|| ts::call_count("remediate_revoke_expired_grants") == 1).await;
+    ts::wait_until("the error toast", || {
+        m.session.toasts.with_untracked(|l| {
+            l.iter()
+                .any(|t| t.kind == ToastKind::Error && t.message.contains("API permissions failed"))
+        })
+    })
+    .await;
+    assert!(
+        ts::has_button_labelled("Revoke 1 expired grant"),
+        "unfinished work keeps the Fix"
+    );
 }

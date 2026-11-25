@@ -150,6 +150,43 @@ pub struct DowngradeOutcome {
     pub declaration_swapped: bool,
 }
 
+/// One application grant, by resource and app role — the unit a grant expiry
+/// is set on and the Fix revokes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantRef {
+    pub resource_app_id: String,
+    pub app_role_id: String,
+}
+
+/// What revoking a principal's expired grants did, by permission name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeExpiredResult {
+    /// Revoked now.
+    pub revoked: Vec<String>,
+    /// No longer held (revoked by hand, or the resource is gone): only the
+    /// expiry was cleared (and, on an app registration, the declaration).
+    pub already_gone: Vec<String>,
+    /// Granted again after its expiry date had passed, so not the grant the
+    /// date was set for: kept, and only the stale expiry cleared.
+    #[serde(default)]
+    pub regranted: Vec<String>,
+    /// Confirmed, but no longer past an expiry (the date was changed or
+    /// cleared since the audit): left alone.
+    #[serde(default)]
+    pub unchanged: Vec<String>,
+    /// Could not be revoked; their expiries stay.
+    pub failed: Vec<String>,
+    /// Anything else the operator should know (a declaration that could not
+    /// be removed from the manifest).
+    pub warnings: Vec<String>,
+    /// The first failure, with its code: a dead session or a missing role
+    /// raises the same lever as any other command.
+    #[serde(default)]
+    pub error: Option<crate::UiError>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,20 +255,4 @@ mod tests {
             RevokeScopeOutcome::Deleted
         ));
     }
-}
-
-/// What revoking a principal's expired grants did, by permission name.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevokeExpiredResult {
-    /// Revoked now.
-    pub revoked: Vec<String>,
-    /// No longer held (revoked by hand, or the resource is gone): only the
-    /// expiry was cleared.
-    pub already_gone: Vec<String>,
-    /// Could not be revoked; their expiries stay.
-    pub failed: Vec<String>,
-    /// Anything else the operator should know (a declaration that could not
-    /// be removed from the manifest).
-    pub warnings: Vec<String>,
 }

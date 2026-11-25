@@ -321,7 +321,15 @@ pub(crate) fn apply_grant_expiries_with(
         if passed.is_empty() {
             continue;
         }
-        let names_passed: Vec<String> = passed.iter().map(|e| name_of(e)).collect();
+        let expired: Vec<azapptoolkit_core::audit::ExpiredGrant> = passed
+            .iter()
+            .map(|e| azapptoolkit_core::audit::ExpiredGrant {
+                resource_app_id: e.resource_app_id.clone(),
+                app_role_id: e.app_role_id.clone(),
+                name: name_of(e),
+                expires_on: e.expires_on,
+            })
+            .collect();
         let listing = passed
             .iter()
             .map(|e| format!("{} (expired {})", name_of(e), e.expires_on))
@@ -332,14 +340,13 @@ pub(crate) fn apply_grant_expiries_with(
             azapptoolkit_core::audit::issue::GRANT_EXPIRED
         ));
         item.recommendations.push(
-            "Revoke them, or set a new expiry on the Permissions tab if they're still needed"
-                .to_string(),
+            "Revoke them, or set a new expiry date (Expiry…) if they're still needed".to_string(),
         );
         item.remediations
             .push(azapptoolkit_core::audit::revoke_expired_remediation(
-                &names_passed,
+                &expired,
             ));
-        item.expired_grants = names_passed;
+        item.expired_grants = expired;
     }
 }
 

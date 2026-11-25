@@ -29,12 +29,21 @@ fn mi_grant_result() -> GrantManagedIdentityResult {
 /// detail window for the identity, and land on its Permissions tab. The window
 /// resolves the identity (id `mi-0`) from the mocked `list_managed_identities`.
 async fn mount_mi_permissions() -> ts::Mounted {
+    mount_mi_permissions_with(Vec::new(), Vec::new()).await
+}
+
+/// [`mount_mi_permissions`] holding `grants`, with `expiries` set on them.
+async fn mount_mi_permissions_with(
+    grants: Vec<AppRoleGrantDto>,
+    expiries: Vec<azapptoolkit_core::audit::GrantExpiry>,
+) -> ts::Mounted {
     ts::reset();
     ts::mock_ok(
         "list_managed_identities",
         &fixtures::managed_identities(&["mi-prod-api"]),
     );
-    ts::mock_ok("list_held_app_role_grants", &Vec::<AppRoleGrantDto>::new());
+    ts::mock_ok("list_held_app_role_grants", &grants);
+    ts::mock_ok("get_grant_expiries", &expiries);
     ts::mock_ok(
         "get_mail_scopes_for_principal",
         &Vec::<MailScopeEntry>::new(),
@@ -109,4 +118,25 @@ async fn detail_pane_offers_the_grant_wizard() {
     // The single unified entry point opens the wizard (full catalog).
     ts::click_button_labelled("Grant access");
     ts::wait_for(|| ts::body_contains("Step 1 of 3 — Select permissions")).await;
+}
+
+/// A managed identity's held grants show their expiry dates and offer the
+/// Expiry button: the only way to extend or clear a date it was given.
+#[wasm_bindgen_test]
+async fn a_managed_identitys_held_grant_shows_and_edits_its_expiry() {
+    use wasm_bindgen::JsCast;
+    let grant = fixtures::held_grant("User.Read.All");
+    let expiry = azapptoolkit_core::audit::GrantExpiry {
+        resource_app_id: fixtures::MICROSOFT_GRAPH_APP_ID.to_string(),
+        app_role_id: grant.app_role_id.clone(),
+        expires_on: "2099-12-24".parse().unwrap(),
+    };
+    let _m = mount_mi_permissions_with(vec![grant], vec![expiry]).await;
+    ts::wait_for(|| ts::body_contains("Expires 2099-12-24")).await;
+    let button: web_sys::HtmlElement =
+        ts::query("[aria-label='Set expiry for User.Read.All on Microsoft Graph']")
+            .expect("the held grant's Expiry button")
+            .unchecked_into();
+    button.click();
+    ts::wait_for(|| ts::body_contains("Expiry for User.Read.All")).await;
 }

@@ -226,18 +226,16 @@ pub async fn revoke_oauth2_scope(
 struct GrantExpiryArgs<'a> {
     tenant_id: &'a str,
     sp_object_id: &'a str,
-    resource_app_id: &'a str,
-    app_role_id: &'a str,
+    grants: &'a [GrantRef],
     expires_on: Option<&'a str>,
 }
 
-/// Sets (`Some("YYYY-MM-DD")`) or clears (`None`) the expiry of an
-/// application grant held by `sp_object_id`.
+/// Sets (`Some("YYYY-MM-DD")`) or clears (`None`) the expiry of each grant in
+/// `grants` held by `sp_object_id`, in one tag write.
 pub async fn set_grant_expiry(
     tenant_id: &str,
     sp_object_id: &str,
-    resource_app_id: &str,
-    app_role_id: &str,
+    grants: &[GrantRef],
     expires_on: Option<&str>,
 ) -> Result<(), UiError> {
     invoke_result(
@@ -245,9 +243,30 @@ pub async fn set_grant_expiry(
         GrantExpiryArgs {
             tenant_id,
             sp_object_id,
-            resource_app_id,
-            app_role_id,
+            grants,
             expires_on,
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpObjectArgs<'a> {
+    tenant_id: &'a str,
+    sp_object_id: &'a str,
+}
+
+/// The expiries set on `sp_object_id`'s grants, read live.
+pub async fn get_grant_expiries(
+    tenant_id: &str,
+    sp_object_id: &str,
+) -> Result<Vec<azapptoolkit_core::audit::GrantExpiry>, UiError> {
+    invoke_result(
+        "get_grant_expiries",
+        SpObjectArgs {
+            tenant_id,
+            sp_object_id,
         },
     )
     .await

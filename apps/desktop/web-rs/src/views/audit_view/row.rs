@@ -21,6 +21,7 @@ use crate::views::dialogs::migrate_legacy_scope::MigrateLegacyScopeButton;
 use crate::views::dialogs::scope_remediation::{
     ScopeFixTarget, ScopeMailboxButton, ScopeSharePointButton,
 };
+use azapptoolkit_dto::permissions::GrantRef;
 
 use super::controller::AuditController;
 use super::groups::{GroupSpec, group_remediation_kinds};
@@ -191,6 +192,14 @@ pub(super) fn AuditRowActions(
     let app_name_disable = item.application_name.clone();
     let app_name_revoke = item.application_name.clone();
     let oid_revoke = object_id.clone();
+    let grants_revoke: Vec<GrantRef> = item
+        .expired_grants
+        .iter()
+        .map(|e| GrantRef {
+            resource_app_id: e.resource_app_id.clone(),
+            app_role_id: e.app_role_id.clone(),
+        })
+        .collect();
     let target_m = scope_target.clone();
     let target_s = scope_target;
 
@@ -325,6 +334,7 @@ pub(super) fn AuditRowActions(
                         <RevokeExpiredGrantsAction
                             object_id=oid_revoke.clone()
                             principal_kind=kind
+                            grants=grants_revoke.clone()
                             app_name=app_name_revoke.clone()
                             action=action
                             on_done=done(RemediationKind::RevokeExpiredGrants)
@@ -424,33 +434,46 @@ fn DisableSignInAction(
 /// The toast for a revoke-expired-grants run, and whether the finding cleared
 /// (nothing failed).
 fn revoke_expired_report(r: &RevokeExpiredResult) -> (String, bool) {
-    let mut msg = String::new();
+    let mut parts: Vec<String> = Vec::new();
     if !r.revoked.is_empty() {
-        let _ = write!(msg, "Revoked {}.", r.revoked.join(", "));
+        parts.push(format!("Revoked {}.", r.revoked.join(", ")));
     }
     if !r.already_gone.is_empty() {
-        let _ = write!(
-            msg,
-            "{}No longer held: {} (expiry cleared).",
-            if msg.is_empty() { "" } else { " " },
+        parts.push(format!(
+            "No longer held: {} (expiry cleared).",
             r.already_gone.join(", ")
-        );
+        ));
+    }
+    if !r.regranted.is_empty() {
+        parts.push(format!(
+            "Granted again after its expiry date, so kept: {} (old expiry cleared).",
+            r.regranted.join(", ")
+        ));
+    }
+    if !r.unchanged.is_empty() {
+        parts.push(format!(
+            "No longer past an expiry date: {} — nothing revoked; re-run the audit.",
+            r.unchanged.join(", ")
+        ));
     }
     if !r.failed.is_empty() {
-        let _ = write!(
-            msg,
-            "{}Couldn't revoke {} — try again, or revoke on the Permissions tab.",
-            if msg.is_empty() { "" } else { " " },
+        let why = r
+            .error
+            .as_ref()
+            .map(|e| format!(" ({})", e.message))
+            .unwrap_or_default();
+        parts.push(format!(
+            "Couldn't revoke {}{why} — try again, or revoke on the Permissions tab.",
             r.failed.join(", ")
-        );
+        ));
     }
-    for w in &r.warnings {
-        let _ = write!(msg, "{}{w}", if msg.is_empty() { "" } else { " " });
+    parts.extend(r.warnings.iter().cloned());
+    if parts.is_empty() {
+        parts.push("Nothing to revoke.".to_string());
     }
-    if msg.is_empty() {
-        msg.push_str("Nothing to revoke — the expired grants were already gone.");
-    }
-    (msg, r.failed.is_empty())
+    // Done only when nothing failed and nothing was left undone.
+    let done = r.failed.is_empty() && r.warnings.is_empty() && r.error.is_none();
+    (parts.join(" "), done)
 }
 
 /// Rule 25's Fix: revokes the grants whose expiry passed (the backend re-reads
@@ -460,6 +483,8 @@ fn revoke_expired_report(r: &RevokeExpiredResult) -> (String, bool) {
 fn RevokeExpiredGrantsAction(
     object_id: String,
     principal_kind: AuditPrincipalKind,
+    /// The grants the confirm names: the Fix revokes exactly these.
+    grants: Vec<GrantRef>,
     app_name: String,
     action: RemediationAction,
     #[prop(into)] on_done: Callback<String>,
@@ -477,6 +502,7 @@ fn RevokeExpiredGrantsAction(
         busy.set(true);
         error.set(None);
         let object_id = object_id.clone();
+        let grants = grants.clone();
         let tenant = tenant.get();
         leptos::task::spawn_local(async move {
             let Some(t) = tenant else {
@@ -487,6 +513,7 @@ fn RevokeExpiredGrantsAction(
                 &t.tenant_id,
                 &object_id,
                 principal_kind,
+                &grants,
             )
             .await;
             if !session.is_active_tenant(&t.tenant_id) {
@@ -496,12 +523,18 @@ fn RevokeExpiredGrantsAction(
             match res {
                 Ok(r) => {
                     open.set(false);
-                    let (msg, cleared) = revoke_expired_report(&r);
-                    if cleared {
+                    let (msg, done) = revoke_expired_report(&r);
+                    if done {
                         session.toast_success(msg);
                         on_done.try_run(object_id);
                     } else {
+                        // Unfinished work keeps the Fix and a toast that stays;
+                        // a failure's code raises its lever (re-authenticate,
+                        // consent) like any other command's.
                         session.toast_error(msg, None);
+                        if let Some(e) = &r.error {
+                            session.report_command_error(e);
+                        }
                     }
                 }
                 Err(e) => fail_fix(session, error, e),

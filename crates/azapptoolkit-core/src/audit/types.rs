@@ -668,11 +668,10 @@ pub struct AuditItem {
     /// cached runs from before the field existed.
     #[serde(default)]
     pub unscopable_grants: Vec<super::UnscopableGrant>,
-    /// Rule 25: the names of grants whose expiry date has passed (the role id
-    /// when the name couldn't be resolved). Filled by the runner's expiry pass;
-    /// the Fix re-reads them live.
+    /// Rule 25: the grants whose expiry date has passed. Filled by the
+    /// runner's expiry pass; the Fix revokes exactly these (re-checked live).
     #[serde(default)]
-    pub expired_grants: Vec<String>,
+    pub expired_grants: Vec<super::ExpiredGrant>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits

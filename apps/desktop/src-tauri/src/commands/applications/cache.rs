@@ -369,8 +369,9 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
 /// HideApp): the SP index selects `tags`, so its row is patched in place
 /// (`Keep` when the SP isn't indexed or already carries these tags) instead of
 /// dropping the list tier; the enterprise list projection, whose rows carry
-/// tags, is dropped; and the detail tier and the audit run, which read them,
-/// are busted. Call only on `Ok`.
+/// tags, is dropped; and the detail tier is busted. The audit run is kept: a
+/// HideApp toggle changes no finding, so a grant-expiry writer drops it itself
+/// (`invalidate_app_detail_state`). Call only on `Ok`.
 pub(crate) fn record_sp_tags(cache: &Cache, tenant_id: &str, sp_object_id: &str, tags: &[String]) {
     cache.patch_typed_index_with::<Vec<ServicePrincipal>>(
         CacheKind::Lists,
@@ -385,7 +386,7 @@ pub(crate) fn record_sp_tags(cache: &Cache, tenant_id: &str, sp_object_id: &str,
         },
     );
     cache.invalidate(CacheKind::Lists, &enterprise_key(tenant_id));
-    invalidate_app_detail_state(cache, tenant_id);
+    invalidate_app_details(cache, tenant_id);
 }
 
 /// The patch tier for deleted app registrations. Their rows leave the App

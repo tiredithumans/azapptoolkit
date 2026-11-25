@@ -2400,10 +2400,24 @@ fn grant_expiries_post_pass_flags_and_names() {
         .collect();
     assert_eq!(fix.len(), 1);
     assert_eq!(fix[0].targets.len(), 2);
+    let expired: Vec<(&str, &str, &str)> = items[0]
+        .expired_grants
+        .iter()
+        .map(|e| {
+            (
+                e.resource_app_id.as_str(),
+                e.app_role_id.as_str(),
+                e.name.as_str(),
+            )
+        })
+        .collect();
     assert_eq!(
-        items[0].expired_grants,
-        vec!["Chat.Read.All".to_string(), EXPIRY_ROLE_A.to_string()],
-        "the structured field the UI keys off"
+        expired,
+        vec![
+            (MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, "Chat.Read.All"),
+            (UNKNOWN_RESOURCE, EXPIRY_ROLE_A, EXPIRY_ROLE_A),
+        ],
+        "the pairs the Fix revokes, and the names the confirm shows"
     );
     // The future expiry still shows on the checklist's grant.
     let call_records = items[0]
