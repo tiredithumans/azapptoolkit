@@ -6,6 +6,10 @@ After 0.34.1, each change is one line written for the person using the app.
 
 ## [Unreleased]
 
+### Added
+
+- The Security tab flags permissions Microsoft offers no way to narrow, with each app's safeguards.
+
 ### Changed
 
 - The security audit now scores Teams call-record, meeting and channel-message permissions.
