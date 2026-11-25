@@ -67,7 +67,10 @@ async fn none_offers_create_and_creates_report_only() {
     let _m = mount();
     ts::wait_until("the create button", || ts::has_button_labelled(CREATE)).await;
     ts::click_button_labelled(CREATE);
-    ts::wait_until("the named-location list", || ts::body_contains("Head office")).await;
+    ts::wait_until("the named-location list", || {
+        ts::body_contains("Head office")
+    })
+    .await;
     assert!(
         ts::body_contains("Created report-only"),
         "{}",
@@ -80,7 +83,10 @@ async fn none_offers_create_and_creates_report_only() {
     })
     .await;
     ts::click_button_labelled_in(".modal", "Create lock");
-    ts::wait_until("the create call", || ts::call_count("create_network_lock") == 1).await;
+    ts::wait_until("the create call", || {
+        ts::call_count("create_network_lock") == 1
+    })
+    .await;
     let args = ts::last_call("create_network_lock").unwrap().args;
     assert_eq!(
         args["namedLocationIds"],

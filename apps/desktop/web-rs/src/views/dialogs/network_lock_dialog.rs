@@ -9,7 +9,7 @@ use thaw::{Button, ButtonAppearance, Field, Input, Textarea};
 
 use crate::bindings::conditional_access::{self, NewLocationArgs};
 use crate::components::modal_shell::ModalShell;
-use crate::components::ui::{FormError, SkeletonList, Spinner};
+use crate::components::ui::{DetailLoadError, FormError, SkeletonList, Spinner};
 use crate::hooks::use_command::use_command;
 use crate::state::use_session;
 use crate::util::{no_tenant, parse_lines};
@@ -26,10 +26,12 @@ pub fn NetworkLockDialog(
     let new_name = RwSignal::new(String::new());
     let new_cidrs = RwSignal::new(String::new());
     let cmd = use_command().with_consent_feature("conditional_access_write");
+    let reload = RwSignal::new(0_u32);
 
     let locations = LocalResource::new(move || {
         let tenant = session.active_tenant.get();
         let is_open = open.get();
+        let _ = reload.get();
         async move {
             if !is_open {
                 return Ok(Vec::new());
@@ -132,7 +134,15 @@ pub fn NetworkLockDialog(
                                 .collect_view()
                                 .into_any()
                         }
-                        Err(e) => view! { <FormError>{e.message}</FormError> }.into_any(),
+                        Err(e) => {
+                            view! {
+                                <DetailLoadError
+                                    error=e
+                                    on_retry=Callback::new(move |_| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
                     }
                 })}
             </Suspense>
