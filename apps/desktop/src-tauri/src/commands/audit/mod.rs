@@ -151,6 +151,11 @@ pub(crate) struct ScoreCtx {
     /// Every Conditional Access policy, from the run's one tenant-wide read.
     /// Empty when unavailable.
     pub(crate) ca_policies: Arc<Vec<ConditionalAccessPolicy>>,
+    /// Each principal's direct, active directory roles by SP object id
+    /// (Rule 26), from the run's one tenant-wide read. `None` = unreadable:
+    /// no admin-unit limit is inferred, and the org-wide finding still shows.
+    pub(crate) directory_roles:
+        Option<Arc<HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>>>>,
 }
 
 /// The service principals the run's tenant-wide SP index read

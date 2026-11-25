@@ -86,6 +86,10 @@ pub(super) const PTS_UNVERIFIED_PUBLISHER: u32 = 2;
 /// residual stays.
 pub(super) const PTS_SCOPED_HIGH_RISK_MAIL: u32 = 3;
 pub(super) const PTS_SCOPED_MEDIUM_RISK_MAIL: u32 = 2;
+/// Net-new (Rule 26): a High-tier directory write limited to an admin unit
+/// keeps the same reduced weight a confirmed-scoped High mail permission does,
+/// so limiting an app never reads as all-clear.
+pub(super) const PTS_SCOPED_HIGH_RISK_DIRECTORY: u32 = PTS_SCOPED_HIGH_RISK_MAIL;
 
 /// Tier-0 application permissions (by `value` string): each is, on its own, a
 /// path to Global Administrator or to taking over the tenant, with no other

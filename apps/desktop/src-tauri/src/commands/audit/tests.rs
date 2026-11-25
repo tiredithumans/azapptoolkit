@@ -5,8 +5,9 @@ use jiff::SignedDuration;
 
 use super::prefetch::{
     GraphUsage, UsagePrefetch, ca_pre_acquire_outcome, conditional_access_outcome,
-    graph_usage_from_tables, prefetch_admin_consent_grants, prefetch_office365_role_grants,
-    risky_service_principals_outcome, sign_in_activity_outcome, sign_in_pre_acquire_outcome,
+    graph_usage_from_tables, held_directory_roles, prefetch_admin_consent_grants,
+    prefetch_directory_roles, prefetch_office365_role_grants, risky_service_principals_outcome,
+    sign_in_activity_outcome, sign_in_pre_acquire_outcome,
 };
 use super::run::await_usage;
 use super::score::{
@@ -20,8 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, AuditPrincipalKind, CredentialStatus, ResourcePermission, RiskLevel,
-    issue,
+    AppPermissions, AuditItem, AuditPrincipalKind, CredentialStatus, HeldDirectoryRole,
+    ResourcePermission, RiskLevel, issue,
 };
 use azapptoolkit_core::cache::{Cache, CacheKind};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
@@ -791,6 +792,7 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         app_policy: Arc::default(),
         ca_available: false,
         ca_policies: Arc::default(),
+        directory_roles: None,
     }
 }
 
@@ -2439,4 +2441,65 @@ fn grant_expiries_post_pass_flags_and_names() {
             .iter()
             .all(|r| r.kind != RemediationKind::RevokeExpiredGrants)
     );
+}
+
+// ---- Rule 26: directory roles prefetch -----------------------------------
+
+#[test]
+fn directory_roles_join_by_principal_and_name_units() {
+    use azapptoolkit_core::models::DirectoryRoleAssignment;
+    let ra = |id: &str, principal: &str, role: &str, scope: &str| DirectoryRoleAssignment {
+        id: id.into(),
+        principal_id: principal.into(),
+        role_definition_id: role.into(),
+        directory_scope_id: scope.into(),
+        role_definition: None,
+    };
+    let assignments = vec![
+        ra("1", "sp-a", "role-user", "/administrativeUnits/au-1"),
+        ra("2", "sp-a", "role-ga", "/"),
+        ra("3", "sp-b", "role-user", "/administrativeUnits/au-2"),
+        // Scoped to one object: neither tenant nor admin unit, left out.
+        ra("4", "sp-b", "role-app", "/0000-app-object"),
+    ];
+    let names = HashMap::from([("au-1".to_string(), "Finance".to_string())]);
+    let by_principal = held_directory_roles(&assignments, &names);
+    assert_eq!(
+        by_principal["sp-a"],
+        vec![
+            HeldDirectoryRole {
+                role_template_id: "role-user".into(),
+                admin_unit: Some(("au-1".into(), "Finance".into())),
+            },
+            HeldDirectoryRole {
+                role_template_id: "role-ga".into(),
+                admin_unit: None,
+            },
+        ]
+    );
+    assert_eq!(
+        by_principal["sp-b"],
+        vec![HeldDirectoryRole {
+            role_template_id: "role-user".into(),
+            admin_unit: Some(("au-2".into(), "au-2".into())),
+        }],
+        "an unnamed unit falls back to its id; an object-scoped role is left out"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_directory_roles_read_is_unknown_not_empty() {
+    use wiremock::matchers::{method, path};
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(method("GET"))
+        .and(path("/v1.0/roleManagement/directory/roleAssignments"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": "Authorization_RequestDenied", "message": "denied" }
+            })),
+        )
+        .mount(&server)
+        .await;
+    let client = crate::commands::test_support::mock_graph(&server);
+    assert!(prefetch_directory_roles(&client).await.is_none());
 }

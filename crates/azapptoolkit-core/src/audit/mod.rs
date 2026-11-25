@@ -56,8 +56,8 @@ pub use scoring::{
 };
 pub use types::{
     AppPermissions, AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus,
-    CredentialSummary, ListCredentialStatus, MailPermissionScope, RemediationAction,
-    RemediationKind, ResourcePermission, RiskLevel, ScopeMechanism, issue,
+    CredentialSummary, HeldDirectoryRole, ListCredentialStatus, MailPermissionScope,
+    RemediationAction, RemediationKind, ResourcePermission, RiskLevel, ScopeMechanism, issue,
 };
 pub use unscopable::{
     DIRECTORY_READ_EXCLUSIONS, NativeScoping, UnmanagedMechanism, UnscopableGrant,

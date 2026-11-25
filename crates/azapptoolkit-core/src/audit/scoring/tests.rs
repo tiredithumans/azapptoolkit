@@ -3133,3 +3133,136 @@ fn rule24_runs_on_sp_only_rows() {
             .any(|i| i.starts_with(issue::UNSCOPABLE_PRIVILEGED))
     );
 }
+
+// ---- Rule 26: org-wide directory writes and admin-unit limits (net-new) ---
+
+const USER_ADMIN_ROLE: &str = "fe930be7-5e62-47db-91af-98c3a49a38b1";
+
+fn unit_role(role: &str, unit: &str) -> HeldDirectoryRole {
+    HeldDirectoryRole {
+        role_template_id: role.into(),
+        admin_unit: Some((format!("au-{unit}"), unit.into())),
+    }
+}
+
+fn tenant_role(role: &str) -> HeldDirectoryRole {
+    HeldDirectoryRole {
+        role_template_id: role.into(),
+        admin_unit: None,
+    }
+}
+
+#[test]
+fn an_orgwide_directory_write_gets_the_scope_fix_and_no_extra_score() {
+    let plain = score_service_principal(&base_sp(), &sp_perms(&["User.ReadWrite.All"]), now());
+    let mut perms = sp_perms(&["User.ReadWrite.All"]);
+    perms.directory_roles = Some(Vec::new());
+    let item = score_service_principal(&base_sp(), &perms, now());
+    let line = item
+        .issues
+        .iter()
+        .find(|x| x.starts_with(issue::ORG_WIDE_DIRECTORY_WRITE))
+        .expect("org-wide directory write issue");
+    assert!(line.contains("User.ReadWrite.All"), "{line}");
+    let fix: Vec<_> = item
+        .remediations
+        .iter()
+        .filter(|r| r.kind == RemediationKind::ScopeDirectoryWrite)
+        .collect();
+    assert_eq!(fix.len(), 1);
+    assert_eq!(fix[0].targets, vec!["User.ReadWrite.All".to_string()]);
+    assert_eq!(
+        item.risk_score, plain.risk_score,
+        "the weight is Rule 1's alone"
+    );
+    // A Graph read or a value on another resource is never the finding.
+    let read = score_service_principal(&base_sp(), &sp_perms(&["User.Read.All"]), now());
+    assert!(
+        !read
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::ORG_WIDE_DIRECTORY_WRITE))
+    );
+}
+
+#[test]
+fn a_unit_limited_write_is_healthy_and_scores_the_scoped_weight() {
+    let mut perms = sp_perms(&["User.Read.All"]);
+    perms.directory_roles = Some(vec![unit_role(USER_ADMIN_ROLE, "Finance")]);
+    let item = score_service_principal(&base_sp(), &perms, now());
+    let line = item
+        .issues
+        .iter()
+        .find(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE))
+        .expect("healthy line");
+    assert!(line.contains("User Administrator (Finance)"), "{line}");
+    let baseline = score_service_principal(&base_sp(), &sp_perms(&["User.Read.All"]), now());
+    assert_eq!(item.risk_score, baseline.risk_score + 3);
+    assert!(
+        item.remediations
+            .iter()
+            .all(|r| r.kind != RemediationKind::ScopeDirectoryWrite)
+    );
+}
+
+#[test]
+fn a_covering_tenant_role_is_not_healthy() {
+    use crate::scoping::admin_unit::GLOBAL_ADMIN_ROLE_TEMPLATE_ID;
+    for covering in [USER_ADMIN_ROLE, GLOBAL_ADMIN_ROLE_TEMPLATE_ID] {
+        let mut perms = sp_perms(&["User.Read.All"]);
+        perms.directory_roles = Some(vec![
+            unit_role(USER_ADMIN_ROLE, "Finance"),
+            tenant_role(covering),
+        ]);
+        let item = score_service_principal(&base_sp(), &perms, now());
+        assert!(
+            !item
+                .issues
+                .iter()
+                .any(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE)),
+            "{covering}: {:?}",
+            item.issues
+        );
+    }
+}
+
+#[test]
+fn unreadable_roles_never_read_as_limited() {
+    let mut perms = sp_perms(&["User.ReadWrite.All"]);
+    perms.directory_roles = None;
+    let item = score_service_principal(&base_sp(), &perms, now());
+    assert!(
+        item.issues
+            .iter()
+            .any(|x| x.starts_with(issue::ORG_WIDE_DIRECTORY_WRITE))
+    );
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE))
+    );
+    // Still holding the tenant-wide permission: never healthy, even with a
+    // unit role alongside it.
+    let mut both = sp_perms(&["User.ReadWrite.All"]);
+    both.directory_roles = Some(vec![unit_role(USER_ADMIN_ROLE, "Finance")]);
+    let item = score_service_principal(&base_sp(), &both, now());
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE))
+    );
+}
+
+#[test]
+fn app_rows_get_rule_26_too() {
+    let mut perms = sp_perms(&["Group.ReadWrite.All"]);
+    perms.directory_roles = Some(Vec::new());
+    let item = score_application(&base_app(), None, &perms, now());
+    assert!(
+        item.remediations
+            .iter()
+            .any(|r| r.kind == RemediationKind::ScopeDirectoryWrite)
+    );
+}

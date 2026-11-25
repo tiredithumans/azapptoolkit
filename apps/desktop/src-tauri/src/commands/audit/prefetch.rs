@@ -913,3 +913,70 @@ pub(crate) async fn prefetch_app_management_policy(
         }),
     )
 }
+
+/// Rule 26: each principal's direct, active directory roles, keyed by service
+/// principal object id. Tenant and admin-unit scope only: a role scoped to
+/// one object (an app, say) neither covers nor limits a directory write.
+/// Units are named from `unit_names`, else by id.
+pub(crate) fn held_directory_roles(
+    assignments: &[azapptoolkit_core::models::DirectoryRoleAssignment],
+    unit_names: &HashMap<String, String>,
+) -> HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>> {
+    let mut out: HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>> = HashMap::new();
+    for a in assignments {
+        let admin_unit = match a.admin_unit_id() {
+            Some(id) => Some((
+                id.to_string(),
+                unit_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| id.to_string()),
+            )),
+            None if a.is_tenant_scope() => None,
+            None => continue,
+        };
+        out.entry(a.principal_id.to_ascii_lowercase())
+            .or_default()
+            .push(azapptoolkit_core::audit::HeldDirectoryRole {
+                role_template_id: a.role_template_id().to_string(),
+                admin_unit,
+            });
+    }
+    out
+}
+
+/// One tenant-wide read of the direct directory role assignments, plus the
+/// admin units' names (sign-in `Directory.Read.All` token). Unreadable →
+/// `None`: unknown, never "no roles" — no limit is inferred, and it is not a
+/// coverage gap (the org-wide finding still shows). An unreadable unit list
+/// only loses the names.
+pub(crate) async fn prefetch_directory_roles(
+    client: &GraphClient,
+) -> Option<Arc<HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>>>> {
+    let assignments = match client.list_directory_role_assignments().await {
+        Ok(a) => a,
+        Err(err) => {
+            tracing::info!(
+                code = err.ui_code(),
+                "directory role assignments unreadable; admin-unit limits unknown this run"
+            );
+            return None;
+        }
+    };
+    let unit_names: HashMap<String, String> =
+        if assignments.iter().any(|a| a.admin_unit_id().is_some()) {
+            client
+                .list_admin_units()
+                .await
+                .map(|units| {
+                    units
+                        .into_iter()
+                        .filter_map(|u| u.display_name.map(|n| (u.id, n)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+    Some(Arc::new(held_directory_roles(&assignments, &unit_names)))
+}

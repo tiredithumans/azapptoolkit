@@ -23,9 +23,10 @@ use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::UsagePrefetch;
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
-    prefetch_conditional_access, prefetch_credential_activity, prefetch_graph_app_roles,
-    prefetch_graph_usage, prefetch_legacy_access_policies, prefetch_office365_role_grants,
-    prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
+    prefetch_conditional_access, prefetch_credential_activity, prefetch_directory_roles,
+    prefetch_graph_app_roles, prefetch_graph_usage, prefetch_legacy_access_policies,
+    prefetch_office365_role_grants, prefetch_risky_service_principals, prefetch_sign_in_activity,
+    prefetch_sp_index,
 };
 use super::score::{
     apply_grant_expiries_with, apply_graph_usage, combine_granted_roles,
@@ -136,6 +137,7 @@ pub async fn run_audit(
         risky_sps,
         legacy_policies,
         conditional_access,
+        directory_roles,
     ) = futures::join!(
         client.list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
@@ -213,6 +215,9 @@ pub async fn run_audit(
         // verdict. Unavailable (no consent, license or role) leaves every lock
         // unknown without a gap; only a transient failure is one.
         prefetch_conditional_access(&state, &client, &tenant_id),
+        // ONE tenant-wide read of the direct directory role assignments → Rule
+        // 26's admin-unit limits. Unreadable leaves them unknown (no gap).
+        prefetch_directory_roles(&client),
     );
 
     // The audit is the one caller that CANNOT swallow truncation: it caches its
@@ -321,6 +326,7 @@ pub async fn run_audit(
         risky_by_sp,
         ca_available,
         ca_policies,
+        directory_roles,
     });
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must
