@@ -24,6 +24,16 @@ use std::path::Path;
 /// `(file under src/, fragment that must be present, the rule it carries)`.
 const REQUIRED: &[(&str, &str, &str)] = &[
     (
+        "views/tabs/conditional_access_tab.rs",
+        "confirm_label=\"Turn on\"",
+        "turning a network lock on blocks the app's sign-ins outside its locations: click-confirm naming the app",
+    ),
+    (
+        "views/tabs/conditional_access_tab.rs",
+        "confirm_label=\"Delete policy\"",
+        "removing a network lock deletes its policy: click-confirm naming the app",
+    ),
+    (
         "views/dialogs/deleted_apps_dialog.rs",
         "require_keyword=\"DELETE\"",
         "permanent delete is irreversible: typed keyword",

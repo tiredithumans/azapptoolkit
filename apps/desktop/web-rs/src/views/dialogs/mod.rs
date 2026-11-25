@@ -11,6 +11,7 @@ pub mod create_app_dialog;
 pub mod deleted_apps_dialog;
 pub mod gallery_dialog;
 pub mod migrate_legacy_scope;
+pub mod network_lock_dialog;
 pub mod new_app_chooser_dialog;
 pub mod scope_remediation;
 pub mod secret_reveal_dialog;

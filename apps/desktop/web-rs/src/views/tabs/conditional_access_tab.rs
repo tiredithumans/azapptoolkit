@@ -11,27 +11,48 @@ use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance};
 
 use crate::bindings::applications::ApplicationDetail;
-use crate::bindings::conditional_access::{self, ConditionalAccessPolicyDto};
+use crate::bindings::conditional_access::{
+    self, ConditionalAccessPolicyDto, NetworkLockStatus, ReportOnlyReadout,
+};
 use crate::components::feature_load_error::FeatureLoadError;
 use crate::components::requires_role::RequiresRole;
-use crate::components::ui::{Badge, BadgeTone, DataTable, SkeletonList};
+use crate::components::ui::{Badge, BadgeTone, DataTable, FormError, SkeletonList};
+use crate::hooks::use_command::use_command;
 use crate::state::use_session;
+use crate::views::dialogs::confirm_dialog::ConfirmDialog;
+use crate::views::dialogs::network_lock_dialog::NetworkLockDialog;
+use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
 
 use crate::util::no_tenant;
 
-/// App-registration Conditional Access tab (keys on the app's appId).
+/// App-registration Conditional Access tab (keys on the app's appId): the
+/// Network lock section, then the policies that apply. A lock write refreshes
+/// both.
 #[component]
 pub fn ConditionalAccessTab(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl IntoView {
     let app_id = Signal::derive(move || detail.with(|d| d.application.app_id.clone()));
-    view! { <ConditionalAccessPanel app_id=app_id /> }
+    let app_name = Signal::derive(move || detail.with(|d| d.application.display_name.clone()));
+    let reload = RwSignal::new(0_u32);
+    view! {
+        <NetworkLockSection
+            app_id=app_id
+            app_name=app_name
+            on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+        />
+        <ConditionalAccessPanel app_id=app_id reload=reload />
+    }
 }
 
 /// Core CA panel for an appId. Shared by the app-registration and
-/// enterprise-application detail panes.
+/// enterprise-application detail panes. `reload` lets a host refresh it (the
+/// app-registration tab does after a lock write).
 #[component]
-pub fn ConditionalAccessPanel(#[prop(into)] app_id: Signal<String>) -> impl IntoView {
+pub fn ConditionalAccessPanel(
+    #[prop(into)] app_id: Signal<String>,
+    #[prop(optional)] reload: Option<RwSignal<u32>>,
+) -> impl IntoView {
     let session = use_session();
-    let reload = RwSignal::new(0_u32);
+    let reload = reload.unwrap_or_else(|| RwSignal::new(0_u32));
 
     let policies = LocalResource::new(move || {
         let tenant = session.active_tenant.get();
@@ -184,4 +205,269 @@ fn control_label(control: &str) -> String {
         other => return other.to_string(),
     }
     .to_string()
+}
+
+/// Why Conditional Access can't target the app, in the checklist's words.
+fn ineligible_text(reason: LockIneligible) -> &'static str {
+    match reason {
+        LockIneligible::OtherTenant => {
+            "Not possible — Conditional Access can't target an app owned by another tenant."
+        }
+        LockIneligible::MultiTenantApp => {
+            "Not possible — Conditional Access can't target a multi-tenant app."
+        }
+        LockIneligible::ManagedIdentity => {
+            "Not possible — Conditional Access can't target a managed identity."
+        }
+        LockIneligible::NoServicePrincipal => {
+            "Not possible — Conditional Access can't target an app with no service principal."
+        }
+    }
+}
+
+/// What a report-only lock would have blocked, as one sentence.
+fn readout_line(readout: Option<&ReportOnlyReadout>) -> String {
+    match readout {
+        Some(r) if r.would_block == 0 => format!(
+            "In the last {} days, no sign-ins would have been blocked.",
+            r.window_days
+        ),
+        Some(r) => format!(
+            "In the last {} days, {} sign-in{} would have been blocked (from {}).",
+            r.window_days,
+            r.would_block,
+            if r.would_block == 1 { "" } else { "s" },
+            r.sample_ips.join(", ")
+        ),
+        None => "Couldn't check what it would have blocked (needs the sign-in log consent and an \
+                 Entra ID P1/P2 licence)."
+            .to_string(),
+    }
+}
+
+/// The app's Network lock: a per-app Conditional Access policy that blocks
+/// its sign-ins from everywhere except chosen named locations. Offers only the
+/// toolkit's own actions — create when nothing locks the app, turn on / remove
+/// the toolkit's lock in any state — and nothing for another policy's lock or
+/// an app Conditional Access can't target. A lock limits where a stolen
+/// credential works; it never narrows what the app can read.
+#[component]
+pub fn NetworkLockSection(
+    #[prop(into)] app_id: Signal<String>,
+    #[prop(into)] app_name: Signal<String>,
+    #[prop(optional)] on_changed: Option<Callback<()>>,
+) -> impl IntoView {
+    let session = use_session();
+    let reload = RwSignal::new(0_u32);
+    let create_open = RwSignal::new(false);
+    let pending_turn_on: RwSignal<Option<(String, String)>> = RwSignal::new(None);
+    let pending_remove: RwSignal<Option<String>> = RwSignal::new(None);
+    let cmd = use_command().with_consent_feature("conditional_access_write");
+
+    let status = LocalResource::new(move || {
+        let tenant = session.active_tenant.get();
+        let app_id = app_id.get();
+        let _ = reload.get();
+        async move {
+            let Some(t) = tenant else {
+                return Err(no_tenant());
+            };
+            conditional_access::get_network_lock(&t.tenant_id, &app_id).await
+        }
+    });
+    let changed = move || {
+        reload.update(|n| *n += 1);
+        if let Some(cb) = on_changed {
+            cb.try_run(());
+        }
+    };
+    let turn_on = move |policy_id: String| {
+        let app = app_id.get();
+        cmd.run(
+            move |()| changed(),
+            move |tenant| async move {
+                conditional_access::enable_network_lock(&tenant, &app, &policy_id).await
+            },
+        );
+    };
+    let remove = move |policy_id: String| {
+        let app = app_id.get();
+        cmd.run(
+            move |()| changed(),
+            move |tenant| async move {
+                conditional_access::remove_network_lock(&tenant, &app, &policy_id).await
+            },
+        );
+    };
+
+    view! {
+        <section class="conditional-access-tab">
+            <header class="row-between">
+                <div class="row">
+                    <strong>"Network lock"</strong>
+                    <RequiresRole capability_key="conditional_access_lock" />
+                </div>
+            </header>
+            <Suspense fallback=move || view! { <SkeletonList rows=2 /> }>
+                {move || Suspend::new(async move {
+                    match status.await {
+                        Ok(s) => {
+                            lock_state_view(s, app_name, create_open, pending_turn_on, pending_remove)
+                                .into_any()
+                        }
+                        Err(e) => {
+                            view! {
+                                <FeatureLoadError
+                                    error=e
+                                    consent_feature="policy"
+                                    step_up_features=&["policy"]
+                                    consent_text="The network lock reads Conditional Access, which needs admin consent to Policy.Read.All."
+                                    unavailable_code="ca_unavailable"
+                                    on_retry=Callback::new(move |()| reload.update(|n| *n += 1))
+                                />
+                            }
+                                .into_any()
+                        }
+                    }
+                })}
+            </Suspense>
+            {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
+            <NetworkLockDialog
+                open=create_open
+                app_id=app_id
+                on_close=Callback::new(move |()| create_open.set(false))
+                on_created=Callback::new(move |()| changed())
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || pending_turn_on.with(|p| p.is_some()))
+                title="Turn on the network lock?"
+                body="Sign-ins by this app from outside the chosen locations will be blocked."
+                subject=Signal::derive(move || {
+                    pending_turn_on.with(|p| p.as_ref().map(|(_, s)| s.clone())).unwrap_or_default()
+                })
+                confirm_label="Turn on"
+                busy=cmd.busy
+                on_confirm=Callback::new(move |()| {
+                    if let Some((id, _)) = pending_turn_on.get() {
+                        pending_turn_on.set(None);
+                        turn_on(id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_turn_on.set(None))
+            />
+            <ConfirmDialog
+                open=Signal::derive(move || pending_remove.with(|p| p.is_some()))
+                title="Remove the network lock?"
+                body="Deletes the toolkit's lock policy. The named locations stay."
+                subject=app_name
+                confirm_label="Delete policy"
+                busy=cmd.busy
+                on_confirm=Callback::new(move |()| {
+                    if let Some(id) = pending_remove.get() {
+                        pending_remove.set(None);
+                        remove(id);
+                    }
+                })
+                on_close=Callback::new(move |()| pending_remove.set(None))
+            />
+        </section>
+    }
+}
+
+/// The section body for one status.
+fn lock_state_view(
+    s: NetworkLockStatus,
+    app_name: Signal<String>,
+    create_open: RwSignal<bool>,
+    pending_turn_on: RwSignal<Option<(String, String)>>,
+    pending_remove: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let button = |label: &'static str, on: Box<dyn Fn() + Send + Sync>| {
+        view! {
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                on_click=Box::new(move |_| on())
+            >
+                {label}
+            </Button>
+        }
+    };
+    if let Some(reason) = s.ineligible {
+        return view! { <span class="ui-text">{ineligible_text(reason)}</span> }.into_any();
+    }
+    if let Some(lock) = s.toolkit_lock {
+        let places = lock
+            .excluded_locations
+            .iter()
+            .map(|l| l.display_name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id_on = lock.policy_id.clone();
+        let id_off = lock.policy_id.clone();
+        let readout = readout_line(s.readout.as_ref());
+        let readout_subject = readout.clone();
+        let ask_turn_on: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            pending_turn_on.set(Some((
+                id_on.clone(),
+                format!("{}: {readout_subject}", app_name.get_untracked()),
+            )))
+        });
+        let ask_remove: Box<dyn Fn() + Send + Sync> =
+            Box::new(move || pending_remove.set(Some(id_off.clone())));
+        return match lock.state.as_str() {
+            "enabled" => view! {
+                <span class="ui-text">
+                    {format!("Blocking this app's sign-ins from outside: {places}.")}
+                </span>
+                <div class="actions-row">{button("Remove lock", ask_remove)}</div>
+            }
+            .into_any(),
+            "enabledForReportingButNotEnforced" => view! {
+                <span class="ui-text">
+                    {format!("Report-only — not blocking yet. Allowed locations: {places}.")}
+                </span>
+                <span class="ui-text">{readout}</span>
+                <div class="actions-row">
+                    {button("Turn on lock", ask_turn_on)} {button("Remove", ask_remove)}
+                </div>
+            }
+            .into_any(),
+            _ => view! {
+                <span class="ui-text">
+                    {format!(
+                        "Turned off outside the toolkit (in the portal). Allowed locations: {places}.",
+                    )}
+                </span>
+                <div class="actions-row">
+                    {button("Turn on lock", ask_turn_on)} {button("Remove", ask_remove)}
+                </div>
+            }
+            .into_any(),
+        };
+    }
+    if let NetworkLock::Enforced { .. } = s.other {
+        let name = s
+            .other_policy_name
+            .unwrap_or_else(|| "another policy".into());
+        return view! {
+            <span class="ui-text">{format!("Locked by {name} — not managed here.")}</span>
+        }
+        .into_any();
+    }
+    let maybe_other = matches!(s.other, NetworkLock::ReportOnly | NetworkLock::MayApply).then(|| {
+        view! {
+            <span class="ui-text muted">
+                "Another policy may cover this app (report-only, or through a filter or app group)."
+            </span>
+        }
+    });
+    let open_create: Box<dyn Fn() + Send + Sync> = Box::new(move || create_open.set(true));
+    view! {
+        <span class="ui-text">
+            "No network lock. A lock blocks this app's sign-ins from everywhere except the named locations you choose, so a stolen credential stops working elsewhere. It doesn't narrow what the app can read."
+        </span>
+        {maybe_other}
+        <div class="actions-row">{button("Lock to trusted locations…", open_create)}</div>
+    }
+    .into_any()
 }

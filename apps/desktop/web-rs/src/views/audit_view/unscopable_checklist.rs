@@ -35,7 +35,8 @@ pub(super) fn network_lock_line(lock: &NetworkLock) -> (&'static str, String) {
         ),
         NetworkLock::None => (
             "✗",
-            "no Conditional Access policy locks this app to named locations".to_string(),
+            "no Conditional Access policy locks this app to named locations — set one up on the app's Conditional Access tab"
+                .to_string(),
         ),
         NetworkLock::NotPossible { reason } => (
             "·",
@@ -217,7 +218,7 @@ mod tests {
             (
                 NetworkLock::None,
                 "✗",
-                "no Conditional Access policy locks this app to named locations",
+                "no Conditional Access policy locks this app to named locations — set one up on the app's Conditional Access tab",
             ),
             (
                 NetworkLock::NotPossible {
