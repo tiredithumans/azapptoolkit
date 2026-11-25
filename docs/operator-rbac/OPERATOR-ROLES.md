@@ -83,6 +83,7 @@ Administrator or Global Administrator), then make it PIM-eligible in **Entra PIM
 | Activity tab | `auditLogs/allProperties/read` |
 | Unused-app / sign-in activity | `signInReports/allProperties/read` |
 | Conditional Access tab | `conditionalAccessPolicies/standard/read` |
+| Network lock (create / turn on / remove) | Conditional Access Administrator (built-in) |
 | App-management policies (Credentials-tab lifetime markers + pre-add lifetime warning) | No custom-role permission expresses this read — it rides the `Policy.Read.All` scope (the same on-demand policy token as the CA tab) plus a member of **Security Reader** / **Security Administrator** / **Global Reader** / **Global Administrator**; unlike the CA tab it needs **no P1/P2 license** |
 | Risky-SP audit signal | No custom-role permission expresses this read — it rides the `IdentityRiskyServicePrincipal.Read.All` scope plus a member of **Security Reader** / **Security Administrator** / **Global Reader** / **Global Administrator**, and the tenant needs Entra ID **Workload Identities premium** (otherwise the audit skips the check) |
 
@@ -170,7 +171,8 @@ then sign out and back in so a fresh token is issued.
    sign-in reports are served in the **Global cloud only**), `Policy.Read.All`,
    `IdentityRiskyServicePrincipal.Read.All` (the risky-service-principal audit signal; the tenant
    also needs Entra ID **Workload Identities premium**, and the audit skips the check without it),
-   `Policy.ReadWrite.ApplicationConfiguration`, `Sites.FullControl.All`,
+   `Policy.ReadWrite.ApplicationConfiguration`, `Policy.ReadWrite.ConditionalAccess` (the network
+   lock; the tenant also needs Entra **Workload ID Premium**), `Sites.FullControl.All`,
    `GroupMember.ReadWrite.All`,
    `https://outlook.office365.com/Exchange.Manage`, `https://management.azure.com/.default`,
    `https://vault.azure.net/.default`, `https://api.loganalytics.azure.com/.default`

@@ -282,6 +282,7 @@ pub(crate) enum ConsentFeature {
     Policy,
     RiskyServicePrincipals,
     PolicyWrite,
+    ConditionalAccessWrite,
     SharePoint,
     GroupMembership,
     Exchange,
@@ -291,13 +292,14 @@ pub(crate) enum ConsentFeature {
 }
 
 impl ConsentFeature {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Write,
         Self::Sync,
         Self::AuditLog,
         Self::Policy,
         Self::RiskyServicePrincipals,
         Self::PolicyWrite,
+        Self::ConditionalAccessWrite,
         Self::SharePoint,
         Self::GroupMembership,
         Self::Exchange,
@@ -316,6 +318,7 @@ impl ConsentFeature {
             Self::Policy => "policy",
             Self::RiskyServicePrincipals => "risky_service_principals",
             Self::PolicyWrite => "policy_write",
+            Self::ConditionalAccessWrite => "conditional_access_write",
             Self::SharePoint => "sharepoint",
             Self::GroupMembership => "group_membership",
             Self::Exchange => "exchange",
@@ -787,6 +790,13 @@ impl AppState {
                 tenant_id.to_string(),
                 self.auth.default_graph_policy_write_scopes(),
             );
+            // Policy.Read.All + Policy.ReadWrite.ConditionalAccess for the
+            // network lock (one per-app Conditional Access policy) — on demand.
+            let conditional_access_write_token = ScopedTokenAdapter::new_cae(
+                self.auth.clone(),
+                tenant_id.to_string(),
+                self.auth.default_graph_conditional_access_write_scopes(),
+            );
             // Sites.FullControl.All for the SharePoint Sites.Selected tab — on demand
             // (incremental consent), never at sign-in; the site-permission reads as
             // well as writes require it, so the SharePoint calls ride this token.
@@ -818,6 +828,7 @@ impl AppState {
                 .with_policy_token(policy_token)
                 .with_risky_sp_token(risky_sp_token)
                 .with_policy_write_token(policy_write_token)
+                .with_conditional_access_write_token(conditional_access_write_token)
                 .with_sharepoint_token(sharepoint_token)
                 .with_group_member_token(group_member_token),
             )
@@ -881,6 +892,9 @@ impl AppState {
                 self.auth.default_graph_risky_service_principal_scopes()
             }
             ConsentFeature::PolicyWrite => self.auth.default_graph_policy_write_scopes(),
+            ConsentFeature::ConditionalAccessWrite => {
+                self.auth.default_graph_conditional_access_write_scopes()
+            }
             ConsentFeature::SharePoint => self.auth.default_graph_sharepoint_scopes(),
             ConsentFeature::GroupMembership => self.auth.default_graph_group_member_scopes(),
             ConsentFeature::Exchange => self.auth.default_exchange_scopes(),
@@ -1381,6 +1395,10 @@ mod tests {
                 assert_eq!(ConsentFeature::parse(f.as_str()), Some(f));
             }
             assert_eq!(ConsentFeature::parse("nope"), None);
+            assert_eq!(
+                ConsentFeature::parse("conditional_access_write"),
+                Some(ConsentFeature::ConditionalAccessWrite)
+            );
         }
 
         #[test]

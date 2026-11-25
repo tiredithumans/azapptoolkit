@@ -78,6 +78,14 @@ impl EntraAuthService {
         ])
     }
 
+    /// `Policy.Read.All` + `Policy.ReadWrite.ConditionalAccess` — the network
+    /// lock's create / read-back / enable / delete of one Conditional Access
+    /// policy and its untrusted IP named location (Graph's least-privileged
+    /// pair). Admin-consent-only; acquired on demand, never at sign-in.
+    pub fn default_graph_conditional_access_write_scopes(&self) -> Vec<String> {
+        self.graph_scopes(&["Policy.Read.All", "Policy.ReadWrite.ConditionalAccess"])
+    }
+
     /// `Sites.FullControl.All` Graph scope for the SharePoint `Sites.Selected`
     /// model — listing, granting, and revoking a site's per-app permissions
     /// (the Permissions tab's SharePoint site access section). The
@@ -209,6 +217,22 @@ mod tests {
     }
 
     #[test]
+    fn conditional_access_write_scopes_pair_read_with_write() {
+        // Verify-then-write (read the policy back before enabling or deleting
+        // it) needs both in ONE token, and Graph documents both as least privilege.
+        let scopes =
+            EntraAuthService::new("c", "t").default_graph_conditional_access_write_scopes();
+        for perm in ["Policy.Read.All", "Policy.ReadWrite.ConditionalAccess"] {
+            assert!(
+                scopes
+                    .iter()
+                    .any(|s| s == &format!("https://graph.microsoft.com/{perm}")),
+                "{perm} missing from {scopes:?}"
+            );
+        }
+    }
+
+    #[test]
     fn policy_write_scopes_pair_the_policy_scope_with_application_readwrite() {
         // The SP-side `$ref` assign/list/remove need both scopes in ONE token.
         let scopes = EntraAuthService::new("c", "t").default_graph_policy_write_scopes();
@@ -262,6 +286,7 @@ mod tests {
             svc.default_graph_policy_scopes(),
             svc.default_graph_risky_service_principal_scopes(),
             svc.default_graph_policy_write_scopes(),
+            svc.default_graph_conditional_access_write_scopes(),
             svc.default_graph_sharepoint_scopes(),
             svc.default_graph_group_member_scopes(),
         ] {
