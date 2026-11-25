@@ -12,6 +12,10 @@ use azapptoolkit_core::audit::{
     score_service_principal, secret_lifetime_advisory, unused_app_advisory,
     unused_credential_advisory,
 };
+use azapptoolkit_core::conditional_access::{
+    LockIneligible, NetworkLock, lock_ineligibility_for_app, lock_ineligibility_for_sp,
+    network_lock_for,
+};
 use azapptoolkit_core::models::{Application, RequiredResourceAccess, ServicePrincipal};
 use azapptoolkit_core::scoping::{
     EWS_FULL_ACCESS_AS_APP, MICROSOFT_GRAPH_APP_ID, is_scopable_exchange_resource_permission,
@@ -221,6 +225,16 @@ pub(crate) fn score_sp_only(
         item.sp_risk_level = Some(level.to_string());
         apply_service_principal_risk(&mut item);
     }
+    apply_network_locks(
+        &mut item,
+        ctx,
+        Some(&sp.id),
+        lock_ineligibility_for_sp(
+            sp.service_principal_type.as_deref(),
+            sp.app_owner_organization_id.as_deref(),
+            &ctx.tenant_id,
+        ),
+    );
     let last_sign_in = ctx.last_sign_in_for(&sp.app_id);
     item.sign_in_report_available = last_sign_in.is_some();
     item.last_sign_in = last_sign_in.flatten();
@@ -231,6 +245,38 @@ pub(crate) fn score_sp_only(
         item.recommendations.push(rec);
     }
     item
+}
+
+/// Fills each Rule 24 grant's Conditional Access network-lock verdict, from
+/// the run's one tenant-wide policy read. Per grant, because a policy can
+/// cover one resource and not another. Unreadable policies leave every lock
+/// `Unknown` (never "no lock"); a principal Conditional Access can't target
+/// reads `NotPossible`. An unresolved resource is evaluated as Graph — the
+/// classifier only admits Graph or unresolved grants.
+pub(crate) fn apply_network_locks(
+    item: &mut AuditItem,
+    ctx: &ScoreCtx,
+    sp_object_id: Option<&str>,
+    ineligible: Option<LockIneligible>,
+) {
+    for grant in &mut item.unscopable_grants {
+        grant.network_lock = match (ctx.ca_available, ineligible, sp_object_id) {
+            (false, _, _) => NetworkLock::Unknown,
+            (true, Some(reason), _) => NetworkLock::NotPossible { reason },
+            (true, None, None) => NetworkLock::NotPossible {
+                reason: LockIneligible::NoServicePrincipal,
+            },
+            (true, None, Some(sp)) => network_lock_for(
+                &ctx.ca_policies,
+                sp,
+                grant
+                    .permission
+                    .resource_app_id
+                    .as_deref()
+                    .unwrap_or(MICROSOFT_GRAPH_APP_ID),
+            ),
+        };
+    }
 }
 
 /// The SP-only scoring candidates: service principals whose `appId` has no
@@ -503,6 +549,13 @@ pub(crate) async fn score_one(
         item.sp_risk_level = Some(level.to_string());
         apply_service_principal_risk(&mut item);
     }
+    let sp_object_id = sp.as_ref().map(|s| s.id.as_str());
+    apply_network_locks(
+        &mut item,
+        ctx,
+        sp_object_id,
+        lock_ineligibility_for_app(app.sign_in_audience.as_deref(), sp_object_id.is_some()),
+    );
     // Carry the sign-in signal as structured fields (the "Unused" facet keys off
     // `unused`, the table shows `last_sign_in`) and keep the human-readable
     // advisory in `issues` for export/detail. Outer `Some` = report available.

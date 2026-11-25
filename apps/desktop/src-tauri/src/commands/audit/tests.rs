@@ -4,12 +4,13 @@ use super::*;
 use jiff::SignedDuration;
 
 use super::prefetch::{
-    prefetch_admin_consent_grants, prefetch_office365_role_grants,
-    risky_service_principals_outcome, sign_in_activity_outcome, sign_in_pre_acquire_outcome,
+    ca_pre_acquire_outcome, conditional_access_outcome, prefetch_admin_consent_grants,
+    prefetch_office365_role_grants, risky_service_principals_outcome, sign_in_activity_outcome,
+    sign_in_pre_acquire_outcome,
 };
 use super::score::{
-    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
-    merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
+    apply_network_locks, combine_granted_roles, derive_orgwide_mail_scopes,
+    ews_full_access_holders, merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -767,6 +768,8 @@ fn score_ctx(client: Arc<GraphClient>, cache: Arc<Cache>) -> ScoreCtx {
         risky_by_sp: Arc::default(),
         app_policy_available: false,
         app_policy: Arc::default(),
+        ca_available: false,
+        ca_policies: Arc::default(),
     }
 }
 
@@ -1898,4 +1901,165 @@ fn a_capped_sp_index_is_a_coverage_gap() {
         false,
         &[AuditCoverageGap::ServicePrincipalIndex]
     ));
+}
+
+// ---- Conditional Access prefetch + network locks (Rule 24) ---------------
+
+fn graph_lock_policy() -> azapptoolkit_core::models::ConditionalAccessPolicy {
+    serde_json::from_value(serde_json::json!({
+        "id": "lock-1",
+        "state": "enabled",
+        "conditions": {
+            "applications": { "includeApplications": [MICROSOFT_GRAPH_APP_ID] },
+            "clientApplications": { "includeServicePrincipals": ["ServicePrincipalsInMyTenant"] },
+            "locations": { "includeLocations": ["All"], "excludeLocations": ["AllTrusted"] }
+        },
+        "grantControls": { "builtInControls": ["block"], "operator": "OR" }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn ca_outcome_ok_is_available() {
+    let (available, policies, gap) = conditional_access_outcome(Ok(vec![graph_lock_policy()]));
+    assert!(available);
+    assert_eq!(policies.len(), 1);
+    assert_eq!(gap, None);
+}
+
+#[test]
+fn ca_outcome_forbidden_is_unavailable_not_a_gap() {
+    // An operator without a role that reads Conditional Access (or a tenant
+    // without the license) gets "unknown" on every grant — never a degraded
+    // run, which would also stop the run being cached.
+    let (available, policies, gap) =
+        conditional_access_outcome(Err(azapptoolkit_graph::GraphError::Forbidden(
+            r#"{"error":{"code":"Authorization_RequestDenied"}}"#.into(),
+        )));
+    assert!(!available);
+    assert!(policies.is_empty());
+    assert_eq!(gap, None);
+}
+
+#[test]
+fn ca_outcome_throttled_is_a_gap() {
+    for err in [
+        azapptoolkit_graph::GraphError::Server {
+            status: 503,
+            body: String::new(),
+        },
+        azapptoolkit_graph::GraphError::Throttled {
+            retry_after_secs: Some(1),
+        },
+    ] {
+        let (available, policies, gap) = conditional_access_outcome(Err(err));
+        assert!(!available);
+        assert!(policies.is_empty());
+        assert_eq!(gap, Some(AuditCoverageGap::ConditionalAccess));
+    }
+}
+
+#[test]
+fn ca_pre_acquire_network_is_a_gap_consent_is_not() {
+    let (available, _, gap) = ca_pre_acquire_outcome(&UiError::new("network", "offline", true));
+    assert!(!available);
+    assert_eq!(gap, Some(AuditCoverageGap::ConditionalAccess));
+    let (available, _, gap) =
+        ca_pre_acquire_outcome(&UiError::new("consent_required", "AADSTS65001", false));
+    assert!(!available);
+    assert_eq!(gap, None);
+}
+
+/// An item holding `CallRecords.Read.All` on Graph plus a grant on another
+/// resource, which no policy covers — the per-grant shape the lock rides on.
+fn item_with_two_unscopable_grants() -> AuditItem {
+    use azapptoolkit_core::audit::UnscopableGrant;
+    use azapptoolkit_core::conditional_access::NetworkLock;
+    let mut item = azapptoolkit_core::audit::score_application(
+        &bare_app(),
+        Some(true),
+        &AppPermissions::default(),
+        jiff::Timestamp::now(),
+    );
+    item.unscopable_grants = vec![
+        UnscopableGrant {
+            permission: ResourcePermission::graph("CallRecords.Read.All"),
+            risk: RiskLevel::Medium,
+            microsoft_mechanism: None,
+            network_lock: NetworkLock::Unknown,
+        },
+        UnscopableGrant {
+            permission: ResourcePermission {
+                resource_app_id: Some("99999999-9999-9999-9999-999999999999".into()),
+                value: "Other.Read.All".into(),
+            },
+            risk: RiskLevel::Medium,
+            microsoft_mechanism: None,
+            network_lock: NetworkLock::Unknown,
+        },
+    ];
+    item
+}
+
+fn lock_ctx(ca_available: bool) -> ScoreCtx {
+    let cache = Cache::new();
+    let token = StaticTokenProvider::new("tok");
+    let client = Arc::new(GraphClient::with_base_url(
+        "tenant-test",
+        token.clone(),
+        token,
+        cache.clone(),
+        "http://127.0.0.1:9".to_string(),
+    ));
+    ScoreCtx {
+        ca_available,
+        ca_policies: Arc::new(if ca_available {
+            vec![graph_lock_policy()]
+        } else {
+            Vec::new()
+        }),
+        ..score_ctx(client, cache)
+    }
+}
+
+#[test]
+fn network_locks_unknown_when_ca_unavailable() {
+    use azapptoolkit_core::conditional_access::NetworkLock;
+    let mut item = item_with_two_unscopable_grants();
+    apply_network_locks(&mut item, &lock_ctx(false), Some("sp-1"), None);
+    assert!(
+        item.unscopable_grants
+            .iter()
+            .all(|g| g.network_lock == NetworkLock::Unknown)
+    );
+}
+
+#[test]
+fn network_locks_not_possible_when_ineligible() {
+    use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
+    let mut item = item_with_two_unscopable_grants();
+    apply_network_locks(
+        &mut item,
+        &lock_ctx(true),
+        Some("sp-1"),
+        Some(LockIneligible::OtherTenant),
+    );
+    assert!(item.unscopable_grants.iter().all(|g| g.network_lock
+        == NetworkLock::NotPossible {
+            reason: LockIneligible::OtherTenant
+        }));
+}
+
+#[test]
+fn network_locks_evaluated_per_grant() {
+    use azapptoolkit_core::conditional_access::NetworkLock;
+    let mut item = item_with_two_unscopable_grants();
+    apply_network_locks(&mut item, &lock_ctx(true), Some("sp-1"), None);
+    assert_eq!(
+        item.unscopable_grants[0].network_lock,
+        NetworkLock::Enforced {
+            policy_ids: vec!["lock-1".into()]
+        }
+    );
+    assert_eq!(item.unscopable_grants[1].network_lock, NetworkLock::None);
 }

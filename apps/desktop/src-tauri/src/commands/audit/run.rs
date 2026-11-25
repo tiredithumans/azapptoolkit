@@ -22,9 +22,9 @@ use crate::state::AppState;
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
-    prefetch_credential_activity, prefetch_graph_app_roles, prefetch_legacy_access_policies,
-    prefetch_office365_role_grants, prefetch_risky_service_principals, prefetch_sign_in_activity,
-    prefetch_sp_index,
+    prefetch_conditional_access, prefetch_credential_activity, prefetch_graph_app_roles,
+    prefetch_legacy_access_policies, prefetch_office365_role_grants,
+    prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{
     combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders, score_one,
@@ -119,6 +119,7 @@ pub async fn run_audit(
         app_policy,
         risky_sps,
         legacy_policies,
+        conditional_access,
     ) = futures::join!(
         client.list_applications_all(
             // `$expand=owners` brings owner ids inline so the ownership audit
@@ -191,6 +192,11 @@ pub async fn run_audit(
         // lookup on this path (it would be an extra admin-API call per app), so
         // without this an app confined ONLY by a policy read as org-wide.
         prefetch_legacy_access_policies(exo.as_deref()),
+        // ONE tenant-wide Conditional Access policy read (Policy.Read.All, the
+        // Conditional Access tab's consent) → each Rule 24 grant's network-lock
+        // verdict. Unavailable (no consent, license or role) leaves every lock
+        // unknown without a gap; only a transient failure is one.
+        prefetch_conditional_access(&state, &client, &tenant_id),
     );
 
     // The audit is the one caller that CANNOT swallow truncation: it caches its
@@ -205,6 +211,7 @@ pub async fn run_audit(
     let (app_policy_available, app_policy) = app_policy;
     let (risky_available, risky_by_sp, risky_gap) = risky_sps;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
+    let (ca_available, ca_policies, ca_gap) = conditional_access;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
     // the scan reached every app, but with part of the analysis switched off
     // because a tenant-wide read failed. Collected here so the result can say
@@ -220,6 +227,7 @@ pub async fn run_audit(
         risky_gap,
         consent_gap,
         sign_in_gap,
+        ca_gap,
     ]
     .into_iter()
     .flatten()
@@ -294,6 +302,8 @@ pub async fn run_audit(
         app_policy: app_policy.clone(),
         risky_available,
         risky_by_sp,
+        ca_available,
+        ca_policies,
     });
     let mut items: Vec<AuditItem> = Vec::with_capacity(total);
     // A dead session makes every remaining app fail identically, so the run must

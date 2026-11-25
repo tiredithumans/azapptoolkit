@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, ResourcePermission};
-use azapptoolkit_core::models::{ServicePrincipal, ServicePrincipalSignInActivity};
+use azapptoolkit_core::models::{
+    ConditionalAccessPolicy, ServicePrincipal, ServicePrincipalSignInActivity,
+};
 use azapptoolkit_core::scoping::{
     OFFICE365_EXCHANGE_ONLINE_APP_ID, OFFICE365_SHAREPOINT_ONLINE_APP_ID,
 };
@@ -20,7 +22,7 @@ use crate::commands::graph_err::looks_like_missing_license;
 use crate::commands::graph_roles::graph_role_index;
 use crate::dto::UiError;
 use crate::dto::audit::AuditCoverageGap;
-use crate::state::AppState;
+use crate::state::{AppState, ConsentFeature};
 
 use super::AppPolicyData;
 
@@ -478,6 +480,87 @@ pub(crate) fn sign_in_activity_outcome(
                 "sign-in activity report unavailable; skipping unused-app detection"
             );
             (false, false, Arc::new(HashMap::new()), None)
+        }
+    }
+}
+
+/// What the run learned from the tenant's Conditional Access policies:
+/// `(available, policies, gap)`. Feeds the per-grant network-lock verdict of
+/// the "no built-in scoping" finding (Rule 24).
+pub(crate) type CaPrefetch = (
+    bool,
+    Arc<Vec<ConditionalAccessPolicy>>,
+    Option<AuditCoverageGap>,
+);
+
+/// ONE tenant-wide Conditional Access policy read (`Policy.Read.All`, the
+/// same on-demand consent the Conditional Access tab uses) → [`CaPrefetch`].
+///
+/// The availability split is the sign-in report's
+/// ([`sign_in_activity_outcome`]), not the risky-SP one: a missing consent, a
+/// tenant without Entra ID P1/P2, or an operator whose roles can't read
+/// policies is *unavailable* — every lock reads "unknown", no gap, so the run
+/// still caches and no permanent banner trains operators to ignore it. Only a
+/// transient failure on a tenant that CAN read them is
+/// [`AuditCoverageGap::ConditionalAccess`].
+pub(crate) async fn prefetch_conditional_access(
+    state: &AppState,
+    client: &GraphClient,
+    tenant_id: &str,
+) -> CaPrefetch {
+    match state
+        .ensure_feature_token(tenant_id, ConsentFeature::Policy)
+        .await
+    {
+        Ok(()) => conditional_access_outcome(client.list_conditional_access_policies().await),
+        Err(err) => ca_pre_acquire_outcome(&UiError::from(err)),
+    }
+}
+
+/// The token half of [`prefetch_conditional_access`]: the same transient
+/// codes as [`sign_in_pre_acquire_outcome`] are the gap (the token endpoint
+/// never gave Entra's verdict); anything else is unavailable.
+pub(crate) fn ca_pre_acquire_outcome(ui: &UiError) -> CaPrefetch {
+    let transient = matches!(
+        ui.code.as_str(),
+        "network" | "service_unavailable" | "unexpected_responder"
+    );
+    tracing::info!(
+        code = %ui.code,
+        "Policy.Read.All token unavailable; network locks unknown this run"
+    );
+    (
+        false,
+        Arc::new(Vec::new()),
+        transient.then_some(AuditCoverageGap::ConditionalAccess),
+    )
+}
+
+/// The read half of [`prefetch_conditional_access`]: policies → available; a
+/// retryable failure (throttled, 5xx, network) → the gap; any other failure
+/// (403 license / role) → unavailable.
+pub(crate) fn conditional_access_outcome(
+    read: azapptoolkit_graph::Result<Vec<ConditionalAccessPolicy>>,
+) -> CaPrefetch {
+    match read {
+        Ok(policies) => (true, Arc::new(policies), None),
+        Err(err) if err.is_retryable() => {
+            tracing::warn!(
+                code = err.ui_code(),
+                "Conditional Access read failed; network-lock coverage gap"
+            );
+            (
+                false,
+                Arc::new(Vec::new()),
+                Some(AuditCoverageGap::ConditionalAccess),
+            )
+        }
+        Err(err) => {
+            tracing::info!(
+                code = err.ui_code(),
+                "Conditional Access unavailable; network locks unknown this run"
+            );
+            (false, Arc::new(Vec::new()), None)
         }
     }
 }
