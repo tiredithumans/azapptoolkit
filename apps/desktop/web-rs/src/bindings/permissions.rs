@@ -220,3 +220,35 @@ pub async fn revoke_oauth2_scope(
     )
     .await
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantExpiryArgs<'a> {
+    tenant_id: &'a str,
+    sp_object_id: &'a str,
+    resource_app_id: &'a str,
+    app_role_id: &'a str,
+    expires_on: Option<&'a str>,
+}
+
+/// Sets (`Some("YYYY-MM-DD")`) or clears (`None`) the expiry of an
+/// application grant held by `sp_object_id`.
+pub async fn set_grant_expiry(
+    tenant_id: &str,
+    sp_object_id: &str,
+    resource_app_id: &str,
+    app_role_id: &str,
+    expires_on: Option<&str>,
+) -> Result<(), UiError> {
+    invoke_result(
+        "set_grant_expiry",
+        GrantExpiryArgs {
+            tenant_id,
+            sp_object_id,
+            resource_app_id,
+            app_role_id,
+            expires_on,
+        },
+    )
+    .await
+}

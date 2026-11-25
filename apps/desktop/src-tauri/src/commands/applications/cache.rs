@@ -365,6 +365,29 @@ pub(crate) fn record_created_apps(cache: &Cache, tenant_id: &str, created: &[Cre
     invalidate_app_list_projections(cache, tenant_id);
 }
 
+/// The patch tier for a service principal's `tags` write (grant expiries,
+/// HideApp): the SP index selects `tags`, so its row is patched in place
+/// (`Keep` when the SP isn't indexed or already carries these tags) instead of
+/// dropping the list tier; the enterprise list projection, whose rows carry
+/// tags, is dropped; and the detail tier and the audit run, which read them,
+/// are busted. Call only on `Ok`.
+pub(crate) fn record_sp_tags(cache: &Cache, tenant_id: &str, sp_object_id: &str, tags: &[String]) {
+    cache.patch_typed_index_with::<Vec<ServicePrincipal>>(
+        CacheKind::Lists,
+        &sp_index_key(tenant_id),
+        |index| match index.iter().position(|s| s.id == sp_object_id) {
+            Some(at) if index[at].tags != tags => {
+                let mut next = index.clone();
+                next[at].tags = tags.to_vec();
+                azapptoolkit_core::cache::Patch::Replace(next)
+            }
+            _ => azapptoolkit_core::cache::Patch::Keep,
+        },
+    );
+    cache.invalidate(CacheKind::Lists, &enterprise_key(tenant_id));
+    invalidate_app_detail_state(cache, tenant_id);
+}
+
 /// The patch tier for deleted app registrations. Their rows leave the App
 /// Registrations list, the app-name index and the expiry roll-up. Their
 /// home-tenant service principals leave the SP index, because Graph deletes

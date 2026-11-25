@@ -416,6 +416,13 @@ pub async fn set_enterprise_app_visibility(
 ) -> Result<(), UiError> {
     const HIDE_APP: &str = "HideApp";
     let client = state.graph_for(&tenant_id);
+    // The same per-SP gate as the grant-expiry writer: both re-read and write
+    // the whole tag set, so unserialized they could drop each other's tags.
+    let gate = state.single_flight(&crate::commands::grant_expiry::sp_tags_gate_key(
+        &tenant_id,
+        &service_principal_id,
+    ));
+    let _held = gate.lock().await;
     let sp = client
         .get_service_principal_by_object_id(&service_principal_id)
         .await?
@@ -433,11 +440,14 @@ pub async fn set_enterprise_app_visibility(
     client
         .set_service_principal_tags(&service_principal_id, &tags)
         .await?;
-    // `tags` is not a field the SP index selects (`SP_INDEX_SELECT`), so no
-    // list row carries it: the detail tier, which holds the paired SP, is the
-    // one to bust. Busting the list tier here cost a full directory rescan per
-    // toggle.
-    invalidate_app_details(&state.cache, &tenant_id);
+    // The SP index selects `tags` (grant expiries), so the row is patched in
+    // place rather than the list tier rescanned.
+    crate::commands::applications::record_sp_tags(
+        &state.cache,
+        &tenant_id,
+        &service_principal_id,
+        &tags,
+    );
     Ok(())
 }
 

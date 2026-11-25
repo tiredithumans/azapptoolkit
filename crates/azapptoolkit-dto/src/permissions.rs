@@ -219,3 +219,19 @@ mod tests {
         ));
     }
 }
+
+/// What revoking a principal's expired grants did, by permission name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeExpiredResult {
+    /// Revoked now.
+    pub revoked: Vec<String>,
+    /// No longer held (revoked by hand, or the resource is gone): only the
+    /// expiry was cleared.
+    pub already_gone: Vec<String>,
+    /// Could not be revoked; their expiries stay.
+    pub failed: Vec<String>,
+    /// Anything else the operator should know (a declaration that could not
+    /// be removed from the manifest).
+    pub warnings: Vec<String>,
+}

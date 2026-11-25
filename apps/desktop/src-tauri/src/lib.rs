@@ -129,6 +129,8 @@ pub fn run() {
             commands::network_lock::create_network_lock,
             commands::network_lock::enable_network_lock,
             commands::network_lock::remove_network_lock,
+            commands::grant_expiry::set_grant_expiry,
+            commands::grant_expiry::remediate_revoke_expired_grants,
             commands::audit::run_audit,
             commands::audit::cancel_audit,
             commands::audit::get_cached_audit,
