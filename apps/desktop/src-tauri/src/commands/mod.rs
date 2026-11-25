@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod admin_units;
 pub mod app_roles;
 pub mod applications;
 pub(crate) mod arm_roles;
