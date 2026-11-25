@@ -1096,6 +1096,7 @@ async fn unscopable_group_renders_checklist() {
         network_lock: NetworkLock::NotPossible {
             reason: LockIneligible::OtherTenant,
         },
+        last_used: Default::default(),
     }];
     run.items.push(vendor);
     run.total_apps = run.items.len();

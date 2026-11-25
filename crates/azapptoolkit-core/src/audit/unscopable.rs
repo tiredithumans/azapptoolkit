@@ -85,6 +85,11 @@ pub struct UnscopableGrant {
     pub microsoft_mechanism: Option<UnmanagedMechanism>,
     #[serde(default)]
     pub network_lock: NetworkLock,
+    /// The latest Graph call this permission could have authorized, from the
+    /// runner's Graph-activity pass. The scorer leaves a tracked permission
+    /// `Unknown { NotChecked }` and an untracked one `NotTracked`.
+    #[serde(default)]
+    pub last_used: super::GrantUsage,
 }
 
 /// How (if at all) a permission's reach can be narrowed.

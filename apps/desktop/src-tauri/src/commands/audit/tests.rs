@@ -1987,6 +1987,7 @@ fn item_with_two_unscopable_grants() -> AuditItem {
             risk: RiskLevel::Medium,
             microsoft_mechanism: None,
             network_lock: NetworkLock::Unknown,
+            last_used: Default::default(),
         },
         UnscopableGrant {
             permission: ResourcePermission {
@@ -1996,6 +1997,7 @@ fn item_with_two_unscopable_grants() -> AuditItem {
             risk: RiskLevel::Medium,
             microsoft_mechanism: None,
             network_lock: NetworkLock::Unknown,
+            last_used: Default::default(),
         },
     ];
     item
