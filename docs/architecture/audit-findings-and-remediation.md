@@ -419,6 +419,16 @@ nothing it reports is a scope.
   (managed identities, apps owned by another tenant, multi-tenant apps, apps without a service
   principal — `lock_ineligibility_for_app` / `_sp`), and wins over `Unknown`: it is known
   without the read.
+- **Usage, per grant** (`audit/usage.rs`): one static table of Graph request-path families for
+  the communications permissions (call records, online meetings and their transcripts /
+  recordings / attendance reports, calls, channel messages, chats), most specific first, renders
+  the audit's single 90-day KQL query and the Rust matcher that pins it. The run spawns the query
+  (`prefetch_graph_usage`: the usage panel's Log Analytics consent and cached workspace) BESIDE the
+  scoring fan-out with a 60 s budget, and `apply_graph_usage` fills each tracked grant's
+  `GrantUsage` at the end: `Seen` (a call the permission *could* have authorized), `NotSeen { since }`
+  (the start of the logs actually read — the only evidence about the grant itself), `NotTracked`
+  (directory and other untracked permissions), or `Unknown { reason }`. Usage never degrades the
+  run: every failure is a reason, never an `AuditCoverageGap`.
 - **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
   every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
   can read policies → `AuditCoverageGap::ConditionalAccess`. `Unknown` is never shown as "no lock".
