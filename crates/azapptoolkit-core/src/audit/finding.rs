@@ -75,6 +75,11 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // grants are scored there by value, while this names the hiding place
         // (and fires for an undeclared grant of ANY risk).
         "granted_undeclared" => |x| x.starts_with(issue::GRANTED_NOT_DECLARED),
+        // Rule 24 — Graph permissions Microsoft offers no way to narrow. Its
+        // own finding, not folded into `high_risk_perms`: the grants are scored
+        // there, while this one carries the per-grant safeguards checklist
+        // (`AuditItem::unscopable_grants`). Advisory, no remediation.
+        "unscopable_privileged" => |x| x.starts_with(issue::UNSCOPABLE_PRIVILEGED),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
         // Rule 21 — Microsoft's own disable flag. Its own group (not folded
         // into the credential or exposure findings): the flag is about the
@@ -268,6 +273,13 @@ mod tests {
                 ),
                 "granted_undeclared",
             ),
+            (
+                format!(
+                    "{} CallRecords.Read.All — Microsoft offers no way to narrow these",
+                    issue::UNSCOPABLE_PRIVILEGED
+                ),
+                "unscopable_privileged",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -287,6 +299,7 @@ mod tests {
             "risky_service_principal",
             "unused_credential",
             "granted_undeclared",
+            "unscopable_privileged",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

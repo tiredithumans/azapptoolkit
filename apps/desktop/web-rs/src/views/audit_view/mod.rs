@@ -14,6 +14,7 @@ mod findings;
 mod groups;
 mod row;
 mod sort;
+mod unscopable_checklist;
 
 pub(crate) use controller::AuditController;
 pub(crate) use findings::FindingsPane;

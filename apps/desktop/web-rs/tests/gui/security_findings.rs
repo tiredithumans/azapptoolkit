@@ -1071,3 +1071,58 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
         "only the Critical row survives the drill filter"
     );
 }
+
+/// Rule 24's group shows each grant with its network-lock line, and a vendor
+/// (SP-only) row says a lock is not possible rather than missing.
+#[wasm_bindgen_test]
+async fn unscopable_group_renders_checklist() {
+    use azapptoolkit_core::audit::{ResourcePermission, UnscopableGrant};
+    use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
+    ts::reset();
+    let mut run = cached_run();
+    let mut vendor = fixtures::audit_item(
+        "Call Analytics Vendor",
+        RiskLevel::Medium,
+        &[format!(
+            "{} CallRecords.Read.All — Microsoft offers no way to narrow these",
+            issue::UNSCOPABLE_PRIVILEGED
+        )],
+    );
+    vendor.principal_kind = AuditPrincipalKind::ServicePrincipal;
+    vendor.unscopable_grants = vec![UnscopableGrant {
+        permission: ResourcePermission::graph("CallRecords.Read.All"),
+        risk: RiskLevel::Medium,
+        microsoft_mechanism: None,
+        network_lock: NetworkLock::NotPossible {
+            reason: LockIneligible::OtherTenant,
+        },
+    }];
+    run.items.push(vendor);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("No built-in scoping")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unscopable_privileged".to_string()));
+    ts::wait_for(|| {
+        ts::query(".finding-group__detail")
+            .and_then(|el| el.text_content())
+            .is_some_and(|t| t.contains("CallRecords.Read.All"))
+    })
+    .await;
+    let detail = ts::query(".finding-group__detail")
+        .and_then(|el| el.text_content())
+        .unwrap_or_default();
+    assert!(
+        detail.contains(
+            "not possible — Conditional Access can't target an app owned by another tenant"
+        ),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains("Credentials"),
+        "a vendor row's credentials live in its home tenant: {detail}"
+    );
+}

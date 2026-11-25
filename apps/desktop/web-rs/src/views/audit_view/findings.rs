@@ -29,6 +29,7 @@ use super::controller::AuditController;
 use super::filter::issue_lines_for;
 use super::groups::{FindingGroup, GroupSection, group_bulk_actions, group_findings, tone};
 use super::row::AuditRowActions;
+use super::unscopable_checklist::UnscopableChecklist;
 use super::{last_sign_in_cell, risk_tone};
 
 /// The revealed "Healthy configuration" groups' container — the target of the
@@ -474,6 +475,11 @@ fn finding_group_view(
                                         .into_iter()
                                         .map(str::to_owned)
                                         .collect();
+                                    // Rule 24 evidences its rows with a structured
+                                    // checklist, not the issue line.
+                                    let checklist = (key == "unscopable_privileged"
+                                        && !i.unscopable_grants.is_empty())
+                                        .then(|| i.clone());
                                     view! {
                                         <tr>
                                             {actionable
@@ -513,7 +519,10 @@ fn finding_group_view(
                                                 </div>
                                             </td>
                                             <td class="finding-group__detail">
-                                                {if detail.is_empty() {
+                                                {if let Some(item) = checklist {
+                                                    view! { <UnscopableChecklist item=item /> }
+                                                        .into_any()
+                                                } else if detail.is_empty() {
                                                     view! {
                                                         <span
                                                             class="muted"
