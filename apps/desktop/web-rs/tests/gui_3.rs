@@ -24,6 +24,8 @@ mod gallery;
 mod managed_identities;
 #[path = "gui/managed_identity_scoping.rs"]
 mod managed_identity_scoping;
+#[path = "gui/network_lock.rs"]
+mod network_lock;
 #[path = "gui/orgwide_scope_callout.rs"]
 mod orgwide_scope_callout;
 #[path = "gui/permission_picker.rs"]

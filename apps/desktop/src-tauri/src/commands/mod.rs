@@ -25,6 +25,7 @@ pub(crate) mod guid;
 pub mod keyvault;
 pub mod keyvault_rbac;
 pub mod managed_identity;
+pub mod network_lock;
 pub mod permission_tester;
 pub mod permissions;
 pub mod progress;

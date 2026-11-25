@@ -443,6 +443,37 @@ nothing it reports is a scope.
   rows only — an SP-only row's live in its home tenant) and the last sign-in. No line says
   "scoped", "confined" or "limited to" (pinned by test). Not a posture bucket.
 
+## Network lock (B2)
+
+The checklist's network-lock line is set up from the app registration's **Conditional Access tab**
+(the audit's advisory group keeps offering no row Fix). `commands::network_lock`:
+
+- **One toolkit lock per app**, identified by `conditional_access::toolkit_lock_for` — the display
+  name prefix `azapptoolkit network lock — `, `includeServicePrincipals` exactly this service
+  principal, and the exact shape (`includeApplications: ["All"]`, `includeLocations: ["All"]` with
+  excluded named locations, `block`, no risk gate). It finds the lock in any state, `disabled`
+  included. Turn on and remove act only on that policy, re-read live first (`not_a_toolkit_lock`
+  otherwise); another policy's lock is shown, never offered for change.
+- **Created report-only** (`lock_policy_body`, which `network_lock_for` reads back as `ReportOnly`,
+  then `Enforced`). Before "Turn on", the tab shows, of the app's service-principal sign-ins in the
+  last 7 days that the policy produced a result for, how many it would have blocked (beta
+  `auditLogs/signIns`, whole-second filter, `Prefer: include-unknown-enum-members`,
+  `reportOnlyFailure`, on the `audit_log` consent). It never reassures without evidence: none
+  evaluated yet says so, a read past the 1 000-row cap is "at least", and an unreadable log is
+  "unknown". The shape check also refuses a lock whose client or app side gained an exclusion or a
+  filter, or whose controls are more than `block` — an "unbreak it for now" edit is not a lock.
+- **Named locations the toolkit creates are untrusted** — a trusted range joins `AllTrusted`, which
+  relaxes user MFA policies and Identity Protection risk. CIDRs are validated (`parse_cidr`, `/0`
+  refused); chosen ids must be GUIDs naming live IP locations. A retried create reuses a live
+  location with the same name and ranges (same name, other ranges → `location_name_taken`), so a
+  failed policy create never leaks duplicates. Remove leaves locations in place. Reads degrade like
+  the Conditional Access tab (`map_ca_err`); only writes use the lock's error mapping.
+- **Eligibility** is `lock_ineligibility_for_app` on the live app and service principal: only
+  single-tenant app registrations with a service principal can be locked.
+- **Licence:** a refusal that names workload identities maps to `workload_identity_license_required`
+  (Graph doesn't document the exact error). Scopes: `conditional_access_write` (Policy.Read.All +
+  Policy.ReadWrite.ConditionalAccess); capability `conditional_access_lock`.
+
 ## The risky-service-principal signal (Rule 22)
 
 The run's tenant-wide Identity Protection read — ONE `GET /identityProtection/riskyServicePrincipals`

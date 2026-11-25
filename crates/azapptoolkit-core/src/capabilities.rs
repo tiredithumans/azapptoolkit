@@ -265,6 +265,27 @@ pub static CAPABILITIES: &[Capability] = &[
                       P1/P2 license.",
     },
     Capability {
+        key: "conditional_access_lock",
+        plane: Plane::EntraDirectory,
+        label: "Network lock (Conditional Access)",
+        description: "Create, turn on or remove a per-app Conditional Access policy that blocks \
+                      the app's sign-ins outside chosen named locations.",
+        directory_roles_any: &[
+            (
+                "Conditional Access Administrator",
+                Some(TID_CONDITIONAL_ACCESS_ADMIN),
+            ),
+            ("Security Administrator", Some(TID_SECURITY_ADMIN)),
+            ("Global Administrator", Some(TID_GLOBAL_ADMIN)),
+        ],
+        role_detect: RoleDetect::DirectoryRole,
+        scopes: &["Policy.Read.All", "Policy.ReadWrite.ConditionalAccess"],
+        scope_feature: Some("conditional_access_write"),
+        remediation: "Locking an app to named locations needs the \
+                      Policy.ReadWrite.ConditionalAccess scope, the Conditional Access \
+                      Administrator role and a Microsoft Entra Workload ID Premium licence.",
+    },
+    Capability {
         key: "app_management_policies",
         plane: Plane::EntraDirectory,
         label: "App-management policies (credential lifetime, read)",

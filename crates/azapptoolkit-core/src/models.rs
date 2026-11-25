@@ -905,6 +905,64 @@ pub struct CaGrantControls {
     pub operator: Option<String>,
 }
 
+/// A Conditional Access named location (`/identity/conditionalAccess/namedLocations`).
+/// Only IP locations carry ranges; country locations deserialize with none.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedLocation {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(rename = "@odata.type", default)]
+    pub odata_type: Option<String>,
+    #[serde(default)]
+    pub is_trusted: Option<bool>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub ip_ranges: Vec<IpRange>,
+}
+
+impl NamedLocation {
+    /// An IP (not country) named location.
+    pub fn is_ip(&self) -> bool {
+        self.odata_type.as_deref() == Some("#microsoft.graph.ipNamedLocation")
+    }
+}
+
+/// One `ipRange` of an IP named location.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IpRange {
+    #[serde(default)]
+    pub cidr_address: Option<String>,
+}
+
+/// One sign-in log row (`/auditLogs/signIns`) — only the fields the network
+/// lock's report-only readout reads.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SignIn {
+    #[serde(default)]
+    pub created_date_time: Option<Timestamp>,
+    #[serde(default)]
+    pub ip_address: Option<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub applied_conditional_access_policies: Vec<AppliedConditionalAccessPolicy>,
+}
+
+/// One Conditional Access policy's outcome on a sign-in (`result` includes the
+/// report-only values with `Prefer: include-unknown-enum-members`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedConditionalAccessPolicy {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
 /// One row of the Identity Protection risky-service-principal report
 /// (`GET /identityProtection/riskyServicePrincipals`). The audit joins these
 /// onto principals by `service_principal_id` (the SP **object** id, not its
