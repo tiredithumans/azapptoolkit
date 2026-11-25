@@ -1096,6 +1096,9 @@ async fn unscopable_group_renders_checklist() {
         network_lock: NetworkLock::NotPossible {
             reason: LockIneligible::OtherTenant,
         },
+        last_used: azapptoolkit_core::audit::GrantUsage::NotSeen {
+            since: "2026-08-27T00:00:00Z".parse().unwrap(),
+        },
     }];
     run.items.push(vendor);
     run.total_apps = run.items.len();
@@ -1119,6 +1122,10 @@ async fn unscopable_group_renders_checklist() {
         detail.contains(
             "not possible — Conditional Access can't target an app owned by another tenant"
         ),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("No call it could authorize since 2026-08-27"),
         "{detail}"
     );
     assert!(

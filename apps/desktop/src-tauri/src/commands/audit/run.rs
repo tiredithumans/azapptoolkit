@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
-use azapptoolkit_core::audit::AuditItem;
+use azapptoolkit_core::audit::{AuditItem, UsageUnknownReason, families_for_permission};
 use azapptoolkit_core::cache::CacheKind;
 use azapptoolkit_graph::client::AppListQuery;
 use jiff::Timestamp;
@@ -20,15 +20,16 @@ use crate::dto::audit::{AuditCoverageGap, AuditProgress, AuditRunResult};
 use crate::state::AppState;
 
 use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
+use super::prefetch::UsagePrefetch;
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
     prefetch_conditional_access, prefetch_credential_activity, prefetch_graph_app_roles,
-    prefetch_legacy_access_policies, prefetch_office365_role_grants,
+    prefetch_graph_usage, prefetch_legacy_access_policies, prefetch_office365_role_grants,
     prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{
-    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders, score_one,
-    score_sp_only, sp_audit_candidates,
+    apply_graph_usage, combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
+    score_one, score_sp_only, sp_audit_candidates,
 };
 use super::{AuditFailure, ResourceResolver, RunSps, ScoreCtx, classify_audit_failure};
 
@@ -76,6 +77,20 @@ pub async fn run_audit(
     let audit_watch = state
         .cache
         .generation_for(CacheKind::Audit, &audit_cache_key(&tenant_id));
+    // The Graph-activity usage query (Rule 24's `last_used`) starts NOW and runs
+    // beside the prefetch join and the scoring fan-out: it can take a minute on
+    // a busy tenant, and nothing needs it until the very end. One deadline from
+    // here bounds all of it (token, workspace discovery, queries); a dropped
+    // guard aborts it on any early return.
+    let usage_deadline = tokio::time::Instant::now() + USAGE_BUDGET;
+    let mut usage_task = AbortOnDrop(Some({
+        let handle = app_handle.clone();
+        let tenant = tenant_id.clone();
+        tokio::spawn(async move {
+            let state = handle.state::<AppState>();
+            prefetch_graph_usage(&state, &tenant).await
+        })
+    }));
 
     // Effective Exchange mailbox-scoping is resolved on every run so a mail
     // permission confined to specific mailboxes scores below an org-wide one.
@@ -434,6 +449,24 @@ pub async fn run_audit(
     }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
+    // Wait for usage only when some row holds a tracked grant, and never past
+    // the deadline or a Cancel: usage never blocks the audit.
+    let tracks_usage = items.iter().any(|i| {
+        i.unscopable_grants
+            .iter()
+            .any(|g| !families_for_permission(&g.permission.value).is_empty())
+    });
+    let usage = match usage_task.0.take() {
+        Some(task) if !cancelled && tracks_usage => {
+            await_usage(task, usage_deadline, || cancel.is_cancelled()).await
+        }
+        Some(task) => {
+            task.abort();
+            Err(UsageUnknownReason::NotChecked)
+        }
+        None => Err(UsageUnknownReason::NotChecked),
+    };
+    apply_graph_usage(&mut items, &usage);
     // Whether every mail permission was actually checked against Exchange
     // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
     // which over-reports — but the operator has to be told, because the
@@ -512,4 +545,48 @@ pub async fn run_audit(
 #[tauri::command]
 pub fn cancel_audit(state: State<'_, AppState>) {
     state.audit_cancel.cancel();
+}
+
+/// How long after the run starts the usage query may still be awaited: it
+/// overlaps the whole prefetch and fan-out, so this only caps the wait at the
+/// end on a run that finished scoring quickly.
+const USAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Awaits the spawned usage query until `deadline`, checking `is_cancelled`
+/// every 250 ms. Past the deadline it is `TimedOut`; on Cancel `NotChecked`
+/// (the run didn't fail to read anything); a task that panicked or was
+/// aborted is `Failed`. The task is aborted on both early exits.
+pub(crate) async fn await_usage(
+    mut task: tokio::task::JoinHandle<UsagePrefetch>,
+    deadline: tokio::time::Instant,
+    is_cancelled: impl Fn() -> bool,
+) -> UsagePrefetch {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            joined = &mut task => return joined.unwrap_or(Err(UsageUnknownReason::Failed)),
+            () = tokio::time::sleep_until(deadline) => {
+                task.abort();
+                return Err(UsageUnknownReason::TimedOut);
+            }
+            _ = tick.tick() => {
+                if is_cancelled() {
+                    task.abort();
+                    return Err(UsageUnknownReason::NotChecked);
+                }
+            }
+        }
+    }
+}
+
+/// Aborts a spawned task when dropped — the run's early returns (a dead
+/// session, an app-list failure) must not leave the usage query running.
+struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }

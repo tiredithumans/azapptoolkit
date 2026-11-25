@@ -639,6 +639,11 @@ fn rule_unscopable_privileged(perms: &AppPermissions) -> (RuleContribution, Vec<
                     &g.value,
                 ),
                 network_lock: crate::conditional_access::NetworkLock::Unknown,
+                last_used: if families_for_permission(&g.value).is_empty() {
+                    GrantUsage::NotTracked
+                } else {
+                    GrantUsage::default()
+                },
             })
         })
         .collect();

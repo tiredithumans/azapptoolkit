@@ -873,6 +873,18 @@ mod tests {
         );
     }
 
+    /// A grant serialized before usage existed carries no `last_used`.
+    #[test]
+    fn unscopable_grant_without_last_used_deserializes() {
+        let g: crate::audit::UnscopableGrant = serde_json::from_value(serde_json::json!({
+            "permission": { "resource_app_id": crate::scoping::MICROSOFT_GRAPH_APP_ID, "value": "CallRecords.Read.All" },
+            "risk": "Medium",
+            "microsoft_mechanism": null
+        }))
+        .unwrap();
+        assert_eq!(g.last_used, crate::audit::GrantUsage::default());
+    }
+
     /// A run cached before Rule 24 existed carries no `unscopable_grants`; it
     /// must still load (and show no checklist).
     #[test]

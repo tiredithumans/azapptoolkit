@@ -3037,7 +3037,24 @@ fn unscopable(value: &str, risk: RiskLevel, m: Option<UnmanagedMechanism>) -> Un
         risk,
         microsoft_mechanism: m,
         network_lock: crate::conditional_access::NetworkLock::Unknown,
+        // Every value these tests use is a tracked communications permission.
+        last_used: GrantUsage::Unknown {
+            reason: UsageUnknownReason::NotChecked,
+        },
     }
+}
+
+#[test]
+fn rule24_marks_directory_permissions_not_tracked() {
+    let perms = AppPermissions {
+        app_role_grants: vec![ResourcePermission::graph(
+            "RoleManagement.ReadWrite.Directory",
+        )],
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &perms, now());
+    assert_eq!(item.unscopable_grants.len(), 1);
+    assert_eq!(item.unscopable_grants[0].last_used, GrantUsage::NotTracked);
 }
 
 #[test]

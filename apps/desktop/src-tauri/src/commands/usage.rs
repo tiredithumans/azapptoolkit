@@ -56,7 +56,7 @@ type WorkspaceLookup = Option<(String, String)>;
 /// here". The first hit is cached per tenant (`CacheKind::Permissions`) so
 /// subsequent usage queries skip discovery. `None` = no workspace found,
 /// which the caller turns into setup guidance.
-async fn discover_workspace(
+pub(crate) async fn discover_workspace(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<Option<(String, String)>, UiError> {

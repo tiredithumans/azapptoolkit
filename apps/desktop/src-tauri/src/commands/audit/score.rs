@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, RemediationKind,
-    ResourcePermission, SpAuditInput, apply_service_principal_risk, is_expired, score_application,
-    score_service_principal, secret_lifetime_advisory, unused_app_advisory,
-    unused_credential_advisory,
+    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, GrantUsage, RemediationKind,
+    ResourcePermission, SpAuditInput, apply_service_principal_risk, families_for_permission,
+    grant_usage, is_expired, score_application, score_service_principal, secret_lifetime_advisory,
+    unused_app_advisory, unused_credential_advisory,
 };
 use azapptoolkit_core::conditional_access::{
     LockIneligible, NetworkLock, lock_ineligibility_for_app, lock_ineligibility_for_sp,
@@ -28,6 +28,7 @@ use jiff::Timestamp;
 use crate::commands::exchange::resolve_mail_scopes_audit_cached;
 use crate::dto::UiError;
 
+use super::prefetch::UsagePrefetch;
 use super::{ResourceIndex, ResourceResolver, ScoreCtx};
 
 /// The org-wide-granted mailbox permissions `score_one` reconciles against a
@@ -245,6 +246,29 @@ pub(crate) fn score_sp_only(
         item.recommendations.push(rec);
     }
     item
+}
+
+/// Fills each tracked Rule 24 grant's `last_used` from the run's Graph
+/// activity usage, after scoring (the query ran alongside it). Untracked
+/// grants keep Rule 24's `NotTracked`. App ids compare case-insensitively.
+pub(crate) fn apply_graph_usage(items: &mut [AuditItem], usage: &UsagePrefetch) {
+    let none = HashMap::new();
+    for item in items {
+        let app = item.app_id.to_ascii_lowercase();
+        for grant in &mut item.unscopable_grants {
+            if families_for_permission(&grant.permission.value).is_empty() {
+                continue;
+            }
+            grant.last_used = match usage {
+                Ok(u) => grant_usage(
+                    &grant.permission.value,
+                    u.by_app.get(&app).unwrap_or(&none),
+                    u.since,
+                ),
+                Err(reason) => GrantUsage::Unknown { reason: *reason },
+            };
+        }
+    }
 }
 
 /// Fills each Rule 24 grant's Conditional Access network-lock verdict, from
