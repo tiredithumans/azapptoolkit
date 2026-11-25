@@ -225,24 +225,43 @@ fn ineligible_text(reason: LockIneligible) -> &'static str {
     }
 }
 
-/// What a report-only lock would have blocked, as one sentence.
+/// What a report-only lock would have blocked, as one sentence — never a
+/// reassurance without evidence: no evaluated sign-ins says so, and a capped
+/// read is a floor.
 fn readout_line(readout: Option<&ReportOnlyReadout>) -> String {
-    match readout {
-        Some(r) if r.would_block == 0 => format!(
-            "In the last {} days, no sign-ins would have been blocked.",
-            r.window_days
-        ),
-        Some(r) => format!(
-            "In the last {} days, {} sign-in{} would have been blocked (from {}).",
-            r.window_days,
-            r.would_block,
-            if r.would_block == 1 { "" } else { "s" },
-            r.sample_ips.join(", ")
-        ),
-        None => "Couldn't check what it would have blocked (needs the sign-in log consent and an \
-                 Entra ID P1/P2 licence)."
-            .to_string(),
+    let Some(r) = readout else {
+        return "Couldn't read the app's sign-in log, so what the lock would block is unknown."
+            .to_string();
+    };
+    if r.evaluated == 0 {
+        return "No sign-ins have been checked against the lock yet — wait until the app has \
+                signed in before turning it on."
+            .to_string();
     }
+    let checked = if r.truncated {
+        format!(
+            "Of the latest {} sign-ins the lock checked in the last {} days (older ones weren't read)",
+            r.evaluated, r.window_days
+        )
+    } else {
+        format!(
+            "Of {} sign-in{} the lock checked in the last {} days",
+            r.evaluated,
+            if r.evaluated == 1 { "" } else { "s" },
+            r.window_days
+        )
+    };
+    let blocked = match (r.would_block, r.truncated) {
+        (0, false) => "none would have been blocked".to_string(),
+        (n, true) => format!("at least {n} would have been blocked"),
+        (n, false) => format!("{n} would have been blocked"),
+    };
+    let from = if r.would_block > 0 && !r.sample_ips.is_empty() {
+        format!(" (from {})", r.sample_ips.join(", "))
+    } else {
+        String::new()
+    };
+    format!("{checked}, {blocked}{from}.")
 }
 
 /// The app's Network lock: a per-app Conditional Access policy that blocks
@@ -405,7 +424,13 @@ fn lock_state_view(
         let id_on = lock.policy_id.clone();
         let id_off = lock.policy_id.clone();
         let readout = readout_line(s.readout.as_ref());
-        let readout_subject = readout.clone();
+        // The readout is only read for a report-only lock: a turned-off one
+        // checks nothing, so its confirm says that instead.
+        let readout_subject = if lock.state == "enabledForReportingButNotEnforced" {
+            readout.clone()
+        } else {
+            "the lock is turned off, so it hasn't checked any sign-ins.".to_string()
+        };
         let ask_turn_on: Box<dyn Fn() + Send + Sync> = Box::new(move || {
             pending_turn_on.set(Some((
                 id_on.clone(),
@@ -467,7 +492,51 @@ fn lock_state_view(
             "No network lock. A lock blocks this app's sign-ins from everywhere except the named locations you choose, so a stolen credential stops working elsewhere. It doesn't narrow what the app can read."
         </span>
         {maybe_other}
-        <div class="actions-row">{button("Lock to trusted locations…", open_create)}</div>
+        <div class="actions-row">{button("Lock to named locations…", open_create)}</div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn readout(
+        evaluated: u32,
+        would_block: u32,
+        truncated: bool,
+        ips: &[&str],
+    ) -> ReportOnlyReadout {
+        ReportOnlyReadout {
+            evaluated,
+            would_block,
+            truncated,
+            sample_ips: ips.iter().map(|s| s.to_string()).collect(),
+            window_days: 7,
+        }
+    }
+
+    #[test]
+    fn readout_lines_never_reassure_without_evidence() {
+        assert_eq!(
+            readout_line(Some(&readout(0, 0, false, &[]))),
+            "No sign-ins have been checked against the lock yet — wait until the app has signed in before turning it on."
+        );
+        assert_eq!(
+            readout_line(Some(&readout(5, 3, false, &["203.0.113.7"]))),
+            "Of 5 sign-ins the lock checked in the last 7 days, 3 would have been blocked (from 203.0.113.7)."
+        );
+        assert_eq!(
+            readout_line(Some(&readout(5, 0, false, &[]))),
+            "Of 5 sign-ins the lock checked in the last 7 days, none would have been blocked."
+        );
+        assert_eq!(
+            readout_line(Some(&readout(1000, 12, true, &[]))),
+            "Of the latest 1000 sign-ins the lock checked in the last 7 days (older ones weren't read), at least 12 would have been blocked."
+        );
+        assert_eq!(
+            readout_line(None),
+            "Couldn't read the app's sign-in log, so what the lock would block is unknown."
+        );
+    }
 }

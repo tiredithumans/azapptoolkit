@@ -144,7 +144,7 @@ fn state_rank(state: &str) -> u8 {
 /// distinct message, every Graph failure degrades to `ca_unavailable` (a
 /// classified token failure keeps its own code), and a raw Graph body is never
 /// leaked.
-fn map_ca_err(err: GraphError) -> UiError {
+pub(crate) fn map_ca_err(err: GraphError) -> UiError {
     graph_err::premium_feature_err(
         "ca_unavailable",
         "Conditional Access",

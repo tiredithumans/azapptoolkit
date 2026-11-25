@@ -60,11 +60,13 @@ async fn live_app(client: &GraphClient, app_id: &str) -> Result<LiveApp, UiError
     })
 }
 
-async fn live_policies(client: &GraphClient) -> Result<Vec<ConditionalAccessPolicy>, UiError> {
-    client
-        .list_conditional_access_policies()
-        .await
-        .map_err(map_lock_write_err)
+/// The tenant's policies; `map` is the read's error mapping (the tab's
+/// graceful `map_ca_err` for the status read, the lock's for a write's verify).
+async fn live_policies(
+    client: &GraphClient,
+    map: fn(GraphError) -> UiError,
+) -> Result<Vec<ConditionalAccessPolicy>, UiError> {
+    client.list_conditional_access_policies().await.map_err(map)
 }
 
 fn location_dto(l: &NamedLocation) -> Option<NamedLocationDto> {
@@ -76,17 +78,29 @@ fn location_dto(l: &NamedLocation) -> Option<NamedLocationDto> {
     })
 }
 
-/// What a report-only lock would have blocked: sign-ins where this policy's
-/// applied result is `reportOnlyFailure`, plus up to five distinct addresses.
-pub(crate) fn readout_from(sign_ins: &[SignIn], policy_id: &str) -> ReportOnlyReadout {
+/// What a report-only lock would have blocked: of the sign-ins this policy
+/// produced any result for (`evaluated` — zero before the app signs in after
+/// the lock was created), those whose result is `reportOnlyFailure`, plus up
+/// to five distinct addresses. `truncated` = the read hit its cap.
+pub(crate) fn readout_from(
+    sign_ins: &[SignIn],
+    policy_id: &str,
+    truncated: bool,
+) -> ReportOnlyReadout {
+    let mut evaluated = 0u32;
     let mut would_block = 0u32;
     let mut ips: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     for s in sign_ins {
-        let hit = s.applied_conditional_access_policies.iter().any(|p| {
-            p.id.as_deref() == Some(policy_id) && p.result.as_deref() == Some("reportOnlyFailure")
-        });
-        if !hit {
+        let ours = s
+            .applied_conditional_access_policies
+            .iter()
+            .find(|p| p.id.as_deref() == Some(policy_id));
+        let Some(ours) = ours else {
+            continue;
+        };
+        evaluated = evaluated.saturating_add(1);
+        if ours.result.as_deref() != Some("reportOnlyFailure") {
             continue;
         }
         would_block = would_block.saturating_add(1);
@@ -98,23 +112,31 @@ pub(crate) fn readout_from(sign_ins: &[SignIn], policy_id: &str) -> ReportOnlyRe
         }
     }
     ReportOnlyReadout {
+        evaluated,
         would_block,
+        truncated,
         sample_ips: ips,
         window_days: READOUT_WINDOW_DAYS,
     }
 }
 
-/// Maps a lock read/write failure. A refusal that names workload identities
-/// is the missing Workload ID Premium licence (Graph doesn't document the
-/// exact error, so the body is matched on its text); any other 403 carries the
-/// catalog's remediation.
+/// Maps a lock WRITE failure (reads use the tab's graceful `map_ca_err`). A
+/// refusal about a workload-identity LICENCE is the missing Workload ID
+/// Premium licence (Graph doesn't document the exact error, so the body is
+/// matched on its text: it must name workload identities AND a licence /
+/// premium); any other 403 carries the catalog's remediation.
 pub(crate) fn map_lock_write_err(err: GraphError) -> UiError {
     let body = match &err {
         GraphError::Forbidden(b) => Some(b.as_str()),
         GraphError::Api { body, .. } => Some(body.as_str()),
         _ => None,
     };
-    if body.is_some_and(|b| b.to_ascii_lowercase().contains("workload identit")) {
+    let is_licence = body.is_some_and(|b| {
+        let b = b.to_ascii_lowercase();
+        (b.contains("workload identit") || b.contains("workload id"))
+            && (b.contains("licen") || b.contains("premium"))
+    });
+    if is_licence {
         return UiError::validation(
             "workload_identity_license_required",
             "Creating or changing a Conditional Access policy for an app needs a Microsoft \
@@ -126,6 +148,55 @@ pub(crate) fn map_lock_write_err(err: GraphError) -> UiError {
         ui.message = format!("{} {remediation}", ui.message);
     }
     ui
+}
+
+/// A new named location's id when a live IP location already has this name
+/// (trimmed, case-insensitive) AND exactly these ranges — a retried create
+/// reuses it instead of leaking a duplicate. Same name, other ranges →
+/// `location_name_taken`.
+pub(crate) fn reusable_location(
+    live: &[NamedLocation],
+    name: &str,
+    cidrs: &[(bool, String)],
+) -> Result<Option<String>, UiError> {
+    let name = name.trim();
+    let Some(same_name) = live.iter().find(|l| {
+        l.is_ip()
+            && l.display_name
+                .as_deref()
+                .is_some_and(|n| n.trim().eq_ignore_ascii_case(name))
+    }) else {
+        return Ok(None);
+    };
+    let mut have: Vec<String> = same_name
+        .ip_ranges
+        .iter()
+        .filter_map(|r| r.cidr_address.clone())
+        .collect();
+    let mut want: Vec<String> = cidrs.iter().map(|(_, c)| c.clone()).collect();
+    have.sort();
+    want.sort();
+    if have == want {
+        Ok(same_name.id.clone())
+    } else {
+        Err(UiError::validation(
+            "location_name_taken",
+            format!(
+                "A named location called \"{name}\" already exists with other ranges. Choose it from the list, or use another name."
+            ),
+        ))
+    }
+}
+
+/// A failed policy create's message: when the named location landed first,
+/// say so — it is kept and can be chosen next time.
+pub(crate) fn create_failed_message(base: &str, created_location: Option<&str>) -> String {
+    match created_location {
+        Some(name) => format!(
+            "{base} The named location \"{name}\" was created and is kept — choose it next time."
+        ),
+        None => base.to_string(),
+    }
 }
 
 /// Validates a create request against the live IP named locations: at least
@@ -223,7 +294,7 @@ pub async fn get_network_lock(
             readout: None,
         });
     };
-    let policies = live_policies(&client).await?;
+    let policies = live_policies(&client, crate::commands::conditional_access::map_ca_err).await?;
     let ours = toolkit_lock_for(&policies, sp_id).cloned();
     let ours_id = ours.as_ref().and_then(|p| p.id.clone());
     let others: Vec<ConditionalAccessPolicy> = policies
@@ -273,11 +344,13 @@ pub async fn get_network_lock(
         {
             let since =
                 Timestamp::now() - SignedDuration::from_hours(24 * i64::from(READOUT_WINDOW_DAYS));
-            readout = client
-                .list_service_principal_sign_ins(&app_id, since)
-                .await
-                .ok()
-                .map(|rows| readout_from(&rows, &policy_id));
+            readout = match client.list_service_principal_sign_ins(&app_id, since).await {
+                Ok((rows, truncated)) => Some(readout_from(&rows, &policy_id, truncated)),
+                Err(err) => {
+                    tracing::warn!(code = err.ui_code(), "network lock: sign-in readout failed");
+                    None
+                }
+            };
         }
         toolkit_lock = Some(ToolkitLockDto {
             policy_id,
@@ -309,7 +382,7 @@ pub async fn list_named_locations(
         .graph_for(&tenant_id)
         .list_named_locations()
         .await
-        .map_err(map_lock_write_err)?;
+        .map_err(crate::commands::conditional_access::map_ca_err)?;
     Ok(locations
         .iter()
         .filter(|l| l.is_ip())
@@ -350,7 +423,7 @@ pub async fn create_network_lock(
             ));
         }
     };
-    let policies = live_policies(&client).await?;
+    let policies = live_policies(&client, map_lock_write_err).await?;
     if toolkit_lock_for(&policies, &sp_id).is_some() {
         return Err(UiError::validation(
             "lock_exists",
@@ -366,33 +439,33 @@ pub async fn create_network_lock(
     let mut created_location_id = None;
     let mut created_location_name = None;
     if let Some(new) = &new_location {
-        let created = client
-            .create_ip_named_location(new.name.trim(), &cidrs)
-            .await
-            .map_err(map_lock_write_err)?;
-        let id = created.id.ok_or_else(|| {
-            UiError::new(
-                "protocol",
-                "Graph returned a named location without an id",
-                false,
-            )
-        })?;
-        excluded.push(id.clone());
-        created_location_id = Some(id);
-        created_location_name = Some(new.name.trim().to_string());
+        // A retried create (the policy failed last time) reuses the location
+        // it already made instead of leaking a duplicate.
+        if let Some(id) = reusable_location(&live_locations, &new.name, &cidrs)? {
+            excluded.push(id);
+        } else {
+            let created = client
+                .create_ip_named_location(new.name.trim(), &cidrs)
+                .await
+                .map_err(map_lock_write_err)?;
+            let id = created.id.ok_or_else(|| {
+                UiError::new(
+                    "protocol",
+                    "Graph returned a named location without an id",
+                    false,
+                )
+            })?;
+            excluded.push(id.clone());
+            created_location_id = Some(id);
+            created_location_name = Some(new.name.trim().to_string());
+        }
     }
     let body = lock_policy_body(&lock_display_name(&app.display_name), &sp_id, &excluded);
     let created = match client.create_ca_policy(&body).await {
         Ok(p) => p,
         Err(err) => {
             let mut ui = map_lock_write_err(err);
-            if let Some(name) = &created_location_name {
-                ui.message = format!(
-                    "{} The named location \"{name}\" was created and is kept — choose it next time.",
-                    ui.message
-                );
-                invalidate_app_detail_state(&state.cache, &tenant_id);
-            }
+            ui.message = create_failed_message(&ui.message, created_location_name.as_deref());
             return Err(ui);
         }
     };
@@ -429,7 +502,7 @@ async fn verified_toolkit_lock(
         )
     };
     let sp_id = app.sp_id.ok_or_else(not_ours)?;
-    let policies = live_policies(&client).await?;
+    let policies = live_policies(&client, map_lock_write_err).await?;
     match toolkit_lock_for(&policies, &sp_id) {
         Some(p) if p.id.as_deref() == Some(policy_id) => Ok(client),
         _ => Err(not_ours()),
@@ -513,10 +586,19 @@ mod tests {
             sign_in("203.0.113.3", &[("other", "reportOnlyFailure")]),
             sign_in("203.0.113.4", &[("pol-1", "reportOnlyFailure")]),
         ];
-        let r = readout_from(&rows, "pol-1");
+        let r = readout_from(&rows, "pol-1", false);
         assert_eq!(r.would_block, 3);
+        assert_eq!(
+            r.evaluated, 4,
+            "every result for this policy, success included"
+        );
+        assert!(!r.truncated);
         assert_eq!(r.sample_ips, vec!["203.0.113.1", "203.0.113.4"]);
         assert_eq!(r.window_days, READOUT_WINDOW_DAYS);
+        // Sign-ins from before the lock existed carry no result for it.
+        let before = vec![sign_in("203.0.113.9", &[("other", "success")])];
+        let r = readout_from(&before, "pol-1", true);
+        assert_eq!((r.evaluated, r.would_block, r.truncated), (0, 0, true));
         let many: Vec<SignIn> = (0..9)
             .map(|i| {
                 sign_in(
@@ -525,7 +607,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(readout_from(&many, "pol-1").sample_ips.len(), 5);
+        assert_eq!(readout_from(&many, "pol-1", false).sample_ips.len(), 5);
     }
 
     #[test]
@@ -551,6 +633,57 @@ mod tests {
         let ui = map_lock_write_err(role);
         assert_eq!(ui.code, "forbidden");
         assert!(ui.message.contains("Conditional Access"), "{}", ui.message);
+        // Mentioning workload identities isn't enough: it must be about a licence.
+        let shape = azapptoolkit_graph::GraphError::Api {
+            status: 400,
+            body: "clientApplications is invalid for workload identity policies".into(),
+        };
+        assert_ne!(
+            map_lock_write_err(shape).code,
+            "workload_identity_license_required"
+        );
+        let id_premium = azapptoolkit_graph::GraphError::Forbidden(
+            "This tenant needs Workload ID Premium for this policy".into(),
+        );
+        assert_eq!(
+            map_lock_write_err(id_premium).code,
+            "workload_identity_license_required"
+        );
+    }
+
+    #[test]
+    fn a_retried_create_reuses_its_named_location_or_refuses_a_clash() {
+        let mut existing = ip_location("aaaaaaaa-0000-0000-0000-000000000009");
+        existing.display_name = Some("Payroll egress".into());
+        existing.ip_ranges = vec![azapptoolkit_core::models::IpRange {
+            cidr_address: Some("10.0.0.0/8".into()),
+        }];
+        let live = vec![existing];
+        let same = vec![(false, "10.0.0.0/8".to_string())];
+        assert_eq!(
+            reusable_location(&live, " payroll EGRESS ", &same).unwrap(),
+            Some("aaaaaaaa-0000-0000-0000-000000000009".to_string())
+        );
+        let other = vec![(false, "192.0.2.0/24".to_string())];
+        assert_eq!(
+            reusable_location(&live, "Payroll egress", &other)
+                .err()
+                .map(|e| e.code),
+            Some("location_name_taken".into())
+        );
+        assert_eq!(reusable_location(&live, "New place", &same).unwrap(), None);
+    }
+
+    /// Review Focus 5: the location landed, the policy didn't.
+    #[test]
+    fn a_failed_policy_create_names_the_location_that_landed() {
+        let msg = create_failed_message("Graph refused.", Some("Payroll egress"));
+        assert!(msg.starts_with("Graph refused."), "{msg}");
+        assert!(msg.contains("\"Payroll egress\""), "{msg}");
+        assert_eq!(
+            create_failed_message("Graph refused.", None),
+            "Graph refused."
+        );
     }
 
     fn ip_location(id: &str) -> NamedLocation {

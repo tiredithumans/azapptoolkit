@@ -113,17 +113,18 @@ impl GraphClient {
     /// One app's service-principal sign-ins since `since` (beta: the
     /// `signInEventTypes` filter is beta-only), with the report-only CA
     /// results Graph hides unless asked (`Prefer: include-unknown-enum-members`).
-    /// Capped at 1 000 rows.
+    /// Capped at 1 000 rows (newest first); the flag says the cap was hit.
     pub async fn list_service_principal_sign_ins(
         &self,
         app_id: &str,
         since: Timestamp,
-    ) -> Result<Vec<SignIn>> {
+    ) -> Result<(Vec<SignIn>, bool)> {
         let token = self.audit_log_token()?;
         let filter = format!(
             "appId eq '{}' and createdDateTime ge {} and signInEventTypes/any(t: t eq 'servicePrincipal')",
             escape_odata(app_id),
-            since
+            // Whole seconds, as Graph's documented sign-in filters use.
+            since.strftime("%Y-%m-%dT%H:%M:%SZ")
         );
         let mut url = url::Url::parse(&format!("{}/auditLogs/signIns", self.beta_base()))
             .map_err(|e| GraphError::Protocol(format!("bad sign-in url: {e}")))?;
@@ -148,9 +149,7 @@ impl GraphClient {
                 .map_err(|e| GraphError::Deserialize(e.to_string()))
         };
         let first = fetch(url.to_string()).await?;
-        let (rows, _truncated) = self
-            .collect_pages_from_capped(first, SIGN_IN_ROW_CAP, fetch)
-            .await?;
-        Ok(rows)
+        self.collect_pages_from_capped(first, SIGN_IN_ROW_CAP, fetch)
+            .await
     }
 }

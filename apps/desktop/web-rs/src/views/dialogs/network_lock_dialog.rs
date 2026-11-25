@@ -63,10 +63,16 @@ pub fn NetworkLockDialog(
             cidrs,
         });
         let app = app_id.get();
-        cmd.run(
+        cmd.run_with(
             move |_created| {
                 on_created.try_run(());
                 on_close.try_run(());
+            },
+            // A failed create may still have made the new named location:
+            // refresh the list so it shows (a retry reuses it either way).
+            move |e| {
+                reload.update(|n| *n += 1);
+                cmd.fail_inline(e);
             },
             move |tenant| async move {
                 conditional_access::create_network_lock(&tenant, &app, &ids, new_location.as_ref())
@@ -78,7 +84,7 @@ pub fn NetworkLockDialog(
     view! {
         <ModalShell
             open=open
-            title="Lock this app to trusted locations"
+            title="Lock this app to named locations"
             busy=cmd.busy
             on_close=on_close
         >

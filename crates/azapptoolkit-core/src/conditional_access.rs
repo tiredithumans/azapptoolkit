@@ -440,21 +440,29 @@ pub fn toolkit_lock_for<'a>(
             .display_name
             .as_deref()
             .is_some_and(|n| n.starts_with(TOOLKIT_LOCK_PREFIX));
+        // Exactly this one service principal, with no client exclusion or
+        // filter: an "unbreak it for now" exclusion leaves a lock that blocks
+        // nothing, which the tab must not call a lock.
         let only_this_sp = c.client_applications.as_ref().is_some_and(|ca| {
             ca.include_service_principals.len() == 1
                 && ca.include_service_principals[0].eq_ignore_ascii_case(sp_object_id)
+                && ca.exclude_service_principals.is_empty()
+                && ca.service_principal_filter.is_none()
         });
-        let all_apps = c
-            .applications
-            .as_ref()
-            .is_some_and(|a| a.include_applications == ["All"]);
+        let all_apps = c.applications.as_ref().is_some_and(|a| {
+            a.include_applications == ["All"]
+                && a.exclude_applications.is_empty()
+                && a.application_filter.is_none()
+        });
         let all_but_some_places = c.locations.as_ref().is_some_and(|l| {
-            l.include_locations.iter().any(|x| x == "All") && !l.exclude_locations.is_empty()
+            l.include_locations.iter().any(|x| x == "All")
+                && !l.exclude_locations.is_empty()
+                && !l.exclude_locations.iter().any(|x| x == "All")
         });
         let blocks = p
             .grant_controls
             .as_ref()
-            .is_some_and(|g| g.built_in_controls.iter().any(|x| x == "block"));
+            .is_some_and(|g| g.built_in_controls == ["block"]);
         named
             && only_this_sp
             && all_apps
@@ -1081,7 +1089,7 @@ mod tests {
 
         #[test]
         fn toolkit_lock_for_refuses_foreign_or_changed_policies() {
-            let changed: [fn(&mut ConditionalAccessPolicy); 6] = [
+            let changed: [fn(&mut ConditionalAccessPolicy); 11] = [
                 |p| p.display_name = Some("Someone's lock".into()),
                 |p| {
                     p.conditions
@@ -1115,6 +1123,54 @@ mod tests {
                 |p| {
                     p.conditions.as_mut().unwrap().service_principal_risk_levels =
                         vec!["high".into()]
+                },
+                // "Unbreak it for now" edits that leave the lock blocking nothing.
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .client_applications
+                        .as_mut()
+                        .unwrap()
+                        .exclude_service_principals = vec![SP.into()]
+                },
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .applications
+                        .as_mut()
+                        .unwrap()
+                        .exclude_applications = vec![G.into()]
+                },
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .client_applications
+                        .as_mut()
+                        .unwrap()
+                        .service_principal_filter = Some(crate::models::CaApplicationFilter {
+                        mode: Some("exclude".into()),
+                        rule: Some("x".into()),
+                    })
+                },
+                |p| {
+                    p.grant_controls
+                        .as_mut()
+                        .unwrap()
+                        .built_in_controls
+                        .push("mfa".into())
+                },
+                |p| {
+                    p.conditions
+                        .as_mut()
+                        .unwrap()
+                        .locations
+                        .as_mut()
+                        .unwrap()
+                        .exclude_locations
+                        .push("All".into())
                 },
             ];
             for (i, change) in changed.iter().enumerate() {

@@ -173,6 +173,10 @@ async fn sp_sign_ins_filter_and_prefer_header() {
             "$filter",
             "appId eq '11111111-1111-1111-1111-111111111111'",
         ))
+        .and(wiremock::matchers::query_param_contains(
+            "$filter",
+            "createdDateTime ge 2026-11-18T00:00:00Z ",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{
                 "createdDateTime": "2026-11-24T10:00:00Z",
@@ -186,12 +190,14 @@ async fn sp_sign_ins_filter_and_prefer_header() {
         .await;
     let uri = format!("{}/v1.0", server.uri());
     let client = ca_client(&uri);
-    let since: jiff::Timestamp = "2026-11-18T00:00:00Z".parse().unwrap();
-    let rows = client
+    // Sub-second precision is dropped: Graph's documented filters use whole seconds.
+    let since: jiff::Timestamp = "2026-11-18T00:00:00.123456789Z".parse().unwrap();
+    let (rows, truncated) = client
         .list_service_principal_sign_ins("11111111-1111-1111-1111-111111111111", since)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
+    assert!(!truncated);
     assert_eq!(rows[0].ip_address.as_deref(), Some("203.0.113.7"));
     assert_eq!(
         rows[0].applied_conditional_access_policies[0]

@@ -16,7 +16,7 @@ use azapptoolkit_web_rs::test_support::{self as ts, fixtures};
 use azapptoolkit_web_rs::views::tabs::conditional_access_tab::NetworkLockSection;
 
 const APP: &str = "11111111-1111-1111-1111-111111111111";
-const CREATE: &str = "Lock to trusted locations…";
+const CREATE: &str = "Lock to named locations…";
 
 fn mount() -> ts::Mounted {
     ts::mount_view(|| {
@@ -105,7 +105,9 @@ async fn report_only_shows_the_readout_in_the_turn_on_confirm() {
             NetworkLock::None,
             None,
             Some(ReportOnlyReadout {
+                evaluated: 5,
                 would_block: 3,
+                truncated: false,
                 sample_ips: vec!["203.0.113.7".into()],
                 window_days: 7,
             }),
@@ -115,7 +117,9 @@ async fn report_only_shows_the_readout_in_the_turn_on_confirm() {
     let _m = mount();
     ts::wait_for(|| ts::body_contains("Report-only")).await;
     assert!(
-        ts::body_contains("3 sign-ins would have been blocked"),
+        ts::body_contains(
+            "Of 5 sign-ins the lock checked in the last 7 days, 3 would have been blocked"
+        ),
         "{}",
         ts::body_text()
     );
@@ -123,10 +127,7 @@ async fn report_only_shows_the_readout_in_the_turn_on_confirm() {
     ts::wait_for(|| ts::has_button_labelled("Turn on")).await;
     let modal = ts::text(".modal");
     assert!(modal.contains("Payroll"), "{modal}");
-    assert!(
-        modal.contains("3 sign-ins would have been blocked"),
-        "{modal}"
-    );
+    assert!(modal.contains("3 would have been blocked"), "{modal}");
     ts::click_button_labelled("Turn on");
     ts::wait_for(|| ts::call_count("enable_network_lock") == 1).await;
     assert_eq!(

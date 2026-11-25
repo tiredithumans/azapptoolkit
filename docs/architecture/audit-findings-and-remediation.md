@@ -455,13 +455,19 @@ The checklist's network-lock line is set up from the app registration's **Condit
   included. Turn on and remove act only on that policy, re-read live first (`not_a_toolkit_lock`
   otherwise); another policy's lock is shown, never offered for change.
 - **Created report-only** (`lock_policy_body`, which `network_lock_for` reads back as `ReportOnly`,
-  then `Enforced`). Before "Turn on", the tab shows how many of the app's service-principal sign-ins
-  in the last 7 days the policy would have blocked (beta `auditLogs/signIns` with
-  `Prefer: include-unknown-enum-members`, the `reportOnlyFailure` results, on the `audit_log`
-  consent); unreadable → the confirm says it couldn't check.
+  then `Enforced`). Before "Turn on", the tab shows, of the app's service-principal sign-ins in the
+  last 7 days that the policy produced a result for, how many it would have blocked (beta
+  `auditLogs/signIns`, whole-second filter, `Prefer: include-unknown-enum-members`,
+  `reportOnlyFailure`, on the `audit_log` consent). It never reassures without evidence: none
+  evaluated yet says so, a read past the 1 000-row cap is "at least", and an unreadable log is
+  "unknown". The shape check also refuses a lock whose client or app side gained an exclusion or a
+  filter, or whose controls are more than `block` — an "unbreak it for now" edit is not a lock.
 - **Named locations the toolkit creates are untrusted** — a trusted range joins `AllTrusted`, which
   relaxes user MFA policies and Identity Protection risk. CIDRs are validated (`parse_cidr`, `/0`
-  refused); chosen ids must be GUIDs naming live IP locations. Remove leaves locations in place.
+  refused); chosen ids must be GUIDs naming live IP locations. A retried create reuses a live
+  location with the same name and ranges (same name, other ranges → `location_name_taken`), so a
+  failed policy create never leaks duplicates. Remove leaves locations in place. Reads degrade like
+  the Conditional Access tab (`map_ca_err`); only writes use the lock's error mapping.
 - **Eligibility** is `lock_ineligibility_for_app` on the live app and service principal: only
   single-tenant app registrations with a service principal can be locked.
 - **Licence:** a refusal that names workload identities maps to `workload_identity_license_required`

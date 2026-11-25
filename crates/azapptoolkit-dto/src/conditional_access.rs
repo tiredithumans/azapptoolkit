@@ -56,7 +56,12 @@ pub struct ToolkitLockDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportOnlyReadout {
+    /// Sign-ins this policy produced any result for — zero right after the
+    /// lock is created, before the app signs in again.
+    pub evaluated: u32,
     pub would_block: u32,
+    /// The sign-in read hit its row cap (newest first): the counts are a floor.
+    pub truncated: bool,
     pub sample_ips: Vec<String>,
     pub window_days: u32,
 }
