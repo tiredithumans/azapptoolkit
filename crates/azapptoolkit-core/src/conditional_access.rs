@@ -2,7 +2,9 @@
 //! tab (`commands::conditional_access`) and the audit's network-lock check read
 //! one implementation of the two condition axes.
 
-use crate::models::{CaApplications, CaClientApplications, CaConditions};
+use serde::{Deserialize, Serialize};
+
+use crate::models::{CaApplications, CaClientApplications, CaConditions, ConditionalAccessPolicy};
 
 /// The client-axis outcome for this app's service principal.
 enum ClientAxis {
@@ -189,6 +191,187 @@ fn client_axis(clients: &CaClientApplications, sp_id: Option<&str>) -> ClientAxi
         ClientAxis::MayApply
     } else {
         ClientAxis::Unconstrained
+    }
+}
+
+// ---- network lock ----------------------------------------------------------
+
+/// Whether a Conditional Access policy locks a service principal's sign-ins to
+/// named network locations for one resource — the safeguard the audit's "no
+/// built-in scoping" checklist reports per grant. A lock limits WHERE a stolen
+/// credential works; it never narrows what the app can read.
+///
+/// Crosses IPC inside `AuditItem` (internally tagged: `{"state": "enforced",
+/// "policy_ids": [...]}`), so a rename is a wire-format change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NetworkLock {
+    /// Enabled block policies that name this service principal, cover the
+    /// grant's resource and carry a location condition.
+    Enforced { policy_ids: Vec<String> },
+    /// The same shape, but the policy is report-only: it blocks nothing yet.
+    ReportOnly,
+    /// A filter or an app group (`Office365`) might cover it; not evaluable.
+    MayApply,
+    /// The policies were read and none locks this principal for this resource.
+    None,
+    /// Microsoft does not let Conditional Access target this principal.
+    NotPossible { reason: LockIneligible },
+    /// The policies could not be read. Never shown as "no lock".
+    #[default]
+    Unknown,
+}
+
+/// Why Conditional Access for workload identities can't target a principal:
+/// Microsoft covers only single-tenant service principals registered in this
+/// tenant — not managed identities, not multi-tenant or third-party apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockIneligible {
+    ManagedIdentity,
+    OtherTenant,
+    MultiTenantApp,
+    NoServicePrincipal,
+}
+
+/// Three-valued axis match: covered, might be covered (not evaluable
+/// client-side), or not covered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cover {
+    Yes,
+    May,
+    No,
+}
+
+/// The policy's client axis against this service principal. A policy with no
+/// client axis targets users, which is not a workload-identity lock.
+fn lock_client_cover(conditions: &CaConditions, sp_object_id: &str) -> Cover {
+    match &conditions.client_applications {
+        Some(clients) if !clients.is_empty() => match client_axis(clients, Some(sp_object_id)) {
+            ClientAxis::Matched => Cover::Yes,
+            ClientAxis::MayApply => Cover::May,
+            ClientAxis::Hidden | ClientAxis::Unconstrained => Cover::No,
+        },
+        _ => Cover::No,
+    }
+}
+
+/// The policy's resource axis against the grant's resource — NOT the app's
+/// own appId, which is what [`applies`] asks (the app as the thing called).
+/// Exclude wins; `Office365` and an application filter can't be expanded
+/// here, so they "may" cover.
+fn lock_resource_cover(conditions: &CaConditions, resource_app_id: &str) -> Cover {
+    let Some(apps) = &conditions.applications else {
+        return Cover::No;
+    };
+    if apps
+        .exclude_applications
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(resource_app_id))
+    {
+        return Cover::No;
+    }
+    let inc = &apps.include_applications;
+    if inc
+        .iter()
+        .any(|a| a == "All" || a.eq_ignore_ascii_case(resource_app_id))
+    {
+        Cover::Yes
+    } else if inc.iter().any(|a| a == "Office365")
+        || (inc.is_empty() && apps.application_filter.is_some())
+    {
+        Cover::May
+    } else {
+        Cover::No
+    }
+}
+
+/// Whether `policies` lock `sp_object_id`'s sign-ins to named locations for
+/// `resource_app_id`. The policies were read, so this never answers
+/// [`NetworkLock::Unknown`] or [`NetworkLock::NotPossible`] — the caller
+/// decides those. Precedence: Enforced > MayApply > ReportOnly > None.
+pub fn network_lock_for(
+    policies: &[ConditionalAccessPolicy],
+    sp_object_id: &str,
+    resource_app_id: &str,
+) -> NetworkLock {
+    let mut enforced: Vec<String> = Vec::new();
+    let mut may_apply = false;
+    let mut report_only = false;
+    for policy in policies {
+        let enabled = match policy.state.as_deref() {
+            Some("enabled") => true,
+            Some("enabledForReportingButNotEnforced") => false,
+            _ => continue,
+        };
+        let Some(conditions) = &policy.conditions else {
+            continue;
+        };
+        let blocks = policy
+            .grant_controls
+            .as_ref()
+            .is_some_and(|g| g.built_in_controls.iter().any(|c| c == "block"));
+        let has_locations = conditions
+            .locations
+            .as_ref()
+            .is_some_and(|l| !l.include_locations.is_empty());
+        if !blocks || !has_locations {
+            continue;
+        }
+        let client = lock_client_cover(conditions, sp_object_id);
+        let resource = lock_resource_cover(conditions, resource_app_id);
+        if client == Cover::No || resource == Cover::No {
+            continue;
+        }
+        let certain = client == Cover::Yes && resource == Cover::Yes;
+        match (enabled, certain) {
+            (true, true) => enforced.push(policy.id.clone().unwrap_or_default()),
+            (true, false) => may_apply = true,
+            (false, _) => report_only = true,
+        }
+    }
+    if !enforced.is_empty() {
+        NetworkLock::Enforced {
+            policy_ids: enforced,
+        }
+    } else if may_apply {
+        NetworkLock::MayApply
+    } else if report_only {
+        NetworkLock::ReportOnly
+    } else {
+        NetworkLock::None
+    }
+}
+
+/// Why an app registration's service principal can't be locked, if it
+/// can't: no service principal, or a sign-in audience beyond this tenant.
+pub fn lock_ineligibility_for_app(
+    sign_in_audience: Option<&str>,
+    has_service_principal: bool,
+) -> Option<LockIneligible> {
+    if !has_service_principal {
+        Some(LockIneligible::NoServicePrincipal)
+    } else if sign_in_audience.is_some_and(|a| a != "AzureADMyOrg") {
+        Some(LockIneligible::MultiTenantApp)
+    } else {
+        None
+    }
+}
+
+/// Why a service principal with no local app registration can't be locked,
+/// if it can't: a managed identity, or an app owned by another tenant. An
+/// unknown owner is evaluated rather than guessed.
+pub fn lock_ineligibility_for_sp(
+    service_principal_type: Option<&str>,
+    app_owner_organization_id: Option<&str>,
+    tenant_id: &str,
+) -> Option<LockIneligible> {
+    if service_principal_type == Some("ManagedIdentity") {
+        Some(LockIneligible::ManagedIdentity)
+    } else if app_owner_organization_id.is_some_and(|o| !o.eq_ignore_ascii_case(tenant_id)) {
+        Some(LockIneligible::OtherTenant)
+    } else {
+        None
     }
 }
 
@@ -446,6 +629,264 @@ mod tests {
             ),
         ] {
             assert_eq!(applies(&c, APP, None), want, "{c:?}");
+        }
+    }
+
+    // ---- network lock ---------------------------------------------------
+
+    mod network_lock {
+        use super::*;
+        use crate::models::{CaGrantControls, CaLocations, ConditionalAccessPolicy};
+
+        const G: &str = "00000003-0000-0000-c000-000000000000";
+
+        fn locs(include: &[&str], exclude: &[&str]) -> Option<CaLocations> {
+            Some(CaLocations {
+                include_locations: include.iter().map(|s| s.to_string()).collect(),
+                exclude_locations: exclude.iter().map(|s| s.to_string()).collect(),
+            })
+        }
+
+        /// One policy; the defaults are a textbook workload-identity lock.
+        fn lock_policy(
+            id: &str,
+            state: &str,
+            client_axis: Option<CaClientApplications>,
+            resources: CaApplications,
+            locations: Option<CaLocations>,
+            controls: &[&str],
+        ) -> ConditionalAccessPolicy {
+            ConditionalAccessPolicy {
+                id: Some(id.into()),
+                display_name: Some(id.into()),
+                state: Some(state.into()),
+                conditions: Some(CaConditions {
+                    applications: Some(resources),
+                    client_applications: client_axis,
+                    locations,
+                }),
+                grant_controls: Some(CaGrantControls {
+                    built_in_controls: controls.iter().map(|s| s.to_string()).collect(),
+                    operator: Some("OR".into()),
+                }),
+            }
+        }
+
+        fn textbook(id: &str) -> ConditionalAccessPolicy {
+            lock_policy(
+                id,
+                "enabled",
+                Some(clients(&[SP], &[])),
+                apps(&["All"], &[], &[]),
+                locs(&["All"], &["AllTrusted"]),
+                &["block"],
+            )
+        }
+
+        fn verdict(p: ConditionalAccessPolicy) -> NetworkLock {
+            network_lock_for(&[p], SP, G)
+        }
+
+        #[test]
+        fn enforced_when_enabled_block_with_locations_names_sp() {
+            assert_eq!(
+                verdict(textbook("p1")),
+                NetworkLock::Enforced {
+                    policy_ids: vec!["p1".into()]
+                }
+            );
+        }
+
+        #[test]
+        fn tenant_token_counts() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().client_applications =
+                Some(clients(&["ServicePrincipalsInMyTenant"], &[]));
+            assert!(matches!(verdict(p), NetworkLock::Enforced { .. }));
+        }
+
+        #[test]
+        fn report_only() {
+            let mut p = textbook("p1");
+            p.state = Some("enabledForReportingButNotEnforced".into());
+            assert_eq!(verdict(p), NetworkLock::ReportOnly);
+        }
+
+        #[test]
+        fn disabled_is_none() {
+            let mut p = textbook("p1");
+            p.state = Some("disabled".into());
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn no_block_is_none() {
+            let mut p = textbook("p1");
+            p.grant_controls.as_mut().unwrap().built_in_controls = vec!["mfa".into()];
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn no_locations_is_none() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().locations = None;
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn exclude_only_locations_is_none() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().locations = locs(&[], &["AllTrusted"]);
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn client_exclude_wins() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().client_applications =
+                Some(clients(&["ServicePrincipalsInMyTenant"], &[SP]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn other_sp_only_is_none() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().client_applications = Some(clients(&[OTHER_SP], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn no_client_axis_is_none() {
+            // A user policy: blocking users outside named locations is not a
+            // workload-identity lock.
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().client_applications = None;
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn resource_excluded_is_none() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().applications = Some(apps(&["All"], &[G], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+            // Case-insensitive, like every other id compare.
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().applications =
+                Some(apps(&["All"], &[&G.to_uppercase()], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn other_resource_only_is_none() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().applications = Some(apps(&[OTHER], &[], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn named_resource_counts() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().applications =
+                Some(apps(&[&G.to_uppercase()], &[], &[]));
+            assert!(matches!(verdict(p), NetworkLock::Enforced { .. }));
+        }
+
+        #[test]
+        fn office365_or_app_filter_may_apply() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().applications = Some(apps(&["Office365"], &[], &[]));
+            assert_eq!(verdict(p), NetworkLock::MayApply);
+            let mut p = textbook("p1");
+            let mut a = apps(&[], &[], &[]);
+            a.application_filter = Some(CaApplicationFilter {
+                mode: Some("include".into()),
+                rule: Some("app.tags -contains \"x\"".into()),
+            });
+            p.conditions.as_mut().unwrap().applications = Some(a);
+            assert_eq!(verdict(p), NetworkLock::MayApply);
+        }
+
+        #[test]
+        fn client_filter_may_apply() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().client_applications = Some(sp_filter("include"));
+            assert_eq!(verdict(p), NetworkLock::MayApply);
+        }
+
+        #[test]
+        fn enforced_beats_report_only() {
+            let mut report = textbook("p2");
+            report.state = Some("enabledForReportingButNotEnforced".into());
+            assert_eq!(
+                network_lock_for(&[report, textbook("p1")], SP, G),
+                NetworkLock::Enforced {
+                    policy_ids: vec!["p1".into()]
+                }
+            );
+        }
+
+        #[test]
+        fn no_policies_is_none() {
+            assert_eq!(network_lock_for(&[], SP, G), NetworkLock::None);
+        }
+
+        #[test]
+        fn ineligibility_for_apps() {
+            assert_eq!(
+                lock_ineligibility_for_app(Some("AzureADMultipleOrgs"), true),
+                Some(LockIneligible::MultiTenantApp)
+            );
+            assert_eq!(
+                lock_ineligibility_for_app(Some("AzureADMyOrg"), false),
+                Some(LockIneligible::NoServicePrincipal)
+            );
+            assert_eq!(lock_ineligibility_for_app(Some("AzureADMyOrg"), true), None);
+        }
+
+        #[test]
+        fn ineligibility_for_service_principals() {
+            const T: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+            assert_eq!(
+                lock_ineligibility_for_sp(Some("ManagedIdentity"), Some(T), T),
+                Some(LockIneligible::ManagedIdentity)
+            );
+            assert_eq!(
+                lock_ineligibility_for_sp(
+                    Some("Application"),
+                    Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    T
+                ),
+                Some(LockIneligible::OtherTenant)
+            );
+            assert_eq!(
+                lock_ineligibility_for_sp(Some("Application"), Some(&T.to_uppercase()), T),
+                None
+            );
+            assert_eq!(
+                lock_ineligibility_for_sp(Some("Application"), None, T),
+                None
+            );
+        }
+
+        #[test]
+        fn wire_spelling_is_pinned() {
+            let v = serde_json::to_value(NetworkLock::NotPossible {
+                reason: LockIneligible::OtherTenant,
+            })
+            .unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({"state": "not_possible", "reason": "other_tenant"})
+            );
+            let v = serde_json::to_value(NetworkLock::Enforced {
+                policy_ids: vec!["p".into()],
+            })
+            .unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({"state": "enforced", "policy_ids": ["p"]})
+            );
+            assert_eq!(NetworkLock::default(), NetworkLock::Unknown);
         }
     }
 }
