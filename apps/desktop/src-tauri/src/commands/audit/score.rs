@@ -249,10 +249,11 @@ pub(crate) fn score_sp_only(
 
 /// Fills each Rule 24 grant's Conditional Access network-lock verdict, from
 /// the run's one tenant-wide policy read. Per grant, because a policy can
-/// cover one resource and not another. Unreadable policies leave every lock
-/// `Unknown` (never "no lock"); a principal Conditional Access can't target
-/// reads `NotPossible`. An unresolved resource is evaluated as Graph — the
-/// classifier only admits Graph or unresolved grants.
+/// cover one resource and not another. A principal Conditional Access can't
+/// target reads `NotPossible` whether or not the policies were readable;
+/// otherwise unreadable policies leave the lock `Unknown` (never "no lock").
+/// An unresolved resource is evaluated as Graph — the classifier only admits
+/// Graph or unresolved grants.
 pub(crate) fn apply_network_locks(
     item: &mut AuditItem,
     ctx: &ScoreCtx,
@@ -260,9 +261,12 @@ pub(crate) fn apply_network_locks(
     ineligible: Option<LockIneligible>,
 ) {
     for grant in &mut item.unscopable_grants {
+        // "Not possible" is known without the read, so it comes first: an
+        // operator who can't read Conditional Access must not be told a role
+        // would help on a vendor or managed-identity row.
         grant.network_lock = match (ctx.ca_available, ineligible, sp_object_id) {
-            (false, _, _) => NetworkLock::Unknown,
-            (true, Some(reason), _) => NetworkLock::NotPossible { reason },
+            (_, Some(reason), _) => NetworkLock::NotPossible { reason },
+            (false, None, _) => NetworkLock::Unknown,
             (true, None, None) => NetworkLock::NotPossible {
                 reason: LockIneligible::NoServicePrincipal,
             },

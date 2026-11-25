@@ -2063,3 +2063,21 @@ fn network_locks_evaluated_per_grant() {
     );
     assert_eq!(item.unscopable_grants[1].network_lock, NetworkLock::None);
 }
+
+/// "Not possible" is known without reading Conditional Access: an operator
+/// who can't read it must not be told a role would help on a vendor row.
+#[test]
+fn network_locks_not_possible_even_when_ca_unavailable() {
+    use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
+    let mut item = item_with_two_unscopable_grants();
+    apply_network_locks(
+        &mut item,
+        &lock_ctx(false),
+        Some("sp-1"),
+        Some(LockIneligible::ManagedIdentity),
+    );
+    assert!(item.unscopable_grants.iter().all(|g| g.network_lock
+        == NetworkLock::NotPossible {
+            reason: LockIneligible::ManagedIdentity
+        }));
+}

@@ -32,6 +32,17 @@ pub const DIRECTORY_READ_EXCLUSIONS: &[&str] = &[
     "RoleManagement.Read.Directory",
 ];
 
+/// Risk-weighted permissions that are themselves the narrowed form, so "no
+/// way to narrow it" would be false — `Application.ReadWrite.OwnedBy`
+/// reaches only the apps it owns.
+const ALREADY_NARROWED: &[&str] = &["Application.ReadWrite.OwnedBy"];
+
+/// A narrower permission to switch to, for a broad one whose narrowing is
+/// another permission rather than a scoping mechanism (the
+/// `least_privilege_alternative_for` arms cover SharePoint and Files).
+const NARROWER_PERMISSION: &[(&str, &str)] =
+    &[("Application.ReadWrite.All", "Application.ReadWrite.OwnedBy")];
+
 /// A Microsoft-enforced way to narrow a permission that this toolkit does not
 /// manage (yet). A permission carrying one is still flagged — the toolkit
 /// cannot apply it — but the finding says Microsoft can.
@@ -174,6 +185,12 @@ pub fn native_scoping_for(resource_app_id: Option<&str>, value: &str) -> NativeS
         NativeScoping::Managed(kind)
     } else if let Some(alt) = least_privilege_alternative_for(resource, value) {
         NativeScoping::Swappable(alt)
+    } else if let Some((_, alt)) = NARROWER_PERMISSION
+        .iter()
+        .find(|(broad, _)| *broad == value)
+        .filter(|_| resource == Some(MICROSOFT_GRAPH_APP_ID))
+    {
+        NativeScoping::Swappable(alt)
     } else if let Some(m) = unmanaged_mechanism_for(resource, value) {
         NativeScoping::MicrosoftUnmanaged(m)
     } else {
@@ -191,7 +208,9 @@ pub fn is_unscopable_privileged(resource_app_id: Option<&str>, value: &str) -> b
         Some(MICROSOFT_GRAPH_APP_ID) | None => {}
         Some(_) => return false,
     }
-    if risk_level_for_app_permission(value).is_none() || DIRECTORY_READ_EXCLUSIONS.contains(&value)
+    if risk_level_for_app_permission(value).is_none()
+        || DIRECTORY_READ_EXCLUSIONS.contains(&value)
+        || ALREADY_NARROWED.contains(&value)
     {
         return false;
     }
@@ -219,7 +238,7 @@ mod tests {
     #[test]
     fn unscopable_classification_table() {
         let upper_graph = Some("00000003-0000-0000-C000-000000000000");
-        let cases: [(Option<&str>, &str, bool, &str); 14] = [
+        let cases: [(Option<&str>, &str, bool, &str); 16] = [
             (G, "CallRecords.Read.All", true, "no mechanism"),
             (
                 upper_graph,
@@ -254,6 +273,18 @@ mod tests {
                 "tier-0, no mechanism",
             ),
             (G, "Organization.Read.All", false, "in no tier"),
+            (
+                G,
+                "Application.ReadWrite.OwnedBy",
+                false,
+                "already the narrowed form",
+            ),
+            (
+                G,
+                "Application.ReadWrite.All",
+                false,
+                "Swappable to OwnedBy",
+            ),
         ];
         for (resource, value, want, why) in cases {
             assert_eq!(
@@ -294,6 +325,10 @@ mod tests {
         assert_eq!(
             native_scoping_for(G, "CallRecords.Read.All"),
             NativeScoping::None
+        );
+        assert_eq!(
+            native_scoping_for(G, "Application.ReadWrite.All"),
+            NativeScoping::Swappable("Application.ReadWrite.OwnedBy")
         );
     }
 }

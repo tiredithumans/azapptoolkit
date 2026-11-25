@@ -45,7 +45,7 @@ pub(super) fn network_lock_line(lock: &NetworkLock) -> (&'static str, String) {
         ),
         NetworkLock::Unknown => (
             "·",
-            "unknown — couldn't read Conditional Access (needs Security Reader or similar)"
+            "unknown — couldn't read Conditional Access (needs Policy.Read.All consent, an Entra ID P1/P2 license and a role such as Security Reader)"
                 .to_string(),
         ),
     }
@@ -73,6 +73,21 @@ fn owners_line(item: &AuditItem) -> (&'static str, &'static str) {
         ("·", "one")
     } else {
         ("✓", "two or more")
+    }
+}
+
+/// `(mark, text)` for an app registration's instance property lock, from the
+/// Rule 15 marker (it fires whenever an app holding permissions has the lock
+/// off — always the case for a row in this group).
+fn instance_lock_line(item: &AuditItem) -> (&'static str, &'static str) {
+    if item
+        .issues
+        .iter()
+        .any(|i| i.starts_with(issue::INSTANCE_LOCK_DISABLED))
+    {
+        ("✗", "not fully enabled")
+    } else {
+        ("✓", "on")
     }
 }
 
@@ -106,9 +121,11 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
     let app_lines = is_app.then(|| {
         let (cm, ct) = credentials_line(&item);
         let (om, ot) = owners_line(&item);
+        let (lm, lt) = instance_lock_line(&item);
         view! {
             <li>{format!("{cm} Credentials: {ct}")}</li>
             <li>{format!("{om} Owners: {ot}")}</li>
+            <li>{format!("{lm} Instance property lock: {lt}")}</li>
         }
     });
     let sign_in = last_sign_in_cell(&item);
@@ -183,7 +200,7 @@ mod tests {
             (
                 NetworkLock::Unknown,
                 "·",
-                "unknown — couldn't read Conditional Access (needs Security Reader or similar)",
+                "unknown — couldn't read Conditional Access (needs Policy.Read.All consent, an Entra ID P1/P2 license and a role such as Security Reader)",
             ),
         ];
         for (lock, mark, text) in cases {
@@ -194,5 +211,22 @@ mod tests {
                 assert!(!t.contains(banned), "{t:?} says {banned:?}");
             }
         }
+    }
+
+    #[test]
+    fn instance_lock_line_reads_the_rule_15_marker() {
+        let on = azapptoolkit_core::audit::score_application(
+            &azapptoolkit_core::models::Application::default(),
+            None,
+            &azapptoolkit_core::audit::AppPermissions::default(),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
+        assert_eq!(instance_lock_line(&on), ("✓", "on"));
+        let mut off = on.clone();
+        off.issues.push(format!(
+            "{} — credentials could be added",
+            issue::INSTANCE_LOCK_DISABLED
+        ));
+        assert_eq!(instance_lock_line(&off), ("✗", "not fully enabled"));
     }
 }

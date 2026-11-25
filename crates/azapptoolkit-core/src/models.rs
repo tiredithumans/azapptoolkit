@@ -815,6 +815,11 @@ pub struct CaConditions {
     /// location include is what locks a workload identity to known networks.
     #[serde(default)]
     pub locations: Option<CaLocations>,
+    /// `servicePrincipalRiskLevels`: a workload-identity policy limited to
+    /// risky sign-ins (`low` / `medium` / `high`). Empty = every sign-in. A
+    /// block gated on risk is not a network lock.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub service_principal_risk_levels: Vec<String>,
 }
 
 /// `conditionalAccessLocations`. Named-location contents are not resolved —

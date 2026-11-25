@@ -207,7 +207,8 @@ fn client_axis(clients: &CaClientApplications, sp_id: Option<&str>) -> ClientAxi
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum NetworkLock {
     /// Enabled block policies that name this service principal, cover the
-    /// grant's resource and carry a location condition.
+    /// grant's resource and include every location (`All`, trusted ones
+    /// excluded) with no risk gate.
     Enforced { policy_ids: Vec<String> },
     /// The same shape, but the policy is report-only: it blocks nothing yet.
     ReportOnly,
@@ -311,11 +312,16 @@ pub fn network_lock_for(
             .grant_controls
             .as_ref()
             .is_some_and(|g| g.built_in_controls.iter().any(|c| c == "block"));
-        let has_locations = conditions
+        // Microsoft's documented lock: include ANY location (`All`), exclude
+        // the trusted / named ones, block. Any other include — a deny-list of
+        // places, or `AllTrusted` — blocks only there, and a stolen credential
+        // still works everywhere else. A risk-gated block fires only for risky
+        // sign-ins. Neither is a lock.
+        let locks_everywhere = conditions
             .locations
             .as_ref()
-            .is_some_and(|l| !l.include_locations.is_empty());
-        if !blocks || !has_locations {
+            .is_some_and(|l| l.include_locations.iter().any(|x| x == "All"));
+        if !blocks || !locks_everywhere || !conditions.service_principal_risk_levels.is_empty() {
             continue;
         }
         let client = lock_client_cover(conditions, sp_object_id);
@@ -394,6 +400,7 @@ mod tests {
             applications: Some(apps),
             client_applications: clients,
             locations: None,
+            service_principal_risk_levels: Vec::new(),
         }
     }
 
@@ -664,6 +671,7 @@ mod tests {
                     applications: Some(resources),
                     client_applications: client_axis,
                     locations,
+                    service_principal_risk_levels: Vec::new(),
                 }),
                 grant_controls: Some(CaGrantControls {
                     built_in_controls: controls.iter().map(|s| s.to_string()).collect(),
@@ -737,6 +745,31 @@ mod tests {
         fn exclude_only_locations_is_none() {
             let mut p = textbook("p1");
             p.conditions.as_mut().unwrap().locations = Some(locs(&[], &["AllTrusted"]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        /// A block on a deny-list of places is the opposite of a lock: a stolen
+        /// credential still works from everywhere else.
+        #[test]
+        fn deny_list_include_is_not_a_lock() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().locations =
+                Some(locs(&["11111111-aaaa-bbbb-cccc-blockedplace"], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        #[test]
+        fn all_trusted_include_is_not_a_lock() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().locations = Some(locs(&["AllTrusted"], &[]));
+            assert_eq!(verdict(p), NetworkLock::None);
+        }
+
+        /// A risk-gated block fires only for risky sign-ins — not a lock.
+        #[test]
+        fn risk_gated_block_is_not_a_lock() {
+            let mut p = textbook("p1");
+            p.conditions.as_mut().unwrap().service_principal_risk_levels = vec!["high".into()];
             assert_eq!(verdict(p), NetworkLock::None);
         }
 

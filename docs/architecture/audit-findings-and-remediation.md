@@ -401,7 +401,9 @@ nothing it reports is a scope.
   resource is treated as Graph; the Graph appId compares case-insensitively) that is not a
   directory read (`DIRECTORY_READ_EXCLUSIONS`), not mailbox-reaching / SharePoint site access /
   org-wide Files (Rules 11/12 own those, with different advice), and has no mechanism the toolkit
-  applies (`scope_kind_for`) or swaps to (`least_privilege_alternative_for`).
+  applies (`scope_kind_for`) or swaps to (`least_privilege_alternative_for`, or
+  `Application.ReadWrite.All` → `Application.ReadWrite.OwnedBy`). `Application.ReadWrite.OwnedBy`
+  is itself the narrowed form and is never flagged.
 - **Microsoft mechanisms the toolkit doesn't manage** (`UnmanagedMechanism`: Teams meeting access
   policy, resource-specific consent, admin-unit-scoped roles) still flag — the toolkit can't apply
   them — and the copy says Microsoft can narrow the permission that way. Graph only.
@@ -410,15 +412,19 @@ nothing it reports is a scope.
   `NetworkLock` via `conditional_access::network_lock_for`: an enabled policy whose client axis
   names the service principal (or every workload identity, `ServicePrincipalsInMyTenant`
   included), whose resource axis covers the **grant's** resource (exclude wins; `Office365` / an
-  application filter only "may"), with a location include and a `block` control. Report-only and
-  may-apply policies get their own verdicts. `NotPossible` covers what Conditional Access for
-  workload identities can't target (managed identities, apps owned by another tenant, multi-tenant
-  apps, apps without a service principal — `lock_ineligibility_for_app` / `_sp`).
+  application filter only "may"), that includes every location (`All`, trusted ones excluded)
+  with a `block` control and no `servicePrincipalRiskLevels` gate — a block on a deny-list of
+  places or on `AllTrusted` is not a lock. Report-only and may-apply policies get their own
+  verdicts. `NotPossible` covers what Conditional Access for workload identities can't target
+  (managed identities, apps owned by another tenant, multi-tenant apps, apps without a service
+  principal — `lock_ineligibility_for_app` / `_sp`), and wins over `Unknown`: it is known
+  without the read.
 - **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
   every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
   can read policies → `AuditCoverageGap::ConditionalAccess`. `Unknown` is never shown as "no lock".
 - **The checklist** (`views/audit_view/unscopable_checklist.rs`) is the group's Detail cell:
-  per grant the lock line and any Microsoft mechanism, then credentials and owners (application
+  per grant the lock line and any Microsoft mechanism, then credentials, owners and the instance
+  property lock (application
   rows only — an SP-only row's live in its home tenant) and the last sign-in. No line says
   "scoped", "confined" or "limited to" (pinned by test). Not a posture bucket.
 
