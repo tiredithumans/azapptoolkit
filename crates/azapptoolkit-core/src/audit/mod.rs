@@ -26,6 +26,7 @@ mod permissions;
 mod posture;
 mod scoring;
 mod types;
+mod unscopable;
 
 pub use credentials::{
     CredentialActivity, CredentialLifetime, SignInStatus, credential_over_cap,
@@ -51,4 +52,8 @@ pub use types::{
     AppPermissions, AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus,
     CredentialSummary, ListCredentialStatus, MailPermissionScope, RemediationAction,
     RemediationKind, ResourcePermission, RiskLevel, ScopeMechanism, issue,
+};
+pub use unscopable::{
+    DIRECTORY_READ_EXCLUSIONS, NativeScoping, UnmanagedMechanism, is_unscopable_privileged,
+    native_scoping_for, unmanaged_mechanism_for,
 };
