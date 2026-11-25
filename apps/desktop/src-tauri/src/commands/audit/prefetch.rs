@@ -4,7 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use azapptoolkit_core::audit::{CredentialActivity, MailPermissionScope, ResourcePermission};
+use azapptoolkit_core::audit::{
+    CredentialActivity, MailPermissionScope, ResourcePermission, USAGE_FAMILIES, USAGE_WINDOW_DAYS,
+    UsageUnknownReason, graph_usage_kql, graph_usage_since_kql,
+};
 use azapptoolkit_core::models::{
     ConditionalAccessPolicy, ServicePrincipal, ServicePrincipalSignInActivity,
 };
@@ -482,6 +485,104 @@ pub(crate) fn sign_in_activity_outcome(
             (false, false, Arc::new(HashMap::new()), None)
         }
     }
+}
+
+/// The audit's Microsoft Graph activity usage: where the logs it read start,
+/// and the latest call per (lower-case appId, path family).
+pub(crate) struct GraphUsage {
+    pub(crate) since: Timestamp,
+    pub(crate) by_app: HashMap<String, HashMap<&'static str, Timestamp>>,
+}
+
+/// Usage, or why it is unknown. Never a coverage gap: usage is advisory
+/// evidence, and `Unknown` claims nothing.
+pub(crate) type UsagePrefetch = Result<GraphUsage, UsageUnknownReason>;
+
+/// The usage query's budget on top of the client's own retries. The query runs
+/// alongside scoring, so this only bounds how long the run waits at its end.
+const USAGE_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The tenant's Graph activity usage for the "no built-in scoping" grants: the
+/// Log Analytics consent, the cached workspace discovery, then the two static
+/// queries under [`USAGE_QUERY_BUDGET`]. Every failure is a reason, never an
+/// error: the run spawns this beside scoring and fills `last_used` at the end.
+pub(crate) async fn prefetch_graph_usage(state: &AppState, tenant_id: &str) -> UsagePrefetch {
+    if let Err(err) = state.ensure_log_analytics_token(tenant_id).await {
+        let ui = UiError::from(err);
+        return Err(if ui.is_consent_required() {
+            UsageUnknownReason::NoConsent
+        } else {
+            UsageUnknownReason::Failed
+        });
+    }
+    let workspace = match crate::commands::usage::discover_workspace(state, tenant_id).await {
+        Ok(Some((id, _name))) => id,
+        Ok(None) => return Err(UsageUnknownReason::NoWorkspace),
+        Err(err) => {
+            tracing::info!(code = %err.code, "audit: usage workspace discovery failed");
+            return Err(UsageUnknownReason::Failed);
+        }
+    };
+    let la = state.log_analytics_for(tenant_id);
+    let timespan = format!("P{USAGE_WINDOW_DAYS}D");
+    let queries = async {
+        let rows = la.query(&workspace, &graph_usage_kql(), &timespan).await?;
+        let since = la
+            .query(&workspace, &graph_usage_since_kql(), &timespan)
+            .await?;
+        Ok::<_, azapptoolkit_arm::ArmError>((rows, since))
+    };
+    match tokio::time::timeout(USAGE_QUERY_BUDGET, queries).await {
+        Err(_) => Err(UsageUnknownReason::TimedOut),
+        Ok(Err(err)) => {
+            tracing::info!(code = err.ui_code(), "audit: usage query failed");
+            Err(UsageUnknownReason::Failed)
+        }
+        Ok(Ok((rows, since))) => Ok(graph_usage_from_tables(&rows, &since, Timestamp::now())),
+    }
+}
+
+/// Maps the two query tables by **column name** (the service may reorder
+/// columns). A family the table doesn't know is dropped; appIds are
+/// lower-cased; a missing `Since` falls back to the window's start.
+pub(crate) fn graph_usage_from_tables(
+    rows: &azapptoolkit_arm::LogsQueryTable,
+    since: &azapptoolkit_arm::LogsQueryTable,
+    now: Timestamp,
+) -> GraphUsage {
+    let window_start = now - jiff::SignedDuration::from_hours(24 * i64::from(USAGE_WINDOW_DAYS));
+    let since = since
+        .column_index("Since")
+        .and_then(|i| since.rows.first().and_then(|r| r.get(i)))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<Timestamp>().ok())
+        .unwrap_or(window_start);
+    let mut by_app: HashMap<String, HashMap<&'static str, Timestamp>> = HashMap::new();
+    if let (Some(app), Some(family), Some(last)) = (
+        rows.column_index("AppId"),
+        rows.column_index("Family"),
+        rows.column_index("LastSeen"),
+    ) {
+        for row in &rows.rows {
+            let cell = |i: usize| row.get(i).and_then(|v| v.as_str());
+            let (Some(app_id), Some(fam), Some(at)) = (
+                cell(app),
+                cell(family).and_then(|f| USAGE_FAMILIES.iter().find(|x| x.key == f)),
+                cell(last).and_then(|s| s.parse::<Timestamp>().ok()),
+            ) else {
+                continue;
+            };
+            let slot = by_app
+                .entry(app_id.to_ascii_lowercase())
+                .or_default()
+                .entry(fam.key)
+                .or_insert(at);
+            if at > *slot {
+                *slot = at;
+            }
+        }
+    }
+    GraphUsage { since, by_app }
 }
 
 /// What the run learned from the tenant's Conditional Access policies:

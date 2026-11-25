@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use azapptoolkit_core::audit::AuditItem;
 use azapptoolkit_core::cache::CacheKind;
@@ -23,12 +23,12 @@ use super::cache::{CachedAuditRun, audit_cache_key, run_is_cacheable};
 use super::prefetch::{
     audit_exchange_client, prefetch_admin_consent_grants, prefetch_app_management_policy,
     prefetch_conditional_access, prefetch_credential_activity, prefetch_graph_app_roles,
-    prefetch_legacy_access_policies, prefetch_office365_role_grants,
+    prefetch_graph_usage, prefetch_legacy_access_policies, prefetch_office365_role_grants,
     prefetch_risky_service_principals, prefetch_sign_in_activity, prefetch_sp_index,
 };
 use super::score::{
-    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders, score_one,
-    score_sp_only, sp_audit_candidates,
+    apply_graph_usage, combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
+    score_one, score_sp_only, sp_audit_candidates,
 };
 use super::{AuditFailure, ResourceResolver, RunSps, ScoreCtx, classify_audit_failure};
 
@@ -322,6 +322,18 @@ pub async fn run_audit(
     // Scoring is mostly CPU once the prefetches land, so its ticks are rate
     // limited (see `EmitGate`); the last one always goes out.
     let emit_gate = Arc::new(crate::commands::progress::EmitGate::new());
+    // The Graph-activity usage query (Rule 24's `last_used`) runs BESIDE the
+    // fan-out, not in the prefetch `join!`: it can take a minute on a busy
+    // tenant, and scoring doesn't need it until the very end. Aborted if the
+    // run returns early or is cancelled.
+    let mut usage_task = AbortOnDrop(Some({
+        let handle = app_handle.clone();
+        let tenant = tenant_id.clone();
+        tokio::spawn(async move {
+            let state = handle.state::<AppState>();
+            prefetch_graph_usage(&state, &tenant).await
+        })
+    }));
     let cancelled_before_all_dispatched = dispatch_capped(
         apps,
         || meter.limit(),
@@ -434,6 +446,17 @@ pub async fn run_audit(
     }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
+    let usage = match usage_task.0.take() {
+        Some(task) if !cancelled => task
+            .await
+            .unwrap_or(Err(azapptoolkit_core::audit::UsageUnknownReason::Failed)),
+        Some(task) => {
+            task.abort();
+            Err(azapptoolkit_core::audit::UsageUnknownReason::Failed)
+        }
+        None => Err(azapptoolkit_core::audit::UsageUnknownReason::Failed),
+    };
+    apply_graph_usage(&mut items, &usage);
     // Whether every mail permission was actually checked against Exchange
     // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
     // which over-reports — but the operator has to be told, because the
@@ -512,4 +535,16 @@ pub async fn run_audit(
 #[tauri::command]
 pub fn cancel_audit(state: State<'_, AppState>) {
     state.audit_cancel.cancel();
+}
+
+/// Aborts a spawned task when dropped — the run's early returns (a dead
+/// session, an app-list failure) must not leave the usage query running.
+struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }

@@ -4,12 +4,12 @@ use super::*;
 use jiff::SignedDuration;
 
 use super::prefetch::{
-    ca_pre_acquire_outcome, conditional_access_outcome, prefetch_admin_consent_grants,
-    prefetch_office365_role_grants, risky_service_principals_outcome, sign_in_activity_outcome,
-    sign_in_pre_acquire_outcome,
+    GraphUsage, UsagePrefetch, ca_pre_acquire_outcome, conditional_access_outcome,
+    graph_usage_from_tables, prefetch_admin_consent_grants, prefetch_office365_role_grants,
+    risky_service_principals_outcome, sign_in_activity_outcome, sign_in_pre_acquire_outcome,
 };
 use super::score::{
-    apply_network_locks, combine_granted_roles, derive_orgwide_mail_scopes,
+    apply_graph_usage, apply_network_locks, combine_granted_roles, derive_orgwide_mail_scopes,
     ews_full_access_holders, merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
 };
 
@@ -2082,4 +2082,145 @@ fn network_locks_not_possible_even_when_ca_unavailable() {
         == NetworkLock::NotPossible {
             reason: LockIneligible::ManagedIdentity
         }));
+}
+
+// ---- Graph activity usage (B1) -------------------------------------------
+
+fn la_table(columns: &[&str], rows: serde_json::Value) -> azapptoolkit_arm::LogsQueryTable {
+    let cols: Vec<serde_json::Value> = columns
+        .iter()
+        .map(|c| serde_json::json!({ "name": c, "type": "string" }))
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "name": "PrimaryResult",
+        "columns": cols,
+        "rows": rows,
+    }))
+    .unwrap()
+}
+
+fn ts(s: &str) -> jiff::Timestamp {
+    s.parse().unwrap()
+}
+
+#[test]
+fn graph_usage_from_tables_maps_by_column_name() {
+    // Columns reordered, an unknown family, an upper-case appId.
+    let rows = la_table(
+        &["LastSeen", "Family", "AppId"],
+        serde_json::json!([
+            [
+                "2026-11-20T10:00:00Z",
+                "call_records",
+                "AAAAAAAA-0000-0000-0000-00000000APP1"
+            ],
+            [
+                "2026-11-21T00:00:00Z",
+                "not_a_family",
+                "AAAAAAAA-0000-0000-0000-00000000APP1"
+            ]
+        ]),
+    );
+    let since = la_table(&["Since"], serde_json::json!([["2026-09-01T00:00:00Z"]]));
+    let u = graph_usage_from_tables(&rows, &since, ts("2026-11-25T00:00:00Z"));
+    assert_eq!(u.since, ts("2026-09-01T00:00:00Z"));
+    let app = u
+        .by_app
+        .get("aaaaaaaa-0000-0000-0000-00000000app1")
+        .expect("keyed lower-case");
+    assert_eq!(app.get("call_records"), Some(&ts("2026-11-20T10:00:00Z")));
+    assert_eq!(app.len(), 1, "an unknown family is dropped");
+}
+
+#[test]
+fn graph_usage_since_falls_back_to_the_window() {
+    let rows = la_table(&["AppId", "Family", "LastSeen"], serde_json::json!([]));
+    let since = la_table(&["Since"], serde_json::json!([]));
+    let now = ts("2026-11-25T00:00:00Z");
+    let u = graph_usage_from_tables(&rows, &since, now);
+    assert_eq!(u.since, now - jiff::SignedDuration::from_hours(24 * 90));
+}
+
+/// Rule 24's grants for an app holding CallRecords (tracked) and a directory
+/// permission (not tracked), under `app_id`.
+fn usage_item(app_id: &str) -> AuditItem {
+    let app = Application {
+        app_id: app_id.into(),
+        display_name: "Demo".into(),
+        ..Default::default()
+    };
+    let perms = AppPermissions {
+        app_role_grants: vec![
+            ResourcePermission::graph("CallRecords.Read.All"),
+            ResourcePermission::graph("RoleManagement.ReadWrite.Directory"),
+        ],
+        ..Default::default()
+    };
+    azapptoolkit_core::audit::score_application(
+        &app,
+        Some(true),
+        &perms,
+        ts("2026-11-25T00:00:00Z"),
+    )
+}
+
+#[test]
+fn apply_graph_usage_sets_seen_not_seen_and_unknown() {
+    use azapptoolkit_core::audit::{GrantUsage, UsageUnknownReason};
+    let since = ts("2026-09-01T00:00:00Z");
+    let seen_at = ts("2026-11-20T10:00:00Z");
+    let mut by_app = HashMap::new();
+    by_app.insert(
+        "app-1".to_string(),
+        HashMap::from([("call_records", seen_at)]),
+    );
+    let usage: UsagePrefetch = Ok(GraphUsage { since, by_app });
+
+    let mut items = vec![usage_item("app-1"), usage_item("app-2")];
+    apply_graph_usage(&mut items, &usage);
+    assert_eq!(
+        items[0].unscopable_grants[0].last_used,
+        GrantUsage::Seen { at: seen_at }
+    );
+    assert_eq!(
+        items[0].unscopable_grants[1].last_used,
+        GrantUsage::NotTracked
+    );
+    assert_eq!(
+        items[1].unscopable_grants[0].last_used,
+        GrantUsage::NotSeen { since },
+        "the table's own since, not now - 90 days"
+    );
+
+    let mut items = vec![usage_item("app-1")];
+    apply_graph_usage(&mut items, &Err(UsageUnknownReason::TimedOut));
+    assert_eq!(
+        items[0].unscopable_grants[0].last_used,
+        GrantUsage::Unknown {
+            reason: UsageUnknownReason::TimedOut
+        }
+    );
+    assert_eq!(
+        items[0].unscopable_grants[1].last_used,
+        GrantUsage::NotTracked
+    );
+}
+
+#[test]
+fn apply_graph_usage_matches_app_id_case_insensitively() {
+    use azapptoolkit_core::audit::GrantUsage;
+    let seen_at = ts("2026-11-20T10:00:00Z");
+    let usage: UsagePrefetch = Ok(GraphUsage {
+        since: ts("2026-09-01T00:00:00Z"),
+        by_app: HashMap::from([(
+            "app-abc".to_string(),
+            HashMap::from([("call_records", seen_at)]),
+        )]),
+    });
+    let mut items = vec![usage_item("APP-ABC")];
+    apply_graph_usage(&mut items, &usage);
+    assert_eq!(
+        items[0].unscopable_grants[0].last_used,
+        GrantUsage::Seen { at: seen_at }
+    );
 }
