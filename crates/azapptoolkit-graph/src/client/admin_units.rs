@@ -72,9 +72,9 @@ impl GraphClient {
         };
         // `cast` is one of three fixed type names, never input.
         let path = format!("/directory/administrativeUnits/{admin_unit_id}/members/") + cast;
-        // One row answers the question; this is a probe, not a paged walk.
-        let params: [(&str, &str); 2] = [("$select", "id"), ("$top", "1")];
-        let page: Paged<serde_json::Value> = self.get_json(&path, &params, false).await?;
+        // One page answers the question; this is a probe, not a paged walk.
+        // No `$select`/`$top`: Microsoft documents neither on this method.
+        let page: Paged<serde_json::Value> = self.get_json(&path, &[], false).await?;
         Ok(!page.items.is_empty())
     }
 
@@ -86,10 +86,10 @@ impl GraphClient {
     ) -> Result<Vec<DirectoryRoleAssignment>> {
         require_guid("principal id", principal_id)?;
         let filter = format!("principalId eq '{}'", escape_odata(principal_id));
-        let params: [(&str, &str); 3] = [
+        // No `$top`: the method documents only `$filter`/`$expand`/`$select`.
+        let params: [(&str, &str); 2] = [
             ("$filter", filter.as_str()),
             ("$expand", ROLE_DEFINITION_EXPAND),
-            ("$top", MAX_PAGE_SIZE),
         ];
         let page: Paged<DirectoryRoleAssignment> = self
             .get_json("/roleManagement/directory/roleAssignments", &params, false)
@@ -100,9 +100,9 @@ impl GraphClient {
     /// Every direct, active directory role assignment in the tenant (tenant
     /// and admin-unit scope): the audit joins them to its principals.
     pub async fn list_directory_role_assignments(&self) -> Result<Vec<DirectoryRoleAssignment>> {
-        let params: [(&str, &str); 1] = [("$top", MAX_PAGE_SIZE)];
+        // No `$top`: the method documents only `$filter`/`$expand`/`$select`.
         let page: Paged<DirectoryRoleAssignment> = self
-            .get_json("/roleManagement/directory/roleAssignments", &params, false)
+            .get_json("/roleManagement/directory/roleAssignments", &[], false)
             .await?;
         self.collect_all_pages(page, false).await
     }

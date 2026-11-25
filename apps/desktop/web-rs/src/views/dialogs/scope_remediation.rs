@@ -632,6 +632,7 @@ pub fn ScopeDirectoryWriteButton(
                         permission_value: &value,
                         admin_unit_id: &u.id,
                         created_now: created,
+                        require_held: true,
                     })
                     .await
                 },
@@ -648,10 +649,18 @@ pub fn ScopeDirectoryWriteButton(
         <div class="audit-actions">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new(move |_| {
-                    cmd.error.set(None);
-                    warned.set(Vec::new());
-                    open.set(true);
+                on_click=Box::new({
+                    let first = action.targets.first().cloned().unwrap_or_default();
+                    move |_| {
+                        // A fresh open: no unit, nothing "just created",
+                        // no notes from the last run.
+                        cmd.error.set(None);
+                        warned.set(Vec::new());
+                        unit.set(None);
+                        created_now.set(false);
+                        permission.set(first.clone());
+                        open.set(true);
+                    }
                 })
             >
                 {label}

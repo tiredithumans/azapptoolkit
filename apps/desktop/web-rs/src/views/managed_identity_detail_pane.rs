@@ -320,6 +320,7 @@ pub fn ManagedIdentityDetailPane(
                                         </CollapsibleScopingSection>
                                     }
                                 });
+                            let held_graph = crate::components::held_permissions_panel::graph_values(&list);
                             view! {
                                 {scope_banner}
                                 // Org-wide discoverability callout — same shared
@@ -342,7 +343,10 @@ pub fn ManagedIdentityDetailPane(
                                 />
                                 {exchange_section}
                                 {sharepoint_section}
-                                <DirectoryRolesSection sp_object_id=roles_sp />
+                                <DirectoryRolesSection
+                                    sp_object_id=roles_sp
+                                    held_values=Signal::derive(move || held_graph.clone())
+                                />
                             }
                                 .into_any()
                         }

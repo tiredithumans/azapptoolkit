@@ -547,7 +547,7 @@ fn rule_sharepoint_advisory(
 /// still covers it. Returns the org-wide set the fix keys off.
 fn rule_directory_write(perms: &AppPermissions) -> (RuleContribution, Vec<&ResourcePermission>) {
     use crate::scoping::admin_unit::{
-        DIRECTORY_WRITE_MAPPINGS, covers_tenant_wide,
+        DIRECTORY_WRITE_MAPPINGS, covering_permission, covers_tenant_wide,
         is_scopable_directory_write_resource_permission,
     };
     let mut c = RuleContribution::default();
@@ -570,7 +570,16 @@ fn rule_directory_write(perms: &AppPermissions) -> (RuleContribution, Vec<&Resou
                 .to_string(),
         );
     }
-    if let Some(roles) = &perms.directory_roles {
+    // A tenant-wide Directory.ReadWrite.All writes everyone: no limit is real.
+    let directory_write_held = perms
+        .app_role_grants
+        .iter()
+        .any(|g| covering_permission(g.resource_app_id.as_deref(), &g.value));
+    if let Some(roles) = perms
+        .directory_roles
+        .as_ref()
+        .filter(|_| !directory_write_held)
+    {
         let mut limited: Vec<String> = Vec::new();
         for m in DIRECTORY_WRITE_MAPPINGS {
             if orgwide.iter().any(|g| g.value == m.permission) {

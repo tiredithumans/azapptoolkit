@@ -538,6 +538,8 @@ async fn apply_admin_unit_scoped(
         permission_value: &value,
         admin_unit_id: &unit.id,
         created_now,
+        // The wizard may give limited write access from scratch.
+        require_held: false,
     })
     .await?;
     let role = directory_write_mapping(Some(MICROSOFT_GRAPH_APP_ID), &value)

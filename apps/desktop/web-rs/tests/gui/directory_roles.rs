@@ -36,9 +36,16 @@ fn tenant_role(id: &str, template: &str, name: &str) -> DirectoryRoleDto {
     }
 }
 
+/// Mounted as the panes do: with the principal's held Graph permissions (a
+/// tenant-wide read only, so a unit role is a real limit).
 fn mount() -> ts::Mounted {
     ts::mount_view(|| {
-        view! { <DirectoryRolesSection sp_object_id=Signal::derive(|| SP.to_string()) /> }
+        view! {
+            <DirectoryRolesSection
+                sp_object_id=Signal::derive(|| SP.to_string())
+                held_values=Signal::derive(|| vec!["User.Read.All".to_string()])
+            />
+        }
     })
 }
 

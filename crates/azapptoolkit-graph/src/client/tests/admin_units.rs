@@ -71,8 +71,7 @@ async fn admin_unit_has_members_casts_to_the_kind() {
         .and(path(format!(
             "/directory/administrativeUnits/{AU}/members/microsoft.graph.group"
         )))
-        .and(query_param("$select", "id"))
-        .and(query_param("$top", "1"))
+        .and(query_param_is_missing("$top"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
         .mount(&server)
         .await;
@@ -108,7 +107,7 @@ async fn role_assignments_for_a_principal_filter_and_expand() {
         .and(path("/roleManagement/directory/roleAssignments"))
         .and(query_param("$filter", format!("principalId eq '{SP}'")))
         .and(query_param("$expand", "roleDefinition($select=id,displayName,templateId)"))
-        .and(query_param("$top", MAX_PAGE_SIZE))
+        .and(query_param_is_missing("$top"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [{
                 "id": "ra-1", "principalId": SP, "roleDefinitionId": USER_ADMIN,
@@ -141,7 +140,7 @@ async fn unit_scoped_role_assignments_keep_only_unit_scopes() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/roleManagement/directory/roleAssignments"))
-        .and(query_param("$top", MAX_PAGE_SIZE))
+        .and(query_param_is_missing("$top"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "value": [
                 { "id": "ra-1", "principalId": SP, "roleDefinitionId": USER_ADMIN, "directoryScopeId": format!("/administrativeUnits/{AU}") },

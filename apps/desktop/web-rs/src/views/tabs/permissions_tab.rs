@@ -1010,12 +1010,29 @@ pub fn PermissionsTab(
                         }
                     })
             }}
-            <DirectoryRolesSection sp_object_id=Signal::derive(move || {
-                detail
-                    .with(|d| {
-                        d.service_principal.as_ref().map(|sp| sp.id.clone()).unwrap_or_default()
-                    })
-            }) />
+            <DirectoryRolesSection
+                sp_object_id=Signal::derive(move || {
+                    detail
+                        .with(|d| {
+                            d.service_principal.as_ref().map(|sp| sp.id.clone()).unwrap_or_default()
+                        })
+                })
+                held_values=Signal::derive(move || {
+                    detail
+                        .with(|d| {
+                            d.resolved_permissions
+                                .iter()
+                                .filter(|p| {
+                                    p.permission_kind == PermissionKind::Application
+                                        && p.runtime_assignment_id.is_some()
+                                        && p.resource_app_id
+                                            .eq_ignore_ascii_case(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID)
+                                })
+                                .filter_map(|p| p.permission_value.clone())
+                                .collect::<Vec<_>>()
+                        })
+                })
+            />
             <UsagePanel detail=detail />
         </div>
     }

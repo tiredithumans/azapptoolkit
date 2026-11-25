@@ -6,7 +6,7 @@
 
 use leptos::prelude::*;
 
-use azapptoolkit_core::scoping::admin_unit::{DIRECTORY_WRITE_MAPPINGS, covers_tenant_wide};
+use azapptoolkit_core::scoping::admin_unit::{DIRECTORY_WRITE_MAPPINGS, covering_role_name};
 
 use crate::bindings::admin_units::{self, DirectoryRoleDto, DirectoryRoleScopeDto};
 use crate::components::icon::IconName;
@@ -16,10 +16,12 @@ use crate::state::use_session;
 use crate::util::no_tenant;
 use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 
-/// One line per directory-write role held at an admin unit: "Writes limited
-/// to <unit>", or "Not limited: also holds <role> tenant-wide" when a tenant
-/// role (the same one, or Global Administrator) still covers it.
-pub(crate) fn limit_lines(roles: &[DirectoryRoleDto]) -> Vec<String> {
+/// One line per directory-write role held at an admin unit. `held` is the
+/// principal's Graph application permissions (`None` = unknown): while the
+/// tenant-wide write is still held the line says writes aren't limited yet;
+/// a covering tenant role or `Directory.ReadWrite.All` says "Not limited";
+/// unknown permissions never claim the writes are limited.
+pub(crate) fn limit_lines(roles: &[DirectoryRoleDto], held: Option<&[String]>) -> Vec<String> {
     let mut lines = Vec::new();
     for m in DIRECTORY_WRITE_MAPPINGS {
         let units: Vec<&str> = roles
@@ -33,16 +35,29 @@ pub(crate) fn limit_lines(roles: &[DirectoryRoleDto]) -> Vec<String> {
         if units.is_empty() {
             continue;
         }
-        let covering = roles.iter().find(|r| {
+        let units = units.join(", ");
+        let covering_role = roles.iter().find_map(|r| {
             matches!(r.scope, DirectoryRoleScopeDto::Tenant)
-                && covers_tenant_wide(m, &r.role_template_id)
+                .then(|| covering_role_name(m, &r.role_template_id))
+                .flatten()
         });
-        lines.push(match covering {
-            Some(c) => format!(
-                "{} — Not limited: also holds {} tenant-wide",
-                m.role_name, c.role_name
-            ),
-            None => format!("{} — Writes limited to {}", m.role_name, units.join(", ")),
+        let covering = covering_role.or_else(|| {
+            held.into_iter()
+                .flatten()
+                .any(|v| v == "Directory.ReadWrite.All")
+                .then_some("Directory.ReadWrite.All")
+        });
+        lines.push(if let Some(c) = covering {
+            format!("{} — Not limited: also holds {c} tenant-wide", m.role_name)
+        } else {
+            match held {
+                Some(values) if values.iter().any(|v| v == m.permission) => format!(
+                    "{} at {units} — the tenant-wide {} is still held, so writes aren't limited yet",
+                    m.role_name, m.permission
+                ),
+                Some(_) => format!("{} — Writes limited to {units}", m.role_name),
+                None => format!("{} at {units}", m.role_name),
+            }
         });
     }
     lines
@@ -61,6 +76,10 @@ pub fn DirectoryRolesSection(
     /// The service principal whose roles to list (empty = none to show).
     #[prop(into)]
     sp_object_id: Signal<String>,
+    /// The principal's Microsoft Graph application permissions, when the
+    /// caller knows them (`None`: never claim the writes are limited).
+    #[prop(optional, into)]
+    held_values: Option<Signal<Vec<String>>>,
 ) -> impl IntoView {
     let session = use_session();
     let reload = RwSignal::new(0_u32);
@@ -141,7 +160,8 @@ pub fn DirectoryRolesSection(
                 {move || Suspend::new(async move {
                     match roles.await {
                         Ok(list) => {
-                            let lines = limit_lines(&list);
+                            let held = held_values.map(|s| s.get_untracked());
+                            let lines = limit_lines(&list, held.as_deref());
                             view! {
                                 <DataTable
                                     headers=vec!["Role", "Scope", ""]
@@ -207,24 +227,53 @@ mod tests {
             name: "Finance".into(),
         };
         let user_admin = "fe930be7-5e62-47db-91af-98c3a49a38b1";
+        let none: Vec<String> = Vec::new();
         assert_eq!(
-            limit_lines(&[role(user_admin, "User Administrator", unit.clone())]),
+            limit_lines(
+                &[role(user_admin, "User Administrator", unit.clone())],
+                Some(&none)
+            ),
             vec!["User Administrator — Writes limited to Finance".to_string()]
         );
         assert_eq!(
-            limit_lines(&[
-                role(user_admin, "User Administrator", unit),
-                role(
-                    user_admin,
-                    "User Administrator",
-                    DirectoryRoleScopeDto::Tenant
-                ),
-            ]),
+            limit_lines(
+                &[
+                    role(user_admin, "User Administrator", unit.clone()),
+                    role(
+                        user_admin,
+                        "User Administrator",
+                        DirectoryRoleScopeDto::Tenant
+                    ),
+                ],
+                Some(&none)
+            ),
             vec![
                 "User Administrator — Not limited: also holds User Administrator tenant-wide"
                     .to_string()
             ]
         );
-        assert!(limit_lines(&[]).is_empty());
+        // I6: the tenant-wide permission still held means not limited yet.
+        let held = vec!["User.ReadWrite.All".to_string()];
+        assert_eq!(
+            limit_lines(&[role(user_admin, "User Administrator", unit.clone())], Some(&held)),
+            vec!["User Administrator at Finance — the tenant-wide User.ReadWrite.All is still held, so writes aren't limited yet".to_string()]
+        );
+        let dir = vec!["Directory.ReadWrite.All".to_string()];
+        assert_eq!(
+            limit_lines(
+                &[role(user_admin, "User Administrator", unit.clone())],
+                Some(&dir)
+            ),
+            vec![
+                "User Administrator — Not limited: also holds Directory.ReadWrite.All tenant-wide"
+                    .to_string()
+            ]
+        );
+        // Unknown permissions: never claims the writes are limited.
+        assert_eq!(
+            limit_lines(&[role(user_admin, "User Administrator", unit)], None),
+            vec!["User Administrator at Finance".to_string()]
+        );
+        assert!(limit_lines(&[], Some(&none)).is_empty());
     }
 }

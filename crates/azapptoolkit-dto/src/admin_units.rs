@@ -52,6 +52,9 @@ pub struct DirectoryWriteScopeResult {
     pub role_assigned: bool,
     /// The principal already held that role at that unit.
     pub role_already_held: bool,
+    /// The principal held the tenant-wide write before this run.
+    #[serde(default)]
+    pub write_held: bool,
     /// The tenant-wide read permission was granted now.
     pub read_granted: bool,
     /// The principal could already read tenant-wide.

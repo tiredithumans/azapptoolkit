@@ -54,6 +54,21 @@ fn is_held_scopable(resource_app_id: Option<&str>, value: &str) -> bool {
         )
 }
 
+/// The Microsoft Graph application permission values among `grants` (the
+/// Directory roles section reads them to tell a real unit limit from one a
+/// held tenant-wide permission still voids).
+pub(crate) fn graph_values(grants: &[AppRoleGrantDto]) -> Vec<String> {
+    grants
+        .iter()
+        .filter(|g| {
+            g.resource_app_id.as_deref().is_some_and(|r| {
+                r.eq_ignore_ascii_case(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID)
+            })
+        })
+        .filter_map(|g| g.app_role_value.clone())
+        .collect()
+}
+
 #[component]
 pub fn HeldPermissionsPanel(
     /// The resolved held grants (the caller awaits its own resource).

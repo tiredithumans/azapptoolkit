@@ -15,7 +15,7 @@ use azapptoolkit_core::guid::is_guid;
 use azapptoolkit_core::models::{AdministrativeUnit, DirectoryRoleAssignment};
 use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
 use azapptoolkit_core::scoping::admin_unit::{
-    AdminUnitMemberKind, DirectoryWriteMapping, GLOBAL_ADMIN_ROLE_TEMPLATE_ID, covers_tenant_wide,
+    AdminUnitMemberKind, DirectoryWriteMapping, covering_permission, covering_role_name,
     directory_write_mapping, satisfies_tenant_read,
 };
 use azapptoolkit_graph::{GraphClient, GraphError};
@@ -31,7 +31,7 @@ use crate::dto::UiError;
 use crate::dto::admin_units::{
     AdminUnitDto, DirectoryRoleDto, DirectoryRoleScopeDto, DirectoryWriteScopeResult,
 };
-use crate::state::AppState;
+use crate::state::{AppState, ConsentFeature};
 
 /// The capability whose remediation a 403 here carries.
 const CAPABILITY: &str = "admin_unit_roles";
@@ -131,24 +131,24 @@ pub(crate) fn removable_unit_assignment<'a>(
     Ok(found)
 }
 
-/// The name of a tenant-scope role among `roles` that voids `mapping`'s unit
-/// limit.
+/// What still lets the app write everywhere despite a unit limit: a
+/// tenant-scope role among `roles` that covers `mapping`, or a held
+/// `Directory.ReadWrite.All` (among `held_values`).
 fn covering_role(
     mapping: &DirectoryWriteMapping,
     roles: &[DirectoryRoleAssignment],
+    held_values: &[&String],
 ) -> Option<String> {
     roles
         .iter()
         .filter(|r| r.is_tenant_scope())
-        .find(|r| covers_tenant_wide(mapping, r.role_template_id()))
-        .map(|r| {
-            if r.role_template_id()
-                .eq_ignore_ascii_case(GLOBAL_ADMIN_ROLE_TEMPLATE_ID)
-            {
-                "Global Administrator".to_string()
-            } else {
-                mapping.role_name.to_string()
-            }
+        .find_map(|r| covering_role_name(mapping, r.role_template_id()))
+        .map(str::to_string)
+        .or_else(|| {
+            held_values
+                .iter()
+                .any(|v| covering_permission(Some(MICROSOFT_GRAPH_APP_ID), v))
+                .then(|| "Directory.ReadWrite.All".to_string())
         })
 }
 
@@ -202,6 +202,7 @@ pub(crate) async fn scope_directory_write_core(
     mapping: &'static DirectoryWriteMapping,
     admin_unit_id: &str,
     created_now: bool,
+    require_held: bool,
 ) -> Result<DirectoryWriteScopeResult, UiError> {
     // 1. Every read the decision rests on, before any write.
     let sp = client
@@ -210,6 +211,15 @@ pub(crate) async fn scope_directory_write_core(
         .map_err(admin_unit_err)?
         .ok_or_else(|| UiError::not_found("service_principal", "Service principal not found"))?;
     require_same_app(&sp.app_id, principal.app_id, "service principal")?;
+    // The app registration too, before any write (the ids arrive separately
+    // from the webview).
+    if let Some(object_id) = principal.object_id {
+        let app = client
+            .get_application(object_id)
+            .await
+            .map_err(admin_unit_err)?;
+        require_same_app(&app.app_id, principal.app_id, "app registration")?;
+    }
     let graph = graph_resource_roles(client).await?;
     let existing = client
         .list_app_role_assignments(principal.sp_object_id)
@@ -230,8 +240,43 @@ pub(crate) async fn scope_directory_write_core(
         .await
         .map_err(admin_unit_err)?;
 
+    let write_role_id: String = graph
+        .role_value_by_id
+        .iter()
+        .find(|(_, v)| v.as_str() == mapping.permission)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| {
+            UiError::not_found(
+                "role",
+                format!("Microsoft Graph doesn't expose {}", mapping.permission),
+            )
+        })?;
+    let is_write_grant = |a: &azapptoolkit_core::models::AppRoleAssignment| {
+        a.resource_id.eq_ignore_ascii_case(&graph.sp_object_id)
+            && a.app_role_id.eq_ignore_ascii_case(&write_role_id)
+    };
+    let held_writes = existing.iter().filter(|a| is_write_grant(a)).count();
+    let held_values: Vec<&String> = existing
+        .iter()
+        .filter(|a| a.resource_id.eq_ignore_ascii_case(&graph.sp_object_id))
+        .filter_map(|a| graph.role_value_by_id.get(&a.app_role_id))
+        .collect();
+    // The audit's Fix limits a write the app holds; it never gives a role to
+    // an app whose write was only declared.
+    if require_held && held_writes == 0 {
+        return Err(UiError::validation(
+            "write_not_held",
+            format!(
+                "This app doesn't hold {} tenant-wide (it may only be declared), so there's \
+                 nothing to limit. To give it limited write access, use Grant access.",
+                mapping.permission
+            ),
+        ));
+    }
+
     let mut result = DirectoryWriteScopeResult {
-        covering_role: covering_role(mapping, &roles),
+        write_held: held_writes > 0,
+        covering_role: covering_role(mapping, &roles, &held_values),
         ..Default::default()
     };
 
@@ -256,11 +301,6 @@ pub(crate) async fn scope_directory_write_core(
     }
 
     // 3. Tenant-wide read: without it the role does nothing.
-    let held_values: Vec<&String> = existing
-        .iter()
-        .filter(|a| a.resource_id.eq_ignore_ascii_case(&graph.sp_object_id))
-        .filter_map(|a| graph.role_value_by_id.get(&a.app_role_id))
-        .collect();
     result.read_already_held = held_values
         .iter()
         .any(|v| satisfies_tenant_read(mapping, Some(MICROSOFT_GRAPH_APP_ID), v));
@@ -276,7 +316,28 @@ pub(crate) async fn scope_directory_write_core(
         )
         .await
         {
-            Ok(_) => result.read_granted = true,
+            Ok(_) => {
+                result.read_granted = true;
+                invalidate_app_detail_state(cache, principal.tenant_id);
+            }
+            // A dead session or a missing consent keeps its code, so the UI
+            // raises the right lever (the role, if newly assigned, stays: a
+            // rerun finds it held).
+            Err(e) if e.is_reauth_fatal() || e.is_consent_required() => {
+                return Err(UiError {
+                    message: format!(
+                        "{} Couldn't give the app tenant-wide read ({}): {}",
+                        if result.role_assigned {
+                            "The admin role was assigned, but the run stopped."
+                        } else {
+                            "The run stopped."
+                        },
+                        mapping.read_permission,
+                        e.message
+                    ),
+                    ..e
+                });
+            }
             Err(e) => {
                 result.warnings.push(format!(
                     "Couldn't give the app tenant-wide read ({}): {}",
@@ -297,23 +358,11 @@ pub(crate) async fn scope_directory_write_core(
     if result.kept_reason.is_some() {
         return Ok(result);
     }
-    let write_role_id: Option<&String> = graph
-        .role_value_by_id
-        .iter()
-        .find(|(_, v)| v.as_str() == mapping.permission)
-        .map(|(id, _)| id);
-    let Some(write_role_id) = write_role_id else {
-        return Ok(result);
-    };
     let removed = strip_app_role_grants(
         client,
         principal.sp_object_id,
         &existing,
-        |a| {
-            (a.resource_id.eq_ignore_ascii_case(&graph.sp_object_id)
-                && a.app_role_id.eq_ignore_ascii_case(write_role_id))
-            .then(|| mapping.permission.to_string())
-        },
+        |a| is_write_grant(a).then(|| mapping.permission.to_string()),
         &mut result.warnings,
     )
     .await;
@@ -322,15 +371,17 @@ pub(crate) async fn scope_directory_write_core(
         invalidate_app_detail_state(cache, principal.tenant_id);
     }
     // On an app registration the declaration goes too, so "Grant admin
-    // consent" can't restore the tenant-wide grant.
-    if let Some(object_id) = principal.object_id {
+    // consent" can't restore the tenant-wide grant — but only once every held
+    // grant of it is gone: a live grant must never be left undeclared.
+    let every_grant_removed = removed.len() == held_writes;
+    if let Some(object_id) = principal.object_id.filter(|_| every_grant_removed) {
         match client.get_application(object_id).await {
             Ok(mut app) => {
                 require_same_app(&app.app_id, principal.app_id, "app registration")?;
                 if remove_declared_access(
                     &mut app.required_resource_access,
                     MICROSOFT_GRAPH_APP_ID,
-                    write_role_id,
+                    &write_role_id,
                     Some("Role"),
                 ) {
                     let patch = azapptoolkit_graph::client::AppPatch {
@@ -393,6 +444,7 @@ pub async fn scope_directory_write(
     permission_value: String,
     admin_unit_id: String,
     created_now: bool,
+    require_held: bool,
 ) -> Result<DirectoryWriteScopeResult, UiError> {
     crate::commands::guid::require_app_id(&app_id)?;
     if !is_guid(&admin_unit_id) {
@@ -411,6 +463,15 @@ pub async fn scope_directory_write(
                 format!("{permission_value} can't be limited to an admin unit."),
             )
         })?;
+    // Both tokens before the first write: the role rides `admin_unit_roles`
+    // (whose consent covers the write scopes too), the read grant and the
+    // strip ride `write`. A consent surfaced mid-run would strand the role.
+    for feature in [ConsentFeature::AdminUnitRoles, ConsentFeature::Write] {
+        state
+            .ensure_feature_token(&tenant_id, feature)
+            .await
+            .map_err(UiError::from)?;
+    }
     let client = state.graph_for(&tenant_id);
     let sp_object_id = resolve_sp_object_id(&client, sp_object_id.as_deref(), &app_id).await?;
     scope_directory_write_core(
@@ -425,6 +486,7 @@ pub async fn scope_directory_write(
         mapping,
         &admin_unit_id,
         created_now,
+        require_held,
     )
     .await
 }
@@ -544,6 +606,8 @@ pub async fn remove_admin_unit_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
     use azapptoolkit_core::scoping::admin_unit::directory_write_mapping;
     use azapptoolkit_core::token::StaticTokenProvider;
@@ -621,7 +685,8 @@ mod tests {
                     "appRoles": [
                         { "id": USER_RW, "value": "User.ReadWrite.All", "allowedMemberTypes": ["Application"] },
                         { "id": USER_R, "value": "User.Read.All", "allowedMemberTypes": ["Application"] },
-                        { "id": DIR_R, "value": "Directory.Read.All", "allowedMemberTypes": ["Application"] }
+                        { "id": DIR_R, "value": "Directory.Read.All", "allowedMemberTypes": ["Application"] },
+                        { "id": "19dbc75e-c2e2-444c-a770-ec69d8559fc7", "value": "Directory.ReadWrite.All", "allowedMemberTypes": ["Application"] }
                     ]
                 }]
             })))
@@ -730,6 +795,17 @@ mod tests {
         object_id: Option<&'static str>,
         created_now: bool,
     ) -> DirectoryWriteScopeResult {
+        try_run(server, object_id, created_now, false)
+            .await
+            .unwrap()
+    }
+
+    async fn try_run(
+        server: &MockServer,
+        object_id: Option<&'static str>,
+        created_now: bool,
+        require_held: bool,
+    ) -> Result<DirectoryWriteScopeResult, UiError> {
         let cache = azapptoolkit_core::cache::Cache::new();
         scope_directory_write_core(
             &client(server),
@@ -738,9 +814,9 @@ mod tests {
             user_mapping(),
             AU,
             created_now,
+            require_held,
         )
         .await
-        .unwrap()
     }
 
     fn method_and_path(r: &Request) -> String {
@@ -784,17 +860,7 @@ mod tests {
         expect_role_post(&server, 403, 1).await;
         expect_read_grant(&server, 201, 0).await;
         expect_strip(&server, 0).await;
-        let cache = azapptoolkit_core::cache::Cache::new();
-        let err = scope_directory_write_core(
-            &client(&server),
-            &cache,
-            &principal(None),
-            user_mapping(),
-            AU,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let err = try_run(&server, None, false, false).await.unwrap_err();
         assert_eq!(err.code, "forbidden");
     }
 
@@ -1071,5 +1137,170 @@ mod tests {
                 .code,
             "service_principal_not_found"
         );
+    }
+
+    const DIR_RW: &str = "19dbc75e-c2e2-444c-a770-ec69d8559fc7";
+
+    /// I1: the audit's Fix never assigns a role to an app that doesn't hold
+    /// the tenant-wide write it claims to limit.
+    #[tokio::test]
+    async fn the_fix_refuses_a_write_the_app_does_not_hold() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &World {
+                held: &[USER_R],
+                ..World::default()
+            },
+        )
+        .await;
+        expect_role_post(&server, 201, 0).await;
+        expect_read_grant(&server, 201, 0).await;
+        let err = try_run(&server, None, false, true).await.unwrap_err();
+        assert_eq!(err.code, "write_not_held");
+    }
+
+    /// The wizard may give an app limited write access from scratch.
+    #[tokio::test]
+    async fn the_wizard_may_grant_a_limited_write_from_scratch() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &World {
+                held: &[USER_R],
+                ..World::default()
+            },
+        )
+        .await;
+        expect_role_post(&server, 201, 1).await;
+        expect_strip(&server, 0).await;
+        let r = run(&server, None, false).await;
+        assert!(
+            r.role_assigned && !r.write_held && !r.orgwide_removed,
+            "{r:?}"
+        );
+    }
+
+    /// I2: a drifted app registration is refused before anything is written.
+    #[tokio::test]
+    async fn a_drifted_app_registration_is_refused_before_any_write() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &World {
+                held: &[USER_RW, USER_R],
+                ..World::default()
+            },
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJ}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": OBJ, "appId": "22222222-3333-4444-8555-666666666666",
+                "displayName": "Someone else"
+            })))
+            .mount(&server)
+            .await;
+        expect_role_post(&server, 201, 0).await;
+        expect_strip(&server, 0).await;
+        let err = try_run(&server, Some(OBJ), false, false).await.unwrap_err();
+        assert_eq!(err.code, "principal_mismatch");
+    }
+
+    /// I3: a failed strip keeps the declaration, so a live grant is never
+    /// left undeclared.
+    #[tokio::test]
+    async fn a_failed_strip_keeps_the_declaration() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &World {
+                held: &[USER_RW, USER_R],
+                ..World::default()
+            },
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1.0/applications/{OBJ}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": OBJ, "appId": APP, "displayName": "Directory Sync",
+                "requiredResourceAccess": [{
+                    "resourceAppId": MICROSOFT_GRAPH_APP_ID,
+                    "resourceAccess": [
+                        { "id": USER_RW, "type": "Role" },
+                        { "id": USER_R, "type": "Role" }
+                    ]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/v1.0/servicePrincipals/{SP}/appRoleAssignments/ga-{USER_RW}"
+            )))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": "Authorization_RequestDenied", "message": "denied" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1.0/applications/{OBJ}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        expect_role_post(&server, 201, 1).await;
+        let r = run(&server, Some(OBJ), false).await;
+        assert!(!r.orgwide_removed && !r.warnings.is_empty(), "{r:?}");
+    }
+
+    /// I4: a dead session on the read grant returns its code (so the UI can
+    /// prompt re-auth) instead of a warning string.
+    #[tokio::test]
+    async fn a_dead_session_on_the_read_grant_returns_its_code() {
+        let server = MockServer::start().await;
+        mount(&server, &World::default()).await;
+        expect_role_post(&server, 201, 1).await;
+        let dead: Arc<dyn azapptoolkit_core::token::BearerProvider> =
+            crate::commands::test_support::dead_token();
+        let client = GraphClient::with_base_url(
+            "tenant-test",
+            StaticTokenProvider::new("tok"),
+            dead,
+            azapptoolkit_core::cache::Cache::new(),
+            format!("{}/v1.0", server.uri()),
+        )
+        .with_admin_unit_roles_token(StaticTokenProvider::new("aur"));
+        let cache = azapptoolkit_core::cache::Cache::new();
+        let err = scope_directory_write_core(
+            &client,
+            &cache,
+            &principal(None),
+            user_mapping(),
+            AU,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_reauth_fatal(), "{err:?}");
+    }
+
+    /// I5: a tenant-wide Directory.ReadWrite.All still writes everyone.
+    #[tokio::test]
+    async fn a_covering_directory_readwrite_grant_is_reported() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            &World {
+                held: &[USER_RW, USER_R, DIR_RW],
+                ..World::default()
+            },
+        )
+        .await;
+        expect_role_post(&server, 201, 1).await;
+        expect_strip(&server, 1).await;
+        let r = run(&server, None, false).await;
+        assert_eq!(r.covering_role.as_deref(), Some("Directory.ReadWrite.All"));
     }
 }

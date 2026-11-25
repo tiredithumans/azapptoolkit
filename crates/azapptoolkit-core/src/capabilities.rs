@@ -303,6 +303,8 @@ pub static CAPABILITIES: &[Capability] = &[
         scopes: &[
             "RoleManagement.ReadWrite.Directory",
             "AdministrativeUnit.ReadWrite.All",
+            "Application.ReadWrite.All",
+            "AppRoleAssignment.ReadWrite.All",
         ],
         scope_feature: Some("admin_unit_roles"),
         remediation: "Limiting an app's writes to an admin unit needs the \

@@ -3266,3 +3266,34 @@ fn app_rows_get_rule_26_too() {
             .any(|r| r.kind == RemediationKind::ScopeDirectoryWrite)
     );
 }
+
+#[test]
+fn a_tenant_wide_directory_readwrite_voids_the_limit() {
+    let mut perms = sp_perms(&["User.Read.All", "Directory.ReadWrite.All"]);
+    perms.directory_roles = Some(vec![unit_role(USER_ADMIN_ROLE, "Finance")]);
+    let item = score_service_principal(&base_sp(), &perms, now());
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE))
+    );
+}
+
+#[test]
+fn a_unit_groups_admin_beside_a_tenant_user_admin_is_not_healthy() {
+    let mut perms = sp_perms(&["Group.Read.All"]);
+    perms.directory_roles = Some(vec![
+        unit_role("fdd7a751-b60b-444a-984c-02652fe8fa1c", "Finance"),
+        tenant_role(USER_ADMIN_ROLE),
+    ]);
+    let item = score_service_principal(&base_sp(), &perms, now());
+    assert!(
+        !item
+            .issues
+            .iter()
+            .any(|x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE)),
+        "{:?}",
+        item.issues
+    );
+}

@@ -36,6 +36,10 @@ pub struct DirectoryWriteMapping {
     pub also_allows: &'static [&'static str],
     /// What the app can no longer do once the tenant-wide permission goes.
     pub no_longer: &'static [&'static str],
+    /// Tenant-scope roles beyond itself, Global Administrator and Privileged
+    /// Role Administrator whose writes reach the same objects: `(template
+    /// id, name)`.
+    pub covered_by: &'static [(&'static str, &'static str)],
 }
 
 /// Global Administrator: covers every mapping at tenant scope.
@@ -57,8 +61,10 @@ pub const DIRECTORY_WRITE_MAPPINGS: &[DirectoryWriteMapping] = &[
         no_longer: &[
             "Change users outside the unit",
             "Change users who hold admin roles",
+            "Change users' profile photos",
             "Create new users, unless Microsoft allows it at admin-unit scope (it doesn't document this)",
         ],
+        covered_by: &[],
     },
     DirectoryWriteMapping {
         permission: "Group.ReadWrite.All",
@@ -67,14 +73,16 @@ pub const DIRECTORY_WRITE_MAPPINGS: &[DirectoryWriteMapping] = &[
         read_permission: "Group.Read.All",
         member_kind: AdminUnitMemberKind::Group,
         also_allows: &[
-            "Change group settings, including naming and expiration policies",
             "Restore and permanently delete groups in the unit",
             "Assign licences to groups in the unit",
         ],
         no_longer: &[
             "Change groups outside the unit",
             "Change role-assignable groups",
+            "Read and write group conversations, posts and calendars (Group.ReadWrite.All allows these; the role doesn't, even inside the unit)",
         ],
+        // A tenant-wide User Administrator writes every group.
+        covered_by: &[("fe930be7-5e62-47db-91af-98c3a49a38b1", "User Administrator")],
     },
     DirectoryWriteMapping {
         permission: "Device.ReadWrite.All",
@@ -91,15 +99,22 @@ pub const DIRECTORY_WRITE_MAPPINGS: &[DirectoryWriteMapping] = &[
             "Change devices outside the unit",
             "Change device properties other than enabling, disabling and deleting",
         ],
+        covered_by: &[],
     },
 ];
+
+/// Whether `resource_app_id` is Microsoft Graph's appId, in any case (a
+/// hand-edited manifest may carry it upper-case).
+fn is_graph(resource_app_id: Option<&str>) -> bool {
+    resource_app_id.is_some_and(|r| r.eq_ignore_ascii_case(MICROSOFT_GRAPH_APP_ID))
+}
 
 /// The mapping for `value` on `resource_app_id` (Microsoft Graph only).
 pub fn directory_write_mapping(
     resource_app_id: Option<&str>,
     value: &str,
 ) -> Option<&'static DirectoryWriteMapping> {
-    if resource_app_id != Some(MICROSOFT_GRAPH_APP_ID) {
+    if !is_graph(resource_app_id) {
         return None;
     }
     DIRECTORY_WRITE_MAPPINGS
@@ -123,17 +138,50 @@ pub fn satisfies_tenant_read(
     resource_app_id: Option<&str>,
     value: &str,
 ) -> bool {
-    resource_app_id == Some(MICROSOFT_GRAPH_APP_ID)
+    is_graph(resource_app_id)
         && (value == mapping.read_permission
             || value == "Directory.Read.All"
             || value == "Directory.ReadWrite.All")
 }
 
+/// Privileged Role Administrator.
+pub const PRIVILEGED_ROLE_ADMIN_ROLE_TEMPLATE_ID: &str = "e8611ab8-c189-46e8-94e1-60213ab1f814";
+
+/// The name of the tenant-scope role `held_role_template_id` if it voids
+/// `mapping`'s unit limit: the same role, Global Administrator, Privileged
+/// Role Administrator (it can assign itself any role), or one of the
+/// mapping's `covered_by` roles.
+pub fn covering_role_name(
+    mapping: &DirectoryWriteMapping,
+    held_role_template_id: &str,
+) -> Option<&'static str> {
+    let held = held_role_template_id;
+    if held.eq_ignore_ascii_case(mapping.role_template_id) {
+        Some(mapping.role_name)
+    } else if held.eq_ignore_ascii_case(GLOBAL_ADMIN_ROLE_TEMPLATE_ID) {
+        Some("Global Administrator")
+    } else if held.eq_ignore_ascii_case(PRIVILEGED_ROLE_ADMIN_ROLE_TEMPLATE_ID) {
+        Some("Privileged Role Administrator")
+    } else {
+        mapping
+            .covered_by
+            .iter()
+            .find(|(id, _)| held.eq_ignore_ascii_case(id))
+            .map(|(_, name)| *name)
+    }
+}
+
+/// Whether holding `value` on `resource_app_id` writes every user, group and
+/// device anyway (Microsoft Graph's `Directory.ReadWrite.All`), voiding any
+/// unit limit.
+pub fn covering_permission(resource_app_id: Option<&str>, value: &str) -> bool {
+    is_graph(resource_app_id) && value == "Directory.ReadWrite.All"
+}
+
 /// Whether a tenant-scope assignment of `held_role_template_id` voids a unit
-/// limit for `mapping`: the same role, or Global Administrator.
+/// limit for `mapping` (see [`covering_role_name`]).
 pub fn covers_tenant_wide(mapping: &DirectoryWriteMapping, held_role_template_id: &str) -> bool {
-    held_role_template_id.eq_ignore_ascii_case(mapping.role_template_id)
-        || held_role_template_id.eq_ignore_ascii_case(GLOBAL_ADMIN_ROLE_TEMPLATE_ID)
+    covering_role_name(mapping, held_role_template_id).is_some()
 }
 
 /// The user attributes the create-by-rule builder offers.
@@ -290,5 +338,62 @@ mod tests {
             r#"(user.employeeType -eq "Contractor")"#,
             "the value is trimmed"
         );
+    }
+
+    #[test]
+    fn disclosures_match_microsofts_unit_scope_tables() {
+        let groups = directory_write_mapping(GRAPH, "Group.ReadWrite.All").unwrap();
+        assert!(
+            groups.also_allows.iter().all(|l| !l.contains("naming")),
+            "a unit-scoped Groups Administrator can't manage naming or expiration policies"
+        );
+        assert!(
+            groups.no_longer.iter().any(|l| l.contains("conversations")),
+            "Group.ReadWrite.All covers conversations; the role doesn't"
+        );
+        let users = directory_write_mapping(GRAPH, "User.ReadWrite.All").unwrap();
+        assert!(users.no_longer.iter().any(|l| l.contains("photo")));
+    }
+
+    #[test]
+    fn the_graph_resource_matches_in_any_case() {
+        let upper = MICROSOFT_GRAPH_APP_ID.to_uppercase();
+        let m = directory_write_mapping(Some(&upper), "User.ReadWrite.All").expect("mapped");
+        assert!(satisfies_tenant_read(m, Some(&upper), "User.Read.All"));
+        assert!(covering_permission(Some(&upper), "Directory.ReadWrite.All"));
+    }
+
+    #[test]
+    fn broader_tenant_roles_and_directory_write_cover_the_limit() {
+        let groups = directory_write_mapping(GRAPH, "Group.ReadWrite.All").unwrap();
+        assert_eq!(
+            covering_role_name(groups, "fe930be7-5e62-47db-91af-98c3a49a38b1"),
+            Some("User Administrator"),
+            "a tenant-wide User Administrator writes every group"
+        );
+        for m in DIRECTORY_WRITE_MAPPINGS {
+            assert_eq!(
+                covering_role_name(m, PRIVILEGED_ROLE_ADMIN_ROLE_TEMPLATE_ID),
+                Some("Privileged Role Administrator"),
+                "{}",
+                m.permission
+            );
+            assert_eq!(
+                covering_role_name(m, GLOBAL_ADMIN_ROLE_TEMPLATE_ID),
+                Some("Global Administrator")
+            );
+            assert_eq!(covering_role_name(m, m.role_template_id), Some(m.role_name));
+        }
+        let users = directory_write_mapping(GRAPH, "User.ReadWrite.All").unwrap();
+        assert_eq!(
+            covering_role_name(users, "fdd7a751-b60b-444a-984c-02652fe8fa1c"),
+            None
+        );
+        assert!(covering_permission(GRAPH, "Directory.ReadWrite.All"));
+        assert!(!covering_permission(GRAPH, "Directory.Read.All"));
+        assert!(!covering_permission(
+            Some(OFFICE365_EXCHANGE_ONLINE_APP_ID),
+            "Directory.ReadWrite.All"
+        ));
     }
 }

@@ -1338,8 +1338,89 @@ async fn orgwide_directory_write_group_offers_the_scope_fix() {
     assert_eq!(args["permissionValue"], "User.ReadWrite.All");
     assert_eq!(args["adminUnitId"], "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12");
     assert_eq!(args["createdNow"], false);
+    assert_eq!(
+        args["requireHeld"], true,
+        "the Fix limits only a write the app holds"
+    );
     ts::wait_for(|| {
         !ts::has_button_labelled("Limit 1 directory write permission to an admin unit")
     })
     .await;
+}
+
+/// I7: reopening the Fix starts fresh — a unit created last time isn't
+/// still marked "just created".
+#[wasm_bindgen_test]
+async fn reopening_the_directory_write_fix_starts_fresh() {
+    use azapptoolkit_core::audit::{RemediationAction, RemediationKind};
+    use azapptoolkit_dto::admin_units::{AdminUnitDto, DirectoryWriteScopeResult};
+    ts::reset();
+    let mut run = cached_run();
+    let mut app = fixtures::audit_item(
+        "Directory Sync",
+        RiskLevel::High,
+        &[format!(
+            "{} User.ReadWrite.All",
+            issue::ORG_WIDE_DIRECTORY_WRITE
+        )],
+    );
+    app.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeDirectoryWrite,
+        label: "Limit 1 directory write permission to an admin unit".into(),
+        detail: String::new(),
+        targets: vec!["User.ReadWrite.All".into()],
+    }];
+    run.items.push(app);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok("list_admin_units", &Vec::<AdminUnitDto>::new());
+    ts::mock_ok(
+        "create_admin_unit_by_rule",
+        &AdminUnitDto {
+            id: "6c3e1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01".into(),
+            display_name: "Finance".into(),
+            dynamic: true,
+            membership_rule: None,
+            rule_processing_on: true,
+            restricted: false,
+        },
+    );
+    ts::mock_ok(
+        "scope_directory_write",
+        &DirectoryWriteScopeResult {
+            role_assigned: true,
+            write_held: true,
+            kept_reason: Some("The admin unit was just created".into()),
+            ..Default::default()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Organization-wide directory write")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_directory_write".to_string()));
+    let fix = "Limit 1 directory write permission to an admin unit";
+    ts::wait_for(|| ts::has_button_labelled(fix)).await;
+    ts::click_button_labelled(fix);
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel__name input").is_some()).await;
+    ts::set_input_value(".modal .admin-unit-panel__name input", "Finance");
+    ts::set_input_value(".modal .admin-unit-panel__value input", "Finance");
+    ts::tick().await;
+    ts::click_button_labelled("Create admin unit");
+    ts::wait_for(|| ts::button_labelled_enabled("Limit writes")).await;
+    ts::click_button_labelled("Limit writes");
+    ts::wait_for(|| ts::body_contains("just created")).await;
+    ts::click_button_labelled("Cancel");
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel").is_none()).await;
+    ts::click_button_labelled(fix);
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel").is_some()).await;
+    assert!(
+        !ts::button_labelled_enabled("Limit writes"),
+        "no unit picked on a fresh open"
+    );
+    assert!(
+        !ts::body_contains("just created"),
+        "last run's notes are gone"
+    );
 }

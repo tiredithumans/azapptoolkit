@@ -102,6 +102,8 @@ pub struct ScopeDirectoryWriteArgs<'a> {
     pub admin_unit_id: &'a str,
     /// The unit was created in this same run.
     pub created_now: bool,
+    /// Refuse unless the app holds the tenant-wide write (the audit's Fix).
+    pub require_held: bool,
 }
 
 /// Limits a tenant-wide directory write to an admin unit (assign the role at
@@ -119,6 +121,7 @@ pub async fn scope_directory_write(
         permission_value,
         admin_unit_id,
         created_now,
+        require_held,
     } = args;
     invoke_result(
         "scope_directory_write",
@@ -130,6 +133,7 @@ pub async fn scope_directory_write(
             permission_value,
             admin_unit_id,
             created_now,
+            require_held,
         },
     )
     .await

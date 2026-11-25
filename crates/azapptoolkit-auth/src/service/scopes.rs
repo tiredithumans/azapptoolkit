@@ -93,9 +93,14 @@ impl EntraAuthService {
     /// can assign any role), so admin-consent-only and acquired on demand,
     /// never at sign-in.
     pub fn default_graph_admin_unit_roles_scopes(&self) -> Vec<String> {
+        // Plus the Graph write scopes the same run uses (the read grant, the
+        // strip, the manifest PATCH), so one consent covers the whole apply —
+        // as the group-membership set carries Application.ReadWrite.All.
         self.graph_scopes(&[
             "RoleManagement.ReadWrite.Directory",
             "AdministrativeUnit.ReadWrite.All",
+            "Application.ReadWrite.All",
+            "AppRoleAssignment.ReadWrite.All",
         ])
     }
 

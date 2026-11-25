@@ -1032,6 +1032,10 @@ async fn admin_unit_path_assigns_then_reports_kept_or_removed() {
     assert_eq!(args["adminUnitId"], SALES_AU);
     assert_eq!(args["permissionValue"], "User.ReadWrite.All");
     assert_eq!(args["createdNow"], false);
+    assert_eq!(
+        args["requireHeld"], false,
+        "the wizard may grant limited from scratch"
+    );
     assert_eq!(args["spObjectId"], "sp-app");
     assert_eq!(args["objectId"], "obj-app");
     assert_eq!(args["appId"], "app-0");
