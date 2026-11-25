@@ -6,6 +6,7 @@ mod common;
 
 mod applications;
 mod batch;
+mod conditional_access;
 mod credentials;
 mod directory;
 mod grants;

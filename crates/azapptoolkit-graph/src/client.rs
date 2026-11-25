@@ -87,6 +87,7 @@ pub trait ThrottleObserver: Send + Sync {
 
 mod applications;
 mod batch;
+mod conditional_access;
 mod credentials;
 mod directory;
 mod partition;
@@ -157,6 +158,10 @@ pub struct GraphClient {
     /// documented as needing both scopes in the same token; acquired on demand (incremental
     /// consent).
     policy_write_token: Option<Arc<dyn BearerProvider>>,
+    /// Optional `Policy.Read.All` + `Policy.ReadWrite.ConditionalAccess` token for the network
+    /// lock: create, read back, enable and delete one Conditional Access policy, and create an IP
+    /// named location. Acquired on demand (incremental consent).
+    conditional_access_write_token: Option<Arc<dyn BearerProvider>>,
     /// Optional `Sites.FullControl.All` token for the SharePoint `Sites.Selected` model. The
     /// verb-selected `read_token` (`Directory.Read.All`) cannot read `/sites/{id}/permissions`,
     /// and this scope is admin-consent-only, so the site-permission calls ride this token
@@ -222,6 +227,7 @@ impl GraphClient {
             policy_token: None,
             risky_sp_token: None,
             policy_write_token: None,
+            conditional_access_write_token: None,
             sharepoint_token: None,
             group_member_token: None,
             throttle_observer: parking_lot::RwLock::new(None),
@@ -268,6 +274,13 @@ impl GraphClient {
     /// create/update/delete and the service-principal assign/list/remove.
     pub fn with_policy_write_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.policy_write_token = Some(token);
+        self
+    }
+
+    /// Attaches a `Policy.Read.All` + `Policy.ReadWrite.ConditionalAccess` token
+    /// enabling the network lock's policy and named-location writes.
+    pub fn with_conditional_access_write_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
+        self.conditional_access_write_token = Some(token);
         self
     }
 
@@ -399,6 +412,13 @@ impl GraphClient {
     /// Unwrap an `Option<&Arc<dyn BearerProvider>>` into a typed error, or return the inner
     /// reference for chaining.
     #[allow(clippy::unused_self)]
+    fn conditional_access_write_token(&self) -> Result<&Arc<dyn BearerProvider>> {
+        self.require_token(
+            self.conditional_access_write_token.as_ref(),
+            "Policy.Read.All + Policy.ReadWrite.ConditionalAccess",
+        )
+    }
+
     fn require_token<'a>(
         &self,
         token: Option<&'a Arc<dyn BearerProvider>>,
