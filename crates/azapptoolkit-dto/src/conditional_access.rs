@@ -32,6 +32,68 @@ pub struct ConditionalAccessPolicyDto {
     pub grant_operator: Option<String>,
 }
 
+/// An IP named location, as the network-lock picker lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedLocationDto {
+    pub id: String,
+    pub display_name: String,
+    pub is_trusted: bool,
+    pub range_count: u32,
+}
+
+/// The toolkit's own lock policy for an app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolkitLockDto {
+    pub policy_id: String,
+    /// Raw Graph state: `enabled` / `enabledForReportingButNotEnforced` / `disabled`.
+    pub state: String,
+    pub excluded_locations: Vec<NamedLocationDto>,
+}
+
+/// What a report-only lock would have blocked recently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportOnlyReadout {
+    pub would_block: u32,
+    pub sample_ips: Vec<String>,
+    pub window_days: u32,
+}
+
+/// The Network lock section's state for one app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkLockStatus {
+    /// Why Conditional Access can't target this app, if it can't.
+    pub ineligible: Option<azapptoolkit_core::conditional_access::LockIneligible>,
+    /// The toolkit's own lock, in any state.
+    pub toolkit_lock: Option<ToolkitLockDto>,
+    /// Every OTHER policy's verdict for this app on Microsoft Graph.
+    pub other: azapptoolkit_core::conditional_access::NetworkLock,
+    /// The first other policy that enforces a lock, by name.
+    pub other_policy_name: Option<String>,
+    /// Only for a report-only toolkit lock; `None` when the sign-in log
+    /// couldn't be read.
+    pub readout: Option<ReportOnlyReadout>,
+}
+
+/// A new untrusted IP named location to create with the lock.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewLocationArgs {
+    pub name: String,
+    pub cidrs: Vec<String>,
+}
+
+/// The created lock.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedLock {
+    pub policy_id: String,
+    pub created_location_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

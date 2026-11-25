@@ -1143,6 +1143,8 @@ fn register_fixtures() {
         "list_conditional_access_for_app",
         &f::conditional_access_policies(),
     );
+    mock_ok("get_network_lock", &f::network_lock_status_none());
+    mock_ok("list_named_locations", &f::named_locations());
     mock_ok("list_directory_audits_for_app", &f::directory_audits());
     mock_each("get_app_sign_in_activity", move |args| {
         f::sign_in_activity(

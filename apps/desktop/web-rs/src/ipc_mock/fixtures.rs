@@ -2303,3 +2303,32 @@ pub fn app_permission_grants() -> Vec<AppPermissionGrantDto> {
         ),
     ]
 }
+
+/// A Network lock status for an eligible app with no lock anywhere.
+pub fn network_lock_status_none() -> azapptoolkit_dto::conditional_access::NetworkLockStatus {
+    azapptoolkit_dto::conditional_access::NetworkLockStatus {
+        ineligible: None,
+        toolkit_lock: None,
+        other: azapptoolkit_core::conditional_access::NetworkLock::None,
+        other_policy_name: None,
+        readout: None,
+    }
+}
+
+/// Two IP named locations for the lock picker.
+pub fn named_locations() -> Vec<azapptoolkit_dto::conditional_access::NamedLocationDto> {
+    vec![
+        azapptoolkit_dto::conditional_access::NamedLocationDto {
+            id: "aaaaaaaa-0000-0000-0000-000000000001".into(),
+            display_name: "Head office".into(),
+            is_trusted: true,
+            range_count: 2,
+        },
+        azapptoolkit_dto::conditional_access::NamedLocationDto {
+            id: "aaaaaaaa-0000-0000-0000-000000000002".into(),
+            display_name: "Payroll egress".into(),
+            is_trusted: false,
+            range_count: 1,
+        },
+    ]
+}
