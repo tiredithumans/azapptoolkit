@@ -43,7 +43,7 @@
 use std::fmt::Write;
 
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance};
+use thaw::{Button, ButtonAppearance, Field};
 
 use crate::bindings::exchange::{self, ExchangeScopeGroupDto};
 use crate::bindings::{auth, managed_identity, permissions, sharepoint};
@@ -54,7 +54,7 @@ use crate::components::modal_shell::ModalShell;
 use crate::components::permission_picker::{PermissionPicker, PickerMode, PickerSelection};
 use crate::components::requires_role::RequiresRole;
 use crate::components::site_selection_panel::SiteSelectionPanel;
-use crate::components::ui::{Callout, FormError, Spinner};
+use crate::components::ui::{Callout, FormError, Select, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
 use azapptoolkit_core::audit::is_unscopable_privileged;
@@ -218,6 +218,17 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
 }
 
 /// Comma-joined permission values for the review line / summaries.
+/// The expiry date an "Expires" choice (`never` / a day count) means from
+/// `now`, by the UTC calendar the audit judges expiry in.
+fn expiry_date_in(choice: &str, now: jiff::Timestamp) -> Option<jiff::civil::Date> {
+    let days: i64 = choice.parse().ok()?;
+    jiff::tz::Offset::UTC
+        .to_datetime(now)
+        .date()
+        .checked_add(jiff::Span::new().days(days))
+        .ok()
+}
+
 fn perm_values(items: &[PickerSelection]) -> Vec<String> {
     items.iter().map(|i| i.permission_value.clone()).collect()
 }
@@ -361,8 +372,12 @@ async fn apply_orgwide(
     tenant_id: String,
     target: ScopeTarget,
     items: Vec<PickerSelection>,
+    expires_on: Option<jiff::civil::Date>,
 ) -> Result<Applied, UiError> {
-    if let Some(object_id) = &target.object_id {
+    // `(holding SP, item)` for each Application grant that landed, for the
+    // expiry pass after the grants.
+    let mut held: Vec<(String, PickerSelection)> = Vec::new();
+    let mut applied = if let Some(object_id) = &target.object_id {
         let mut failures: Vec<String> = Vec::new();
         for item in &items {
             match permissions::grant_single_permission(
@@ -374,7 +389,15 @@ async fn apply_orgwide(
             )
             .await
             {
-                Ok(r) => failures.extend(r.failures.into_iter().map(|f| f.message)),
+                Ok(r) => {
+                    if item.kind == PermissionKind::Application
+                        && r.failures.is_empty()
+                        && !r.client_service_principal_id.is_empty()
+                    {
+                        held.push((r.client_service_principal_id.clone(), item.clone()));
+                    }
+                    failures.extend(r.failures.into_iter().map(|f| f.message));
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -390,7 +413,7 @@ async fn apply_orgwide(
                 failures.join("; ")
             );
         }
-        Ok(Applied::clean(s))
+        Applied::clean(s)
     } else {
         // Bare SP: app-role grants only, grouped by resource (one call each).
         let mut by_resource: std::collections::BTreeMap<String, Vec<String>> =
@@ -413,6 +436,15 @@ async fn apply_orgwide(
             .await?;
             granted += r.granted.len();
             skipped += r.skipped.len();
+            // Already-present grants take the expiry too: the operator chose
+            // one for this permission.
+            for item in items.iter().filter(|i| {
+                i.resource_app_id == *resource
+                    && (r.granted.contains(&i.permission_value)
+                        || r.skipped.contains(&i.permission_value))
+            }) {
+                held.push((target.sp_object_id.clone(), item.clone()));
+            }
             failures.extend(r.failures);
         }
         let mut s = format!(
@@ -431,8 +463,33 @@ async fn apply_orgwide(
                 failures.join("; ")
             );
         }
-        Ok(Applied::clean(s))
+        Applied::clean(s)
+    };
+    if let Some(date) = expires_on {
+        let day = date.to_string();
+        let mut set = 0usize;
+        for (sp_object_id, item) in &held {
+            match permissions::set_grant_expiry(
+                &tenant_id,
+                sp_object_id,
+                &item.resource_app_id,
+                &item.permission_id,
+                Some(&day),
+            )
+            .await
+            {
+                Ok(()) => set += 1,
+                Err(e) => applied.warnings.push(format!(
+                    "Granted {}, but its expiry couldn't be set ({}) — set it on the Permissions tab.",
+                    item.permission_value, e.message
+                )),
+            }
+        }
+        if set > 0 {
+            let _ = write!(applied.summary, " Expires {day}.");
+        }
     }
+    Ok(applied)
 }
 
 /// The single scoping mechanism this cart can apply, or `None` for org-wide.
@@ -551,6 +608,12 @@ pub fn ScopeWizard(
     let site_write = RwSignal::new(false);
     let item_urls = RwSignal::new(String::new());
     let item_write = RwSignal::new(false);
+    // The org-wide path's "Expires" choice: `never` or a day count.
+    let expires_in = RwSignal::new("never".to_string());
+    // Only Application grants can carry an expiry (it's a tag on the holding
+    // service principal, matched to an app role).
+    let has_app_items =
+        move || selected.with(|s| s.iter().any(|i| i.kind == PermissionKind::Application));
     // The level the cart grants at — drives the target panel's per-URL
     // accept/reject preview. `None` whenever the cart isn't a homogeneous
     // sub-site Selected selection, which is also when the panel isn't shown.
@@ -593,6 +656,7 @@ pub fn ScopeWizard(
         // open of the wizard, pre-filled against a different permission.
         item_urls.set(String::new());
         item_write.set(false);
+        expires_in.set("never".to_string());
         busy.set(false);
         error.set(None);
         needs_consent.set(false);
@@ -760,6 +824,7 @@ pub fn ScopeWizard(
             }
         };
 
+        let expires_on = expiry_date_in(&expires_in.get_untracked(), jiff::Timestamp::now());
         busy.set(true);
         error.set(None);
         needs_consent.set(false);
@@ -767,7 +832,7 @@ pub fn ScopeWizard(
         let started_for = tenant_id.clone();
         leptos::task::spawn_local(async move {
             let res = match plan {
-                Plan::OrgWide => apply_orgwide(tenant_id, target, items).await,
+                Plan::OrgWide => apply_orgwide(tenant_id, target, items, expires_on).await,
                 Plan::ExchangeScoped(groups) => {
                     apply_exchange_scoped(tenant_id, target, items, groups).await
                 }
@@ -1042,6 +1107,26 @@ pub fn ScopeWizard(
                             "The app will reach every resource in the tenant. Only choose this when the permission genuinely needs tenant-wide reach."
                         </span>
                     </Callout>
+                    {move || {
+                        has_app_items()
+                            .then(|| {
+                                view! {
+                                    <div class="scope-wizard__expiry">
+                                        <Field label="Expires">
+                                            <Select value=expires_in label="Expires">
+                                                <option value="never">"Never"</option>
+                                                <option value="7">"In 7 days"</option>
+                                                <option value="30">"In 30 days"</option>
+                                                <option value="90">"In 90 days"</option>
+                                            </Select>
+                                        </Field>
+                                        <span class="hint">
+                                            "Nothing is revoked on the day: the next Security audit lists the grant under \"Grants past their expiry\", whose Fix revokes it."
+                                        </span>
+                                    </div>
+                                }
+                            })
+                    }}
                 </Show>
                 {move || {
                     mechanism
@@ -1100,6 +1185,17 @@ pub fn ScopeWizard(
                             }
                         }}
                     </dd>
+                    {move || {
+                        let date = (active_mode.get() == ScopeMode::OrgWide && has_app_items())
+                            .then(|| expiry_date_in(&expires_in.get(), jiff::Timestamp::now()))
+                            .flatten()?;
+                        Some(
+                            view! {
+                                <dt>"Expiry"</dt>
+                                <dd>{format!("Expires {date} (end of day, UTC)")}</dd>
+                            },
+                        )
+                    }}
                 </dl>
                 <span class="ui-text">{review_line}</span>
                 {move || {
@@ -1560,6 +1656,20 @@ mod tests {
         assert!(
             !sites_need_write(&[]),
             "an empty cart never reaches the sites step"
+        );
+    }
+
+    #[test]
+    fn expiry_choices_count_days_on_the_utc_calendar() {
+        let now: jiff::Timestamp = "2026-11-25T23:30:00Z".parse().unwrap();
+        assert_eq!(expiry_date_in("never", now), None);
+        assert_eq!(
+            expiry_date_in("7", now),
+            Some("2026-12-02".parse().unwrap())
+        );
+        assert_eq!(
+            expiry_date_in("90", now),
+            Some("2027-02-23".parse().unwrap())
         );
     }
 }

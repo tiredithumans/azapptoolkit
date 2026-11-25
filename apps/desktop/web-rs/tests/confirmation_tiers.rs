@@ -24,6 +24,11 @@ use std::path::Path;
 /// `(file under src/, fragment that must be present, the rule it carries)`.
 const REQUIRED: &[(&str, &str, &str)] = &[
     (
+        "views/audit_view/row.rs",
+        "confirm_label=\"Revoke\"",
+        "revoking expired grants removes access the operator chose to end: click-confirm naming the app and grants",
+    ),
+    (
         "views/tabs/conditional_access_tab.rs",
         "confirm_label=\"Turn on\"",
         "turning a network lock on blocks the app's sign-ins outside its locations: click-confirm naming the app",

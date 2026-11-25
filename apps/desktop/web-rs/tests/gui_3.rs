@@ -20,6 +20,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 mod app_site_access;
 #[path = "gui/gallery.rs"]
 mod gallery;
+#[path = "gui/grant_expiry.rs"]
+mod grant_expiry;
 #[path = "gui/managed_identities.rs"]
 mod managed_identities;
 #[path = "gui/managed_identity_scoping.rs"]

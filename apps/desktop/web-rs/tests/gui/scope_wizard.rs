@@ -285,6 +285,11 @@ async fn orgwide_option_grants_without_scoping() {
 
     assert_eq!(ts::call_count("grant_exchange_mailbox_access"), 0);
     assert_eq!(ts::call_count("declare_app_permission"), 0);
+    assert_eq!(
+        ts::call_count("set_grant_expiry"),
+        0,
+        "Never is the default"
+    );
 }
 
 #[wasm_bindgen_test]
@@ -912,4 +917,43 @@ async fn the_review_step_warns_about_a_permission_with_no_built_in_scoping() {
         ),
         "the review step names the unnarrowable permission"
     );
+}
+
+/// An org-wide grant can carry an expiry: once granted, the wizard writes it on
+/// the client service principal the grant returned.
+#[wasm_bindgen_test]
+async fn orgwide_with_expiry_sets_it_after_granting() {
+    let _m = mount_wizard(Some(graph_app_selection("User.Read.All")));
+    ts::mock_ok("grant_single_permission", &fixtures::grant_result());
+    ts::mock_ok("set_grant_expiry", &());
+
+    ts::wait_for(|| ts::query(".scope-wizard__expiry select").is_some()).await;
+    let select: web_sys::HtmlSelectElement = ts::query(".scope-wizard__expiry select")
+        .unwrap()
+        .unchecked_into();
+    select.set_value("30");
+    select
+        .dispatch_event(&web_sys::Event::new("change").unwrap())
+        .unwrap();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+
+    ts::wait_for(|| ts::body_contains("EVERY resource")).await;
+    let expected = jiff::tz::Offset::UTC
+        .to_datetime(jiff::Timestamp::now())
+        .date()
+        .checked_add(jiff::Span::new().days(30))
+        .unwrap()
+        .to_string();
+    assert!(
+        ts::body_contains(&format!("Expires {expected}")),
+        "the review names the date"
+    );
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("set_grant_expiry") == 1).await;
+    let args = ts::last_call("set_grant_expiry").unwrap().args;
+    assert_eq!(args["spObjectId"], "client-sp");
+    assert_eq!(args["resourceAppId"], fixtures::MICROSOFT_GRAPH_APP_ID);
+    assert_eq!(args["appRoleId"], "User.Read.All-role-id");
+    assert_eq!(args["expiresOn"], expected.as_str());
 }

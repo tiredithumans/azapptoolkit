@@ -12,7 +12,7 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlElement;
 
 use crate::bindings::remediation;
-use crate::bindings::remediation::RedundantPermissionsOutcome;
+use crate::bindings::remediation::{RedundantPermissionsOutcome, RevokeExpiredResult};
 use crate::state::{Session, use_session};
 use crate::util::plural;
 use crate::views::dialogs::add_owner::AddOwnerButton;
@@ -156,6 +156,7 @@ pub(super) fn AuditRowActions(
     let sharepoint = find(RemediationKind::ScopeSharePointAccess);
     let add_owner = find(RemediationKind::AddOwner);
     let disable = find(RemediationKind::DisableSignIn);
+    let revoke_expired = find(RemediationKind::RevokeExpiredGrants);
 
     let tab = target_tab(&item, section);
     let kind = item.principal_kind;
@@ -188,6 +189,8 @@ pub(super) fn AuditRowActions(
     // Disabling sign-in changes the app itself, so its confirm dialog names the
     // app rather than a credential or permission list (see `DisableSignInAction`).
     let app_name_disable = item.application_name.clone();
+    let app_name_revoke = item.application_name.clone();
+    let oid_revoke = object_id.clone();
     let target_m = scope_target.clone();
     let target_s = scope_target;
 
@@ -316,6 +319,18 @@ pub(super) fn AuditRowActions(
                         />
                     }
                 })}
+            {revoke_expired
+                .map(|action| {
+                    view! {
+                        <RevokeExpiredGrantsAction
+                            object_id=oid_revoke.clone()
+                            principal_kind=kind
+                            app_name=app_name_revoke.clone()
+                            action=action
+                            on_done=done(RemediationKind::RevokeExpiredGrants)
+                        />
+                    }
+                })}
         </div>
     }
 }
@@ -404,6 +419,122 @@ fn DisableSignInAction(
         </div>
     }
         .into_any()
+}
+
+/// The toast for a revoke-expired-grants run, and whether the finding cleared
+/// (nothing failed).
+fn revoke_expired_report(r: &RevokeExpiredResult) -> (String, bool) {
+    let mut msg = String::new();
+    if !r.revoked.is_empty() {
+        let _ = write!(msg, "Revoked {}.", r.revoked.join(", "));
+    }
+    if !r.already_gone.is_empty() {
+        let _ = write!(
+            msg,
+            "{}No longer held: {} (expiry cleared).",
+            if msg.is_empty() { "" } else { " " },
+            r.already_gone.join(", ")
+        );
+    }
+    if !r.failed.is_empty() {
+        let _ = write!(
+            msg,
+            "{}Couldn't revoke {} — try again, or revoke on the Permissions tab.",
+            if msg.is_empty() { "" } else { " " },
+            r.failed.join(", ")
+        );
+    }
+    for w in &r.warnings {
+        let _ = write!(msg, "{}{w}", if msg.is_empty() { "" } else { " " });
+    }
+    if msg.is_empty() {
+        msg.push_str("Nothing to revoke — the expired grants were already gone.");
+    }
+    (msg, r.failed.is_empty())
+}
+
+/// Rule 25's Fix: revokes the grants whose expiry passed (the backend re-reads
+/// both the dates and the held grants live). Removes access the operator
+/// already chose to end, so a click-confirm naming the app and grants.
+#[component]
+fn RevokeExpiredGrantsAction(
+    object_id: String,
+    principal_kind: AuditPrincipalKind,
+    app_name: String,
+    action: RemediationAction,
+    #[prop(into)] on_done: Callback<String>,
+) -> impl IntoView {
+    let session = use_session();
+    let tenant = session.active_tenant;
+    let open = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+
+    let confirm = move |()| {
+        if busy.get() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let object_id = object_id.clone();
+        let tenant = tenant.get();
+        leptos::task::spawn_local(async move {
+            let Some(t) = tenant else {
+                busy.set(false);
+                return;
+            };
+            let res = remediation::remediate_revoke_expired_grants(
+                &t.tenant_id,
+                &object_id,
+                principal_kind,
+            )
+            .await;
+            if !session.is_active_tenant(&t.tenant_id) {
+                busy.set(false);
+                return;
+            }
+            match res {
+                Ok(r) => {
+                    open.set(false);
+                    let (msg, cleared) = revoke_expired_report(&r);
+                    if cleared {
+                        session.toast_success(msg);
+                        on_done.try_run(object_id);
+                    } else {
+                        session.toast_error(msg, None);
+                    }
+                }
+                Err(e) => fail_fix(session, error, e),
+            }
+            busy.set(false);
+        });
+    };
+
+    let label = action.label.clone();
+    let subject = format!("{app_name}: {}", action.targets.join(", "));
+
+    view! {
+        <div class="audit-actions">
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                on_click=Box::new(move |_| open.set(true))
+            >
+                {label}
+            </Button>
+            <ConfirmDialog
+                open=Signal::derive(move || open.get())
+                title="Revoke expired grants?"
+                body="Revokes these application permissions now: their expiry dates have passed. On an app registration they're also removed from its API permissions. To keep one, cancel and set a new expiry on the Permissions tab instead."
+                subject=subject
+                confirm_label="Revoke"
+                busy=Signal::derive(move || busy.get())
+                error=Signal::derive(move || error.get())
+                on_confirm=Callback::new(confirm)
+                on_close=Callback::new(move |()| open.set(false))
+            />
+        </div>
+    }
+    .into_any()
 }
 
 /// What the remove-redundant-permissions Fix reports, and whether it cleared the

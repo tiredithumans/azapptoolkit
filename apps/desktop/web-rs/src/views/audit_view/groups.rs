@@ -146,6 +146,16 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Rule 25 — grants whose expiry date (set on the Permissions tab or in the
+    // Grant access wizard) has passed. Its Fix revokes them; the handler
+    // re-reads the dates and the held grants live.
+    GroupSpec {
+        key: "expired_grants",
+        title: "Grants past their expiry",
+        blurb: "Application permissions whose expiry date has passed. Revoke them, or set a new date on the Permissions tab if the app still needs them. On an app registration the revoke also removes them from its API permissions, so \"Grant admin consent\" can't quietly restore them.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     // Org-wide reach the toolkit cannot confine — advisory siblings of
     // `high_risk_perms`, split by the scorer's advice (remove vs. review).
     GroupSpec {
@@ -377,6 +387,7 @@ pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
         "redundant_perms" => &[RemediationKind::RemoveRedundantPermissions],
         "ownership" => &[RemediationKind::AddOwner],
         "unused" => &[RemediationKind::DisableSignIn],
+        "expired_grants" => &[RemediationKind::RevokeExpiredGrants],
         _ => &[],
     }
 }
@@ -833,6 +844,7 @@ mod tests {
             RemediationKind::AddOwner,
             RemediationKind::MigrateApplicationAccessPolicy,
             RemediationKind::DisableSignIn,
+            RemediationKind::RevokeExpiredGrants,
         ];
         for kind in all {
             let owners: Vec<&str> = GROUP_CATALOG

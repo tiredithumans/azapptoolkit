@@ -68,6 +68,10 @@ pub fn HeldPermissionsPanel(
     /// always a Microsoft Graph `Sites.*` application role).
     #[prop(optional, into)]
     on_scope: Option<Callback<PickerSelection>>,
+    /// Set or clear a grant's expiry: emits `(resource_app_id, app_role_id,
+    /// label)`. Rendered only on rows whose resource resolved.
+    #[prop(optional, into)]
+    on_expiry: Option<Callback<(String, String, String)>>,
     /// When true, the per-row revoke/scope actions are disabled — the caller
     /// sets this while a mutation it owns is in flight, so a second click can't
     /// fire a duplicate revoke/scope (and the greyed buttons signal "in
@@ -146,7 +150,7 @@ pub fn HeldPermissionsPanel(
         })
         .collect();
 
-    let has_actions = on_revoke.is_some() || on_scope.is_some();
+    let has_actions = on_revoke.is_some() || on_scope.is_some() || on_expiry.is_some();
     let mut headers = vec!["Resource", "Permission"];
     if show_scope_column {
         headers.push("Scope");
@@ -191,6 +195,22 @@ pub fn HeldPermissionsPanel(
                 }
             })
         });
+        let expiry_btn = on_expiry.and_then(|cb| {
+            let resource = row_resource_app_id.clone()?;
+            let role = app_role_id.clone();
+            let label = perm.clone();
+            Some(view! {
+                <IconButton
+                    icon=IconName::Clock
+                    aria_label=format!("Set expiry for {perm} on {res}")
+                    title="Expiry…".to_string()
+                    disabled=busy
+                    on_click=Callback::new(move |_| {
+                        cb.run((resource.clone(), role.clone(), label.clone()))
+                    })
+                />
+            })
+        });
         let revoke_btn = on_revoke.map(|cb| {
             let aid = assignment_id.clone();
             view! {
@@ -233,7 +253,7 @@ pub fn HeldPermissionsPanel(
                     .then(|| {
                         view! {
                             <td class="cell-mid">
-                                <div class="cell-actions">{scope_btn}{revoke_btn}</div>
+                                <div class="cell-actions">{scope_btn}{expiry_btn}{revoke_btn}</div>
                             </td>
                         }
                     })}

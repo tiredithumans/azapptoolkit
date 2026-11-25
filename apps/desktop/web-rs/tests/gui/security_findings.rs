@@ -1134,3 +1134,57 @@ async fn unscopable_group_renders_checklist() {
         "a vendor row's credentials live in its home tenant: {detail}"
     );
 }
+
+/// Rule 25: a grant past its expiry gets its own group, whose Fix names the
+/// app and the grants in a click-confirm and routes an SP-only row by kind.
+#[wasm_bindgen_test]
+async fn expired_grants_group_offers_revoke_with_a_named_confirm() {
+    use azapptoolkit_core::audit::revoke_expired_remediation;
+    use azapptoolkit_dto::permissions::RevokeExpiredResult;
+    ts::reset();
+    let mut run = cached_run();
+    let mut vendor = fixtures::audit_item(
+        "Chat Archiver",
+        RiskLevel::Medium,
+        &[format!(
+            "{} Chat.Read.All (expired 2026-11-01)",
+            issue::GRANT_EXPIRED
+        )],
+    );
+    vendor.principal_kind = AuditPrincipalKind::ServicePrincipal;
+    vendor.expired_grants = vec!["Chat.Read.All".to_string()];
+    vendor.remediations = vec![revoke_expired_remediation(&vendor.expired_grants)];
+    run.items.push(vendor);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok(
+        "remediate_revoke_expired_grants",
+        &RevokeExpiredResult {
+            revoked: vec!["Chat.Read.All".to_string()],
+            ..Default::default()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Grants past their expiry")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("expired_grants".to_string()));
+    ts::wait_for(|| ts::has_button_labelled("Revoke 1 expired grant")).await;
+    ts::click_button_labelled("Revoke 1 expired grant");
+    ts::wait_for(|| ts::body_contains("Revoke expired grants?")).await;
+    assert_eq!(
+        ts::query(".confirm-dialog__subject")
+            .and_then(|el| el.text_content())
+            .as_deref(),
+        Some("Chat Archiver: Chat.Read.All")
+    );
+    ts::click_button_labelled("Revoke");
+    ts::wait_for(|| ts::call_count("remediate_revoke_expired_grants") == 1).await;
+    let args = ts::last_call("remediate_revoke_expired_grants")
+        .unwrap()
+        .args;
+    assert_eq!(args["objectId"], "obj-Chat Archiver");
+    assert_eq!(args["principalKind"], "service_principal");
+    ts::wait_for(|| !ts::has_button_labelled("Revoke 1 expired grant")).await;
+}
