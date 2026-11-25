@@ -63,6 +63,21 @@ pub fn decode_expiry_tag(tag: &str) -> Option<Option<GrantExpiry>> {
     }))
 }
 
+/// Rule 25's Fix for the named expired grants (the names ride `targets` for
+/// the confirm).
+pub fn revoke_expired_remediation(names: &[String]) -> super::RemediationAction {
+    super::RemediationAction {
+        kind: super::RemediationKind::RevokeExpiredGrants,
+        label: format!(
+            "Revoke {} expired grant{}",
+            names.len(),
+            if names.len() == 1 { "" } else { "s" }
+        ),
+        detail: names.join(", "),
+        targets: names.to_vec(),
+    }
+}
+
 /// Every valid expiry among a principal's tags.
 pub fn expiries_in(tags: &[String]) -> Vec<GrantExpiry> {
     tags.iter()

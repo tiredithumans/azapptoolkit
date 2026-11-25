@@ -1099,6 +1099,7 @@ async fn unscopable_group_renders_checklist() {
         last_used: azapptoolkit_core::audit::GrantUsage::NotSeen {
             since: "2026-08-27T00:00:00Z".parse().unwrap(),
         },
+        expires_on: None,
     }];
     run.items.push(vendor);
     run.total_apps = run.items.len();

@@ -97,6 +97,7 @@ struct RowDone {
     sharepoint: Callback<String>,
     add_owner: Callback<String>,
     disable: Callback<String>,
+    revoke_expired: Callback<String>,
 }
 
 impl AuditController {
@@ -175,6 +176,7 @@ impl AuditController {
             sharepoint: done(RemediationKind::ScopeSharePointAccess),
             add_owner: done(RemediationKind::AddOwner),
             disable: done(RemediationKind::DisableSignIn),
+            revoke_expired: done(RemediationKind::RevokeExpiredGrants),
         };
         let on_bulk_done = Callback::new(move |_| session.bump_apps_reload());
 
@@ -401,6 +403,7 @@ impl AuditController {
             RemediationKind::ScopeSharePointAccess => self.row_done.sharepoint,
             RemediationKind::AddOwner => self.row_done.add_owner,
             RemediationKind::DisableSignIn => self.row_done.disable,
+            RemediationKind::RevokeExpiredGrants => self.row_done.revoke_expired,
         }
     }
 

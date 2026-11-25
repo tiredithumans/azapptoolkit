@@ -530,6 +530,13 @@ pub enum RemediationKind {
     /// Attached by the audit *runner*, not `score_application`: `unused` is a
     /// runner post-pass flag (the sign-in report is fetched separately).
     DisableSignIn,
+    /// Revoke the grants whose expiry date has passed (Rule 25) and, on an app
+    /// registration, remove them from its API permissions. Safe because the
+    /// operator set the date to end the access; the handler re-reads the tags
+    /// and the held assignments live and revokes only what is still held and
+    /// still past its date. `targets` carries the permission names for the
+    /// confirm.
+    RevokeExpiredGrants,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -661,6 +668,11 @@ pub struct AuditItem {
     /// cached runs from before the field existed.
     #[serde(default)]
     pub unscopable_grants: Vec<super::UnscopableGrant>,
+    /// Rule 25: the names of grants whose expiry date has passed (the role id
+    /// when the name couldn't be resolved). Filled by the runner's expiry pass;
+    /// the Fix re-reads them live.
+    #[serde(default)]
+    pub expired_grants: Vec<String>,
 }
 
 /// Stable markers the UI keys audit facets/home cards off. The scorer emits
@@ -760,6 +772,10 @@ pub mod issue {
     /// whole tenant. The structured list is `AuditItem::unscopable_grants`.
     /// No remediation — removing a permission is admin-judged.
     pub const UNSCOPABLE_PRIVILEGED: &str = "No built-in scoping:";
+    /// Rule 25 (advisory, no score, a runner post-pass): grants whose expiry
+    /// tag (`audit::grant_expiry`) has passed. Fires on the tag alone; the
+    /// [`super::RemediationKind::RevokeExpiredGrants`] Fix re-checks live.
+    pub const GRANT_EXPIRED: &str = "Grants past their expiry:";
 }
 
 #[cfg(test)]

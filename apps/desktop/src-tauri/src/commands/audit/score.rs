@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use azapptoolkit_core::audit::{
-    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, GrantUsage, RemediationKind,
-    ResourcePermission, SpAuditInput, apply_service_principal_risk, families_for_permission,
-    grant_usage, is_expired, score_application, score_service_principal, secret_lifetime_advisory,
-    unused_app_advisory, unused_credential_advisory,
+    AppPermissions, AuditItem, CredentialActivity, CredentialLifetime, GrantExpiry, GrantUsage,
+    RemediationKind, ResourcePermission, SpAuditInput, apply_service_principal_risk, expiries_in,
+    expiry_has_passed, families_for_permission, grant_usage, is_expired, score_application,
+    score_service_principal, secret_lifetime_advisory, unused_app_advisory,
+    unused_credential_advisory,
 };
 use azapptoolkit_core::conditional_access::{
     LockIneligible, NetworkLock, lock_ineligibility_for_app, lock_ineligibility_for_sp,
@@ -248,6 +249,100 @@ pub(crate) fn score_sp_only(
     item
 }
 
+/// Permission names for the expiries the run's principals carry, keyed by
+/// `(resourceAppId, appRoleId)`, from the cached resource-SP read. NOT through
+/// the run's `ResourceResolver`, whose misses mark the run degraded: a tag
+/// naming a deleted resource must not make every audit uncacheable. A miss
+/// simply leaves the role id as the name.
+pub(crate) async fn resolve_expiry_names(
+    ctx: &ScoreCtx,
+    expiries: &[GrantExpiry],
+) -> HashMap<(String, String), String> {
+    let mut names = HashMap::new();
+    let resources: HashSet<&str> = expiries
+        .iter()
+        .map(|e| e.resource_app_id.as_str())
+        .collect();
+    for resource in resources {
+        if let Ok(Some(sp)) = ctx.client.resolve_resource_sp(resource).await {
+            for role in sp.app_roles.iter().filter(|r| !r.value.is_empty()) {
+                names.insert(
+                    (resource.to_string(), role.id.to_ascii_lowercase()),
+                    role.value.clone(),
+                );
+            }
+        }
+    }
+    names
+}
+
+/// Rule 25, the runner's post-pass: for each row, the expiry tags its service
+/// principal carries (`tags_for(app_id)`, from the run's SP index). Passed
+/// ones add the issue and the `RevokeExpiredGrants` Fix; every expiry also
+/// dates the matching Rule 24 grant for the checklist. No score.
+pub(crate) fn apply_grant_expiries_with(
+    items: &mut [AuditItem],
+    tags_for: impl Fn(&str) -> Option<Vec<String>>,
+    names: &HashMap<(String, String), String>,
+    now: Timestamp,
+) {
+    for item in items.iter_mut() {
+        let Some(tags) = tags_for(&item.app_id) else {
+            continue;
+        };
+        let expiries = expiries_in(&tags);
+        if expiries.is_empty() {
+            continue;
+        }
+        let name_of = |e: &GrantExpiry| {
+            names
+                .get(&(e.resource_app_id.clone(), e.app_role_id.clone()))
+                .cloned()
+                .unwrap_or_else(|| e.app_role_id.clone())
+        };
+        for grant in &mut item.unscopable_grants {
+            let resource = grant
+                .permission
+                .resource_app_id
+                .as_deref()
+                .unwrap_or(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID);
+            grant.expires_on = expiries
+                .iter()
+                .find(|e| {
+                    e.resource_app_id.eq_ignore_ascii_case(resource)
+                        && name_of(e) == grant.permission.value
+                })
+                .map(|e| e.expires_on);
+        }
+        let passed: Vec<&GrantExpiry> = expiries
+            .iter()
+            .filter(|e| expiry_has_passed(e.expires_on, now))
+            .collect();
+        if passed.is_empty() {
+            continue;
+        }
+        let names_passed: Vec<String> = passed.iter().map(|e| name_of(e)).collect();
+        let listing = passed
+            .iter()
+            .map(|e| format!("{} (expired {})", name_of(e), e.expires_on))
+            .collect::<Vec<_>>()
+            .join(", ");
+        item.issues.push(format!(
+            "{} {listing}",
+            azapptoolkit_core::audit::issue::GRANT_EXPIRED
+        ));
+        item.recommendations.push(
+            "Revoke them, or set a new expiry on the Permissions tab if they're still needed"
+                .to_string(),
+        );
+        item.remediations
+            .push(azapptoolkit_core::audit::revoke_expired_remediation(
+                &names_passed,
+            ));
+        item.expired_grants = names_passed;
+    }
+}
+
 /// Fills each tracked Rule 24 grant's `last_used` from the run's Graph
 /// activity usage, after scoring (the query ran alongside it). Untracked
 /// grants keep Rule 24's `NotTracked`. App ids compare case-insensitively.
@@ -335,6 +430,7 @@ pub(crate) fn sp_audit_candidates(
     local_app_ids: &HashSet<String>,
     granted_roles_by_sp: &HashMap<String, Vec<ResourcePermission>>,
     risky_by_sp: &HashMap<String, (String, String)>,
+    now: Timestamp,
 ) -> Vec<ServicePrincipal> {
     sp_index
         .iter()
@@ -344,6 +440,12 @@ pub(crate) fn sp_audit_candidates(
                 .get(&sp.id)
                 .is_some_and(|v| !v.is_empty())
                 || risky_by_sp.contains_key(&sp.id)
+                // Rule 25 fires on the tag alone: a vendor whose only
+                // expiring grant is on an API the matrices don't cover still
+                // gets a row.
+                || expiries_in(&sp.tags)
+                    .iter()
+                    .any(|e| expiry_has_passed(e.expires_on, now))
         })
         .cloned()
         .collect()

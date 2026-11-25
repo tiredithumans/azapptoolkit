@@ -3041,6 +3041,7 @@ fn unscopable(value: &str, risk: RiskLevel, m: Option<UnmanagedMechanism>) -> Un
         last_used: GrantUsage::Unknown {
             reason: UsageUnknownReason::NotChecked,
         },
+        expires_on: None,
     }
 }
 

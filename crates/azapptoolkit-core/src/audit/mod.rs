@@ -39,7 +39,7 @@ pub use credentials::{
 pub use finding::{finding_issue_marker, matches_finding};
 pub use grant_expiry::{
     GRANT_EXPIRY_TAG_FAMILY, GrantExpiry, decode_expiry_tag, encode_expiry_tag, expiries_in,
-    expiry_has_passed, with_expiry,
+    expiry_has_passed, revoke_expired_remediation, with_expiry,
 };
 pub use permissions::{
     EXPIRY_WARNING_DAYS, HIGH_RISK_APP_PERMISSIONS, HIGH_RISK_DELEGATED_PERMISSIONS,
