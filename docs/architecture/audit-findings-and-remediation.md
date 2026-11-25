@@ -31,6 +31,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 23 | `rule_granted_undeclared` | advisory (the grants themselves are weighted by Rules 1/2 — the runner merges them into `app_role_grants`) | `GRANTED_NOT_DECLARED` | `granted_undeclared` | — (revoking a deliberate grant is admin-judged) | net-new |
 | 24 | `rule_unscopable_privileged` (+ the runner's `apply_network_locks` post-pass) | advisory (the grants are weighted by Rules 1/2) | `UNSCOPABLE_PRIVILEGED` (structured `unscopable_grants`) | `unscopable_privileged` | — (removing a permission is admin-judged) | net-new; see [No built-in scoping](#no-built-in-scoping-rule-24) |
 | 25 | the runner's `apply_grant_expiries_with` post-pass (names from `resolve_expiry_names`) | advisory | `GRANT_EXPIRED` (structured `expired_grants`) | `expired_grants` | `RevokeExpiredGrants` → `remediate_revoke_expired_grants` | net-new; see [Expiring grants](#expiring-grants-b3) |
+| 26 | `rule_directory_write` (+ the runner's `prefetch_directory_roles`) | advisory for the org-wide line; the limited line scores `PTS_SCOPED_HIGH_RISK_DIRECTORY` (3) per role | `ORG_WIDE_DIRECTORY_WRITE` / `SCOPED_DIRECTORY_WRITE` | `orgwide_directory_write` / `scoped_directory_write` (healthy) | `ScopeDirectoryWrite` → `scope_directory_write` | net-new; see [Admin-unit scoping](#admin-unit-scoping-c1) |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
 | 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
@@ -517,6 +518,39 @@ warning). Nothing happens on the day: the next audit lists the grant, and its Fi
   (`regranted`); a pair no longer past its date is left alone (`unchanged`); a refused revoke
   keeps its tag and its error rides `RevokeExpiredResult.error`, stopping on a re-auth-fatal code.
   Anything unfinished keeps the row's Fix and an error toast.
+
+## Admin-unit scoping (C1)
+
+`ScopeKind::AdministrativeUnit` replaces a tenant-wide Microsoft Graph `User.ReadWrite.All`,
+`Group.ReadWrite.All` or `Device.ReadWrite.All` with the matching Entra admin role (User, Groups or
+Cloud Device Administrator) **assigned at administrative-unit scope**, so the app's writes reach
+only the unit's members. Microsoft lets a service principal hold these roles, vendor apps included.
+
+- **One table** (`core::scoping::admin_unit::DIRECTORY_WRITE_MAPPINGS`, Graph only): the role, its
+  template id, the tenant-wide read it needs (the role is unusable without tenant-wide read, which
+  can't be limited to a unit), the kind of member the unit must hold, and what the role also allows
+  and what the app can no longer do — both shown before the operator confirms (verified against
+  Microsoft's built-in roles reference; Cloud Device Administrator also reads BitLocker keys and
+  local admin passwords).
+- **The apply** (`commands::admin_units::scope_directory_write_core`, both principal kinds) reads
+  everything first, assigns the role at `/administrativeUnits/{id}` (idempotent; the Graph client
+  builds the scope, so it can't assign tenant-wide), makes sure the app can read tenant-wide (the
+  mapped read or `Directory.Read(Write).All`, else granted and declared), and only then strips the
+  tenant-wide write and its declaration — **kept**, with the reason, when the unit was created in
+  this run, has no members of the right kind, or its rule is paused. A tenant-scope copy of the same
+  role, or Global Administrator, voids the limit: reported, never shown healthy.
+- **Admin units** are picked (a dynamic unit is refused for a group permission: dynamic rules
+  can't add groups) or created by rule (a users-whose-attribute-equals builder, or an advanced
+  rule). One permission per wizard run: each needs a different role and kind of unit.
+- **Rule 26** reads the direct, active role assignments once per run (sign-in `Directory.Read.All`;
+  unreadable → unknown, no gap). Org-wide holders get the Scope fix; a limited principal gets the
+  healthy line and the reduced scoped weight, so limiting never reads as all-clear.
+- **The Directory roles section** lists a principal's direct, active roles; only admin-unit-scoped
+  ones have Remove (re-read live; `not_admin_unit_scoped` otherwise).
+- **Limitation:** roles inherited through a role-assignable group and PIM-eligible roles are not
+  read. Writes ride the on-demand `admin_unit_roles` consent (`RoleManagement.ReadWrite.Directory`
+  + `AdministrativeUnit.ReadWrite.All`); capability `admin_unit_roles` (Privileged Role
+  Administrator).
 
 ## The risky-service-principal signal (Rule 22)
 
