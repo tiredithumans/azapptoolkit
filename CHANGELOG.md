@@ -11,6 +11,7 @@ After 0.34.1, each change is one line written for the person using the app.
 - The Security tab flags permissions Microsoft offers no way to narrow, with each app's safeguards.
 - The Security tab flags unnarrowable permissions with no matching call in Microsoft Graph activity logs.
 - The Conditional Access tab can lock an app to named locations: report-only first, then turn it on.
+- Application-permission grants can be given an expiry date; the Security tab flags and revokes expired ones.
 
 ### Changed
 

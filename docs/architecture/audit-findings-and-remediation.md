@@ -30,6 +30,7 @@ tests cite — the legacy PowerShell module is not vendored here (see `audit/mod
 | 13 | `rule_high_risk_delegated` | advisory | `HIGH_RISK_DELEGATED_PERMS` | `high_risk_delegated` | — | list `Constants.ps1:104-130`; the broad-prefix half (`is_risky_delegated_scope`, every Selected scope excluded) is net-new |
 | 23 | `rule_granted_undeclared` | advisory (the grants themselves are weighted by Rules 1/2 — the runner merges them into `app_role_grants`) | `GRANTED_NOT_DECLARED` | `granted_undeclared` | — (revoking a deliberate grant is admin-judged) | net-new |
 | 24 | `rule_unscopable_privileged` (+ the runner's `apply_network_locks` post-pass) | advisory (the grants are weighted by Rules 1/2) | `UNSCOPABLE_PRIVILEGED` (structured `unscopable_grants`) | `unscopable_privileged` | — (removing a permission is admin-judged) | net-new; see [No built-in scoping](#no-built-in-scoping-rule-24) |
+| 25 | the runner's `apply_grant_expiries_with` post-pass (names from `resolve_expiry_names`) | advisory | `GRANT_EXPIRED` (structured `expired_grants`) | `expired_grants` | `RevokeExpiredGrants` → `remediate_revoke_expired_grants` | net-new; see [Expiring grants](#expiring-grants-b3) |
 | 14 | `rule_app_hygiene` | advisory | `NO_OWNERS`, `SINGLE_OWNER` | `ownership` | `AddOwner` | not cited |
 | 15–17 | same | advisory | `INSTANCE_LOCK_DISABLED`, `PUBLIC_CLIENT_CREDENTIALS`, `PREFER_CERT_OVER_SECRET` | — | — | net-new (tests' "Tier-2 advisory rules") |
 | 18 | `rule_redundant_permissions` | advisory (the narrower grant keeps its Rule 1/2 weight) | `REDUNDANT_APP_PERMS` | `redundant_perms` | `RemoveRedundantPermissions` | not cited |
@@ -473,6 +474,37 @@ The checklist's network-lock line is set up from the app registration's **Condit
 - **Licence:** a refusal that names workload identities maps to `workload_identity_license_required`
   (Graph doesn't document the exact error). Scopes: `conditional_access_write` (Policy.Read.All +
   Policy.ReadWrite.ConditionalAccess); capability `conditional_access_lock`.
+
+## Expiring grants (B3)
+
+An application grant can carry an **expiry date**, set on the Permissions tab (an **Expiry…**
+button on granted Application rows, and on an enterprise app's held permissions) or in the Grant
+access wizard's org-wide path (**Expires**: never / 7 / 30 / 90 days, written after the grant
+lands; a failed write is a warning). Nothing happens on the day: the next audit lists the grant,
+and its Fix revokes it.
+
+- **Storage:** one tag per grant on the holding service principal,
+  `azapptoolkit:grantExpiry:v1|{resourceAppId}|{appRoleId}|{YYYY-MM-DD}`
+  (`audit::grant_expiry`: `encode_expiry_tag` / `decode_expiry_tag` / `expiries_in` /
+  `with_expiry`). Tags are untrusted input: GUIDs lower-cased and shape-checked, an unknown
+  version or a malformed tag is ignored, never guessed at. A grant **expires at the end of its day,
+  UTC** (`expiry_has_passed`); today is not yet expired.
+- **Writers** (`commands::grant_expiry::set_grant_expiry`, the Fix, and the HideApp toggle) re-read
+  the live tags and write the whole collection back under one per-SP gate,
+  `sp_tags_gate_key` — pinned by `repo_invariants::every_sp_tag_writer_holds_the_shared_gate`
+  (the DR restore is exempt: it writes the tags of a service principal it has just created). A
+  landed write calls `record_sp_tags`, which patches the SP index row.
+- **Rule 25** reads every row's tags from the run's SP index (which selects `tags`), so it costs
+  no Graph call per app; an SP past the index cap gets no expiry check. Names come from the cached
+  resource-SP read, **not** the run's `ResourceResolver`: a tag naming a deleted resource or a role
+  it no longer defines shows the role id and never degrades the run. SP-only candidates are
+  admitted on a passed expiry alone. Every expiry also dates its Rule 24 grant
+  (`UnscopableGrant.expires_on`) for the checklist.
+- **The Fix** (`remediate_revoke_expired_grants`, click-confirm naming the app and grants) re-reads
+  the tags and the held assignments live, revokes each still-held grant past its date, removes
+  those declarations from an app registration's manifest in one PATCH (so the portal's "Grant
+  admin consent" can't quietly restore them), and clears the processed tags. A grant already gone
+  only has its tag cleared (`already_gone`); a resource it can't read keeps its tags (`failed`).
 
 ## The risky-service-principal signal (Rule 22)
 

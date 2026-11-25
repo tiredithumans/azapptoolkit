@@ -459,10 +459,12 @@ roles/scopes (`app_roles.rs`, `expose_api.rs`) change one app or SP in place —
 rename nothing, so nothing in the list tier changes — and call `invalidate_app_details` (the
 can't-miss cheap sweep of the per-app payloads). `repo_invariants::an_in_place_write_never_busts_the_list_tier`
 pins both tiers lexically: a command body with an in-place mutation call and no set-changing call
-must not name `invalidate_app_lists`. An SP PATCH is in place too: hiding an app from My Apps (a
-tag), `appRoleAssignmentRequired` and the SAML signing-key thumbprint are on no list row, so they
-take the detail tier, while `accountEnabled` is selected into the SP index and shown on the
-Enterprise list, so it busts the list tier — the pin reads the indexed fields from the graph
+must not name `invalidate_app_lists`. An SP PATCH is in place too: `appRoleAssignmentRequired` and
+the SAML signing-key thumbprint are on no list row, so they take the detail tier, while
+`accountEnabled` is selected into the SP index and shown on the Enterprise list, so it busts the
+list tier. `tags` are selected into the SP index too (the audit reads grant expiries from it), so a
+tag write — hiding an app from My Apps, a grant expiry — patches that one row through
+`record_sp_tags` and drops the enterprise projection, never rescanning — the pin reads the indexed fields from the graph
 client's `SP_INDEX_SELECT` rather than listing them by hand. Removing an app's Exchange mailbox
 scoping and the AAP migration take `invalidate_app_detail_state` for the same reason.
 

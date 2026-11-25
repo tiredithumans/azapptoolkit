@@ -2737,3 +2737,36 @@ fn sign_in_forgets_the_tenant_but_reauthenticate_keeps_its_caches() {
         "`reauthenticate` restores the SAME account in place and must keep the data caches"
     );
 }
+
+/// Every service-principal tag writer (the HideApp toggle, the grant-expiry
+/// commands) re-reads and writes back the whole collection, so each holds the
+/// one per-SP gate, `grant_expiry::sp_tags_gate_key`: two unserialized writers
+/// drop each other's tags (a HideApp toggle racing an expiry write loses one).
+#[test]
+fn every_sp_tag_writer_holds_the_shared_gate() {
+    use super::sources::{calls, command_functions};
+    /// `(writer, why it needs no gate)`.
+    const EXEMPT: &[(&str, &str)] = &[(
+        "restore_enterprise_app",
+        "writes the backup's tags onto a service principal this restore created moments \
+         earlier: no other writer can know its id yet",
+    )];
+    let writers: Vec<_> = command_functions()
+        .into_iter()
+        .filter(|f| calls(&f.body, "set_service_principal_tags"))
+        .filter(|f| !EXEMPT.iter().any(|(name, _)| *name == f.name))
+        .collect();
+    assert!(
+        writers.len() >= 3,
+        "expected the HideApp toggle and both grant-expiry writers, found {:?}",
+        writers.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    for f in &writers {
+        assert!(
+            calls(&f.body, "sp_tags_gate_key"),
+            "`{}` writes service-principal tags without holding the per-SP gate \
+             (`grant_expiry::sp_tags_gate_key`)",
+            f.name
+        );
+    }
+}
