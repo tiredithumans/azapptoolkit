@@ -38,6 +38,9 @@ pub(crate) const SP_INDEX_SELECT: &[&str] = &[
     "createdDateTime",
     "alternativeNames",
     "disabledByMicrosoftStatus",
+    // Grant expiries (`audit::grant_expiry`) are SP tags: the audit reads every
+    // principal's from the index, and a tag write patches the row.
+    "tags",
 ];
 
 /// `sp` projected to the fields the tenant index selects. A write
@@ -55,6 +58,7 @@ pub fn sp_index_row(sp: &ServicePrincipal) -> ServicePrincipal {
         created_date_time: sp.created_date_time,
         alternative_names: sp.alternative_names.clone(),
         disabled_by_microsoft_status: sp.disabled_by_microsoft_status.clone(),
+        tags: sp.tags.clone(),
         ..ServicePrincipal::default()
     }
 }
@@ -625,8 +629,25 @@ impl GraphClient {
         self.get_json_optional(&path, &params).await
     }
 
-    /// Replaces a service principal's `tags` array (full-set PATCH). Used to
-    /// toggle the `HideApp` tag that controls My Apps portal visibility.
+    /// A service principal's `tags`, read live on their own (uncached). Tag
+    /// writers re-read the set with this before writing the whole collection
+    /// back with [`Self::set_service_principal_tags`].
+    pub async fn get_service_principal_tags(&self, object_id: &str) -> Result<Vec<String>> {
+        validate::require_path_segment("service principal id", object_id)?;
+        #[derive(serde::Deserialize)]
+        struct SpTags {
+            #[serde(default)]
+            tags: Option<Vec<String>>,
+        }
+        let path = format!("/servicePrincipals/{object_id}");
+        let params: [(&str, &str); 1] = [("$select", "id,tags")];
+        let sp: SpTags = self.get_json(&path, &params, false).await?;
+        Ok(sp.tags.unwrap_or_default())
+    }
+
+    /// Replaces a service principal's `tags` array (full-set PATCH): the
+    /// `HideApp` tag that controls My Apps portal visibility, and grant
+    /// expiries. Callers serialize per SP and write the re-read set back.
     pub async fn set_service_principal_tags(&self, object_id: &str, tags: &[String]) -> Result<()> {
         validate::require_path_segment("service principal id", object_id)?;
         let path = format!("/servicePrincipals/{object_id}");
