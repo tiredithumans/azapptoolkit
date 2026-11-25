@@ -9,7 +9,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Added
 
 - The Security tab flags permissions Microsoft offers no way to narrow, with each app's safeguards.
-- The Security tab shows when each unnarrowable permission was last used, from Graph activity logs.
+- The Security tab flags unnarrowable permissions with no matching call in Microsoft Graph activity logs.
 
 ### Changed
 

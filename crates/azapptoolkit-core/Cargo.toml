@@ -35,3 +35,6 @@ workspace = true
 # `sleep_before_retry`'s BRANCH assertable: virtual time advances instantly, so
 # a test can prove a 120s Retry-After is honored verbatim without waiting 120s.
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+# Evaluates the Graph-activity KQL regexes `audit::usage` generates, so the
+# query that runs is pinned against the matcher the tests exercise.
+regex = { workspace = true }

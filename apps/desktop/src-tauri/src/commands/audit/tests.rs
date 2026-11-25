@@ -8,6 +8,7 @@ use super::prefetch::{
     graph_usage_from_tables, prefetch_admin_consent_grants, prefetch_office365_role_grants,
     risky_service_principals_outcome, sign_in_activity_outcome, sign_in_pre_acquire_outcome,
 };
+use super::run::await_usage;
 use super::score::{
     apply_graph_usage, apply_network_locks, combine_granted_roles, derive_orgwide_mail_scopes,
     ews_full_access_holders, merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
@@ -2121,8 +2122,11 @@ fn graph_usage_from_tables_maps_by_column_name() {
             ]
         ]),
     );
-    let since = la_table(&["Since"], serde_json::json!([["2026-09-01T00:00:00Z"]]));
-    let u = graph_usage_from_tables(&rows, &since, ts("2026-11-25T00:00:00Z"));
+    let window = la_table(
+        &["Until", "Since"],
+        serde_json::json!([["2026-11-24T20:00:00Z", "2026-09-01T00:00:00Z"]]),
+    );
+    let u = graph_usage_from_tables(&rows, &window, ts("2026-11-25T00:00:00Z")).unwrap();
     assert_eq!(u.since, ts("2026-09-01T00:00:00Z"));
     let app = u
         .by_app
@@ -2132,13 +2136,71 @@ fn graph_usage_from_tables_maps_by_column_name() {
     assert_eq!(app.len(), 1, "an unknown family is dropped");
 }
 
+/// The one claim this feature makes ("no call since X") must never rest on an
+/// invented window: no logs in the window, logs that stopped arriving, a
+/// missing column or an unreadable cell are all Unknown, never NotSeen.
 #[test]
-fn graph_usage_since_falls_back_to_the_window() {
-    let rows = la_table(&["AppId", "Family", "LastSeen"], serde_json::json!([]));
-    let since = la_table(&["Since"], serde_json::json!([]));
+fn graph_usage_fails_closed() {
+    use azapptoolkit_core::audit::UsageUnknownReason as R;
     let now = ts("2026-11-25T00:00:00Z");
-    let u = graph_usage_from_tables(&rows, &since, now);
-    assert_eq!(u.since, now - jiff::SignedDuration::from_hours(24 * 90));
+    let rows = || la_table(&["AppId", "Family", "LastSeen"], serde_json::json!([]));
+    let no_rows = la_table(&["Since", "Until"], serde_json::json!([]));
+    assert_eq!(
+        graph_usage_from_tables(&rows(), &no_rows, now).err(),
+        Some(R::NoLogs)
+    );
+    let nulls = la_table(&["Since", "Until"], serde_json::json!([[null, null]]));
+    assert_eq!(
+        graph_usage_from_tables(&rows(), &nulls, now).err(),
+        Some(R::NoLogs)
+    );
+    // The export stopped two days ago.
+    let stale = la_table(
+        &["Since", "Until"],
+        serde_json::json!([["2026-09-01T00:00:00Z", "2026-11-23T00:00:00Z"]]),
+    );
+    assert_eq!(
+        graph_usage_from_tables(&rows(), &stale, now).err(),
+        Some(R::Stale)
+    );
+    let fresh = la_table(
+        &["Since", "Until"],
+        serde_json::json!([["2026-09-01T00:00:00Z", "2026-11-24T23:00:00Z"]]),
+    );
+    let no_app_column = la_table(&["Family", "LastSeen"], serde_json::json!([]));
+    assert_eq!(
+        graph_usage_from_tables(&no_app_column, &fresh, now).err(),
+        Some(R::Failed)
+    );
+    let bad_cell = la_table(
+        &["AppId", "Family", "LastSeen"],
+        serde_json::json!([["app-1", "call_records", "not a time"]]),
+    );
+    assert_eq!(
+        graph_usage_from_tables(&bad_cell, &fresh, now).err(),
+        Some(R::Failed)
+    );
+    assert!(graph_usage_from_tables(&rows(), &fresh, now).is_ok());
+}
+
+#[tokio::test]
+async fn await_usage_stops_at_the_deadline() {
+    use azapptoolkit_core::audit::UsageUnknownReason as R;
+    let task: tokio::task::JoinHandle<UsagePrefetch> = tokio::spawn(std::future::pending());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+    let usage = await_usage(task, deadline, || false).await;
+    assert_eq!(usage.err(), Some(R::TimedOut));
+}
+
+#[tokio::test]
+async fn await_usage_stops_on_cancel_as_not_checked() {
+    use azapptoolkit_core::audit::UsageUnknownReason as R;
+    let task: tokio::task::JoinHandle<UsagePrefetch> = tokio::spawn(std::future::pending());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let started = std::time::Instant::now();
+    let usage = await_usage(task, deadline, || true).await;
+    assert_eq!(usage.err(), Some(R::NotChecked));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
 /// Rule 24's grants for an app holding CallRecords (tracked) and a directory

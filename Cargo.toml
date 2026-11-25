@@ -22,6 +22,8 @@ repository = "https://github.com/tiredithumans/azapptoolkit"
 # Internal crates: this is a desktop app, not a published library set.
 publish = false
 [workspace.dependencies]
+# Test-only: core's usage test evaluates the KQL regexes it generates.
+regex = "1"
 # Async
 # Trimmed to what the non-test code actually uses (2026-10-02, review F230):
 # `sync` + `time`. The old union carried `macros`/`rt-multi-thread`/`net`/`io-util`

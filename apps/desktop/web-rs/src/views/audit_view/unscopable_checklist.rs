@@ -83,7 +83,14 @@ pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
                 UsageUnknownReason::TimedOut => {
                     "Usage unknown — the Graph activity query took too long; re-run the audit"
                 }
-                UsageUnknownReason::Failed | UsageUnknownReason::NotChecked => {
+                UsageUnknownReason::NoLogs => {
+                    "Usage unknown — the workspace has no Microsoft Graph activity logs from the last 90 days"
+                }
+                UsageUnknownReason::Stale => {
+                    "Usage unknown — Microsoft Graph activity logs stopped arriving; check the Entra diagnostic setting"
+                }
+                UsageUnknownReason::NotChecked => "Usage not checked in this run",
+                UsageUnknownReason::Failed => {
                     "Usage unknown — couldn't read Microsoft Graph activity logs"
                 }
             }
@@ -309,7 +316,17 @@ mod tests {
             (
                 GrantUsage::Unknown { reason: R::NotChecked },
                 "·",
-                "Usage unknown — couldn't read Microsoft Graph activity logs".to_string(),
+                "Usage not checked in this run".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::NoLogs },
+                "·",
+                "Usage unknown — the workspace has no Microsoft Graph activity logs from the last 90 days".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::Stale },
+                "·",
+                "Usage unknown — Microsoft Graph activity logs stopped arriving; check the Entra diagnostic setting".to_string(),
             ),
         ];
         for (usage, mark, text) in cases {

@@ -3,7 +3,8 @@
 //!
 //! One static table of path families drives both halves: the KQL the audit
 //! sends to Log Analytics ([`graph_usage_kql`]) and the Rust matcher
-//! ([`family_for_path`]) the tests pin it with. Families are most-specific
+//! ([`family_for_path`]). A test compiles the generated regexes and checks
+//! they agree with the matcher, path by path. Families are most-specific
 //! first, so a transcripts call is never counted as an online-meetings call.
 //!
 //! Semantics: a call in a permission's family is one that permission COULD
@@ -52,7 +53,11 @@ pub static FAMILIES: &[UsageFamily] = &[
     UsageFamily {
         key: "meeting_artifacts",
         permissions: &["OnlineMeetingArtifact.Read.All"],
-        patterns: &["users/*/onlinemeetings/*/attendancereports"],
+        patterns: &[
+            "users/*/onlinemeetings/*/attendancereports",
+            "users/*/onlinemeetings/*/attendeereport",
+            "communications/onlinemeetings/*/attendancereports",
+        ],
     },
     UsageFamily {
         key: "online_meetings",
@@ -76,7 +81,12 @@ pub static FAMILIES: &[UsageFamily] = &[
     UsageFamily {
         key: "channel_messages",
         permissions: &["ChannelMessage.Read.All"],
-        patterns: &["teams/*/channels/*/messages", "teams/getallmessages"],
+        patterns: &[
+            "teams/*/channels/*/messages",
+            "teams/*/channels/getallmessages",
+            "teams/*/channels/getallretainedmessages",
+            "teams/getallmessages",
+        ],
     },
     UsageFamily {
         key: "chats",
@@ -84,6 +94,12 @@ pub static FAMILIES: &[UsageFamily] = &[
         patterns: &["chats", "users/*/chats"],
     },
 ];
+
+/// Whole terms (KQL `has_any`, case-insensitive) at least one of which every
+/// pattern names as a segment, so the prefilter drops only rows no family
+/// could match — it cuts the 90-day scan to the communications traffic
+/// before the per-row regexes run (pinned by test).
+pub const USAGE_PREFILTER_TERMS: &[&str] = &["communications", "onlinemeetings", "chats", "teams"];
 
 /// What the audit observed for one unscopable grant. Crosses IPC inside
 /// `AuditItem` (internally tagged: `{"state": "not_seen", "since": ...}`).
@@ -120,6 +136,10 @@ pub enum UsageUnknownReason {
     NoWorkspace,
     /// The query didn't finish within the audit's budget.
     TimedOut,
+    /// The workspace holds no Graph activity logs in the window.
+    NoLogs,
+    /// The logs stopped arriving (the newest row is too old to trust "no call").
+    Stale,
     /// Any other failure.
     Failed,
 }
@@ -127,11 +147,15 @@ pub enum UsageUnknownReason {
 /// The lower-case path segments after the API-version prefix, without the
 /// query string; `None` for a path with no `/v1.0` or `/beta` prefix.
 fn normalized_segments(path: &str) -> Option<Vec<String>> {
-    let path = path
+    let mut path = path
         .split('?')
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // The KQL collapses repeated slashes the same way (`replace_regex(@'/+')`).
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
     let rest = path
         .strip_prefix("/v1.0/")
         .or_else(|| path.strip_prefix("/beta/"))?;
@@ -201,21 +225,28 @@ pub fn graph_usage_kql() -> String {
     format!(
         "MicrosoftGraphActivityLogs \
          | where TimeGenerated > ago({USAGE_WINDOW_DAYS}d) \
-         | extend P = tolower(tostring(parse_url(RequestUri).Path)) \
+         | where RequestUri has_any ({}) \
+         | extend P = tolower(replace_regex(tostring(parse_url(RequestUri).Path), @'/+', '/')) \
          | extend Family = case({}, \"\") \
          | where isnotempty(Family) \
          | summarize LastSeen = max(TimeGenerated) by AppId, Family",
+        USAGE_PREFILTER_TERMS
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", "),
         arms.join(", ")
     )
 }
 
-/// The start of the logs the usage query actually reads (retention can be
-/// shorter than the window).
-pub fn graph_usage_since_kql() -> String {
+/// The span of the logs the usage query actually reads: `Since` (retention
+/// can be shorter than the window) and `Until` (an export that stopped leaves
+/// a gap no "no call" may cover).
+pub fn graph_usage_window_kql() -> String {
     format!(
         "MicrosoftGraphActivityLogs \
          | where TimeGenerated > ago({USAGE_WINDOW_DAYS}d) \
-         | summarize Since = min(TimeGenerated)"
+         | summarize Since = min(TimeGenerated), Until = max(TimeGenerated)"
     )
 }
 
@@ -243,7 +274,7 @@ mod tests {
 
     #[test]
     fn family_for_path_table() {
-        let cases: [(&str, Option<&str>); 9] = [
+        let cases: [(&str, Option<&str>); 14] = [
             ("/v1.0/communications/callRecords/abc", Some("call_records")),
             (
                 "/beta/communications/callRecords/getPstnCalls(fromDateTime=2026-01-01)",
@@ -265,6 +296,23 @@ mod tests {
             ("/v1.0/users/u1/chats", Some("chats")),
             ("/v1.0/users/u1/messages", None),
             ("/v1.0/communicationsx/callrecords", None),
+            (
+                "/v1.0/teams/t1/channels/getAllMessages",
+                Some("channel_messages"),
+            ),
+            (
+                "/v1.0/teams/t1/channels/getAllRetainedMessages",
+                Some("channel_messages"),
+            ),
+            (
+                "/v1.0/users/u1/onlineMeetings/m1/attendeeReport",
+                Some("meeting_artifacts"),
+            ),
+            (
+                "/v1.0/communications/onlineMeetings/m1/attendanceReports",
+                Some("meeting_artifacts"),
+            ),
+            ("/v1.0//users/u1/chats", Some("chats")),
         ];
         for (path, want) in cases {
             assert_eq!(family_for_path(path), want, "{path}");
@@ -312,7 +360,84 @@ mod tests {
             "{kql}"
         );
         assert!(!kql.contains('{'), "no interpolation leftovers: {kql}");
-        assert!(graph_usage_since_kql().contains("min(TimeGenerated)"));
+        let window = graph_usage_window_kql();
+        assert!(window.contains("Since = min(TimeGenerated)"), "{window}");
+        assert!(window.contains("Until = max(TimeGenerated)"), "{window}");
+    }
+
+    /// The query that RUNS must agree with the matcher the tests exercise:
+    /// every table path, normalized the way the KQL normalizes it, hits the
+    /// same family through the generated regexes, first match in table order.
+    #[test]
+    fn generated_regexes_agree_with_the_matcher() {
+        let paths = [
+            "/v1.0/communications/callRecords/abc",
+            "/beta/communications/callRecords/getPstnCalls(fromDateTime=2026-01-01)",
+            "/v1.0/users/u1/onlineMeetings/m1/transcripts/t1/content",
+            "/v1.0/users/u1/onlineMeetings/getAllTranscripts(meetingOrganizerUserId='u1')",
+            "/v1.0/users/u1/onlineMeetings/m1",
+            "/v1.0/teams/t1/channels/c1/messages",
+            "/v1.0/teams/t1/channels/getAllMessages",
+            "/v1.0/teams/t1/channels/getAllRetainedMessages",
+            "/v1.0/users/u1/onlineMeetings/m1/attendeeReport",
+            "/v1.0/communications/onlineMeetings/m1/attendanceReports",
+            "/v1.0//users/u1/chats",
+            "/v1.0/users/u1/messages",
+            "/v1.0/communicationsx/callrecords",
+            "/v1.0/me/onlineMeetings",
+        ];
+        let compiled: Vec<(&str, Vec<regex::Regex>)> = FAMILIES
+            .iter()
+            .map(|f| {
+                (
+                    f.key,
+                    f.patterns
+                        .iter()
+                        .map(|p| regex::Regex::new(&pattern_regex(p)).unwrap())
+                        .collect(),
+                )
+            })
+            .collect();
+        let slashes = regex::Regex::new("/+").unwrap();
+        for path in paths {
+            // KQL: tolower(replace_regex(parse_url(RequestUri).Path, @'/+', '/')).
+            let normalized = slashes.replace_all(path, "/").to_lowercase();
+            let by_kql = compiled
+                .iter()
+                .find(|(_, res)| res.iter().any(|r| r.is_match(&normalized)))
+                .map(|(k, _)| *k);
+            assert_eq!(by_kql, family_for_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn kql_orders_specific_families_first_and_collapses_slashes() {
+        let kql = graph_usage_kql();
+        let at = |k: &str| kql.find(&format!("\"{k}\"")).unwrap();
+        assert!(at("meeting_transcripts") < at("online_meetings"));
+        assert!(at("meeting_artifacts") < at("online_meetings"));
+        assert!(kql.contains("replace_regex("), "{kql}");
+        assert!(kql.contains("@'/+'"), "{kql}");
+    }
+
+    /// The `has_any` prefilter must never drop a row a family could match:
+    /// every pattern names at least one prefilter term as a whole segment.
+    #[test]
+    fn kql_prefilter_terms_cover_every_pattern() {
+        let kql = graph_usage_kql();
+        assert!(kql.contains("has_any ("), "{kql}");
+        for family in FAMILIES {
+            for pat in family.patterns {
+                assert!(
+                    pat.split('/')
+                        .any(|seg| USAGE_PREFILTER_TERMS.contains(&seg)),
+                    "{pat} names no prefilter term"
+                );
+            }
+        }
+        for term in USAGE_PREFILTER_TERMS {
+            assert!(kql.contains(&format!("\"{term}\"")), "{term}");
+        }
     }
 
     #[test]

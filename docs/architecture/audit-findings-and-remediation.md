@@ -422,13 +422,18 @@ nothing it reports is a scope.
 - **Usage, per grant** (`audit/usage.rs`): one static table of Graph request-path families for
   the communications permissions (call records, online meetings and their transcripts /
   recordings / attendance reports, calls, channel messages, chats), most specific first, renders
-  the audit's single 90-day KQL query and the Rust matcher that pins it. The run spawns the query
-  (`prefetch_graph_usage`: the usage panel's Log Analytics consent and cached workspace) BESIDE the
-  scoring fan-out with a 60 s budget, and `apply_graph_usage` fills each tracked grant's
-  `GrantUsage` at the end: `Seen` (a call the permission *could* have authorized), `NotSeen { since }`
+  the audit's single 90-day KQL query (a whole-term `has_any` prefilter, repeated slashes
+  collapsed) and a Rust matcher; a test compiles the generated regexes and checks they agree with
+  the matcher path by path. The run spawns the query (`prefetch_graph_usage`: the usage panel's
+  Log Analytics consent and cached workspace) as it starts, beside the prefetch and the fan-out;
+  `run::await_usage` waits only while some row holds a tracked grant, never past one 90 s deadline
+  from the spawn or a Cancel, and `apply_graph_usage` fills each tracked grant's `GrantUsage`: `Seen` (a call the permission *could* have authorized), `NotSeen { since }`
   (the start of the logs actually read — the only evidence about the grant itself), `NotTracked`
-  (directory and other untracked permissions), or `Unknown { reason }`. Usage never degrades the
-  run: every failure is a reason, never an `AuditCoverageGap`.
+  (directory and other untracked permissions), or `Unknown { reason }`. The table mapper fails
+  CLOSED — no logs in the window (`NoLogs`), a newest row older than a day (`Stale`, the export
+  stopped), a missing column or an unreadable cell (`Failed`) are never `NotSeen`. Usage never
+  degrades the run: every failure is a reason, never an `AuditCoverageGap`. A tenant that moved
+  `MicrosoftGraphActivityLogs` to a pay-per-query log plan pays for one scan per audit.
 - **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
   every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
   can read policies → `AuditCoverageGap::ConditionalAccess`. `Unknown` is never shown as "no lock".
