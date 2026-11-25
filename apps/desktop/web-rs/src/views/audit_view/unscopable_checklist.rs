@@ -5,11 +5,14 @@
 //! Wording rule: a safeguard limits where a stolen credential works, never
 //! what the app can read — no line says "scoped", "confined" or "limited to".
 
-use azapptoolkit_core::audit::{AuditItem, AuditPrincipalKind, issue};
+use azapptoolkit_core::audit::{
+    AuditItem, AuditPrincipalKind, GrantUsage, UsageUnknownReason, issue,
+};
 use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
 use leptos::prelude::*;
 
 use crate::components::ui::Badge;
+use crate::util::fmt_day;
 
 use super::{last_sign_in_cell, risk_tone};
 
@@ -47,6 +50,44 @@ pub(super) fn network_lock_line(lock: &NetworkLock) -> (&'static str, String) {
             "·",
             "unknown — couldn't read Conditional Access (needs Policy.Read.All consent, an Entra ID P1/P2 license and a role such as Security Reader)"
                 .to_string(),
+        ),
+    }
+}
+
+/// `(mark, text)` for one grant's observed Graph usage. A call in the
+/// permission's family is one it COULD have authorized, so only "no call" is
+/// worded as evidence about the grant.
+pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
+    match usage {
+        GrantUsage::Seen { at } => (
+            "·",
+            format!("Last call it could authorize: {}", fmt_day(*at)),
+        ),
+        GrantUsage::NotSeen { since } => (
+            "✗",
+            format!(
+                "No call it could authorize since {} — consider removing it",
+                fmt_day(*since)
+            ),
+        ),
+        GrantUsage::NotTracked => ("·", "Usage not tracked for this permission".to_string()),
+        GrantUsage::Unknown { reason } => (
+            "·",
+            match reason {
+                UsageUnknownReason::NoWorkspace => {
+                    "Usage unknown — no Log Analytics workspace with Microsoft Graph activity logs"
+                }
+                UsageUnknownReason::NoConsent => {
+                    "Usage unknown — grant the Log Analytics consent on the Observed Graph activity panel"
+                }
+                UsageUnknownReason::TimedOut => {
+                    "Usage unknown — the Graph activity query took too long; re-run the audit"
+                }
+                UsageUnknownReason::Failed | UsageUnknownReason::NotChecked => {
+                    "Usage unknown — couldn't read Microsoft Graph activity logs"
+                }
+            }
+            .to_string(),
         ),
     }
 }
@@ -101,6 +142,7 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
         .iter()
         .map(|g| {
             let (mark, lock) = network_lock_line(&g.network_lock);
+            let (umark, used) = usage_line(&g.last_used);
             let mechanism = g.microsoft_mechanism.map(|m| {
                 format!(
                     "Microsoft can narrow this with {}; this toolkit doesn't manage it yet.",
@@ -113,6 +155,7 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
                     " "
                     <Badge label=g.risk.as_str() tone=risk_tone(&g.risk) />
                     <div>{format!("{mark} Network lock: {lock}")}</div>
+                    <div>{format!("{umark} {used}")}</div>
                     {mechanism.map(|m| view! { <div class="muted">{m}</div> })}
                 </li>
             }
@@ -228,5 +271,53 @@ mod tests {
             issue::INSTANCE_LOCK_DISABLED
         ));
         assert_eq!(instance_lock_line(&off), ("✗", "not fully enabled"));
+    }
+
+    #[test]
+    fn usage_lines() {
+        use azapptoolkit_core::audit::{GrantUsage, UsageUnknownReason as R};
+        let at: jiff::Timestamp = "2026-11-20T10:00:00Z".parse().unwrap();
+        let since: jiff::Timestamp = "2026-08-27T00:00:00Z".parse().unwrap();
+        let cases = [
+            (GrantUsage::Seen { at }, "·", "Last call it could authorize: 2026-11-20".to_string()),
+            (
+                GrantUsage::NotSeen { since },
+                "✗",
+                "No call it could authorize since 2026-08-27 — consider removing it".to_string(),
+            ),
+            (GrantUsage::NotTracked, "·", "Usage not tracked for this permission".to_string()),
+            (
+                GrantUsage::Unknown { reason: R::NoWorkspace },
+                "·",
+                "Usage unknown — no Log Analytics workspace with Microsoft Graph activity logs".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::NoConsent },
+                "·",
+                "Usage unknown — grant the Log Analytics consent on the Observed Graph activity panel".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::TimedOut },
+                "·",
+                "Usage unknown — the Graph activity query took too long; re-run the audit".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::Failed },
+                "·",
+                "Usage unknown — couldn't read Microsoft Graph activity logs".to_string(),
+            ),
+            (
+                GrantUsage::Unknown { reason: R::NotChecked },
+                "·",
+                "Usage unknown — couldn't read Microsoft Graph activity logs".to_string(),
+            ),
+        ];
+        for (usage, mark, text) in cases {
+            let (m, t) = usage_line(&usage);
+            assert_eq!((m, t.as_str()), (mark, text.as_str()), "{usage:?}");
+            for banned in ["used it", "scoped", "confined"] {
+                assert!(!t.contains(banned), "{t:?} says {banned:?}");
+            }
+        }
     }
 }
