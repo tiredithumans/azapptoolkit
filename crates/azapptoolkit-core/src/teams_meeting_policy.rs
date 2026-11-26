@@ -9,7 +9,8 @@
 //! The script is injection-safe by construction: every value is a single-
 //! quoted literal with each of PowerShell's five single-quote characters
 //! doubled ([`ps_quote`]: `'` and the typographic U+2018–U+201B), comment
-//! text has control characters stripped, ids are GUIDs, and neither a
+//! text has control, bidi and invisible format characters stripped, ids are
+//! GUIDs, a group rank is 1 to 64, and neither a
 //! `-Global` grant nor the `Global` policy is ever written. It runs as one
 //! block that stops at the first error, so a failed step never grants a
 //! policy it didn't create.
@@ -70,6 +71,7 @@ pub enum PolicyScriptError {
     GlobalPolicy,
     InvalidTarget(String),
     NoTargets,
+    InvalidRank,
 }
 
 impl std::fmt::Display for PolicyScriptError {
@@ -90,6 +92,10 @@ impl std::fmt::Display for PolicyScriptError {
             PolicyScriptError::NoTargets => write!(
                 f,
                 "Pick at least one user or a group: a new policy granted to no one covers no meetings."
+            ),
+            PolicyScriptError::InvalidRank => write!(
+                f,
+                "Rank is a whole number from 1 (first) to 64, or blank for last."
             ),
         }
     }
@@ -112,10 +118,27 @@ pub fn ps_quote(s: &str) -> String {
 }
 
 /// Text safe for a comment or a description: control characters (newlines
-/// included) become spaces.
+/// included), bidi controls and invisible format characters become spaces,
+/// so a name can't make its line display as something else. The zero-width
+/// joiners (U+200C/D) stay: Persian, Indic and emoji names need them.
 fn inert(s: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{061C}'
+                    | '\u{200B}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{2028}'..='\u{202E}'
+                    | '\u{2060}'..='\u{2064}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{FEFF}'
+                    | '\u{E0000}'..='\u{E007F}'
+            )
+    };
     s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if hidden(c) { ' ' } else { c })
         .collect::<String>()
         .trim()
         .to_string()
@@ -152,6 +175,25 @@ pub fn default_policy_name(app_name: &str, app_id: &str) -> String {
     .join("-")
 }
 
+/// A group grant's rank as typed: blank, or 1 to 64.
+/// Microsoft: ranks are renumbered 1, 2, 3… with 1 first, a blank rank is
+/// last, and a policy type reaches at most 64 groups. A typo must not
+/// silently become "last".
+pub fn parse_rank(input: &str) -> Result<Option<u32>, PolicyScriptError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    match input.parse::<u32>() {
+        Ok(r) if valid_rank(r) => Ok(Some(r)),
+        _ => Err(PolicyScriptError::InvalidRank),
+    }
+}
+
+fn valid_rank(rank: u32) -> bool {
+    (1..=64).contains(&rank)
+}
+
 fn valid_policy_name(name: &str) -> bool {
     (1..=64).contains(&name.chars().count())
         && name
@@ -179,6 +221,11 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
     }
     if req.mode == PolicyMode::New && targets.is_empty() {
         return Err(PolicyScriptError::NoTargets);
+    }
+    if let PolicyTargets::Group { rank: Some(r), .. } = &req.targets
+        && !valid_rank(*r)
+    {
+        return Err(PolicyScriptError::InvalidRank);
     }
 
     let app = inert(&req.app_name);
@@ -225,6 +272,30 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
             "(Get-CsApplicationAccessPolicy -Identity 'Global' -ErrorAction SilentlyContinue).AppIds -contains {app_id}"
         ),
     ]);
+    // Who holds it. A check that fails must not stop the block and hide the
+    // results above it.
+    let assignment_note = "# Who holds it: re-run the next line after about 30 minutes (a large group: up to 24 hours).";
+    match &req.targets {
+        PolicyTargets::Users(ids) if !ids.is_empty() => {
+            let ids = ids
+                .iter()
+                .map(|id| ps_quote(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push(assignment_note.to_string());
+            body.push(format!(
+                "foreach ($u in @({ids})) {{ Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy -ErrorAction Continue | Select-Object -ExpandProperty PolicySource }}"
+            ));
+        }
+        PolicyTargets::Users(_) => {}
+        PolicyTargets::Group { id, .. } => {
+            body.push(assignment_note.to_string());
+            body.push(format!(
+                "Get-CsGroupPolicyAssignment -GroupId {} -PolicyType ApplicationAccessPolicy -ErrorAction Continue",
+                ps_quote(id)
+            ));
+        }
+    }
     // One block: pasted or saved as a .ps1, it runs as a unit and stops at
     // the first error. No blank lines inside: one ends a continuation in a
     // console without PSReadLine.
@@ -432,6 +503,67 @@ mod tests {
             g.contains("Get-CsApplicationAccessPolicy"),
             "the checks are included"
         );
+        // The checks also confirm the assignments (C3f), without stopping the
+        // block if a check itself fails.
+        assert!(g.contains(&format!(
+            "Get-CsGroupPolicyAssignment -GroupId '{G}' -PolicyType ApplicationAccessPolicy -ErrorAction Continue"
+        )), "{g}");
+        assert!(s.contains(&format!(
+            "foreach ($u in @('{U1}', '{U2}')) {{ Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy -ErrorAction Continue | Select-Object -ExpandProperty PolicySource }}"
+        )), "{s}");
+        assert!(s.contains("up to 24 hours"), "{s}");
+        let none = script(&req(
+            PolicyMode::AddToExisting,
+            PolicyTargets::Users(vec![]),
+        ))
+        .unwrap();
+        assert!(!none.contains("Get-CsUserPolicyAssignment"), "{none}");
+    }
+
+    #[test]
+    fn format_and_bidi_characters_leave_comment_text() {
+        let mut r = req(PolicyMode::New, PolicyTargets::Users(vec![U1.into()]));
+        r.app_name = "A\u{202E}B\u{2066}C\u{2028}D\u{FEFF}E\u{200B}F\u{E0041}G".into();
+        let s = script(&r).unwrap();
+        for c in [
+            '\u{202E}',
+            '\u{2066}',
+            '\u{2028}',
+            '\u{FEFF}',
+            '\u{200B}',
+            '\u{E0041}',
+        ] {
+            assert!(!s.contains(c), "{c:?} survived");
+        }
+        assert!(s.contains("A B C D E F G"), "{s}");
+        // Joiners stay: Persian, Indic and emoji names need them.
+        r.app_name = "\u{0645}\u{200C}\u{0627}".into();
+        assert!(script(&r).unwrap().contains("\u{0645}\u{200C}\u{0627}"));
+    }
+
+    #[test]
+    fn rank_is_blank_or_one_to_sixty_four() {
+        assert_eq!(parse_rank(""), Ok(None));
+        assert_eq!(parse_rank("  "), Ok(None));
+        assert_eq!(parse_rank("2"), Ok(Some(2)));
+        assert_eq!(parse_rank(" 64 "), Ok(Some(64)));
+        for bad in ["0", "1st", "-1", "65", "99999999999"] {
+            assert_eq!(
+                parse_rank(bad),
+                Err(PolicyScriptError::InvalidRank),
+                "{bad}"
+            );
+        }
+        for rank in [0, 65] {
+            let r = req(
+                PolicyMode::New,
+                PolicyTargets::Group {
+                    id: G.into(),
+                    rank: Some(rank),
+                },
+            );
+            assert_eq!(script(&r), Err(PolicyScriptError::InvalidRank), "{rank}");
+        }
     }
 
     #[test]

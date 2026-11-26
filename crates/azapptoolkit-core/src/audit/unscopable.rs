@@ -340,4 +340,25 @@ mod tests {
             );
         }
     }
+
+    /// The checklist points every Teams-policy row at Meeting policy…, so
+    /// the generator's list may be wider than this table, never narrower.
+    #[test]
+    fn every_teams_policy_row_offers_the_meeting_policy_button() {
+        let rows: Vec<&str> = MICROSOFT_UNMANAGED
+            .iter()
+            .filter(|(_, m)| *m == UnmanagedMechanism::TeamsMeetingAccessPolicy)
+            .map(|(v, _)| *v)
+            .collect();
+        assert!(!rows.is_empty());
+        for v in rows {
+            assert!(
+                crate::teams_meeting_policy::is_meeting_policy_permission(
+                    Some(crate::scoping::MICROSOFT_GRAPH_APP_ID),
+                    v
+                ),
+                "{v} has no Meeting policy… button"
+            );
+        }
+    }
 }

@@ -9,7 +9,8 @@ use thaw::{Button, ButtonAppearance, Field, Input};
 
 use azapptoolkit_core::models::DirectoryObject;
 use azapptoolkit_core::teams_meeting_policy::{
-    PolicyMode, PolicyRequest, PolicyTargets, default_policy_name, script,
+    PolicyMode, PolicyRequest, PolicyScriptError, PolicyTargets, default_policy_name, parse_rank,
+    script,
 };
 
 use crate::components::directory_search::{DirectoryScope, DirectorySearch};
@@ -59,7 +60,7 @@ pub fn MeetingPolicyDialog(
             match group.get() {
                 Some((id, _)) => PolicyTargets::Group {
                     id,
-                    rank: rank.get().trim().parse().ok(),
+                    rank: parse_rank(&rank.get())?,
                 },
                 None => PolicyTargets::Users(Vec::new()),
             }
@@ -73,7 +74,6 @@ pub fn MeetingPolicyDialog(
             mode: mode.get(),
             targets,
         })
-        .map_err(|e| e.to_string())
     });
 
     let on_pick = Callback::new(move |obj: DirectoryObject| {
@@ -116,39 +116,54 @@ pub fn MeetingPolicyDialog(
             <span class="ui-text">
                 "Online-meeting, transcript and recording permissions reach only the meetings of users this app's Teams application access policy covers. Microsoft offers no API for these policies, so run this PowerShell as a Teams administrator; changes take up to 30 minutes."
             </span>
-            {radio(
-                "meeting-policy-mode",
-                Signal::derive(move || mode.get() == PolicyMode::New),
-                Callback::new(move |()| mode.set(PolicyMode::New)),
-                "Create a new policy",
-            )}
-            {radio(
-                "meeting-policy-mode",
-                Signal::derive(move || mode.get() == PolicyMode::AddToExisting),
-                Callback::new(move |()| mode.set(PolicyMode::AddToExisting)),
-                "Add this app to an existing policy",
-            )}
+            <div role="radiogroup" aria-label="Policy">
+                {radio(
+                    "meeting-policy-mode",
+                    Signal::derive(move || mode.get() == PolicyMode::New),
+                    Callback::new(move |()| mode.set(PolicyMode::New)),
+                    "Create a new policy",
+                )}
+                {radio(
+                    "meeting-policy-mode",
+                    Signal::derive(move || mode.get() == PolicyMode::AddToExisting),
+                    Callback::new(move |()| mode.set(PolicyMode::AddToExisting)),
+                    "Add this app to an existing policy",
+                )}
+            </div>
             <Field label="Policy name">
                 <Input value=policy_name />
             </Field>
-            {radio(
-                "meeting-policy-targets",
-                Signal::derive(move || !group_mode.get()),
-                Callback::new(move |()| group_mode.set(false)),
-                "Specific users",
-            )}
-            {radio(
-                "meeting-policy-targets",
-                Signal::derive(move || group_mode.get()),
-                Callback::new(move |()| group_mode.set(true)),
-                "One group",
-            )}
+            // The prefilled name is ours; an existing policy has its own.
+            {move || {
+                (mode.get() == PolicyMode::AddToExisting)
+                    .then(|| {
+                        view! {
+                            <span class="ui-text muted">
+                                "Type the existing policy's name. To list them: Get-CsApplicationAccessPolicy | Format-Table Identity, AppIds"
+                            </span>
+                        }
+                    })
+            }}
+            <div role="radiogroup" aria-label="Grant to">
+                {radio(
+                    "meeting-policy-targets",
+                    Signal::derive(move || !group_mode.get()),
+                    Callback::new(move |()| group_mode.set(false)),
+                    "Specific users",
+                )}
+                {radio(
+                    "meeting-policy-targets",
+                    Signal::derive(move || group_mode.get()),
+                    Callback::new(move |()| group_mode.set(true)),
+                    "One group",
+                )}
+            </div>
             {move || {
                 if group_mode.get() {
                     view! {
                         <Callout tone="warn">
                             <span class="ui-text">
-                                "A group grant reaches the group's direct members only, not nested groups. A user's own policy beats it, and between groups the lower rank number wins. Groups with hidden membership can't be used, and a large group can take longer than 30 minutes."
+                                "A group grant reaches the group's direct members only, not nested groups. A user's own policy beats it, and between groups the lower rank number wins. Groups with hidden membership can't be used, and a large group can take up to 24 hours."
                             </span>
                         </Callout>
                     }
@@ -204,6 +219,7 @@ pub fn MeetingPolicyDialog(
                                 .into_iter()
                                 .map(|(id, name)| {
                                     let remove = id.clone();
+                                    let remove_label = format!("Remove {name}");
                                     view! {
                                         <li>
                                             {name}
@@ -211,6 +227,7 @@ pub fn MeetingPolicyDialog(
                                             <button
                                                 type="button"
                                                 class="link-btn"
+                                                aria-label=remove_label
                                                 on:click=move |_| {
                                                     users.update(|u| u.retain(|(i, _)| *i != remove))
                                                 }
@@ -238,7 +255,16 @@ pub fn MeetingPolicyDialog(
                     }
                         .into_any()
                 }
-                Err(e) => view! { <FormError>{e}</FormError> }.into_any(),
+                // Nothing picked yet is a step, not an error: say it quietly.
+                Err(PolicyScriptError::NoTargets) => {
+                    view! {
+                        <span class="ui-text muted">
+                            "Pick at least one user or a group to build the script."
+                        </span>
+                    }
+                        .into_any()
+                }
+                Err(e) => view! { <FormError>{e.to_string()}</FormError> }.into_any(),
             }}
             <div class="actions-row">
                 <Button

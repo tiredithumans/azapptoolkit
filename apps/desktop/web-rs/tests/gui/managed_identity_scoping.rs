@@ -122,6 +122,29 @@ async fn detail_pane_offers_the_grant_wizard() {
 
 /// A managed identity's held grants show their expiry dates and offer the
 /// Expiry button: the only way to extend or clear a date it was given.
+/// The held-permissions panel offers Meeting policy… on an online-meeting
+/// grant and not on others (C3i).
+#[wasm_bindgen_test]
+async fn a_managed_identitys_meeting_grant_offers_the_meeting_policy() {
+    use wasm_bindgen::JsCast;
+    let _m = mount_mi_permissions_with(
+        vec![
+            fixtures::held_grant("OnlineMeetings.Read.All"),
+            fixtures::held_grant("User.Read.All"),
+        ],
+        Vec::new(),
+    )
+    .await;
+    ts::wait_for(|| ts::body_contains("OnlineMeetings.Read.All")).await;
+    assert!(ts::query("[aria-label='Meeting policy for User.Read.All']").is_none());
+    let button: web_sys::HtmlElement =
+        ts::query("[aria-label='Meeting policy for OnlineMeetings.Read.All']")
+            .expect("the meeting grant's button")
+            .unchecked_into();
+    button.click();
+    ts::wait_for(|| ts::body_contains("Meeting access policy")).await;
+}
+
 #[wasm_bindgen_test]
 async fn a_managed_identitys_held_grant_shows_and_edits_its_expiry() {
     use wasm_bindgen::JsCast;
