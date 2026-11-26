@@ -452,7 +452,8 @@ nothing it reports is a scope.
   per grant the lock line and any Microsoft mechanism, then credentials, owners and the instance
   property lock (application
   rows only — an SP-only row's live in its home tenant) and the last sign-in. No line says
-  "scoped", "confined" or "limited to" (pinned by test). Not a posture bucket.
+  "scoped", "confined" or "limited to" (the lock, usage, mechanism and expiry lines are pinned by
+  test). Not a posture bucket.
 
 ## Teams meeting access policy (C3)
 
