@@ -179,10 +179,16 @@ pub fn GrantExpiryDialog(
         <ModalShell open=open title=title busy=cmd.busy on_close=on_close>
             <span class="ui-text">
                 "On this date the grant is due to end. Nothing is revoked automatically: the next \
-                 Security audit lists it under \"Grants past their expiry\", whose Fix revokes it."
+                 Security audit lists it under \"Grants past their expiry\", whose Fix revokes it. \
+                 Dates are UTC: the grant stays valid through the end of that day."
             </span>
             <Field label="Expires on">
-                <DateInput value=date label="Expires on" class="grant-expiry__date" />
+                <DateInput
+                    value=date
+                    label="Expires on"
+                    class="grant-expiry__date"
+                    min=jiff::tz::Offset::UTC.to_datetime(jiff::Timestamp::now()).date()
+                />
             </Field>
             {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
             <div class="actions-row">

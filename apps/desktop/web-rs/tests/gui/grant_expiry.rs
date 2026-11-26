@@ -78,6 +78,33 @@ async fn the_expiry_dialog_sets_and_clears() {
     assert!(!ts::has_button_labelled("Clear expiry"), "nothing to clear");
 }
 
+/// The server judges dates in UTC, so the dialog says so and won't offer a
+/// day already over (B3d).
+#[wasm_bindgen_test]
+async fn the_expiry_dialog_says_utc_and_starts_today() {
+    ts::reset();
+    let t = RwSignal::new(Some(target(None)));
+    let _m = ts::mount_view(move || {
+        view! {
+            <GrantExpiryDialog
+                target=t
+                on_close=Callback::new(move |()| t.set(None))
+                on_saved=Callback::new(|_| {})
+            />
+        }
+    });
+    ts::wait_for(|| ts::body_contains("Expiry for CallRecords.Read.All")).await;
+    let today = jiff::tz::Offset::UTC
+        .to_datetime(jiff::Timestamp::now())
+        .date()
+        .to_string();
+    let min = ts::query(".grant-expiry__date")
+        .and_then(|el| el.get_attribute("min"))
+        .unwrap_or_default();
+    assert_eq!(min, today);
+    assert!(ts::body_contains("Dates are UTC"));
+}
+
 /// A granted Application row shows its expiry under the status badge, and
 /// its Expiry button opens the dialog prefilled for that grant on the app's
 /// service principal.

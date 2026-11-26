@@ -348,6 +348,21 @@ where
     FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
 }
 
+/// [`mock_each`] whose handler picks the outcome per call: `Ok` resolves,
+/// `Err` rejects — so one test can have the first call land and the next fail.
+pub fn mock_result_each<T, F>(cmd: &str, f: F)
+where
+    T: Serialize,
+    F: Fn(&serde_json::Value) -> Result<T, azapptoolkit_dto::UiError> + 'static,
+{
+    ensure_installed();
+    let handler: DynRoute = Box::new(move |args| match f(args) {
+        Ok(v) => RouteResult::Ok(wire_value(&v)),
+        Err(e) => RouteResult::Err(wire_value(&e)),
+    });
+    FN_ROUTES.with(|r| r.borrow_mut().insert(cmd.to_string(), handler));
+}
+
 /// How many times `cmd` has been invoked since the last [`reset`].
 pub fn call_count(cmd: &str) -> usize {
     CALLS.with(|c| c.borrow().iter().filter(|call| call.cmd == cmd).count())

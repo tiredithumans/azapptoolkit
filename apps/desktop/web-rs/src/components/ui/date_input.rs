@@ -14,13 +14,16 @@ const ISO: &str = "%Y-%m-%d";
 ///
 /// `label` becomes the input's `aria-label`: callers render their visible label
 /// apart from the input, so nothing else names it. `class` adds a caller hook
-/// next to the styled `ui-date-input` base.
+/// next to the styled `ui-date-input` base. `min` greys out earlier days in
+/// the native picker (the server still checks).
 #[component]
 pub fn DateInput(
     value: RwSignal<Option<Date>>,
     label: &'static str,
     #[prop(optional)] class: &'static str,
+    #[prop(optional)] min: Option<Date>,
 ) -> impl IntoView {
+    let min = min.map(|d| d.strftime(ISO).to_string());
     let class = if class.is_empty() {
         "ui-date-input".to_string()
     } else {
@@ -31,6 +34,7 @@ pub fn DateInput(
             type="date"
             class=class
             aria-label=label
+            min=min
             prop:value=move || value.get().map(|d| d.strftime(ISO).to_string()).unwrap_or_default()
             on:input=move |ev| value.set(Date::strptime(ISO, event_target_value(&ev)).ok())
         />

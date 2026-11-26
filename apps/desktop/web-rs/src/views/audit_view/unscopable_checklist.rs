@@ -101,16 +101,26 @@ pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
 }
 
 /// `(mark, text)` for a grant's expiry (Rule 25's tag), `None` when none is
-/// set. A grant expires at the end of its day (UTC).
+/// set. A grant expires at the end of its day (UTC). `listed`: the run's
+/// "Grants past their expiry" holds it — a run computed before UTC midnight
+/// doesn't yet, so the line says to re-run rather than point at a group that
+/// lacks it.
 pub(super) fn expiry_line(
     expires_on: Option<jiff::civil::Date>,
     now: jiff::Timestamp,
+    listed: bool,
 ) -> Option<(&'static str, String)> {
     let date = expires_on?;
     Some(if expiry_has_passed(date, now) {
         (
             "✗",
-            format!("Expired {date} — revoke it from Grants past their expiry"),
+            if listed {
+                format!("Expired {date} — revoke it from Grants past their expiry")
+            } else {
+                format!(
+                    "Expired {date} — re-run the audit to list it under Grants past their expiry"
+                )
+            },
         )
     } else {
         ("·", format!("Expires {date}"))
@@ -168,7 +178,17 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
         .map(|g| {
             let (mark, lock) = network_lock_line(&g.network_lock);
             let (umark, used) = usage_line(&g.last_used);
-            let expiry = expiry_line(g.expires_on, jiff::Timestamp::now())
+            // The run dated this grant from the same tag it listed, so the
+            // resource and the date identify it.
+            let resource = g
+                .permission
+                .resource_app_id
+                .as_deref()
+                .unwrap_or(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID);
+            let listed = item.expired_grants.iter().any(|e| {
+                e.resource_app_id.eq_ignore_ascii_case(resource) && Some(e.expires_on) == g.expires_on
+            });
+            let expiry = expiry_line(g.expires_on, jiff::Timestamp::now(), listed)
                 .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
             let mechanism = g.microsoft_mechanism.map(|m| match m {
                 // C3: the toolkit writes the PowerShell (Teams has no API).
@@ -368,21 +388,30 @@ mod tests {
     fn expiry_lines() {
         let now: jiff::Timestamp = "2026-11-25T12:00:00Z".parse().unwrap();
         let day = |d: &str| Some(d.parse::<jiff::civil::Date>().unwrap());
-        assert_eq!(expiry_line(None, now), None);
+        assert_eq!(expiry_line(None, now, false), None);
         assert_eq!(
-            expiry_line(day("2026-12-24"), now),
+            expiry_line(day("2026-12-24"), now, false),
             Some(("·", "Expires 2026-12-24".to_string()))
         );
         assert_eq!(
-            expiry_line(day("2026-11-25"), now),
+            expiry_line(day("2026-11-25"), now, false),
             Some(("·", "Expires 2026-11-25".to_string())),
             "a grant expires at the end of its day"
         );
         assert_eq!(
-            expiry_line(day("2026-11-24"), now),
+            expiry_line(day("2026-11-24"), now, true),
             Some((
                 "✗",
                 "Expired 2026-11-24 — revoke it from Grants past their expiry".to_string()
+            ))
+        );
+        // A run computed before UTC midnight doesn't list it yet (B3g).
+        assert_eq!(
+            expiry_line(day("2026-11-24"), now, false),
+            Some((
+                "✗",
+                "Expired 2026-11-24 — re-run the audit to list it under Grants past their expiry"
+                    .to_string()
             ))
         );
     }

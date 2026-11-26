@@ -223,7 +223,6 @@ fn sharepoint_item_summary(r: &sharepoint::SelectedItemScopeResult) -> String {
     s
 }
 
-/// Comma-joined permission values for the review line / summaries.
 /// The expiry date an "Expires" choice (`never` / a day count) means from
 /// `now`, by the UTC calendar the audit judges expiry in.
 fn expiry_date_in(choice: &str, now: jiff::Timestamp) -> Option<jiff::civil::Date> {
@@ -235,6 +234,7 @@ fn expiry_date_in(choice: &str, now: jiff::Timestamp) -> Option<jiff::civil::Dat
         .ok()
 }
 
+/// Comma-joined permission values for the review line / summaries.
 fn perm_values(items: &[PickerSelection]) -> Vec<String> {
     items.iter().map(|i| i.permission_value.clone()).collect()
 }
@@ -383,8 +383,13 @@ async fn apply_orgwide(
     // `(holding SP, item)` for each Application grant that landed, for the
     // expiry pass after the grants.
     let mut held: Vec<(String, PickerSelection)> = Vec::new();
+    // Where a grant failed after others landed: the cart stops there, and the
+    // expiry pass below still dates what landed. With nothing landed the
+    // error is returned as before, so consent-and-retry still works.
+    let mut stopped: Option<String> = None;
     let mut applied = if let Some(object_id) = &target.object_id {
         let mut failures: Vec<String> = Vec::new();
+        let mut landed = 0usize;
         for item in &items {
             match permissions::grant_single_permission(
                 &tenant_id,
@@ -396,6 +401,7 @@ async fn apply_orgwide(
             .await
             {
                 Ok(r) => {
+                    landed += 1;
                     if item.kind == PermissionKind::Application
                         && r.failures.is_empty()
                         && !r.client_service_principal_id.is_empty()
@@ -404,12 +410,19 @@ async fn apply_orgwide(
                     }
                     failures.extend(r.failures.into_iter().map(|f| f.message));
                 }
-                Err(e) => return Err(e),
+                Err(e) if landed == 0 => return Err(e),
+                Err(e) => {
+                    stopped = Some(format!(
+                        "Stopped at {}: {}. The permissions before it were granted.",
+                        item.permission_value, e.message
+                    ));
+                    break;
+                }
             }
         }
         let mut s = format!(
             "Granted {} org-wide.",
-            count_noun(items.len(), "permission", "permissions")
+            count_noun(landed, "permission", "permissions")
         );
         if !failures.is_empty() {
             let _ = write!(
@@ -432,14 +445,30 @@ async fn apply_orgwide(
         }
         let (mut granted, mut skipped) = (0usize, 0usize);
         let mut failures: Vec<String> = Vec::new();
+        let mut answered = 0usize;
         for (resource, values) in &by_resource {
-            let r = managed_identity::grant_managed_identity_permission(
+            let r = match managed_identity::grant_managed_identity_permission(
                 &tenant_id,
                 &target.sp_object_id,
                 resource,
                 values,
             )
-            .await?;
+            .await
+            {
+                Ok(r) => {
+                    answered += 1;
+                    r
+                }
+                Err(e) if answered == 0 => return Err(e),
+                Err(e) => {
+                    stopped = Some(format!(
+                        "Stopped at {}: {}. The permissions before it were granted.",
+                        values.join(", "),
+                        e.message
+                    ));
+                    break;
+                }
+            };
             granted += r.granted.len();
             skipped += r.skipped.len();
             // Already-present grants take the expiry too: the operator chose
@@ -471,6 +500,7 @@ async fn apply_orgwide(
         }
         Applied::clean(s)
     };
+    applied.warnings.extend(stopped);
     // The expiry, written per holding service principal in one write. "Never"
     // writes too: it clears a date an earlier grant of the same permission
     // left behind.
