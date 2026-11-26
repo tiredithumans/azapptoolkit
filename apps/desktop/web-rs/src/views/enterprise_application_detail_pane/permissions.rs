@@ -15,6 +15,7 @@ use crate::components::sharepoint_item_scopes_section::SharePointItemScopesSecti
 use crate::components::sharepoint_sites_section::SharePointSitesSection;
 use crate::hooks::use_command::use_command;
 use crate::views::dialogs::grant_expiry_dialog::{GrantExpiryDialog, use_held_expiries};
+use crate::views::dialogs::meeting_policy_dialog::MeetingPolicyDialog;
 use azapptoolkit_core::audit::MailPermissionScope;
 use azapptoolkit_core::scoping::{
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
@@ -181,6 +182,8 @@ pub(super) fn PermissionsContent(
 
     // Grant expiries (B3): read live, and again after each save.
     let held_expiries = use_held_expiries(sp_id);
+    // The Teams meeting access policy script dialog (C3).
+    let meeting_policy_open = RwSignal::new(false);
 
     // App-role *definitions* this app exposes are managed on the dedicated
     // "App roles" tab (add/edit/enable/delete); this tab keeps the held
@@ -231,6 +234,12 @@ pub(super) fn PermissionsContent(
                     wizard_preseed.set(None);
                 })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
+            <MeetingPolicyDialog
+                open=meeting_policy_open
+                app_id=app_id
+                app_name=display_name
+                on_close=Callback::new(move |()| meeting_policy_open.set(false))
             />
             <GrantExpiryDialog
                 target=held_expiries.target
@@ -373,6 +382,9 @@ pub(super) fn PermissionsContent(
                                     on_scope=on_scope
                                     on_expiry=held_expiries.on_expiry
                                     expiries=held_expiries.expiries
+                                    on_meeting_policy=Callback::new(move |()| {
+                                        meeting_policy_open.set(true)
+                                    })
                                     busy=Signal::derive(move || revoke_cmd.busy.get())
                                 />
                                 {exchange_section}

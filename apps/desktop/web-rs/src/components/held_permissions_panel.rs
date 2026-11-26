@@ -94,6 +94,10 @@ pub fn HeldPermissionsPanel(
     /// label)`. Rendered only on rows whose resource resolved.
     #[prop(optional, into)]
     on_expiry: Option<Callback<(String, String, String)>>,
+    /// Open the Teams meeting access policy script dialog (C3); rendered on
+    /// online-meeting permission rows.
+    #[prop(optional, into)]
+    on_meeting_policy: Option<Callback<()>>,
     /// The expiries set on these grants, shown under each permission.
     #[prop(optional, into)]
     expiries: Option<Signal<Vec<GrantExpiry>>>,
@@ -175,7 +179,10 @@ pub fn HeldPermissionsPanel(
         })
         .collect();
 
-    let has_actions = on_revoke.is_some() || on_scope.is_some() || on_expiry.is_some();
+    let has_actions = on_revoke.is_some()
+        || on_scope.is_some()
+        || on_expiry.is_some()
+        || on_meeting_policy.is_some();
     let mut headers = vec!["Resource", "Permission"];
     if show_scope_column {
         headers.push("Scope");
@@ -216,6 +223,23 @@ pub fn HeldPermissionsPanel(
                         title="Scope…".to_string()
                         disabled=busy
                         on_click=Callback::new(move |_| cb.run(sel.clone()))
+                    />
+                }
+            })
+        });
+        let meeting_btn = on_meeting_policy.and_then(|cb| {
+            let v = value.clone()?;
+            azapptoolkit_core::teams_meeting_policy::is_meeting_policy_permission(
+                row_resource_app_id.as_deref(),
+                &v,
+            )
+            .then(|| {
+                view! {
+                    <IconButton
+                        icon=IconName::UserCheck
+                        aria_label=format!("Meeting policy for {v}")
+                        title="Meeting policy…".to_string()
+                        on_click=Callback::new(move |_| cb.run(()))
                     />
                 }
             })
@@ -286,7 +310,7 @@ pub fn HeldPermissionsPanel(
                     .then(|| {
                         view! {
                             <td class="cell-mid">
-                                <div class="cell-actions">{scope_btn}{expiry_btn}{revoke_btn}</div>
+                                <div class="cell-actions">{scope_btn}{meeting_btn}{expiry_btn}{revoke_btn}</div>
                             </td>
                         }
                     })}

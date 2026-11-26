@@ -28,6 +28,8 @@ mod grant_expiry;
 mod managed_identities;
 #[path = "gui/managed_identity_scoping.rs"]
 mod managed_identity_scoping;
+#[path = "gui/meeting_policy.rs"]
+mod meeting_policy;
 #[path = "gui/network_lock.rs"]
 mod network_lock;
 #[path = "gui/orgwide_scope_callout.rs"]

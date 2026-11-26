@@ -170,11 +170,16 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
             let (umark, used) = usage_line(&g.last_used);
             let expiry = expiry_line(g.expires_on, jiff::Timestamp::now())
                 .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
-            let mechanism = g.microsoft_mechanism.map(|m| {
-                format!(
+            let mechanism = g.microsoft_mechanism.map(|m| match m {
+                // C3: the toolkit writes the PowerShell (Teams has no API).
+                azapptoolkit_core::audit::UnmanagedMechanism::TeamsMeetingAccessPolicy => format!(
+                    "Microsoft can narrow this with {}: Meeting policy… on the app's Permissions tab writes the PowerShell.",
+                    m.label()
+                ),
+                _ => format!(
                     "Microsoft can narrow this with {}; this toolkit doesn't manage it yet.",
                     m.label()
-                )
+                ),
             });
             view! {
                 <li>
