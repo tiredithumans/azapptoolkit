@@ -502,13 +502,19 @@ Application rows on the Permissions tab; an enterprise app's and a managed ident
 permissions, which show each date, read live with `get_grant_expiries`) or in the Grant access
 wizard's org-wide path (**Expires**: never / 7 / 30 / 90 days, one write per holding service
 principal after the grants land; "Never" clears a date an earlier grant left; a failed write is a
-warning). Nothing happens on the day: the next audit lists the grant, and its Fix revokes it.
+warning; a grant that fails partway through the cart stops it there with a warning, and the grants
+already landed are still dated — with nothing landed the error returns, so consent-and-retry
+works). The dialog says dates are UTC and its picker starts at today. Nothing happens on the day: the next audit lists the grant, and its Fix revokes it.
 
 - **Storage:** one tag per grant on the holding service principal,
   `azapptoolkit:grantExpiry:v1|{resourceAppId}|{appRoleId}|{YYYY-MM-DD}`
   (`audit::grant_expiry`: `encode_expiry_tag` / `decode_expiry_tag` / `expiries_in` /
   `with_expiry`). Tags are untrusted input: GUIDs lower-cased and shape-checked, an unknown
-  version or a malformed tag is ignored, never guessed at. A grant **expires at the end of its day,
+  version or a malformed tag is ignored, never guessed at — and the audit row says so
+  (`UNREADABLE_GRANT_EXPIRY`, quoting the tags; `unreadable_expiry_tags` also admits an SP-only
+  candidate). `with_expiry` replaces every v1 tag for its pair whatever the date says, so setting
+  the date again clears a mistyped one. Two tags for one grant read as one, the earliest date
+  (fails closed). A grant **expires at the end of its day,
   UTC** (`expiry_has_passed`); today is not yet expired.
 - **Writers** (`set_grant_expiry`, which takes every pair in one read-modify-write, the Fix, the
   revoke-path prune and the HideApp toggle) re-read the live tags and write the whole collection
@@ -524,8 +530,11 @@ warning). Nothing happens on the day: the next audit lists the grant, and its Fi
 - **Rule 25** reads every row's tags from the run's SP index (which selects `tags`), so it costs
   no Graph call per app; an SP past the index cap gets no expiry check. Names come from the cached
   resource-SP read, **not** the run's `ResourceResolver`: a tag naming a deleted resource or a role
-  it no longer defines shows the role id and never degrades the run. SP-only candidates are
-  admitted on a passed expiry alone. Every expiry also dates its Rule 24 grant
+  it no longer defines shows the role id and never degrades the run; a resource other than Graph
+  is named too ("Mail.Read on Office 365 Exchange Online": Graph and Exchange Online both define
+  it). One clock serves every expiry judgement in a run. SP-only candidates are admitted on a
+  passed expiry alone. The checklist matches a grant to the run's list by resource and date, and
+  says "re-run the audit" for one that passed after the run. Every expiry also dates its Rule 24 grant
   (`UnscopableGrant.expires_on`) for the checklist.
 - **The Fix** (`remediate_revoke_expired_grants`, click-confirm naming the app and grants) acts
   only on the pairs the confirm named (`AuditItem.expired_grants`), re-reading the tags and held
@@ -534,7 +543,9 @@ warning). Nothing happens on the day: the next audit lists the grant, and its Fi
   quietly restore them); if that PATCH fails their tags stay and the next audit lists them again.
   A grant already gone only has its tag cleared — its declaration may be deliberate (the
   Exchange-scoped path keeps one); a grant created after its date had passed is a re-grant, kept
-  (`regranted`); a pair no longer past its date is left alone (`unchanged`); a refused revoke
+  (`regranted`); a pair no longer past its date is left alone (`unchanged`); a pair whose
+  resource didn't resolve while some assignment still holds its role is never called gone — it
+  keeps its tag and is reported failed with a warning (`unresolved`); a refused revoke
   keeps its tag and its error rides `RevokeExpiredResult.error`, stopping on a re-auth-fatal code.
   Anything unfinished keeps the row's Fix and an error toast.
 

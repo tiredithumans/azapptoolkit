@@ -413,7 +413,7 @@ async fn apply_orgwide(
                 Err(e) if landed == 0 => return Err(e),
                 Err(e) => {
                     stopped = Some(format!(
-                        "Stopped at {}: {}. The permissions before it were granted.",
+                        "Stopped at {}: {}.",
                         item.permission_value, e.message
                     ));
                     break;
@@ -461,11 +461,7 @@ async fn apply_orgwide(
                 }
                 Err(e) if answered == 0 => return Err(e),
                 Err(e) => {
-                    stopped = Some(format!(
-                        "Stopped at {}: {}. The permissions before it were granted.",
-                        values.join(", "),
-                        e.message
-                    ));
+                    stopped = Some(format!("Stopped at {}: {}.", values.join(", "), e.message));
                     break;
                 }
             };

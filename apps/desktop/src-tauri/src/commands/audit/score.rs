@@ -311,16 +311,28 @@ pub(crate) fn apply_grant_expiries_with(
         let Some(tags) = tags_for(&item.app_id) else {
             continue;
         };
-        let unreadable = azapptoolkit_core::audit::unreadable_expiry_tags(&tags);
-        if unreadable > 0 {
+        let unreadable: Vec<&String> = tags
+            .iter()
+            .filter(|t| matches!(azapptoolkit_core::audit::decode_expiry_tag(t), Some(None)))
+            .collect();
+        if !unreadable.is_empty() {
+            let n = unreadable.len();
+            // Quoted (a few), so the operator can find a tag that names no grant.
+            let shown: Vec<&str> = unreadable.iter().take(3).map(|t| t.as_str()).collect();
             item.issues.push(format!(
-                "{} {unreadable} tag{} ignored, so no grant expires by {}",
+                "{} {n} tag{} ignored, so no grant expires by {}: {}{}",
                 azapptoolkit_core::audit::issue::UNREADABLE_GRANT_EXPIRY,
-                if unreadable == 1 { "" } else { "s" },
-                if unreadable == 1 { "it" } else { "them" },
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "it" } else { "them" },
+                shown.join("; "),
+                if n > shown.len() { "; …" } else { "" },
             ));
-            item.recommendations
-                .push("Set the date again with Expiry… on the grant's permission".to_string());
+            item.recommendations.push(
+                "Set the date again with Expiry… on the grant's permission, which replaces its \
+                 tag; remove a tag that names no grant from the service principal's tags \
+                 (Microsoft Graph or PowerShell)"
+                    .to_string(),
+            );
         }
         let expiries = expiries_in(&tags);
         if expiries.is_empty() {
@@ -489,6 +501,7 @@ pub(crate) fn sp_audit_candidates(
                 // Rule 25 fires on the tag alone: a vendor whose only
                 // expiring grant is on an API the matrices don't cover still
                 // gets a row.
+                || azapptoolkit_core::audit::unreadable_expiry_tags(&sp.tags) > 0
                 || expiries_in(&sp.tags)
                     .iter()
                     .any(|e| expiry_has_passed(e.expires_on, now))

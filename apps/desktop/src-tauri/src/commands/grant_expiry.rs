@@ -66,7 +66,8 @@ pub(crate) fn parse_expiry_date(
 pub(crate) struct RevocationPlan {
     /// `(assignment id, expiry)`: held, and granted before its date passed.
     pub revoke: Vec<(String, GrantExpiry)>,
-    /// Nothing held for it (revoked by hand, or the resource is gone).
+    /// Nothing held for it: revoked by hand, or no assignment carries its
+    /// role on any resource.
     pub gone: Vec<GrantExpiry>,
     /// The resource didn't resolve, but some assignment still carries the
     /// role: never called gone (that would clear the tag of a held grant).
@@ -473,8 +474,15 @@ pub(crate) async fn revoke_expired(
     let mut ended: Vec<GrantExpiry> = plan.gone.clone();
     let mut revoked_now: Vec<GrantExpiry> = Vec::new();
     result.already_gone.extend(plan.gone.iter().map(name));
-    // Unresolved but possibly still held: kept, and reported failed.
+    // Unresolved but possibly still held: kept, and reported failed with why.
     result.failed.extend(plan.unresolved.iter().map(name));
+    if !plan.unresolved.is_empty() {
+        let names: Vec<String> = plan.unresolved.iter().map(name).collect();
+        result.warnings.push(format!(
+            "Couldn't confirm {}: its resource didn't resolve, so the expiry is kept. Try again later.",
+            names.join(", ")
+        ));
+    }
     result.regranted.extend(plan.regranted.iter().map(name));
     let mut stopped = false;
     for (assignment_id, e) in plan.revoke {
@@ -981,6 +989,44 @@ mod tests {
             .unwrap();
             assert_eq!(r.already_gone, vec!["Chat.Read.All".to_string()]);
             assert!(r.revoked.is_empty() && r.warnings.is_empty(), "{r:?}");
+        }
+
+        /// A resource that doesn't resolve (a cached "not found") while its
+        /// role is still held keeps the expiry, never "already gone", and
+        /// says why (B3b).
+        #[tokio::test]
+        async fn an_unresolved_resource_keeps_a_held_grants_expiry() {
+            let server = MockServer::start().await;
+            mount_sp_tags(&server, &[tag(ROLE, "2026-11-01")]).await;
+            mount_app(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/servicePrincipals"))
+                .and(query_param("$filter", format!("appId eq '{RES}'")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
+                )
+                .mount(&server)
+                .await;
+            mount_assignments(&server, &[("a-1", ROLE, "2026-10-01T00:00:00Z")]).await;
+            no_sp_tag_write(&server).await;
+            let state = AppState::for_test(T, &server.uri());
+
+            let r = revoke_expired(
+                &state,
+                T,
+                OBJ,
+                AuditPrincipalKind::Application,
+                &[grant(ROLE)],
+                now(),
+            )
+            .await
+            .unwrap();
+            assert!(r.already_gone.is_empty() && r.revoked.is_empty(), "{r:?}");
+            assert_eq!(r.failed, vec![ROLE.to_string()]);
+            assert!(
+                r.warnings.iter().any(|w| w.contains("didn't resolve")),
+                "{r:?}"
+            );
         }
 
         /// A grant on a resource other than Graph says which resource: both

@@ -127,6 +127,22 @@ pub(super) fn expiry_line(
     })
 }
 
+/// Whether the run's "Grants past their expiry" lists `g`. The run dated `g`
+/// from the same tag it listed, so the resource and the date identify it.
+pub(super) fn is_listed(
+    expired: &[azapptoolkit_core::audit::ExpiredGrant],
+    g: &azapptoolkit_core::audit::UnscopableGrant,
+) -> bool {
+    let resource = g
+        .permission
+        .resource_app_id
+        .as_deref()
+        .unwrap_or(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID);
+    expired.iter().any(|e| {
+        e.resource_app_id.eq_ignore_ascii_case(resource) && Some(e.expires_on) == g.expires_on
+    })
+}
+
 /// `(mark, text)` for an app registration's credentials.
 fn credentials_line(item: &AuditItem) -> (&'static str, &'static str) {
     match (item.certificates.is_empty(), item.secrets.is_empty()) {
@@ -178,17 +194,11 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
         .map(|g| {
             let (mark, lock) = network_lock_line(&g.network_lock);
             let (umark, used) = usage_line(&g.last_used);
-            // The run dated this grant from the same tag it listed, so the
-            // resource and the date identify it.
-            let resource = g
-                .permission
-                .resource_app_id
-                .as_deref()
-                .unwrap_or(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID);
-            let listed = item.expired_grants.iter().any(|e| {
-                e.resource_app_id.eq_ignore_ascii_case(resource) && Some(e.expires_on) == g.expires_on
-            });
-            let expiry = expiry_line(g.expires_on, jiff::Timestamp::now(), listed)
+            let expiry = expiry_line(
+                g.expires_on,
+                jiff::Timestamp::now(),
+                is_listed(&item.expired_grants, g),
+            )
                 .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
             let mechanism = g.microsoft_mechanism.map(|m| match m {
                 // C3: the toolkit writes the PowerShell (Teams has no API).
@@ -382,6 +392,51 @@ mod tests {
                 assert!(!t.contains(banned), "{t:?} says {banned:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_grant_is_listed_by_resource_and_date() {
+        use azapptoolkit_core::audit::{
+            ExpiredGrant, ResourcePermission, RiskLevel, UnscopableGrant,
+        };
+        let day = |d: &str| d.parse::<jiff::civil::Date>().unwrap();
+        let grant = |resource: Option<&str>, date: &str| UnscopableGrant {
+            permission: ResourcePermission {
+                resource_app_id: resource.map(str::to_string),
+                ..ResourcePermission::graph("CallRecords.Read.All")
+            },
+            risk: RiskLevel::Medium,
+            microsoft_mechanism: None,
+            network_lock: NetworkLock::default(),
+            last_used: Default::default(),
+            expires_on: Some(day(date)),
+        };
+        let listed = vec![ExpiredGrant {
+            resource_app_id: azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID.into(),
+            app_role_id: "role".into(),
+            name: "CallRecords.Read.All".into(),
+            expires_on: day("2026-11-24"),
+        }];
+        assert!(
+            is_listed(&listed, &grant(None, "2026-11-24")),
+            "no resource = Graph"
+        );
+        assert!(is_listed(
+            &listed,
+            &grant(Some("00000003-0000-0000-C000-000000000000"), "2026-11-24")
+        ));
+        assert!(
+            !is_listed(&listed, &grant(None, "2026-11-25")),
+            "another date"
+        );
+        assert!(
+            !is_listed(&[], &grant(None, "2026-11-24")),
+            "a run before midnight"
+        );
+        assert!(!is_listed(
+            &listed,
+            &grant(Some("00000002-0000-0ff1-ce00-000000000000"), "2026-11-24")
+        ));
     }
 
     #[test]

@@ -1014,6 +1014,10 @@ async fn an_error_mid_cart_still_dates_the_grants_that_landed() {
         ts::body_contains("Stopped at Mail.Send") && ts::body_contains("Insufficient privileges")
     })
     .await;
+    assert!(ts::body_contains("Granted 1 permission org-wide."));
+    // An earlier call can answer Ok with only per-item failures, so the
+    // warning claims nothing about what came before.
+    assert!(!ts::body_contains("before it were granted"));
 }
 
 // ---- Admin-unit scoping (C1) ----------------------------------------------

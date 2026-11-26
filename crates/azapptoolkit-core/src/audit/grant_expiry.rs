@@ -70,7 +70,8 @@ pub fn decode_expiry_tag(tag: &str) -> Option<Option<GrantExpiry>> {
 pub struct ExpiredGrant {
     pub resource_app_id: String,
     pub app_role_id: String,
-    /// The permission's value, or the role id when it couldn't be resolved.
+    /// The permission's value (with " on <resource>" for a resource other
+    /// than Graph), or the role id when it couldn't be resolved.
     pub name: String,
     pub expires_on: Date,
 }
@@ -123,9 +124,21 @@ pub fn expiry_has_passed(expires_on: Date, now: Timestamp) -> bool {
     jiff::tz::Offset::UTC.to_datetime(now).date() > expires_on
 }
 
+/// The `(resource, role)` a v1 tag of ours names, even when its date can't be
+/// read: setting or clearing that grant's expiry replaces such a tag too.
+fn v1_pair(tag: &str) -> Option<(&str, &str)> {
+    let body = tag
+        .strip_prefix(GRANT_EXPIRY_TAG_FAMILY)?
+        .strip_prefix(V1)?;
+    let mut parts = body.split('|');
+    let (resource, role) = (parts.next()?, parts.next()?);
+    (is_guid(resource) && is_guid(role)).then_some((resource, role))
+}
+
 /// `tags` with this `(resource, role)`'s expiry set to `expires_on` (or
-/// cleared on `None`): every tag of our family for the pair is removed, case-
-/// insensitively, and the new one appended; other tags keep their order.
+/// cleared on `None`): every v1 tag of our family for the pair is removed,
+/// case-insensitively and whatever its date says, and the new one appended;
+/// other tags keep their order.
 /// `None` only when the ids aren't GUIDs.
 pub fn with_expiry(
     tags: &[String],
@@ -136,15 +149,12 @@ pub fn with_expiry(
     if !is_guid(resource_app_id) || !is_guid(app_role_id) {
         return None;
     }
-    let same_pair = |e: &GrantExpiry| {
-        e.resource_app_id.eq_ignore_ascii_case(resource_app_id)
-            && e.app_role_id.eq_ignore_ascii_case(app_role_id)
+    let same_pair = |t: &String| {
+        v1_pair(t).is_some_and(|(resource, role)| {
+            resource.eq_ignore_ascii_case(resource_app_id) && role.eq_ignore_ascii_case(app_role_id)
+        })
     };
-    let mut out: Vec<String> = tags
-        .iter()
-        .filter(|t| !matches!(decode_expiry_tag(t), Some(Some(e)) if same_pair(&e)))
-        .cloned()
-        .collect();
+    let mut out: Vec<String> = tags.iter().filter(|t| !same_pair(t)).cloned().collect();
     if let Some(expires_on) = expires_on {
         out.push(encode_expiry_tag(&GrantExpiry {
             resource_app_id: resource_app_id.to_string(),
@@ -238,6 +248,22 @@ mod tests {
         ];
         assert_eq!(unreadable_expiry_tags(&tags), 4);
         assert_eq!(unreadable_expiry_tags(&tags[..3]), 0);
+    }
+
+    #[test]
+    fn with_expiry_replaces_an_unreadable_tag_of_the_same_pair() {
+        // The advisory's own advice (set the date again) must clear it.
+        let bad = format!(
+            "azapptoolkit:grantExpiry:v1|{RES}|{}|2026-11-31",
+            ROLE.to_uppercase()
+        );
+        let other = "azapptoolkit:grantExpiry:v1|nope|x|2026-12-24".to_string();
+        let tags = vec![bad, other.clone()];
+        let set = with_expiry(&tags, RES, ROLE, Some(date("2027-01-31"))).unwrap();
+        assert_eq!(unreadable_expiry_tags(&set), 1, "{set:?}");
+        assert!(set.contains(&other), "a tag it can't match is left alone");
+        let cleared = with_expiry(&tags, RES, ROLE, None).unwrap();
+        assert_eq!(cleared, vec![other]);
     }
 
     #[test]

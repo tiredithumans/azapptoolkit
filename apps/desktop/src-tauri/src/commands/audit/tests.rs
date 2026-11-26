@@ -2335,7 +2335,20 @@ fn sp_audit_candidates_admits_a_passed_expiry() {
         tags: vec![expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, date)],
         ..Default::default()
     };
-    let index = vec![sp("sp-past", "2026-11-01"), sp("sp-future", "2027-01-01")];
+    // A mistyped date (an unreadable tag of ours) is admitted too, so its
+    // advisory line reaches a vendor whose grant no matrix covers.
+    let index = vec![
+        sp("sp-past", "2026-11-01"),
+        sp("sp-future", "2027-01-01"),
+        ServicePrincipal {
+            id: "sp-typo".into(),
+            app_id: "app-sp-typo".into(),
+            tags: vec![format!(
+                "azapptoolkit:grantExpiry:v1|{MICROSOFT_GRAPH_APP_ID}|{EXPIRY_ROLE_A}|2026-11-31"
+            )],
+            ..Default::default()
+        },
+    ];
     let got: Vec<String> = sp_audit_candidates(
         &index,
         &HashSet::new(),
@@ -2346,7 +2359,7 @@ fn sp_audit_candidates_admits_a_passed_expiry() {
     .into_iter()
     .map(|s| s.id)
     .collect();
-    assert_eq!(got, vec!["sp-past"]);
+    assert_eq!(got, vec!["sp-past", "sp-typo"]);
 }
 
 #[test]
@@ -2500,6 +2513,7 @@ fn grant_expiries_post_pass_reports_unreadable_tags() {
             .find(|i| i.starts_with(issue::UNREADABLE_GRANT_EXPIRY))
             .unwrap_or_else(|| panic!("{}: {:?}", item.app_id, item.issues));
         assert!(line.contains("1 tag"), "{line}");
+        assert!(line.contains("|2026-11-31"), "the tag is quoted: {line}");
         assert!(
             item.remediations
                 .iter()
