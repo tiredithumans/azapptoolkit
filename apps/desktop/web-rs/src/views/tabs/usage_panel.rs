@@ -29,6 +29,10 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
     let busy = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let consent_needed = RwSignal::new(false);
+    // The read takes Log Analytics, then ARM (workspace discovery). A consent
+    // still missing after Log Analytics was granted here is ARM's, so the
+    // next click asks for that instead of looping.
+    let next_consent: RwSignal<&'static str> = RwSignal::new("log_analytics");
     // A Conditional Access step-up (`interaction_required`) for Log Analytics
     // or for the ARM workspace discovery before it.
     let step_up_needed = RwSignal::new(false);
@@ -69,7 +73,10 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                 return;
             }
             match res {
-                Ok(r) => result.set(Some(r)),
+                Ok(r) => {
+                    next_consent.set("log_analytics");
+                    result.set(Some(r));
+                }
                 Err(e) => {
                     consent_needed.set(e.is_consent_required());
                     step_up_needed.set(e.is_interaction_required());
@@ -91,16 +98,20 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
     let grant_consent = move |_| {
         let Some(t) = tenant.get() else { return };
         error.set(None);
+        let feature = next_consent.get_untracked();
         leptos::task::spawn_local(async move {
-            let res = auth::request_scope_consent(&t.tenant_id, "log_analytics").await;
+            let res = auth::request_scope_consent(&t.tenant_id, feature).await;
             // The consent prompt is answered minutes later, perhaps after the
             // pane closed: `do_load` reads `busy`, which panics once disposed.
             if busy.is_disposed() || !session.is_active_tenant(&t.tenant_id) {
                 return;
             }
             match res {
-                Ok(()) => do_load(),
-                Err(e) => session.fail_inline(&e, "log_analytics", error),
+                Ok(()) => {
+                    next_consent.set("arm");
+                    do_load();
+                }
+                Err(e) => session.fail_inline(&e, feature, error),
             }
         });
     };
@@ -144,7 +155,13 @@ pub fn UsagePanel(#[prop(into)] detail: Signal<Arc<ApplicationDetail>>) -> impl 
                                                     appearance=Signal::derive(|| ButtonAppearance::Primary)
                                                     on_click=Box::new(grant_consent)
                                                 >
-                                                    "Grant consent & retry"
+                                                    {move || {
+                                                        if next_consent.get() == "arm" {
+                                                            "Grant Azure consent & retry"
+                                                        } else {
+                                                            "Grant consent & retry"
+                                                        }
+                                                    }}
                                                 </Button>
                                             </div>
                                         }

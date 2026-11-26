@@ -481,8 +481,10 @@ pub enum CidrError {
     PrefixZero,
 }
 
-/// Parses an IPv4 / IPv6 CIDR range for a named location: `(is_ipv6, text)`
-/// with surrounding whitespace trimmed. `/0` is refused.
+/// Parses an IPv4 / IPv6 CIDR range for a named location: `(is_ipv6, text)`,
+/// with the text in canonical form (`10.0.0.0/8`, never `/+8` or `/08`;
+/// IPv6 compressed and lower-case), so a retried create compares equal.
+/// `/0` is refused.
 pub fn parse_cidr(input: &str) -> Result<(bool, String), CidrError> {
     let text = input.trim();
     let (addr, prefix) = text.split_once('/').ok_or(CidrError::Malformed)?;
@@ -495,7 +497,7 @@ pub fn parse_cidr(input: &str) -> Result<(bool, String), CidrError> {
     if prefix == 0 {
         return Err(CidrError::PrefixZero);
     }
-    Ok((addr.is_ipv6(), text.to_string()))
+    Ok((addr.is_ipv6(), format!("{addr}/{prefix}")))
 }
 
 #[cfg(test)]
@@ -1185,8 +1187,12 @@ mod tests {
         #[test]
         fn parse_cidr_table() {
             type Case<'a> = (&'a str, Result<(bool, &'a str), CidrError>);
-            let cases: [Case<'_>; 7] = [
+            let cases: [Case<'_>; 10] = [
                 ("10.0.0.0/8", Ok((false, "10.0.0.0/8"))),
+                // Stored in canonical form, so a retried create matches (B2b).
+                ("10.0.0.0/+8", Ok((false, "10.0.0.0/8"))),
+                ("10.0.0.0/08", Ok((false, "10.0.0.0/8"))),
+                ("2001:DB8:0:0::/32", Ok((true, "2001:db8::/32"))),
                 (" 2001:db8::/32 ", Ok((true, "2001:db8::/32"))),
                 ("0.0.0.0/0", Err(CidrError::PrefixZero)),
                 ("::/0", Err(CidrError::PrefixZero)),

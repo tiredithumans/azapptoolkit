@@ -240,6 +240,40 @@ async fn an_inline_surface_offers_the_resource_step_up_and_retries() {
     assert_eq!(ts::call_count("sign_out"), 0, "never a sign-out");
 }
 
+/// The read takes Log Analytics, then ARM for workspace discovery: a consent
+/// still missing after Log Analytics was granted is ARM's, so the second
+/// click asks for that instead of looping (B1a).
+#[wasm_bindgen_test]
+async fn a_second_consent_retry_asks_for_azure_resource_manager() {
+    ts::reset();
+    ts::mock_err(
+        "get_app_graph_usage",
+        &fixtures::ui_error("consent_required", "Admin consent is required."),
+    );
+    let features = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = features.clone();
+    ipc_mock::mock_each("request_scope_consent", move |args| {
+        seen.borrow_mut()
+            .push(args["feature"].as_str().unwrap_or_default().to_string());
+    });
+    let detail = Arc::new(fixtures::application_detail("obj-1", "app-1", "Payroll"));
+    let _m = ts::mount_view(move || {
+        view! { <UsagePanel detail=Signal::derive(move || detail.clone()) /> }
+    });
+
+    ts::click_button_labelled("Check observed usage (90d)");
+    ts::wait_for(|| ts::has_button_labelled("Grant consent & retry")).await;
+    ts::click_button_labelled("Grant consent & retry");
+    ts::wait_until("the retry", || ts::call_count("get_app_graph_usage") == 2).await;
+    ts::wait_for(|| ts::has_button_labelled("Grant Azure consent & retry")).await;
+    ts::click_button_labelled("Grant Azure consent & retry");
+    ts::wait_until("the second retry", || {
+        ts::call_count("get_app_graph_usage") == 3
+    })
+    .await;
+    assert_eq!(*features.borrow(), ["log_analytics", "arm"]);
+}
+
 /// A failed step-up keeps the surface and says why, instead of retrying.
 #[wasm_bindgen_test]
 async fn a_failed_inline_step_up_says_so_and_does_not_retry() {

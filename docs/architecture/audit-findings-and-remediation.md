@@ -430,11 +430,18 @@ nothing it reports is a scope.
   Log Analytics consent and cached workspace) as it starts, beside the prefetch and the fan-out;
   `run::await_usage` waits only while some row holds a tracked grant, never past one 90 s deadline
   from the spawn or a Cancel, and `apply_graph_usage` fills each tracked grant's `GrantUsage`: `Seen` (a call the permission *could* have authorized), `NotSeen { since }`
-  (the start of the logs actually read — the only evidence about the grant itself), `NotTracked`
+  (the start of the logs actually read — the only evidence about the grant itself; the checklist
+  advises removal only past `USAGE_MIN_EVIDENCE_DAYS`, 30, so an export switched on two days ago
+  says "too few to judge"), `NotTracked`
   (directory and other untracked permissions), or `Unknown { reason }`. The table mapper fails
   CLOSED — no logs in the window (`NoLogs`), a newest row older than a day (`Stale`, the export
   stopped), a missing column or an unreadable cell (`Failed`) are never `NotSeen`. Usage never
-  degrades the run: every failure is a reason, never an `AuditCoverageGap`. A tenant that moved
+  degrades the run: every failure is a reason, never an `AuditCoverageGap`; a missing consent at
+  any step (Log Analytics, or the ARM consent workspace discovery needs) is `NoConsent`
+  (`usage_reason`). Workspace discovery stops and caches nothing when a probe or a subscription
+  listing can't get a token (`probe_outcome`: `Abort`), treats a transient failure as inconclusive,
+  and stores its answer behind a `generation_for` watch. The usage panel's consent button asks for
+  Log Analytics first and ARM on the next click. A tenant that moved
   `MicrosoftGraphActivityLogs` to a pay-per-query log plan pays for one scan per audit.
 - **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
   every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
@@ -487,16 +494,23 @@ The checklist's network-lock line is set up from the app registration's **Condit
   `auditLogs/signIns`, whole-second filter, `Prefer: include-unknown-enum-members`,
   `reportOnlyFailure`, on the `audit_log` consent). It never reassures without evidence: none
   evaluated yet says so, a read past the 1 000-row cap is "at least", and an unreadable log is
-  "unknown". The shape check also refuses a lock whose client or app side gained an exclusion or a
+  "unknown"; the read is bounded (`READOUT_BUDGET`, 15 s), past which it is unknown too. The shape
+  check also refuses a lock whose client or app side gained an exclusion or a
   filter, or whose controls are more than `block` — an "unbreak it for now" edit is not a lock.
 - **Named locations the toolkit creates are untrusted** — a trusted range joins `AllTrusted`, which
-  relaxes user MFA policies and Identity Protection risk. CIDRs are validated (`parse_cidr`, `/0`
-  refused); chosen ids must be GUIDs naming live IP locations. A retried create reuses a live
+  relaxes user MFA policies and Identity Protection risk. CIDRs are validated and stored canonical
+  (`parse_cidr`: `/0` refused, `/+8` → `/8`, IPv6 compressed and lower-case, and the live side
+  canonicalised before a reuse compares); chosen ids must be GUIDs naming live IP locations. A retried create reuses a live
   location with the same name and ranges (same name, other ranges → `location_name_taken`), so a
-  failed policy create never leaks duplicates. Remove leaves locations in place. Reads degrade like
+  failed policy create never leaks duplicates. A policy create that may have committed (5xx, a
+  dropped connection) sweeps the cached audit and says the lock may exist
+  (`create_policy_failed`). A refusal (`not_a_toolkit_lock`, `lock_exists`) reloads the section. Remove leaves locations in place. Reads degrade like
   the Conditional Access tab (`map_ca_err`); only writes use the lock's error mapping.
 - **Eligibility** is `lock_ineligibility_for_app` on the live app and service principal: only
-  single-tenant app registrations with a service principal can be locked.
+  single-tenant app registrations with a service principal can be locked. An app that became
+  ineligible after it was locked (it went multi-tenant) still shows the toolkit's lock, with Remove
+  only: Conditional Access ignores it now, but it is back in force if the app returns to
+  single-tenant.
 - **Licence:** a refusal that names workload identities maps to `workload_identity_license_required`
   (Graph doesn't document the exact error). Scopes: `conditional_access_write` (Policy.Read.All +
   Policy.ReadWrite.ConditionalAccess); capability `conditional_access_lock`.

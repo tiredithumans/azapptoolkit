@@ -12,7 +12,9 @@ use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
 use leptos::prelude::*;
 
 use crate::components::ui::Badge;
+use crate::state::use_session;
 use crate::util::fmt_day;
+use crate::views::tabs::app_tab::AppTab;
 
 use super::{last_sign_in_cell, risk_tone};
 
@@ -33,10 +35,10 @@ pub(super) fn network_lock_line(lock: &NetworkLock) -> (&'static str, String) {
             "·",
             "a Conditional Access policy may cover this app (filter or app group)".to_string(),
         ),
+        // Where to set one up depends on the row: see `UnscopableChecklist`.
         NetworkLock::None => (
             "✗",
-            "no Conditional Access policy locks this app to named locations — set one up on the app's Conditional Access tab"
-                .to_string(),
+            "no Conditional Access policy locks this app to named locations".to_string(),
         ),
         NetworkLock::NotPossible { reason } => (
             "·",
@@ -57,9 +59,27 @@ pub(super) fn network_lock_line(lock: &NetworkLock) -> (&'static str, String) {
 
 /// `(mark, text)` for one grant's observed Graph usage. A call in the
 /// permission's family is one it COULD have authorized, so only "no call" is
-/// worded as evidence about the grant.
-pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
+/// worded as evidence about the grant — and only over enough days of logs to
+/// advise removal (`not_seen_is_conclusive`).
+pub(super) fn usage_line(usage: &GrantUsage, now: jiff::Timestamp) -> (&'static str, String) {
     match usage {
+        GrantUsage::NotSeen { since }
+            if !azapptoolkit_core::audit::not_seen_is_conclusive(*since, now) =>
+        {
+            let days = now.duration_since(*since).as_hours() / 24;
+            let span = match days {
+                ..=0 => "less than a day".to_string(),
+                1 => "only 1 day".to_string(),
+                n => format!("only {n} days"),
+            };
+            (
+                "·",
+                format!(
+                    "No call it could authorize since {} — {span} of logs so far, too few to judge",
+                    fmt_day(*since),
+                ),
+            )
+        }
         GrantUsage::Seen { at } => (
             "·",
             format!("Last call it could authorize: {}", fmt_day(*at)),
@@ -79,7 +99,7 @@ pub(super) fn usage_line(usage: &GrantUsage) -> (&'static str, String) {
                     "Usage unknown — no Log Analytics workspace with Microsoft Graph activity logs"
                 }
                 UsageUnknownReason::NoConsent => {
-                    "Usage unknown — grant the Log Analytics consent on the Observed Graph activity panel"
+                    "Usage unknown — grant the Log Analytics and Azure Resource Manager consents on the Observed Graph activity panel"
                 }
                 UsageUnknownReason::TimedOut => {
                     "Usage unknown — the Graph activity query took too long; re-run the audit"
@@ -187,13 +207,38 @@ fn instance_lock_line(item: &AuditItem) -> (&'static str, &'static str) {
 /// credentials and owners; an SP-only row's live in its home tenant.
 #[component]
 pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
+    let session = use_session();
     let is_app = item.principal_kind == AuditPrincipalKind::Application;
+    let object_id = item.object_id.clone();
     let grants = item
         .unscopable_grants
         .iter()
         .map(|g| {
             let (mark, lock) = network_lock_line(&g.network_lock);
-            let (umark, used) = usage_line(&g.last_used);
+            // A missing lock: an app registration's is set up on its
+            // Conditional Access tab (one click away); the enterprise pane
+            // has no lock section.
+            let lock_tail = (g.network_lock == NetworkLock::None).then(|| {
+                if is_app {
+                    let oid = object_id.clone();
+                    view! {
+                        " — set one up on "
+                        <button
+                            type="button"
+                            class="link-btn"
+                            on:click=move |_| {
+                                session.open_app_on_tab(oid.clone(), AppTab::ConditionalAccess.value())
+                            }
+                        >
+                            "the app's Conditional Access tab"
+                        </button>
+                    }
+                        .into_any()
+                } else {
+                    " — set one up in the Microsoft Entra admin center".into_any()
+                }
+            });
+            let (umark, used) = usage_line(&g.last_used, jiff::Timestamp::now());
             let expiry = expiry_line(
                 g.expires_on,
                 jiff::Timestamp::now(),
@@ -216,7 +261,7 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
                     <span class="mono">{g.permission.value.clone()}</span>
                     " "
                     <Badge label=g.risk.as_str() tone=risk_tone(&g.risk) />
-                    <div>{format!("{mark} Network lock: {lock}")}</div>
+                    <div>{format!("{mark} Network lock: {lock}")} {lock_tail}</div>
                     <div>{format!("{umark} {used}")}</div>
                     {expiry}
                     {mechanism.map(|m| view! { <div class="muted">{m}</div> })}
@@ -271,9 +316,10 @@ mod tests {
                 "a Conditional Access policy may cover this app (filter or app group)",
             ),
             (
+                // Where to set one up is the row's to say (a link, B2e).
                 NetworkLock::None,
                 "✗",
-                "no Conditional Access policy locks this app to named locations — set one up on the app's Conditional Access tab",
+                "no Conditional Access policy locks this app to named locations",
             ),
             (
                 NetworkLock::NotPossible {
@@ -341,12 +387,26 @@ mod tests {
         use azapptoolkit_core::audit::{GrantUsage, UsageUnknownReason as R};
         let at: jiff::Timestamp = "2026-11-20T10:00:00Z".parse().unwrap();
         let since: jiff::Timestamp = "2026-08-27T00:00:00Z".parse().unwrap();
+        let now: jiff::Timestamp = "2026-11-25T00:00:00Z".parse().unwrap();
+        let recent: jiff::Timestamp = "2026-11-22T00:00:00Z".parse().unwrap();
         let cases = [
             (GrantUsage::Seen { at }, "·", "Last call it could authorize: 2026-11-20".to_string()),
             (
                 GrantUsage::NotSeen { since },
                 "✗",
                 "No call it could authorize since 2026-08-27 — consider removing it".to_string(),
+            ),
+            // On the export's first day (or with clock skew), "less than a day".
+            (
+                GrantUsage::NotSeen { since: now },
+                "·",
+                "No call it could authorize since 2026-11-25 — less than a day of logs so far, too few to judge".to_string(),
+            ),
+            // Logs only just started: too little to advise removal (B1b).
+            (
+                GrantUsage::NotSeen { since: recent },
+                "·",
+                "No call it could authorize since 2026-11-22 — only 3 days of logs so far, too few to judge".to_string(),
             ),
             (GrantUsage::NotTracked, "·", "Usage not tracked for this permission".to_string()),
             (
@@ -357,7 +417,7 @@ mod tests {
             (
                 GrantUsage::Unknown { reason: R::NoConsent },
                 "·",
-                "Usage unknown — grant the Log Analytics consent on the Observed Graph activity panel".to_string(),
+                "Usage unknown — grant the Log Analytics and Azure Resource Manager consents on the Observed Graph activity panel".to_string(),
             ),
             (
                 GrantUsage::Unknown { reason: R::TimedOut },
@@ -386,7 +446,7 @@ mod tests {
             ),
         ];
         for (usage, mark, text) in cases {
-            let (m, t) = usage_line(&usage);
+            let (m, t) = usage_line(&usage, now);
             assert_eq!((m, t.as_str()), (mark, text.as_str()), "{usage:?}");
             for banned in ["used it", "scoped", "confined"] {
                 assert!(!t.contains(banned), "{t:?} says {banned:?}");

@@ -60,18 +60,6 @@ impl GraphClient {
             .await
     }
 
-    /// One Conditional Access policy, read on the write token so a verify-then-
-    /// write needs one consent.
-    pub async fn get_ca_policy(&self, policy_id: &str) -> Result<ConditionalAccessPolicy> {
-        validate::require_path_segment("policy id", policy_id)?;
-        let token = self.conditional_access_write_token()?;
-        let url = format!(
-            "{}/identity/conditionalAccess/policies/{policy_id}",
-            self.base_url
-        );
-        self.scoped_get_retried(token, &url).await
-    }
-
     /// Creates a Conditional Access policy from a prepared body
     /// (`conditional_access::lock_policy_body`). A POST is never replayed
     /// after a 5xx, so a create can't land twice.

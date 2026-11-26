@@ -1072,6 +1072,60 @@ async fn home_drills_route_severity_to_apps_and_findings_to_groups() {
     );
 }
 
+/// A missing lock on an app registration links straight to its Conditional
+/// Access tab, where the lock is set up (B2e).
+#[wasm_bindgen_test]
+async fn a_missing_lock_links_to_the_conditional_access_tab() {
+    use azapptoolkit_core::audit::{ResourcePermission, UnscopableGrant};
+    use azapptoolkit_core::conditional_access::NetworkLock;
+    ts::reset();
+    let mut run = cached_run();
+    let mut app = fixtures::audit_item(
+        "Call Reporter",
+        RiskLevel::Medium,
+        &[format!(
+            "{} CallRecords.Read.All — Microsoft offers no way to narrow these",
+            issue::UNSCOPABLE_PRIVILEGED
+        )],
+    );
+    app.unscopable_grants = vec![UnscopableGrant {
+        permission: ResourcePermission::graph("CallRecords.Read.All"),
+        risk: RiskLevel::Medium,
+        microsoft_mechanism: None,
+        network_lock: NetworkLock::None,
+        last_used: azapptoolkit_core::audit::GrantUsage::NotTracked,
+        expires_on: None,
+    }];
+    let object_id = app.object_id.clone();
+    run.items.push(app);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("No built-in scoping")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("unscopable_privileged".to_string()));
+    ts::wait_for(|| ts::has_button_labelled("the app's Conditional Access tab")).await;
+    ts::click_button_labelled("the app's Conditional Access tab");
+    assert_eq!(
+        m.session
+            .tenant_ui
+            .pending_app_tab
+            .get_untracked()
+            .as_deref(),
+        Some("conditionalAccess")
+    );
+    assert!(
+        m.session
+            .open_items
+            .get_untracked()
+            .iter()
+            .any(|i| i.entity_id == object_id),
+        "the app opens"
+    );
+}
+
 /// Rule 24's group shows each grant with its network-lock line, and a vendor
 /// (SP-only) row says a lock is not possible rather than missing.
 #[wasm_bindgen_test]

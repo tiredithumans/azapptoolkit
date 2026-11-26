@@ -2523,6 +2523,23 @@ fn grant_expiries_post_pass_reports_unreadable_tags() {
     }
 }
 
+/// A missing consent anywhere in the usage chain (Log Analytics, or the
+/// ARM consent workspace discovery needs) reads as "no consent", not
+/// "couldn't read" (B1a).
+#[test]
+fn discovery_consent_failure_reads_no_consent() {
+    use super::prefetch::usage_reason;
+    use azapptoolkit_core::audit::UsageUnknownReason as R;
+    assert_eq!(
+        usage_reason(&UiError::new("consent_required", "x", false)),
+        R::NoConsent
+    );
+    assert_eq!(
+        usage_reason(&UiError::new("arm_error", "x", true)),
+        R::Failed
+    );
+}
+
 // ---- Rule 26: directory roles prefetch -----------------------------------
 
 #[test]

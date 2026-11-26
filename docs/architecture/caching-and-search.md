@@ -352,8 +352,10 @@ call then returns `NotFound` for a delete that succeeded. The Graph client's del
 (`delete_application`, `delete_service_principal`, the grant deletes) therefore sweep their caches
 through `client::delete_may_have_landed`: on `Ok`, on `NotFound`, and on an error after which the
 write may have committed (`GraphError::may_have_committed`). The `delete_application` command drops
-the list tier in the same cases and still returns the error. A request Graph refused outright
-(401/403, another 4xx) sweeps nothing, as before.
+the list tier in the same cases and still returns the error. A POST whose outcome Graph never
+reported is swept the same way on `may_have_committed`: `add_password_core` and the network
+lock's policy create (`create_policy_failed`). A request Graph refused outright (401/403, another
+4xx) sweeps nothing, as before.
 
 After a successful mutation, bust the relevant list cache (`invalidate_app_lists(...)`); never on
 the error path, so a failed write doesn't clear fresh data.

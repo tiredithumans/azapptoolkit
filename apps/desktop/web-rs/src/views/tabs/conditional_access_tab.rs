@@ -300,10 +300,21 @@ pub fn NetworkLockSection(
             cb.try_run(());
         }
     };
+    // A refusal because the policy changed outside the toolkit reloads the
+    // section, so its message sits next to the current state.
+    let refused = move |e: azapptoolkit_dto::UiError| {
+        if e.code == "not_a_toolkit_lock" {
+            reload.update(|n| *n += 1);
+        }
+        cmd.fail_inline(e);
+    };
+    // `run_with` keeps the last error; each new attempt starts clean.
     let turn_on = move |policy_id: String| {
         let app = app_id.get();
-        cmd.run(
+        cmd.error.set(None);
+        cmd.run_with(
             move |()| changed(),
+            refused,
             move |tenant| async move {
                 conditional_access::enable_network_lock(&tenant, &app, &policy_id).await
             },
@@ -311,8 +322,10 @@ pub fn NetworkLockSection(
     };
     let remove = move |policy_id: String| {
         let app = app_id.get();
-        cmd.run(
+        cmd.error.set(None);
+        cmd.run_with(
             move |()| changed(),
+            refused,
             move |tenant| async move {
                 conditional_access::remove_network_lock(&tenant, &app, &policy_id).await
             },
@@ -412,7 +425,25 @@ fn lock_state_view(
         }
     };
     if let Some(reason) = s.ineligible {
-        return view! { <span class="ui-text">{ineligible_text(reason)}</span> }.into_any();
+        // A lock the toolkit made before the app became ineligible is still
+        // in the tenant (dormant, and back in force if the app becomes
+        // eligible again): it can be removed, nothing else.
+        let leftover = s.toolkit_lock.map(|lock| {
+            let id = lock.policy_id.clone();
+            let ask_remove: Box<dyn Fn() + Send + Sync> =
+                Box::new(move || pending_remove.set(Some(id.clone())));
+            view! {
+                <span class="ui-text">
+                    "The toolkit's earlier lock policy is still in the tenant; Conditional Access doesn't apply it to this app now."
+                </span>
+                <div class="actions-row">{button("Remove lock", ask_remove)}</div>
+            }
+        });
+        return view! {
+            <span class="ui-text">{ineligible_text(reason)}</span>
+            {leftover}
+        }
+        .into_any();
     }
     if let Some(lock) = s.toolkit_lock {
         let places = lock
