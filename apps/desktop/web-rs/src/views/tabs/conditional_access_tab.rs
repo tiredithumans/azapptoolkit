@@ -308,8 +308,10 @@ pub fn NetworkLockSection(
         }
         cmd.fail_inline(e);
     };
+    // `run_with` keeps the last error; each new attempt starts clean.
     let turn_on = move |policy_id: String| {
         let app = app_id.get();
+        cmd.error.set(None);
         cmd.run_with(
             move |()| changed(),
             refused,
@@ -320,6 +322,7 @@ pub fn NetworkLockSection(
     };
     let remove = move |policy_id: String| {
         let app = app_id.get();
+        cmd.error.set(None);
         cmd.run_with(
             move |()| changed(),
             refused,

@@ -300,3 +300,39 @@ async fn a_refused_turn_on_reloads_the_section() {
     ts::wait_until("the reload", || ts::call_count("get_network_lock") == 2).await;
     ts::wait_for(|| ts::body_contains("toolkit network lock any more")).await;
 }
+
+/// A failed Turn on, then a Remove that works: the old error goes with the
+/// state it described.
+#[wasm_bindgen_test]
+async fn a_later_success_clears_an_earlier_error() {
+    ts::reset();
+    ts::mock_ok(
+        "get_network_lock",
+        &status(
+            Some(toolkit("enabledForReportingButNotEnforced")),
+            NetworkLock::None,
+            None,
+            None,
+        ),
+    );
+    ts::mock_err(
+        "enable_network_lock",
+        &fixtures::ui_error("forbidden", "Turn on was refused."),
+    );
+    ts::mock_ok("remove_network_lock", &());
+    let _m = mount();
+    ts::wait_for(|| ts::has_button_labelled("Turn on lock")).await;
+    ts::click_button_labelled("Turn on lock");
+    ts::wait_for(|| ts::has_button_labelled("Turn on")).await;
+    ts::click_button_labelled("Turn on");
+    ts::wait_for(|| ts::body_contains("Turn on was refused.")).await;
+    ts::click_button_labelled("Remove");
+    ts::wait_for(|| ts::has_button_labelled("Delete policy")).await;
+    ts::click_button_labelled("Delete policy");
+    ts::wait_for(|| ts::call_count("remove_network_lock") == 1).await;
+    ts::wait_until("the reload", || ts::call_count("get_network_lock") == 2).await;
+    ts::wait_until("the stale error to go", || {
+        !ts::body_contains("Turn on was refused.")
+    })
+    .await;
+}

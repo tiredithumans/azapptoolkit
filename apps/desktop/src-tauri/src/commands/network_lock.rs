@@ -169,17 +169,24 @@ pub(crate) fn reusable_location(
         return Ok(None);
     };
     // Both sides canonical: Graph may store a range in another spelling. A
-    // live range that doesn't parse drops out, so the sets differ (refused).
-    let mut have: Vec<String> = same_name
+    // live range that is missing or doesn't parse makes the location's reach
+    // unknown, so it is never reused (it might allow more than asked).
+    let have: Option<Vec<String>> = same_name
         .ip_ranges
         .iter()
-        .filter_map(|r| r.cidr_address.as_deref())
-        .filter_map(|c| parse_cidr(c).ok().map(|(_, c)| c))
+        .map(|r| {
+            r.cidr_address
+                .as_deref()
+                .and_then(|c| parse_cidr(c).ok())
+                .map(|(_, c)| c)
+        })
         .collect();
+    let mut have = have.unwrap_or_default();
+    let unreadable = have.len() != same_name.ip_ranges.len();
     let mut want: Vec<String> = cidrs.iter().map(|(_, c)| c.clone()).collect();
     have.sort();
     want.sort();
-    if have == want {
+    if !unreadable && have == want {
         Ok(same_name.id.clone())
     } else {
         Err(UiError::validation(
@@ -225,8 +232,9 @@ pub(crate) fn create_policy_failed(
     let mut ui = map_lock_write_err(err);
     ui.message = create_failed_message(&ui.message, created_location);
     if may_have_committed {
-        ui.message
-            .push_str(" The lock may have been created anyway; reload before trying again.");
+        ui.message.push_str(
+            " The lock may have been created anyway: check the section before trying again.",
+        );
     }
     (ui, may_have_committed)
 }
@@ -785,6 +793,25 @@ mod tests {
         }];
         let got = reusable_location(&[live], "office", &[(true, "2001:db8::/32".into())]);
         assert_eq!(got.unwrap(), Some("loc-1".to_string()));
+    }
+
+    /// A live location with a range that can't be read (or none at all) is
+    /// never reused: its real reach is unknown, so it might allow more.
+    #[test]
+    fn reusable_location_refuses_an_unreadable_range() {
+        use azapptoolkit_core::models::IpRange;
+        let mut live = ip_location("loc-1");
+        live.ip_ranges = vec![
+            IpRange {
+                cidr_address: Some("203.0.113.0/24".into()),
+            },
+            IpRange {
+                cidr_address: Some("010.1.2.0/24".into()),
+            },
+            IpRange { cidr_address: None },
+        ];
+        let got = reusable_location(&[live], "office", &[(false, "203.0.113.0/24".into())]);
+        assert_eq!(got.unwrap_err().code, "location_name_taken");
     }
 
     /// The sign-in readout can't hold the section's skeleton for minutes

@@ -67,12 +67,16 @@ pub(super) fn usage_line(usage: &GrantUsage, now: jiff::Timestamp) -> (&'static 
             if !azapptoolkit_core::audit::not_seen_is_conclusive(*since, now) =>
         {
             let days = now.duration_since(*since).as_hours() / 24;
+            let span = match days {
+                ..=0 => "less than a day".to_string(),
+                1 => "only 1 day".to_string(),
+                n => format!("only {n} days"),
+            };
             (
                 "·",
                 format!(
-                    "No call it could authorize since {} — only {days} day{} of logs so far, too few to judge",
+                    "No call it could authorize since {} — {span} of logs so far, too few to judge",
                     fmt_day(*since),
-                    if days == 1 { "" } else { "s" }
                 ),
             )
         }
@@ -391,6 +395,12 @@ mod tests {
                 GrantUsage::NotSeen { since },
                 "✗",
                 "No call it could authorize since 2026-08-27 — consider removing it".to_string(),
+            ),
+            // On the export's first day (or with clock skew), "less than a day".
+            (
+                GrantUsage::NotSeen { since: now },
+                "·",
+                "No call it could authorize since 2026-11-25 — less than a day of logs so far, too few to judge".to_string(),
             ),
             // Logs only just started: too little to advise removal (B1b).
             (

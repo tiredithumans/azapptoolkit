@@ -1376,6 +1376,7 @@ const GUARDED_SCAN_KEYS: &[&str] = &[
     "sso_certificate_expirations_key",
     "app_role_resources_key",
     "app_detail_key",
+    "workspace_cache_key",
 ];
 
 /// The unpinned guarded store forms.
