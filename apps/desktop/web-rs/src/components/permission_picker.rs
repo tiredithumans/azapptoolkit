@@ -291,8 +291,9 @@ fn scope_hint_note(resource_app_id: &str, value: &str) -> Option<(bool, String)>
         }
         let note = match unmanaged_mechanism_for(Some(resource_app_id), value) {
             Some(m) => format!(
-                "Tenant-wide. Microsoft can narrow it with {}; this toolkit doesn't manage that yet.",
-                m.label()
+                "Tenant-wide. Microsoft can narrow it with {}; {}.",
+                m.label(),
+                m.toolkit_note()
             ),
             None => "Tenant-wide — Microsoft offers no way to narrow this permission.".to_string(),
         };
@@ -538,7 +539,7 @@ mod tests {
         assert!(!scoped);
         assert!(
             text.ends_with(
-                "Microsoft can narrow it with per-team (resource-specific) consent; this toolkit doesn't manage that yet."
+                "Microsoft can narrow it with per-team (resource-specific) consent; this toolkit doesn't manage it yet."
             ),
             "{text}"
         );
@@ -547,6 +548,9 @@ mod tests {
             scope_hint_note(OFFICE365_EXCHANGE_ONLINE_APP_ID, "Exchange.ManageAsApp"),
             None
         );
+        // A Teams-policy permission points at Meeting policy… (X1).
+        let (_, text) = scope_hint_note(MICROSOFT_GRAPH_APP_ID, "OnlineMeetings.Read.All").unwrap();
+        assert!(text.contains("Meeting policy…"), "{text}");
     }
 
     #[test]

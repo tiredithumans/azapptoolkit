@@ -348,6 +348,11 @@ pub enum AuditCoverageGap {
     /// lock as unknown. A tenant without the license, or an operator without
     /// a role that reads policies, is "unavailable" instead — never this gap.
     ConditionalAccess,
+    /// The directory role assignments could not be read just now (throttled,
+    /// failing or unreachable), so Rule 26 couldn't see which apps hold an
+    /// admin role limited to an admin unit: their limited line and its weight
+    /// are missing. A refusal (403) is "unavailable" instead, never this gap.
+    DirectoryRoles,
     /// A gap recorded by a newer build than the one reading it back.
     #[serde(other)]
     Other,
@@ -411,6 +416,11 @@ impl AuditCoverageGap {
                  Graph was throttling, failing or unreachable), so this run could not check \
                  whether apps holding unnarrowable permissions are locked to named networks — \
                  re-run to include it."
+            }
+            AuditCoverageGap::DirectoryRoles => {
+                "The tenant's directory role assignments could not be read just now (Microsoft \
+                 Graph was throttling, failing or unreachable), so this run could not see which \
+                 apps hold an admin role limited to an admin unit — re-run to include them."
             }
             AuditCoverageGap::Other => {
                 "Part of this run's tenant-wide analysis could not be completed."

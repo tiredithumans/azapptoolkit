@@ -445,7 +445,9 @@ nothing it reports is a scope.
   `MicrosoftGraphActivityLogs` to a pay-per-query log plan pays for one scan per audit.
 - **Unavailable vs gap** follows the sign-in report: no consent, license or policy-reading role →
   every lock `Unknown`, no gap (the run still caches); a transient read failure on a tenant that
-  can read policies → `AuditCoverageGap::ConditionalAccess`. `Unknown` is never shown as "no lock".
+  can read policies → `AuditCoverageGap::ConditionalAccess`, dropped after scoring when the run saw
+  every principal and no grant's lock is `Unknown` (`retain_needed_ca_gap`: nothing needed the
+  read). `Unknown` is never shown as "no lock".
 - **The checklist** (`views/audit_view/unscopable_checklist.rs`) is the group's Detail cell:
   per grant the lock line and any Microsoft mechanism, then credentials, owners and the instance
   property lock (application
@@ -593,7 +595,8 @@ only the unit's members. Microsoft lets a service principal hold these roles, ve
   can't add groups) or created by rule (a users-whose-attribute-equals builder, or an advanced
   rule). One permission per wizard run: each needs a different role and kind of unit.
 - **Rule 26** reads the direct, active role assignments once per run (sign-in `Directory.Read.All`;
-  unreadable → unknown, no gap). Org-wide holders get the Scope fix; a limited principal gets the
+  unreadable → unknown; a refusal is no gap, a transient failure is
+  `AuditCoverageGap::DirectoryRoles`). Org-wide holders get the Scope fix; a limited principal gets the
   healthy line and the reduced scoped weight, so limiting never reads as all-clear.
 - **The Directory roles section** lists a principal's direct, active roles; only admin-unit-scoped
   ones have Remove (re-read live; `not_admin_unit_scoped` otherwise).

@@ -951,22 +951,31 @@ pub(crate) fn held_directory_roles(
     out
 }
 
+/// The roles prefetch: each principal's held roles (`None` = unknown, never
+/// "no roles"), and the run's coverage gap.
+pub(crate) type DirectoryRolesPrefetch = (
+    Option<Arc<HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>>>>,
+    Option<AuditCoverageGap>,
+);
+
 /// One tenant-wide read of the direct directory role assignments, plus the
 /// admin units' names (sign-in `Directory.Read.All` token). Unreadable →
-/// `None`: unknown, never "no roles" — no limit is inferred, and it is not a
-/// coverage gap (the org-wide finding still shows). An unreadable unit list
-/// only loses the names.
-pub(crate) async fn prefetch_directory_roles(
-    client: &GraphClient,
-) -> Option<Arc<HashMap<String, Vec<azapptoolkit_core::audit::HeldDirectoryRole>>>> {
+/// unknown, never "no roles": no limit is inferred. A refusal (403, no role)
+/// is unavailable, no gap; a transient failure is
+/// [`AuditCoverageGap::DirectoryRoles`], since a limited app then loses its
+/// line and weight while the run looks complete. An unreadable unit list only
+/// loses the names.
+pub(crate) async fn prefetch_directory_roles(client: &GraphClient) -> DirectoryRolesPrefetch {
     let assignments = match client.list_directory_role_assignments().await {
         Ok(a) => a,
         Err(err) => {
+            let transient = err.is_retryable();
             tracing::info!(
                 code = err.ui_code(),
+                transient,
                 "directory role assignments unreadable; admin-unit limits unknown this run"
             );
-            return None;
+            return (None, transient.then_some(AuditCoverageGap::DirectoryRoles));
         }
     };
     let unit_names: HashMap<String, String> =
@@ -984,5 +993,8 @@ pub(crate) async fn prefetch_directory_roles(
         } else {
             HashMap::new()
         };
-    Some(Arc::new(held_directory_roles(&assignments, &unit_names)))
+    (
+        Some(Arc::new(held_directory_roles(&assignments, &unit_names))),
+        None,
+    )
 }

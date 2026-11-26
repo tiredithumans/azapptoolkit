@@ -56,6 +56,10 @@ pub enum UnmanagedMechanism {
     /// (`ChannelMessage.Read.Group`, `ChatMessage.Read.Chat`) instead of the
     /// tenant-wide one.
     ResourceSpecificConsent,
+    /// An admin role assigned to the service principal over an
+    /// administrative unit (Authentication, Password/Helpdesk or Groups
+    /// Administrator), which the toolkit doesn't assign for these.
+    AdministrativeUnitRole,
 }
 
 impl UnmanagedMechanism {
@@ -64,6 +68,23 @@ impl UnmanagedMechanism {
         match self {
             UnmanagedMechanism::TeamsMeetingAccessPolicy => "a Teams meeting access policy",
             UnmanagedMechanism::ResourceSpecificConsent => "per-team (resource-specific) consent",
+            UnmanagedMechanism::AdministrativeUnitRole => {
+                "an admin role assigned over an administrative unit"
+            }
+        }
+    }
+
+    /// What the toolkit offers for it, written to follow "Microsoft can
+    /// narrow this with <label>; …". One wording for the checklist, the
+    /// badge and the picker.
+    pub fn toolkit_note(self) -> &'static str {
+        match self {
+            // C3: the toolkit writes the PowerShell (Teams has no API).
+            UnmanagedMechanism::TeamsMeetingAccessPolicy => {
+                "use Meeting policy… on the app's Permissions tab, which writes the PowerShell"
+            }
+            UnmanagedMechanism::ResourceSpecificConsent
+            | UnmanagedMechanism::AdministrativeUnitRole => "this toolkit doesn't manage it yet",
         }
     }
 }
@@ -138,8 +159,22 @@ const MICROSOFT_UNMANAGED: &[(&str, UnmanagedMechanism)] = &[
         "Chat.ReadWrite.All",
         UnmanagedMechanism::ResourceSpecificConsent,
     ),
-    // User / Groups / Cloud Device Administrator, assigned to the service
-    // principal over an administrative unit.
+    // Microsoft documents an admin role over an administrative unit for
+    // these (Authentication, Password/Helpdesk and Groups Administrator; the
+    // admin-units-assign-roles table), which the toolkit doesn't assign. The
+    // ones it does (User/Group/Device.ReadWrite.All) are `ScopeKind`s.
+    (
+        "UserAuthenticationMethod.ReadWrite.All",
+        UnmanagedMechanism::AdministrativeUnitRole,
+    ),
+    (
+        "User-PasswordProfile.ReadWrite.All",
+        UnmanagedMechanism::AdministrativeUnitRole,
+    ),
+    (
+        "GroupMember.ReadWrite.All",
+        UnmanagedMechanism::AdministrativeUnitRole,
+    ),
 ];
 
 /// `Some(MICROSOFT_GRAPH_APP_ID)` for the Graph appId in any case, the
@@ -295,6 +330,38 @@ mod tests {
         // Admin-unit roles are a toolkit mechanism now (`ScopeKind::AdministrativeUnit`).
         assert_eq!(unmanaged_mechanism_for(G, "User.ReadWrite.All"), None);
         assert_eq!(unmanaged_mechanism_for(EXO, "User.ReadWrite.All"), None);
+        // Microsoft documents an admin role over a unit for these, which the
+        // toolkit doesn't assign (A6): Authentication, Password and Groups
+        // Administrator.
+        for v in [
+            "UserAuthenticationMethod.ReadWrite.All",
+            "User-PasswordProfile.ReadWrite.All",
+            "GroupMember.ReadWrite.All",
+        ] {
+            assert_eq!(
+                unmanaged_mechanism_for(G, v),
+                Some(UnmanagedMechanism::AdministrativeUnitRole),
+                "{v}"
+            );
+            assert!(is_unscopable_privileged(G, v), "{v} is still flagged");
+        }
+    }
+
+    /// What each mechanism's line says the toolkit offers: only the Teams
+    /// policy has a toolkit action (Meeting policy…).
+    #[test]
+    fn each_mechanism_says_what_the_toolkit_offers() {
+        assert!(
+            UnmanagedMechanism::TeamsMeetingAccessPolicy
+                .toolkit_note()
+                .contains("Meeting policy…")
+        );
+        for m in [
+            UnmanagedMechanism::ResourceSpecificConsent,
+            UnmanagedMechanism::AdministrativeUnitRole,
+        ] {
+            assert_eq!(m.toolkit_note(), "this toolkit doesn't manage it yet");
+        }
     }
 
     #[test]

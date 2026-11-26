@@ -163,6 +163,16 @@ pub(super) fn is_listed(
     })
 }
 
+/// The line for a grant Microsoft can narrow by a mechanism the toolkit
+/// doesn't apply itself.
+pub(super) fn mechanism_line(m: azapptoolkit_core::audit::UnmanagedMechanism) -> String {
+    format!(
+        "Microsoft can narrow this with {}; {}.",
+        m.label(),
+        m.toolkit_note()
+    )
+}
+
 /// `(mark, text)` for an app registration's credentials.
 fn credentials_line(item: &AuditItem) -> (&'static str, &'static str) {
     match (item.certificates.is_empty(), item.secrets.is_empty()) {
@@ -244,18 +254,8 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
                 jiff::Timestamp::now(),
                 is_listed(&item.expired_grants, g),
             )
-                .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
-            let mechanism = g.microsoft_mechanism.map(|m| match m {
-                // C3: the toolkit writes the PowerShell (Teams has no API).
-                azapptoolkit_core::audit::UnmanagedMechanism::TeamsMeetingAccessPolicy => format!(
-                    "Microsoft can narrow this with {}: Meeting policy… on the app's Permissions tab writes the PowerShell.",
-                    m.label()
-                ),
-                _ => format!(
-                    "Microsoft can narrow this with {}; this toolkit doesn't manage it yet.",
-                    m.label()
-                ),
-            });
+            .map(|(m, t)| view! { <div>{format!("{m} {t}")}</div> });
+            let mechanism = g.microsoft_mechanism.map(mechanism_line);
             view! {
                 <li>
                     <span class="mono">{g.permission.value.clone()}</span>
@@ -293,6 +293,46 @@ pub(super) fn UnscopableChecklist(item: AuditItem) -> impl IntoView {
 mod tests {
     use super::*;
     use azapptoolkit_core::conditional_access::{LockIneligible, NetworkLock};
+
+    /// Every mechanism line, and both expiry lines, keep to the wording
+    /// rule: a safeguard never "scopes" (A1).
+    #[test]
+    fn mechanism_and_expiry_lines_avoid_scope_words() {
+        use azapptoolkit_core::audit::UnmanagedMechanism as M;
+        let all = [
+            M::TeamsMeetingAccessPolicy,
+            M::ResourceSpecificConsent,
+            M::AdministrativeUnitRole,
+        ];
+        // A new variant fails to compile here until it joins `all`.
+        for m in all {
+            match m {
+                M::TeamsMeetingAccessPolicy
+                | M::ResourceSpecificConsent
+                | M::AdministrativeUnitRole => {}
+            }
+        }
+        let now: jiff::Timestamp = "2026-11-25T12:00:00Z".parse().unwrap();
+        let day = |d: &str| Some(d.parse::<jiff::civil::Date>().unwrap());
+        let mut lines: Vec<String> = all.iter().map(|m| mechanism_line(*m)).collect();
+        for (date, listed) in [
+            ("2026-12-24", true),
+            ("2026-11-24", true),
+            ("2026-11-24", false),
+        ] {
+            lines.push(expiry_line(day(date), now, listed).unwrap().1);
+        }
+        for t in &lines {
+            for banned in ["scoped", "confined", "limited to"] {
+                assert!(!t.contains(banned), "{t:?} says {banned:?}");
+            }
+        }
+        assert!(mechanism_line(M::TeamsMeetingAccessPolicy).contains("Meeting policy…"));
+        assert_eq!(
+            mechanism_line(M::AdministrativeUnitRole),
+            "Microsoft can narrow this with an admin role assigned over an administrative unit; this toolkit doesn't manage it yet."
+        );
+    }
 
     #[test]
     fn network_lock_lines() {
