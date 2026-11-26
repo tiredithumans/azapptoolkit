@@ -24,6 +24,11 @@ use std::path::Path;
 /// `(file under src/, fragment that must be present, the rule it carries)`.
 const REQUIRED: &[(&str, &str, &str)] = &[
     (
+        "components/directory_roles_section.rs",
+        "confirm_label=\"Remove role\"",
+        "removing an admin-unit role can stop the app's writes to that unit: click-confirm naming the role and unit",
+    ),
+    (
         "views/audit_view/row.rs",
         "confirm_label=\"Revoke\"",
         "revoking expired grants removes access the operator chose to end: click-confirm naming the app and grants",

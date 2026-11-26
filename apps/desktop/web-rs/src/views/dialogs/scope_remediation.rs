@@ -545,3 +545,185 @@ pub fn ScopeSharePointButton(
     }
     .into_any()
 }
+
+/// Rule 26's Fix: limit a tenant-wide directory write to an admin unit. Picks
+/// (or creates) the unit, shows what the role also allows and what the app
+/// can no longer do, then runs the same core as the wizard. Anything kept, or
+/// a covering tenant-wide role, stays in the modal and keeps the row's Fix.
+#[component]
+pub fn ScopeDirectoryWriteButton(
+    target: ScopeFixTarget,
+    /// The audit row's appId: an app registration's service principal is
+    /// resolved from it.
+    app_id: String,
+    action: RemediationAction,
+    #[prop(into)] on_done: Callback<String>,
+) -> impl IntoView {
+    use crate::bindings::admin_units::{self, AdminUnitDto, ScopeDirectoryWriteArgs};
+    use crate::components::admin_unit_panel::{AdminUnitPanel, DirectoryWriteDisclosures};
+    use crate::components::ui::Select;
+    use crate::hooks::use_command::use_command;
+    use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
+    use azapptoolkit_core::scoping::admin_unit::directory_write_mapping;
+
+    let session = use_session();
+    let open = RwSignal::new(false);
+    let cmd = use_command().with_consent_feature("admin_unit_roles");
+    let permission = RwSignal::new(action.targets.first().cloned().unwrap_or_default());
+    let unit: RwSignal<Option<AdminUnitDto>> = RwSignal::new(None);
+    let created_now = RwSignal::new(false);
+    let warned: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let member_kind = Signal::derive(move || {
+        permission.with(|p| {
+            directory_write_mapping(Some(MICROSOFT_GRAPH_APP_ID), p).map(|m| m.member_kind)
+        })
+    });
+    let disclosed = Signal::derive(move || Some(permission.get()).filter(|p| !p.is_empty()));
+    let row_id = target.row_id();
+
+    let apply = {
+        let target = target.clone();
+        let app_id = app_id.clone();
+        let row_id = row_id.clone();
+        Callback::new(move |_: ()| {
+            let Some(u) = unit.get_untracked() else {
+                cmd.error
+                    .set(Some("Pick an admin unit, or create one.".into()));
+                return;
+            };
+            let value = permission.get_untracked();
+            let created = created_now.get_untracked();
+            let (sp, object_id) = match &target {
+                ScopeFixTarget::AppReg { object_id } => (None, Some(object_id.clone())),
+                ScopeFixTarget::ServicePrincipal { sp_object_id, .. } => {
+                    (Some(sp_object_id.clone()), None)
+                }
+            };
+            let app_id = app_id.clone();
+            let row_id = row_id.clone();
+            cmd.run_with(
+                move |r: admin_units::DirectoryWriteScopeResult| {
+                    let mut notes: Vec<String> = Vec::new();
+                    notes.extend(r.kept_reason.clone());
+                    if let Some(c) = &r.covering_role {
+                        notes.push(format!(
+                            "The app also holds {c} tenant-wide, so its writes still reach everyone. Remove that role to make the limit real."
+                        ));
+                    }
+                    notes.extend(r.warnings.clone());
+                    if notes.is_empty() {
+                        open.set(false);
+                        session.toast_success(format!(
+                            "Writes limited to {}. Re-run the audit to refresh scores.",
+                            u.display_name
+                        ));
+                        on_done.try_run(row_id);
+                    } else {
+                        warned.set(notes);
+                    }
+                },
+                move |e| cmd.fail_inline(e),
+                move |tenant| async move {
+                    admin_units::scope_directory_write(ScopeDirectoryWriteArgs {
+                        tenant_id: &tenant,
+                        sp_object_id: sp.as_deref(),
+                        object_id: object_id.as_deref(),
+                        app_id: &app_id,
+                        permission_value: &value,
+                        admin_unit_id: &u.id,
+                        created_now: created,
+                        require_held: true,
+                    })
+                    .await
+                },
+            );
+        })
+    };
+
+    let label = action.label.clone();
+    let detail = action.detail.clone();
+    let targets = action.targets.clone();
+    let several = targets.len() > 1;
+
+    view! {
+        <div class="audit-actions">
+            <Button
+                appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                on_click=Box::new({
+                    let first = action.targets.first().cloned().unwrap_or_default();
+                    move |_| {
+                        // A fresh open: no unit, nothing "just created",
+                        // no notes from the last run.
+                        cmd.error.set(None);
+                        warned.set(Vec::new());
+                        unit.set(None);
+                        created_now.set(false);
+                        permission.set(first.clone());
+                        open.set(true);
+                    }
+                })
+            >
+                {label}
+            </Button>
+            <div class="audit-actions__preview">{detail}</div>
+            <ModalShell
+                open=open
+                title="Limit writes to an admin unit"
+                busy=cmd.busy
+                on_close=Callback::new(move |()| open.set(false))
+            >
+                {several
+                    .then(|| {
+                        let options = targets.clone();
+                        view! {
+                            <Select value=permission label="Permission">
+                                {options
+                                    .into_iter()
+                                    .map(|t| {
+                                        let label = t.clone();
+                                        view! { <option value=t>{label}</option> }
+                                    })
+                                    .collect_view()}
+                            </Select>
+                        }
+                    })}
+                <AdminUnitPanel member_kind=member_kind selected=unit created_now=created_now />
+                <DirectoryWriteDisclosures permission=disclosed />
+                {move || {
+                    let notes = warned.get();
+                    (!notes.is_empty())
+                        .then(|| {
+                            view! {
+                                <Callout tone="warn">
+                                    <ul class="member-list">
+                                        {notes
+                                            .into_iter()
+                                            .map(|n| view! { <li>{n}</li> })
+                                            .collect_view()}
+                                    </ul>
+                                </Callout>
+                            }
+                        })
+                }}
+                {move || cmd.error.get().map(|e| view! { <FormError>{e}</FormError> })}
+                <div class="actions-row">
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                        disabled=Signal::derive(move || cmd.busy.get())
+                        on_click=Box::new(move |_| open.set(false))
+                    >
+                        "Cancel"
+                    </Button>
+                    <Button
+                        appearance=Signal::derive(|| ButtonAppearance::Primary)
+                        disabled=Signal::derive(move || cmd.busy.get() || unit.with(Option::is_none))
+                        on_click=Box::new(move |_| apply.run(()))
+                    >
+                        "Limit writes"
+                    </Button>
+                    {move || cmd.busy.get().then(|| view! { <Spinner /> })}
+                </div>
+            </ModalShell>
+        </div>
+    }
+}

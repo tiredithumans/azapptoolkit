@@ -21,6 +21,8 @@
 //! definition instead of drifting copies. `azapptoolkit-exchange` re-exports the
 //! Exchange helpers for its existing callers.
 
+pub mod admin_unit;
+
 /// Microsoft Graph's first-party app id — the resource that exposes the
 /// mail/calendar/contacts **application** permissions.
 pub const MICROSOFT_GRAPH_APP_ID: &str = "00000003-0000-0000-c000-000000000000";
@@ -596,8 +598,11 @@ pub enum ScopeKind {
     /// shape and granted through a different endpoint, so a cart mixing the two
     /// has no single target panel to show and must fall back to org-wide.
     SharePointItem,
-    // Future: AdministrativeUnit (directory perms), AzureRbac (ARM/MI),
-    // ResourceSpecificConsent (Teams/Chat — owner-consented, see `admin_applicable`).
+    /// `User`/`Group`/`Device.ReadWrite.All` → the matching Entra admin role
+    /// assigned at administrative-unit scope (`admin_unit`).
+    AdministrativeUnit,
+    // Future: AzureRbac (ARM/MI), ResourceSpecificConsent (Teams/Chat —
+    // owner-consented, see `admin_applicable`).
 }
 
 impl ScopeKind {
@@ -614,6 +619,7 @@ impl ScopeKind {
             // SharePoint Administrator role does not reach. Sharing one key
             // made the proactive hint promise a role that isn't sufficient.
             ScopeKind::SharePointItem => "sharepoint_selected_items",
+            ScopeKind::AdministrativeUnit => "admin_unit_roles",
         }
     }
 
@@ -623,7 +629,10 @@ impl ScopeKind {
     /// that can't work.
     pub fn admin_applicable(self) -> bool {
         match self {
-            ScopeKind::Exchange | ScopeKind::SharePoint | ScopeKind::SharePointItem => true,
+            ScopeKind::Exchange
+            | ScopeKind::SharePoint
+            | ScopeKind::SharePointItem
+            | ScopeKind::AdministrativeUnit => true,
         }
     }
 }
@@ -651,6 +660,8 @@ pub fn scope_kind_for(resource_app_id: Option<&str>, value: &str) -> Option<Scop
         Some(ScopeKind::SharePoint)
     } else if is_scoped_sharepoint_item_resource_permission(resource_app_id, value) {
         Some(ScopeKind::SharePointItem)
+    } else if admin_unit::is_scopable_directory_write_resource_permission(resource_app_id, value) {
+        Some(ScopeKind::AdministrativeUnit)
     } else {
         None
     }
@@ -659,6 +670,30 @@ pub fn scope_kind_for(resource_app_id: Option<&str>, value: &str) -> Option<Scop
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_writes_are_scoped_by_admin_unit() {
+        for v in [
+            "User.ReadWrite.All",
+            "Group.ReadWrite.All",
+            "Device.ReadWrite.All",
+        ] {
+            assert_eq!(
+                scope_kind_for(Some(MICROSOFT_GRAPH_APP_ID), v),
+                Some(ScopeKind::AdministrativeUnit),
+                "{v}"
+            );
+            assert_eq!(
+                scope_kind_for(Some(OFFICE365_EXCHANGE_ONLINE_APP_ID), v),
+                None
+            );
+        }
+        assert_eq!(
+            ScopeKind::AdministrativeUnit.capability_key(),
+            "admin_unit_roles"
+        );
+        assert!(ScopeKind::AdministrativeUnit.admin_applicable());
+    }
 
     #[test]
     fn only_read_and_write_are_grantable_selected_roles() {

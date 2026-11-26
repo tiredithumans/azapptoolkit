@@ -1,6 +1,7 @@
 //! Shared UI components used across multiple views.
 
 pub mod aap_migration_report;
+pub mod admin_unit_panel;
 pub mod app_site_access_panel;
 pub mod audit_dashboard;
 pub mod browser_fallback_notice;
@@ -11,6 +12,7 @@ pub mod claims_overview;
 pub mod collapsible_scoping_section;
 pub mod date_range_filter;
 pub mod detail_header;
+pub mod directory_roles_section;
 pub mod directory_search;
 pub mod exchange_scoping_section;
 pub mod export_menu;

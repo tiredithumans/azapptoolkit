@@ -14,6 +14,7 @@ use thaw::{Button, ButtonAppearance};
 use crate::bindings::applications::ApplicationDetail;
 use crate::bindings::exchange;
 use crate::bindings::permissions::{self, GrantResult};
+use crate::components::directory_roles_section::DirectoryRolesSection;
 use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::icon::IconName;
 use crate::components::legacy_exchange_grants_callout::{
@@ -45,6 +46,7 @@ use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{
     GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in,
 };
+use azapptoolkit_core::scoping::admin_unit::is_scopable_directory_write_resource_permission;
 use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
@@ -85,8 +87,12 @@ fn row_scope_kind(resource_app_id: Option<&str>, value: &str) -> Option<ScopeKin
     // until a resource is picked. A held `Files.SelectedOperations.Selected` with
     // no per-item grants is an app that cannot read a single file, and this is
     // the row an operator lands on when they go looking for why.
-    is_scoped_sharepoint_item_resource_permission(resource_app_id, value)
-        .then_some(ScopeKind::SharePointItem)
+    if is_scoped_sharepoint_item_resource_permission(resource_app_id, value) {
+        return Some(ScopeKind::SharePointItem);
+    }
+    // A tenant-wide directory write can be limited to an admin unit.
+    is_scopable_directory_write_resource_permission(resource_app_id, value)
+        .then_some(ScopeKind::AdministrativeUnit)
 }
 
 /// The admin-consent outcome as a toast message: `Ok` for a clean grant, `Err`
@@ -1004,6 +1010,29 @@ pub fn PermissionsTab(
                         }
                     })
             }}
+            <DirectoryRolesSection
+                sp_object_id=Signal::derive(move || {
+                    detail
+                        .with(|d| {
+                            d.service_principal.as_ref().map(|sp| sp.id.clone()).unwrap_or_default()
+                        })
+                })
+                held_values=Signal::derive(move || {
+                    detail
+                        .with(|d| {
+                            d.resolved_permissions
+                                .iter()
+                                .filter(|p| {
+                                    p.permission_kind == PermissionKind::Application
+                                        && p.runtime_assignment_id.is_some()
+                                        && p.resource_app_id
+                                            .eq_ignore_ascii_case(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID)
+                                })
+                                .filter_map(|p| p.permission_value.clone())
+                                .collect::<Vec<_>>()
+                        })
+                })
+            />
             <UsagePanel detail=detail />
         </div>
     }
@@ -1434,6 +1463,18 @@ mod tests {
     fn a_non_sites_permission_has_no_per_row_mechanism() {
         assert_eq!(
             row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "Directory.Read.All"),
+            None
+        );
+    }
+
+    #[test]
+    fn directory_writes_get_the_scope_button() {
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "User.ReadWrite.All"),
+            Some(ScopeKind::AdministrativeUnit)
+        );
+        assert_eq!(
+            row_scope_kind(Some(MICROSOFT_GRAPH_APP_ID), "User.Read.All"),
             None
         );
     }

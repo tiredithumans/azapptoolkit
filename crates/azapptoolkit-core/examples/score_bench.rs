@@ -25,6 +25,7 @@ fn main() {
         admin_consented_scopes: None,
         mail_scopes: Default::default(),
         undeclared_grants: Vec::new(),
+        directory_roles: None,
     };
     let app = Application {
         id: "obj".into(),

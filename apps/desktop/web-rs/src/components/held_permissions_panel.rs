@@ -48,6 +48,25 @@ use crate::util::count_noun;
 /// button. Mirrors the SharePoint arm of `permissions_tab::row_scope_kind`.
 fn is_held_scopable(resource_app_id: Option<&str>, value: &str) -> bool {
     is_scopable_sharepoint_resource_permission(resource_app_id, value)
+        || azapptoolkit_core::scoping::admin_unit::is_scopable_directory_write_resource_permission(
+            resource_app_id,
+            value,
+        )
+}
+
+/// The Microsoft Graph application permission values among `grants` (the
+/// Directory roles section reads them to tell a real unit limit from one a
+/// held tenant-wide permission still voids).
+pub(crate) fn graph_values(grants: &[AppRoleGrantDto]) -> Vec<String> {
+    grants
+        .iter()
+        .filter(|g| {
+            g.resource_app_id.as_deref().is_some_and(|r| {
+                r.eq_ignore_ascii_case(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID)
+            })
+        })
+        .filter_map(|g| g.app_role_value.clone())
+        .collect()
 }
 
 #[component]

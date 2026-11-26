@@ -156,6 +156,14 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         tab: "permissions",
         section: GroupSection::Actionable,
     },
+    // Rule 26 — tenant-wide directory writes an admin-unit role can replace.
+    GroupSpec {
+        key: "orgwide_directory_write",
+        title: "Organization-wide directory write",
+        blurb: "Apps holding User.ReadWrite.All, Group.ReadWrite.All or Device.ReadWrite.All across the whole tenant. The Fix gives the app the matching admin role limited to an administrative unit and then removes the tenant-wide permission; the app keeps reading the directory, and its writes reach only the unit's members.",
+        tab: "permissions",
+        section: GroupSection::Actionable,
+    },
     // Org-wide reach the toolkit cannot confine — advisory siblings of
     // `high_risk_perms`, split by the scorer's advice (remove vs. review).
     GroupSpec {
@@ -231,6 +239,13 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
         key: "scoped_sites",
         title: "SharePoint scoped to selected sites",
         blurb: "SharePoint access on the least-privilege Sites.Selected model.",
+        tab: "permissions",
+        section: GroupSection::Healthy,
+    },
+    GroupSpec {
+        key: "scoped_directory_write",
+        title: "Directory writes limited to admin units",
+        blurb: "Apps whose user, group or device writes reach only an administrative unit's members: they hold the matching admin role at the unit and no tenant-wide write permission.",
         tab: "permissions",
         section: GroupSection::Healthy,
     },
@@ -388,6 +403,7 @@ pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
         "ownership" => &[RemediationKind::AddOwner],
         "unused" => &[RemediationKind::DisableSignIn],
         "expired_grants" => &[RemediationKind::RevokeExpiredGrants],
+        "orgwide_directory_write" => &[RemediationKind::ScopeDirectoryWrite],
         _ => &[],
     }
 }
@@ -845,6 +861,7 @@ mod tests {
             RemediationKind::MigrateApplicationAccessPolicy,
             RemediationKind::DisableSignIn,
             RemediationKind::RevokeExpiredGrants,
+            RemediationKind::ScopeDirectoryWrite,
         ];
         for kind in all {
             let owners: Vec<&str> = GROUP_CATALOG

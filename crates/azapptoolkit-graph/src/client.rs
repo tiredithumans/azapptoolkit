@@ -85,6 +85,7 @@ pub trait ThrottleObserver: Send + Sync {
     fn on_throttle(&self, retry_after_secs: Option<u64>);
 }
 
+mod admin_units;
 mod applications;
 mod batch;
 mod conditional_access;
@@ -162,6 +163,10 @@ pub struct GraphClient {
     /// lock: create, read back, enable and delete one Conditional Access policy, and create an IP
     /// named location. Acquired on demand (incremental consent).
     conditional_access_write_token: Option<Arc<dyn BearerProvider>>,
+    /// Optional `RoleManagement.ReadWrite.Directory` + `AdministrativeUnit.ReadWrite.All`
+    /// token for admin-unit scoping: assign and remove a role at admin-unit scope, and create a
+    /// unit by rule. Acquired on demand (incremental consent).
+    admin_unit_roles_token: Option<Arc<dyn BearerProvider>>,
     /// Optional `Sites.FullControl.All` token for the SharePoint `Sites.Selected` model. The
     /// verb-selected `read_token` (`Directory.Read.All`) cannot read `/sites/{id}/permissions`,
     /// and this scope is admin-consent-only, so the site-permission calls ride this token
@@ -228,6 +233,7 @@ impl GraphClient {
             risky_sp_token: None,
             policy_write_token: None,
             conditional_access_write_token: None,
+            admin_unit_roles_token: None,
             sharepoint_token: None,
             group_member_token: None,
             throttle_observer: parking_lot::RwLock::new(None),
@@ -281,6 +287,14 @@ impl GraphClient {
     /// enabling the network lock's policy and named-location writes.
     pub fn with_conditional_access_write_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
         self.conditional_access_write_token = Some(token);
+        self
+    }
+
+    /// Attaches a `RoleManagement.ReadWrite.Directory` +
+    /// `AdministrativeUnit.ReadWrite.All` token enabling admin-unit scoping's
+    /// writes.
+    pub fn with_admin_unit_roles_token(mut self, token: Arc<dyn BearerProvider>) -> Self {
+        self.admin_unit_roles_token = Some(token);
         self
     }
 
@@ -413,6 +427,13 @@ impl GraphClient {
         self.require_token(
             self.conditional_access_write_token.as_ref(),
             "Policy.Read.All + Policy.ReadWrite.ConditionalAccess",
+        )
+    }
+
+    fn admin_unit_roles_token(&self) -> Result<&Arc<dyn BearerProvider>> {
+        self.require_token(
+            self.admin_unit_roles_token.as_ref(),
+            "RoleManagement.ReadWrite.Directory + AdministrativeUnit.ReadWrite.All",
         )
     }
 

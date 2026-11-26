@@ -587,6 +587,18 @@ const PAGE_SIZE_EVIDENCE: &[&str] = &[
 /// fails the rule), so this cannot quietly grow into an allowlist.
 const PAGE_SIZE_EXEMPT: &[(&str, &str, &str)] = &[
     (
+        "admin_units.rs",
+        "list_role_assignments_for_principal",
+        "Microsoft documents only $filter/$expand/$select on List unifiedRoleAssignments; \
+         collect_all_pages still follows any nextLink",
+    ),
+    (
+        "admin_units.rs",
+        "list_directory_role_assignments",
+        "Microsoft documents only $filter/$expand/$select on List unifiedRoleAssignments; \
+         collect_all_pages still follows any nextLink",
+    ),
+    (
         "applications.rs",
         "list_applications_all",
         "its params come from app_list_params (shared with list_applications), which sends \

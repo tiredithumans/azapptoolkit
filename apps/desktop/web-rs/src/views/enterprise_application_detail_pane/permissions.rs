@@ -3,8 +3,9 @@ use crate::bindings::exchange as exchange_bindings;
 use crate::bindings::exchange::PrincipalPermission;
 use crate::bindings::graph_roles;
 use crate::bindings::permissions as permissions_bindings;
+use crate::components::directory_roles_section::DirectoryRolesSection;
 use crate::components::exchange_scoping_section::ExchangeScopingSection;
-use crate::components::held_permissions_panel::HeldPermissionsPanel;
+use crate::components::held_permissions_panel::{HeldPermissionsPanel, graph_values};
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
 use crate::components::permission_picker::PickerSelection;
 use crate::components::scope_badge::is_exchange_scopable_on;
@@ -349,6 +350,10 @@ pub(super) fn PermissionsContent(
                                     />
                                 }
                             });
+                            // The held Graph values, so the Directory roles
+                            // section can tell a real unit limit from one the
+                            // tenant-wide permission still voids.
+                            let held_graph = graph_values(&list);
                             view! {
                                 {scope_banner}
                                 // Org-wide discoverability callout: names the held
@@ -373,6 +378,10 @@ pub(super) fn PermissionsContent(
                                 {exchange_section}
                                 {sharepoint_section}
                                 {item_section}
+                                <DirectoryRolesSection
+                                    sp_object_id=sp_id
+                                    held_values=Signal::derive(move || held_graph.clone())
+                                />
                             }
                                 .into_any()
                         }

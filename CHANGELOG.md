@@ -12,10 +12,12 @@ After 0.34.1, each change is one line written for the person using the app.
 - The Security tab flags unnarrowable permissions with no matching call in Microsoft Graph activity logs.
 - The Conditional Access tab can lock an app to named locations: report-only first, then turn it on.
 - Application-permission grants can be given an expiry date; the Security tab flags and revokes expired ones.
+- The Grant access wizard can limit an app's user, group or device writes to an administrative unit.
 
 ### Changed
 
 - The security audit now scores Teams call-record, meeting and channel-message permissions.
+- Apps whose directory writes are limited to an admin unit now score a small amount instead of nothing.
 
 ### Fixed
 

@@ -18,6 +18,7 @@ use crate::bindings::managed_identity::{self, AppRoleGrantDto, ManagedIdentityDt
 use crate::components::app_site_access_panel::AppSiteAccessPanel;
 use crate::components::collapsible_scoping_section::CollapsibleScopingSection;
 use crate::components::detail_header::DetailHeader;
+use crate::components::directory_roles_section::DirectoryRolesSection;
 use crate::components::exchange_scoping_section::ExchangeScopingSection;
 use crate::components::held_permissions_panel::HeldPermissionsPanel;
 use crate::components::orgwide_scope_callout::OrgwideScopeCallout;
@@ -97,6 +98,12 @@ pub fn ManagedIdentityDetailPane(
     // Grant expiries (B3) on the identity's service principal: read live, and
     // again after each save.
     let expiry_sp = mi.id.clone();
+    // The identity's SP for the Directory roles section (a Copy signal, so the
+    // tab's render closures can each use it).
+    let roles_sp = Signal::derive({
+        let id = mi.id.clone();
+        move || id.clone()
+    });
     let held_expiries = use_held_expiries(Signal::derive(move || expiry_sp.clone()));
     let wizard_target = Signal::derive(move || ScopeTarget {
         object_id: None,
@@ -313,6 +320,7 @@ pub fn ManagedIdentityDetailPane(
                                         </CollapsibleScopingSection>
                                     }
                                 });
+                            let held_graph = crate::components::held_permissions_panel::graph_values(&list);
                             view! {
                                 {scope_banner}
                                 // Org-wide discoverability callout — same shared
@@ -335,6 +343,10 @@ pub fn ManagedIdentityDetailPane(
                                 />
                                 {exchange_section}
                                 {sharepoint_section}
+                                <DirectoryRolesSection
+                                    sp_object_id=roles_sp
+                                    held_values=Signal::derive(move || held_graph.clone())
+                                />
                             }
                                 .into_any()
                         }

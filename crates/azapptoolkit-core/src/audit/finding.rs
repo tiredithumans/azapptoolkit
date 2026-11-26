@@ -83,6 +83,10 @@ pub fn finding_issue_marker(finding: &str) -> Option<fn(&str) -> bool> {
         // Rule 25 — grants past the expiry an operator set. Its own finding:
         // its Fix revokes them, which no other group offers.
         "expired_grants" => |x| x.starts_with(issue::GRANT_EXPIRED),
+        // Rule 26 — tenant-wide directory writes (with the Scope fix) and the
+        // healthy admin-unit limits.
+        "orgwide_directory_write" => |x| x.starts_with(issue::ORG_WIDE_DIRECTORY_WRITE),
+        "scoped_directory_write" => |x| x.starts_with(issue::SCOPED_DIRECTORY_WRITE),
         "scoped_sites" => |x| x.starts_with(issue::SCOPED_SHAREPOINT),
         // Rule 21 — Microsoft's own disable flag. Its own group (not folded
         // into the credential or exposure findings): the flag is about the
@@ -291,6 +295,17 @@ mod tests {
                 ),
                 "expired_grants",
             ),
+            (
+                format!("{} User.ReadWrite.All", issue::ORG_WIDE_DIRECTORY_WRITE),
+                "orgwide_directory_write",
+            ),
+            (
+                format!(
+                    "{} User Administrator (Finance)",
+                    issue::SCOPED_DIRECTORY_WRITE
+                ),
+                "scoped_directory_write",
+            ),
         ];
         let marker_findings = [
             "high_risk_perms",
@@ -312,6 +327,8 @@ mod tests {
             "granted_undeclared",
             "unscopable_privileged",
             "expired_grants",
+            "orgwide_directory_write",
+            "scoped_directory_write",
         ];
         for (text, expect) in &cases {
             let item = with_issue(text.clone());

@@ -36,6 +36,7 @@
 //! change that must keep the wire text and every frontend consumer in step.
 
 pub mod activity;
+pub mod admin_units;
 pub mod applications;
 pub mod audit;
 pub mod backup;

@@ -202,6 +202,12 @@ pub(crate) fn score_sp_only(
         // An SP-only row has no manifest: its grants ARE its permissions,
         // so nothing is "undeclared".
         undeclared_grants: Vec::new(),
+        directory_roles: ctx.directory_roles.as_ref().map(|by_sp| {
+            by_sp
+                .get(&sp.id.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default()
+        }),
     };
     let granted_grants = perms.app_role_grants.clone();
     apply_legacy_policy_verdict(
@@ -558,6 +564,14 @@ pub(crate) async fn score_one(
     {
         merge_granted_roles(&mut perms, granted, &unresolved_resources);
     }
+
+    // Rule 26: the SP's directory roles (an app with no SP holds none).
+    perms.directory_roles = ctx.directory_roles.as_ref().map(|by_sp| {
+        sp.as_ref()
+            .and_then(|sp| by_sp.get(&sp.id.to_ascii_lowercase()))
+            .cloned()
+            .unwrap_or_default()
+    });
 
     // Admin-consent flag: true if any AllPrincipals grant names this SP as the
     // client (membership in the run's one tenant-wide prefetch).

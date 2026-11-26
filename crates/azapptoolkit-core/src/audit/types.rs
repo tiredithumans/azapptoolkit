@@ -284,6 +284,14 @@ impl ResourcePermission {
     }
 }
 
+/// One directory role a principal holds (Rule 26): its template id, and the
+/// admin unit it is limited to — `(id, name)`, or `None` for tenant scope.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HeldDirectoryRole {
+    pub role_template_id: String,
+    pub admin_unit: Option<(String, String)>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppPermissions {
     /// Role-type entries on the app's `requiredResourceAccess` (or, for an
@@ -329,6 +337,11 @@ pub struct AppPermissions {
     /// grants ARE their only permission source.
     #[serde(default)]
     pub undeclared_grants: Vec<ResourcePermission>,
+    /// The principal's direct, active Microsoft Entra directory roles, from
+    /// the run's one tenant-wide read (Rule 26). `None` = unreadable: no
+    /// admin-unit limit is ever inferred from it.
+    #[serde(default)]
+    pub directory_roles: Option<Vec<HeldDirectoryRole>>,
 }
 
 impl AppPermissions {
@@ -380,6 +393,7 @@ impl AppPermissions {
             admin_consented_scopes: self.admin_consented_scopes.clone(),
             mail_scopes: self.mail_scopes.clone(),
             undeclared_grants: self.undeclared_grants.clone(),
+            directory_roles: self.directory_roles.clone(),
         }
     }
 
@@ -537,6 +551,11 @@ pub enum RemediationKind {
     /// still past its date. `targets` carries the permission names for the
     /// confirm.
     RevokeExpiredGrants,
+    /// Limit a tenant-wide directory write to an admin unit (Rule 26): assign
+    /// the matching admin role at the unit's scope, ensure tenant-wide read,
+    /// then remove the tenant-wide permission. Opens a dialog that picks or
+    /// creates the unit; `targets` carries the permission values.
+    ScopeDirectoryWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -775,6 +794,14 @@ pub mod issue {
     /// tag (`audit::grant_expiry`) has passed. Fires on the tag alone; the
     /// [`super::RemediationKind::RevokeExpiredGrants`] Fix re-checks live.
     pub const GRANT_EXPIRED: &str = "Grants past their expiry:";
+    /// Rule 26 (advisory, net-new): tenant-wide `User`/`Group`/
+    /// `Device.ReadWrite.All` that admin-unit scoping can limit. Weighted by
+    /// Rules 1/2 already; carries [`super::RemediationKind::ScopeDirectoryWrite`].
+    pub const ORG_WIDE_DIRECTORY_WRITE: &str = "Organization-wide directory write:";
+    /// Rule 26's healthy note: the matching admin role held at admin-unit
+    /// scope, the tenant-wide permission gone, no covering tenant-scope role.
+    /// Scored at the reduced scoped weight.
+    pub const SCOPED_DIRECTORY_WRITE: &str = "Directory writes limited to admin units:";
 }
 
 #[cfg(test)]

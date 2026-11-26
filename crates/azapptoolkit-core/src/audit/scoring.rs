@@ -13,8 +13,9 @@ use super::permissions::{
     PTS_ADMIN_CONSENT_DELEGATED, PTS_ALL_CREDS_EXPIRED, PTS_ALL_EXPIRING_SOON,
     PTS_DISABLED_BY_MICROSOFT, PTS_HIGH_RISK_APP_PERM, PTS_LONG_LIVED, PTS_MEDIUM_RISK_APP_PERM,
     PTS_MIXED_EXPIRED, PTS_MIXED_EXPIRING, PTS_MULTITENANT_EXPOSURE, PTS_RISKY_SERVICE_PRINCIPAL,
-    PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL, PTS_SP_DISABLED, PTS_STALE_APP,
-    PTS_TIER0_APP_PERM, PTS_UNVERIFIED_PUBLISHER, RedundantPermission,
+    PTS_SCOPED_HIGH_RISK_DIRECTORY, PTS_SCOPED_HIGH_RISK_MAIL, PTS_SCOPED_MEDIUM_RISK_MAIL,
+    PTS_SP_DISABLED, PTS_STALE_APP, PTS_TIER0_APP_PERM, PTS_UNVERIFIED_PUBLISHER,
+    RedundantPermission,
 };
 
 /// One rule's contribution: score delta plus the issues/recommendations it
@@ -536,6 +537,81 @@ fn rule_sharepoint_advisory(
     (c, scopable)
 }
 
+/// Rule 26 (net-new, no PowerShell counterpart): tenant-wide directory writes
+/// admin-unit scoping can limit (`ORG_WIDE_DIRECTORY_WRITE`, the Scope fix,
+/// no extra score — Rules 1/2 weigh them), and the limits already in place
+/// (`SCOPED_DIRECTORY_WRITE`, the reduced scoped weight per role). Reads the
+/// HELD grants: the fix removes the grant whether or not it is declared. A
+/// limit counts only when the roles are readable, the tenant-wide permission
+/// is gone, and no tenant-scope role (the same one, or Global Administrator)
+/// still covers it. Returns the org-wide set the fix keys off.
+fn rule_directory_write(perms: &AppPermissions) -> (RuleContribution, Vec<&ResourcePermission>) {
+    use crate::scoping::admin_unit::{
+        DIRECTORY_WRITE_MAPPINGS, covering_permission, covers_tenant_wide,
+        is_scopable_directory_write_resource_permission,
+    };
+    let mut c = RuleContribution::default();
+    let orgwide: Vec<&ResourcePermission> = perms
+        .app_role_grants
+        .iter()
+        .filter(|g| {
+            is_scopable_directory_write_resource_permission(g.resource_app_id.as_deref(), &g.value)
+        })
+        .collect();
+    if !orgwide.is_empty() {
+        c.issues.push(format!(
+            "{} {}",
+            issue::ORG_WIDE_DIRECTORY_WRITE,
+            join_values(&orgwide)
+        ));
+        c.recommendations.push(
+            "Limit these writes to an administrative unit: the matching admin role at the unit's \
+             scope replaces the tenant-wide permission"
+                .to_string(),
+        );
+    }
+    // A tenant-wide Directory.ReadWrite.All writes everyone: no limit is real.
+    let directory_write_held = perms
+        .app_role_grants
+        .iter()
+        .any(|g| covering_permission(g.resource_app_id.as_deref(), &g.value));
+    if let Some(roles) = perms
+        .directory_roles
+        .as_ref()
+        .filter(|_| !directory_write_held)
+    {
+        let mut limited: Vec<String> = Vec::new();
+        for m in DIRECTORY_WRITE_MAPPINGS {
+            if orgwide.iter().any(|g| g.value == m.permission) {
+                continue;
+            }
+            if roles
+                .iter()
+                .any(|r| r.admin_unit.is_none() && covers_tenant_wide(m, &r.role_template_id))
+            {
+                continue;
+            }
+            let units: Vec<&str> = roles
+                .iter()
+                .filter(|r| r.role_template_id.eq_ignore_ascii_case(m.role_template_id))
+                .filter_map(|r| r.admin_unit.as_ref().map(|(_, name)| name.as_str()))
+                .collect();
+            if !units.is_empty() {
+                limited.push(format!("{} ({})", m.role_name, units.join(", ")));
+                c.score += PTS_SCOPED_HIGH_RISK_DIRECTORY;
+            }
+        }
+        if !limited.is_empty() {
+            c.issues.push(format!(
+                "{} {}",
+                issue::SCOPED_DIRECTORY_WRITE,
+                limited.join(", ")
+            ));
+        }
+    }
+    (c, orgwide)
+}
+
 /// Rule 13 (advisory, no score): high-risk delegated permissions — the legacy
 /// module weighted delegated only via Rule 3, so this surfaces specific scopes
 /// without altering the score. Two halves, gated differently:
@@ -898,6 +974,7 @@ fn build_remediations(
     mailbox_unscoped: &[&ResourcePermission],
     mailbox_legacy: &[&ResourcePermission],
     sharepoint_orgwide: &[&ResourcePermission],
+    directory_orgwide: &[&ResourcePermission],
     redundant: &[RedundantPermission],
     owner_count: Option<usize>,
 ) -> Vec<RemediationAction> {
@@ -957,6 +1034,21 @@ fn build_remediations(
                 join_values(sharepoint_orgwide)
             ),
             targets: sharepoint_orgwide.iter().map(|g| g.value.clone()).collect(),
+        });
+    }
+    if !directory_orgwide.is_empty() {
+        let n = directory_orgwide.len();
+        remediations.push(RemediationAction {
+            kind: RemediationKind::ScopeDirectoryWrite,
+            label: format!(
+                "Limit {n} directory write permission{} to an admin unit",
+                if n == 1 { "" } else { "s" }
+            ),
+            detail: format!(
+                "Assigns the matching admin role at an admin unit, then removes: {}",
+                join_values(directory_orgwide)
+            ),
+            targets: directory_orgwide.iter().map(|g| g.value.clone()).collect(),
         });
     }
     if !redundant.is_empty() {
@@ -1161,6 +1253,8 @@ pub fn score_application(
     acc.merge(rule_granted_undeclared(perms)); // Rule 23
     let (unscopable_contrib, unscopable_grants) = rule_unscopable_privileged(perms); // Rule 24
     acc.merge(unscopable_contrib);
+    let (directory_contrib, directory_orgwide) = rule_directory_write(perms); // Rule 26
+    acc.merge(directory_contrib);
 
     let has_app_permissions = !perms.app_role_grants.is_empty();
     let has_credentials = !all_creds.is_empty();
@@ -1191,6 +1285,7 @@ pub fn score_application(
         &mailbox_unscoped,
         &mailbox_legacy,
         &sharepoint_orgwide,
+        &directory_orgwide,
         &redundant,
         app.owners.as_ref().map(Vec::len),
     );
@@ -1295,6 +1390,8 @@ pub fn score_service_principal(
     )); // Rule 13
     let (unscopable_contrib, unscopable_grants) = rule_unscopable_privileged(perms); // Rule 24
     acc.merge(unscopable_contrib);
+    let (directory_contrib, directory_orgwide) = rule_directory_write(perms); // Rule 26
+    acc.merge(directory_contrib);
 
     // Only the scope remediations (SP-only cores exist): expired credentials
     // are unknowable, redundancy removal edits the manifest, and SP owners
@@ -1305,6 +1402,7 @@ pub fn score_service_principal(
         &mailbox_unscoped,
         &mailbox_legacy,
         &sharepoint_orgwide,
+        &directory_orgwide,
         &[],
         None,
     );

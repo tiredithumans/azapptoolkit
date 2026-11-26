@@ -125,14 +125,14 @@ async fn declare_graph_role(
 /// The principal a Selected grant is for. Named fields because three adjacent
 /// `&str` ids transpose easily (the `ApplyExchangeMailboxScopeParams`
 /// reasoning in `exchange/grants.rs`).
-struct GraphRolePrincipal<'a> {
-    tenant_id: &'a str,
+pub(crate) struct GraphRolePrincipal<'a> {
+    pub(crate) tenant_id: &'a str,
     /// The app registration to declare on; `None` for an SP-only principal.
-    object_id: Option<&'a str>,
-    sp_object_id: &'a str,
+    pub(crate) object_id: Option<&'a str>,
+    pub(crate) sp_object_id: &'a str,
     /// The appId the per-resource grant is made to. Both objects above are
     /// checked against it before anything is written.
-    app_id: &'a str,
+    pub(crate) app_id: &'a str,
 }
 
 /// Refuses an object whose `appId` is not the one the grant names. The
@@ -152,9 +152,9 @@ pub(crate) fn require_same_app(found: &str, app_id: &str, what: &str) -> Result<
 }
 
 /// What [`declare_and_grant_graph_role`] changed.
-struct GraphRoleGrant {
-    declared_permission: bool,
-    granted_role_added: bool,
+pub(crate) struct GraphRoleGrant {
+    pub(crate) declared_permission: bool,
+    pub(crate) granted_role_added: bool,
 }
 
 /// Declares Microsoft Graph application permission `value` on the app
@@ -169,7 +169,7 @@ struct GraphRoleGrant {
 /// never declared — and an assignment with no declaration does not appear in
 /// the Permissions tab at all. Without the assigned appRole in the token, the
 /// per-resource permissions the callers grant next give nothing at all.
-async fn declare_and_grant_graph_role(
+pub(crate) async fn declare_and_grant_graph_role(
     client: &azapptoolkit_graph::GraphClient,
     cache: &Cache,
     principal: &GraphRolePrincipal<'_>,

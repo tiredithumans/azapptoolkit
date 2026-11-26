@@ -21,6 +21,7 @@
 //! every binding against its `#[tauri::command]`.
 
 pub mod activity;
+pub mod admin_units;
 pub mod applications;
 pub mod audit;
 pub mod auth;

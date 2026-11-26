@@ -1144,6 +1144,33 @@ fn register_fixtures() {
         &f::conditional_access_policies(),
     );
     mock_ok("get_network_lock", &f::network_lock_status_none());
+    // Two admin units to pick from (one by rule); no app holds a directory
+    // role in the demo.
+    mock_ok(
+        "list_admin_units",
+        &vec![
+            azapptoolkit_dto::admin_units::AdminUnitDto {
+                id: "6c3e1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01".to_string(),
+                display_name: "Finance".to_string(),
+                dynamic: true,
+                membership_rule: Some("(user.department -eq \"Finance\")".to_string()),
+                rule_processing_on: true,
+                restricted: false,
+            },
+            azapptoolkit_dto::admin_units::AdminUnitDto {
+                id: "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12".to_string(),
+                display_name: "Sales".to_string(),
+                dynamic: false,
+                membership_rule: None,
+                rule_processing_on: true,
+                restricted: false,
+            },
+        ],
+    );
+    mock_ok(
+        "list_directory_roles",
+        &Vec::<azapptoolkit_dto::admin_units::DirectoryRoleDto>::new(),
+    );
     // No grant in the demo carries an expiry date.
     mock_ok(
         "get_grant_expiries",
