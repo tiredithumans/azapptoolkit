@@ -42,6 +42,7 @@ use crate::views::dialogs::confirm_dialog::ConfirmDialog;
 use crate::views::dialogs::grant_expiry_dialog::{
     ExpiryTarget, GrantExpiryDialog, current_expiry, expiry_note,
 };
+use crate::views::dialogs::meeting_policy_dialog::MeetingPolicyDialog;
 use crate::views::tabs::usage_panel::UsagePanel;
 use azapptoolkit_core::audit::{
     GrantExpiry, MailPermissionScope, downgrade_alternatives, expiries_in,
@@ -51,6 +52,7 @@ use azapptoolkit_core::scoping::{
     ScopeKind, is_scopable_sharepoint_resource_permission,
     is_scoped_sharepoint_item_resource_permission, is_sharepoint_site_access_permission,
 };
+use azapptoolkit_core::teams_meeting_policy::is_meeting_policy_permission;
 use azapptoolkit_dto::UiError;
 use azapptoolkit_dto::permissions::{PermissionKind, ResolvedPermission};
 
@@ -372,6 +374,9 @@ pub fn PermissionsTab(
         })
     });
     let expiry_target: RwSignal<Option<ExpiryTarget>> = RwSignal::new(None);
+    // The Teams meeting access policy script dialog (C3).
+    let meeting_policy_open = RwSignal::new(false);
+    let open_meeting_policy = move || meeting_policy_open.set(true);
     let open_expiry = move |resource_app_id: String, app_role_id: String, label: String| {
         let Some(sp_object_id) =
             detail.with_untracked(|d| d.service_principal.as_ref().map(|sp| sp.id.clone()))
@@ -620,6 +625,12 @@ pub fn PermissionsTab(
                 on_close=Callback::new(move |()| expiry_target.set(None))
                 on_saved=Callback::new(move |_| on_changed.run(()))
             />
+            <MeetingPolicyDialog
+                open=meeting_policy_open
+                app_id=Signal::derive(move || detail.with(|d| d.application.app_id.clone()))
+                app_name=Signal::derive(move || detail.with(|d| d.application.display_name.clone()))
+                on_close=Callback::new(move |()| meeting_policy_open.set(false))
+            />
             <ScopeWizard
                 open=wizard_open
                 target=wizard_target
@@ -756,6 +767,7 @@ pub fn PermissionsTab(
                                         open_tester,
                                         open_expiry,
                                         sp_expiries,
+                                        open_meeting_policy,
                                     )
                                 }
                             />
@@ -1063,7 +1075,7 @@ fn chip_kind_for_permission(kind: PermissionKind) -> AppKind {
 // expiry) plus the read-only jump into the Permission tester; the props are genuinely
 // independent, so a parameter struct would only add ceremony.
 #[allow(clippy::too_many_arguments)]
-fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess, Expiry>(
+fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess, Expiry, Meeting>(
     p: ResolvedPermission,
     // Read reactively in the Scope cell (below) so that under a keyed `<For>` a
     // row's scope still updates when the async mail-scopes resolve — without
@@ -1078,9 +1090,11 @@ fn view_resolved_row<RevApp, RevDel, Remove, Scope, Downgrade, TestAccess, Expir
     test_access: TestAccess,
     expiry: Expiry,
     expiries: Memo<Vec<GrantExpiry>>,
+    meeting_policy: Meeting,
 ) -> impl IntoView
 where
     Expiry: Fn(String, String, String) + Send + Sync + Copy + 'static,
+    Meeting: Fn() + Send + Sync + Copy + 'static,
     RevApp: Fn(String, String) + Send + Sync + Copy + 'static,
     RevDel: Fn(String, String) + Send + Sync + Copy + 'static,
     Remove: Fn(String, String, PermissionKind, String) + Send + Sync + Copy + 'static,
@@ -1241,6 +1255,26 @@ where
         _ => None,
     };
 
+    // "Meeting policy…" on an online-meeting permission: Microsoft scopes those
+    // only through a Teams application access policy, which has no API.
+    let meeting_button = (permission_kind == PermissionKind::Application
+        && p.permission_value
+            .as_deref()
+            .is_some_and(|v| is_meeting_policy_permission(Some(&p.resource_app_id), v)))
+    .then(|| {
+        let aria = format!(
+            "Meeting policy for {}",
+            p.permission_value.clone().unwrap_or_default()
+        );
+        view! {
+            <IconButton
+                icon=IconName::UserCheck
+                aria_label=aria
+                title="Meeting policy…".to_string()
+                on_click=Callback::new(move |_| meeting_policy())
+            />
+        }
+    });
     // "Expiry…" on a granted Application row: the date is a tag on the app's
     // service principal; Rule 25's Fix revokes the grant once it passes.
     let expiry_button = (permission_kind == PermissionKind::Application && granted).then(|| {
@@ -1338,6 +1372,7 @@ where
                 <div class="cell-actions cell-actions--end">
                     {scope_button}
                     {downgrade_button}
+                    {meeting_button}
                     {expiry_button}
                     {trash_button}
                 </div>

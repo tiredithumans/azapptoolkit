@@ -35,6 +35,7 @@ use crate::components::verify_identity_button::{VERIFY_IDENTITY_MESSAGE, VerifyI
 use crate::state::use_session;
 use crate::util::keep_alive;
 use crate::views::dialogs::grant_expiry_dialog::{GrantExpiryDialog, use_held_expiries};
+use crate::views::dialogs::meeting_policy_dialog::MeetingPolicyDialog;
 use crate::views::managed_identities::chip_kind_for;
 
 #[component]
@@ -105,6 +106,16 @@ pub fn ManagedIdentityDetailPane(
         move || id.clone()
     });
     let held_expiries = use_held_expiries(Signal::derive(move || expiry_sp.clone()));
+    // The Teams meeting access policy script dialog (C3).
+    let meeting_policy_open = RwSignal::new(false);
+    let meeting_app_id = Signal::derive({
+        let id = mi.app_id.clone();
+        move || id.clone()
+    });
+    let meeting_app_name = Signal::derive({
+        let name = mi.display_name.clone();
+        move || name.clone()
+    });
     let wizard_target = Signal::derive(move || ScopeTarget {
         object_id: None,
         sp_object_id: wiz_sp.clone(),
@@ -198,6 +209,12 @@ pub fn ManagedIdentityDetailPane(
                     wizard_preseed.set(None);
                 })
                 on_changed=Callback::new(move |()| reload.update(|n| *n += 1))
+            />
+            <MeetingPolicyDialog
+                open=meeting_policy_open
+                app_id=meeting_app_id
+                app_name=meeting_app_name
+                on_close=Callback::new(move |()| meeting_policy_open.set(false))
             />
             <GrantExpiryDialog
                 target=held_expiries.target
@@ -339,6 +356,9 @@ pub fn ManagedIdentityDetailPane(
                                     on_scope=on_scope
                                     on_expiry=held_expiries.on_expiry
                                     expiries=held_expiries.expiries
+                                    on_meeting_policy=Callback::new(move |()| {
+                                        meeting_policy_open.set(true)
+                                    })
                                     busy=Signal::derive(move || busy.get())
                                 />
                                 {exchange_section}

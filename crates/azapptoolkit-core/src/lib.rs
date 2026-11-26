@@ -34,6 +34,7 @@ pub mod restore_plan;
 pub mod scoping;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod settings;
+pub mod teams_meeting_policy;
 pub mod thumbprint;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod token;

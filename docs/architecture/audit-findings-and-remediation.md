@@ -445,6 +445,25 @@ nothing it reports is a scope.
   rows only — an SP-only row's live in its home tenant) and the last sign-in. No line says
   "scoped", "confined" or "limited to" (pinned by test). Not a posture bucket.
 
+## Teams meeting access policy (C3)
+
+Online-meeting, transcript, recording, artifact and virtual-event application permissions reach only
+the meetings of users the app's **Teams application access policy** covers (with none granted, the
+calls fail). Teams has no API for these policies, so a **Meeting policy…** action on those permission
+rows (`core::teams_meeting_policy::is_meeting_policy_permission`: the Permissions tab and both
+held-permission panels) opens a dialog that writes the PowerShell (`teams_meeting_policy::script`): a
+new policy, or the app added to an existing one (a user holds ONE policy, so the new-policy mode
+warns), granted to picked users or one group — never `-Global`, which covers every user without
+their own policy — plus checks. Every value is a single-quoted literal with each of PowerShell's five
+single-quote characters doubled (`'` and the typographic U+2018–U+201B, which PowerShell also ends a
+string at), comment text is stripped of control characters, and ids are GUIDs, so a vendor's display
+name can't inject. The `Global` policy is refused as a name, the default name carries the app id's
+first 8 characters (two apps never share one), and the script is one `& { … }` block with
+`$ErrorActionPreference = 'Stop'`, so a `New-` that fails on an existing name never goes on to grant
+that other policy. The dialog's warning follows the target: a user grant replaces that user's policy
+(in either mode); a group grant reaches direct members only and loses to a user's own policy or a
+better-ranked group. Nothing is run or read: the toolkit can't see which policies exist.
+
 ## Network lock (B2)
 
 The checklist's network-lock line is set up from the app registration's **Conditional Access tab**
