@@ -14,9 +14,12 @@ use azapptoolkit_web_rs::views::tabs::permissions_tab::PermissionsTab;
 
 const APP: &str = "11111111-2222-4333-8444-555555555555";
 
-/// Mounted closed and then opened, as every pane does (the dialog always
-/// starts closed in the app).
+/// Mounted closed and then opened, as every pane does.
 async fn mount_dialog() -> ts::Mounted {
+    mount_dialog_with(Callback::new(|()| {})).await
+}
+
+async fn mount_dialog_with(on_close: Callback<()>) -> ts::Mounted {
     let open = RwSignal::new(false);
     let m = ts::mount_view(move || {
         view! {
@@ -24,7 +27,7 @@ async fn mount_dialog() -> ts::Mounted {
                 open=open
                 app_id=Signal::derive(|| APP.to_string())
                 app_name=Signal::derive(|| "Contoso Recorder".to_string())
-                on_close=Callback::new(|()| {})
+                on_close=on_close
             />
         }
     });
@@ -69,7 +72,7 @@ async fn the_dialog_builds_a_users_script_and_never_global() {
     for id in [&pat.id, &jordan.id] {
         assert!(
             s.contains(&format!(
-                "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder' -Identity '{id}'"
+                "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder-11111111' -Identity '{id}'"
             )),
             "{s}"
         );
@@ -80,6 +83,32 @@ async fn the_dialog_builds_a_users_script_and_never_global() {
         "A user holds one application access policy"
     ));
     assert!(ts::body_contains("-Global isn't offered"));
+    assert!(
+        ts::body_contains("Search users"),
+        "the search says what it searches"
+    );
+    // Adding the app to an existing policy still replaces each picked user's
+    // current policy, so the warning stays (I4).
+    let modes = ts::query_all("input[name='meeting-policy-mode']");
+    let add: web_sys::HtmlElement = wasm_bindgen::JsCast::unchecked_into(modes[1].clone());
+    add.click();
+    ts::wait_until("the Set- line", || {
+        script_text().contains("Set-CsApplicationAccessPolicy")
+    })
+    .await;
+    assert!(ts::body_contains(
+        "A user holds one application access policy"
+    ));
+}
+
+#[wasm_bindgen_test]
+async fn the_dialog_closes_from_its_close_button() {
+    ts::reset();
+    let closed = RwSignal::new(false);
+    let _m = mount_dialog_with(Callback::new(move |()| closed.set(true))).await;
+    ts::wait_until("the Close button", || ts::has_button_labelled("Close")).await;
+    ts::click_button_labelled("Close");
+    ts::wait_until("on_close", || closed.get_untracked()).await;
 }
 
 #[wasm_bindgen_test]
@@ -106,12 +135,18 @@ async fn the_group_mode_builds_one_grant_with_rank() {
     let s = script_text();
     assert!(
         s.contains(&format!(
-            "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder' -Group '{}' -Rank 2",
+            "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder-11111111' -Group '{}' -Rank 2",
             group.id
         )),
         "{s}"
     );
     assert_eq!(s.matches("Grant-CsApplicationAccessPolicy").count(), 1);
+    // A group grant follows group-assignment rules, not "replaces theirs" (I4).
+    assert!(ts::body_contains("direct members only"));
+    assert!(!ts::body_contains(
+        "A user holds one application access policy"
+    ));
+    assert!(ts::body_contains("Search groups"));
 }
 
 #[wasm_bindgen_test]

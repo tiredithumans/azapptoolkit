@@ -5,7 +5,7 @@
 //! group, never `-Global`) for the operator to run. Nothing is changed here.
 
 use leptos::prelude::*;
-use thaw::{Field, Input};
+use thaw::{Button, ButtonAppearance, Field, Input};
 
 use azapptoolkit_core::models::DirectoryObject;
 use azapptoolkit_core::teams_meeting_policy::{
@@ -42,7 +42,10 @@ pub fn MeetingPolicyDialog(
     // Every open starts fresh, named after the app.
     Effect::new(move |_| {
         if open.get() {
-            policy_name.set(default_policy_name(&app_name.get_untracked()));
+            policy_name.set(default_policy_name(
+                &app_name.get_untracked(),
+                &app_id.get_untracked(),
+            ));
             mode.set(PolicyMode::New);
             group_mode.set(false);
             users.set(Vec::new());
@@ -125,18 +128,6 @@ pub fn MeetingPolicyDialog(
                 Callback::new(move |()| mode.set(PolicyMode::AddToExisting)),
                 "Add this app to an existing policy",
             )}
-            {move || {
-                (mode.get() == PolicyMode::New)
-                    .then(|| {
-                        view! {
-                            <Callout tone="warn">
-                                <span class="ui-text">
-                                    "A user holds one application access policy; granting this one replaces theirs. For users who already have one, use Add this app to an existing policy."
-                                </span>
-                            </Callout>
-                        }
-                    })
-            }}
             <Field label="Policy name">
                 <Input value=policy_name />
             </Field>
@@ -152,9 +143,43 @@ pub fn MeetingPolicyDialog(
                 Callback::new(move |()| group_mode.set(true)),
                 "One group",
             )}
-            <div class="meeting-policy__search">
-                <DirectorySearch on_pick=on_pick scope=scope />
-            </div>
+            {move || {
+                if group_mode.get() {
+                    view! {
+                        <Callout tone="warn">
+                            <span class="ui-text">
+                                "A group grant reaches the group's direct members only, not nested groups. A user's own policy beats it, and between groups the lower rank number wins. Groups with hidden membership can't be used, and a large group can take longer than 30 minutes."
+                            </span>
+                        </Callout>
+                    }
+                        .into_any()
+                } else {
+                    let tail = if mode.get() == PolicyMode::New {
+                        " For users who already have one, add this app to their policy instead."
+                    } else {
+                        ""
+                    };
+                    view! {
+                        <Callout tone="warn">
+                            <span class="ui-text">
+                                {format!(
+                                    "A user holds one application access policy: granting this one replaces each picked user's current policy, and any app on it loses their meetings.{tail}",
+                                )}
+                            </span>
+                        </Callout>
+                    }
+                        .into_any()
+                }
+            }}
+            // Rebuilt per target kind, so the label says what it searches.
+            {move || {
+                let label = if group_mode.get() { "Search groups" } else { "Search users" };
+                view! {
+                    <div class="meeting-policy__search">
+                        <DirectorySearch on_pick=on_pick scope=scope label=label />
+                    </div>
+                }
+            }}
             {move || {
                 if group_mode.get() {
                     group
@@ -215,6 +240,14 @@ pub fn MeetingPolicyDialog(
                 }
                 Err(e) => view! { <FormError>{e}</FormError> }.into_any(),
             }}
+            <div class="actions-row">
+                <Button
+                    appearance=Signal::derive(|| ButtonAppearance::Secondary)
+                    on_click=Box::new(move |_| on_close.run(()))
+                >
+                    "Close"
+                </Button>
+            </div>
         </ModalShell>
     }
 }

@@ -7,8 +7,12 @@
 //! application access policy; changes take up to 30 minutes to reach Graph.
 //!
 //! The script is injection-safe by construction: every value is a single-
-//! quoted literal with `'` doubled ([`ps_quote`]), comment text has control
-//! characters stripped, ids are GUIDs, and a `-Global` grant is never written.
+//! quoted literal with each of PowerShell's five single-quote characters
+//! doubled ([`ps_quote`]: `'` and the typographic U+2018–U+201B), comment
+//! text has control characters stripped, ids are GUIDs, and neither a
+//! `-Global` grant nor the `Global` policy is ever written. It runs as one
+//! block that stops at the first error, so a failed step never grants a
+//! policy it didn't create.
 
 use crate::guid::is_guid;
 use crate::scoping::MICROSOFT_GRAPH_APP_ID;
@@ -63,6 +67,7 @@ pub struct PolicyRequest {
 pub enum PolicyScriptError {
     InvalidAppId,
     InvalidPolicyName,
+    GlobalPolicy,
     InvalidTarget(String),
     NoTargets,
 }
@@ -74,6 +79,10 @@ impl std::fmt::Display for PolicyScriptError {
             PolicyScriptError::InvalidPolicyName => write!(
                 f,
                 "Name the policy with up to 64 letters, digits, spaces, dots, dashes or underscores."
+            ),
+            PolicyScriptError::GlobalPolicy => write!(
+                f,
+                "Global is the org-wide policy, which covers every user without their own; use a policy of your own."
             ),
             PolicyScriptError::InvalidTarget(id) => {
                 write!(f, "{id} isn't a valid object id.")
@@ -88,7 +97,18 @@ impl std::fmt::Display for PolicyScriptError {
 
 /// A single-quoted PowerShell literal: `'` doubled, nothing interpolated.
 pub fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        // PowerShell ends a single-quoted string at any of these, and
+        // escapes each by doubling it (`CodeGeneration.EscapeSingleQuotedStringContent`).
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// Text safe for a comment or a description: control characters (newlines
@@ -101,9 +121,15 @@ fn inert(s: &str) -> String {
         .to_string()
 }
 
-/// `azapptoolkit-` plus the app's name reduced to letters, digits and dashes
-/// (spaces become dashes), at most 64 characters.
-pub fn default_policy_name(app_name: &str) -> String {
+/// `azapptoolkit-`, the app's name reduced to letters, digits and dashes
+/// (spaces become dashes), and the app id's first 8 characters, so two apps
+/// whose names reduce alike (or to nothing) never share a name; at most 64.
+pub fn default_policy_name(app_name: &str, app_id: &str) -> String {
+    let id: String = app_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
     let mut slug = String::new();
     for c in app_name.trim().chars() {
         if c.is_ascii_alphanumeric() {
@@ -112,11 +138,18 @@ pub fn default_policy_name(app_name: &str) -> String {
             slug.push('-');
         }
     }
+    // Room for "azapptoolkit-" (13), "-" and the id within 64.
+    slug.truncate(64 - 14 - id.len());
     let slug = slug.trim_matches('-');
-    let slug = if slug.is_empty() { "app" } else { slug };
-    let mut name = format!("azapptoolkit-{slug}");
-    name.truncate(64);
-    name.trim_end_matches('-').to_string()
+    [
+        Some("azapptoolkit"),
+        (!slug.is_empty()).then_some(slug),
+        (!id.is_empty()).then_some(id.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("-")
 }
 
 fn valid_policy_name(name: &str) -> bool {
@@ -134,6 +167,9 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
     if !valid_policy_name(&req.policy_name) {
         return Err(PolicyScriptError::InvalidPolicyName);
     }
+    if req.policy_name.trim().eq_ignore_ascii_case("global") {
+        return Err(PolicyScriptError::GlobalPolicy);
+    }
     let targets: Vec<String> = match &req.targets {
         PolicyTargets::Users(ids) => ids.clone(),
         PolicyTargets::Group { id, .. } => vec![id.clone()],
@@ -148,25 +184,23 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
     let app = inert(&req.app_name);
     let name = ps_quote(&req.policy_name);
     let app_id = ps_quote(&req.app_id);
-    let mut out = vec![
-        format!("# Teams application access policy for {app}, written by azapptoolkit."),
-        "# Run in PowerShell with the MicrosoftTeams module, as a Teams administrator.".to_string(),
+    let mut body = vec![
+        "$ErrorActionPreference = 'Stop'".to_string(),
         "Connect-MicrosoftTeams".to_string(),
-        String::new(),
     ];
     match req.mode {
-        PolicyMode::New => out.push(format!(
+        PolicyMode::New => body.push(format!(
             "New-CsApplicationAccessPolicy -Identity {name} -AppIds {app_id} -Description {}",
             ps_quote(&format!("Created by azapptoolkit for {app}"))
         )),
-        PolicyMode::AddToExisting => out.push(format!(
+        PolicyMode::AddToExisting => body.push(format!(
             "Set-CsApplicationAccessPolicy -Identity {name} -AppIds @{{Add={app_id}}}"
         )),
     }
     match &req.targets {
         PolicyTargets::Users(ids) => {
             for id in ids {
-                out.push(format!(
+                body.push(format!(
                     "Grant-CsApplicationAccessPolicy -PolicyName {name} -Identity {}",
                     ps_quote(id)
                 ));
@@ -174,22 +208,35 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
         }
         PolicyTargets::Group { id, rank } => {
             let rank = rank.map(|r| format!(" -Rank {r}")).unwrap_or_default();
-            out.push(format!(
+            body.push(format!(
                 "Grant-CsApplicationAccessPolicy -PolicyName {name} -Group {}{rank}",
                 ps_quote(id)
             ));
         }
     }
-    out.extend([
-        String::new(),
-        "# Check: the policies that include the app, and whether the tenant-wide".to_string(),
+    body.extend([
+        "# Check: the policies that include the app, and whether the org-wide".to_string(),
         "# Global policy does (True there means every user without their own policy".to_string(),
         "# is covered). Changes take up to 30 minutes to reach Microsoft Graph.".to_string(),
         format!(
             "Get-CsApplicationAccessPolicy | Where-Object {{ $_.AppIds -contains {app_id} }} | Format-List Identity, AppIds"
         ),
-        format!("(Get-CsApplicationAccessPolicy -Identity 'Global').AppIds -contains {app_id}"),
+        format!(
+            "(Get-CsApplicationAccessPolicy -Identity 'Global' -ErrorAction SilentlyContinue).AppIds -contains {app_id}"
+        ),
     ]);
+    // One block: pasted or saved as a .ps1, it runs as a unit and stops at
+    // the first error. No blank lines inside: one ends a continuation in a
+    // console without PSReadLine.
+    let mut out = vec![
+        format!("# Teams application access policy for {app}, written by azapptoolkit."),
+        "# Run in PowerShell with the MicrosoftTeams module, as a Teams administrator.".to_string(),
+        "# It stops at the first error, so a failed step never grants a policy it didn't create."
+            .to_string(),
+        "& {".to_string(),
+    ];
+    out.extend(body.into_iter().map(|l| format!("    {l}")));
+    out.push("}".to_string());
     Ok(out.join("\n") + "\n")
 }
 
@@ -207,7 +254,7 @@ mod tests {
         PolicyRequest {
             app_id: APP.into(),
             app_name: "Contoso Recorder".into(),
-            policy_name: "azapptoolkit-Contoso-Recorder".into(),
+            policy_name: "azapptoolkit-Contoso-Recorder-11111111".into(),
             mode,
             targets,
         }
@@ -231,11 +278,74 @@ mod tests {
         );
         let new_line = s
             .lines()
-            .find(|l| l.starts_with("New-CsApplicationAccessPolicy"))
+            .find(|l| l.trim_start().starts_with("New-CsApplicationAccessPolicy"))
             .unwrap();
         assert!(
             new_line.contains("'Created by azapptoolkit for O''Brien"),
             "{new_line}"
+        );
+    }
+
+    /// PowerShell ends (and escapes) a single-quoted string at any of five
+    /// quote characters, the typographic ones included (C1).
+    #[test]
+    fn every_powershell_single_quote_is_doubled() {
+        for q in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert_eq!(
+                ps_quote(&format!("a{q}b")),
+                format!("'a{q}{q}b'"),
+                "U+{:04X}",
+                q as u32
+            );
+        }
+        let mut r = req(PolicyMode::New, PolicyTargets::Users(vec![U1.into()]));
+        r.app_name = "Contoso\u{2019}s Recorder\u{2019}; Write-Host PWNED; \u{2019}".into();
+        let s = script(&r).unwrap();
+        assert!(
+            s.contains("'Created by azapptoolkit for Contoso\u{2019}\u{2019}s Recorder\u{2019}\u{2019}; Write-Host PWNED; \u{2019}\u{2019}'"),
+            "{s}"
+        );
+    }
+
+    /// `Global` is the org-wide policy: adding the app to it reaches every
+    /// user without their own policy (I2).
+    #[test]
+    fn global_is_never_the_policy() {
+        for name in ["Global", "global", "GLOBAL"] {
+            let mut r = req(PolicyMode::AddToExisting, PolicyTargets::Users(Vec::new()));
+            r.policy_name = name.into();
+            assert_eq!(script(&r), Err(PolicyScriptError::GlobalPolicy), "{name}");
+        }
+    }
+
+    /// A failed step must not run the next one: a `New-` that fails on an
+    /// existing name would otherwise grant that other policy (I3).
+    #[test]
+    fn the_script_stops_at_the_first_error() {
+        let s = script(&req(PolicyMode::New, PolicyTargets::Users(vec![U1.into()]))).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}: {s}"))
+        };
+        let open = at("& {");
+        assert!(
+            lines[open + 1].contains("$ErrorActionPreference = 'Stop'"),
+            "{s}"
+        );
+        assert!(open < at("Connect-MicrosoftTeams"));
+        assert!(at("New-CsApplicationAccessPolicy") < at("Grant-CsApplicationAccessPolicy"));
+        assert_eq!(lines.last().map(|l| l.trim()), Some("}"), "{s}");
+        // A blank line ends a continuation in a console without PSReadLine.
+        assert!(lines[open..].iter().all(|l| !l.trim().is_empty()), "{s}");
+        // Reading a missing Global instance mustn't stop the checks.
+        assert!(
+            s.contains(
+                "Get-CsApplicationAccessPolicy -Identity 'Global' -ErrorAction SilentlyContinue"
+            ),
+            "{s}"
         );
     }
 
@@ -277,7 +387,7 @@ mod tests {
         ))
         .unwrap();
         assert!(s.contains(&format!(
-            "Set-CsApplicationAccessPolicy -Identity 'azapptoolkit-Contoso-Recorder' -AppIds @{{Add='{APP}'}}"
+            "Set-CsApplicationAccessPolicy -Identity 'azapptoolkit-Contoso-Recorder-11111111' -AppIds @{{Add='{APP}'}}"
         )));
         assert!(!s.contains("Grant-CsApplicationAccessPolicy"));
     }
@@ -291,12 +401,12 @@ mod tests {
         .unwrap();
         for u in [U1, U2] {
             assert!(s.contains(&format!(
-                "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder' -Identity '{u}'"
+                "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder-11111111' -Identity '{u}'"
             )));
         }
         assert!(s.contains("Connect-MicrosoftTeams"));
         assert!(s.contains(&format!(
-            "New-CsApplicationAccessPolicy -Identity 'azapptoolkit-Contoso-Recorder' -AppIds '{APP}'"
+            "New-CsApplicationAccessPolicy -Identity 'azapptoolkit-Contoso-Recorder-11111111' -AppIds '{APP}'"
         )));
         let g = script(&req(
             PolicyMode::New,
@@ -307,7 +417,7 @@ mod tests {
         ))
         .unwrap();
         assert!(g.contains(&format!(
-            "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder' -Group '{G}' -Rank 2"
+            "Grant-CsApplicationAccessPolicy -PolicyName 'azapptoolkit-Contoso-Recorder-11111111' -Group '{G}' -Rank 2"
         )));
         let g = script(&req(
             PolicyMode::New,
@@ -345,11 +455,24 @@ mod tests {
     #[test]
     fn default_names() {
         assert_eq!(
-            default_policy_name("Contoso Recorder!"),
-            "azapptoolkit-Contoso-Recorder"
+            default_policy_name("Contoso Recorder!", APP),
+            "azapptoolkit-Contoso-Recorder-11111111"
         );
-        assert!(default_policy_name(&"x".repeat(200)).len() <= 64);
-        assert_eq!(default_policy_name("  "), "azapptoolkit-app");
+        let long = default_policy_name(&"x".repeat(200), APP);
+        assert!(long.len() <= 64 && long.ends_with("x-11111111"), "{long}");
+        assert_eq!(default_policy_name("  ", APP), "azapptoolkit-11111111");
+        // Names that reduce to the same slug stay apart by app id (I3).
+        assert_ne!(
+            default_policy_name("\u{4F1A}\u{8B70}", APP),
+            default_policy_name("\u{4F1A}\u{8B70}", U1)
+        );
+        assert!(
+            script(&PolicyRequest {
+                policy_name: long,
+                ..req(PolicyMode::New, PolicyTargets::Users(vec![U1.into()]))
+            })
+            .is_ok()
+        );
     }
 
     #[test]
