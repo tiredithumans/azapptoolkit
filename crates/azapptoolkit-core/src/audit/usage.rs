@@ -19,6 +19,16 @@ use serde::{Deserialize, Serialize};
 /// How far back the audit's usage query looks (the table's default retention).
 pub const USAGE_WINDOW_DAYS: u32 = 90;
 
+/// How many days of activity logs a "no call since" needs before it's worth
+/// acting on: an export switched on two days ago can't say a monthly job never
+/// calls.
+pub const USAGE_MIN_EVIDENCE_DAYS: i64 = 30;
+
+/// Whether "no call since `since`" covers enough days to suggest removal.
+pub fn not_seen_is_conclusive(since: Timestamp, now: Timestamp) -> bool {
+    now.duration_since(since) >= jiff::SignedDuration::from_hours(24 * USAGE_MIN_EVIDENCE_DAYS)
+}
+
 /// One family of Graph request paths and the permissions that authorize them.
 /// Patterns are lower-case segment lists after the `/v1.0` or `/beta` prefix:
 /// `*` is any one segment, and the LAST segment also matches a function call
@@ -271,6 +281,17 @@ pub fn grant_usage(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Two days of logs can't say a monthly job never calls (B1b).
+    #[test]
+    fn not_seen_needs_thirty_days_of_logs() {
+        let now: Timestamp = "2026-11-25T00:00:00Z".parse().unwrap();
+        let ago = |days: i64| now - jiff::SignedDuration::from_hours(24 * days);
+        assert!(!not_seen_is_conclusive(ago(2), now));
+        assert!(!not_seen_is_conclusive(ago(29), now));
+        assert!(not_seen_is_conclusive(ago(30), now));
+        assert!(not_seen_is_conclusive(ago(90), now));
+    }
 
     #[test]
     fn family_for_path_table() {

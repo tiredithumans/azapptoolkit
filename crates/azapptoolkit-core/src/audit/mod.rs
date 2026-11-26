@@ -65,7 +65,7 @@ pub use unscopable::{
     is_unscopable_privileged, native_scoping_for, unmanaged_mechanism_for,
 };
 pub use usage::{
-    FAMILIES as USAGE_FAMILIES, GrantUsage, USAGE_PREFILTER_TERMS, USAGE_WINDOW_DAYS, UsageFamily,
-    UsageUnknownReason, families_for_permission, family_for_path, grant_usage, graph_usage_kql,
-    graph_usage_window_kql,
+    FAMILIES as USAGE_FAMILIES, GrantUsage, USAGE_MIN_EVIDENCE_DAYS, USAGE_PREFILTER_TERMS,
+    USAGE_WINDOW_DAYS, UsageFamily, UsageUnknownReason, families_for_permission, family_for_path,
+    grant_usage, graph_usage_kql, graph_usage_window_kql, not_seen_is_conclusive,
 };

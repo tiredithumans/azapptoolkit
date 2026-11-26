@@ -190,3 +190,113 @@ async fn an_ineligible_app_says_why_and_offers_nothing() {
     ts::wait_for(|| ts::body_contains("multi-tenant app")).await;
     assert!(!ts::has_button_labelled(CREATE));
 }
+
+/// An enabled lock blocks, and the only action is to remove it (B2h).
+#[wasm_bindgen_test]
+async fn an_enabled_lock_says_blocking_and_offers_only_remove() {
+    ts::reset();
+    ts::mock_ok(
+        "get_network_lock",
+        &status(Some(toolkit("enabled")), NetworkLock::None, None, None),
+    );
+    let _m = mount();
+    ts::wait_for(|| ts::body_contains("Blocking this app's sign-ins from outside: Head office."))
+        .await;
+    assert!(ts::has_button_labelled("Remove lock"));
+    assert!(!ts::has_button_labelled("Turn on lock"));
+    assert!(!ts::has_button_labelled(CREATE));
+}
+
+/// Remove asks first, naming the app, then deletes the toolkit's policy and
+/// reloads the section (B2h).
+#[wasm_bindgen_test]
+async fn remove_confirms_naming_the_app_then_deletes() {
+    ts::reset();
+    ts::mock_ok(
+        "get_network_lock",
+        &status(Some(toolkit("enabled")), NetworkLock::None, None, None),
+    );
+    ts::mock_ok("remove_network_lock", &());
+    let _m = mount();
+    ts::wait_for(|| ts::has_button_labelled("Remove lock")).await;
+    ts::click_button_labelled("Remove lock");
+    ts::wait_for(|| ts::has_button_labelled("Delete policy")).await;
+    let modal = ts::text(".modal");
+    assert!(modal.contains("Payroll"), "{modal}");
+    assert!(modal.contains("The named locations stay"), "{modal}");
+    ts::click_button_labelled("Delete policy");
+    ts::wait_for(|| ts::call_count("remove_network_lock") == 1).await;
+    assert_eq!(
+        ts::last_call("remove_network_lock").unwrap().args["policyId"],
+        "pol-1"
+    );
+    ts::wait_until("the reload", || ts::call_count("get_network_lock") == 2).await;
+}
+
+/// An app that went multi-tenant after it was locked still has the
+/// toolkit's policy in the tenant (dormant, and back on if the app returns
+/// to single-tenant): it can be removed here, and nothing else (B2c).
+#[wasm_bindgen_test]
+async fn an_ineligible_app_with_a_leftover_lock_offers_only_remove() {
+    ts::reset();
+    ts::mock_ok(
+        "get_network_lock",
+        &NetworkLockStatus {
+            ineligible: Some(LockIneligible::MultiTenantApp),
+            toolkit_lock: Some(toolkit("enabled")),
+            other: NetworkLock::NotPossible {
+                reason: LockIneligible::MultiTenantApp,
+            },
+            other_policy_name: None,
+            readout: None,
+        },
+    );
+    ts::mock_ok("remove_network_lock", &());
+    let _m = mount();
+    ts::wait_for(|| ts::body_contains("multi-tenant app")).await;
+    assert!(
+        ts::body_contains("still in the tenant"),
+        "{}",
+        ts::body_text()
+    );
+    assert!(!ts::has_button_labelled("Turn on lock"));
+    assert!(!ts::has_button_labelled(CREATE));
+    ts::click_button_labelled("Remove lock");
+    ts::wait_for(|| ts::has_button_labelled("Delete policy")).await;
+    ts::click_button_labelled("Delete policy");
+    ts::wait_for(|| ts::call_count("remove_network_lock") == 1).await;
+    assert_eq!(
+        ts::last_call("remove_network_lock").unwrap().args["policyId"],
+        "pol-1"
+    );
+}
+
+/// A refusal because the policy changed outside the toolkit reloads the
+/// section, so the error sits next to the current state (B2d).
+#[wasm_bindgen_test]
+async fn a_refused_turn_on_reloads_the_section() {
+    ts::reset();
+    ts::mock_ok(
+        "get_network_lock",
+        &status(
+            Some(toolkit("enabledForReportingButNotEnforced")),
+            NetworkLock::None,
+            None,
+            None,
+        ),
+    );
+    ts::mock_err(
+        "enable_network_lock",
+        &fixtures::ui_error(
+            "not_a_toolkit_lock",
+            "That policy isn't this app's toolkit network lock any more.",
+        ),
+    );
+    let _m = mount();
+    ts::wait_for(|| ts::has_button_labelled("Turn on lock")).await;
+    ts::click_button_labelled("Turn on lock");
+    ts::wait_for(|| ts::has_button_labelled("Turn on")).await;
+    ts::click_button_labelled("Turn on");
+    ts::wait_until("the reload", || ts::call_count("get_network_lock") == 2).await;
+    ts::wait_for(|| ts::body_contains("toolkit network lock any more")).await;
+}

@@ -168,10 +168,13 @@ pub(crate) fn reusable_location(
     }) else {
         return Ok(None);
     };
+    // Both sides canonical: Graph may store a range in another spelling. A
+    // live range that doesn't parse drops out, so the sets differ (refused).
     let mut have: Vec<String> = same_name
         .ip_ranges
         .iter()
-        .filter_map(|r| r.cidr_address.clone())
+        .filter_map(|r| r.cidr_address.as_deref())
+        .filter_map(|c| parse_cidr(c).ok().map(|(_, c)| c))
         .collect();
     let mut want: Vec<String> = cidrs.iter().map(|(_, c)| c.clone()).collect();
     have.sort();
@@ -186,6 +189,46 @@ pub(crate) fn reusable_location(
             ),
         ))
     }
+}
+
+/// How long the report-only readout (the sign-in log read) may take before
+/// the section gives up on it: the section renders only once it returns, and
+/// the read can retry for minutes. 15 s matches readiness's Azure plane.
+pub(crate) const READOUT_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `read` bounded by `budget`: past it, the readout is unknown (`None`), which
+/// the section already words honestly.
+pub(crate) async fn readout_within<T>(
+    budget: std::time::Duration,
+    read: impl std::future::Future<Output = Option<T>>,
+) -> Option<T> {
+    match tokio::time::timeout(budget, read).await {
+        Ok(readout) => readout,
+        Err(_) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                "network lock: sign-in readout timed out"
+            );
+            None
+        }
+    }
+}
+
+/// A failed policy create's error, and whether the POST may have committed
+/// anyway (a 5xx, a dropped connection, an unreadable 2xx): then the cached
+/// audit, which shows each grant's lock, is swept and the message says so.
+pub(crate) fn create_policy_failed(
+    err: GraphError,
+    created_location: Option<&str>,
+) -> (UiError, bool) {
+    let may_have_committed = err.may_have_committed();
+    let mut ui = map_lock_write_err(err);
+    ui.message = create_failed_message(&ui.message, created_location);
+    if may_have_committed {
+        ui.message
+            .push_str(" The lock may have been created anyway; reload before trying again.");
+    }
+    (ui, may_have_committed)
 }
 
 /// A failed policy create's message: when the named location landed first,
@@ -284,16 +327,36 @@ pub async fn get_network_lock(
         .map_err(UiError::from)?;
     let client = state.graph_for(&tenant_id);
     let app = live_app(&client, &app_id).await?;
-    let (Some(sp_id), None) = (app.sp_id.as_deref(), app.ineligible) else {
-        let reason = app.ineligible.unwrap_or(LockIneligible::NoServicePrincipal);
-        return Ok(NetworkLockStatus {
-            ineligible: Some(reason),
-            toolkit_lock: None,
-            other: NetworkLock::NotPossible { reason },
-            other_policy_name: None,
-            readout: None,
-        });
+    let ineligible = |reason, toolkit_lock| NetworkLockStatus {
+        ineligible: Some(reason),
+        toolkit_lock,
+        other: NetworkLock::NotPossible { reason },
+        other_policy_name: None,
+        readout: None,
     };
+    let Some(sp_id) = app.sp_id.as_deref() else {
+        return Ok(ineligible(LockIneligible::NoServicePrincipal, None));
+    };
+    if let Some(reason) = app.ineligible {
+        // Conditional Access doesn't apply to this app now, but a lock the
+        // toolkit made earlier is still in the tenant (and back in force if
+        // the app becomes eligible again): offer its removal. An unreadable
+        // policy list keeps the plain "not possible".
+        let ours = match live_policies(&client, crate::commands::conditional_access::map_ca_err)
+            .await
+        {
+            Ok(policies) => toolkit_lock_for(&policies, sp_id).cloned(),
+            Err(err) => {
+                tracing::info!(code = %err.code, "network lock: policies unreadable for an ineligible app");
+                None
+            }
+        };
+        let lock = match ours {
+            Some(p) => Some(toolkit_lock_dto(&client, &p).await),
+            None => None,
+        };
+        return Ok(ineligible(reason, lock));
+    }
     let policies = live_policies(&client, crate::commands::conditional_access::map_ca_err).await?;
     let ours = toolkit_lock_for(&policies, sp_id).cloned();
     let ours_id = ours.as_ref().and_then(|p| p.id.clone());
@@ -312,31 +375,8 @@ pub async fn get_network_lock(
     let mut toolkit_lock = None;
     let mut readout = None;
     if let Some(p) = ours {
-        let locations = client.list_named_locations().await.unwrap_or_default();
-        let excluded = p
-            .conditions
-            .as_ref()
-            .and_then(|c| c.locations.as_ref())
-            .map(|l| l.exclude_locations.clone())
-            .unwrap_or_default();
-        let excluded_locations = excluded
-            .iter()
-            .map(|id| {
-                locations
-                    .iter()
-                    .find(|l| l.id.as_deref() == Some(id.as_str()))
-                    .and_then(location_dto)
-                    .unwrap_or(NamedLocationDto {
-                        id: id.clone(),
-                        display_name: id.clone(),
-                        is_trusted: false,
-                        range_count: 0,
-                    })
-            })
-            .collect();
-        let policy_id = p.id.clone().unwrap_or_default();
-        let lock_state = p.state.clone().unwrap_or_else(|| "unknown".into());
-        if lock_state == "enabledForReportingButNotEnforced"
+        let lock = toolkit_lock_dto(&client, &p).await;
+        if lock.state == "enabledForReportingButNotEnforced"
             && state
                 .ensure_feature_token(&tenant_id, ConsentFeature::AuditLog)
                 .await
@@ -344,19 +384,21 @@ pub async fn get_network_lock(
         {
             let since =
                 Timestamp::now() - SignedDuration::from_hours(24 * i64::from(READOUT_WINDOW_DAYS));
-            readout = match client.list_service_principal_sign_ins(&app_id, since).await {
-                Ok((rows, truncated)) => Some(readout_from(&rows, &policy_id, truncated)),
-                Err(err) => {
-                    tracing::warn!(code = err.ui_code(), "network lock: sign-in readout failed");
-                    None
+            readout = readout_within(READOUT_BUDGET, async {
+                match client.list_service_principal_sign_ins(&app_id, since).await {
+                    Ok((rows, truncated)) => Some(readout_from(&rows, &lock.policy_id, truncated)),
+                    Err(err) => {
+                        tracing::warn!(
+                            code = err.ui_code(),
+                            "network lock: sign-in readout failed"
+                        );
+                        None
+                    }
                 }
-            };
+            })
+            .await;
         }
-        toolkit_lock = Some(ToolkitLockDto {
-            policy_id,
-            state: lock_state,
-            excluded_locations,
-        });
+        toolkit_lock = Some(lock);
     }
     Ok(NetworkLockStatus {
         ineligible: None,
@@ -427,7 +469,7 @@ pub async fn create_network_lock(
     if toolkit_lock_for(&policies, &sp_id).is_some() {
         return Err(UiError::validation(
             "lock_exists",
-            "This app already has a network lock. Reload to see it.",
+            "This app already has a network lock.",
         ));
     }
     let live_locations = client
@@ -464,8 +506,11 @@ pub async fn create_network_lock(
     let created = match client.create_ca_policy(&body).await {
         Ok(p) => p,
         Err(err) => {
-            let mut ui = map_lock_write_err(err);
-            ui.message = create_failed_message(&ui.message, created_location_name.as_deref());
+            let (ui, may_have_landed) = create_policy_failed(err, created_location_name.as_deref());
+            // The "only on Ok" exception for a write that may have landed.
+            if may_have_landed {
+                invalidate_app_detail_state(&state.cache, &tenant_id);
+            }
             return Err(ui);
         }
     };
@@ -474,6 +519,40 @@ pub async fn create_network_lock(
         policy_id: created.id.unwrap_or_default(),
         created_location_id,
     })
+}
+
+/// The toolkit lock's DTO: its state and the named locations it excludes
+/// (an unreadable location list shows ids).
+async fn toolkit_lock_dto(client: &GraphClient, p: &ConditionalAccessPolicy) -> ToolkitLockDto {
+    let locations = client.list_named_locations().await.unwrap_or_default();
+    let excluded = p
+        .conditions
+        .as_ref()
+        .and_then(|c| c.locations.as_ref())
+        .map(|l| l.exclude_locations.clone())
+        .unwrap_or_default();
+    let excluded_locations = excluded
+        .iter()
+        .map(|id| {
+            locations
+                .iter()
+                .find(|l| l.id.as_deref() == Some(id.as_str()))
+                .and_then(location_dto)
+                .unwrap_or(NamedLocationDto {
+                    id: id.clone(),
+                    display_name: id.clone(),
+                    is_trusted: false,
+                    range_count: 0,
+                })
+        })
+        .collect();
+    let policy_id = p.id.clone().unwrap_or_default();
+    let lock_state = p.state.clone().unwrap_or_else(|| "unknown".into());
+    ToolkitLockDto {
+        policy_id,
+        state: lock_state,
+        excluded_locations,
+    }
 }
 
 /// The toolkit lock's id for this app, verified live; refuses anything else.
@@ -497,8 +576,8 @@ async fn verified_toolkit_lock(
     let not_ours = || {
         UiError::validation(
             "not_a_toolkit_lock",
-            "That policy isn't this app's toolkit network lock (it may have been changed in the \
-             portal). Reload to see the current state.",
+            "That policy isn't this app's toolkit network lock any more (it may have been \
+             changed in the portal).",
         )
     };
     let sp_id = app.sp_id.ok_or_else(not_ours)?;
@@ -694,6 +773,56 @@ mod tests {
             is_trusted: Some(true),
             ip_ranges: Vec::new(),
         }
+    }
+
+    /// A retried create matches the live location whatever spelling either
+    /// side used (B2b).
+    #[test]
+    fn reusable_location_compares_canonical_ranges() {
+        let mut live = ip_location("loc-1");
+        live.ip_ranges = vec![azapptoolkit_core::models::IpRange {
+            cidr_address: Some("2001:DB8::/32".into()),
+        }];
+        let got = reusable_location(&[live], "office", &[(true, "2001:db8::/32".into())]);
+        assert_eq!(got.unwrap(), Some("loc-1".to_string()));
+    }
+
+    /// The sign-in readout can't hold the section's skeleton for minutes
+    /// (B2a).
+    #[tokio::test(start_paused = true)]
+    async fn readout_gives_up_at_its_budget() {
+        let started = tokio::time::Instant::now();
+        let none: Option<u32> = readout_within(READOUT_BUDGET, std::future::pending()).await;
+        assert_eq!(none, None);
+        assert!(started.elapsed() >= READOUT_BUDGET);
+        let some = readout_within(READOUT_BUDGET, async { Some(7_u32) }).await;
+        assert_eq!(some, Some(7));
+    }
+
+    /// A policy POST that may have committed sweeps the cached audit and
+    /// says the lock may exist (B2g).
+    #[test]
+    fn a_policy_create_that_may_have_landed_sweeps() {
+        let (ui, sweep) = create_policy_failed(
+            GraphError::Server {
+                status: 502,
+                body: String::new(),
+            },
+            None,
+        );
+        assert!(sweep);
+        assert!(
+            ui.message.contains("may have been created"),
+            "{}",
+            ui.message
+        );
+        let (ui, sweep) = create_policy_failed(GraphError::Forbidden("no".into()), None);
+        assert!(!sweep);
+        assert!(
+            !ui.message.contains("may have been created"),
+            "{}",
+            ui.message
+        );
     }
 
     #[test]

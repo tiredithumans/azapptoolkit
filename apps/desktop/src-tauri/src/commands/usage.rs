@@ -10,7 +10,7 @@
 //! action applies). Everything degrades to a typed, actionable error — never a
 //! hard failure of the surrounding view.
 
-use azapptoolkit_arm::LogsQueryTable;
+use azapptoolkit_arm::{ArmError, LogsQueryTable};
 use azapptoolkit_core::cache::CacheKind;
 use futures::stream::{self, StreamExt};
 use tauri::State;
@@ -67,6 +67,11 @@ pub(crate) async fn discover_workspace(
     {
         return Ok(hit);
     }
+    // Before the first await: a sign-out mid-discovery must not land its
+    // answer in the next session's cache.
+    let watch = state
+        .cache
+        .generation_for(CacheKind::Permissions, &cache_key);
 
     // Typed ARM consent probe first, so a missing-consent rejection surfaces
     // as `consent_required` rather than a generic token error mid-discovery.
@@ -84,38 +89,43 @@ pub(crate) async fn discover_workspace(
     // subscription back-to-back before any probe could start, so discovery
     // scaled with the operator's subscription count. A subscription we can't
     // read is skipped, not fatal.
-    let workspaces: Vec<_> = stream::iter(subscriptions)
+    let listings: Vec<Result<Vec<_>, ArmError>> = stream::iter(subscriptions)
         .map(|sub| {
             let arm = arm.clone();
             async move {
-                match arm
-                    .list_log_analytics_workspaces(&sub.subscription_id)
+                arm.list_log_analytics_workspaces(&sub.subscription_id)
                     .await
-                {
-                    Ok(ws) => ws,
-                    Err(err) => {
+                    .inspect_err(|err| {
                         tracing::info!(
                             sub = %sub.subscription_id,
                             code = err.ui_code(),
                             "usage: workspace listing failed; skipping subscription"
                         );
-                        Vec::new()
-                    }
-                }
+                    })
             }
         })
         .buffer_unordered(ARM_CONCURRENCY)
-        .collect::<Vec<Vec<_>>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect()
+        .await;
+    // A subscription we can't read is skipped, but a token failure says
+    // nothing about any workspace (abort, cache nothing), and a transient one
+    // makes a miss inconclusive.
+    let mut inconclusive = false;
+    let mut workspaces = Vec::new();
+    for listing in listings {
+        match listing {
+            Ok(ws) => workspaces.extend(ws),
+            Err(err) => match probe_outcome(&err) {
+                Probe::Abort => return Err(UiError::from(err)),
+                Probe::Inconclusive => inconclusive = true,
+                Probe::NotHere => {}
+            },
+        }
+    }
 
     let mut probed = 0usize;
     let mut found: WorkspaceLookup = None;
     let mut hit_cap = false;
-    // A probe that failed for a reason other than "not this workspace".
-    let mut inconclusive = false;
     for ws in workspaces {
         if probed >= MAX_WORKSPACES_PROBED {
             tracing::warn!(
@@ -142,15 +152,16 @@ pub(crate) async fn discover_workspace(
                 break;
             }
             Err(err) => {
-                // Table absent (400) or no read access (403) — not this one.
-                // A throttle, 5xx or network failure says nothing about the
-                // workspace, so the lookup as a whole is then not conclusive.
-                inconclusive |= err.is_retryable();
                 tracing::debug!(
                     ws = ws.name.as_deref().unwrap_or("?"),
                     code = err.ui_code(),
                     "usage: workspace probe negative"
                 );
+                match probe_outcome(&err) {
+                    Probe::Abort => return Err(UiError::from(err)),
+                    Probe::Inconclusive => inconclusive = true,
+                    Probe::NotHere => {}
+                }
             }
         }
     }
@@ -161,9 +172,33 @@ pub(crate) async fn discover_workspace(
     // Nor an inconclusive miss: one transient probe failure on the only
     // workspace otherwise read "no workspace" for the whole TTL.
     if !hit_cap && (found.is_some() || !inconclusive) {
-        state.cache.put(CacheKind::Permissions, cache_key, &found);
+        state.cache.put_if_current(watch, &found);
     }
     Ok(found)
+}
+
+/// What one failed workspace probe (or listing) says.
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    /// Table absent (400) or no read access (403): not this workspace.
+    NotHere,
+    /// A throttle, 5xx or network failure says nothing about the workspace,
+    /// so a miss is not conclusive.
+    Inconclusive,
+    /// The call couldn't get a token (refresh failed, a dead session, a
+    /// moved epoch): stop and cache nothing, so the token's own code reaches
+    /// the caller's levers.
+    Abort,
+}
+
+fn probe_outcome(err: &ArmError) -> Probe {
+    if matches!(err, ArmError::Token(_) | ArmError::Unauthorized) {
+        Probe::Abort
+    } else if err.is_retryable() {
+        Probe::Inconclusive
+    } else {
+        Probe::NotHere
+    }
 }
 
 /// KQL summarizing one app's Graph calls by (method, GUID-normalized path),
@@ -275,6 +310,41 @@ pub async fn get_app_graph_usage(
 mod tests {
     use super::*;
     use azapptoolkit_arm::models::LogsQueryColumn;
+
+    /// A probe that couldn't even get a token says nothing about the
+    /// workspace: discovery stops and caches nothing (B1c).
+    #[test]
+    fn a_token_failure_aborts_workspace_discovery() {
+        use azapptoolkit_arm::ArmError;
+        use azapptoolkit_core::token::TokenError;
+        let token = ArmError::Token(TokenError {
+            code: "refresh_missing".into(),
+            message: "x".into(),
+        });
+        assert_eq!(probe_outcome(&token), Probe::Abort);
+        assert_eq!(probe_outcome(&ArmError::Unauthorized), Probe::Abort);
+        assert_eq!(
+            probe_outcome(&ArmError::Network("x".into())),
+            Probe::Inconclusive
+        );
+        assert_eq!(
+            probe_outcome(&ArmError::Throttled {
+                retry_after_secs: None
+            }),
+            Probe::Inconclusive
+        );
+        assert_eq!(
+            probe_outcome(&ArmError::Forbidden("x".into())),
+            Probe::NotHere
+        );
+        assert_eq!(
+            probe_outcome(&ArmError::Api {
+                status: 400,
+                body: String::new()
+            }),
+            Probe::NotHere
+        );
+    }
 
     #[test]
     fn usage_kql_filters_the_app_and_escapes_quotes() {

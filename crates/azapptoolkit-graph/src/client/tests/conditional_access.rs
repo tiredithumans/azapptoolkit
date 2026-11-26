@@ -50,16 +50,8 @@ async fn set_ca_policy_state_patches_state_only() {
 }
 
 #[tokio::test]
-async fn get_and_delete_ca_policy() {
+async fn delete_ca_policy_uses_the_write_token() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/identity/conditionalAccess/policies/pol-1"))
-        .and(header("authorization", "Bearer caw"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "pol-1", "state": "enabled"
-        })))
-        .mount(&server)
-        .await;
     Mock::given(method("DELETE"))
         .and(path("/identity/conditionalAccess/policies/pol-1"))
         .and(header("authorization", "Bearer caw"))
@@ -68,15 +60,6 @@ async fn get_and_delete_ca_policy() {
         .mount(&server)
         .await;
     let client = ca_client(&server.uri());
-    assert_eq!(
-        client
-            .get_ca_policy("pol-1")
-            .await
-            .unwrap()
-            .state
-            .as_deref(),
-        Some("enabled")
-    );
     client.delete_ca_policy("pol-1").await.unwrap();
 }
 
@@ -89,10 +72,6 @@ async fn policy_id_is_shape_checked() {
     ] {
         assert!(matches!(result, Err(GraphError::Protocol(_))), "{result:?}");
     }
-    assert!(matches!(
-        client.get_ca_policy("a?b").await,
-        Err(GraphError::Protocol(_))
-    ));
 }
 
 #[tokio::test]

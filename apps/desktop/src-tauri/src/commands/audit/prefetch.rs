@@ -503,6 +503,17 @@ pub(crate) type UsagePrefetch = Result<GraphUsage, UsageUnknownReason>;
 /// hours, so a day of silence means the export stopped.
 const USAGE_STALE_AFTER_HOURS: i64 = 24;
 
+/// Why usage is unknown after a token or discovery failure: a missing consent
+/// (Log Analytics, or the ARM one workspace discovery needs) is the
+/// operator's to grant; anything else is a failed read.
+pub(crate) fn usage_reason(err: &UiError) -> UsageUnknownReason {
+    if err.is_consent_required() {
+        UsageUnknownReason::NoConsent
+    } else {
+        UsageUnknownReason::Failed
+    }
+}
+
 /// The tenant's Graph activity usage for the "no built-in scoping" grants: the
 /// Log Analytics consent, the cached workspace discovery, then the two static
 /// queries. Every failure is a reason, never an error. The run spawns this as
@@ -510,19 +521,14 @@ const USAGE_STALE_AFTER_HOURS: i64 = 24;
 /// one deadline in `run::await_usage`.
 pub(crate) async fn prefetch_graph_usage(state: &AppState, tenant_id: &str) -> UsagePrefetch {
     if let Err(err) = state.ensure_log_analytics_token(tenant_id).await {
-        let ui = UiError::from(err);
-        return Err(if ui.is_consent_required() {
-            UsageUnknownReason::NoConsent
-        } else {
-            UsageUnknownReason::Failed
-        });
+        return Err(usage_reason(&UiError::from(err)));
     }
     let workspace = match crate::commands::usage::discover_workspace(state, tenant_id).await {
         Ok(Some((id, _name))) => id,
         Ok(None) => return Err(UsageUnknownReason::NoWorkspace),
         Err(err) => {
             tracing::info!(code = %err.code, "audit: usage workspace discovery failed");
-            return Err(UsageUnknownReason::Failed);
+            return Err(usage_reason(&err));
         }
     };
     let la = state.log_analytics_for(tenant_id);

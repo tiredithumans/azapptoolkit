@@ -23,6 +23,7 @@ After 0.34.1, each change is one line written for the person using the app.
 ### Fixed
 
 - The Conditional Access tab now lists policies that cover every service principal in the tenant.
+- Observed Graph activity asks for the Azure consent it needs, and no longer says "no workspace" after a sign-in hiccup.
 
 ## [0.36.3] - 2026-11-23
 

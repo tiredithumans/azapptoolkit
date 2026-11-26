@@ -72,6 +72,11 @@ pub fn NetworkLockDialog(
             // refresh the list so it shows (a retry reuses it either way).
             move |e| {
                 reload.update(|n| *n += 1);
+                // A lock already there (made elsewhere, or by a create that
+                // landed late): reload the section behind the dialog.
+                if e.code == "lock_exists" {
+                    on_created.try_run(());
+                }
                 cmd.fail_inline(e);
             },
             move |tenant| async move {

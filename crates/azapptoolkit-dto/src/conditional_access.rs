@@ -72,7 +72,9 @@ pub struct ReportOnlyReadout {
 pub struct NetworkLockStatus {
     /// Why Conditional Access can't target this app, if it can't.
     pub ineligible: Option<azapptoolkit_core::conditional_access::LockIneligible>,
-    /// The toolkit's own lock, in any state.
+    /// The toolkit's own lock, in any state. Also set for an ineligible app
+    /// that still has one (made before it went multi-tenant), so it can be
+    /// removed.
     pub toolkit_lock: Option<ToolkitLockDto>,
     /// Every OTHER policy's verdict for this app on Microsoft Graph.
     pub other: azapptoolkit_core::conditional_access::NetworkLock,
