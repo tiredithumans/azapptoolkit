@@ -1171,6 +1171,13 @@ async fn expired_grants_group_offers_revoke_with_a_named_confirm() {
         .audit_expanded_group
         .set(Some("expired_grants".to_string()));
     ts::wait_for(|| ts::has_button_labelled("Revoke 1 expired grant")).await;
+    assert!(
+        ts::button_labelled("Revoke 1 expired grant")
+            .unwrap()
+            .class_list()
+            .contains("button--danger"),
+        "a Fix that revokes access looks destructive, like its siblings"
+    );
     ts::click_button_labelled("Revoke 1 expired grant");
     ts::wait_for(|| ts::body_contains("Revoke expired grants?")).await;
     assert_eq!(

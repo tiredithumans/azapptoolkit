@@ -563,6 +563,7 @@ fn RevokeExpiredGrantsAction(
     view! {
         <div class="audit-actions">
             <Button
+                class="button--danger"
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
                 on_click=Box::new(move |_| open.set(true))
             >

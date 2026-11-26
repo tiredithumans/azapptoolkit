@@ -255,24 +255,38 @@ pub(crate) fn score_sp_only(
     item
 }
 
+/// Names for the expiries a run's principals carry.
+#[derive(Debug, Default)]
+pub(crate) struct ExpiryNames {
+    /// Permission value by `(resourceAppId, appRoleId)`.
+    pub roles: HashMap<(String, String), String>,
+    /// Display name by resourceAppId, for every resource other than Graph:
+    /// Graph and Exchange Online both define `Mail.Read`.
+    pub resources: HashMap<String, String>,
+}
+
 /// Permission names for the expiries the run's principals carry, keyed by
 /// `(resourceAppId, appRoleId)`, from the cached resource-SP read. NOT through
 /// the run's `ResourceResolver`, whose misses mark the run degraded: a tag
 /// naming a deleted resource must not make every audit uncacheable. A miss
 /// simply leaves the role id as the name.
-pub(crate) async fn resolve_expiry_names(
-    ctx: &ScoreCtx,
-    expiries: &[GrantExpiry],
-) -> HashMap<(String, String), String> {
-    let mut names = HashMap::new();
+pub(crate) async fn resolve_expiry_names(ctx: &ScoreCtx, expiries: &[GrantExpiry]) -> ExpiryNames {
+    let mut names = ExpiryNames::default();
     let resources: HashSet<&str> = expiries
         .iter()
         .map(|e| e.resource_app_id.as_str())
         .collect();
     for resource in resources {
         if let Ok(Some(sp)) = ctx.client.resolve_resource_sp(resource).await {
+            if !resource.eq_ignore_ascii_case(azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID)
+                && !sp.display_name.is_empty()
+            {
+                names
+                    .resources
+                    .insert(resource.to_string(), sp.display_name.clone());
+            }
             for role in sp.app_roles.iter().filter(|r| !r.value.is_empty()) {
-                names.insert(
+                names.roles.insert(
                     (resource.to_string(), role.id.to_ascii_lowercase()),
                     role.value.clone(),
                 );
@@ -285,26 +299,57 @@ pub(crate) async fn resolve_expiry_names(
 /// Rule 25, the runner's post-pass: for each row, the expiry tags its service
 /// principal carries (`tags_for(app_id)`, from the run's SP index). Passed
 /// ones add the issue and the `RevokeExpiredGrants` Fix; every expiry also
-/// dates the matching Rule 24 grant for the checklist. No score.
+/// dates the matching Rule 24 grant for the checklist; an unreadable tag of
+/// ours adds an advisory line. No score.
 pub(crate) fn apply_grant_expiries_with(
     items: &mut [AuditItem],
     tags_for: impl Fn(&str) -> Option<Vec<String>>,
-    names: &HashMap<(String, String), String>,
+    names: &ExpiryNames,
     now: Timestamp,
 ) {
     for item in items.iter_mut() {
         let Some(tags) = tags_for(&item.app_id) else {
             continue;
         };
+        let unreadable: Vec<&String> = tags
+            .iter()
+            .filter(|t| matches!(azapptoolkit_core::audit::decode_expiry_tag(t), Some(None)))
+            .collect();
+        if !unreadable.is_empty() {
+            let n = unreadable.len();
+            // Quoted (a few), so the operator can find a tag that names no grant.
+            let shown: Vec<&str> = unreadable.iter().take(3).map(|t| t.as_str()).collect();
+            item.issues.push(format!(
+                "{} {n} tag{} ignored, so no grant expires by {}: {}{}",
+                azapptoolkit_core::audit::issue::UNREADABLE_GRANT_EXPIRY,
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "it" } else { "them" },
+                shown.join("; "),
+                if n > shown.len() { "; …" } else { "" },
+            ));
+            item.recommendations.push(
+                "Set the date again with Expiry… on the grant's permission, which replaces its \
+                 tag; remove a tag that names no grant from the service principal's tags \
+                 (Microsoft Graph or PowerShell)"
+                    .to_string(),
+            );
+        }
         let expiries = expiries_in(&tags);
         if expiries.is_empty() {
             continue;
         }
         let name_of = |e: &GrantExpiry| {
             names
+                .roles
                 .get(&(e.resource_app_id.clone(), e.app_role_id.clone()))
                 .cloned()
                 .unwrap_or_else(|| e.app_role_id.clone())
+        };
+        // What the operator reads: the value, plus the resource when it isn't
+        // Graph. Dating the Rule 24 grant below compares the bare value.
+        let label_of = |e: &GrantExpiry| match names.resources.get(&e.resource_app_id) {
+            Some(resource) => format!("{} on {resource}", name_of(e)),
+            None => name_of(e),
         };
         for grant in &mut item.unscopable_grants {
             let resource = grant
@@ -332,13 +377,13 @@ pub(crate) fn apply_grant_expiries_with(
             .map(|e| azapptoolkit_core::audit::ExpiredGrant {
                 resource_app_id: e.resource_app_id.clone(),
                 app_role_id: e.app_role_id.clone(),
-                name: name_of(e),
+                name: label_of(e),
                 expires_on: e.expires_on,
             })
             .collect();
         let listing = passed
             .iter()
-            .map(|e| format!("{} (expired {})", name_of(e), e.expires_on))
+            .map(|e| format!("{} (expired {})", label_of(e), e.expires_on))
             .collect::<Vec<_>>()
             .join(", ");
         item.issues.push(format!(
@@ -456,6 +501,7 @@ pub(crate) fn sp_audit_candidates(
                 // Rule 25 fires on the tag alone: a vendor whose only
                 // expiring grant is on an API the matrices don't cover still
                 // gets a row.
+                || azapptoolkit_core::audit::unreadable_expiry_tags(&sp.tags) > 0
                 || expiries_in(&sp.tags)
                     .iter()
                     .any(|e| expiry_has_passed(e.expires_on, now))

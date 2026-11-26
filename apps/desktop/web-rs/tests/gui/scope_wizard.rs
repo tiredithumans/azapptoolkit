@@ -964,6 +964,62 @@ async fn orgwide_with_expiry_sets_it_after_granting() {
     assert_eq!(args["expiresOn"], expected.as_str());
 }
 
+/// A grant that fails partway through a cart doesn't strand the ones that
+/// already landed without their expiry: the wizard stops, says where, and
+/// still dates what it granted (B3e).
+#[wasm_bindgen_test]
+async fn an_error_mid_cart_still_dates_the_grants_that_landed() {
+    let _m = mount_wizard(Some(graph_app_selection("User.Read.All")));
+    azapptoolkit_web_rs::ipc_mock::mock_result_each("grant_single_permission", |args| {
+        if args["permissionId"] == "User.Read.All-role-id" {
+            Ok(fixtures::grant_result())
+        } else {
+            Err(fixtures::ui_error("forbidden", "Insufficient privileges"))
+        }
+    });
+    ts::mock_ok("set_grant_expiry", &());
+    // A preseed opens on step 2; back to the picker for a second permission.
+    ts::wait_for(|| ts::has_button_labelled("Back")).await;
+    ts::click_button_labelled("Back");
+    ts::wait_for(|| ts::query("[aria-label='Select Mail.Send']").is_some()).await;
+    let check: web_sys::HtmlElement = ts::query("[aria-label='Select Mail.Send']")
+        .unwrap()
+        .unchecked_into();
+    check.click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::query(".scope-wizard__expiry select").is_some()).await;
+    let select: web_sys::HtmlSelectElement = ts::query(".scope-wizard__expiry select")
+        .unwrap()
+        .unchecked_into();
+    select.set_value("30");
+    select
+        .dispatch_event(&web_sys::Event::new("change").unwrap())
+        .unwrap();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::has_button_labelled("Grant access")).await;
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("set_grant_expiry") == 1).await;
+    let args = ts::last_call("set_grant_expiry").unwrap().args;
+    assert_eq!(
+        args["grants"],
+        serde_json::json!([{
+            "resourceAppId": fixtures::MICROSOFT_GRAPH_APP_ID,
+            "appRoleId": "User.Read.All-role-id"
+        }]),
+        "only the grant that landed is dated"
+    );
+    ts::wait_until("the stop warning", || {
+        ts::body_contains("Stopped at Mail.Send") && ts::body_contains("Insufficient privileges")
+    })
+    .await;
+    assert!(ts::body_contains("Granted 1 permission org-wide."));
+    // An earlier call can answer Ok with only per-item failures, so the
+    // warning claims nothing about what came before.
+    assert!(!ts::body_contains("before it were granted"));
+}
+
 // ---- Admin-unit scoping (C1) ----------------------------------------------
 
 const FINANCE_AU: &str = "6c3e1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01";

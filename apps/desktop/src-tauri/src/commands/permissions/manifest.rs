@@ -62,13 +62,17 @@ pub(crate) fn remove_declared_access(
 ) -> bool {
     let mut removed = false;
     for resource in required.iter_mut() {
-        if resource.resource_app_id != resource_app_id {
+        // Ids are GUIDs: casing is not identity.
+        if !resource
+            .resource_app_id
+            .eq_ignore_ascii_case(resource_app_id)
+        {
             continue;
         }
         let before = resource.resource_access.len();
-        resource
-            .resource_access
-            .retain(|a| !(a.id == permission_id && entry_type.is_none_or(|t| a.r#type == t)));
+        resource.resource_access.retain(|a| {
+            !(a.id.eq_ignore_ascii_case(permission_id) && entry_type.is_none_or(|t| a.r#type == t))
+        });
         removed |= resource.resource_access.len() != before;
     }
     if removed {
@@ -90,13 +94,14 @@ pub(crate) fn declare_resource_access(
     permission_id: &str,
     entry_type: &str,
 ) -> bool {
+    // Ids are GUIDs: casing is not identity.
     let already = required
         .iter()
-        .find(|r| r.resource_app_id == resource_app_id)
+        .find(|r| r.resource_app_id.eq_ignore_ascii_case(resource_app_id))
         .is_some_and(|r| {
             r.resource_access
                 .iter()
-                .any(|a| a.id == permission_id && a.r#type == entry_type)
+                .any(|a| a.id.eq_ignore_ascii_case(permission_id) && a.r#type == entry_type)
         });
     if already {
         return false;
@@ -107,7 +112,7 @@ pub(crate) fn declare_resource_access(
     };
     if let Some(existing) = required
         .iter_mut()
-        .find(|r| r.resource_app_id == resource_app_id)
+        .find(|r| r.resource_app_id.eq_ignore_ascii_case(resource_app_id))
     {
         existing.resource_access.push(access);
     } else {
@@ -173,10 +178,10 @@ pub(crate) fn swap_declared_role(
         return false;
     }
     let narrow_declared = required.iter().any(|r| {
-        r.resource_app_id == resource_app_id
+        r.resource_app_id.eq_ignore_ascii_case(resource_app_id)
             && r.resource_access
                 .iter()
-                .any(|a| a.id == narrow_id && a.r#type == "Role")
+                .any(|a| a.id.eq_ignore_ascii_case(narrow_id) && a.r#type == "Role")
     });
     if !narrow_declared {
         let access = ResourceAccess {
@@ -185,7 +190,7 @@ pub(crate) fn swap_declared_role(
         };
         if let Some(existing) = required
             .iter_mut()
-            .find(|r| r.resource_app_id == resource_app_id)
+            .find(|r| r.resource_app_id.eq_ignore_ascii_case(resource_app_id))
         {
             existing.resource_access.push(access);
         } else {
@@ -231,6 +236,43 @@ mod tests {
             Some("Role")
         ));
         assert!(req.is_empty(), "emptied resource entry should be pruned");
+    }
+
+    #[test]
+    fn remove_declared_access_ignores_id_case() {
+        // Ids are GUIDs: casing is not identity. The expiry Fix passes the
+        // tag codec's lower-case ids against a hand-edited upper-case manifest.
+        let mut req = manifest(&[(
+            "00000003-0000-0000-C000-000000000000",
+            &[("45BBB07E-7321-4FD7-A8F6-3FF27E6A81C8", "Role")],
+        )]);
+        assert!(remove_declared_access(
+            &mut req,
+            "00000003-0000-0000-c000-000000000000",
+            "45bbb07e-7321-4fd7-a8f6-3ff27e6a81c8",
+            Some("Role")
+        ));
+        assert!(req.is_empty(), "{req:?}");
+    }
+
+    #[test]
+    fn declare_and_swap_ignore_id_case() {
+        // A downgrade on a hand-edited upper-case manifest must not leave a
+        // second entry for the same resource or the same access.
+        const GRAPH_UP: &str = "00000003-0000-0000-C000-000000000000";
+        const GRAPH: &str = "00000003-0000-0000-c000-000000000000";
+        let mut req = manifest(&[(GRAPH_UP, &[("BROAD-ROLE", "Role")])]);
+        declare_resource_access(&mut req, GRAPH, "broad-role", "Role");
+        assert_eq!(req.len(), 1, "{req:?}");
+        assert_eq!(req[0].resource_access.len(), 1, "{req:?}");
+        swap_declared_role(&mut req, GRAPH, "broad-role", "narrow-role");
+        assert_eq!(req.len(), 1, "{req:?}");
+        assert_eq!(req[0].resource_access.len(), 1, "{req:?}");
+        assert!(
+            req[0].resource_access[0]
+                .id
+                .eq_ignore_ascii_case("narrow-role")
+        );
     }
 
     #[test]

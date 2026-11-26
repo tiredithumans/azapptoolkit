@@ -271,12 +271,16 @@ pub async fn run_audit(
     // Exchange Online or SharePoint Online — OR are flagged risky by Identity
     // Protection, so a risky grantless principal is still scored.
     let local_app_ids: HashSet<String> = apps.iter().map(|a| a.app_id.clone()).collect();
+    // One clock for every expiry judgement in the run (Rule 25's admission,
+    // the SP-only scoring and the post-pass), so a run that crosses UTC
+    // midnight gives one answer.
+    let now = Timestamp::now();
     let sp_candidates = sp_audit_candidates(
         &sp_index,
         &local_app_ids,
         &granted_roles_by_sp,
         &risky_by_sp,
-        Timestamp::now(),
+        now,
     );
     let total = apps.len() + sp_candidates.len();
 
@@ -431,7 +435,6 @@ pub async fn run_audit(
     // tenant-wide, so `score_sp_only` is pure scoring — no per-item Graph
     // traffic, no fan-out needed.
     if !cancelled_before_all_dispatched && !cancel.is_cancelled() {
-        let now = Timestamp::now();
         // `done` continues from the fan-out's completion count; each scored SP
         // is one more item done.
         for (done_count, sp) in (meter.done() + 1..).zip(sp_candidates) {
@@ -483,15 +486,15 @@ pub async fn run_audit(
             .filter_map(|i| ctx.run_sps.get(&i.app_id))
             .flat_map(|sp| azapptoolkit_core::audit::expiries_in(&sp.tags))
             .collect();
-        if !all_expiries.is_empty() {
-            let names = resolve_expiry_names(&ctx, &all_expiries).await;
-            apply_grant_expiries_with(
-                &mut items,
-                |app_id| ctx.run_sps.get(app_id).map(|sp| sp.tags.clone()),
-                &names,
-                Timestamp::now(),
-            );
-        }
+        // Runs even with no readable expiry: an unreadable tag of ours is
+        // reported on its row.
+        let names = resolve_expiry_names(&ctx, &all_expiries).await;
+        apply_grant_expiries_with(
+            &mut items,
+            |app_id| ctx.run_sps.get(app_id).map(|sp| sp.tags.clone()),
+            &names,
+            now,
+        );
     }
     // Whether every mail permission was actually checked against Exchange
     // mailbox scoping. Not a `degraded` gap — the fallback is org-wide weight,
