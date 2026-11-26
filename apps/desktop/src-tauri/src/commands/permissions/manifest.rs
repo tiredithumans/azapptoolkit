@@ -62,13 +62,17 @@ pub(crate) fn remove_declared_access(
 ) -> bool {
     let mut removed = false;
     for resource in required.iter_mut() {
-        if resource.resource_app_id != resource_app_id {
+        // Ids are GUIDs: casing is not identity.
+        if !resource
+            .resource_app_id
+            .eq_ignore_ascii_case(resource_app_id)
+        {
             continue;
         }
         let before = resource.resource_access.len();
-        resource
-            .resource_access
-            .retain(|a| !(a.id == permission_id && entry_type.is_none_or(|t| a.r#type == t)));
+        resource.resource_access.retain(|a| {
+            !(a.id.eq_ignore_ascii_case(permission_id) && entry_type.is_none_or(|t| a.r#type == t))
+        });
         removed |= resource.resource_access.len() != before;
     }
     if removed {
@@ -231,6 +235,23 @@ mod tests {
             Some("Role")
         ));
         assert!(req.is_empty(), "emptied resource entry should be pruned");
+    }
+
+    #[test]
+    fn remove_declared_access_ignores_id_case() {
+        // Ids are GUIDs: casing is not identity. The expiry Fix passes the
+        // tag codec's lower-case ids against a hand-edited upper-case manifest.
+        let mut req = manifest(&[(
+            "00000003-0000-0000-C000-000000000000",
+            &[("45BBB07E-7321-4FD7-A8F6-3FF27E6A81C8", "Role")],
+        )]);
+        assert!(remove_declared_access(
+            &mut req,
+            "00000003-0000-0000-c000-000000000000",
+            "45bbb07e-7321-4fd7-a8f6-3ff27e6a81c8",
+            Some("Role")
+        ));
+        assert!(req.is_empty(), "{req:?}");
     }
 
     #[test]

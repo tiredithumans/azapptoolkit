@@ -5,7 +5,8 @@
 //! Microsoft has no expiry for application grants and the toolkit runs nothing
 //! in the background, so an expiry is enforced by the audit (Rule 25) and its
 //! one-click revoke. Tags are shared by every operator of the tenant, and read
-//! as untrusted input: a malformed tag of our family is ignored.
+//! as untrusted input: a malformed tag of our family is ignored, and the
+//! audit row says so.
 //! Pure, so the WASM frontend shows existing expiries with the same codec.
 
 use jiff::Timestamp;
@@ -90,11 +91,30 @@ pub fn revoke_expired_remediation(expired: &[ExpiredGrant]) -> super::Remediatio
     }
 }
 
-/// Every valid expiry among a principal's tags.
+/// Every valid expiry among a principal's tags, one per `(resource, role)`:
+/// when another writer left two for one grant, the earliest date wins (an
+/// expiry fails closed).
 pub fn expiries_in(tags: &[String]) -> Vec<GrantExpiry> {
+    let mut out: Vec<GrantExpiry> = Vec::new();
+    for e in tags.iter().filter_map(|t| decode_expiry_tag(t).flatten()) {
+        // Decoded ids are already lower-case.
+        match out
+            .iter_mut()
+            .find(|o| o.resource_app_id == e.resource_app_id && o.app_role_id == e.app_role_id)
+        {
+            Some(o) => o.expires_on = o.expires_on.min(e.expires_on),
+            None => out.push(e),
+        }
+    }
+    out
+}
+
+/// How many of a principal's tags are ours but unreadable, so ignored: the
+/// audit says so on the row rather than let a mistyped date pass silently.
+pub fn unreadable_expiry_tags(tags: &[String]) -> usize {
     tags.iter()
-        .filter_map(|t| decode_expiry_tag(t).flatten())
-        .collect()
+        .filter(|t| matches!(decode_expiry_tag(t), Some(None)))
+        .count()
 }
 
 /// An expiry has passed once its whole day (UTC) is over: a grant expiring
@@ -193,6 +213,31 @@ mod tests {
             format!("azapptoolkit:grantExpiry:v1|{RES}|{ROLE}|garbage"),
         ];
         assert_eq!(expiries_in(&tags), vec![expiry("2026-12-24")]);
+    }
+
+    #[test]
+    fn expiries_in_keeps_one_per_pair_the_earliest() {
+        let later = encode_expiry_tag(&expiry("2026-12-24")).unwrap();
+        let earlier = encode_expiry_tag(&expiry("2026-11-01"))
+            .unwrap()
+            .replace(ROLE, &ROLE.to_uppercase());
+        let tags = vec![later, "HideApp".to_string(), earlier];
+        assert_eq!(expiries_in(&tags), vec![expiry("2026-11-01")]);
+    }
+
+    #[test]
+    fn unreadable_expiry_tags_are_counted() {
+        let tags = vec![
+            "HideApp".to_string(),
+            "azapptoolkit:spItem:v1|site|a|b".to_string(),
+            encode_expiry_tag(&expiry("2026-12-24")).unwrap(),
+            format!("azapptoolkit:grantExpiry:v1|{RES}|{ROLE}|2026-13-40"),
+            format!("azapptoolkit:grantExpiry:v1|nope|{ROLE}|2026-12-24"),
+            format!("azapptoolkit:grantExpiry:v2|{RES}|{ROLE}|2026-12-24"),
+            "azapptoolkit:grantExpiry:v1|too|few".to_string(),
+        ];
+        assert_eq!(unreadable_expiry_tags(&tags), 4);
+        assert_eq!(unreadable_expiry_tags(&tags[..3]), 0);
     }
 
     #[test]

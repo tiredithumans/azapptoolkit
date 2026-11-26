@@ -11,9 +11,9 @@ use super::prefetch::{
 };
 use super::run::await_usage;
 use super::score::{
-    apply_grant_expiries_with, apply_graph_usage, apply_network_locks, combine_granted_roles,
-    derive_orgwide_mail_scopes, ews_full_access_holders, merge_granted_roles, score_one,
-    score_sp_only, sp_audit_candidates,
+    ExpiryNames, apply_grant_expiries_with, apply_graph_usage, apply_network_locks,
+    combine_granted_roles, derive_orgwide_mail_scopes, ews_full_access_holders,
+    merge_granted_roles, score_one, score_sp_only, sp_audit_candidates,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -2358,8 +2358,13 @@ fn grant_expiries_post_pass_flags_and_names() {
         expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, "2026-11-01"),
         expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_B, "2027-01-31"),
         expiry_tag(UNKNOWN_RESOURCE, EXPIRY_ROLE_A, "2026-10-01"),
+        expiry_tag(
+            OFFICE365_EXCHANGE_ONLINE_APP_ID,
+            EXPIRY_ROLE_B,
+            "2026-11-02",
+        ),
     ];
-    let names = HashMap::from([
+    let roles = HashMap::from([
         (
             (
                 MICROSOFT_GRAPH_APP_ID.to_string(),
@@ -2374,7 +2379,22 @@ fn grant_expiries_post_pass_flags_and_names() {
             ),
             "CallRecords.Read.All".to_string(),
         ),
+        (
+            (
+                OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string(),
+                EXPIRY_ROLE_B.to_string(),
+            ),
+            "Mail.Read".to_string(),
+        ),
     ]);
+    // Graph names stay bare; another resource's say which resource (B3c).
+    let names = ExpiryNames {
+        roles,
+        resources: HashMap::from([(
+            OFFICE365_EXCHANGE_ONLINE_APP_ID.to_string(),
+            "Office 365 Exchange Online".to_string(),
+        )]),
+    };
     apply_grant_expiries_with(
         &mut items,
         |app_id| (app_id == "app-1").then(|| tags.clone()),
@@ -2401,7 +2421,11 @@ fn grant_expiries_post_pass_flags_and_names() {
         .filter(|r| r.kind == RemediationKind::RevokeExpiredGrants)
         .collect();
     assert_eq!(fix.len(), 1);
-    assert_eq!(fix[0].targets.len(), 2);
+    assert_eq!(fix[0].targets.len(), 3);
+    assert!(
+        line.contains("Mail.Read on Office 365 Exchange Online"),
+        "{line}"
+    );
     let expired: Vec<(&str, &str, &str)> = items[0]
         .expired_grants
         .iter()
@@ -2418,6 +2442,11 @@ fn grant_expiries_post_pass_flags_and_names() {
         vec![
             (MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_A, "Chat.Read.All"),
             (UNKNOWN_RESOURCE, EXPIRY_ROLE_A, EXPIRY_ROLE_A),
+            (
+                OFFICE365_EXCHANGE_ONLINE_APP_ID,
+                EXPIRY_ROLE_B,
+                "Mail.Read on Office 365 Exchange Online"
+            ),
         ],
         "the pairs the Fix revokes, and the names the confirm shows"
     );
@@ -2441,6 +2470,43 @@ fn grant_expiries_post_pass_flags_and_names() {
             .iter()
             .all(|r| r.kind != RemediationKind::RevokeExpiredGrants)
     );
+}
+
+#[test]
+fn grant_expiries_post_pass_reports_unreadable_tags() {
+    use azapptoolkit_core::audit::{RemediationKind, issue};
+    let now = ts("2026-11-25T00:00:00Z");
+    let mut items = vec![usage_item("app-1"), usage_item("app-2")];
+    let bad =
+        format!("azapptoolkit:grantExpiry:v1|{MICROSOFT_GRAPH_APP_ID}|{EXPIRY_ROLE_A}|2026-11-31");
+    let only_bad = vec!["HideApp".to_string(), bad.clone()];
+    let mixed = vec![
+        bad,
+        expiry_tag(MICROSOFT_GRAPH_APP_ID, EXPIRY_ROLE_B, "2027-01-31"),
+    ];
+    apply_grant_expiries_with(
+        &mut items,
+        |app_id| match app_id {
+            "app-1" => Some(only_bad.clone()),
+            _ => Some(mixed.clone()),
+        },
+        &ExpiryNames::default(),
+        now,
+    );
+    for item in &items {
+        let line = item
+            .issues
+            .iter()
+            .find(|i| i.starts_with(issue::UNREADABLE_GRANT_EXPIRY))
+            .unwrap_or_else(|| panic!("{}: {:?}", item.app_id, item.issues));
+        assert!(line.contains("1 tag"), "{line}");
+        assert!(
+            item.remediations
+                .iter()
+                .all(|r| r.kind != RemediationKind::RevokeExpiredGrants),
+            "an unreadable tag is advisory, never a revoke"
+        );
+    }
 }
 
 // ---- Rule 26: directory roles prefetch -----------------------------------

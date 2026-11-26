@@ -17,6 +17,7 @@ use azapptoolkit_core::audit::{
 };
 use azapptoolkit_core::guid::is_guid;
 use azapptoolkit_core::models::AppRoleAssignment;
+use azapptoolkit_core::scoping::MICROSOFT_GRAPH_APP_ID;
 use azapptoolkit_graph::GraphError;
 
 use crate::commands::applications::{invalidate_app_detail_state, record_sp_tags};
@@ -67,6 +68,9 @@ pub(crate) struct RevocationPlan {
     pub revoke: Vec<(String, GrantExpiry)>,
     /// Nothing held for it (revoked by hand, or the resource is gone).
     pub gone: Vec<GrantExpiry>,
+    /// The resource didn't resolve, but some assignment still carries the
+    /// role: never called gone (that would clear the tag of a held grant).
+    pub unresolved: Vec<GrantExpiry>,
     /// Held, but every holding assignment was created after the date had
     /// passed: a later grant, not the one the date was set for.
     pub regranted: Vec<GrantExpiry>,
@@ -82,18 +86,22 @@ pub(crate) fn plan_revocations(
 ) -> RevocationPlan {
     let mut plan = RevocationPlan::default();
     for e in expiries {
-        let held: Vec<&AppRoleAssignment> = resource_sp_ids
-            .get(&e.resource_app_id)
-            .map(|res| {
-                assignments
-                    .iter()
-                    .filter(|a| {
-                        a.resource_id.eq_ignore_ascii_case(res)
-                            && a.app_role_id.eq_ignore_ascii_case(&e.app_role_id)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let holds_role =
+            |a: &&AppRoleAssignment| a.app_role_id.eq_ignore_ascii_case(&e.app_role_id);
+        let Some(res) = resource_sp_ids.get(&e.resource_app_id) else {
+            // Fail closed: a role id still held may be this grant on a
+            // resource a cached "not found" hides.
+            if assignments.iter().any(|a| holds_role(&a)) {
+                plan.unresolved.push(e.clone());
+            } else {
+                plan.gone.push(e.clone());
+            }
+            continue;
+        };
+        let held: Vec<&AppRoleAssignment> = assignments
+            .iter()
+            .filter(|a| a.resource_id.eq_ignore_ascii_case(res) && holds_role(a))
+            .collect();
         // An assignment with no creation time is treated as the dated one:
         // revoking is what the operator asked for.
         let dated: Vec<&AppRoleAssignment> = held
@@ -386,6 +394,8 @@ pub(crate) async fn revoke_expired(
     // that can't be read keeps its expiries (reported failed), never guessed.
     let mut resource_sp_ids: HashMap<String, String> = HashMap::new();
     let mut role_names: HashMap<(String, String), String> = HashMap::new();
+    // Display names of resources other than Graph, so a name says which.
+    let mut resource_names: HashMap<String, String> = HashMap::new();
     let mut unreadable: HashSet<String> = HashSet::new();
     let mut result = RevokeExpiredResult::default();
     let resources: HashSet<String> = expired
@@ -400,6 +410,11 @@ pub(crate) async fn revoke_expired(
     for resource in resources {
         match client.resolve_resource_sp(&resource).await {
             Ok(Some(sp)) => {
+                if !resource.eq_ignore_ascii_case(MICROSOFT_GRAPH_APP_ID)
+                    && !sp.display_name.is_empty()
+                {
+                    resource_names.insert(resource.clone(), sp.display_name.clone());
+                }
                 for role in &sp.app_roles {
                     role_names.insert(
                         (resource.clone(), role.id.to_ascii_lowercase()),
@@ -419,11 +434,15 @@ pub(crate) async fn revoke_expired(
         }
     }
     let name_of = |resource: &str, role: &str| {
-        role_names
+        let value = role_names
             .get(&(resource.to_ascii_lowercase(), role.to_ascii_lowercase()))
             .filter(|v| !v.is_empty())
             .cloned()
-            .unwrap_or_else(|| role.to_string())
+            .unwrap_or_else(|| role.to_string());
+        match resource_names.get(&resource.to_ascii_lowercase()) {
+            Some(r) => format!("{value} on {r}"),
+            None => value,
+        }
     };
     let name = |e: &GrantExpiry| name_of(&e.resource_app_id, &e.app_role_id);
     result.unchanged = unchanged
@@ -454,6 +473,8 @@ pub(crate) async fn revoke_expired(
     let mut ended: Vec<GrantExpiry> = plan.gone.clone();
     let mut revoked_now: Vec<GrantExpiry> = Vec::new();
     result.already_gone.extend(plan.gone.iter().map(name));
+    // Unresolved but possibly still held: kept, and reported failed.
+    result.failed.extend(plan.unresolved.iter().map(name));
     result.regranted.extend(plan.regranted.iter().map(name));
     let mut stopped = false;
     for (assignment_id, e) in plan.revoke {
@@ -572,6 +593,7 @@ mod tests {
     const RES: &str = "00000003-0000-0000-c000-000000000000";
     const ROLE: &str = "45bbb07e-7321-4fd7-a8f6-3ff27e6a81c8";
     const OTHER_ROLE: &str = "7ab1d382-f21e-4acd-a863-ba3e13f7da61";
+    const UNHELD_ROLE: &str = "0e263e50-5827-48a4-b97c-d940288653c7";
 
     fn expiry(role: &str) -> GrantExpiry {
         GrantExpiry {
@@ -609,10 +631,17 @@ mod tests {
             vec![expiry(OTHER_ROLE)],
             "the other role is held on another resource"
         );
-        // An unresolvable resource has nothing to revoke.
+        // An unresolved resource (a cached "not found") with the role still
+        // held is never called gone: its tag stays (B3b). Nothing revokes on
+        // a role-only match.
         let plan = plan_revocations(&[expiry(ROLE)], &assignments, &HashMap::new());
         assert!(plan.revoke.is_empty());
-        assert_eq!(plan.gone, vec![expiry(ROLE)]);
+        assert!(plan.gone.is_empty(), "{:?}", plan.gone);
+        assert_eq!(plan.unresolved, vec![expiry(ROLE)]);
+        // A role nobody holds is gone, resolved or not.
+        let plan = plan_revocations(&[expiry(UNHELD_ROLE)], &assignments, &HashMap::new());
+        assert_eq!(plan.gone, vec![expiry(UNHELD_ROLE)]);
+        assert!(plan.unresolved.is_empty());
         // A grant created after its expiry date passed is a later grant.
         let mut late = assignment("a-3", "graph-sp", ROLE);
         late.created_date_time = Some("2026-11-02T00:00:00Z".parse().unwrap());
@@ -952,6 +981,56 @@ mod tests {
             .unwrap();
             assert_eq!(r.already_gone, vec!["Chat.Read.All".to_string()]);
             assert!(r.revoked.is_empty() && r.warnings.is_empty(), "{r:?}");
+        }
+
+        /// A grant on a resource other than Graph says which resource: both
+        /// define `Mail.Read` (B3c).
+        #[tokio::test]
+        async fn a_non_graph_grant_is_named_with_its_resource() {
+            const EXO: &str = "00000002-0000-0ff1-ce00-000000000000";
+            let server = MockServer::start().await;
+            let exo_tag = azapptoolkit_core::audit::encode_expiry_tag(&GrantExpiry {
+                resource_app_id: EXO.into(),
+                app_role_id: ROLE.into(),
+                expires_on: "2026-11-01".parse().unwrap(),
+            })
+            .unwrap();
+            mount_sp_tags(&server, &[exo_tag]).await;
+            mount_app(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1.0/servicePrincipals"))
+                .and(query_param("$filter", format!("appId eq '{EXO}'")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{
+                        "id": RES_SP, "appId": EXO, "displayName": "Office 365 Exchange Online",
+                        "appRoles": [
+                            { "id": ROLE, "value": "Mail.Read", "allowedMemberTypes": ["Application"] }
+                        ]
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            mount_assignments(&server, &[]).await;
+            expect_sp_tags(&server, &[], 1).await;
+            let state = AppState::for_test(T, &server.uri());
+
+            let r = revoke_expired(
+                &state,
+                T,
+                OBJ,
+                AuditPrincipalKind::Application,
+                &[GrantRef {
+                    resource_app_id: EXO.into(),
+                    app_role_id: ROLE.into(),
+                }],
+                now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                r.already_gone,
+                vec!["Mail.Read on Office 365 Exchange Online".to_string()]
+            );
         }
 
         /// A downgrade moves the broad grant's expiry onto its narrower

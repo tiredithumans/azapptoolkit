@@ -794,6 +794,10 @@ pub mod issue {
     /// tag (`audit::grant_expiry`) has passed. Fires on the tag alone; the
     /// [`super::RemediationKind::RevokeExpiredGrants`] Fix re-checks live.
     pub const GRANT_EXPIRED: &str = "Grants past their expiry:";
+    /// Rule 25 (advisory): expiry tags of our family that can't be read (a
+    /// mistyped date, a bad id, an unknown version), so no grant expires by
+    /// them. The operator sets the date again; no Fix.
+    pub const UNREADABLE_GRANT_EXPIRY: &str = "Unreadable grant-expiry tags:";
     /// Rule 26 (advisory, net-new): tenant-wide `User`/`Group`/
     /// `Device.ReadWrite.All` that admin-unit scoping can limit. Weighted by
     /// Rules 1/2 already; carries [`super::RemediationKind::ScopeDirectoryWrite`].
